@@ -69,6 +69,8 @@ pub struct Vm {
     pub array_prototype: Value,
     /// Reference to String.prototype for string property access.
     pub string_prototype: Value,
+    /// Reference to Object.prototype for setting on newly created objects.
+    pub object_prototype: Value,
 }
 
 impl Vm {
@@ -87,6 +89,7 @@ impl Vm {
             eval_fn: UnsafeCell::new(None),
             array_prototype: Value::undefined(),
             string_prototype: Value::undefined(),
+            object_prototype: Value::undefined(),
         }
     }
 
@@ -170,6 +173,11 @@ impl Vm {
             let math_obj = make_object(gc, &math_entries);
             self.builtin_wrappers.insert("Math".to_string(), math_obj);
         }
+
+        // Object.prototype — an empty object that serves as default [[Prototype]]
+        let obj_proto_shape = Shape::empty();
+        let obj_proto_ptr = JSObject::allocate(gc, obj_proto_shape, &[]);
+        self.object_prototype = Value::from_heap_ptr(obj_proto_ptr as *mut u8);
 
         // Global constants: NaN, Infinity, undefined
         let nan_val = {
@@ -733,6 +741,13 @@ impl Vm {
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
                 }
+                Opcode::In => {
+                    let obj = self.pop();
+                    let key = self.pop();
+                    let found = has_property(obj, key);
+                    self.push(if found { Value::smi(1) } else { Value::smi(0) });
+                    self.frames[fi].pc = pc + 1;
+                }
 
                 // ---- Objects ----
                 Opcode::NewObject => {
@@ -749,6 +764,11 @@ impl Vm {
                     }
                     let shape = Shape::intern(entries, key_names);
                     let obj = JSObject::allocate(gc, shape, &values);
+                    if self.object_prototype.is_heap_object() {
+                        if let Some(proto_ptr) = self.object_prototype.heap_ptr() {
+                            unsafe { JSObject::set_prototype(obj, proto_ptr); }
+                        }
+                    }
                     self.push(Value::from_heap_ptr(obj as *mut u8));
                     self.frames[fi].pc = pc + 1;
                 }
@@ -2242,6 +2262,94 @@ fn ic_cache_key(shape_id: u64, raw_key: Value) -> (u64, u64) {
         (shape_id, key.as_u64())
     } else {
         (shape_id, 0)
+    }
+}
+
+/// Check if an object has a property (for the `in` operator).
+/// Returns false for non-object values (primitives are not objects).
+fn has_property(obj: Value, raw_key: Value) -> bool {
+    if let Some(ptr) = obj.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_OBJECT {
+            if let Some(key) = value_to_prop_key(raw_key) {
+                let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                if shape.lookup(&key).is_some() {
+                    return true;
+                }
+                // Walk prototype chain
+                let mut current = obj;
+                let mut depth = 0;
+                loop {
+                    if depth >= 5_000 {
+                        return false;
+                    }
+                    depth += 1;
+                    let cur_ptr = current.heap_ptr().unwrap();
+                    let cur_tag = unsafe { (*(cur_ptr as *const GcHeader)).tag() };
+                    if cur_tag == TAG_OBJECT {
+                        let proto = unsafe { JSObject::prototype(cur_ptr as *mut JSObject) };
+                        if proto.is_null() {
+                            return false;
+                        }
+                        current = Value::from_heap_ptr(proto);
+                        if let Some(proto_ptr) = current.heap_ptr() {
+                            let proto_tag = unsafe { (*(proto_ptr as *const GcHeader)).tag() };
+                            if proto_tag == TAG_OBJECT {
+                                let proto_shape = unsafe { JSObject::shape_ptr(proto_ptr as *mut JSObject) };
+                                if proto_shape.lookup(&key).is_some() {
+                                    return true;
+                                }
+                            } else {
+                                return false;
+                            }
+                        } else {
+                            return false;
+                        }
+                    } else {
+                        return false;
+                    }
+                }
+            }
+            false
+        } else if tag == TAG_ARRAY {
+            if let Some(index) = value_to_array_index(raw_key) {
+                let len = unsafe { RuneArray::length(ptr as *mut RuneArray) };
+                return index < len as usize;
+            }
+            if let Some(key_ptr) = raw_key.heap_ptr() {
+                let key_tag = unsafe { (*(key_ptr as *const GcHeader)).tag() };
+                if key_tag == TAG_STRING {
+                    let key_str = unsafe { HeapString::to_string(key_ptr as *mut HeapString) };
+                    if key_str == "length" {
+                        return true;
+                    }
+                }
+            }
+            // Walk prototype chain for non-numeric keys on arrays
+            has_property(unsafe {
+                let proto = JSObject::prototype(ptr as *mut JSObject);
+                if proto.is_null() { return false; }
+                Value::from_heap_ptr(proto)
+            }, raw_key)
+        } else if tag == TAG_FUNC {
+            if let Some(key) = value_to_prop_key(raw_key) {
+                if key == *PROTOTYPE_KEY {
+                    return true;
+                }
+            }
+            false
+        } else if tag == TAG_STRING {
+            if let Some(index) = value_to_array_index(raw_key) {
+                let len = unsafe { HeapString::len(ptr as *mut HeapString) };
+                return index < len;
+            }
+            // Walk String.prototype for non-numeric keys
+            false
+        } else {
+            false
+        }
+    } else {
+        false
     }
 }
 

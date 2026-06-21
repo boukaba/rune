@@ -1018,6 +1018,24 @@ fn test_mixed_comparison() {
 }
 
 #[test]
+fn test_in_operator() {
+    let mut ctx = Context::new();
+    let r = ctx.eval(r#"var o = {a: 1}; "a" in o"#).unwrap();
+    assert_eq!(r.as_smi(), Some(1), r#""a" in o should be true"#);
+    let r2 = ctx.eval(r#"var o = {a: 1}; "b" in o"#).unwrap();
+    assert_eq!(r2.as_smi(), Some(0), r#""b" in o should be false"#);
+    let r3 = ctx.eval(r#"var a = [10, 20]; 0 in a"#).unwrap();
+    assert_eq!(r3.as_smi(), Some(1), "0 in [10,20] should be true");
+    let r4 = ctx.eval(r#"var a = [10, 20]; 2 in a"#).unwrap();
+    assert_eq!(r4.as_smi(), Some(0), "2 in [10,20] should be false (OOB)");
+    let r5 = ctx.eval(r#"var a = [10, 20]; "length" in a"#).unwrap();
+    assert_eq!(r5.as_smi(), Some(1), "\"length\" in [10,20] should be true");
+    // Nested object literal: property access via bracket notation
+    let r6 = ctx.eval(r#"var o = {nested: {key: 1}}; "key" in o.nested"#).unwrap();
+    assert_eq!(r6.as_smi(), Some(1), "key in nested object should be true");
+}
+
+#[test]
 fn test_strict_eq_smi_float() {
     let mut ctx = Context::new();
     let r = ctx.eval("1 === 1.0").unwrap();

@@ -39,7 +39,7 @@ pub enum Opcode {
     // Logical (short-circuit)
     LogicalAnd,
     LogicalOr,
-    // Comparisons
+    // Comparisons / relational
     Eq,
     Ne,
     StrictEq,
@@ -48,6 +48,7 @@ pub enum Opcode {
     Gt,
     Le,
     Ge,
+    In,
     // Objects
     NewObject,
     NewArray,

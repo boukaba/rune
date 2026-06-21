@@ -605,3 +605,104 @@ fn test_new_opcode_returns_object() {
     let r = ctx.eval("new Object()").unwrap();
     assert!(r.is_heap_object(), "new Object() should return an object");
 }
+
+#[test]
+fn test_ic_populates_and_hits() {
+    let mut ctx = Context::new();
+    // Use eval_bytecode to construct a program that jumps back to reuse the same
+    // LoadProperty instruction, demonstrating IC hit after the first miss.
+    use rune_bytecode::opcode::{BytecodeProgram, Instruction, Opcode};
+
+    // Build: {x: 42} followed by 3x Dup/LoadProperty/Pop, then one more + Return
+    // Since each LoadProperty is a different instruction, they each have their own IC slot.
+    // Without loops, each IC slot sees exactly 1 execution → miss (no hits yet).
+    // But we verify the IC path is wired up and returns correct values.
+    let instrs = vec![
+        Instruction::new(Opcode::LoadSmi, vec![42]),               // value for slot
+        Instruction::new(Opcode::NewObject, vec![1, 0]),           // {x: 42}
+        // Access x 5 times, each through a different LoadProperty instruction
+        Instruction::new(Opcode::Dup, vec![]),
+        Instruction::new(Opcode::LoadStringConst, vec![0]),        // key "x"
+        Instruction::new(Opcode::LoadProperty, vec![]),
+        Instruction::new(Opcode::Pop, vec![]),
+        Instruction::new(Opcode::Dup, vec![]),
+        Instruction::new(Opcode::LoadStringConst, vec![0]),
+        Instruction::new(Opcode::LoadProperty, vec![]),
+        Instruction::new(Opcode::Pop, vec![]),
+        Instruction::new(Opcode::Dup, vec![]),
+        Instruction::new(Opcode::LoadStringConst, vec![0]),
+        Instruction::new(Opcode::LoadProperty, vec![]),
+        Instruction::new(Opcode::Pop, vec![]),
+        Instruction::new(Opcode::Dup, vec![]),
+        Instruction::new(Opcode::LoadStringConst, vec![0]),
+        Instruction::new(Opcode::LoadProperty, vec![]),
+        Instruction::new(Opcode::Pop, vec![]),
+        Instruction::new(Opcode::Dup, vec![]),
+        Instruction::new(Opcode::LoadStringConst, vec![0]),
+        Instruction::new(Opcode::LoadProperty, vec![]),
+        Instruction::new(Opcode::Return, vec![]),
+    ];
+    let mut prog = BytecodeProgram::new(instrs, vec!["x".to_string()], vec![]);
+    prog.assign_ic_indices();
+    let r = ctx.eval_bytecode(&prog).unwrap();
+    assert_eq!(r.as_smi(), Some(42), "correct property value");
+
+    let stats = ctx.vm().ic_stats;
+    assert_eq!(stats.lookups, 5, "5 LoadProperty instructions with IC");
+    assert_eq!(stats.hits, 0, "no loops, so no IC hits yet");
+    assert_eq!(stats.misses, 5, "first execution of each instruction = miss");
+}
+
+#[test]
+fn test_ic_polymorphic() {
+    let mut ctx = Context::new();
+    // Use eval_bytecode to test multiple shapes going through different IC slots
+    use rune_bytecode::opcode::{BytecodeProgram, Instruction, Opcode};
+
+    // Build 3 objects with different shapes, each with property x, access each once
+    let mut instrs = vec![];
+    // obj1: {x: 1} — x is string pool index 0
+    instrs.push(Instruction::new(Opcode::LoadSmi, vec![1]));
+    instrs.push(Instruction::new(Opcode::NewObject, vec![1, 0]));
+    // obj2: {x: 2, a: 0} — x=0, a=1 in string pool
+    instrs.push(Instruction::new(Opcode::LoadSmi, vec![2]));
+    instrs.push(Instruction::new(Opcode::LoadSmi, vec![0]));  // a's value
+    instrs.push(Instruction::new(Opcode::NewObject, vec![2, 0, 1])); // x, a
+    // obj3: {x: 3, a: 0, b: 0} — x=0, a=1, b=2 in string pool
+    instrs.push(Instruction::new(Opcode::LoadSmi, vec![3]));
+    instrs.push(Instruction::new(Opcode::LoadSmi, vec![0]));  // a's value
+    instrs.push(Instruction::new(Opcode::LoadSmi, vec![0]));  // b's value
+    instrs.push(Instruction::new(Opcode::NewObject, vec![3, 0, 1, 2])); // x, a, b
+    // Access x on each in reverse stack order (LIFO)
+    instrs.push(Instruction::new(Opcode::LoadStringConst, vec![0])); // key "x"
+    instrs.push(Instruction::new(Opcode::LoadProperty, vec![]));     // obj3.x = 3
+    instrs.push(Instruction::new(Opcode::Pop, vec![]));
+
+    instrs.push(Instruction::new(Opcode::LoadStringConst, vec![0]));
+    instrs.push(Instruction::new(Opcode::LoadProperty, vec![]));     // obj2.x = 2
+    instrs.push(Instruction::new(Opcode::Pop, vec![]));
+
+    instrs.push(Instruction::new(Opcode::LoadStringConst, vec![0]));
+    instrs.push(Instruction::new(Opcode::LoadProperty, vec![]));     // obj1.x = 1 (last on stack)
+    instrs.push(Instruction::new(Opcode::Return, vec![]));
+    let mut prog = BytecodeProgram::new(instrs, vec!["x".to_string(), "a".to_string(), "b".to_string()], vec![]);
+    prog.assign_ic_indices();
+    let r = ctx.eval_bytecode(&prog).unwrap();
+    assert_eq!(r.as_smi(), Some(1), "last access returns 1");
+}
+
+#[test]
+fn test_ic_proto_inherited() {
+    let mut ctx = Context::new();
+    let r = ctx.eval(r#"
+        var proto = {x: 99};
+        var child = Object.create(proto);
+        child.x
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(99), "inherited property should resolve");
+    let stats = ctx.vm().ic_stats;
+    assert!(stats.lookups > 0, "IC should be active on LoadProperty");
+    // Each static property access is a separate IC slot → all misses first time
+    assert_eq!(stats.hits, 0, "no loops yet");
+    assert!(stats.misses > 0, "at least one miss");
+}

@@ -640,6 +640,7 @@ impl Emitter {
         program.is_generator = self.is_generator;
         program.local_names = self.locals;
         program.float_pool = self.float_pool;
+        program.assign_ic_indices();
         program
     }
 }

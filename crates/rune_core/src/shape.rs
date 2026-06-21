@@ -21,6 +21,8 @@ static SHAPE_COUNTER: AtomicU64 = AtomicU64::new(1);
 lazy_static::lazy_static! {
     static ref SHAPE_TABLE: Mutex<HashMap<Vec<(PropertyKey, usize)>, &'static Shape>> =
         Mutex::new(HashMap::new());
+    /// Interned PropertyKey for "prototype" — avoids HeapString alloc on every `new` call.
+    pub static ref PROTOTYPE_KEY: PropertyKey = PropertyKey::from_string("prototype");
 }
 
 impl Shape {

@@ -80,11 +80,14 @@ pub enum Opcode {
 pub struct Instruction {
     pub opcode: Opcode,
     pub operands: Vec<i64>,
+    /// Optional index into the Vm's IC table for LoadProperty/StoreProperty caching.
+    /// -1 means no IC attached; other values index into Vm.ics[].
+    pub ic_index: i64,
 }
 
 impl Instruction {
     pub fn new(opcode: Opcode, operands: Vec<i64>) -> Self {
-        Instruction { opcode, operands }
+        Instruction { opcode, operands, ic_index: -1 }
     }
 }
 
@@ -129,5 +132,20 @@ impl BytecodeProgram {
         let idx = self.string_pool.len();
         self.string_pool.push(s.to_string());
         idx
+    }
+
+    /// Assign IC indices to all LoadProperty/StoreProperty instructions.
+    /// Recursively processes nested function programs.
+    pub fn assign_ic_indices(&mut self) {
+        let mut ic_count = 0;
+        for instr in &mut self.instructions {
+            if matches!(instr.opcode, Opcode::LoadProperty | Opcode::StoreProperty) {
+                instr.ic_index = ic_count;
+                ic_count += 1;
+            }
+        }
+        for func in &mut self.functions {
+            func.assign_ic_indices();
+        }
     }
 }

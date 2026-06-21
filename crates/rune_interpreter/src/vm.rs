@@ -1,13 +1,14 @@
-use rune_bytecode::opcode::{BytecodeProgram, Opcode};
+use rune_bytecode::opcode::{BytecodeProgram, Instruction, Opcode};
 use rune_core::float::HeapFloat64;
 use rune_core::function::Func;
 use rune_core::gc::{GcHeader, SemiSpace, TAG_FUNC, TAG_STRING, TAG_OBJECT, TAG_FLOAT64};
 use rune_core::object::JSObject;
-use rune_core::shape::{PropertyKey, Shape};
+use rune_core::shape::{PropertyKey, Shape, PROTOTYPE_KEY};
 use rune_core::string::HeapString;
 use rune_core::value::Value;
 use crate::builtins::{Builtin, BuiltinFn};
 use crate::generator::Generator;
+use crate::ic::{IcEntry, IcStats, InlineCache};
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 
@@ -50,6 +51,10 @@ pub struct Vm {
     pub generators: Vec<Generator>,
     pub builtins: Vec<Builtin>,
     pub globals: HashMap<String, Value>,
+    /// Shape-Indexed Dispatch Tables for property access caching.
+    pub ics: Vec<InlineCache>,
+    /// Aggregate IC statistics.
+    pub ic_stats: IcStats,
     /// Pre-built constructor objects (like `Object`) that expose methods via property access.
     builtin_wrappers: HashMap<String, Value>,
     last_locals: Vec<Value>,
@@ -65,6 +70,8 @@ impl Vm {
             generators: Vec::new(),
             builtins: Vec::new(),
             globals: HashMap::new(),
+            ics: Vec::new(),
+            ic_stats: IcStats::default(),
             builtin_wrappers: HashMap::new(),
             last_locals: Vec::new(),
             eval_fn: UnsafeCell::new(None),
@@ -600,7 +607,42 @@ impl Vm {
                     let raw_key = self.pop();
                     let obj = self.pop();
                     let result = if obj.is_heap_object() {
-                        load_property_recursive(obj, raw_key)
+                        // IC fast path: check inline cache before full walk
+                        if instr.ic_index >= 0 {
+                            let ic_idx = instr.ic_index as usize;
+                            self.ic_stats.lookups += 1;
+                            if ic_idx < self.ics.len() {
+                                if let Some(ptr) = obj.heap_ptr() {
+                                    let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+                                    if tag == TAG_OBJECT {
+                                        let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                                        if let Some(entry) = self.ics[ic_idx].entries.get(&shape.id) {
+                                            self.ic_stats.hits += 1;
+                                            let val = if entry.is_own {
+                                                unsafe { JSObject::get_slot(ptr as *mut JSObject, entry.offset) }
+                                            } else {
+                                                let mut p = ptr as *mut u8;
+                                                for _ in 0..entry.proto_depth {
+                                                    let next = unsafe { JSObject::prototype(p as *mut JSObject) };
+                                                    if next.is_null() { break; }
+                                                    p = next;
+                                                }
+                                                unsafe { JSObject::get_slot(p as *mut JSObject, entry.offset) }
+                                            };
+                                            self.push(val);
+                                            self.frames[fi].pc = pc + 1;
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+                            self.ic_stats.misses += 1;
+                            // Full lookup with IC population
+                            load_property_recursive_ic(gc, &mut self.ics, &instr, obj, raw_key)
+                        } else {
+                            // No IC attached — fall back to full lookup
+                            load_property_recursive(obj, raw_key)
+                        }
                     } else {
                         Value::undefined()
                     };
@@ -838,15 +880,21 @@ impl Vm {
                     }
                     // Set prototype from constructor.prototype
                     // §11.2.2 [[Construct]]: new object's [[Prototype]] = constructor.prototype
+                    // Use interned PROTOTYPE_KEY to avoid HeapString allocation.
                     if constructor.is_heap_object() {
-                        let key_val = Value::from_heap_ptr(
-                            HeapString::allocate(gc, "prototype") as *mut u8
-                        );
-                        let proto_val = load_property_recursive(constructor, key_val);
-                        if proto_val.is_heap_object() {
-                            if let Some(proto_ptr) = proto_val.heap_ptr() {
-                                unsafe {
-                                    JSObject::set_prototype(obj, proto_ptr);
+                        if let Some(ptr) = constructor.heap_ptr() {
+                            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+                            if tag == TAG_OBJECT {
+                                let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                                if let Some(slot) = shape.lookup(&*PROTOTYPE_KEY) {
+                                    let proto_val = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+                                    if proto_val.is_heap_object() {
+                                        if let Some(proto_ptr) = proto_val.heap_ptr() {
+                                            unsafe {
+                                                JSObject::set_prototype(obj, proto_ptr);
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1473,6 +1521,63 @@ fn load_property_recursive(obj: Value, raw_key: Value) -> Value {
         }
         return Value::undefined();
     }
+}
+
+/// Full property lookup that populates the inline cache on miss.
+fn load_property_recursive_ic(
+    _gc: &mut SemiSpace,
+    ics: &mut Vec<InlineCache>,
+    instr: &Instruction,
+    obj: Value,
+    raw_key: Value,
+) -> Value {
+    let result = load_property_recursive(obj, raw_key);
+    // Populate IC if applicable
+    if instr.ic_index >= 0 {
+        if result.is_heap_object() {
+            if let Some(ptr) = obj.heap_ptr() {
+                let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+                if tag == TAG_OBJECT {
+                    if let Some(key) = value_to_prop_key(raw_key) {
+                        let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                        let ic_idx = instr.ic_index as usize;
+                        while ics.len() <= ic_idx {
+                            ics.push(InlineCache::new());
+                        }
+                        if let Some(offset) = shape.lookup(&key) {
+                            // Own property
+                            ics[ic_idx].entries.insert(shape.id, IcEntry {
+                                offset,
+                                is_own: true,
+                                proto_depth: 0,
+                            });
+                        } else {
+                            // Inherited — walk prototype chain to find offset and depth
+                            let mut depth: u8 = 0;
+                            let mut p = ptr as *mut u8;
+                            loop {
+                                let next = unsafe { JSObject::prototype(p as *mut JSObject) };
+                                if next.is_null() { break; }
+                                depth += 1;
+                                if depth >= MAX_PROTOTYPE_DEPTH as u8 { break; }
+                                let next_shape = unsafe { JSObject::shape_ptr(next as *mut JSObject) };
+                                if let Some(offset) = next_shape.lookup(&key) {
+                                    ics[ic_idx].entries.insert(shape.id, IcEntry {
+                                        offset,
+                                        is_own: false,
+                                        proto_depth: depth,
+                                    });
+                                    break;
+                                }
+                                p = next;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    result
 }
 
 /// Convert a Value to an f64 for numeric operations.

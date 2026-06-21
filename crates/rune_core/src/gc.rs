@@ -179,6 +179,11 @@ impl SemiSpace {
                             self.forward_value(slots_ptr.add(i));
                         }
                     }
+                    TAG_FUNC => {
+                        // Forward the prototype pointer (byte offset 24 from object start)
+                        let proto_ptr = scan_ptr.add(size_of::<GcHeader>() + 16) as *mut u64;
+                        self.forward_value(proto_ptr);
+                    }
                     TAG_STRING => {}
                     _ => {}
                 }
@@ -199,7 +204,8 @@ impl SemiSpace {
                     obj_start.add(align_up(total, 8))
                 }
                 TAG_FUNC => {
-                    obj_start.add(align_up(16, 8))
+                    // Func layout: GcHeader(8) + func_idx(8) + prog_ptr(8) + prototype(8) = 32 bytes
+                    obj_start.add(32)
                 }
                 TAG_FLOAT64 => {
                     obj_start.add(size_of::<GcHeader>() + 8)

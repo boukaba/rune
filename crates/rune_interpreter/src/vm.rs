@@ -817,6 +817,15 @@ impl Vm {
                                     unsafe { RuneArray::set_element(ptr as *mut RuneArray, index, value) };
                                 }
                             }
+                        } else if tag == TAG_FUNC {
+                            // Function.prototype = value
+                            if let Some(key) = value_to_prop_key(raw_key) {
+                                if key == *PROTOTYPE_KEY {
+                                    if let Some(val_ptr) = value.heap_ptr() {
+                                        unsafe { Func::set_prototype(ptr as *mut Func, val_ptr); }
+                                    }
+                                }
+                            }
                         }
                     }
                     self.push(value);
@@ -1002,6 +1011,9 @@ impl Vm {
                     let func_idx = instr.operands[0] as u64;
                     let prog_ptr = prog as *const BytecodeProgram as *const u8;
                     let ptr = Func::allocate(gc, func_idx, prog_ptr);
+                    // Create default `.prototype` object (§11.2.2)
+                    let default_proto = JSObject::allocate(gc, Shape::empty(), &[]);
+                    unsafe { Func::set_prototype(ptr, default_proto as *mut u8); }
                     self.push(Value::from_heap_ptr(ptr as *mut u8));
                     self.frames[fi].pc = pc + 1;
                 }
@@ -1048,8 +1060,13 @@ impl Vm {
                                         }
                                     }
                                 }
+                            } else if tag == TAG_FUNC {
+                                // User-defined function: read prototype from Func struct
+                                let proto_ptr = unsafe { Func::prototype(ptr as *mut Func) };
+                                if !proto_ptr.is_null() {
+                                    unsafe { JSObject::set_prototype(obj, proto_ptr); }
+                                }
                             }
-                            // TAG_FUNC objects don't have property slots yet (deferred)
                         }
                     }
                     // If constructor is a user-defined function, call its body with this = new object
@@ -1727,6 +1744,16 @@ fn load_property_recursive(obj: Value, raw_key: Value) -> Value {
                 }
                 current = Value::from_heap_ptr(proto);
                 continue;
+            } else if tag == TAG_FUNC {
+                if let Some(key) = value_to_prop_key(raw_key) {
+                    if key == *PROTOTYPE_KEY {
+                        let proto_ptr = unsafe { Func::prototype(ptr as *mut Func) };
+                        if !proto_ptr.is_null() {
+                            return Value::from_heap_ptr(proto_ptr);
+                        }
+                    }
+                }
+                return Value::undefined();
             }
         }
         return Value::undefined();

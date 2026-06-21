@@ -872,3 +872,55 @@ fn test_constructor_returns_object() {
     "#).unwrap();
     assert_eq!(r.as_smi(), Some(1));
 }
+
+#[test]
+fn test_constructor_prototype_inheritance() {
+    let mut ctx = Context::new();
+    // Foo.prototype exists and is accessible
+    let r = ctx.eval(r#"
+        function Foo() {}
+        var p = Foo.prototype;
+        1
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(1), "Foo.prototype should be accessible");
+    // Own property on the new object (set via constructor)
+    let r2 = ctx.eval(r#"
+        function Foo(x) { this.x = x; }
+        var f = new Foo(42);
+        f.x
+    "#).unwrap();
+    assert_eq!(r2.as_smi(), Some(42), "own property via constructor");
+    // Property set on prototype is inherited by new objects
+    let r3 = ctx.eval(r#"
+        function Foo() {}
+        Foo.prototype.x = 42;
+        var f = new Foo();
+        f.x
+    "#).unwrap();
+    assert_eq!(r3.as_smi(), Some(42), "inherited property via prototype");
+    // Own property shadows prototype property
+    let r4 = ctx.eval(r#"
+        function Foo() {}
+        Foo.prototype.x = 99;
+        var f = new Foo();
+        f.x = 42;
+        f.x
+    "#).unwrap();
+    assert_eq!(r4.as_smi(), Some(42), "own property shadows prototype");
+    // Modifying prototype after construction affects existing objects
+    let r5 = ctx.eval(r#"
+        function Foo() {}
+        var f = new Foo();
+        Foo.prototype.x = 42;
+        f.x
+    "#).unwrap();
+    assert_eq!(r5.as_smi(), Some(42), "dynamic prototype mutation affects existing objects");
+    // Foo.prototype.constructor points back to Foo
+    let r6 = ctx.eval(r#"
+        function Foo() {}
+        var p = Foo.prototype;
+        var c = p.constructor;
+        1
+    "#).unwrap();
+    assert_eq!(r6.as_smi(), Some(1), "prototype.constructor is accessible");
+}

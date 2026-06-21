@@ -396,7 +396,7 @@ mod tests {
         // if (0) { return 42; } else { return 99; }
         let prog = make_prog(vec![
             Instruction::new(Opcode::LoadSmi, vec![0]),
-            Instruction::new(Opcode::JumpIfFalse, vec![5]),
+            Instruction::new(Opcode::JumpIfFalse, vec![4]),
             Instruction::new(Opcode::LoadSmi, vec![42]),
             Instruction::new(Opcode::Return, vec![]),
             Instruction::new(Opcode::LoadSmi, vec![99]),
@@ -415,7 +415,7 @@ mod tests {
         // if (undefined) { return 42; } else { return 99; }
         let prog = make_prog(vec![
             Instruction::new(Opcode::LoadUndefined, vec![]),
-            Instruction::new(Opcode::JumpIfFalse, vec![5]),
+            Instruction::new(Opcode::JumpIfFalse, vec![4]),
             Instruction::new(Opcode::LoadSmi, vec![42]),
             Instruction::new(Opcode::Return, vec![]),
             Instruction::new(Opcode::LoadSmi, vec![99]),

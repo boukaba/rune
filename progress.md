@@ -361,6 +361,66 @@
 
 ---
 
+## Sprint 7 — Constructor `this` + `.prototype` + Array Grow
+
+> **Spec mandate:** See [`ecma262.md`](./ecma262.md) §11.2.2 ([[Construct]]), §26.1 (Array exotic object), §10.1.7 (OrdinaryGet/Set). Open linked URLs via `webfetch`. No guessing.
+
+### Task 7A: Constructor `this` binding + Parser `new` fix 🔥 — Priority 1 ✅
+- [x] `Frame::this` field: populated on `Call` and `New` opcodes
+- [x] `New` opcode pushes a full frame for `TAG_FUNC` constructors with `this = obj_val`
+- [x] `Return` opcode: if `is_constructor_call` and return value is primitive, use `constructed_object`
+- [x] Parser fix: `new Foo()` was incorrectly parsed as `Call(New(Foo), [])` instead of `New(Foo, [])`
+- [x] `parse_primary_refactoring`: `parse_primary_inner()` → no postfix; `parse_member_expr()` → member-only postfix (no calls); `new` uses `parse_member_expr()`
+- [x] 3 integration tests: basic constructor this binding
+- **Acceptance:** ✅ `new Foo(42)` correctly passes `Foo.prototype` object as `this` to Foo body; parser produces correct `New(Foo, [42])` AST
+
+### Task 8A: Constructor `.prototype` property 🟡 — Priority 2 ✅
+- [x] `Func` layout extended from 24→32 bytes with `prototype: *mut u8` field
+- [x] `MakeFunction` creates a default empty `JSObject` prototype
+- [x] `New` opcode reads `Func::prototype()` and sets it as the new object's `[[Prototype]]`
+- [x] `StoreProperty`/`LoadProperty` on `TAG_FUNC` handle the `"prototype"` key
+- [x] GC `scan_end` for `TAG_FUNC` returns 32 bytes; Cheney scan forwards `TAG_FUNC` prototype pointer
+- [x] 6 test assertions: own properties, inheritance, shadowing, dynamic mutation, constructor accessibility
+
+### Task 8B: Array Reallocation (Grow) 🟡 — Priority 3 ✅
+- [x] `RuneArray::grow()` — allocate new array with ~1.5x capacity, copy header + elements, zero new slots
+- [x] `RuneArray::push()` — now returns `*mut RuneArray` (new pointer if grown), auto-grows on capacity exhaustion
+- [x] `RuneArray::shape_ptr()`/`set_shape_ptr()`/`prototype()`/`set_prototype()` accessors for grow copy
+- [x] `BuiltinFn` signature: `fn(gc, this, args, vm: &mut Vm)` (was `&Vm`)
+- [x] All 21 builtins updated to `&mut Vm` signature
+- [x] `Vm::update_heap_reference(old_ptr, new_ptr)` — scans stack, all frame locals, and globals for stale pointers
+- [x] `array_push` builtin calls `update_heap_reference` after grow
+- [x] 2 integration tests: `test_array_push_grow`, `test_array_push_grow_identity`
+- [x] `load_property_recursive` handles `"length"` key on `TAG_ARRAY`
+- **Acceptance:** ✅ Array auto-grows on push beyond initial capacity; aliased variables (`var b = a`) point to same grown array
+
+### Task 8C: Deferred Builtin Cleanup 🟢 — Priority 4 ✅
+- [x] `Array.isArray` — Array constructor wrapper with `isArray` property in builtin_wrappers
+- [x] `String.fromCharCode` — String constructor wrapper with `fromCharCode` property (shadows `String(42)` as callable, consistent with Object wrapper pattern)
+- [x] Math constants (PI, E) — HeapFloat64 values in Math object shape slots
+- [x] `charAt` OOB returns `""` per §22.1.3.1 (was `undefined`; also fixed bogus `ch == '\0'` guard)
+- [x] String `.length` counts UTF-16 code units per §22.1.4.1 via `encode_utf16().count()`
+
+### Task 8D: `for-in` Loop 🟢 — Priority 5
+- [ ] Own enumerable shape entries as string keys
+- [ ] Dense array: `0..length-1` as string keys
+
+### Task 8E: CFG & Liveness Analysis 🟢 — Priority 6
+- [ ] `block.rs` — Basic block builder, CFG construction
+- [ ] `analysis.rs` — Liveness analysis
+
+### Acceptance — Sprint 7
+- [x] `new Foo(42)` works with both `this` binding and prototype inheritance
+- [x] Array auto-grows on push; `a.length` returns correct length
+- [x] 168 tests pass (94 integration + 27 interpreter + 10 core + 25 parser + 5 gc acceptance + 5 gc + 2 spike)
+- [x] `Array.isArray([1,2,3])` returns true; `Array.isArray(42)` returns false
+- [x] `String.fromCharCode(65)` returns a heap string
+- [x] `Math.PI` and `Math.E` are accessible as float64 values
+- [x] `charAt` OOB returns empty string; string `.length` counts UTF-16 code units
+- [ ] `for (var k in obj)` iterates own keys (deferred)
+
+---
+
 ## Phase 3 — Baseline Copy-and-Patch JIT
 
 > **Spec mandate:** See [`ecma262.md`](./ecma262.md) §11 ([[Call]]/[[Construct]]), §29.3 (generator JIT) — open each linked `https://tc39.es/ecma262/multipage/` URL via `webfetch` for exact call semantics and generator dispatch. No guessing.

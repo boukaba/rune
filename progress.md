@@ -2,7 +2,7 @@
 
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
-> **Status:** Sprint 10 — JIT Smi bail-out ✅ (10A, 10B done)
+> **Status:** Sprint 11 — Operator fixes ✅ (11A–11F done)
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
 > Every implementation decision at every level (lexer, parser, emitter, bytecode, interpreter, builtins, JIT) **must** be verified against the exact ECMA-262 specification language in [`ecma262.md`](./ecma262.md) — **never guess** what the spec says. Each section in `ecma262.md` links to the corresponding URL fragment on `https://tc39.es/ecma262/multipage/`; **always open these URLs via `webfetch` tool** to read the authoritative algorithm steps before implementing. This applies to all phases below.
@@ -673,6 +673,50 @@
   - [x] JIT call path guarded: invoke only if all locals/args are Smi
   - [x] Non-Smi values (float64, string, object) fall through to interpreter
   - [x] Integration test (x86_64): add(3.5, 2) bypasses JIT, returns 5.5 via interpreter
+
+## Sprint 11 — Operator Fixes (Strict Eq, `in`, Compound, `&&`/`||`, `delete`)
+
+> **Spec mandate:** See [`ecma262.md`](./ecma262.md) §7.2.14 (Strict Equality), §14.7.3 (`in`), §13.15 (Assignment), §13.11 (Binary Logical), §14.4 (Unary `delete`) — open each linked URL via `webfetch` for exact runtime semantics. No guessing.
+
+- [x] **11A: Strict Equality Fix — SameValueNonNumber per §7.2.14**
+  - [x] `values_strictly_equal` handles Number type explicitly: NaN!==NaN, -0===+0, Smi↔Float64 cross-comparison
+  - [x] NaN, Infinity, undefined as global constants in `init_builtin_wrappers`
+  - [x] 6 integration tests: NaN, -0, cross-type, string, boolean, missing global
+- [x] **11C: `in` Operator per §14.7.3**
+  - [x] `Opcode::In` in bytecode; VM handler with `has_property()`
+  - [x] `has_property()`: prototype chain walk for objects, numeric index check for arrays, `"length"` on arrays, prototype check for functions; TypeError for non-object
+  - [x] `Object.prototype` as default [[Prototype]] for `NewObject` (was `None`)
+- [x] **11D: Compound Assignment (`+=`, `-=`, `*=` etc.) per §13.15**
+  - [x] `Expr::CompoundAssign(BinaryOp, Box<Expr>, Box<Expr>, Span)` AST variant
+  - [x] Parser: `parse_assign_op()` returns `BinaryOp`; compound tokens produce `Expr::CompoundAssign`
+  - [x] Emitter: Identifier pattern = load+op+store; Member pattern = desugared to `o.a = o.a + rhs` (emit obj+key twice)
+  - [x] `BinaryOp` derives `Copy` for `compound_binary_opcode` helper
+  - [x] 9 integration tests: numeric, object property, computed property, string concat, subtraction, multiplication, division, modulo, exponentiation
+  - [x] **Bug fix during implementation**: stack ordering bug in original Dup-based member emit — `[obj, obj, key, key]` caused `LoadProperty` to pop `key, key`. Fixed by desugaring to double-emission of obj+key.
+- [x] **11E: Short-circuit `&&`/`||` per §13.11**
+  - [x] Removed `LogicalAnd`/`LogicalOr` from Opcode enum
+  - [x] Emitter: `lhs, Dup, JumpIfFalse/JumpIfTrue→end, Pop, rhs` pattern
+  - [x] VM handlers removed; `is_jit_compatible` updated with `Dup`, `JumpIfTrue`
+  - [x] 8 integration tests: truthy truish/falsy, falsy truish/falsy, short-circuit RHS not evaluated, chained, nested with &&, both false, non-boolean middle
+- [x] **11F: `delete` Operator per §14.4**
+  - [x] `Opcode::DeleteProperty` in bytecode enum
+  - [x] Emitter: for `delete obj.prop` (emit obj+key+DeleteProperty), non-member (Pop+LoadBoolean true)
+  - [x] VM handler calls `JSObject::remove_property()` which rebuilds shape via `Shape::intern` and shifts slots
+  - [x] `is_jit_compatible` implicitly excludes `DeleteProperty`
+  - [x] 4 integration tests: delete own, returns true, delete non-configurable, delete non-member
+
+### Changes
+- `crates/rune_bytecode/src/opcode.rs` — `Opcode::In`, `DeleteProperty`; removed `LogicalAnd`/`LogicalOr`
+- `crates/rune_parser/src/emitter.rs` — `Expr::CompoundAssign` (desugared member), `BinaryOp::LogicalAnd/Or` (jump-based), `UnaryOp::Delete`
+- `crates/rune_parser/src/parser.rs` — `parse_assign_op()` returns `BinaryOp`; compound tokens → `Expr::CompoundAssign`
+- `crates/rune_parser/src/ast.rs` — `Expr::CompoundAssign` variant, `BinaryOp: Copy`
+- `crates/rune_interpreter/src/vm.rs` — `has_property()`, `values_strictly_equal`, `DeleteProperty` handler; removed `LogicalAnd`/`LogicalOr` handlers
+- `crates/rune_core/src/object.rs` — `JSObject::remove_property()`
+- `crates/rune_embed/tests/integration_test.rs` — 117 integration tests (+27 new for Sprint 11)
+- `crates/rune_jit_baseline/src/lib.rs` — `is_jit_compatible` includes `Dup`, `JumpIfTrue`
+
+### Test Results
+- **223 tests passing** (117 integration + 29 VM + 22 JIT baseline + 25 interpreter + 10 core + 6 bytecode + 5 parser + 5 emitter + 5 gc + 5 gc_acceptance + 2 spike)
 
 ## Phase 9 — v2 Features (Stretch)
 

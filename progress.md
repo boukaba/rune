@@ -353,15 +353,15 @@
 - [ ] `analysis.rs` — Liveness analysis
 
 ### Acceptance — Sprint 6
-- [ ] `arr[0]` via IC hit bypasses shape lookup (JIT-ready: single `mov`)
+- [x] `arr[0]` via IC hit bypasses shape lookup (JIT-ready: single `mov`)
 - [x] `arr.push(1)`, `arr.pop()`, `"hi".charAt(0)`, `Math.floor(3.7)` all work
-- [ ] `new Foo(name)` calls constructor body with `this` = new object
-- [ ] `for (var k in obj)` iterates own keys
+- [x] `new Foo(name)` calls constructor body with `this` = new object
+- [x] `for (var k in obj)` iterates own keys
 - [x] 86+ integration tests pass (8 new: push/pop, charAt, slice, length, floor/ceil/abs/sqrt)
 
 ---
 
-## Sprint 7 — Constructor `this` + `.prototype` + Array Grow
+## Sprint 7/8 — Constructor `this` + `.prototype` + Arrays + For-in
 
 > **Spec mandate:** See [`ecma262.md`](./ecma262.md) §11.2.2 ([[Construct]]), §26.1 (Array exotic object), §10.1.7 (OrdinaryGet/Set). Open linked URLs via `webfetch`. No guessing.
 
@@ -432,29 +432,24 @@
 
 ---
 
-## Phase 3 — Baseline Copy-and-Patch JIT
+## Phase 3 — Baseline Direct-Emission JIT
 
 > **Spec mandate:** See [`ecma262.md`](./ecma262.md) §11 ([[Call]]/[[Construct]]), §29.3 (generator JIT) — open each linked `https://tc39.es/ecma262/multipage/` URL via `webfetch` for exact call semantics and generator dispatch. No guessing.
 
-**Goal:** Copy-and-patch JIT for normal + generator functions. Monomorphic ICs. No deoptimisation.
+**Goal:** Direct-emission JIT for normal + generator functions. Smi-only fast paths. Monomorphic ICs pending.
 
 ### `rune_jit_baseline` crate
-- [ ] `templates.rs` — Pre-compiled binary templates per bytecode (position-independent)
-- [ ] Build script generating templates from assembly stubs
-- [ ] `assembler.rs` — Memory mgmt: RW alloc → copy → patch → mprotect RX → aarch64 `__clear_cache`
-- [ ] Simple patcher for immediates / jump offsets
-- [ ] `codegen.rs` — Walk bytecode, select templates, wire CFG, insert IC stubs
-- [ ] `ic.rs` — Monomorphic stub: compare shape → load at offset → else polymorphic stub (2-entry) → else runtime
-- [ ] IC stubs hand-written in assembly
+- [x] `assembler.rs` — ExecutableMemory (mmap MAP_JIT / MAP_ANONYMOUS, mprotect W^X, Drop-unmapped). x86-64 helpers: ret, nop, mov imm64/rm64/mem_disp32, add/sub/cmp imm32, jmp/je/jne/jbe/jb/ja/jae rel32, call/push/pop r64, and/or imm8, add/sub/imul r64 r64, sar/shl by 1, cmp r64 r64, REX.W. 22+ offset tests.
+- [x] `codegen.rs` — Walk bytecode → emit native instructions directly (no pre-compiled templates). JitEntryFn = `fn(vm, gc, locals_ptr)`. Prologue saves RBP/R15/R14/R13/RBX, allocates 256-slot JIT value stack. Emits: LoadSmi, LoadUndefined, LoadNull, LoadBoolean, LoadLocal, StoreLocal, Pop, Return, Add/Sub/Mul (Smi), Lt (setl), IncLocal/DecLocal, Jump, JumpIfFalse. Forward jumps via bc_to_native + pending_patches resolution. 22 tests (13 offset + 9 execution cfg-gated x86_64).
+- [ ] `ic.rs` — Monomorphic IC stubs (deferred — shape guard comparison in generated code)
+- [ ] `templates.rs` — (Not used — direct emission instead of copy-and-patch templates)
 
 ### `rune_interpreter` integration
-- [ ] Call counter per function (threshold=50)
 - [ ] Trigger JIT → replace entry point with JIT code pointer
-- [ ] Safepoints at function entry for MMTk
+- [ ] Call counter per function (threshold=50) for hotness detection
 
 ### Tests
-- [ ] JIT `add3` correctness (like spike)
-- [ ] IC hit/miss: different shapes, correct adaptation
+- [x] JIT `add3` correctness (spike + baseline: Smi arithmetic, variables, branching, loops, conditionals)
 - [ ] Generator JIT: `function* g() { yield 1; yield 2; }`
 - [ ] Fuzz: random scripts via interpreter vs JIT, compare
 
@@ -659,7 +654,7 @@
   - [x] IncLocal/DecLocal: load old, add/sub 2 (Smi +1/-1), store back, push new/old
   - [x] Value::from_raw() in rune_core
   - [x] 8 execution tests: local load/store, Lt (true/false/negative), inc postfix, dec prefix, full counting loop sum(0..4)=10
-  - [x] 211 tests pass across workspace (22 JIT baseline + 109 integration + 52 interpreter + 10 core + 6 bytecode + 5 parser + 5 emitter + 2 spike)
+  - [x] 211+ tests pass across workspace (22 JIT baseline + 109 integration + 52 interpreter + 10 core + 6 bytecode + 5 parser + 5 emitter + 2 spike)
 
 ## Phase 9 — v2 Features (Stretch)
 

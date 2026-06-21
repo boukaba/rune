@@ -1,6 +1,6 @@
 use rune_bytecode::opcode::{BytecodeProgram, Opcode};
 use rune_core::function::Func;
-use rune_core::gc::{GcHeader, SemiSpace, TAG_FUNC, TAG_STRING};
+use rune_core::gc::{GcHeader, SemiSpace, TAG_FUNC, TAG_STRING, TAG_OBJECT};
 use rune_core::object::JSObject;
 use rune_core::shape::{PropertyKey, Shape};
 use rune_core::string::HeapString;
@@ -74,6 +74,36 @@ impl Vm {
             .map(|id| Value::smi(-(id as i32) - 1))
     }
 
+    /// Register all GC root slots (stack, locals, try_stack saved values).
+    /// Must be called after any change to stack/frames/try_stack before GC can run.
+    pub fn register_roots(&mut self, gc: &mut SemiSpace) {
+        gc.clear_roots();
+        for val in &self.stack {
+            gc.push_root(val as *const Value as *mut u64);
+        }
+        for frame in &self.frames {
+            for local in &frame.locals {
+                gc.push_root(local as *const Value as *mut u64);
+            }
+        }
+        for tf in &self.try_stack {
+            if let Some(ref val) = tf.saved_exception {
+                gc.push_root(val as *const Value as *mut u64);
+            }
+        }
+        for val in &self.last_locals {
+            gc.push_root(val as *const Value as *mut u64);
+        }
+        for g in &self.generators {
+            for local in &g.locals {
+                gc.push_root(local as *const Value as *mut u64);
+            }
+        }
+        for val in self.globals.values() {
+            gc.push_root(val as *const Value as *mut u64);
+        }
+    }
+
     /// Execute a bytecode program and return its result.
     pub fn execute(&mut self, gc: &mut SemiSpace, program: &BytecodeProgram) -> Result<Value, Value> {
         self.frames.clear();
@@ -92,6 +122,8 @@ impl Vm {
             prog: program as *const BytecodeProgram,
             generator_id: None,
         });
+
+        self.register_roots(gc);
 
         let result = match self.run_loop(gc) {
             Exit::Return(v) => Ok(v),
@@ -492,11 +524,16 @@ impl Vm {
                     let raw_key = self.pop();
                     let obj = self.pop();
                     let result = if obj.is_heap_object() {
-                        if let Some(key) = value_to_prop_key(raw_key) {
-                            if let Some(ptr) = obj.heap_ptr() {
-                                let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
-                                if let Some(slot) = shape.lookup(&key) {
-                                    unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) }
+                        if let Some(ptr) = obj.heap_ptr() {
+                            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+                            if tag == TAG_OBJECT {
+                                if let Some(key) = value_to_prop_key(raw_key) {
+                                    let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                                    if let Some(slot) = shape.lookup(&key) {
+                                        unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) }
+                                    } else {
+                                        Value::undefined()
+                                    }
                                 } else {
                                     Value::undefined()
                                 }
@@ -517,10 +554,13 @@ impl Vm {
                     let raw_key = self.pop();
                     let obj = self.pop();
                     if let Some(ptr) = obj.heap_ptr() {
-                        if let Some(key) = value_to_prop_key(raw_key) {
-                            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
-                            if let Some(slot) = shape.lookup(&key) {
-                                unsafe { JSObject::set_slot(ptr as *mut JSObject, slot, value) };
+                        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+                        if tag == TAG_OBJECT {
+                            if let Some(key) = value_to_prop_key(raw_key) {
+                                let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                                if let Some(slot) = shape.lookup(&key) {
+                                    unsafe { JSObject::set_slot(ptr as *mut JSObject, slot, value) };
+                                }
                             }
                         }
                     }
@@ -559,7 +599,15 @@ impl Vm {
                     let s = if val.is_undefined() { "undefined" }
                     else if val.is_null() { "object" }
                     else if val.is_smi() { "number" }
-                    else { "object" };
+                    else {
+                        let ptr = val.raw() as *mut GcHeader;
+                        let tag = unsafe { (*ptr).tag() };
+                        match tag {
+                            TAG_STRING => "string",
+                            TAG_FUNC => "function",
+                            _ => "object",
+                        }
+                    };
                     let str = HeapString::allocate(gc, s);
                     self.push(Value::from_heap_ptr(str as *mut u8));
                     self.frames[fi].pc = pc + 1;

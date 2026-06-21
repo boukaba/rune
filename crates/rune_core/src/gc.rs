@@ -93,16 +93,31 @@ impl SemiSpace {
     }
 
     /// Allocate `size` bytes in the active semispace.
-    /// Panics if insufficient space (call `collect()` first).
+    /// Automatically triggers a Cheney-style copying collection if there's
+    /// insufficient space. The caller must have registered roots via `push_root()`
+    /// before any allocation that may trigger GC.
     pub fn alloc(&mut self, size: usize) -> *mut u8 {
         let aligned = align_up(size, 8);
         let ptr = self.bump;
         let next = unsafe { ptr.add(aligned) };
         if next > self.limit {
-            panic!(
-                "GC: out of memory in semispace (need {aligned} bytes, have {} remaining). Call collect() first.",
-                self.remaining()
-            );
+            if self.roots.is_empty() {
+                panic!(
+                    "GC: out of memory (need {aligned} bytes, {} remaining) and no roots registered.",
+                    self.remaining()
+                );
+            }
+            self.collect();
+            let ptr2 = self.bump;
+            let next2 = unsafe { ptr2.add(aligned) };
+            if next2 > self.limit {
+                panic!(
+                    "GC: still out of memory after collection (need {aligned} bytes, have {} remaining).",
+                    self.remaining()
+                );
+            }
+            self.bump = next2;
+            return ptr2;
         }
         self.bump = next;
         ptr

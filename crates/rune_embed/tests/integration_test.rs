@@ -449,3 +449,10 @@ fn test_builtin_test262_error() {
     let r = ctx.eval(r#"Test262Error("fail")"#).unwrap();
     assert!(r.is_heap_object(), "Test262Error should return an object");
 }
+
+#[test]
+fn test_typeof_basic() {
+    let mut ctx = Context::new();
+    let r = ctx.eval(r#"typeof 42"#).unwrap();
+    assert!(r.heap_ptr().is_some(), "typeof should return a string");
+}

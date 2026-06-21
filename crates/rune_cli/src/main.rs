@@ -16,12 +16,13 @@ fn main() {
 
     match args[0].as_str() {
         "test262" => {
+            // args[1] = optional subdirectory filter, args[2] = optional suite_dir
+            let subdir = args.get(1).map(|s| s.as_str());
             let suite_dir = args
-                .get(1)
+                .get(2)
                 .map(std::path::PathBuf::from)
                 .or_else(|| std::env::var("TEST262_DIR").ok().map(std::path::PathBuf::from))
                 .unwrap_or_else(|| std::path::PathBuf::from("./test262"));
-            let subdir = args.get(2).map(|s| s.as_str());
             let passed = test262::run_suite(&suite_dir, subdir);
             if passed == 0 {
                 std::process::exit(1);

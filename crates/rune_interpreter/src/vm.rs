@@ -14,6 +14,8 @@ use std::collections::HashMap;
 /// Callback for the `eval` builtin: parses and executes JS source, returns result.
 pub type EvalFn = Box<dyn FnMut(&mut SemiSpace, &str) -> Result<Value, String>>;
 
+
+
 struct Frame {
     locals: Vec<Value>,
     pc: usize,
@@ -48,6 +50,8 @@ pub struct Vm {
     pub generators: Vec<Generator>,
     pub builtins: Vec<Builtin>,
     pub globals: HashMap<String, Value>,
+    /// Pre-built constructor objects (like `Object`) that expose methods via property access.
+    builtin_wrappers: HashMap<String, Value>,
     last_locals: Vec<Value>,
     pub eval_fn: UnsafeCell<Option<EvalFn>>,
 }
@@ -61,8 +65,25 @@ impl Vm {
             generators: Vec::new(),
             builtins: Vec::new(),
             globals: HashMap::new(),
+            builtin_wrappers: HashMap::new(),
             last_locals: Vec::new(),
             eval_fn: UnsafeCell::new(None),
+        }
+    }
+
+    /// Build pre-wired constructor objects (Object, etc.) in the GC heap.
+    /// Must be called after all builtins are registered.
+    pub fn init_builtin_wrappers(&mut self, gc: &mut SemiSpace) {
+        // Find the Object_create builtin index
+        let create_id = self.builtins.iter().position(|b| b.name == "Object_create");
+        if let Some(create_idx) = create_id {
+            let create_handle = Value::smi(-(create_idx as i32) - 1);
+            // Build Object wrapper: an object with {create: <builtin handle>}
+            let key = rune_core::shape::PropertyKey::from_string("create");
+            let shape = rune_core::shape::Shape::intern(vec![(key, 0usize)]);
+            let obj_ptr = JSObject::allocate(gc, shape, &[create_handle]);
+            let obj_val = Value::from_heap_ptr(obj_ptr as *mut u8);
+            self.builtin_wrappers.insert("Object".to_string(), obj_val);
         }
     }
 
@@ -579,25 +600,7 @@ impl Vm {
                     let raw_key = self.pop();
                     let obj = self.pop();
                     let result = if obj.is_heap_object() {
-                        if let Some(ptr) = obj.heap_ptr() {
-                            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-                            if tag == TAG_OBJECT {
-                                if let Some(key) = value_to_prop_key(raw_key) {
-                                    let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
-                                    if let Some(slot) = shape.lookup(&key) {
-                                        unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) }
-                                    } else {
-                                        Value::undefined()
-                                    }
-                                } else {
-                                    Value::undefined()
-                                }
-                            } else {
-                                Value::undefined()
-                            }
-                        } else {
-                            Value::undefined()
-                        }
+                        load_property_recursive(obj, raw_key)
                     } else {
                         Value::undefined()
                     };
@@ -634,7 +637,10 @@ impl Vm {
                 Opcode::LoadGlobal => {
                     let name_idx = instr.operands[0] as usize;
                     if let Some(name) = self.frames[fi].prog_str(name_idx) {
-                        let val = self.globals.get(&name).copied().or_else(|| self.get_builtin(&name)).unwrap_or(Value::undefined());
+                        let val = self.globals.get(&name).copied()
+                            .or_else(|| self.builtin_wrappers.get(&name).copied())
+                            .or_else(|| self.get_builtin(&name))
+                            .unwrap_or(Value::undefined());
                         self.push(val);
                     } else {
                         self.push(Value::undefined());
@@ -1418,6 +1424,35 @@ fn value_to_prop_key(val: Value) -> Option<PropertyKey> {
         return Some(PropertyKey::from_string(&v.to_string()));
     }
     None
+}
+
+/// Walk the prototype chain to resolve a property.
+/// Implements OrdinaryGet (§10.1.8.1): check own property, then recurse on [[Prototype]].
+fn load_property_recursive(obj: Value, raw_key: Value) -> Value {
+    let mut current = obj;
+    loop {
+        if let Some(ptr) = current.heap_ptr() {
+            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+            if tag == TAG_OBJECT {
+                if let Some(key) = value_to_prop_key(raw_key) {
+                    let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                    if let Some(slot) = shape.lookup(&key) {
+                        return unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+                    }
+                    // Not found — walk to prototype
+                    let proto = unsafe { JSObject::prototype(ptr as *mut JSObject) };
+                    if proto.is_null() {
+                        return Value::undefined();
+                    }
+                    current = Value::from_heap_ptr(proto);
+                    continue;
+                } else {
+                    return Value::undefined();
+                }
+            }
+        }
+        return Value::undefined();
+    }
 }
 
 /// Convert a Value to an f64 for numeric operations.

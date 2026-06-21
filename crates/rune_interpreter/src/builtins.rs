@@ -90,6 +90,20 @@ pub fn object_builtin(gc: &mut SemiSpace, _args: &[Value], _vm: &Vm) -> Value {
     Value::from_heap_ptr(ptr as *mut u8)
 }
 
+/// Object.create(proto) — creates a new object with the given prototype.
+pub fn object_create_builtin(gc: &mut SemiSpace, args: &[Value], _vm: &Vm) -> Value {
+    let shape = Shape::empty();
+    let ptr = JSObject::allocate(gc, shape, &[]);
+    if let Some(proto) = args.first() {
+        if let Some(proto_ptr) = proto.heap_ptr() {
+            unsafe {
+                JSObject::set_prototype(ptr, proto_ptr);
+            }
+        }
+    }
+    Value::from_heap_ptr(ptr as *mut u8)
+}
+
 /// eval(source) — currently not implemented; returns undefined.
 pub fn eval_builtin(_gc: &mut SemiSpace, _args: &[Value], _vm: &Vm) -> Value {
     Value::undefined()
@@ -105,5 +119,14 @@ pub fn default_builtins() -> Vec<Builtin> {
         Builtin { name: "Test262Error", func: test262_error_builtin },
         Builtin { name: "$DONOTEVALUATE", func: donot_evaluate_builtin },
         Builtin { name: "eval", func: eval_builtin },
+        Builtin { name: "Object_create", func: object_create_builtin }, // accessible only via Object.create
     ]
+}
+
+/// Build a wrapper object for the Object constructor, exposing methods like .create().
+/// Returns (object_value, create_builtin_smi_index).
+pub fn build_object_constructor(gc: &mut SemiSpace) -> Value {
+    let shape = Shape::empty();
+    let ptr = JSObject::allocate(gc, shape, &[]);
+    Value::from_heap_ptr(ptr as *mut u8)
 }

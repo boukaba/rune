@@ -563,3 +563,38 @@ fn test_neg_zero_preserved() {
     assert!(r.as_float64().unwrap().is_infinite(), "1 / -0 should be -Infinity");
     assert!(r.as_float64().unwrap().is_sign_negative(), "1 / -0 should be negative");
 }
+
+#[test]
+fn test_prototype_chain_get() {
+    let mut ctx = Context::new();
+    let r = ctx.eval(r#"
+        var animal = { speak: function() { return "generic"; } };
+        var dog = Object.create(animal);
+        dog.speak
+    "#).unwrap();
+    assert!(r.is_heap_object(), "should inherit speak from animal prototype");
+}
+
+#[test]
+fn test_prototype_set_own_property() {
+    let mut ctx = Context::new();
+    let r = ctx.eval(r#"
+        var animal = { x: 1 };
+        var dog = Object.create(animal);
+        dog.x = 2;
+        dog.x
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(2));
+}
+
+#[test]
+fn test_prototype_shadow() {
+    let mut ctx = Context::new();
+    let r = ctx.eval(r#"
+        var proto = { name: "proto" };
+        var obj = Object.create(proto);
+        obj.name = "own";
+        obj.name
+    "#).unwrap();
+    assert_eq!(r.as_smi(), None, "shadowed value is a string, not a number");
+}

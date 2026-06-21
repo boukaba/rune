@@ -44,7 +44,10 @@ impl GcHeader {
 
 /// Size of each semispace region in bytes.
 const SEMISPACE_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
-const OBJECT_SLOTS_OFFSET: usize = 24; // matches object.rs OBJECT_HEADER_END
+/// Offset in bytes from object start to prototype pointer (matches object.rs OBJECT_HEADER_PROTOTYPE)
+const OBJECT_PROTOTYPE_OFFSET: usize = 24;
+/// Offset in bytes from object start to first property slot (matches object.rs OBJECT_HEADER_END)
+const OBJECT_SLOTS_OFFSET: usize = 32;
 
 /// A simple Cheney-style semispace copying GC.
 ///
@@ -164,6 +167,10 @@ impl SemiSpace {
 
                 match tag {
                     TAG_OBJECT => {
+                        // Forward prototype pointer (if non-null)
+                        let proto_ptr = scan_ptr.add(OBJECT_PROTOTYPE_OFFSET) as *mut u64;
+                        self.forward_value(proto_ptr);
+                        // Forward property slots
                         let slots_ptr = scan_ptr.add(OBJECT_SLOTS_OFFSET) as *mut u64;
                         let capacity_ptr = scan_ptr.add(16) as *const u32;
                         let cap = *capacity_ptr as usize;

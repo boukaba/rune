@@ -4,12 +4,13 @@ use crate::value::Value;
 use std::ptr;
 
 /// Memory layout offsets (in bytes) for a JSObject:
-///   [0..8)  GcHeader
-///   [8..16) shape: *const Shape
+///   [0..8)   GcHeader
+///   [8..16)  shape: *const Shape
 ///   [16..20) capacity: u32 (total slot capacity including reserved)
 ///   [20..24) slot_count: u32 (used slots)
-///   [24..)  slots: Value[]
-pub const OBJECT_HEADER_END: usize = 24;
+///   [24..32) prototype: *mut u8 (heap pointer or null)
+///   [32..)   slots: Value[]
+pub const OBJECT_HEADER_END: usize = 32;
 
 /// Number of extra slots to reserve beyond the initial shape's property count.
 const RESERVED_SLOTS: usize = 4;
@@ -35,6 +36,10 @@ impl JSObject {
 
             let sc_ptr = ptr.add(20) as *mut u32;
             *sc_ptr = slot_count as u32;
+
+            // Prototype starts as null (no prototype)
+            let proto_ptr = ptr.add(24) as *mut *mut u8;
+            *proto_ptr = std::ptr::null_mut();
 
             let slots_ptr = ptr.add(OBJECT_HEADER_END) as *mut Value;
             ptr::copy_nonoverlapping(slot_values.as_ptr(), slots_ptr, slot_count);
@@ -75,6 +80,22 @@ impl JSObject {
             let ptr = ptr as *mut u8;
             let shape_ptr_ptr = ptr.add(8) as *mut *const Shape;
             *shape_ptr_ptr = shape as *const Shape;
+        }
+    }
+
+    pub unsafe fn prototype(ptr: *mut JSObject) -> *mut u8 {
+        unsafe {
+            let ptr_bytes = ptr as *mut u8;
+            let proto_ptr = ptr_bytes.add(24) as *const *mut u8;
+            *proto_ptr
+        }
+    }
+
+    pub unsafe fn set_prototype(ptr: *mut JSObject, proto: *mut u8) {
+        unsafe {
+            let ptr_bytes = ptr as *mut u8;
+            let proto_ptr = ptr_bytes.add(24) as *mut *mut u8;
+            *proto_ptr = proto;
         }
     }
 

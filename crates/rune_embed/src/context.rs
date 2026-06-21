@@ -23,6 +23,8 @@ impl Context {
         for b in rune_interpreter::builtins::default_builtins() {
             ctx.vm.register_builtin(b.name, b.func);
         }
+        // Build constructor wrappers (Object.create, etc.)
+        ctx.vm.init_builtin_wrappers(&mut ctx.gc);
         ctx
     }
 

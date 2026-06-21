@@ -8,3 +8,5 @@
 *.o
 test262/
 AGENTS.md
+ecma262.md
+

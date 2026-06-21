@@ -45,6 +45,15 @@ impl Shape {
         leaked
     }
 
+    /// Intern a shape that extends a parent shape with one additional property.
+    /// The new property gets the next slot offset.
+    pub fn intern_with_parent(parent: &Self, key: PropertyKey) -> &'static Self {
+        let mut entries = parent.entries.clone();
+        let offset = entries.len();
+        entries.push((key, offset));
+        Self::intern(entries)
+    }
+
     /// Convenience: intern an empty shape.
     pub fn empty() -> &'static Self {
         Self::intern(vec![])

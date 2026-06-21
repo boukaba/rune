@@ -7,7 +7,11 @@ use rune_core::string::HeapString;
 use rune_core::value::Value;
 use crate::builtins::{Builtin, BuiltinFn};
 use crate::generator::Generator;
+use std::cell::UnsafeCell;
 use std::collections::HashMap;
+
+/// Callback for the `eval` builtin: parses and executes JS source, returns result.
+pub type EvalFn = Box<dyn FnMut(&mut SemiSpace, &str) -> Result<Value, String>>;
 
 struct Frame {
     locals: Vec<Value>,
@@ -44,6 +48,7 @@ pub struct Vm {
     pub builtins: Vec<Builtin>,
     pub globals: HashMap<String, Value>,
     last_locals: Vec<Value>,
+    pub eval_fn: UnsafeCell<Option<EvalFn>>,
 }
 
 impl Vm {
@@ -56,6 +61,7 @@ impl Vm {
             builtins: Vec::new(),
             globals: HashMap::new(),
             last_locals: Vec::new(),
+            eval_fn: UnsafeCell::new(None),
         }
     }
 
@@ -560,6 +566,9 @@ impl Vm {
                                 let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
                                 if let Some(slot) = shape.lookup(&key) {
                                     unsafe { JSObject::set_slot(ptr as *mut JSObject, slot, value) };
+                                } else {
+                                    // Property not found — add it with shape transition
+                                    unsafe { JSObject::add_property(ptr as *mut JSObject, key, value) };
                                 }
                             }
                         }
@@ -762,7 +771,7 @@ impl Vm {
                             if id < self.builtins.len() {
                                 // Builtins receive the new object as first arg? 
                                 // For now, just call the builtin normally
-                                let result = (self.builtins[id].func)(gc, &args);
+                                let result = (self.builtins[id].func)(gc, &args, &*self);
                                 // If result is an object, use it; otherwise use the new object
                                 if result.is_heap_object() {
                                     self.push(result);
@@ -789,7 +798,7 @@ impl Vm {
                         if smi_val < 0 {
                             let id = ((-smi_val) as usize) - 1;
                             if id < self.builtins.len() {
-                                let result = (self.builtins[id].func)(gc, &args);
+                                let result = (self.builtins[id].func)(gc, &args, &*self);
                                 self.push(result);
                                 self.frames[fi].pc = pc + 1;
                                 continue;

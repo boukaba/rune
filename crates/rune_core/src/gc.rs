@@ -157,13 +157,13 @@ impl SemiSpace {
                 let header = &*(scan_ptr as *const GcHeader);
                 let tag = header.tag();
                 let obj_end = self.scan_end(scan_ptr, tag);
-                let obj_size = obj_end as usize - scan_ptr as usize;
 
                 match tag {
                     TAG_OBJECT => {
                         let slots_ptr = scan_ptr.add(OBJECT_SLOTS_OFFSET) as *mut u64;
-                        let slot_count = (obj_size - OBJECT_SLOTS_OFFSET) / size_of::<u64>();
-                        for i in 0..slot_count {
+                        let capacity_ptr = scan_ptr.add(16) as *const u32;
+                        let cap = *capacity_ptr as usize;
+                        for i in 0..cap {
                             self.forward_value(slots_ptr.add(i));
                         }
                     }
@@ -190,9 +190,9 @@ impl SemiSpace {
                     obj_start.add(align_up(16, 8))
                 }
                 TAG_OBJECT => {
-                    let slot_count_ptr = obj_start.add(16) as *const u32;
-                    let slot_count = *slot_count_ptr as usize;
-                    let total = OBJECT_SLOTS_OFFSET + slot_count * size_of::<u64>();
+                    let capacity_ptr = obj_start.add(16) as *const u32;
+                    let capacity = *capacity_ptr as usize;
+                    let total = OBJECT_SLOTS_OFFSET + capacity * size_of::<u64>();
                     obj_start.add(align_up(total, 8))
                 }
                 _ => obj_start.add(8),

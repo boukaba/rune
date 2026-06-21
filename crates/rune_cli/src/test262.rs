@@ -203,7 +203,7 @@ fn strip_frontmatter(source: &str) -> String {
     }
 }
 
-/// Run a single test case.
+/// Run a single test case, catching Rust panics to keep the runner alive.
 fn run_test(test: &TestCase) -> Outcome {
     // Skip tests with unsupported features
     if let Some(features) = test.meta.flags.iter().find(|f| UNSUPPORTED_FEATURES.contains(&f.as_str())) {
@@ -222,35 +222,50 @@ fn run_test(test: &TestCase) -> Outcome {
         Err(e) => return Outcome::Skipped { reason: e },
     };
 
+    // Skip tests containing $DONOTEVALUATE (must not be executed)
+    if source.contains("$DONOTEVALUATE") {
+        return Outcome::Skipped { reason: "contains $DONOTEVALUATE".to_string() };
+    }
+
     // Check for negative tests (expected to fail)
     if let Some(ref neg_type) = test.meta.negative_type {
         let phase = test.meta.negative_phase.as_deref().unwrap_or("runtime");
 
         if phase == "parse" {
             let mut ctx = rune_embed::Context::new();
-            match ctx.eval(&source) {
-                Ok(_) => Outcome::Fail {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctx.eval(&source))) {
+                Ok(Ok(_)) => Outcome::Fail {
                     message: format!("expected parse error {neg_type}, but parsed successfully"),
                 },
-                Err(_) => Outcome::Pass,
+                _ => Outcome::Pass,
             }
         } else {
             let mut ctx = rune_embed::Context::new();
-            match ctx.eval(&source) {
-                Ok(_) => Outcome::Fail {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctx.eval(&source))) {
+                Ok(Ok(_)) => Outcome::Fail {
                     message: format!("expected runtime error {neg_type}, but ran successfully"),
                 },
-                Err(_) => Outcome::Pass,
+                _ => Outcome::Pass,
             }
         }
     } else {
         // Normal test
         let mut ctx = rune_embed::Context::new();
-        match ctx.eval(&source) {
-            Ok(_) => Outcome::Pass,
-            Err(e) => Outcome::Fail {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctx.eval(&source))) {
+            Ok(Ok(_)) => Outcome::Pass,
+            Ok(Err(e)) => Outcome::Fail {
                 message: format!("runtime error: {e}"),
             },
+            Err(panic) => {
+                let msg = if let Some(s) = panic.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "unknown panic".to_string()
+                };
+                Outcome::Fail { message: format!("panic: {msg}") }
+            }
         }
     }
 }

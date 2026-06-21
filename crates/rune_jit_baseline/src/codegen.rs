@@ -753,7 +753,7 @@ mod tests {
             Instruction::new(Opcode::LoadLocal, vec![1]),
             Instruction::new(Opcode::LoadSmi, vec![5]),
             Instruction::new(Opcode::Lt, vec![]),
-            Instruction::new(Opcode::JumpIfFalse, vec![19]),
+            Instruction::new(Opcode::JumpIfFalse, vec![18]),
             // Body
             Instruction::new(Opcode::LoadLocal, vec![0]),
             Instruction::new(Opcode::LoadLocal, vec![1]),
@@ -818,7 +818,7 @@ mod tests {
             Instruction::new(Opcode::LoadLocal, vec![1]),
             Instruction::new(Opcode::LoadSmi, vec![5]),
             Instruction::new(Opcode::Lt, vec![]),
-            Instruction::new(Opcode::JumpIfFalse, vec![19]),
+            Instruction::new(Opcode::JumpIfFalse, vec![18]),
             Instruction::new(Opcode::LoadLocal, vec![0]),
             Instruction::new(Opcode::LoadLocal, vec![1]),
             Instruction::new(Opcode::Add, vec![]),

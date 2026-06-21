@@ -51,6 +51,7 @@ pub enum Opcode {
     NewArray,
     LoadProperty,
     StoreProperty,
+    DeleteProperty,
     DefineProperty,
     // Globals
     LoadGlobal,

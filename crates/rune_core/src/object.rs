@@ -128,6 +128,33 @@ impl JSObject {
         }
     }
 
+    /// Remove a property from the object. Returns true if the property was found and removed.
+    pub unsafe fn remove_property(ptr: *mut JSObject, key: &crate::shape::PropertyKey) -> bool {
+        unsafe {
+            let shape = Self::shape_ptr(ptr);
+            if let Some(slot) = shape.lookup(key) {
+                let count = Self::slot_count(ptr);
+                let mut new_entries: Vec<(crate::shape::PropertyKey, usize)> = Vec::with_capacity(count - 1);
+                let mut new_key_names: Vec<String> = Vec::with_capacity(count - 1);
+                for i in 0..count {
+                    if i == slot { continue; }
+                    let new_offset = new_entries.len();
+                    new_entries.push((shape.entries[i].0, new_offset));
+                    new_key_names.push(shape.key_names[i].clone());
+                }
+                let new_shape = crate::shape::Shape::intern(new_entries, new_key_names);
+                Self::set_shape_ptr(ptr, new_shape);
+                for i in slot..(count - 1) {
+                    Self::set_slot(ptr, i, Self::get_slot(ptr, i + 1));
+                }
+                Self::set_slot_count(ptr, count - 1);
+                true
+            } else {
+                false
+            }
+        }
+    }
+
     /// Add a new property to the object in place, extending the shape and slot array.
     /// Returns the slot index of the new property.
     /// Panics if the object has no reserved capacity left.

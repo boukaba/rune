@@ -986,6 +986,23 @@ impl Vm {
                     self.push(value);
                     self.frames[fi].pc = pc + 1;
                 }
+                Opcode::DeleteProperty => {
+                    let raw_key = self.pop();
+                    let obj = self.pop();
+                    let result = if let Some(ptr) = obj.heap_ptr() {
+                        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+                        if tag == TAG_OBJECT {
+                            if let Some(key) = value_to_prop_key(raw_key) {
+                                unsafe { JSObject::remove_property(ptr as *mut JSObject, &key) };
+                            }
+                        }
+                        Value::smi(1)
+                    } else {
+                        Value::smi(1)
+                    };
+                    self.push(result);
+                    self.frames[fi].pc = pc + 1;
+                }
                 Opcode::DefineProperty => {
                     let _value = self.pop();
                     let _raw_key = self.pop();

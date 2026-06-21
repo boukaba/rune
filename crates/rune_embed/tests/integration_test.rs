@@ -1061,6 +1061,19 @@ fn test_logical_or() {
 }
 
 #[test]
+fn test_delete_property() {
+    let mut ctx = Context::new();
+    let r = ctx.eval(r#"var o = {a: 1}; delete o.a; "a" in o"#).unwrap();
+    assert_eq!(r.as_smi(), Some(0), "delete o.a should remove property; 'a' in o should be false");
+    let r2 = ctx.eval(r#"var o = {a: 1, b: 2}; delete o.a; o.b"#).unwrap();
+    assert_eq!(r2.as_smi(), Some(2), "after delete o.a, o.b should remain 2");
+    let r3 = ctx.eval(r#"var o = {a: 1}; delete o.b; "a" in o"#).unwrap();
+    assert_eq!(r3.as_smi(), Some(1), "delete non-existent property returns true, 'a' in o still true");
+    let r4 = ctx.eval("delete 42").unwrap();
+    assert_eq!(r4.as_smi(), Some(1), "delete 42 should return true");
+}
+
+#[test]
 fn test_in_operator() {
     let mut ctx = Context::new();
     let r = ctx.eval(r#"var o = {a: 1}; "a" in o"#).unwrap();

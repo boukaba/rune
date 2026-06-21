@@ -480,15 +480,38 @@ impl Emitter {
                 self.emit(Opcode::LoadThis, vec![]);
             }
             Expr::Unary(op, arg, _) => {
-                self.emit_expression(arg);
-                match op {
-                    UnaryOp::Minus => self.emit(Opcode::Neg, vec![]),
-                    UnaryOp::Plus => {},
-                    UnaryOp::Not => self.emit(Opcode::Not, vec![]),
-                    UnaryOp::BitNot => self.emit(Opcode::BitNot, vec![]),
-                    UnaryOp::Typeof => self.emit(Opcode::TypeOf, vec![]),
-                    UnaryOp::Void => { self.emit(Opcode::Pop, vec![]); self.emit(Opcode::LoadUndefined, vec![]); },
-                    UnaryOp::Delete => self.emit(Opcode::LoadBoolean, vec![1]),
+                // delete needs special handling: don't emit_expression(arg) which would
+                // evaluate the member expression (including LoadProperty)
+                if *op == UnaryOp::Delete {
+                    match arg.as_ref() {
+                        Expr::Member(obj, prop, computed, _) => {
+                            self.emit_expression(obj);
+                            if *computed {
+                                self.emit_expression(prop);
+                            } else {
+                                let name = prop_name_as_string(prop);
+                                let idx = self.intern_string(&name) as i64;
+                                self.emit(Opcode::LoadStringConst, vec![idx]);
+                            }
+                            self.emit(Opcode::DeleteProperty, vec![]);
+                        }
+                        _ => {
+                            self.emit_expression(arg);
+                            self.emit(Opcode::Pop, vec![]);
+                            self.emit(Opcode::LoadBoolean, vec![1]);
+                        }
+                    }
+                } else {
+                    self.emit_expression(arg);
+                    match op {
+                        UnaryOp::Minus => self.emit(Opcode::Neg, vec![]),
+                        UnaryOp::Plus => {},
+                        UnaryOp::Not => self.emit(Opcode::Not, vec![]),
+                        UnaryOp::BitNot => self.emit(Opcode::BitNot, vec![]),
+                        UnaryOp::Typeof => self.emit(Opcode::TypeOf, vec![]),
+                        UnaryOp::Void => { self.emit(Opcode::Pop, vec![]); self.emit(Opcode::LoadUndefined, vec![]); },
+                        UnaryOp::Delete => unreachable!(),
+                    }
                 }
             }
             Expr::Update(op, arg, prefix, _) => {

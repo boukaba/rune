@@ -1121,3 +1121,22 @@ fn test_jit_tier_up() {
     // sum = 0+1+2+...+99 = 4950
     assert_eq!(r.as_smi(), Some(4950), "JIT tier-up: sum should be 4950");
 }
+
+#[test]
+#[cfg(target_arch = "x86_64")]
+fn test_jit_bailout_on_float() {
+    // add() tier-up at 50, then pass a float64 — JIT should bail out to interpreter
+    let mut ctx = Context::new();
+    let r = ctx.eval(r#"
+        function add(a, b) { return a + b; }
+        var sum = 0;
+        for (var i = 0; i < 100; i++) {
+            sum = add(sum, i);
+        }
+        var result = add(3.5, 2);
+        result
+    "#).unwrap();
+    // 3.5 + 2 = 5.5
+    let f = r.as_float64().unwrap_or(0.0);
+    assert!((f - 5.5).abs() < 0.001, "JIT bail-out: add(3.5, 2) should be ~5.5, got {}", f);
+}

@@ -187,6 +187,11 @@ impl Vm {
             .map(|id| Value::smi(-(id as i32) - 1))
     }
 
+    /// Check if all values in the slice are Smi (tag bit 0 = 1).
+    fn all_smi(values: &[Value]) -> bool {
+        values.iter().all(|v| v.is_smi())
+    }
+
     /// Register all GC root slots (stack, locals, try_stack saved values).
     /// Must be called after any change to stack/frames/try_stack before GC can run.
     pub fn register_roots(&mut self, gc: &mut SemiSpace) {
@@ -1366,14 +1371,18 @@ impl Vm {
                                         while jit_locals.len() < local_count {
                                             jit_locals.push(Value::undefined());
                                         }
-                                        let func: JitEntryFn = unsafe { std::mem::transmute(jit_entry) };
-                                        let vm_ptr = self as *mut Vm as *mut u8;
-                                        let gc_ptr = gc as *mut SemiSpace as *mut u8;
-                                        let result_raw = unsafe { func(vm_ptr, gc_ptr, jit_locals.as_mut_ptr() as *mut u64) };
-                                        self.last_locals = jit_locals;
-                                        self.push(Value::from_raw(result_raw));
-                                        self.frames[fi].pc = pc + 1;
-                                        continue;
+                                        // Safety check: only call JIT if all inputs are Smi
+                                        if Self::all_smi(&jit_locals) {
+                                            let func: JitEntryFn = unsafe { std::mem::transmute(jit_entry) };
+                                            let vm_ptr = self as *mut Vm as *mut u8;
+                                            let gc_ptr = gc as *mut SemiSpace as *mut u8;
+                                            let result_raw = unsafe { func(vm_ptr, gc_ptr, jit_locals.as_mut_ptr() as *mut u64) };
+                                            self.last_locals = jit_locals;
+                                            self.push(Value::from_raw(result_raw));
+                                            self.frames[fi].pc = pc + 1;
+                                            continue;
+                                        }
+                                        // Non-Smi value present — fall through to interpreter
                                     }
                                 }
                                 // --- End JIT tier-up ---

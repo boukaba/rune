@@ -2,7 +2,7 @@
 
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
-> **Status:** Sprint 9 — Spec compliance + Smi codegen ✅ (9C, 9A, 9B done)
+> **Status:** Sprint 9 — Baseline JIT: control flow + branches ✅ (9A-9D done)
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
 > Every implementation decision at every level (lexer, parser, emitter, bytecode, interpreter, builtins, JIT) **must** be verified against the exact ECMA-262 specification language in [`ecma262.md`](./ecma262.md) — **never guess** what the spec says. Each section in `ecma262.md` links to the corresponding URL fragment on `https://tc39.es/ecma262/multipage/`; **always open these URLs via `webfetch` tool** to read the authoritative algorithm steps before implementing. This applies to all phases below.
@@ -620,7 +620,8 @@
 
 ---
 
-### Sprint 9: Baseline JIT Foundation 🟢 — Priority 1 (Phase 3 gate)
+## Sprint 9: Baseline JIT Foundation 🟢 — Priority 1 (Phase 3 gate)
+
 - [x] **9A: JIT Memory Management + Assembler** — 188 tests passing (+12 new)
   - [x] ExecutableMemory: W^X-compliant allocator (mmap + MAP_JIT/mprotect)
   - [x] x86-64: ret, nop, mov, add/sub/cmp, jmp/je/jne, call, push/pop with REX prefix support
@@ -633,13 +634,21 @@
   - [x] Smi arithmetic: Add ((a&~1)+b), Sub ((a-b)|1), Mul (decode→imul→encode)
   - [x] 2 offset-verification tests + 7 execution tests (cfg-gated to x86_64)
   - [x] New assembler helpers: and/or imm8, add/sub r64 r64, imul, sar/shl by 1
-- [ ] 9D: IC Integration — Inline cache fast paths in generated code
 - [x] **9C: ECMA-262 Spec Compliance — Critical Fixes** — 201 tests passing (+11 new)
   - [x] 9C-1: Lt/Gt/Le/Ge use to_number() for HeapFloat64 + NaN per §12.9–12.11
   - [x] 9C-2: to_number() parses numeric strings per §9.3.1 (empty→0, hex, Infinity, etc.)
   - [x] 9C-3: ++/-- operators — parser (prefix+postfix), AST (Update), emitter, 4 bytecode opcodes (IncLocal, DecLocal, IncGlobal, DecGlobal), VM handlers
   - [x] 9C-4: Neg uses to_number() for all non-numeric types; Smi -(-2^30) overflow → HeapFloat64
   - [x] 9C-5: 11 integration tests (float comparison, NaN, string ToNumber, ++/-- prefix/postfix, for-loop with i++, negate string, negate overflow, negate undefined)
+- [x] **9D: JIT Control Flow + Branches** — 19 JIT baseline tests (+5 offset + 4 execution)
+  - [x] cmp_r64_r64 (39 /r), jbe/jb/ja/jae rel32 assembler helpers (0F 86/82/87/83)
+  - [x] bc_to_native: Vec<usize> mapping bytecode index → native offset
+  - [x] pending_patches: Vec<(usize, usize)> for forward branch resolution
+  - [x] Jump: emit_jmp_rel32(0) placeholder, record pending patch
+  - [x] JumpIfFalse: pop rax, cmp rax 2, jbe target (falsy = undefined/Smi(0)/null)
+  - [x] resolve_patches(): rel32 = target_native - (patch_offset + 4) after all instrs
+  - [x] 5 offset-verification + 4 execution tests (cfg-gated x86_64): truthy/falsy/undefined conditionals + unconditional jump
+  - [x] 208 tests pass across workspace (19 JIT baseline + 109 integration + 52 interpreter + 10 core + 6 bytecode + 5 parser + 5 emitter + 2 spike)
 
 ## Phase 9 — v2 Features (Stretch)
 

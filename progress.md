@@ -2,7 +2,7 @@
 
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
-> **Status:** Sprint 10 — JIT tier-up: hot function detection ✅ (10A done)
+> **Status:** Sprint 10 — JIT Smi bail-out ✅ (10A, 10B done)
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
 > Every implementation decision at every level (lexer, parser, emitter, bytecode, interpreter, builtins, JIT) **must** be verified against the exact ECMA-262 specification language in [`ecma262.md`](./ecma262.md) — **never guess** what the spec says. Each section in `ecma262.md` links to the corresponding URL fragment on `https://tc39.es/ecma262/multipage/`; **always open these URLs via `webfetch` tool** to read the authoritative algorithm steps before implementing. This applies to all phases below.
@@ -668,6 +668,11 @@
   - [x] Hot function path: transmute JitEntryFn, pass vm/gc/locals_ptr, push result
   - [x] Integration test (x86_64): add() called 100 times, tier-up at 50, sum(0..99)=4950
   - [x] Phase 3 acceptance: interpreter integration gate met ✅
+- [x] **10B: JIT Smi Bail-Out — skip JIT for non-Smi inputs**
+  - [x] Vm::all_smi() helper — checks all values in a slice are Smi
+  - [x] JIT call path guarded: invoke only if all locals/args are Smi
+  - [x] Non-Smi values (float64, string, object) fall through to interpreter
+  - [x] Integration test (x86_64): add(3.5, 2) bypasses JIT, returns 5.5 via interpreter
 
 ## Phase 9 — v2 Features (Stretch)
 

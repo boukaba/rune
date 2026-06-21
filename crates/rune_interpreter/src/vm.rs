@@ -614,27 +614,6 @@ impl Vm {
                 }
 
                 // ---- Logical ----
-                Opcode::LogicalAnd => {
-                    let a = self.pop();
-                    if !a.to_bool() {
-                        self.push(a);
-                    } else {
-                        let b = self.pop();
-                        self.push(b);
-                    }
-                    self.frames[fi].pc = pc + 1;
-                }
-                Opcode::LogicalOr => {
-                    let a = self.pop();
-                    if a.to_bool() {
-                        self.push(a);
-                    } else {
-                        let b = self.pop();
-                        self.push(b);
-                    }
-                    self.frames[fi].pc = pc + 1;
-                }
-
                 // ---- Comparisons ----
                 Opcode::Eq | Opcode::StrictEq => {
                     let b = self.pop();
@@ -1956,10 +1935,15 @@ mod tests {
     #[test]
     fn test_logical_and_short_circuit() {
         // false && ... → false (short circuit, RHS not evaluated)
+        // lhs, Dup, JumpIfFalse→end, Pop, rhs, end:
+        // JumpIfFalse POPS and jumps if falsy; Dup preserves lhs copy for result.
         let p = BytecodeProgram::new(
             vec![
                 Instruction::new(Opcode::LoadBoolean, vec![0]),
-                Instruction::new(Opcode::LogicalAnd, vec![]),
+                Instruction::new(Opcode::Dup, vec![]),
+                Instruction::new(Opcode::JumpIfFalse, vec![5]),
+                Instruction::new(Opcode::Pop, vec![]),
+                Instruction::new(Opcode::LoadBoolean, vec![1]),
             ],
             vec![], vec![],
         );
@@ -1968,10 +1952,46 @@ mod tests {
 
     #[test]
     fn test_logical_or_short_circuit() {
+        // true || ... → true (short circuit, RHS not evaluated)
         let p = BytecodeProgram::new(
             vec![
                 Instruction::new(Opcode::LoadBoolean, vec![1]),
-                Instruction::new(Opcode::LogicalOr, vec![]),
+                Instruction::new(Opcode::Dup, vec![]),
+                Instruction::new(Opcode::JumpIfTrue, vec![5]),
+                Instruction::new(Opcode::Pop, vec![]),
+                Instruction::new(Opcode::LoadBoolean, vec![0]),
+            ],
+            vec![], vec![],
+        );
+        assert_eq!(run_ok(&p).as_smi(), Some(1));
+    }
+
+    #[test]
+    fn test_logical_and_non_short_circuit() {
+        // true && false → false (no short circuit, both evaluated)
+        let p = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadBoolean, vec![1]),
+                Instruction::new(Opcode::Dup, vec![]),
+                Instruction::new(Opcode::JumpIfFalse, vec![5]),
+                Instruction::new(Opcode::Pop, vec![]),
+                Instruction::new(Opcode::LoadBoolean, vec![0]),
+            ],
+            vec![], vec![],
+        );
+        assert_eq!(run_ok(&p).as_smi(), Some(0));
+    }
+
+    #[test]
+    fn test_logical_or_non_short_circuit() {
+        // false || true → true (no short circuit, both evaluated)
+        let p = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadBoolean, vec![0]),
+                Instruction::new(Opcode::Dup, vec![]),
+                Instruction::new(Opcode::JumpIfTrue, vec![5]),
+                Instruction::new(Opcode::Pop, vec![]),
+                Instruction::new(Opcode::LoadBoolean, vec![1]),
             ],
             vec![], vec![],
         );

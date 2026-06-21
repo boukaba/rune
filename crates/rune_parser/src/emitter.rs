@@ -555,6 +555,30 @@ impl Emitter {
                     }
                     return;
                 }
+                // Short-circuit logical operators
+                // JumpIfFalse/JumpIfTrue POP the value, so we Dup first to preserve the result.
+                if *op == BinaryOp::LogicalAnd {
+                    // a && b: lhs, Dup, JumpIfFalse→end, Pop, rhs, end:
+                    self.emit_expression(lhs);
+                    self.emit(Opcode::Dup, vec![]);
+                    let end = self.current();
+                    self.emit(Opcode::JumpIfFalse, vec![0]);
+                    self.emit(Opcode::Pop, vec![]);
+                    self.emit_expression(rhs);
+                    self.patch(end, self.current());
+                    return;
+                }
+                if *op == BinaryOp::LogicalOr {
+                    // a || b: lhs, Dup, JumpIfTrue→end, Pop, rhs, end:
+                    self.emit_expression(lhs);
+                    self.emit(Opcode::Dup, vec![]);
+                    let end = self.current();
+                    self.emit(Opcode::JumpIfTrue, vec![0]);
+                    self.emit(Opcode::Pop, vec![]);
+                    self.emit_expression(rhs);
+                    self.patch(end, self.current());
+                    return;
+                }
                 self.emit_expression(lhs);
                 self.emit_expression(rhs);
                 let opcode = match op {
@@ -578,11 +602,9 @@ impl Emitter {
                     BinaryOp::Gt => Opcode::Gt,
                     BinaryOp::Le => Opcode::Le,
                     BinaryOp::Ge => Opcode::Ge,
-                    BinaryOp::LogicalAnd => Opcode::LogicalAnd,
-                    BinaryOp::LogicalOr => Opcode::LogicalOr,
                     BinaryOp::In => Opcode::In,
                     BinaryOp::Instanceof => Opcode::Eq,
-                    BinaryOp::Assign => unreachable!(),
+                    BinaryOp::LogicalAnd | BinaryOp::LogicalOr | BinaryOp::Assign => unreachable!(),
                 };
                 self.emit(opcode, vec![]);
             }

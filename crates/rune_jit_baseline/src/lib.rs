@@ -14,8 +14,8 @@ pub fn is_jit_compatible(prog: &rune_bytecode::opcode::BytecodeProgram) -> bool 
             | Opcode::LoadLocal | Opcode::StoreLocal
             | Opcode::Add | Opcode::Sub | Opcode::Mul
             | Opcode::Lt
-            | Opcode::Pop | Opcode::Return
-            | Opcode::Jump | Opcode::JumpIfFalse
+            | Opcode::Pop | Opcode::Dup | Opcode::Return
+            | Opcode::Jump | Opcode::JumpIfFalse | Opcode::JumpIfTrue
             | Opcode::IncLocal | Opcode::DecLocal => {}
             _ => return false,
         }

@@ -36,9 +36,6 @@ pub enum Opcode {
     BitOr,
     BitXor,
     BitAnd,
-    // Logical (short-circuit)
-    LogicalAnd,
-    LogicalOr,
     // Comparisons / relational
     Eq,
     Ne,

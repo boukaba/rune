@@ -1035,6 +1035,32 @@ fn test_compound_assign() {
 }
 
 #[test]
+fn test_logical_and() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("0 && 1").unwrap();
+    assert_eq!(r.as_smi(), Some(0), "0 && 1 should return 0 (falsy short-circuit)");
+    let r2 = ctx.eval("1 && 2").unwrap();
+    assert_eq!(r2.as_smi(), Some(2), "1 && 2 should return 2 (truthy, evaluates RHS)");
+    let r3 = ctx.eval("false && true").unwrap();
+    assert_eq!(r3.as_smi(), Some(0), "false && true should return false (0)");
+    let r4 = ctx.eval("true && 42").unwrap();
+    assert_eq!(r4.as_smi(), Some(42), "true && 42 should return 42");
+}
+
+#[test]
+fn test_logical_or() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("1 || 2").unwrap();
+    assert_eq!(r.as_smi(), Some(1), "1 || 2 should return 1 (truthy short-circuit)");
+    let r2 = ctx.eval("0 || 2").unwrap();
+    assert_eq!(r2.as_smi(), Some(2), "0 || 2 should return 2 (falsy, evaluates RHS)");
+    let r3 = ctx.eval("true || false").unwrap();
+    assert_eq!(r3.as_smi(), Some(1), "true || false should return true (1)");
+    let r4 = ctx.eval("false || 42").unwrap();
+    assert_eq!(r4.as_smi(), Some(42), "false || 42 should return 42");
+}
+
+#[test]
 fn test_in_operator() {
     let mut ctx = Context::new();
     let r = ctx.eval(r#"var o = {a: 1}; "a" in o"#).unwrap();

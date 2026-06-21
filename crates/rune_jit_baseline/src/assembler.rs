@@ -308,6 +308,51 @@ impl ExecutableMemory {
         self.emit_byte(0xD1);
         self.emit_byte(modrm_reg_reg(4, reg));
     }
+
+    /// CMP r/m64, r64  (39 /r) — compare r/m with reg, sets flags
+    pub fn emit_cmp_r64_r64(&mut self, r_m: u8, reg: u8) {
+        let b_rm = (r_m >> 3) & 1;
+        let b_reg = (reg >> 3) & 1;
+        self.emit_rex(true, b_reg != 0, false, b_rm != 0);
+        self.emit_byte(0x39);
+        self.emit_byte(modrm_reg_reg(reg, r_m));
+    }
+
+    /// JBE rel32  (0F 86 cd) — jump if below or equal (unsigned ≤, CF=1 or ZF=1)
+    pub fn emit_jbe_rel32(&mut self, offset: i32) -> usize {
+        let patch_offset = self.offset + 2;
+        self.emit_byte(0x0F);
+        self.emit_byte(0x86);
+        self.emit_u32(offset as u32);
+        patch_offset
+    }
+
+    /// JB rel32  (0F 82 cd) — jump if below (unsigned <, CF=1)
+    pub fn emit_jb_rel32(&mut self, offset: i32) -> usize {
+        let patch_offset = self.offset + 2;
+        self.emit_byte(0x0F);
+        self.emit_byte(0x82);
+        self.emit_u32(offset as u32);
+        patch_offset
+    }
+
+    /// JA rel32  (0F 87 cd) — jump if above (unsigned >, CF=0 and ZF=0)
+    pub fn emit_ja_rel32(&mut self, offset: i32) -> usize {
+        let patch_offset = self.offset + 2;
+        self.emit_byte(0x0F);
+        self.emit_byte(0x87);
+        self.emit_u32(offset as u32);
+        patch_offset
+    }
+
+    /// JAE rel32  (0F 83 cd) — jump if above or equal (unsigned ≥, CF=0)
+    pub fn emit_jae_rel32(&mut self, offset: i32) -> usize {
+        let patch_offset = self.offset + 2;
+        self.emit_byte(0x0F);
+        self.emit_byte(0x83);
+        self.emit_u32(offset as u32);
+        patch_offset
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -428,11 +473,49 @@ mod tests {
         let mut mem = ExecutableMemory::allocate(256);
         let patch = mem.emit_jmp_rel32(0); // placeholder
         mem.patch_u32(patch, 1234);
-        // Verify by reading back
         unsafe {
             let val = ptr::read_unaligned(mem.ptr.add(patch) as *const u32);
             assert_eq!(val, 1234);
         }
+    }
+
+    #[test]
+    fn test_emit_cmp_r64_r64() {
+        let mut mem = ExecutableMemory::allocate(256);
+        mem.emit_cmp_r64_r64(0, 1); // cmp rax, rcx
+        assert_eq!(mem.offset, 3); // REX.W(1) + 39(1) + ModRM(1)
+    }
+
+    #[test]
+    fn test_emit_jbe_rel32() {
+        let mut mem = ExecutableMemory::allocate(256);
+        let patch = mem.emit_jbe_rel32(42);
+        assert_eq!(mem.offset, 6); // 0F(1) + 86(1) + disp32(4)
+        assert_eq!(patch, 2);
+    }
+
+    #[test]
+    fn test_emit_jb_rel32() {
+        let mut mem = ExecutableMemory::allocate(256);
+        let patch = mem.emit_jb_rel32(42);
+        assert_eq!(mem.offset, 6);
+        assert_eq!(patch, 2);
+    }
+
+    #[test]
+    fn test_emit_ja_rel32() {
+        let mut mem = ExecutableMemory::allocate(256);
+        let patch = mem.emit_ja_rel32(42);
+        assert_eq!(mem.offset, 6);
+        assert_eq!(patch, 2);
+    }
+
+    #[test]
+    fn test_emit_jae_rel32() {
+        let mut mem = ExecutableMemory::allocate(256);
+        let patch = mem.emit_jae_rel32(42);
+        assert_eq!(mem.offset, 6);
+        assert_eq!(patch, 2);
     }
 
     // -----------------------------------------------------------------------

@@ -23,12 +23,28 @@ pub type JitEntryFn = unsafe fn(vm_ptr: *mut u8, gc_ptr: *mut u8) -> u64;
 
 pub struct CodeGen {
     mem: ExecutableMemory,
+    bc_to_native: Vec<usize>,
+    pending_patches: Vec<(usize, usize)>,
 }
 
 impl CodeGen {
-    pub fn new() -> Self {
+    pub fn new(instruction_count: usize) -> Self {
         let mem = ExecutableMemory::allocate(64 * 1024);
-        CodeGen { mem }
+        CodeGen {
+            mem,
+            bc_to_native: vec![0; instruction_count],
+            pending_patches: Vec::new(),
+        }
+    }
+
+    /// Resolve all pending forward jumps once native offsets are known.
+    fn resolve_patches(&mut self) {
+        for &(patch_offset, bc_target) in &self.pending_patches {
+            let native_target = self.bc_to_native[bc_target];
+            let rel32 = (native_target as i64) - ((patch_offset as i64) + 4);
+            self.mem.patch_u32(patch_offset, rel32 as u32);
+        }
+        self.pending_patches.clear();
     }
 
     // -----------------------------------------------------------------------
@@ -127,7 +143,9 @@ impl CodeGen {
     pub fn compile(mut self, program: &BytecodeProgram) -> ExecutableMemory {
         self.emit_prologue();
 
-        for instr in &program.instructions {
+        for (bc_idx, instr) in program.instructions.iter().enumerate() {
+            self.bc_to_native[bc_idx] = self.mem.current_offset();
+
             match instr.opcode {
                 Opcode::LoadSmi => {
                     let smi_raw = ((instr.operands[0] as i64) << 1) | 1;
@@ -135,14 +153,12 @@ impl CodeGen {
                     self.emit_jit_stack_push();
                 }
                 Opcode::LoadUndefined => {
-                    // xor rax, rax  (rax = 0 = undefined)
                     self.mem.emit_rex_w();
                     self.mem.emit_byte(0x31);
                     self.mem.emit_byte(0xC0);
                     self.emit_jit_stack_push();
                 }
                 Opcode::LoadNull => {
-                    // xor rax, rax; or rax, 2  (null = Value(2))
                     self.mem.emit_rex_w();
                     self.mem.emit_byte(0x31);
                     self.mem.emit_byte(0xC0);
@@ -150,7 +166,6 @@ impl CodeGen {
                     self.emit_jit_stack_push();
                 }
                 Opcode::LoadBoolean => {
-                    // Value::smi(0) = false = 3, Value::smi(1) = true = 7
                     let val = if instr.operands[0] != 0 { 7u64 } else { 3u64 };
                     self.mem.emit_mov_r64_imm64(0, val);
                     self.emit_jit_stack_push();
@@ -171,13 +186,26 @@ impl CodeGen {
                     self.emit_smi_mul();
                     self.emit_jit_stack_push();
                 }
+                Opcode::Jump => {
+                    let target = instr.operands[0] as usize;
+                    let patch = self.mem.emit_jmp_rel32(0);
+                    self.pending_patches.push((patch, target));
+                }
+                Opcode::JumpIfFalse => {
+                    let target = instr.operands[0] as usize;
+                    self.emit_jit_stack_pop();               // rax = condition
+                    self.mem.emit_mov_r64_imm64(1, 2);       // rcx = 2
+                    self.mem.emit_cmp_r64_r64(0, 1);          // cmp rax, rcx
+                    let patch = self.mem.emit_jbe_rel32(0);   // jbe target (falsy)
+                    self.pending_patches.push((patch, target));
+                }
                 _ => {
-                    // Unimplemented opcode: emit int3 (breakpoint) for debugging
                     self.mem.emit_byte(0xCC);
                 }
             }
         }
 
+        self.resolve_patches();
         self.mem
     }
 }
@@ -206,7 +234,7 @@ mod tests {
             Instruction::new(Opcode::LoadSmi, vec![42]),
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new().compile(&prog);
+        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
         mem.make_executable();
 
         let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
@@ -225,7 +253,7 @@ mod tests {
             Instruction::new(Opcode::Add, vec![]),
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new().compile(&prog);
+        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
         mem.make_executable();
 
         let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
@@ -243,7 +271,7 @@ mod tests {
             Instruction::new(Opcode::Sub, vec![]),
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new().compile(&prog);
+        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
         mem.make_executable();
 
         let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
@@ -261,7 +289,7 @@ mod tests {
             Instruction::new(Opcode::Mul, vec![]),
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new().compile(&prog);
+        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
         mem.make_executable();
 
         let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
@@ -277,7 +305,7 @@ mod tests {
             Instruction::new(Opcode::LoadUndefined, vec![]),
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new().compile(&prog);
+        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
         mem.make_executable();
 
         let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
@@ -292,7 +320,7 @@ mod tests {
             Instruction::new(Opcode::LoadNull, vec![]),
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new().compile(&prog);
+        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
         mem.make_executable();
 
         let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
@@ -307,7 +335,7 @@ mod tests {
             Instruction::new(Opcode::LoadBoolean, vec![1]),
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new().compile(&prog);
+        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
         mem.make_executable();
 
         let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
@@ -329,13 +357,93 @@ mod tests {
             Instruction::new(Opcode::Sub, vec![]),       // 85
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new().compile(&prog);
+        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
         mem.make_executable();
 
         let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
         let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut()) };
         // Smi(85) = (85 << 1) | 1 = 171
         assert_eq!(result, 171u64);
+    }
+
+    // -------------------------------------------------------------------
+    // Control flow tests — execution (x86_64 only)
+    // -------------------------------------------------------------------
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_jit_conditional_true() {
+        // if (1) { return 42; } else { return 99; }
+        // LoadSmi(1) → JumpIfFalse(5) → LoadSmi(42) → Return → LoadSmi(99) → Return
+        let prog = make_prog(vec![
+            Instruction::new(Opcode::LoadSmi, vec![1]),
+            Instruction::new(Opcode::JumpIfFalse, vec![5]),
+            Instruction::new(Opcode::LoadSmi, vec![42]),
+            Instruction::new(Opcode::Return, vec![]),
+            Instruction::new(Opcode::LoadSmi, vec![99]),
+            Instruction::new(Opcode::Return, vec![]),
+        ]);
+        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
+        mem.make_executable();
+        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert_eq!(result, 85u64); // Smi(42) = 85
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_jit_conditional_false() {
+        // if (0) { return 42; } else { return 99; }
+        let prog = make_prog(vec![
+            Instruction::new(Opcode::LoadSmi, vec![0]),
+            Instruction::new(Opcode::JumpIfFalse, vec![5]),
+            Instruction::new(Opcode::LoadSmi, vec![42]),
+            Instruction::new(Opcode::Return, vec![]),
+            Instruction::new(Opcode::LoadSmi, vec![99]),
+            Instruction::new(Opcode::Return, vec![]),
+        ]);
+        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
+        mem.make_executable();
+        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert_eq!(result, 199u64); // Smi(99) = 199
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_jit_conditional_undefined_falsy() {
+        // if (undefined) { return 42; } else { return 99; }
+        let prog = make_prog(vec![
+            Instruction::new(Opcode::LoadUndefined, vec![]),
+            Instruction::new(Opcode::JumpIfFalse, vec![5]),
+            Instruction::new(Opcode::LoadSmi, vec![42]),
+            Instruction::new(Opcode::Return, vec![]),
+            Instruction::new(Opcode::LoadSmi, vec![99]),
+            Instruction::new(Opcode::Return, vec![]),
+        ]);
+        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
+        mem.make_executable();
+        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert_eq!(result, 199u64); // Smi(99) = 199
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_jit_jump() {
+        // Unconditional jump over a block: Jump(3), LoadSmi(42), Return, LoadSmi(99), Return
+        let prog = make_prog(vec![
+            Instruction::new(Opcode::Jump, vec![3]),
+            Instruction::new(Opcode::LoadSmi, vec![42]),
+            Instruction::new(Opcode::Return, vec![]),
+            Instruction::new(Opcode::LoadSmi, vec![99]),
+            Instruction::new(Opcode::Return, vec![]),
+        ]);
+        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
+        mem.make_executable();
+        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert_eq!(result, 199u64); // Smi(99) = 199
     }
 
     // -------------------------------------------------------------------
@@ -349,7 +457,7 @@ mod tests {
         let prog = make_prog(vec![
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new().compile(&prog);
+        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
         // We can't easily verify the exact offset without duplicating the
         // codegen logic, but we can verify that it emitted something.
         assert!(mem.offset > 0);
@@ -367,7 +475,7 @@ mod tests {
             Instruction::new(Opcode::LoadSmi, vec![42]),
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new().compile(&prog);
+        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
         // Verify it emitted a reasonable number of bytes (within 50-75)
         assert!(mem.offset >= 50, "offset was {}", mem.offset);
         assert!(mem.offset <= 75, "offset was {}", mem.offset);

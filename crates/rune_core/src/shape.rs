@@ -13,6 +13,8 @@ pub struct Shape {
     pub property_count: usize,
     pub slot_count: usize,
     pub entries: Vec<(PropertyKey, usize)>,
+    /// Original property key names for for-in enumeration (same order as entries).
+    pub key_names: Vec<String>,
     pub parent: Option<u64>,
     pub is_dense_array: bool,
 }
@@ -32,6 +34,7 @@ lazy_static::lazy_static! {
             property_count: 0,
             slot_count: 0,
             entries: Vec::new(),
+            key_names: Vec::new(),
             parent: None,
             is_dense_array: true,
         });
@@ -42,7 +45,7 @@ lazy_static::lazy_static! {
 impl Shape {
     /// Create a new shape with the given entries and intern it globally.
     /// Returns a `&'static Shape` that lives for the program's lifetime.
-    pub fn intern(entries: Vec<(PropertyKey, usize)>) -> &'static Self {
+    pub fn intern(entries: Vec<(PropertyKey, usize)>, key_names: Vec<String>) -> &'static Self {
         let mut table = SHAPE_TABLE.lock().unwrap();
         if let Some(existing) = table.get(&entries) {
             return existing;
@@ -54,6 +57,7 @@ impl Shape {
             property_count: entries.len(),
             slot_count,
             entries: entries.clone(),
+            key_names,
             parent: None,
             is_dense_array: false,
         };
@@ -64,21 +68,23 @@ impl Shape {
 
     /// Intern a shape that extends a parent shape with one additional property.
     /// The new property gets the next slot offset.
-    pub fn intern_with_parent(parent: &Self, key: PropertyKey) -> &'static Self {
+    pub fn intern_with_parent(parent: &Self, key: PropertyKey, key_name: String) -> &'static Self {
         let mut entries = parent.entries.clone();
         let offset = entries.len();
         entries.push((key, offset));
-        Self::intern(entries)
+        let mut key_names = parent.key_names.clone();
+        key_names.push(key_name);
+        Self::intern(entries, key_names)
     }
 
     /// Convenience: intern an empty shape.
     pub fn empty() -> &'static Self {
-        Self::intern(vec![])
+        Self::intern(vec![], vec![])
     }
 
     /// Create a new shape (for tests or temporary use).
     /// Prefer `intern()` in production code.
-    pub fn new(entries: Vec<(PropertyKey, usize)>) -> Box<Self> {
+    pub fn new(entries: Vec<(PropertyKey, usize)>, key_names: Vec<String>) -> Box<Self> {
         let id = SHAPE_COUNTER.fetch_add(1, Ordering::Relaxed);
         let slot_count = entries.len();
         Box::new(Shape {
@@ -86,6 +92,7 @@ impl Shape {
             property_count: entries.len(),
             slot_count,
             entries,
+            key_names,
             parent: None,
             is_dense_array: false,
         })
@@ -98,12 +105,9 @@ impl Shape {
             .map(|(_, offset)| *offset)
     }
 
-    /// Return a new shape with an additional property appended.
-    pub fn with_property(&self, key: PropertyKey) -> Box<Self> {
-        let mut entries = self.entries.clone();
-        let offset = entries.len();
-        entries.push((key, offset));
-        Self::new(entries)
+    /// Return the key name at the given entry index (for for-in enumeration).
+    pub fn key_name_at(&self, index: usize) -> Option<&str> {
+        self.key_names.get(index).map(|s| s.as_str())
     }
 }
 

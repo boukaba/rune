@@ -99,7 +99,8 @@ impl Vm {
             let keys: Vec<(PropertyKey, usize)> = pairs.iter().enumerate()
                 .map(|(i, (k, _))| (PropertyKey::from_string(k), i))
                 .collect();
-            let shape = Shape::intern(keys);
+            let key_names: Vec<String> = pairs.iter().map(|(k, _)| k.to_string()).collect();
+            let shape = Shape::intern(keys, key_names);
             let vals: Vec<Value> = pairs.iter().map(|(_, v)| *v).collect();
             let obj_ptr = JSObject::allocate(gc, shape, &vals);
             Value::from_heap_ptr(obj_ptr as *mut u8)
@@ -671,12 +672,14 @@ impl Vm {
                     let mut values: Vec<Value> = (0..count).map(|_| self.pop()).collect();
                     values.reverse();
                     let mut entries: Vec<(PropertyKey, usize)> = Vec::with_capacity(count);
+                    let mut key_names: Vec<String> = Vec::with_capacity(count);
                     for i in 0..count {
                         let key_idx = instr.operands[1 + i] as usize;
                         let key_str = self.frames[fi].prog_str(key_idx).unwrap_or_default();
                         entries.push((PropertyKey::from_string(&key_str), i));
+                        key_names.push(key_str);
                     }
-                    let shape = Shape::intern(entries);
+                    let shape = Shape::intern(entries, key_names);
                     let obj = JSObject::allocate(gc, shape, &values);
                     self.push(Value::from_heap_ptr(obj as *mut u8));
                     self.frames[fi].pc = pc + 1;
@@ -700,6 +703,60 @@ impl Vm {
                     }
                     self.push(Value::from_heap_ptr(arr as *mut u8));
                     self.frames[fi].pc = pc + 1;
+                }
+                Opcode::ForInInit => {
+                    let obj = self.pop();
+                    if obj.is_null() || obj.is_undefined() {
+                        self.push(Value::smi(0));
+                    } else {
+                        self.push(obj);
+                        self.push(Value::smi(0));
+                    }
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::ForInNext => {
+                    let end_target = instr.operands[0] as usize;
+                    let index_val = self.pop();
+                    let index = index_val.as_smi().unwrap_or(0) as usize;
+                    let obj = self.peek();
+                    let done = if let Some(ptr) = obj.heap_ptr() {
+                        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+                        match tag {
+                            TAG_ARRAY => {
+                                let len = unsafe { RuneArray::length(ptr as *mut RuneArray) } as usize;
+                                if index < len {
+                                    let key_str = index.to_string();
+                                    let key = HeapString::allocate(gc, &key_str);
+                                    self.push(Value::smi((index + 1) as i32));
+                                    self.push(Value::from_heap_ptr(key as *mut u8));
+                                    false
+                                } else {
+                                    true
+                                }
+                            }
+                            TAG_OBJECT => {
+                                let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                                if index < shape.property_count {
+                                    let key_name = shape.key_name_at(index).unwrap_or("");
+                                    let key = HeapString::allocate(gc, key_name);
+                                    self.push(Value::smi((index + 1) as i32));
+                                    self.push(Value::from_heap_ptr(key as *mut u8));
+                                    false
+                                } else {
+                                    true
+                                }
+                            }
+                            _ => true,
+                        }
+                    } else {
+                        true
+                    };
+                    if done {
+                        self.pop(); // pop obj
+                        self.frames[fi].pc = end_target;
+                    } else {
+                        self.frames[fi].pc = pc + 1;
+                    }
                 }
                 Opcode::LoadProperty => {
                     let raw_key = self.pop();
@@ -762,7 +819,8 @@ impl Vm {
                                     if let Some(ptr) = obj.heap_ptr() {
                                         if tag == TAG_OBJECT {
                                             let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
-                                            if let Some(entry) = self.ics[ic_idx].entries.get(&shape.id) {
+                                            let ck = ic_cache_key(shape.id, raw_key);
+                                            if let Some(entry) = self.ics[ic_idx].entries.get(&ck) {
                                                 self.ic_stats.hits += 1;
                                                 let val = if entry.is_own {
                                                     unsafe { JSObject::get_slot(ptr as *mut JSObject, entry.offset) }
@@ -781,7 +839,8 @@ impl Vm {
                                             }
                                         } else if tag == TAG_ARRAY {
                                             // Array IC hit: offset is element index
-                                            if let Some(entry) = self.ics[ic_idx].entries.get(&(*DENSE_ARRAY_SHAPE).id) {
+                                            let ck = ic_cache_key((*DENSE_ARRAY_SHAPE).id, raw_key);
+                                            if let Some(entry) = self.ics[ic_idx].entries.get(&ck) {
                                                 self.ic_stats.hits += 1;
                                                 let len = unsafe { RuneArray::length(ptr as *mut RuneArray) };
                                                 let val = if entry.is_own {
@@ -829,11 +888,12 @@ impl Vm {
                         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
                         if tag == TAG_OBJECT {
                             if let Some(key) = value_to_prop_key(raw_key) {
+                                let key_name = value_to_debug_string(raw_key);
                                 let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
                                 if let Some(slot) = shape.lookup(&key) {
                                     unsafe { JSObject::set_slot(ptr as *mut JSObject, slot, value) };
                                 } else {
-                                    unsafe { JSObject::add_property(ptr as *mut JSObject, key, value) };
+                                    unsafe { JSObject::add_property(ptr as *mut JSObject, key, key_name, value) };
                                 }
                             }
                         } else if tag == TAG_ARRAY {
@@ -1847,9 +1907,10 @@ fn load_property_recursive_ic(
             if tag == TAG_OBJECT {
                 if let Some(key) = value_to_prop_key(raw_key) {
                     let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                    let ck = ic_cache_key(shape.id, raw_key);
                     if let Some(offset) = shape.lookup(&key) {
                         // Own property
-                        ics[ic_idx].entries.insert(shape.id, IcEntry {
+                        ics[ic_idx].entries.insert(ck, IcEntry {
                             offset,
                             is_own: true,
                             proto_depth: 0,
@@ -1865,7 +1926,7 @@ fn load_property_recursive_ic(
                             if depth >= MAX_PROTOTYPE_DEPTH as u8 { break; }
                             let next_shape = unsafe { JSObject::shape_ptr(next as *mut JSObject) };
                             if let Some(offset) = next_shape.lookup(&key) {
-                                ics[ic_idx].entries.insert(shape.id, IcEntry {
+                                ics[ic_idx].entries.insert(ck, IcEntry {
                                     offset,
                                     is_own: false,
                                     proto_depth: depth,
@@ -1879,13 +1940,15 @@ fn load_property_recursive_ic(
             } else if tag == TAG_ARRAY {
                 // Dense array IC: numeric keys cache element index directly
                 if let Some(index) = value_to_array_index(raw_key) {
-                    ics[ic_idx].entries.insert((*DENSE_ARRAY_SHAPE).id, IcEntry {
+                    let ck = ic_cache_key((*DENSE_ARRAY_SHAPE).id, raw_key);
+                    ics[ic_idx].entries.insert(ck, IcEntry {
                         offset: index,
                         is_own: true,
                         proto_depth: 0,
                     });
                 } else if let Some(key) = value_to_prop_key(raw_key) {
                     // Non-numeric key — inherited from Array.prototype
+                    let ck = ic_cache_key((*DENSE_ARRAY_SHAPE).id, raw_key);
                     let mut depth: u8 = 0;
                     let mut p = ptr as *mut u8;
                     loop {
@@ -1895,7 +1958,7 @@ fn load_property_recursive_ic(
                         if depth >= MAX_PROTOTYPE_DEPTH as u8 { break; }
                         let next_shape = unsafe { JSObject::shape_ptr(next as *mut JSObject) };
                         if let Some(offset) = next_shape.lookup(&key) {
-                            ics[ic_idx].entries.insert((*DENSE_ARRAY_SHAPE).id, IcEntry {
+                            ics[ic_idx].entries.insert(ck, IcEntry {
                                 offset,
                                 is_own: false,
                                 proto_depth: depth,
@@ -1947,6 +2010,18 @@ fn number_result(gc: &mut SemiSpace, val: f64) -> Value {
     Value::from_float64_ptr(ptr as *mut u8)
 }
 
+/// Compute the IC cache key combining shape.id with the property key,
+/// so that different keys on the same shape produce distinct cache entries.
+fn ic_cache_key(shape_id: u64, raw_key: Value) -> (u64, u64) {
+    if let Some(idx) = value_to_array_index(raw_key) {
+        (shape_id, idx as u64)
+    } else if let Some(key) = value_to_prop_key(raw_key) {
+        (shape_id, key.as_u64())
+    } else {
+        (shape_id, 0)
+    }
+}
+
 /// Check if a Value is a GC-allocated string.
 fn value_is_string(v: Value) -> bool {
     if let Some(ptr) = v.heap_ptr() {
@@ -1960,6 +2035,15 @@ fn value_is_string(v: Value) -> bool {
 fn value_to_array_index(v: Value) -> Option<usize> {
     if let Some(n) = v.as_smi() {
         if n >= 0 { Some(n as usize) } else { None }
+    } else if let Some(ptr) = v.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_STRING {
+            let s = unsafe { HeapString::to_string(ptr as *mut HeapString) };
+            // Only parse canonical numeric strings to avoid surprises
+            s.parse::<usize>().ok()
+        } else {
+            None
+        }
     } else {
         None
     }

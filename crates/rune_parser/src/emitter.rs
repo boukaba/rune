@@ -317,7 +317,35 @@ impl Emitter {
                 }
             }
             Stmt::Empty(_) => {}
-            Stmt::ForIn(_, _, _, _) => {}
+            Stmt::ForIn(lhs, obj, body, _) => {
+                // for (var key in obj) { body }
+                // Register the loop variable as a local
+                if let Expr::Identifier(name, _) = lhs.as_ref() {
+                    if !self.locals.contains(&name.to_string()) {
+                        self.locals.push(name.to_string());
+                    }
+                }
+                self.emit_expression(obj);
+                self.emit(Opcode::ForInInit, vec![]);
+                let loop_start = self.current();
+                let exit_jump = self.current();
+                self.emit(Opcode::ForInNext, vec![0]); // patched below
+                // Store the key into the loop variable
+                if let Expr::Identifier(name, _) = lhs.as_ref() {
+                    if let Some(idx) = self.local_index(name) {
+                        self.emit(Opcode::StoreLocal, vec![idx as i64]);
+                    } else {
+                        let name_idx = self.intern_string(name) as i64;
+                        self.emit(Opcode::StoreGlobal, vec![name_idx]);
+                    }
+                    // Pop the value that StoreLocal pushes back (it stays on stack for
+                    // assignment-expression semantics, but here we only need it stored)
+                    self.emit(Opcode::Pop, vec![]);
+                }
+                self.emit_statement(body);
+                self.emit(Opcode::Jump, vec![loop_start as i64]);
+                self.patch(exit_jump, self.current());
+            }
             Stmt::Switch(discriminant, cases, default_body, _) => {
                 self.emit_expression(discriminant);
 

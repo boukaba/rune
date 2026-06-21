@@ -326,18 +326,47 @@ impl Parser {
         let start = self.span();
         self.expect(TokenKind::For);
         self.expect(TokenKind::LParen);
-        let init = if self.tok.kind != TokenKind::Semicolon {
-            if matches!(self.tok.kind, TokenKind::Var | TokenKind::Let | TokenKind::Const) {
-                Some(Box::new(self.parse_var_decl()))
-            } else {
-                let e = self.parse_expr(0);
-                self.consume_semicolon();
-                Some(Box::new(Stmt::Expr(e, self.span())))
-            }
-        } else {
+        // Check for no-initializer C-style: `for (; cond; update)`
+        if self.tok.kind == TokenKind::Semicolon {
             self.advance();
-            None
-        };
+            return self.parse_for_c_style(None, start);
+        }
+        // Check for `for (var x in obj)` — peek ahead for `in` after the first var decl
+        if matches!(self.tok.kind, TokenKind::Var | TokenKind::Let | TokenKind::Const) {
+            let var_stmt = self.parse_var_decl();
+            if self.tok.kind == TokenKind::In {
+                // for (var x in obj)
+                self.advance();
+                let obj = self.parse_expr(0);
+                self.expect(TokenKind::RParen);
+                let body = Box::new(self.parse_statement());
+                // Extract the variable name from the var declaration
+                let name = match &var_stmt {
+                    Stmt::Var(_, decls, _) if decls.len() == 1 => decls[0].name.clone(),
+                    _ => panic!("for-in must have exactly one loop variable"),
+                };
+                let lhs = Box::new(Expr::Identifier(name, Span::default()));
+                return Stmt::ForIn(lhs, Box::new(obj), body, Span { start: start.start, end: self.span().end });
+            }
+            // C-style for with var: cond and update follow
+            return self.parse_for_c_style(Some(Box::new(var_stmt)), start);
+        }
+        // Try `for (lhs in obj)` — parse expression and check for `in`
+        let lhs = self.parse_expr(0);
+        if self.tok.kind == TokenKind::In {
+            self.advance();
+            let obj = self.parse_expr(0);
+            self.expect(TokenKind::RParen);
+            let body = Box::new(self.parse_statement());
+            return Stmt::ForIn(Box::new(lhs), Box::new(obj), body, Span { start: start.start, end: self.span().end });
+        }
+        // C-style for: `for (init; cond; update)`
+        self.consume_semicolon();
+        self.parse_for_c_style(Some(Box::new(Stmt::Expr(lhs, Span::default()))), start)
+    }
+
+    /// Parse the remaining parts of a C-style for loop (after init).
+    fn parse_for_c_style(&mut self, init: Option<Box<Stmt>>, start: Span) -> Stmt {
         let cond = if self.tok.kind != TokenKind::Semicolon {
             let e = self.parse_expr(0);
             self.consume_semicolon();

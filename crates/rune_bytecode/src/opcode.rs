@@ -75,6 +75,9 @@ pub enum Opcode {
     YieldStar,
     Resume,
     InitGenerator,
+    // for-in
+    ForInInit,
+    ForInNext,
 }
 
 #[derive(Clone, Debug)]

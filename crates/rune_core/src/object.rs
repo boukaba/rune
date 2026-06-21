@@ -131,13 +131,13 @@ impl JSObject {
     /// Add a new property to the object in place, extending the shape and slot array.
     /// Returns the slot index of the new property.
     /// Panics if the object has no reserved capacity left.
-    pub unsafe fn add_property(ptr: *mut JSObject, key: crate::shape::PropertyKey, val: Value) -> usize {
+    pub unsafe fn add_property(ptr: *mut JSObject, key: crate::shape::PropertyKey, key_name: String, val: Value) -> usize {
         unsafe {
             let cap = Self::capacity(ptr);
             let count = Self::slot_count(ptr);
             assert!(count < cap, "JSObject: out of reserved slot capacity");
             let shape = Self::shape_ptr(ptr);
-            let new_shape = Shape::intern_with_parent(shape, key);
+            let new_shape = Shape::intern_with_parent(shape, key, key_name);
             Self::set_shape_ptr(ptr, new_shape);
             Self::set_slot(ptr, count, val);
             Self::set_slot_count(ptr, count + 1);

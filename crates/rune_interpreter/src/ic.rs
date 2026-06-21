@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-/// Entry in an inline cache for a specific shape.
+/// Entry in an inline cache for a specific (shape, key) pair.
 #[derive(Copy, Clone, Debug)]
 pub struct IcEntry {
     /// Slot offset in the object (or prototype at proto_depth).
@@ -13,12 +13,12 @@ pub struct IcEntry {
 
 /// Shape-Indexed Dispatch Table — per-callsite inline cache.
 ///
-/// Maps shape.id → IcEntry for O(1) property access.
-/// Unlike V8's 4-state IC, this has NO megamorphic fallback.
-/// The table grows unboundedly — 10 shapes, 100 shapes, all O(1).
+/// Maps (shape.id, key_hash) → IcEntry for O(1) property access.
+/// The key_hash ensures computed properties with different keys
+/// on the same shape don't hit stale cache entries.
 #[derive(Clone, Debug)]
 pub struct InlineCache {
-    pub entries: HashMap<u64, IcEntry>,
+    pub entries: HashMap<(u64, u64), IcEntry>,
 }
 
 impl InlineCache {

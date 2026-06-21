@@ -797,6 +797,34 @@ fn test_array_push_grow_identity() {
 }
 
 #[test]
+fn test_for_in_object() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("var o={x:1,y:2,z:3}; var s=0; for(var k in o){s=s+o[k];} s");
+    assert_eq!(r.unwrap().as_smi(), Some(6));
+}
+
+#[test]
+fn test_for_in_array() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("var a=[10,20,30]; var s=0; for(var k in a){s=s+a[k];} s");
+    assert_eq!(r.unwrap().as_smi(), Some(60));
+}
+
+#[test]
+fn test_for_in_empty() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("var o={}; var c=0; for(var k in o){c=c+1;} c");
+    assert_eq!(r.unwrap().as_smi(), Some(0));
+}
+
+#[test]
+fn test_for_in_null() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("var c=0; for(var k in null){c=c+1;} c");
+    assert_eq!(r.unwrap().as_smi(), Some(0));
+}
+
+#[test]
 fn test_array_is_array() {
     let mut ctx = Context::new();
     let r = ctx.eval("Array.isArray([1,2,3])").unwrap();

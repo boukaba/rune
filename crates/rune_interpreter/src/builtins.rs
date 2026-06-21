@@ -58,7 +58,8 @@ pub fn string_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mu
 /// Create a minimal JS object with the given property key and string value.
 fn make_simple_object(gc: &mut SemiSpace, key: &str, val: Value) -> Value {
     let entries = vec![(PropertyKey::from_string(key), 0usize)];
-    let shape = Shape::intern(entries);
+    let key_names = vec![key.to_string()];
+    let shape = Shape::intern(entries, key_names);
     let obj = JSObject::allocate(gc, shape, &[val]);
     Value::from_heap_ptr(obj as *mut u8)
 }

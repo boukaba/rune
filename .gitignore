@@ -7,3 +7,4 @@
 .vscode/
 *.o
 test262/
+AGENTS.md

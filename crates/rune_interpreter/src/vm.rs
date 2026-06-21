@@ -451,13 +451,13 @@ impl Vm {
                 Opcode::Eq | Opcode::StrictEq => {
                     let b = self.pop();
                     let a = self.pop();
-                    self.push(if a == b { Value::smi(1) } else { Value::smi(0) });
+                    self.push(if values_strictly_equal(a, b) { Value::smi(1) } else { Value::smi(0) });
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::Ne | Opcode::StrictNe => {
                     let b = self.pop();
                     let a = self.pop();
-                    self.push(if a != b { Value::smi(1) } else { Value::smi(0) });
+                    self.push(if !values_strictly_equal(a, b) { Value::smi(1) } else { Value::smi(0) });
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::Lt => {
@@ -465,7 +465,7 @@ impl Vm {
                     let a = self.pop();
                     let result = match (a.as_smi(), b.as_smi()) {
                         (Some(av), Some(bv)) => Value::smi(if av < bv { 1 } else { 0 }),
-                        _ => Value::undefined(),
+                        _ => compare_strings_lt(a, b).map(|v| Value::smi(if v { 1 } else { 0 })).unwrap_or(Value::undefined()),
                     };
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
@@ -475,7 +475,7 @@ impl Vm {
                     let a = self.pop();
                     let result = match (a.as_smi(), b.as_smi()) {
                         (Some(av), Some(bv)) => Value::smi(if av > bv { 1 } else { 0 }),
-                        _ => Value::undefined(),
+                        _ => compare_strings_lt(b, a).map(|v| Value::smi(if v { 1 } else { 0 })).unwrap_or(Value::undefined()),
                     };
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
@@ -485,7 +485,10 @@ impl Vm {
                     let a = self.pop();
                     let result = match (a.as_smi(), b.as_smi()) {
                         (Some(av), Some(bv)) => Value::smi(if av <= bv { 1 } else { 0 }),
-                        _ => Value::undefined(),
+                        _ => {
+                            let gt = compare_strings_lt(b, a).unwrap_or(true);
+                            Value::smi(if !gt { 1 } else { 0 })
+                        }
                     };
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
@@ -495,7 +498,10 @@ impl Vm {
                     let a = self.pop();
                     let result = match (a.as_smi(), b.as_smi()) {
                         (Some(av), Some(bv)) => Value::smi(if av >= bv { 1 } else { 0 }),
-                        _ => Value::undefined(),
+                        _ => {
+                            let lt = compare_strings_lt(a, b).unwrap_or(true);
+                            Value::smi(if !lt { 1 } else { 0 })
+                        }
                     };
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
@@ -933,6 +939,56 @@ impl Frame {
 }
 
 /// Convert a Value to its string representation for concatenation.
+fn values_strictly_equal(a: Value, b: Value) -> bool {
+    if a == b {
+        return true;
+    }
+    if let (Some(pa), Some(pb)) = (a.heap_ptr(), b.heap_ptr()) {
+        let ta = unsafe { (*(pa as *const GcHeader)).tag() };
+        let tb = unsafe { (*(pb as *const GcHeader)).tag() };
+        if ta == TAG_STRING && tb == TAG_STRING {
+            let la = unsafe { HeapString::len(pa as *mut HeapString) };
+            let lb = unsafe { HeapString::len(pb as *mut HeapString) };
+            if la != lb {
+                return false;
+            }
+            let da = unsafe { HeapString::data(pa as *mut HeapString) };
+            let db = unsafe { HeapString::data(pb as *mut HeapString) };
+            for i in 0..la {
+                if unsafe { *da.add(i) != *db.add(i) } {
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
+    false
+}
+
+/// Compare two values as strings for IsLessThan semantics.
+/// Returns None if either value is not a string.
+fn compare_strings_lt(a: Value, b: Value) -> Option<bool> {
+    if let (Some(pa), Some(pb)) = (a.heap_ptr(), b.heap_ptr()) {
+        let ta = unsafe { (*(pa as *const GcHeader)).tag() };
+        let tb = unsafe { (*(pb as *const GcHeader)).tag() };
+        if ta == TAG_STRING && tb == TAG_STRING {
+            let la = unsafe { HeapString::len(pa as *mut HeapString) };
+            let lb = unsafe { HeapString::len(pb as *mut HeapString) };
+            let da = unsafe { HeapString::data(pa as *mut HeapString) };
+            let db = unsafe { HeapString::data(pb as *mut HeapString) };
+            let min_len = la.min(lb);
+            for i in 0..min_len {
+                let ca = unsafe { *da.add(i) };
+                let cb = unsafe { *db.add(i) };
+                if ca < cb { return Some(true); }
+                if ca > cb { return Some(false); }
+            }
+            return Some(la < lb);
+        }
+    }
+    None
+}
+
 fn value_to_debug_string(val: Value) -> String {
     if val.is_undefined() {
         "undefined".to_string()

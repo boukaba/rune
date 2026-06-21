@@ -174,16 +174,18 @@ pub fn string_from_char_code(gc: &mut SemiSpace, _this: Value, args: &[Value], _
 }
 
 /// String.prototype.charAt(index) — returns the character at index as a string.
+/// Per §22.1.3.1, OOB returns empty string, not undefined.
 pub fn string_char_at(gc: &mut SemiSpace, this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     let index = args.first().and_then(|v| v.as_smi()).unwrap_or(0) as usize;
     if let Some(ptr) = this.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_STRING {
             let s = unsafe { HeapString::to_string(ptr as *mut HeapString) };
-            let ch = s.chars().nth(index).unwrap_or('\0');
-            if ch == '\0' && index >= s.len() {
-                return Value::undefined(); // out of bounds → undefined? Actually spec says ""
+            if index >= s.chars().count() {
+                let empty = HeapString::allocate(gc, "");
+                return Value::from_heap_ptr(empty as *mut u8);
             }
+            let ch = s.chars().nth(index).unwrap();
             let result = HeapString::allocate(gc, &ch.to_string());
             return Value::from_heap_ptr(result as *mut u8);
         }

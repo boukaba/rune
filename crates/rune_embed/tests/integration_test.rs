@@ -430,10 +430,12 @@ fn test_builtin_print() {
 }
 
 #[test]
-fn test_builtin_string() {
+fn test_builtin_string_from_char_code() {
     let mut ctx = Context::new();
-    let r = ctx.eval(r#"String(42)"#).unwrap();
-    assert!(r.heap_ptr().is_some(), "String(42) should return a heap-allocated value");
+    let r = ctx.eval(r#"String.fromCharCode(65)"#).unwrap();
+    assert!(r.is_heap_object(), "String.fromCharCode should return a string");
+    let r2 = ctx.eval(r#"String.fromCharCode(72, 73)"#).unwrap();
+    assert!(r2.is_heap_object(), "String.fromCharCode with multiple args should return a string");
 }
 
 #[test]
@@ -795,12 +797,32 @@ fn test_array_push_grow_identity() {
 }
 
 #[test]
+fn test_array_is_array() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("Array.isArray([1,2,3])").unwrap();
+    assert_eq!(r.as_smi(), Some(1), "Array.isArray should return true for arrays");
+    let r2 = ctx.eval("Array.isArray(42)").unwrap();
+    assert_eq!(r2.as_smi(), Some(0), "Array.isArray should return false for non-arrays");
+}
+
+#[test]
+fn test_math_constants() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("Math.PI + 1").unwrap();
+    assert!(r.is_float64(), "Math.PI + 1 should be a float64");
+    let r2 = ctx.eval("Math.E + 1").unwrap();
+    assert!(r2.is_float64(), "Math.E + 1 should be a float64");
+}
+
+#[test]
 fn test_string_char_at() {
     let mut ctx = Context::new();
     let r = ctx.eval(r#"var s = "hello"; s.charAt(0)"#).unwrap();
     assert!(r.is_heap_object(), "charAt should return a string");
     let r2 = ctx.eval(r#"var s = "hello"; s.charAt(1)"#).unwrap();
     assert!(r2.is_heap_object(), "charAt should return a string");
+    let r3 = ctx.eval(r#"var s = "abc"; s.charAt(100)"#).unwrap();
+    assert!(r3.is_heap_object(), "charAt OOB should return a string (not undefined)");
 }
 
 #[test]

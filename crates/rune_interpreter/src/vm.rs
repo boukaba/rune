@@ -129,15 +129,42 @@ impl Vm {
             self.string_prototype = str_proto;
         }
 
+        // Array constructor with .isArray()
+        if let Some(handle) = find_handle(&self.builtins, "Array_isArray") {
+            let arr_ctor = make_object(gc, &[("isArray", handle)]);
+            self.builtin_wrappers.insert("Array".to_string(), arr_ctor);
+        }
+
+        // String constructor with .fromCharCode()
+        if let Some(handle) = find_handle(&self.builtins, "String_fromCharCode") {
+            let str_ctor = make_object(gc, &[("fromCharCode", handle)]);
+            self.builtin_wrappers.insert("String".to_string(), str_ctor);
+        }
+
         // Math namespace with all methods + constants
-        let math_methods: Vec<(&str, Value)> = [
-            "floor", "ceil", "abs", "min", "max", "pow", "sqrt",
-        ].iter().filter_map(|name| {
-            let handle = find_handle(&self.builtins, &format!("Math_{name}"));
-            handle.map(|v| (*name, v))
+        let pi_val = {
+            let ptr = HeapFloat64::allocate(gc, std::f64::consts::PI);
+            Value::from_float64_ptr(ptr as *mut u8)
+        };
+        let e_val = {
+            let ptr = HeapFloat64::allocate(gc, std::f64::consts::E);
+            Value::from_float64_ptr(ptr as *mut u8)
+        };
+        let math_entries: Vec<(&str, Value)> = [
+            ("floor", find_handle(&self.builtins, "Math_floor")),
+            ("ceil", find_handle(&self.builtins, "Math_ceil")),
+            ("abs", find_handle(&self.builtins, "Math_abs")),
+            ("min", find_handle(&self.builtins, "Math_min")),
+            ("max", find_handle(&self.builtins, "Math_max")),
+            ("pow", find_handle(&self.builtins, "Math_pow")),
+            ("sqrt", find_handle(&self.builtins, "Math_sqrt")),
+            ("PI", Some(pi_val)),
+            ("E", Some(e_val)),
+        ].iter().filter_map(|(name, val)| {
+            val.map(|v| (*name, v))
         }).collect();
-        if !math_methods.is_empty() {
-            let math_obj = make_object(gc, &math_methods);
+        if !math_entries.is_empty() {
+            let math_obj = make_object(gc, &math_entries);
             self.builtin_wrappers.insert("Math".to_string(), math_obj);
         }
     }
@@ -702,7 +729,7 @@ impl Vm {
                                     if key_str == "length" {
                                         // String length
                                         let s = unsafe { HeapString::to_string(obj.heap_ptr().unwrap() as *mut HeapString) };
-                                        let len = s.chars().count();
+                                        let len = s.encode_utf16().count();
                                         Value::smi(len as i32)
                                     } else if self.string_prototype.is_heap_object() {
                                         // Look up from String.prototype

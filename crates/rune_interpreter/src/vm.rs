@@ -399,19 +399,20 @@ impl Vm {
                             // Preserve -0.0 per spec (§13.5.5)
                             let ptr = HeapFloat64::allocate(gc, -0.0f64);
                             Value::from_float64_ptr(ptr as *mut u8)
+                        } else if v == -(1 << 30) {
+                            // Overflow: -(-2^30) = 2^30 doesn't fit in Smi
+                            let ptr = HeapFloat64::allocate(gc, -(v as f64));
+                            Value::from_float64_ptr(ptr as *mut u8)
                         } else {
-                            Value::smi(v.wrapping_neg())
+                            Value::smi(-v)
                         }
                     } else if let Some(v) = a.as_float64() {
                         let ptr = HeapFloat64::allocate(gc, -v);
                         Value::from_float64_ptr(ptr as *mut u8)
-                    } else if a.is_undefined() || a.is_null() {
-                        let ptr = HeapFloat64::allocate(gc, f64::NAN);
-                        Value::from_float64_ptr(ptr as *mut u8)
                     } else {
-                        self.push(a);
-                        self.frames[fi].pc = pc + 1;
-                        continue;
+                        let n = to_number(a);
+                        let ptr = HeapFloat64::allocate(gc, -n);
+                        Value::from_float64_ptr(ptr as *mut u8)
                     };
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
@@ -624,7 +625,19 @@ impl Vm {
                     let a = self.pop();
                     let result = match (a.as_smi(), b.as_smi()) {
                         (Some(av), Some(bv)) => Value::smi(if av < bv { 1 } else { 0 }),
-                        _ => compare_strings_lt(a, b).map(|v| Value::smi(if v { 1 } else { 0 })).unwrap_or(Value::undefined()),
+                        _ => {
+                            if let Some(v) = compare_strings_lt(a, b) {
+                                Value::smi(if v { 1 } else { 0 })
+                            } else {
+                                let av = to_number(a);
+                                let bv = to_number(b);
+                                if av.is_nan() || bv.is_nan() {
+                                    Value::undefined()
+                                } else {
+                                    Value::smi(if av < bv { 1 } else { 0 })
+                                }
+                            }
+                        }
                     };
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
@@ -634,7 +647,19 @@ impl Vm {
                     let a = self.pop();
                     let result = match (a.as_smi(), b.as_smi()) {
                         (Some(av), Some(bv)) => Value::smi(if av > bv { 1 } else { 0 }),
-                        _ => compare_strings_lt(b, a).map(|v| Value::smi(if v { 1 } else { 0 })).unwrap_or(Value::undefined()),
+                        _ => {
+                            if let Some(v) = compare_strings_lt(b, a) {
+                                Value::smi(if v { 1 } else { 0 })
+                            } else {
+                                let av = to_number(a);
+                                let bv = to_number(b);
+                                if av.is_nan() || bv.is_nan() {
+                                    Value::undefined()
+                                } else {
+                                    Value::smi(if av > bv { 1 } else { 0 })
+                                }
+                            }
+                        }
                     };
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
@@ -645,8 +670,20 @@ impl Vm {
                     let result = match (a.as_smi(), b.as_smi()) {
                         (Some(av), Some(bv)) => Value::smi(if av <= bv { 1 } else { 0 }),
                         _ => {
-                            let gt = compare_strings_lt(b, a).unwrap_or(true);
-                            Value::smi(if !gt { 1 } else { 0 })
+                            if let Some(v) = compare_strings_lt(a, b) {
+                                Value::smi(if v { 1 } else { 0 })
+                            } else if let Some(v) = compare_strings_lt(b, a) {
+                                // Both are strings: if b < a then a <= b is false, else equal → true
+                                Value::smi(if v { 0 } else { 1 })
+                            } else {
+                                let av = to_number(a);
+                                let bv = to_number(b);
+                                if av.is_nan() || bv.is_nan() {
+                                    Value::smi(0)
+                                } else {
+                                    Value::smi(if av <= bv { 1 } else { 0 })
+                                }
+                            }
                         }
                     };
                     self.push(result);
@@ -658,8 +695,19 @@ impl Vm {
                     let result = match (a.as_smi(), b.as_smi()) {
                         (Some(av), Some(bv)) => Value::smi(if av >= bv { 1 } else { 0 }),
                         _ => {
-                            let lt = compare_strings_lt(a, b).unwrap_or(true);
-                            Value::smi(if !lt { 1 } else { 0 })
+                            if let Some(v) = compare_strings_lt(b, a) {
+                                Value::smi(if v { 1 } else { 0 })
+                            } else if let Some(v) = compare_strings_lt(a, b) {
+                                Value::smi(if v { 0 } else { 1 })
+                            } else {
+                                let av = to_number(a);
+                                let bv = to_number(b);
+                                if av.is_nan() || bv.is_nan() {
+                                    Value::smi(0)
+                                } else {
+                                    Value::smi(if av >= bv { 1 } else { 0 })
+                                }
+                            }
                         }
                     };
                     self.push(result);
@@ -944,6 +992,74 @@ impl Vm {
                         self.globals.insert(name, value);
                     }
                     self.push(value);
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::IncLocal => {
+                    let idx = instr.operands[0] as usize;
+                    let is_prefix = instr.operands[1] != 0;
+                    let old_val = if idx < self.frames[fi].locals.len() {
+                        self.frames[fi].locals[idx]
+                    } else {
+                        Value::undefined()
+                    };
+                    let n = to_number(old_val) + 1.0;
+                    let new_val = number_result(gc, n);
+                    if idx >= self.frames[fi].locals.len() {
+                        self.frames[fi].locals.resize(idx + 1, Value::undefined());
+                    }
+                    self.frames[fi].locals[idx] = new_val;
+                    self.push(if is_prefix { new_val } else { old_val });
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::DecLocal => {
+                    let idx = instr.operands[0] as usize;
+                    let is_prefix = instr.operands[1] != 0;
+                    let old_val = if idx < self.frames[fi].locals.len() {
+                        self.frames[fi].locals[idx]
+                    } else {
+                        Value::undefined()
+                    };
+                    let n = to_number(old_val) - 1.0;
+                    let new_val = number_result(gc, n);
+                    if idx >= self.frames[fi].locals.len() {
+                        self.frames[fi].locals.resize(idx + 1, Value::undefined());
+                    }
+                    self.frames[fi].locals[idx] = new_val;
+                    self.push(if is_prefix { new_val } else { old_val });
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::IncGlobal => {
+                    let name_idx = instr.operands[0] as usize;
+                    let is_prefix = instr.operands[1] != 0;
+                    if let Some(name) = self.frames[fi].prog_str(name_idx) {
+                        let old_val = self.globals.get(&name).copied()
+                            .or_else(|| self.builtin_wrappers.get(&name).copied())
+                            .or_else(|| self.get_builtin(&name))
+                            .unwrap_or(Value::undefined());
+                        let n = to_number(old_val) + 1.0;
+                        let new_val = number_result(gc, n);
+                        self.globals.insert(name, new_val);
+                        self.push(if is_prefix { new_val } else { old_val });
+                    } else {
+                        self.push(Value::undefined());
+                    }
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::DecGlobal => {
+                    let name_idx = instr.operands[0] as usize;
+                    let is_prefix = instr.operands[1] != 0;
+                    if let Some(name) = self.frames[fi].prog_str(name_idx) {
+                        let old_val = self.globals.get(&name).copied()
+                            .or_else(|| self.builtin_wrappers.get(&name).copied())
+                            .or_else(|| self.get_builtin(&name))
+                            .unwrap_or(Value::undefined());
+                        let n = to_number(old_val) - 1.0;
+                        let new_val = number_result(gc, n);
+                        self.globals.insert(name, new_val);
+                        self.push(if is_prefix { new_val } else { old_val });
+                    } else {
+                        self.push(Value::undefined());
+                    }
                     self.frames[fi].pc = pc + 1;
                 }
 
@@ -1983,6 +2099,41 @@ fn to_number(v: Value) -> f64 {
         n
     } else if v.is_null() {
         0.0
+    } else if v.is_undefined() {
+        f64::NAN
+    } else if let Some(ptr) = v.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_STRING {
+            let s = unsafe { HeapString::to_string(ptr as *mut HeapString) };
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return 0.0;
+            }
+            if let Ok(n) = trimmed.parse::<f64>() {
+                return n;
+            }
+            // Hex literals like "0x1F"
+            let upper = trimmed.to_uppercase();
+            if upper.starts_with("0X") {
+                if let Ok(n) = u64::from_str_radix(&upper[2..], 16) {
+                    return n as f64;
+                }
+            }
+            // Infinity
+            if trimmed.eq_ignore_ascii_case("infinity")
+                || trimmed == "+Infinity"
+                || trimmed == "-Infinity"
+            {
+                return if trimmed.starts_with('-') {
+                    f64::NEG_INFINITY
+                } else {
+                    f64::INFINITY
+                };
+            }
+            f64::NAN
+        } else {
+            f64::NAN
+        }
     } else {
         f64::NAN
     }

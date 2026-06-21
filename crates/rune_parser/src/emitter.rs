@@ -491,6 +491,40 @@ impl Emitter {
                     UnaryOp::Delete => self.emit(Opcode::LoadBoolean, vec![1]),
                 }
             }
+            Expr::Update(op, arg, prefix, _) => {
+                match arg.as_ref() {
+                    Expr::Identifier(name, _) => {
+                        let opcode = match op {
+                            UpdateOp::PlusPlus => {
+                                if self.local_index(name).is_some() {
+                                    Opcode::IncLocal
+                                } else {
+                                    Opcode::IncGlobal
+                                }
+                            }
+                            UpdateOp::MinusMinus => {
+                                if self.local_index(name).is_some() {
+                                    Opcode::DecLocal
+                                } else {
+                                    Opcode::DecGlobal
+                                }
+                            }
+                        };
+                        let is_prefix = if *prefix { 1 } else { 0 };
+                        if let Some(idx) = self.local_index(name) {
+                            self.emit(opcode, vec![idx as i64, is_prefix]);
+                        } else {
+                            let name_idx = self.intern_string(name) as i64;
+                            self.emit(opcode, vec![name_idx, is_prefix]);
+                        }
+                    }
+                    _ => {
+                        self.emit_expression(arg);
+                        self.emit(Opcode::Pop, vec![]);
+                        self.emit(Opcode::LoadUndefined, vec![]);
+                    }
+                }
+            }
             Expr::Binary(op, lhs, rhs, _) => {
                 if *op == BinaryOp::Assign {
                     match lhs.as_ref() {

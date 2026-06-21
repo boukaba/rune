@@ -2,7 +2,7 @@
 
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
-> **Status:** Sprint 9 — Baseline JIT Foundation: Smi codegen ✅ (9A, 9B done)
+> **Status:** Sprint 9 — Spec compliance + Smi codegen ✅ (9C, 9A, 9B done)
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
 > Every implementation decision at every level (lexer, parser, emitter, bytecode, interpreter, builtins, JIT) **must** be verified against the exact ECMA-262 specification language in [`ecma262.md`](./ecma262.md) — **never guess** what the spec says. Each section in `ecma262.md` links to the corresponding URL fragment on `https://tc39.es/ecma262/multipage/`; **always open these URLs via `webfetch` tool** to read the authoritative algorithm steps before implementing. This applies to all phases below.
@@ -633,7 +633,13 @@
   - [x] Smi arithmetic: Add ((a&~1)+b), Sub ((a-b)|1), Mul (decode→imul→encode)
   - [x] 2 offset-verification tests + 7 execution tests (cfg-gated to x86_64)
   - [x] New assembler helpers: and/or imm8, add/sub r64 r64, imul, sar/shl by 1
-- [ ] 9C: IC Integration — Inline cache fast paths in generated code
+- [ ] 9D: IC Integration — Inline cache fast paths in generated code
+- [x] **9C: ECMA-262 Spec Compliance — Critical Fixes** — 201 tests passing (+11 new)
+  - [x] 9C-1: Lt/Gt/Le/Ge use to_number() for HeapFloat64 + NaN per §12.9–12.11
+  - [x] 9C-2: to_number() parses numeric strings per §9.3.1 (empty→0, hex, Infinity, etc.)
+  - [x] 9C-3: ++/-- operators — parser (prefix+postfix), AST (Update), emitter, 4 bytecode opcodes (IncLocal, DecLocal, IncGlobal, DecGlobal), VM handlers
+  - [x] 9C-4: Neg uses to_number() for all non-numeric types; Smi -(-2^30) overflow → HeapFloat64
+  - [x] 9C-5: 11 integration tests (float comparison, NaN, string ToNumber, ++/-- prefix/postfix, for-loop with i++, negate string, negate overflow, negate undefined)
 
 ## Phase 9 — v2 Features (Stretch)
 

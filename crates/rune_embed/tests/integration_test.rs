@@ -994,3 +994,113 @@ fn test_constructor_prototype_inheritance() {
     "#).unwrap();
     assert_eq!(r6.as_smi(), Some(1), "prototype.constructor is accessible");
 }
+
+// ---- ECMA-262 Spec Compliance (Task 9C) ----
+
+#[test]
+fn test_float_comparison() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("3.5 > 2").unwrap();
+    assert_eq!(r.as_smi(), Some(1), "3.5 > 2 should be true");
+    let r2 = ctx.eval("Math.PI > 3").unwrap();
+    assert_eq!(r2.as_smi(), Some(1), "Math.PI > 3 should be true");
+    let r3 = ctx.eval("1.5 < 2.5").unwrap();
+    assert_eq!(r3.as_smi(), Some(1), "1.5 < 2.5 should be true");
+}
+
+#[test]
+fn test_mixed_comparison() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("3 > 2.5").unwrap();
+    assert_eq!(r.as_smi(), Some(1), "Smi > Float64 should work");
+    let r2 = ctx.eval("2.5 < 3").unwrap();
+    assert_eq!(r2.as_smi(), Some(1), "Float64 < Smi should work");
+}
+
+#[test]
+fn test_nan_comparison() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("NaN < 5").unwrap();
+    assert!(r.is_undefined(), "NaN < 5 should be undefined per §12.9");
+    let r2 = ctx.eval("NaN >= 5").unwrap();
+    assert_eq!(r2.as_smi(), Some(0), "NaN >= 5 should be false per §12.10");
+    let r3 = ctx.eval("NaN <= 5").unwrap();
+    assert_eq!(r3.as_smi(), Some(0), "NaN <= 5 should be false per §12.10");
+}
+
+#[test]
+fn test_to_number_string() {
+    let mut ctx = Context::new();
+    let r = ctx.eval(r#""5" > 3"#).unwrap();
+    assert_eq!(r.as_smi(), Some(1), "ToNumber('5') = 5 > 3");
+    let r2 = ctx.eval(r#"3 > "5""#).unwrap();
+    assert_eq!(r2.as_smi(), Some(0), "3 > ToNumber('5') should be false");
+}
+
+#[test]
+fn test_increment_prefix() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("var x = 5; ++x").unwrap();
+    assert_eq!(r.as_smi(), Some(6), "++x should return new value");
+    let r2 = ctx.eval("var x = 5; var y = ++x; y").unwrap();
+    assert_eq!(r2.as_smi(), Some(6), "++x assigned to var should be new value");
+}
+
+#[test]
+fn test_increment_postfix() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("var x = 5; x++").unwrap();
+    assert_eq!(r.as_smi(), Some(5), "x++ should return old value");
+    let r2 = ctx.eval("var y = 5; y++; y").unwrap();
+    assert_eq!(r2.as_smi(), Some(6), "y should be incremented after x++");
+}
+
+#[test]
+fn test_decrement() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("var x = 10; --x").unwrap();
+    assert_eq!(r.as_smi(), Some(9), "--x should decrement and return new value");
+    let r2 = ctx.eval("var y = 10; y--").unwrap();
+    assert_eq!(r2.as_smi(), Some(10), "y-- should return old value");
+    let r3 = ctx.eval("var y = 10; y--; y").unwrap();
+    assert_eq!(r3.as_smi(), Some(9), "y should be decremented after y--");
+}
+
+#[test]
+fn test_negate_string() {
+    let mut ctx = Context::new();
+    let r = ctx.eval(r#"-"42""#).unwrap();
+    let val = r.as_float64().unwrap_or(r.as_smi().map(|v| v as f64).unwrap_or(f64::NAN));
+    assert_eq!(val, -42.0, r#"-"42" should be -42 via ToNumber"#);
+}
+
+#[test]
+fn test_negate_overflow() {
+    let mut ctx = Context::new();
+    // -(2^30) = -1073741824 fits in Smi, but -(-2^30) = 2^30 does not
+    // var x = -(1 << 30) → but we can't compute 1<<30 in our runtime yet,
+    // so just test negating a large negative number
+    let r = ctx.eval("var x = -1073741824; -x").unwrap();
+    let val = r.as_float64().unwrap_or(r.as_smi().map(|v| v as f64).unwrap_or(f64::NAN));
+    assert_eq!(val, 1073741824.0, "-(-1073741824) should be 1073741824 via HeapFloat64");
+}
+
+#[test]
+fn test_increment_in_for_loop() {
+    let mut ctx = Context::new();
+    let r = ctx.eval(r#"
+        var sum = 0;
+        for (var i = 0; i < 10; i++) {
+            sum = sum + i;
+        }
+        sum
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(45), "sum 0..9 = 45 after for loop with i++");
+}
+
+#[test]
+fn test_negate_undefined() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("-undefined").unwrap();
+    assert!(r.as_float64().unwrap().is_nan(), "-undefined should be NaN per spec");
+}

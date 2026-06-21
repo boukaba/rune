@@ -27,6 +27,7 @@ pub enum Expr {
     Function(Box<FnNode>, Span),
     Template(Box<str>, Span),
     This(Span),
+    Update(UpdateOp, Box<Expr>, bool, Span), // op, argument, is_prefix, span
     Yield(Option<Box<Expr>>, Span),
 }
 
@@ -53,6 +54,13 @@ pub enum UnaryOp {
     Typeof,
     Void,
     Delete,
+}
+
+/// Increment/decrement update expression.
+#[derive(Clone, Debug, PartialEq)]
+pub enum UpdateOp {
+    PlusPlus,
+    MinusMinus,
 }
 
 #[derive(Clone, Debug, PartialEq)]

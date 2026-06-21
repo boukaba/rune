@@ -78,6 +78,11 @@ pub enum Opcode {
     // for-in
     ForInInit,
     ForInNext,
+    // Increment / decrement
+    IncLocal,
+    DecLocal,
+    IncGlobal,
+    DecGlobal,
 }
 
 #[derive(Clone, Debug)]

@@ -482,8 +482,16 @@ impl Parser {
             TokenKind::Typeof => { self.advance(); self.make_unary(UnaryOp::Typeof, start) }
             TokenKind::Void => { self.advance(); self.make_unary(UnaryOp::Void, start) }
             TokenKind::Delete => { self.advance(); self.make_unary(UnaryOp::Delete, start) }
-            TokenKind::PlusPlus => { self.advance(); self.parse_postfix_prefix(true, start) }
-            TokenKind::MinusMinus => { self.advance(); self.parse_postfix_prefix(true, start) }
+            TokenKind::PlusPlus => {
+                self.advance();
+                let arg = self.parse_unary();
+                Expr::Update(UpdateOp::PlusPlus, Box::new(arg), true, Span { start: start.start, end: self.span().end })
+            }
+            TokenKind::MinusMinus => {
+                self.advance();
+                let arg = self.parse_unary();
+                Expr::Update(UpdateOp::MinusMinus, Box::new(arg), true, Span { start: start.start, end: self.span().end })
+            }
             TokenKind::New => {
                 self.advance();
                 // Parse callee as a member expression (dot/bracket postfix only, NO calls)
@@ -515,16 +523,6 @@ impl Parser {
     fn make_unary(&mut self, op: UnaryOp, start: Span) -> Expr {
         let arg = self.parse_unary();
         Expr::Unary(op, Box::new(arg), Span { start: start.start, end: self.span().end })
-    }
-
-    fn parse_postfix_prefix(&mut self, is_prefix: bool, start: Span) -> Expr {
-        if is_prefix {
-            let arg = self.parse_unary();
-            Expr::Unary(if start.start == self.span().start { UnaryOp::Plus } else { UnaryOp::Minus },
-                        Box::new(arg), self.span())
-        } else {
-            self.parse_primary()
-        }
     }
 
     fn parse_primary(&mut self) -> Expr {
@@ -682,6 +680,16 @@ impl Parser {
                     self.expect(TokenKind::RBracket);
                     let span = self.span();
                     lhs = Expr::Member(Box::new(lhs), Box::new(index), true, span);
+                }
+                TokenKind::PlusPlus => {
+                    self.advance();
+                    let span = self.span();
+                    lhs = Expr::Update(UpdateOp::PlusPlus, Box::new(lhs), false, span);
+                }
+                TokenKind::MinusMinus => {
+                    self.advance();
+                    let span = self.span();
+                    lhs = Expr::Update(UpdateOp::MinusMinus, Box::new(lhs), false, span);
                 }
                 _ => break,
             }

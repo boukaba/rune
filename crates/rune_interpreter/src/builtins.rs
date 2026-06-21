@@ -14,7 +14,7 @@ pub struct Builtin {
 }
 
 /// Signature for a built-in function: receives GC access, `this` value, args, and VM reference.
-pub type BuiltinFn = fn(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &Vm) -> Value;
+pub type BuiltinFn = fn(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value;
 
 /// Format a Value into its JS string representation.
 fn value_to_js_string(v: Value) -> String {
@@ -37,7 +37,7 @@ fn value_to_js_string(v: Value) -> String {
 }
 
 /// print(...) — outputs values to stdout.
-pub fn print_builtin(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &Vm) -> Value {
+pub fn print_builtin(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     let s = args
         .iter()
         .map(|v| format!("{v:?}"))
@@ -48,7 +48,7 @@ pub fn print_builtin(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &Vm
 }
 
 /// String(value) — converts a value to its string representation.
-pub fn string_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &Vm) -> Value {
+pub fn string_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     let arg = args.first().copied().unwrap_or(Value::undefined());
     let s = value_to_js_string(arg);
     let ptr = HeapString::allocate(gc, &s);
@@ -64,7 +64,7 @@ fn make_simple_object(gc: &mut SemiSpace, key: &str, val: Value) -> Value {
 }
 
 /// Error(message) — creates a minimal error object with a `message` property.
-pub fn error_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &Vm) -> Value {
+pub fn error_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     let msg = if let Some(arg) = args.first() {
         value_to_js_string(*arg)
     } else {
@@ -76,17 +76,17 @@ pub fn error_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &Vm)
 }
 
 /// Test262Error(message) — built-in replacement for sta.js Test262Error constructor.
-pub fn test262_error_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &Vm) -> Value {
+pub fn test262_error_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     error_builtin(gc, _this, args, vm)
 }
 
 /// $DONOTEVALUATE() — throws an error (should be optimized away by runner).
-pub fn donot_evaluate_builtin(_gc: &mut SemiSpace, _this: Value, _args: &[Value], _vm: &Vm) -> Value {
+pub fn donot_evaluate_builtin(_gc: &mut SemiSpace, _this: Value, _args: &[Value], _vm: &mut Vm) -> Value {
     panic!("$DONOTEVALUATE was called");
 }
 
 /// Object(value) — returns a new empty object (ignores argument).
-pub fn object_builtin(gc: &mut SemiSpace, _this: Value, _args: &[Value], _vm: &Vm) -> Value {
+pub fn object_builtin(gc: &mut SemiSpace, _this: Value, _args: &[Value], _vm: &mut Vm) -> Value {
     let shape = Shape::empty();
     let ptr = JSObject::allocate(gc, shape, &[]);
     Value::from_heap_ptr(ptr as *mut u8)
@@ -94,7 +94,7 @@ pub fn object_builtin(gc: &mut SemiSpace, _this: Value, _args: &[Value], _vm: &V
 
 /// Object.create(proto) — creates a new object with the given prototype.
 /// Per §20.1.2.2, throws TypeError if proto is not an Object or null.
-pub fn object_create_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &Vm) -> Value {
+pub fn object_create_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     let shape = Shape::empty();
     let ptr = JSObject::allocate(gc, shape, &[]);
     if let Some(proto) = args.first() {
@@ -113,12 +113,12 @@ pub fn object_create_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], _
 }
 
 /// eval(source) — currently not implemented; returns undefined.
-pub fn eval_builtin(_gc: &mut SemiSpace, _this: Value, _args: &[Value], _vm: &Vm) -> Value {
+pub fn eval_builtin(_gc: &mut SemiSpace, _this: Value, _args: &[Value], _vm: &mut Vm) -> Value {
     Value::undefined()
 }
 
 /// Array.isArray(arg) — returns true if arg is a dense array.
-pub fn array_is_array(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &Vm) -> Value {
+pub fn array_is_array(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     let val = args.first().copied().unwrap_or(Value::undefined());
     if let Some(ptr) = val.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
@@ -130,14 +130,19 @@ pub fn array_is_array(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &V
 }
 
 /// Array.prototype.push(value) — pushes value to the array, returns new length.
-pub fn array_push(_gc: &mut SemiSpace, this: Value, args: &[Value], _vm: &Vm) -> Value {
+/// Auto-grows the array if capacity is exhausted and updates VM references.
+pub fn array_push(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let val = args.first().copied().unwrap_or(Value::undefined());
     if let Some(ptr) = this.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_ARRAY {
             unsafe {
-                RuneArray::push(_gc, ptr as *mut RuneArray, val);
-                let len = RuneArray::length(ptr as *mut RuneArray);
+                let old_ptr = ptr;
+                let new_arr = RuneArray::push(gc, old_ptr as *mut RuneArray, val);
+                if new_arr as *mut u8 != old_ptr {
+                    vm.update_heap_reference(old_ptr, new_arr as *mut u8);
+                }
+                let len = RuneArray::length(new_arr);
                 return Value::smi(len as i32);
             }
         }
@@ -146,7 +151,7 @@ pub fn array_push(_gc: &mut SemiSpace, this: Value, args: &[Value], _vm: &Vm) ->
 }
 
 /// Array.prototype.pop() — removes and returns the last element.
-pub fn array_pop(_gc: &mut SemiSpace, this: Value, _args: &[Value], _vm: &Vm) -> Value {
+pub fn array_pop(_gc: &mut SemiSpace, this: Value, _args: &[Value], _vm: &mut Vm) -> Value {
     if let Some(ptr) = this.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_ARRAY {
@@ -157,7 +162,7 @@ pub fn array_pop(_gc: &mut SemiSpace, this: Value, _args: &[Value], _vm: &Vm) ->
 }
 
 /// String.fromCharCode(codes...) — creates a string from char codes.
-pub fn string_from_char_code(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &Vm) -> Value {
+pub fn string_from_char_code(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     let mut s = String::new();
     for arg in args {
         if let Some(n) = arg.as_smi() {
@@ -169,7 +174,7 @@ pub fn string_from_char_code(gc: &mut SemiSpace, _this: Value, args: &[Value], _
 }
 
 /// String.prototype.charAt(index) — returns the character at index as a string.
-pub fn string_char_at(gc: &mut SemiSpace, this: Value, args: &[Value], _vm: &Vm) -> Value {
+pub fn string_char_at(gc: &mut SemiSpace, this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     let index = args.first().and_then(|v| v.as_smi()).unwrap_or(0) as usize;
     if let Some(ptr) = this.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
@@ -187,7 +192,7 @@ pub fn string_char_at(gc: &mut SemiSpace, this: Value, args: &[Value], _vm: &Vm)
 }
 
 /// String.prototype.slice(start, end) — returns a substring.
-pub fn string_slice(gc: &mut SemiSpace, this: Value, args: &[Value], _vm: &Vm) -> Value {
+pub fn string_slice(gc: &mut SemiSpace, this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     let start = args.first().and_then(|v| v.as_smi()).unwrap_or(0) as usize;
     let end = args.get(1).and_then(|v| v.as_smi()).map(|n| n as usize);
     if let Some(ptr) = this.heap_ptr() {
@@ -242,19 +247,19 @@ fn math_op_binary(gc: &mut SemiSpace, args: &[Value], op: fn(f64, f64) -> f64) -
     Value::from_float64_ptr(ptr as *mut u8)
 }
 
-pub fn math_floor(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &Vm) -> Value {
+pub fn math_floor(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     math_op_unary(gc, args, f64::floor)
 }
 
-pub fn math_ceil(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &Vm) -> Value {
+pub fn math_ceil(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     math_op_unary(gc, args, f64::ceil)
 }
 
-pub fn math_abs(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &Vm) -> Value {
+pub fn math_abs(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     math_op_unary(gc, args, f64::abs)
 }
 
-pub fn math_min(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &Vm) -> Value {
+pub fn math_min(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     let mut min = f64::INFINITY;
     for arg in args {
         let n = arg.as_smi().map(|v| v as f64)
@@ -270,7 +275,7 @@ pub fn math_min(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &Vm) -> V
     Value::from_float64_ptr(ptr as *mut u8)
 }
 
-pub fn math_max(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &Vm) -> Value {
+pub fn math_max(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     let mut max = f64::NEG_INFINITY;
     for arg in args {
         let n = arg.as_smi().map(|v| v as f64)
@@ -286,11 +291,11 @@ pub fn math_max(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &Vm) -> V
     Value::from_float64_ptr(ptr as *mut u8)
 }
 
-pub fn math_pow(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &Vm) -> Value {
+pub fn math_pow(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     math_op_binary(gc, args, |a, b| a.powf(b))
 }
 
-pub fn math_sqrt(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &Vm) -> Value {
+pub fn math_sqrt(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     math_op_unary(gc, args, f64::sqrt)
 }
 

@@ -77,19 +77,62 @@ impl RuneArray {
         }
     }
 
+    pub unsafe fn shape_ptr(arr: *mut RuneArray) -> *const crate::shape::Shape {
+        unsafe { *((arr as *mut u8).add(8) as *const *const crate::shape::Shape) }
+    }
+
+    pub unsafe fn set_shape_ptr(arr: *mut RuneArray, shape: *const crate::shape::Shape) {
+        unsafe { *((arr as *mut u8).add(8) as *mut *const crate::shape::Shape) = shape; }
+    }
+
+    pub unsafe fn prototype(arr: *mut RuneArray) -> *mut u8 {
+        unsafe { *((arr as *mut u8).add(24) as *const *mut u8) }
+    }
+
+    pub unsafe fn set_prototype(arr: *mut RuneArray, proto: *mut u8) {
+        unsafe { *((arr as *mut u8).add(24) as *mut *mut u8) = proto; }
+    }
+
+    /// Grow the array to ~1.5x capacity, copying all elements and header.
+    /// Returns the new array pointer (old pointer becomes stale).
+    pub unsafe fn grow(ss: &mut SemiSpace, arr: *mut RuneArray) -> *mut RuneArray {
+        unsafe {
+            let old_len = Self::length(arr) as usize;
+            let old_cap = Self::capacity(arr) as usize;
+            let new_cap = (old_cap * 3 / 2).max(old_cap + 8);
+            let total_size = crate::object::OBJECT_HEADER_END + new_cap * size_of::<Value>();
+            let new_ptr = ss.alloc(total_size) as *mut u8;
+            // Copy header (GcHeader + shape + length + capacity + prototype) = 32 bytes
+            std::ptr::copy_nonoverlapping(arr as *const u8, new_ptr, crate::object::OBJECT_HEADER_END);
+            // Update capacity in new header
+            *(new_ptr.add(20) as *mut u32) = new_cap as u32;
+            // Copy elements
+            let old_elems = (arr as *mut u8).add(crate::object::OBJECT_HEADER_END) as *const Value;
+            let new_elems = new_ptr.add(crate::object::OBJECT_HEADER_END) as *mut Value;
+            std::ptr::copy_nonoverlapping(old_elems, new_elems, old_len);
+            // Zero out new element slots
+            for i in old_len..new_cap {
+                *new_elems.add(i) = Value::undefined();
+            }
+            new_ptr as *mut RuneArray
+        }
+    }
+
     /// Push a value to the end of the array.
-    /// Returns false if there's no reserved capacity left.
-    pub unsafe fn push(_ss: &mut SemiSpace, arr: *mut RuneArray, val: Value) -> bool {
+    /// Auto-grows if capacity is exhausted.
+    /// Returns the (possibly new) array pointer.
+    pub unsafe fn push(ss: &mut SemiSpace, arr: *mut RuneArray, val: Value) -> *mut RuneArray {
         unsafe {
             let len = Self::length(arr);
             let cap = Self::capacity(arr);
-            if (len as usize) < cap as usize {
-                Self::set_element(arr, len as usize, val);
-                Self::set_length(arr, len + 1);
-                true
+            let current = if (len as usize) >= cap as usize {
+                Self::grow(ss, arr)
             } else {
-                false // OOM — caller should grow or realloc
-            }
+                arr
+            };
+            Self::set_element(current, len as usize, val);
+            Self::set_length(current, len + 1);
+            current
         }
     }
 

@@ -1031,7 +1031,7 @@ impl Vm {
                         if smi_val < 0 {
                             let id = ((-smi_val) as usize) - 1;
                             if id < self.builtins.len() {
-                                let result = (self.builtins[id].func)(gc, obj_val, &args, &*self);
+                                let result = (self.builtins[id].func)(gc, obj_val, &args, &mut *self);
                                 if result.is_heap_object() {
                                     self.push(result);
                                 } else {
@@ -1108,7 +1108,7 @@ impl Vm {
                         if smi_val < 0 {
                             let id = ((-smi_val) as usize) - 1;
                             if id < self.builtins.len() {
-                                let result = (self.builtins[id].func)(gc, this, &args, &*self);
+                                let result = (self.builtins[id].func)(gc, this, &args, &mut *self);
                                 self.push(result);
                                 self.frames[fi].pc = pc + 1;
                                 continue;
@@ -1247,6 +1247,35 @@ impl Vm {
 
     pub fn peek(&self) -> Value {
         self.stack.last().copied().unwrap_or(Value::undefined())
+    }
+
+    /// Update all root references from `old_ptr` to `new_ptr` after a heap object
+    /// has been relocated (e.g., array grow reallocation).
+    /// Scans stack, all frame locals, and globals for matching heap pointers.
+    pub fn update_heap_reference(&mut self, old_ptr: *mut u8, new_ptr: *mut u8) {
+        for v in &mut self.stack {
+            if let Some(p) = v.heap_ptr() {
+                if p == old_ptr {
+                    *v = Value::from_heap_ptr(new_ptr);
+                }
+            }
+        }
+        for frame in &mut self.frames {
+            for v in &mut frame.locals {
+                if let Some(p) = v.heap_ptr() {
+                    if p == old_ptr {
+                        *v = Value::from_heap_ptr(new_ptr);
+                    }
+                }
+            }
+        }
+        for v in self.globals.values_mut() {
+            if let Some(p) = v.heap_ptr() {
+                if p == old_ptr {
+                    *v = Value::from_heap_ptr(new_ptr);
+                }
+            }
+        }
     }
 }
 
@@ -1736,6 +1765,17 @@ fn load_property_recursive(obj: Value, raw_key: Value) -> Value {
                         return unsafe { RuneArray::get_element(ptr as *mut RuneArray, index) };
                     }
                     return Value::undefined(); // out of bounds
+                }
+                // "length" property → return stored length
+                if let Some(key_ptr) = raw_key.heap_ptr() {
+                    let key_tag = unsafe { (*(key_ptr as *const GcHeader)).tag() };
+                    if key_tag == TAG_STRING {
+                        let key_str = unsafe { HeapString::to_string(key_ptr as *mut HeapString) };
+                        if key_str == "length" {
+                            let len = unsafe { RuneArray::length(ptr as *mut RuneArray) };
+                            return Value::smi(len as i32);
+                        }
+                    }
                 }
                 // Non-numeric key → walk to prototype
                 let proto = unsafe { JSObject::prototype(ptr as *mut JSObject) };

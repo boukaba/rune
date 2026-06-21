@@ -775,6 +775,26 @@ fn test_array_push_pop() {
 }
 
 #[test]
+fn test_array_push_grow() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("var a = [1]; for (var i = 0; i < 10; i = i + 1) { a.push(i); } a.length").unwrap();
+    assert_eq!(r.as_smi(), Some(11));
+    let r2 = ctx.eval("var a = [1]; for (var i = 0; i < 10; i = i + 1) { a.push(i); } a[0] + a[5] + a[10]").unwrap();
+    assert_eq!(r2.as_smi(), Some(1 + 4 + 9));
+}
+
+#[test]
+fn test_array_push_grow_identity() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("var a = [42]; var b = a; for (var i = 0; i < 20; i = i + 1) { a.push(i); } a.length").unwrap();
+    assert_eq!(r.as_smi(), Some(21));
+    let r2 = ctx.eval("var a = [42]; var b = a; for (var i = 0; i < 20; i = i + 1) { a.push(i); } b.length").unwrap();
+    assert_eq!(r2.as_smi(), Some(21));
+    let r3 = ctx.eval("var a = [42]; var b = a; for (var i = 0; i < 20; i = i + 1) { a.push(i); } b[0] + b[10] + b[20]").unwrap();
+    assert_eq!(r3.as_smi(), Some(42 + 9 + 19));
+}
+
+#[test]
 fn test_string_char_at() {
     let mut ctx = Context::new();
     let r = ctx.eval(r#"var s = "hello"; s.charAt(0)"#).unwrap();

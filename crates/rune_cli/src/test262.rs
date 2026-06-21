@@ -167,23 +167,16 @@ fn build_test_source(test: &TestCase) -> Result<String, String> {
 
     let harness_dir = test.suite_dir.join("harness");
 
-    // Always include sta.js (defines Test262Error, $DONOTEVALUATE)
-    let sta = std::fs::read_to_string(harness_dir.join("sta.js"))
-        .map_err(|e| format!("cannot read sta.js: {}", e))?;
-    full_source.push_str(&sta);
-    full_source.push('\n');
+    // Don't inject sta.js — builtins provide Test262Error, $DONOTEVALUATE
+    // Don't inject assert.js — uses unsupported features (typeof, JSON, bigint, etc.)
+    // Include other requested harness files (skip known ones that use unsupported features)
+    const SKIP_INCLUDES: &[&str] = &["sta.js", "sta", "assert.js", "assert", "fnGlobalObject.js",
+        "doneprintHandle.js", "testTypedArray.js", "testBigIntTypedArray.js",
+        "byteConversionValues.js", "nans.js", "proxyTrapsHelper.js",
+        "dateConstants.js", "propertyHelper.js"];
 
-    // Also include assert.js if the test needs assertions
-    if test.meta.includes.iter().any(|i| i == "assert.js" || i == "assert") {
-        let assert = std::fs::read_to_string(harness_dir.join("assert.js"))
-            .map_err(|e| format!("cannot read assert.js: {}", e))?;
-        full_source.push_str(&assert);
-        full_source.push('\n');
-    }
-
-    // Include other requested harness files
     for include in &test.meta.includes {
-        if include == "sta.js" || include == "sta" || include == "assert.js" || include == "assert" {
+        if SKIP_INCLUDES.contains(&include.as_str()) {
             continue;
         }
         let path = harness_dir.join(include);

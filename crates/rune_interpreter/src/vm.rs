@@ -699,10 +699,35 @@ impl Vm {
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::New => {
-                    let _argc = instr.operands[0] as usize;
-                    for _ in 0.._argc { self.pop(); }
-                    self.pop();
-                    self.push(Value::undefined());
+                    let argc = instr.operands[0] as usize;
+                    let mut args: Vec<Value> = (0..argc).map(|_| self.pop()).collect();
+                    args.reverse();
+                    let constructor = self.pop();
+                    // Create a new empty object
+                    let shape = Shape::empty();
+                    let obj = JSObject::allocate(gc, shape, &[]);
+                    let obj_val = Value::from_heap_ptr(obj as *mut u8);
+                    // If constructor is a builtin, call it with the new object
+                    if let Some(smi_val) = constructor.as_smi() {
+                        if smi_val < 0 {
+                            let id = ((-smi_val) as usize) - 1;
+                            if id < self.builtins.len() {
+                                // Builtins receive the new object as first arg? 
+                                // For now, just call the builtin normally
+                                let result = (self.builtins[id].func)(gc, &args);
+                                // If result is an object, use it; otherwise use the new object
+                                if result.is_heap_object() {
+                                    self.push(result);
+                                } else {
+                                    self.push(obj_val);
+                                }
+                                self.frames[fi].pc = pc + 1;
+                                continue;
+                            }
+                        }
+                    }
+                    // For non-builtin constructors, just return the new empty object
+                    self.push(obj_val);
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::Call => {

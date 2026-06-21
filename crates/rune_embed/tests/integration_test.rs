@@ -271,7 +271,7 @@ fn test_eval_throw() {
 fn test_eval_new_simple() {
     let mut ctx = Context::new();
     let result = ctx.eval("new Object();").unwrap();
-    assert!(result.is_undefined(), "new stub should return undefined");
+    assert!(result.is_heap_object(), "new should return a new object");
 }
 
 #[test]

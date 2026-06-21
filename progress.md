@@ -2,7 +2,7 @@
 
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
-> **Status:** Sprint 9 — Baseline JIT: locals + loops ✅ (9A-9E done)
+> **Status:** Sprint 10 — JIT tier-up: hot function detection ✅ (10A done)
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
 > Every implementation decision at every level (lexer, parser, emitter, bytecode, interpreter, builtins, JIT) **must** be verified against the exact ECMA-262 specification language in [`ecma262.md`](./ecma262.md) — **never guess** what the spec says. Each section in `ecma262.md` links to the corresponding URL fragment on `https://tc39.es/ecma262/multipage/`; **always open these URLs via `webfetch` tool** to read the authoritative algorithm steps before implementing. This applies to all phases below.
@@ -445,8 +445,9 @@
 - [ ] `templates.rs` — (Not used — direct emission instead of copy-and-patch templates)
 
 ### `rune_interpreter` integration
-- [ ] Trigger JIT → replace entry point with JIT code pointer
-- [ ] Call counter per function (threshold=50) for hotness detection
+- [x] Trigger JIT → replace entry point with JIT code pointer
+- [x] Call counter per function (threshold=50) for hotness detection
+- [x] opcode: `is_jit_compatible()` gated on `cfg(all(feature="jit", target_arch="x86_64"))`
 
 ### Tests
 - [x] JIT `add3` correctness (spike + baseline: Smi arithmetic, variables, branching, loops, conditionals)
@@ -655,6 +656,18 @@
   - [x] Value::from_raw() in rune_core
   - [x] 8 execution tests: local load/store, Lt (true/false/negative), inc postfix, dec prefix, full counting loop sum(0..4)=10
   - [x] 211+ tests pass across workspace (22 JIT baseline + 109 integration + 52 interpreter + 10 core + 6 bytecode + 5 parser + 5 emitter + 2 spike)
+
+## Sprint 10 — JIT Tier-Up: Interpreter Integration
+
+- [x] **10A: Hot Function Detection + JIT Calling Convention**
+  - [x] Func layout: 32→48 bytes, add call_count (u32+pad) + jit_entry (u64)
+  - [x] GC scan_end TAG_FUNC → 48; jit_entry forwarded as-is (raw pointer)
+  - [x] `is_jit_compatible()` in rune_jit_baseline — checks bytecode uses only JIT-supported opcodes
+  - [x] `rune_interpreter` optional dep on `rune_jit_baseline` with default `jit` feature (x86_64-gated)
+  - [x] Opcode::Call: increment call count per TAG_FUNC call; at threshold 50 compile via CodeGen + store entry
+  - [x] Hot function path: transmute JitEntryFn, pass vm/gc/locals_ptr, push result
+  - [x] Integration test (x86_64): add() called 100 times, tier-up at 50, sum(0..99)=4950
+  - [x] Phase 3 acceptance: interpreter integration gate met ✅
 
 ## Phase 9 — v2 Features (Stretch)
 

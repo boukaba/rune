@@ -1532,45 +1532,43 @@ fn load_property_recursive_ic(
     raw_key: Value,
 ) -> Value {
     let result = load_property_recursive(obj, raw_key);
-    // Populate IC if applicable
+    // Populate IC for all result types — Smi, Float64, heap, undefined
     if instr.ic_index >= 0 {
-        if result.is_heap_object() {
-            if let Some(ptr) = obj.heap_ptr() {
-                let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-                if tag == TAG_OBJECT {
-                    if let Some(key) = value_to_prop_key(raw_key) {
-                        let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
-                        let ic_idx = instr.ic_index as usize;
-                        while ics.len() <= ic_idx {
-                            ics.push(InlineCache::new());
-                        }
-                        if let Some(offset) = shape.lookup(&key) {
-                            // Own property
-                            ics[ic_idx].entries.insert(shape.id, IcEntry {
-                                offset,
-                                is_own: true,
-                                proto_depth: 0,
-                            });
-                        } else {
-                            // Inherited — walk prototype chain to find offset and depth
-                            let mut depth: u8 = 0;
-                            let mut p = ptr as *mut u8;
-                            loop {
-                                let next = unsafe { JSObject::prototype(p as *mut JSObject) };
-                                if next.is_null() { break; }
-                                depth += 1;
-                                if depth >= MAX_PROTOTYPE_DEPTH as u8 { break; }
-                                let next_shape = unsafe { JSObject::shape_ptr(next as *mut JSObject) };
-                                if let Some(offset) = next_shape.lookup(&key) {
-                                    ics[ic_idx].entries.insert(shape.id, IcEntry {
-                                        offset,
-                                        is_own: false,
-                                        proto_depth: depth,
-                                    });
-                                    break;
-                                }
-                                p = next;
+        if let Some(ptr) = obj.heap_ptr() {
+            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+            if tag == TAG_OBJECT {
+                if let Some(key) = value_to_prop_key(raw_key) {
+                    let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                    let ic_idx = instr.ic_index as usize;
+                    while ics.len() <= ic_idx {
+                        ics.push(InlineCache::new());
+                    }
+                    if let Some(offset) = shape.lookup(&key) {
+                        // Own property
+                        ics[ic_idx].entries.insert(shape.id, IcEntry {
+                            offset,
+                            is_own: true,
+                            proto_depth: 0,
+                        });
+                    } else {
+                        // Inherited — walk prototype chain to find offset and depth
+                        let mut depth: u8 = 0;
+                        let mut p = ptr as *mut u8;
+                        loop {
+                            let next = unsafe { JSObject::prototype(p as *mut JSObject) };
+                            if next.is_null() { break; }
+                            depth += 1;
+                            if depth >= MAX_PROTOTYPE_DEPTH as u8 { break; }
+                            let next_shape = unsafe { JSObject::shape_ptr(next as *mut JSObject) };
+                            if let Some(offset) = next_shape.lookup(&key) {
+                                ics[ic_idx].entries.insert(shape.id, IcEntry {
+                                    offset,
+                                    is_own: false,
+                                    proto_depth: depth,
+                                });
+                                break;
                             }
+                            p = next;
                         }
                     }
                 }

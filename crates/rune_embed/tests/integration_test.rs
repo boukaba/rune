@@ -609,20 +609,14 @@ fn test_new_opcode_returns_object() {
 #[test]
 fn test_ic_populates_and_hits() {
     let mut ctx = Context::new();
-    // Use eval_bytecode to construct a program that jumps back to reuse the same
-    // LoadProperty instruction, demonstrating IC hit after the first miss.
     use rune_bytecode::opcode::{BytecodeProgram, Instruction, Opcode};
 
-    // Build: {x: 42} followed by 3x Dup/LoadProperty/Pop, then one more + Return
-    // Since each LoadProperty is a different instruction, they each have their own IC slot.
-    // Without loops, each IC slot sees exactly 1 execution → miss (no hits yet).
-    // But we verify the IC path is wired up and returns correct values.
     let instrs = vec![
-        Instruction::new(Opcode::LoadSmi, vec![42]),               // value for slot
-        Instruction::new(Opcode::NewObject, vec![1, 0]),           // {x: 42}
-        // Access x 5 times, each through a different LoadProperty instruction
+        Instruction::new(Opcode::LoadSmi, vec![42]),
+        Instruction::new(Opcode::NewObject, vec![1, 0]),
+        // 5 LoadProperty instructions with IC slots 0-4
         Instruction::new(Opcode::Dup, vec![]),
-        Instruction::new(Opcode::LoadStringConst, vec![0]),        // key "x"
+        Instruction::new(Opcode::LoadStringConst, vec![0]),
         Instruction::new(Opcode::LoadProperty, vec![]),
         Instruction::new(Opcode::Pop, vec![]),
         Instruction::new(Opcode::Dup, vec![]),
@@ -644,13 +638,22 @@ fn test_ic_populates_and_hits() {
     ];
     let mut prog = BytecodeProgram::new(instrs, vec!["x".to_string()], vec![]);
     prog.assign_ic_indices();
-    let r = ctx.eval_bytecode(&prog).unwrap();
-    assert_eq!(r.as_smi(), Some(42), "correct property value");
 
-    let stats = ctx.vm().ic_stats;
-    assert_eq!(stats.lookups, 5, "5 LoadProperty instructions with IC");
-    assert_eq!(stats.hits, 0, "no loops, so no IC hits yet");
-    assert_eq!(stats.misses, 5, "first execution of each instruction = miss");
+    // First execution: all misses, IC populated
+    let r = ctx.eval_bytecode(&prog).unwrap();
+    assert_eq!(r.as_smi(), Some(42));
+    let stats1 = ctx.vm().ic_stats;
+    assert_eq!(stats1.lookups, 5);
+    assert_eq!(stats1.hits, 0);
+    assert_eq!(stats1.misses, 5);
+
+    // Second execution of same bytecode: same shape, same IC slots → should all hit
+    let r2 = ctx.eval_bytecode(&prog).unwrap();
+    assert_eq!(r2.as_smi(), Some(42));
+    let stats2 = ctx.vm().ic_stats;
+    assert_eq!(stats2.lookups, 10);
+    assert_eq!(stats2.hits, 5);
+    assert_eq!(stats2.misses, 5);
 }
 
 #[test]
@@ -705,4 +708,30 @@ fn test_ic_proto_inherited() {
     // Each static property access is a separate IC slot → all misses first time
     assert_eq!(stats.hits, 0, "no loops yet");
     assert!(stats.misses > 0, "at least one miss");
+}
+
+#[test]
+fn test_ic_hits_across_evals() {
+    let mut ctx = Context::new();
+    // First eval: 10 property accesses, all misses, IC populated for shape {x: 42}
+    ctx.eval(r#"
+        var obj = {x: 42};
+        obj.x; obj.x; obj.x; obj.x; obj.x;
+        obj.x; obj.x; obj.x; obj.x; obj.x
+    "#).unwrap();
+    let stats1 = ctx.vm().ic_stats;
+    assert_eq!(stats1.lookups, 10);
+    assert_eq!(stats1.hits, 0);
+    assert_eq!(stats1.misses, 10);
+
+    // Second eval: same shape, same IC slots → all hits
+    ctx.eval(r#"
+        var obj = {x: 42};
+        obj.x; obj.x; obj.x; obj.x; obj.x;
+        obj.x; obj.x; obj.x; obj.x; obj.x
+    "#).unwrap();
+    let stats2 = ctx.vm().ic_stats;
+    assert_eq!(stats2.lookups, 20);
+    assert_eq!(stats2.hits, 10);
+    assert_eq!(stats2.misses, 10);
 }

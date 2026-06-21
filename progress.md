@@ -2,7 +2,7 @@
 
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
-> **Status:** Sprint 5 — SIDT ICs ✅ (Tasks 5A, 5F done) → 5B (Dense Arrays)
+> **Status:** Sprint 5 — SIDT ICs ✅ (5A, 5F done) → Sprint 6: Arrays + Builtins + Constructor this
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
 > Every implementation decision at every level (lexer, parser, emitter, bytecode, interpreter, builtins, JIT) **must** be verified against the exact ECMA-262 specification language in [`ecma262.md`](./ecma262.md) — **never guess** what the spec says. Each section in `ecma262.md` links to the corresponding URL fragment on `https://tc39.es/ecma262/multipage/`; **always open these URLs via `webfetch` tool** to read the authoritative algorithm steps before implementing. This applies to all phases below.
@@ -290,12 +290,63 @@
 - [x] Also apply to any other hot-path string allocations in `New` opcode
 
 ### Acceptance — Sprint 5
-- [x] 73+ tests pass across workspace (70 integration + 27 unit + 5 core + 5 parser = 107+ total)
-- [x] SIDT: IC entries grow unboundedly, no megamorphic performance cliff
+- [x] 74+ tests pass across workspace (74 integration + 27 unit + 5 core + 5 parser = 111+)
+- [x] SIDT: IC entries persist across eval calls; same-shape second execution hits 10/10
+- [x] `load_property_recursive_ic` populates IC for all result types (Smi, Float64, heap, undefined)
 - [ ] Dense arrays: `arr[0]` direct load via IC
 - [ ] Array push/pop/length, String charAt/slice, Math.floor/sqrt
 - [ ] New Foo() calls constructor body with this binding
 - [ ] For-in: own keys enumerated
+
+---
+
+## Sprint 6 — Dense Arrays + Builtins + Constructor `this`
+
+> **Spec mandate:** See [`ecma262.md`](./ecma262.md) §10.1 (OrdinaryGet/Set), §11.2.2 ([[Construct]]), §22–24 (Number/Math/String), §26 (Array). Open linked URLs via `webfetch`. No guessing.
+>
+> **V8-Beating Strategy:** Dense arrays make ICs useful for the most common JS operation (array element access). `arr[0]` through an IC hit on `TAG_ARRAY` lets the JIT emit a single `mov` instruction — V8 needs multiple shape checks for the same.
+
+### Task 6A: IC Smi Result Fix 🔴 — Priority 0 ✅
+- [x] Remove `result.is_heap_object()` guard in `load_property_recursive_ic`
+- [x] `test_ic_hits_across_evals` verifies: first eval populates (10 misses), second eval hits (10 hits)
+
+### Task 6B: Dense Array Implementation 🔥 — Priority 1
+- [ ] `TAG_ARRAY = 4` GC tag in `gc.rs`, `RuneArray` struct in `rune_core/src/array.rs`
+- [ ] Array layout: `[GcHeader(TAG_ARRAY) | shape_ptr | length: u32 | capacity: u32 | prototype: *mut u8 | elements: Value[]]`
+- [ ] GC scanning: forward prototype then each element
+- [ ] `NewArray` allocates `RuneArray` instead of `JSObject`
+- [ ] `LoadProperty` numeric-index fast path on `TAG_ARRAY` (bypass shape lookup)
+- [ ] IC integration: numeric index hit populates `IcEntry { offset: index, is_own: true, proto_depth: 0 }`
+- [ ] `value_to_array_index` helper
+- [ ] `push`/`pop` element operations
+
+### Task 6C: Array & String Builtins + `this` Binding 🟡 — Priority 2
+- [ ] `BuiltinFn` signature change: `fn(gc, this: Value, args: &[Value], vm: &Vm) -> Value`
+- [ ] Prototype method `this` detection in `Call` opcode
+- [ ] `Array.isArray`, `Array.prototype.push/pop`
+- [ ] `String.fromCharCode`, `String.prototype.charAt/length/slice`
+- [ ] `Math.floor/ceil/abs/min/max/pow/sqrt/PI/E`
+- [ ] Move builtins to `rune_builtins/` crate
+
+### Task 6D: `New` Calls Constructor Body 🟡 — Priority 3
+- [ ] `this` field in `Frame` struct
+- [ ] `New` sets up frame with `this` = new object
+- [ ] Constructor return value handling (object vs primitive)
+
+### Task 6E: `for-in` Loop 🟢 — Priority 4
+- [ ] Own enumerable shape entries as string keys
+- [ ] Dense array: `0..length-1` as string keys
+
+### Task 6F: CFG & Liveness Analysis 🟢 — Priority 5
+- [ ] `block.rs` — Basic block builder, CFG construction
+- [ ] `analysis.rs` — Liveness analysis
+
+### Acceptance — Sprint 6
+- [ ] `arr[0]` via IC hit bypasses shape lookup (JIT-ready: single `mov`)
+- [ ] `arr.push(1)`, `arr.pop()`, `"hi".charAt(0)`, `Math.floor(3.7)` all work
+- [ ] `new Foo(name)` calls constructor body with `this` = new object
+- [ ] `for (var k in obj)` iterates own keys
+- [ ] 155+ tests pass
 
 ---
 

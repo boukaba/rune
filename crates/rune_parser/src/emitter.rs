@@ -535,10 +535,31 @@ impl Emitter {
                 self.patch(exit_jump, self.current());
             }
             Expr::Call(callee, args, _) => {
-                self.emit_expression(callee);
+                match callee.as_ref() {
+                    Expr::Member(obj, prop, computed, _) => {
+                        // Method call: preserve receiver (this) below the method
+                        self.emit_expression(obj);
+                        self.emit(Opcode::Dup, vec![]);
+                        if *computed {
+                            self.emit_expression(prop);
+                        } else {
+                            let name = prop_name_as_string(prop);
+                            let idx = self.intern_string(&name) as i64;
+                            self.emit(Opcode::LoadStringConst, vec![idx]);
+                        }
+                        self.emit(Opcode::LoadProperty, vec![]);
+                    }
+                    _ => {
+                        // Regular call: this = undefined
+                        self.emit(Opcode::LoadUndefined, vec![]);
+                        self.emit_expression(callee);
+                    }
+                }
+                // stack: [this, callee] or [receiver, method]
                 for arg in args {
                     self.emit_expression(arg);
                 }
+                // stack: [this, callee, arg0, ..., argN-1]
                 self.emit(Opcode::Call, vec![args.len() as i64]);
             }
             Expr::New(callee, args, _) => {

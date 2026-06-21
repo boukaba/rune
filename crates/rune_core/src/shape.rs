@@ -14,6 +14,7 @@ pub struct Shape {
     pub slot_count: usize,
     pub entries: Vec<(PropertyKey, usize)>,
     pub parent: Option<u64>,
+    pub is_dense_array: bool,
 }
 
 static SHAPE_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -23,6 +24,19 @@ lazy_static::lazy_static! {
         Mutex::new(HashMap::new());
     /// Interned PropertyKey for "prototype" — avoids HeapString alloc on every `new` call.
     pub static ref PROTOTYPE_KEY: PropertyKey = PropertyKey::from_string("prototype");
+    /// Shared shape for all dense arrays.
+    pub static ref DENSE_ARRAY_SHAPE: &'static Shape = {
+        let id = SHAPE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let shape = Box::new(Shape {
+            id,
+            property_count: 0,
+            slot_count: 0,
+            entries: Vec::new(),
+            parent: None,
+            is_dense_array: true,
+        });
+        Box::leak(shape)
+    };
 }
 
 impl Shape {
@@ -41,6 +55,7 @@ impl Shape {
             slot_count,
             entries: entries.clone(),
             parent: None,
+            is_dense_array: false,
         };
         let leaked: &'static Shape = Box::leak(Box::new(shape));
         table.insert(entries, leaked);
@@ -72,6 +87,7 @@ impl Shape {
             slot_count,
             entries,
             parent: None,
+            is_dense_array: false,
         })
     }
 

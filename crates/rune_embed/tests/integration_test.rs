@@ -735,3 +735,98 @@ fn test_ic_hits_across_evals() {
     assert_eq!(stats2.hits, 10);
     assert_eq!(stats2.misses, 10);
 }
+
+#[test]
+fn test_dense_array_literal() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("[1, 2, 3]").unwrap();
+    assert!(r.is_heap_object(), "array literal should return heap object");
+}
+
+#[test]
+fn test_dense_array_get_element() {
+    let mut ctx = Context::new();
+    // Single eval: create array and access multiple elements
+    let r = ctx.eval("var a = [10, 20, 30]; a[0] + a[1] + a[2]").unwrap();
+    assert_eq!(r.as_smi(), Some(60));
+}
+
+#[test]
+fn test_dense_array_out_of_bounds() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("var a = [1, 2, 3]; a[5]").unwrap();
+    assert!(r.is_undefined(), "out of bounds should be undefined");
+}
+
+#[test]
+fn test_dense_array_set_element() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("var a = [1, 2, 3]; a[0] = 99; a[0]").unwrap();
+    assert_eq!(r.as_smi(), Some(99));
+}
+
+#[test]
+fn test_array_push_pop() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("var a = [1, 2]; a.push(3); a[2]").unwrap();
+    assert_eq!(r.as_smi(), Some(3));
+    let r2 = ctx.eval("var a = [1, 2, 3]; var v = a.pop(); v").unwrap();
+    assert_eq!(r2.as_smi(), Some(3));
+}
+
+#[test]
+fn test_string_char_at() {
+    let mut ctx = Context::new();
+    let r = ctx.eval(r#"var s = "hello"; s.charAt(0)"#).unwrap();
+    assert!(r.is_heap_object(), "charAt should return a string");
+    let r2 = ctx.eval(r#"var s = "hello"; s.charAt(1)"#).unwrap();
+    assert!(r2.is_heap_object(), "charAt should return a string");
+}
+
+#[test]
+fn test_string_slice() {
+    let mut ctx = Context::new();
+    let r = ctx.eval(r#"var s = "hello"; s.slice(0, 3)"#).unwrap();
+    assert!(r.is_heap_object(), "slice should return a string");
+}
+
+#[test]
+fn test_string_length() {
+    let mut ctx = Context::new();
+    let r = ctx.eval(r#"var s = "hello"; s.length"#).unwrap();
+    assert_eq!(r.as_smi(), Some(5));
+    let r2 = ctx.eval(r#"var s = "a"; s.length"#).unwrap();
+    assert_eq!(r2.as_smi(), Some(1));
+}
+
+#[test]
+fn test_math_floor() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("Math.floor(3.7)").unwrap();
+    assert_eq!(r.as_smi(), Some(3));
+    let r2 = ctx.eval("Math.floor(-1.5)").unwrap();
+    assert_eq!(r2.as_smi(), Some(-2));
+    let r3 = ctx.eval("Math.floor(5)").unwrap();
+    assert_eq!(r3.as_smi(), Some(5));
+}
+
+#[test]
+fn test_math_ceil() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("Math.ceil(3.2)").unwrap();
+    assert_eq!(r.as_smi(), Some(4));
+}
+
+#[test]
+fn test_math_abs() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("Math.abs(-5)").unwrap();
+    assert_eq!(r.as_smi(), Some(5));
+}
+
+#[test]
+fn test_math_sqrt() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("Math.sqrt(9)").unwrap();
+    assert_eq!(r.as_smi(), Some(3));
+}

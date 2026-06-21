@@ -6,6 +6,7 @@ pub const TAG_OBJECT: u64 = 0;
 pub const TAG_STRING: u64 = 1;
 pub const TAG_FUNC: u64 = 2;
 pub const TAG_FLOAT64: u64 = 3;
+pub const TAG_ARRAY: u64 = 4;
 pub const TAG_FORWARDED: u64 = 7;
 
 /// Tag bits mask for GC header tag.
@@ -166,11 +167,11 @@ impl SemiSpace {
                 let obj_end = self.scan_end(scan_ptr, tag);
 
                 match tag {
-                    TAG_OBJECT => {
+                    TAG_OBJECT | TAG_ARRAY => {
                         // Forward prototype pointer (if non-null)
                         let proto_ptr = scan_ptr.add(OBJECT_PROTOTYPE_OFFSET) as *mut u64;
                         self.forward_value(proto_ptr);
-                        // Forward property slots
+                        // Forward property slots / array elements
                         let slots_ptr = scan_ptr.add(OBJECT_SLOTS_OFFSET) as *mut u64;
                         let capacity_ptr = scan_ptr.add(16) as *const u32;
                         let cap = *capacity_ptr as usize;
@@ -203,7 +204,7 @@ impl SemiSpace {
                 TAG_FLOAT64 => {
                     obj_start.add(size_of::<GcHeader>() + 8)
                 }
-                TAG_OBJECT => {
+                TAG_OBJECT | TAG_ARRAY => {
                     let capacity_ptr = obj_start.add(16) as *const u32;
                     let capacity = *capacity_ptr as usize;
                     let total = OBJECT_SLOTS_OFFSET + capacity * size_of::<u64>();

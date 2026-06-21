@@ -2,6 +2,7 @@ pub mod value;
 pub mod string;
 pub mod shape;
 pub mod object;
+pub mod array;
 pub mod function;
 pub mod float;
 pub mod gc;

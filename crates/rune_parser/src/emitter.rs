@@ -449,7 +449,7 @@ impl Emitter {
                 }
             }
             Expr::This(_) => {
-                self.emit(Opcode::LoadUndefined, vec![]);
+                self.emit(Opcode::LoadThis, vec![]);
             }
             Expr::Unary(op, arg, _) => {
                 self.emit_expression(arg);

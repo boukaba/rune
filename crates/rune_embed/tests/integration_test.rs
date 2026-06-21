@@ -830,3 +830,45 @@ fn test_math_sqrt() {
     let r = ctx.eval("Math.sqrt(9)").unwrap();
     assert_eq!(r.as_smi(), Some(3));
 }
+
+#[test]
+fn test_constructor_this_binding() {
+    let mut ctx = Context::new();
+    // Constructor returning this — should return the new object
+    let r = ctx.eval("function Foo() { return this; } new Foo()").unwrap();
+    assert!(r.is_heap_object(), "constructor returning this gives heap object");
+    // Set property on this and verify via property access on the constructed object
+    let r2 = ctx.eval("function Foo() { this.x = 42; } var f = new Foo(); f.x").unwrap();
+    assert_eq!(r2.as_smi(), Some(42), "constructor should set property on this");
+    // Accessing `this` directly
+    let r3 = ctx.eval("function Bar() { return this; } new Bar()").unwrap();
+    assert!(r3.is_heap_object(), "new should return this");
+}
+
+#[test]
+fn test_constructor_basic() {
+    let mut ctx = Context::new();
+    // Constructor that returns 42 — should be ignored (primitive), returning `this`
+    let r = ctx.eval(r#"
+        function Foo() {
+            return 42;
+        }
+        new Foo()
+    "#).unwrap();
+    assert!(r.is_heap_object(), "new Foo() should return heap object");
+}
+
+#[test]
+fn test_constructor_returns_object() {
+    let mut ctx = Context::new();
+    // Constructor can reference `this` (but it's just a local)
+    let r = ctx.eval(r#"
+        function Foo() {
+            var y = 42;
+            return y;
+        }
+        var f = new Foo();
+        1
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(1));
+}

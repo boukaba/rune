@@ -9,6 +9,7 @@ pub enum Opcode {
     LoadString,
     LoadStringConst,
     LoadFloat64,
+    LoadThis,
     // Locals
     LoadLocal,
     StoreLocal,

@@ -25,6 +25,8 @@ struct Frame {
     prog: *const BytecodeProgram,
     generator_id: Option<usize>,
     this: Value,
+    is_constructor_call: bool,
+    constructed_object: Value,
 }
 
 /// Result of the bytecode loop: normal return, generator yield, or throw.
@@ -203,6 +205,8 @@ impl Vm {
             prog: program as *const BytecodeProgram,
             generator_id: None,
             this: Value::undefined(),
+            is_constructor_call: false,
+            constructed_object: Value::undefined(),
         });
 
         self.register_roots(gc);
@@ -243,6 +247,8 @@ impl Vm {
             prog,
             generator_id: Some(gen_id),
             this: Value::undefined(),
+            is_constructor_call: false,
+            constructed_object: Value::undefined(),
         });
 
         if started {
@@ -315,6 +321,12 @@ impl Vm {
                     }
                     let ptr = HeapFloat64::allocate(gc, val);
                     self.push(Value::from_float64_ptr(ptr as *mut u8));
+                    self.frames[fi].pc = pc + 1;
+                }
+
+                // ---- `this` binding ----
+                Opcode::LoadThis => {
+                    self.push(self.frames[fi].this);
                     self.frames[fi].pc = pc + 1;
                 }
 
@@ -1037,6 +1049,31 @@ impl Vm {
                                     }
                                 }
                             }
+                            // TAG_FUNC objects don't have property slots yet (deferred)
+                        }
+                    }
+                    // If constructor is a user-defined function, call its body with this = new object
+                    if let Some(ptr) = constructor.heap_ptr() {
+                        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+                        if tag == TAG_FUNC {
+                            let func_idx = unsafe { Func::func_index(ptr as *mut Func) } as usize;
+                            let creator_prog = unsafe { &*(Func::prog_ptr(ptr as *mut Func) as *const BytecodeProgram) };
+                            if func_idx < creator_prog.functions.len() {
+                                let func_prog = &creator_prog.functions[func_idx];
+                                let mut locals: Vec<Value> = if func_prog.named_function { vec![constructor] } else { vec![] };
+                                locals.extend(args);
+                                self.frames.push(Frame {
+                                    locals,
+                                    pc: 0,
+                                    stack_base: self.stack.len(),
+                                    prog: func_prog as *const BytecodeProgram,
+                                    generator_id: None,
+                                    this: obj_val,
+                                    is_constructor_call: true,
+                                    constructed_object: obj_val,
+                                });
+                                continue;
+                            }
                         }
                     }
                     self.push(obj_val);
@@ -1091,6 +1128,8 @@ impl Vm {
                                     prog: func_prog as *const BytecodeProgram,
                                     generator_id: None,
                                     this,
+                                    is_constructor_call: false,
+                                    constructed_object: Value::undefined(),
                                 });
                                 continue;
                             }
@@ -1107,6 +1146,8 @@ impl Vm {
                         self.generators[id].done = true;
                     }
                     let popped_frame = self.frames.len() - 1;
+                    let is_constructor = self.frames[popped_frame].is_constructor_call;
+                    let constructed_obj = self.frames[popped_frame].constructed_object;
                     self.last_locals = self.frames[popped_frame].locals.clone();
                     self.frames.pop();
                     self.try_stack.retain(|tf| tf.frame_depth != popped_frame);
@@ -1116,7 +1157,17 @@ impl Vm {
                     }
                     let new_fi = self.frames.len() - 1;
                     self.stack.truncate(callee_base);
-                    self.push(result);
+                    // §11.2.2 [[Construct]]: if constructor returns a heap object, use it;
+                    // otherwise use the originally constructed object.
+                    if is_constructor {
+                        if result.is_heap_object() {
+                            self.push(result);
+                        } else {
+                            self.push(constructed_obj);
+                        }
+                    } else {
+                        self.push(result);
+                    }
                     self.frames[new_fi].pc += 1;
                 }
 

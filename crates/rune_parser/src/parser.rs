@@ -457,7 +457,8 @@ impl Parser {
             TokenKind::MinusMinus => { self.advance(); self.parse_postfix_prefix(true, start) }
             TokenKind::New => {
                 self.advance();
-                let callee = Box::new(self.parse_unary());
+                // Parse callee as a member expression (dot/bracket postfix only, NO calls)
+                let callee = Box::new(self.parse_member_expr());
                 let args = if self.tok.kind == TokenKind::LParen {
                     self.advance();
                     let mut a = Vec::new();
@@ -498,6 +499,21 @@ impl Parser {
     }
 
     fn parse_primary(&mut self) -> Expr {
+        let mut expr = self.parse_primary_inner();
+        expr = self.parse_postfix(expr);
+        expr
+    }
+
+    /// Like parse_primary but only applies member-access postfix (dot/bracket), no calls.
+    /// Used by `new` so that `(` is not consumed as a function call.
+    fn parse_member_expr(&mut self) -> Expr {
+        let mut expr = self.parse_primary_inner();
+        expr = self.parse_member_tail(expr);
+        expr
+    }
+
+    /// Parse a primary expression WITHOUT postfix operations.
+    fn parse_primary_inner(&mut self) -> Expr {
         let start = self.span();
         match self.tok.kind {
             TokenKind::Number => {
@@ -530,17 +546,13 @@ impl Parser {
             TokenKind::Identifier => {
                 let t = self.tok.clone();
                 self.advance();
-                let mut expr = Expr::Identifier(t.value.clone().into_boxed_str(),
-                    Span { start: start.start, end: t.span.end });
-                expr = self.parse_postfix(expr);
-                expr
+                Expr::Identifier(t.value.clone().into_boxed_str(),
+                    Span { start: start.start, end: t.span.end })
             }
             TokenKind::LParen => {
                 self.advance();
                 let expr = self.parse_expr(0);
                 self.expect(TokenKind::RParen);
-                let mut expr = expr;
-                expr = self.parse_postfix(expr);
                 expr
             }
             TokenKind::LBracket => {
@@ -552,9 +564,7 @@ impl Parser {
                 }
                 self.expect(TokenKind::RBracket);
                 let span = Span { start: start.start, end: self.span().end };
-                let mut expr = Expr::Array(elems, span);
-                expr = self.parse_postfix(expr);
-                expr
+                Expr::Array(elems, span)
             }
             TokenKind::LBrace => {
                 self.advance();
@@ -569,9 +579,7 @@ impl Parser {
                 }
                 self.expect(TokenKind::RBrace);
                 let span = Span { start: start.start, end: self.span().end };
-                let mut expr = Expr::Object(props, span);
-                expr = self.parse_postfix(expr);
-                expr
+                Expr::Object(props, span)
             }
             TokenKind::Template => {
                 let t = self.tok.clone();
@@ -628,6 +636,35 @@ impl Parser {
                     let span = self.span();
                     lhs = Expr::Call(Box::new(lhs), args, span);
                 }
+                TokenKind::Dot => {
+                    self.advance();
+                    let name = if self.tok.kind == TokenKind::Identifier {
+                        let t = self.tok.clone(); self.advance();
+                        Expr::String(t.value.into_boxed_str(), t.span)
+                    } else {
+                        Expr::Undefined(self.span())
+                    };
+                    let span = self.span();
+                    lhs = Expr::Member(Box::new(lhs), Box::new(name), false, span);
+                }
+                TokenKind::LBracket => {
+                    self.advance();
+                    let index = self.parse_expr(0);
+                    self.expect(TokenKind::RBracket);
+                    let span = self.span();
+                    lhs = Expr::Member(Box::new(lhs), Box::new(index), true, span);
+                }
+                _ => break,
+            }
+        }
+        lhs
+    }
+
+    /// Parse member-access tail (dot and bracket) only — no calls.
+    /// Used by `new` to avoid consuming `(` as a call.
+    fn parse_member_tail(&mut self, mut lhs: Expr) -> Expr {
+        loop {
+            match self.tok.kind {
                 TokenKind::Dot => {
                     self.advance();
                     let name = if self.tok.kind == TokenKind::Identifier {

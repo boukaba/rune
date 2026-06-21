@@ -956,7 +956,8 @@ impl Vm {
                                 }
                                 self.ic_stats.misses += 1;
                                 // Full lookup with IC population
-                                load_property_recursive_ic(gc, &mut self.ics, &instr, obj, raw_key)
+                                let result = load_property_recursive_ic(gc, &mut self.ics, &instr, obj, raw_key);
+                                result
                             } else {
                                 // No IC attached — fall back to full lookup
                                 load_property_recursive(obj, raw_key)
@@ -976,11 +977,11 @@ impl Vm {
                         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
                         if tag == TAG_OBJECT {
                             if let Some(key) = value_to_prop_key(raw_key) {
-                                let key_name = value_to_debug_string(raw_key);
                                 let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
                                 if let Some(slot) = shape.lookup(&key) {
                                     unsafe { JSObject::set_slot(ptr as *mut JSObject, slot, value) };
                                 } else {
+                                    let key_name = value_to_debug_string(raw_key);
                                     unsafe { JSObject::add_property(ptr as *mut JSObject, key, key_name, value) };
                                 }
                             }

@@ -671,6 +671,51 @@ impl Emitter {
                     }
                 }
             }
+            Expr::CompoundAssign(op, target, rhs, _) => {
+                let bin_opcode = compound_binary_opcode(*op);
+                match target.as_ref() {
+                    Expr::Identifier(name, _) => {
+                        if let Some(idx) = self.local_index(name) {
+                            self.emit(Opcode::LoadLocal, vec![idx as i64]);
+                            self.emit_expression(rhs);
+                            self.emit(bin_opcode, vec![]);
+                            self.emit(Opcode::StoreLocal, vec![idx as i64]);
+                        } else {
+                            let name_idx = self.intern_string(name) as i64;
+                            self.emit(Opcode::LoadGlobal, vec![name_idx]);
+                            self.emit_expression(rhs);
+                            self.emit(bin_opcode, vec![]);
+                            self.emit(Opcode::StoreGlobal, vec![name_idx]);
+                        }
+                    }
+                    Expr::Member(obj, prop, computed, _) => {
+                        // Desugar: o.a += rhs → o.a = o.a + rhs
+                        // Emit obj+key first for StoreProperty (bottom of stack)
+                        self.emit_expression(obj);
+                        if *computed {
+                            self.emit_expression(prop);
+                        } else {
+                            let name = prop_name_as_string(prop);
+                            let idx = self.intern_string(&name) as i64;
+                            self.emit(Opcode::LoadStringConst, vec![idx]);
+                        }
+                        // Emit obj+key again for LoadProperty
+                        self.emit_expression(obj);
+                        if *computed {
+                            self.emit_expression(prop);
+                        } else {
+                            let name = prop_name_as_string(prop);
+                            let idx = self.intern_string(&name) as i64;
+                            self.emit(Opcode::LoadStringConst, vec![idx]);
+                        }
+                        self.emit(Opcode::LoadProperty, vec![]);
+                        self.emit_expression(rhs);
+                        self.emit(bin_opcode, vec![]);
+                        self.emit(Opcode::StoreProperty, vec![]);
+                    }
+                    _ => {}
+                }
+            }
             Expr::Array(elems, _) => {
                 for elem in elems {
                     self.emit_expression(elem);
@@ -735,5 +780,24 @@ fn prop_name_as_string(expr: &Expr) -> String {
         Expr::Identifier(name, _) => name.to_string(),
         Expr::String(s, _) => s.to_string(),
         _ => String::new(),
+    }
+}
+
+/// Map a CompoundAssign BinaryOp to the bytecode opcode for the underlying operation.
+fn compound_binary_opcode(op: BinaryOp) -> Opcode {
+    match op {
+        BinaryOp::Add => Opcode::Add,
+        BinaryOp::Sub => Opcode::Sub,
+        BinaryOp::Mul => Opcode::Mul,
+        BinaryOp::Div => Opcode::Div,
+        BinaryOp::Mod => Opcode::Mod,
+        BinaryOp::Exp => Opcode::Exp,
+        BinaryOp::Shl => Opcode::Shl,
+        BinaryOp::Shr => Opcode::Shr,
+        BinaryOp::ShrU => Opcode::ShrU,
+        BinaryOp::BitAnd => Opcode::BitAnd,
+        BinaryOp::BitOr => Opcode::BitOr,
+        BinaryOp::BitXor => Opcode::BitXor,
+        _ => Opcode::Add,
     }
 }

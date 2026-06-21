@@ -24,6 +24,7 @@ pub enum Expr {
     New(Box<Expr>, Vec<Expr>, Span),
     Member(Box<Expr>, Box<Expr>, bool, Span), // computed = true for a[b]
     Assign(Box<Expr>, Box<Expr>, Span),
+    CompoundAssign(BinaryOp, Box<Expr>, Box<Expr>, Span),
     Function(Box<FnNode>, Span),
     Template(Box<str>, Span),
     This(Span),
@@ -63,7 +64,7 @@ pub enum UpdateOp {
     MinusMinus,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum BinaryOp {
     // Assignment
     Assign,

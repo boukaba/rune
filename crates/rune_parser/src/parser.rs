@@ -446,10 +446,14 @@ impl Parser {
                 | TokenKind::BitXorAssign | TokenKind::AndAssign | TokenKind::OrAssign
                 | TokenKind::NullishAssign => {
                     // Assignment is right-associative
-                    let _op = self.parse_assign_op();
+                    let op = self.parse_assign_op();
                     let rhs = self.parse_expr(prec); // right-assoc: same precedence
                     let span = Span { start: self.span().start, end: self.span().end };
-                    lhs = Expr::Assign(Box::new(lhs), Box::new(rhs), span);
+                    if op == BinaryOp::Assign {
+                        lhs = Expr::Assign(Box::new(lhs), Box::new(rhs), span);
+                    } else {
+                        lhs = Expr::CompoundAssign(op, Box::new(lhs), Box::new(rhs), span);
+                    }
                     break; // assignments consume the rest
                 }
                 _ => break,

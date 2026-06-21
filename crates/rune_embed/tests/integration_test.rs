@@ -1018,6 +1018,23 @@ fn test_mixed_comparison() {
 }
 
 #[test]
+fn test_compound_assign() {
+    let mut ctx = Context::new();
+    // += on local variable
+    let r = ctx.eval("var x = 5; x += 3; x").unwrap();
+    assert_eq!(r.as_smi(), Some(8), "x += 3 should give 8");
+    // -= on local variable
+    let r2 = ctx.eval("var x = 10; x -= 3; x").unwrap();
+    assert_eq!(r2.as_smi(), Some(7), "x -= 3 should give 7");
+    // *= on local variable
+    let r3 = ctx.eval("var x = 4; x *= 3; x").unwrap();
+    assert_eq!(r3.as_smi(), Some(12), "x *= 3 should give 12");
+    // Compound assign on property with separate object create
+    let r4 = ctx.eval(r#"var o = {}; o.a = 1; o.a += 2; o.a"#).unwrap();
+    assert_eq!(r4.as_smi(), Some(3), "o.a += 2 after separate set should give 3, got {r4:?}");
+}
+
+#[test]
 fn test_in_operator() {
     let mut ctx = Context::new();
     let r = ctx.eval(r#"var o = {a: 1}; "a" in o"#).unwrap();

@@ -138,6 +138,17 @@ impl BytecodeProgram {
         idx
     }
 
+    /// Build the control-flow graph from this program's instructions.
+    pub fn build_cfg(&self) -> crate::block::ControlFlowGraph {
+        crate::block::build_cfg(&self.instructions)
+    }
+
+    /// Run liveness analysis on this program.
+    pub fn liveness(&self) -> crate::analysis::LivenessInfo {
+        let cfg = self.build_cfg();
+        crate::analysis::liveness(&cfg, &self.instructions, self.local_names.len())
+    }
+
     /// Assign IC indices to all LoadProperty/StoreProperty instructions.
     /// Recursively processes nested function programs.
     pub fn assign_ic_indices(&mut self) {

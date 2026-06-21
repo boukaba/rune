@@ -1,8 +1,8 @@
-use std::pin::Pin;
 use rune_bytecode::opcode::BytecodeProgram;
 use rune_core::gc::SemiSpace;
 use rune_core::value::Value;
 use rune_interpreter::vm::Vm;
+use std::pin::Pin;
 
 /// Stable embedding API for Rune.
 /// Each `Context` owns a GC heap and can evaluate source code.
@@ -10,6 +10,12 @@ pub struct Context {
     gc: SemiSpace,
     vm: Vm,
     programs: Vec<Pin<Box<BytecodeProgram>>>,
+}
+
+impl Default for Context {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Context {
@@ -46,9 +52,11 @@ impl Context {
         // Execute — keep bytecode alive for dangling prog_ptr refs from Func
         let pinned = Box::pin(bytecode);
         self.programs.push(pinned);
-        let prog_ref: &BytecodeProgram = &*self.programs.last().unwrap().as_ref();
+        let prog_ref: &BytecodeProgram = &self.programs.last().unwrap().as_ref();
 
-        self.vm.execute(&mut self.gc, prog_ref).map_err(|v| format!("Uncaught: {v:?}"))
+        self.vm
+            .execute(&mut self.gc, prog_ref)
+            .map_err(|v| format!("Uncaught: {v:?}"))
     }
 
     /// Evaluate raw bytecode instructions and return the top-of-stack Value.

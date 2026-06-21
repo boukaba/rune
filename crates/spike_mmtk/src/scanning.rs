@@ -1,10 +1,10 @@
-use crate::object_model;
 use crate::RuneVM;
-use mmtk::util::opaque_pointer::*;
+use crate::object_model;
+use mmtk::Mutator;
 use mmtk::util::ObjectReference;
+use mmtk::util::opaque_pointer::*;
 use mmtk::vm::slot::SimpleSlot;
 use mmtk::vm::{RootsWorkFactory, Scanning, SlotVisitor};
-use mmtk::Mutator;
 
 pub struct RuneScanning;
 
@@ -15,9 +15,8 @@ impl Scanning<RuneVM> for RuneScanning {
         slot_visitor: &mut SV,
     ) {
         unsafe {
-            let num_slots =
-                (object_model::object_size(object) - object_model::HEADER_SIZE)
-                    / object_model::SLOT_SIZE;
+            let num_slots = (object_model::object_size(object) - object_model::HEADER_SIZE)
+                / object_model::SLOT_SIZE;
 
             for i in 0..num_slots {
                 let slot_val = object_model::get_slot(object, i);
@@ -41,11 +40,7 @@ impl Scanning<RuneVM> for RuneScanning {
     ) {
     }
 
-    fn scan_vm_specific_roots(
-        _tls: VMWorkerThread,
-        _factory: impl RootsWorkFactory<SimpleSlot>,
-    ) {
-    }
+    fn scan_vm_specific_roots(_tls: VMWorkerThread, _factory: impl RootsWorkFactory<SimpleSlot>) {}
 
     fn supports_return_barrier() -> bool {
         false

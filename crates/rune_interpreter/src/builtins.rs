@@ -1,11 +1,11 @@
-use rune_core::gc::{SemiSpace, GcHeader, TAG_STRING, TAG_ARRAY};
-use rune_core::value::Value;
-use rune_core::string::HeapString;
-use rune_core::float::HeapFloat64;
-use rune_core::array::RuneArray;
-use rune_core::shape::{Shape, PropertyKey};
-use rune_core::object::JSObject;
 use crate::vm::Vm;
+use rune_core::array::RuneArray;
+use rune_core::float::HeapFloat64;
+use rune_core::gc::{GcHeader, SemiSpace, TAG_ARRAY, TAG_STRING};
+use rune_core::object::JSObject;
+use rune_core::shape::{PropertyKey, Shape};
+use rune_core::string::HeapString;
+use rune_core::value::Value;
 
 /// A registered built-in function.
 pub struct Builtin {
@@ -77,12 +77,22 @@ pub fn error_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut
 }
 
 /// Test262Error(message) — built-in replacement for sta.js Test262Error constructor.
-pub fn test262_error_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+pub fn test262_error_builtin(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
     error_builtin(gc, _this, args, vm)
 }
 
 /// $DONOTEVALUATE() — throws an error (should be optimized away by runner).
-pub fn donot_evaluate_builtin(_gc: &mut SemiSpace, _this: Value, _args: &[Value], _vm: &mut Vm) -> Value {
+pub fn donot_evaluate_builtin(
+    _gc: &mut SemiSpace,
+    _this: Value,
+    _args: &[Value],
+    _vm: &mut Vm,
+) -> Value {
     panic!("$DONOTEVALUATE was called");
 }
 
@@ -95,7 +105,12 @@ pub fn object_builtin(gc: &mut SemiSpace, _this: Value, _args: &[Value], _vm: &m
 
 /// Object.create(proto) — creates a new object with the given prototype.
 /// Per §20.1.2.2, throws TypeError if proto is not an Object or null.
-pub fn object_create_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+pub fn object_create_builtin(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
     let shape = Shape::empty();
     let ptr = JSObject::allocate(gc, shape, &[]);
     if let Some(proto) = args.first() {
@@ -107,7 +122,8 @@ pub fn object_create_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], v
             }
         } else {
             // proto is not an object and not null — TypeError per §20.1.2.2
-            let msg = crate::vm::heap_string(gc, "TypeError: Object.create expects an object or null");
+            let msg =
+                crate::vm::heap_string(gc, "TypeError: Object.create expects an object or null");
             vm.set_pending_exception(Value::from_heap_ptr(msg));
         }
     }
@@ -157,14 +173,21 @@ pub fn array_pop(_gc: &mut SemiSpace, this: Value, _args: &[Value], _vm: &mut Vm
     if let Some(ptr) = this.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_ARRAY {
-            unsafe { return RuneArray::pop(ptr as *mut RuneArray); }
+            unsafe {
+                return RuneArray::pop(ptr as *mut RuneArray);
+            }
         }
     }
     Value::undefined()
 }
 
 /// String.fromCharCode(codes...) — creates a string from char codes.
-pub fn string_from_char_code(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+pub fn string_from_char_code(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    _vm: &mut Vm,
+) -> Value {
     let mut s = String::new();
     for arg in args {
         if let Some(n) = arg.as_smi() {
@@ -206,7 +229,11 @@ pub fn string_slice(gc: &mut SemiSpace, this: Value, args: &[Value], _vm: &mut V
             let end = end.unwrap_or(s.len());
             let start = start.min(s.len());
             let end = end.min(s.len());
-            let result_s: String = s.chars().skip(start).take(end.saturating_sub(start)).collect();
+            let result_s: String = s
+                .chars()
+                .skip(start)
+                .take(end.saturating_sub(start))
+                .collect();
             let result = HeapString::allocate(gc, &result_s);
             return Value::from_heap_ptr(result as *mut u8);
         }
@@ -217,7 +244,9 @@ pub fn string_slice(gc: &mut SemiSpace, this: Value, args: &[Value], _vm: &mut V
 /// Math.floor(x) — rounds down.
 fn math_op_unary(gc: &mut SemiSpace, args: &[Value], op: fn(f64) -> f64) -> Value {
     let x = args.first().copied().unwrap_or(Value::smi(0));
-    let n = x.as_smi().map(|v| v as f64)
+    let n = x
+        .as_smi()
+        .map(|v| v as f64)
         .or_else(|| x.as_float64())
         .unwrap_or(f64::NAN);
     let result = op(n);
@@ -234,10 +263,14 @@ fn math_op_unary(gc: &mut SemiSpace, args: &[Value], op: fn(f64) -> f64) -> Valu
 fn math_op_binary(gc: &mut SemiSpace, args: &[Value], op: fn(f64, f64) -> f64) -> Value {
     let a = args.first().copied().unwrap_or(Value::smi(0));
     let b = args.get(1).copied().unwrap_or(Value::smi(0));
-    let na = a.as_smi().map(|v| v as f64)
+    let na = a
+        .as_smi()
+        .map(|v| v as f64)
         .or_else(|| a.as_float64())
         .unwrap_or(f64::NAN);
-    let nb = b.as_smi().map(|v| v as f64)
+    let nb = b
+        .as_smi()
+        .map(|v| v as f64)
         .or_else(|| b.as_float64())
         .unwrap_or(f64::NAN);
     let result = op(na, nb);
@@ -266,14 +299,20 @@ pub fn math_abs(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) 
 pub fn math_min(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     let mut min = f64::INFINITY;
     for arg in args {
-        let n = arg.as_smi().map(|v| v as f64)
+        let n = arg
+            .as_smi()
+            .map(|v| v as f64)
             .or_else(|| arg.as_float64())
             .unwrap_or(f64::NAN);
-        if n < min { min = n; }
+        if n < min {
+            min = n;
+        }
     }
     if min.fract() == 0.0 && min.is_finite() {
         let i = min as i32;
-        if i as f64 == min { return Value::smi(i); }
+        if i as f64 == min {
+            return Value::smi(i);
+        }
     }
     let ptr = HeapFloat64::allocate(gc, min);
     Value::from_float64_ptr(ptr as *mut u8)
@@ -282,14 +321,20 @@ pub fn math_min(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) 
 pub fn math_max(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     let mut max = f64::NEG_INFINITY;
     for arg in args {
-        let n = arg.as_smi().map(|v| v as f64)
+        let n = arg
+            .as_smi()
+            .map(|v| v as f64)
             .or_else(|| arg.as_float64())
             .unwrap_or(f64::NAN);
-        if n > max { max = n; }
+        if n > max {
+            max = n;
+        }
     }
     if max.fract() == 0.0 && max.is_finite() {
         let i = max as i32;
-        if i as f64 == max { return Value::smi(i); }
+        if i as f64 == max {
+            return Value::smi(i);
+        }
     }
     let ptr = HeapFloat64::allocate(gc, max);
     Value::from_float64_ptr(ptr as *mut u8)
@@ -306,27 +351,90 @@ pub fn math_sqrt(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm)
 /// Return a list of builtins to register in every new Vm.
 pub fn default_builtins() -> Vec<Builtin> {
     vec![
-        Builtin { name: "print", func: print_builtin },
-        Builtin { name: "String", func: string_builtin },
-        Builtin { name: "Object", func: object_builtin },
-        Builtin { name: "Error", func: error_builtin },
-        Builtin { name: "Test262Error", func: test262_error_builtin },
-        Builtin { name: "$DONOTEVALUATE", func: donot_evaluate_builtin },
-        Builtin { name: "eval", func: eval_builtin },
-        Builtin { name: "Object_create", func: object_create_builtin }, // accessible only via Object.create
-        Builtin { name: "Array_isArray", func: array_is_array },
-        Builtin { name: "Array_prototype_push", func: array_push },
-        Builtin { name: "Array_prototype_pop", func: array_pop },
-        Builtin { name: "String_fromCharCode", func: string_from_char_code },
-        Builtin { name: "String_prototype_charAt", func: string_char_at },
-        Builtin { name: "String_prototype_slice", func: string_slice },
-        Builtin { name: "Math_floor", func: math_floor },
-        Builtin { name: "Math_ceil", func: math_ceil },
-        Builtin { name: "Math_abs", func: math_abs },
-        Builtin { name: "Math_min", func: math_min },
-        Builtin { name: "Math_max", func: math_max },
-        Builtin { name: "Math_pow", func: math_pow },
-        Builtin { name: "Math_sqrt", func: math_sqrt },
+        Builtin {
+            name: "print",
+            func: print_builtin,
+        },
+        Builtin {
+            name: "String",
+            func: string_builtin,
+        },
+        Builtin {
+            name: "Object",
+            func: object_builtin,
+        },
+        Builtin {
+            name: "Error",
+            func: error_builtin,
+        },
+        Builtin {
+            name: "Test262Error",
+            func: test262_error_builtin,
+        },
+        Builtin {
+            name: "$DONOTEVALUATE",
+            func: donot_evaluate_builtin,
+        },
+        Builtin {
+            name: "eval",
+            func: eval_builtin,
+        },
+        Builtin {
+            name: "Object_create",
+            func: object_create_builtin,
+        }, // accessible only via Object.create
+        Builtin {
+            name: "Array_isArray",
+            func: array_is_array,
+        },
+        Builtin {
+            name: "Array_prototype_push",
+            func: array_push,
+        },
+        Builtin {
+            name: "Array_prototype_pop",
+            func: array_pop,
+        },
+        Builtin {
+            name: "String_fromCharCode",
+            func: string_from_char_code,
+        },
+        Builtin {
+            name: "String_prototype_charAt",
+            func: string_char_at,
+        },
+        Builtin {
+            name: "String_prototype_slice",
+            func: string_slice,
+        },
+        Builtin {
+            name: "Math_floor",
+            func: math_floor,
+        },
+        Builtin {
+            name: "Math_ceil",
+            func: math_ceil,
+        },
+        Builtin {
+            name: "Math_abs",
+            func: math_abs,
+        },
+        Builtin {
+            name: "Math_min",
+            func: math_min,
+        },
+        Builtin {
+            name: "Math_max",
+            func: math_max,
+        },
+        Builtin {
+            name: "Math_pow",
+            func: math_pow,
+        },
+        Builtin {
+            name: "Math_sqrt",
+            func: math_sqrt,
+        },
     ]
 }
 

@@ -1,5 +1,5 @@
-use std::os::raw::c_char;
 use rune_embed::Context;
+use std::os::raw::c_char;
 
 /// Opaque handle to a Rune context.
 /// Must be freed with `rune_context_destroy`.
@@ -20,8 +20,12 @@ pub extern "C" fn rune_context_destroy(ctx: *mut std::ffi::c_void) {
 
 /// Evaluate JavaScript source code and return the result as a C string.
 /// Caller must free with `rune_free_string`.
+///
+/// # Safety
+/// `ctx` must be a valid pointer returned by `rune_context_create`.
+/// `source` must be a valid null-terminated C string.
 #[unsafe(no_mangle)]
-pub extern "C" fn rune_context_eval(
+pub unsafe extern "C" fn rune_context_eval(
     ctx: *mut std::ffi::c_void,
     source: *const c_char,
 ) -> *const c_char {
@@ -41,11 +45,13 @@ pub extern "C" fn rune_context_eval(
     c_str.into_raw()
 }
 
+/// Free a string returned by `rune_context_eval`.
+///
+/// # Safety
+/// `s` must be a valid pointer returned by `rune_context_eval` that has not been freed yet.
 #[unsafe(no_mangle)]
-pub extern "C" fn rune_free_string(s: *mut c_char) {
+pub unsafe extern "C" fn rune_free_string(s: *mut c_char) {
     if !s.is_null() {
-        unsafe {
-            let _ = std::ffi::CString::from_raw(s);
-        }
+        unsafe { let _ = std::ffi::CString::from_raw(s); }
     }
 }

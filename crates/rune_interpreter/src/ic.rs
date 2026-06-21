@@ -21,9 +21,17 @@ pub struct InlineCache {
     pub entries: HashMap<(u64, u64), IcEntry>,
 }
 
+impl Default for InlineCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InlineCache {
     pub fn new() -> Self {
-        InlineCache { entries: HashMap::new() }
+        InlineCache {
+            entries: HashMap::new(),
+        }
     }
 }
 

@@ -23,7 +23,9 @@ pub struct GcHeader {
 
 impl GcHeader {
     pub fn new(tag: u64) -> Self {
-        GcHeader { word: AtomicU64::new(tag) }
+        GcHeader {
+            word: AtomicU64::new(tag),
+        }
     }
 
     pub fn tag(&self) -> u64 {
@@ -39,7 +41,8 @@ impl GcHeader {
     }
 
     pub fn set_forwarding(&self, to: *mut u8) {
-        self.word.store((to as u64) | TAG_FORWARDED, Ordering::Release);
+        self.word
+            .store((to as u64) | TAG_FORWARDED, Ordering::Release);
     }
 }
 
@@ -208,9 +211,7 @@ impl SemiSpace {
                     //   + call_count(4) + pad(4) + jit_entry(8) = 48 bytes
                     obj_start.add(48)
                 }
-                TAG_FLOAT64 => {
-                    obj_start.add(size_of::<GcHeader>() + 8)
-                }
+                TAG_FLOAT64 => obj_start.add(size_of::<GcHeader>() + 8),
                 TAG_OBJECT | TAG_ARRAY => {
                     let capacity_ptr = obj_start.add(16) as *const u32;
                     let capacity = *capacity_ptr as usize;

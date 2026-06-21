@@ -1,6 +1,6 @@
 use crate::RuneVM;
-use mmtk::util::opaque_pointer::VMWorkerThread;
 use mmtk::util::ObjectReference;
+use mmtk::util::opaque_pointer::VMWorkerThread;
 use mmtk::vm::ReferenceGlue;
 
 pub struct RuneReferenceGlue;

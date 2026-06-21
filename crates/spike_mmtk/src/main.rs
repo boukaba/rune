@@ -1,15 +1,13 @@
-use spike_mmtk::object_model::{alloc_rune_object, set_shape_id, get_shape_id, set_slot, get_slot};
-use spike_mmtk::{mmtk, RuneVM, SINGLETON};
-use mmtk::memory_manager;
-use mmtk::util::opaque_pointer::*;
-use mmtk::util::ObjectReference;
 use mmtk::MMTKBuilder;
+use mmtk::memory_manager;
+use mmtk::util::ObjectReference;
+use mmtk::util::opaque_pointer::*;
+use spike_mmtk::object_model::{alloc_rune_object, get_shape_id, get_slot, set_shape_id, set_slot};
+use spike_mmtk::{RuneVM, SINGLETON, mmtk};
 
 /// MMTk Spike 1: ObjectModel binding validation.
-///
 /// Uses NoGC plan (no side metadata) to verify the VM trait plumbing.
 /// MarkSweep with side metadata requires macOS kernel config work (Phase 1).
-
 fn main() {
     println!("=== MMTk Spike 1: ObjectModel Binding ===");
 
@@ -59,9 +57,10 @@ fn main() {
     unsafe {
         let child_ref_addr = get_slot(parent, 1);
         assert_eq!(child_ref_addr, child.to_raw_address().as_usize() as u64);
-        let child_obj = ObjectReference::from_raw_address(
-            mmtk::util::Address::from_usize(child_ref_addr as usize),
-        ).expect("Invalid child ref");
+        let child_obj = ObjectReference::from_raw_address(mmtk::util::Address::from_usize(
+            child_ref_addr as usize,
+        ))
+        .expect("Invalid child ref");
         assert_eq!(get_slot(child_obj, 0), 456);
     }
     println!("  Reference graph: PASS");
@@ -72,7 +71,7 @@ fn main() {
     for i in 0..1000 {
         let obj = alloc_rune_object(&mut mutator, 2);
         unsafe {
-            set_shape_id(obj, 100 + i as u64);
+            set_shape_id(obj, 100 + i);
             set_slot(obj, 0, i);
         }
         objects.push(obj);

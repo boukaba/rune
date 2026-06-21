@@ -21,7 +21,11 @@ fn main() {
             let suite_dir = args
                 .get(2)
                 .map(std::path::PathBuf::from)
-                .or_else(|| std::env::var("TEST262_DIR").ok().map(std::path::PathBuf::from))
+                .or_else(|| {
+                    std::env::var("TEST262_DIR")
+                        .ok()
+                        .map(std::path::PathBuf::from)
+                })
                 .unwrap_or_else(|| std::path::PathBuf::from("./test262"));
             let passed = test262::run_suite(&suite_dir, subdir);
             if passed == 0 {

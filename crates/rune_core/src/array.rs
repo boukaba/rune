@@ -22,7 +22,7 @@ impl RuneArray {
         let len = elements.len();
         let cap = len + RESERVED_ELEMENTS;
         let total_size = crate::object::OBJECT_HEADER_END + cap * size_of::<Value>();
-        let ptr = ss.alloc(total_size) as *mut u8;
+        let ptr = ss.alloc(total_size);
         unsafe {
             let header = &mut *(ptr as *mut GcHeader);
             header.word = std::sync::atomic::AtomicU64::new(TAG_ARRAY);
@@ -56,7 +56,9 @@ impl RuneArray {
     }
 
     pub unsafe fn set_length(arr: *mut RuneArray, n: u32) {
-        unsafe { *((arr as *mut u8).add(16) as *mut u32) = n; }
+        unsafe {
+            *((arr as *mut u8).add(16) as *mut u32) = n;
+        }
     }
 
     pub unsafe fn capacity(arr: *mut RuneArray) -> u32 {
@@ -82,7 +84,9 @@ impl RuneArray {
     }
 
     pub unsafe fn set_shape_ptr(arr: *mut RuneArray, shape: *const crate::shape::Shape) {
-        unsafe { *((arr as *mut u8).add(8) as *mut *const crate::shape::Shape) = shape; }
+        unsafe {
+            *((arr as *mut u8).add(8) as *mut *const crate::shape::Shape) = shape;
+        }
     }
 
     pub unsafe fn prototype(arr: *mut RuneArray) -> *mut u8 {
@@ -90,7 +94,9 @@ impl RuneArray {
     }
 
     pub unsafe fn set_prototype(arr: *mut RuneArray, proto: *mut u8) {
-        unsafe { *((arr as *mut u8).add(24) as *mut *mut u8) = proto; }
+        unsafe {
+            *((arr as *mut u8).add(24) as *mut *mut u8) = proto;
+        }
     }
 
     /// Grow the array to ~1.5x capacity, copying all elements and header.
@@ -101,9 +107,13 @@ impl RuneArray {
             let old_cap = Self::capacity(arr) as usize;
             let new_cap = (old_cap * 3 / 2).max(old_cap + 8);
             let total_size = crate::object::OBJECT_HEADER_END + new_cap * size_of::<Value>();
-            let new_ptr = ss.alloc(total_size) as *mut u8;
+            let new_ptr = ss.alloc(total_size);
             // Copy header (GcHeader + shape + length + capacity + prototype) = 32 bytes
-            std::ptr::copy_nonoverlapping(arr as *const u8, new_ptr, crate::object::OBJECT_HEADER_END);
+            std::ptr::copy_nonoverlapping(
+                arr as *const u8,
+                new_ptr,
+                crate::object::OBJECT_HEADER_END,
+            );
             // Update capacity in new header
             *(new_ptr.add(20) as *mut u32) = new_cap as u32;
             // Copy elements

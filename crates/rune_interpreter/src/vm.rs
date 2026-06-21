@@ -1,15 +1,17 @@
-use rune_bytecode::opcode::{BytecodeProgram, Instruction, Opcode};
-use rune_core::float::HeapFloat64;
-use rune_core::function::Func;
-use rune_core::gc::{GcHeader, SemiSpace, TAG_FUNC, TAG_STRING, TAG_OBJECT, TAG_ARRAY, TAG_FLOAT64};
-use rune_core::object::JSObject;
-use rune_core::array::RuneArray;
-use rune_core::shape::{PropertyKey, Shape, PROTOTYPE_KEY, DENSE_ARRAY_SHAPE};
-use rune_core::string::HeapString;
-use rune_core::value::Value;
 use crate::builtins::{Builtin, BuiltinFn};
 use crate::generator::Generator;
 use crate::ic::{IcEntry, IcStats, InlineCache};
+use rune_bytecode::opcode::{BytecodeProgram, Instruction, Opcode};
+use rune_core::array::RuneArray;
+use rune_core::float::HeapFloat64;
+use rune_core::function::Func;
+use rune_core::gc::{
+    GcHeader, SemiSpace, TAG_ARRAY, TAG_FLOAT64, TAG_FUNC, TAG_OBJECT, TAG_STRING,
+};
+use rune_core::object::JSObject;
+use rune_core::shape::{DENSE_ARRAY_SHAPE, PROTOTYPE_KEY, PropertyKey, Shape};
+use rune_core::string::HeapString;
+use rune_core::value::Value;
 #[cfg(all(feature = "jit", target_arch = "x86_64"))]
 use rune_jit_baseline::{CodeGen, JitEntryFn};
 use std::cell::UnsafeCell;
@@ -17,8 +19,6 @@ use std::collections::HashMap;
 
 /// Callback for the `eval` builtin: parses and executes JS source, returns result.
 pub type EvalFn = Box<dyn FnMut(&mut SemiSpace, &str) -> Result<Value, String>>;
-
-
 
 struct Frame {
     locals: Vec<Value>,
@@ -75,6 +75,12 @@ pub struct Vm {
     pub pending_exception: Option<Value>,
 }
 
+impl Default for Vm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Vm {
     pub fn new() -> Self {
         Vm {
@@ -100,11 +106,15 @@ impl Vm {
     /// Must be called after all builtins are registered.
     pub fn init_builtin_wrappers(&mut self, gc: &mut SemiSpace) {
         fn find_handle(builtins: &[Builtin], name: &str) -> Option<Value> {
-            builtins.iter().position(|b| b.name == name)
+            builtins
+                .iter()
+                .position(|b| b.name == name)
                 .map(|id| Value::smi(-(id as i32) - 1))
         }
         fn make_object(gc: &mut SemiSpace, pairs: &[(&str, Value)]) -> Value {
-            let keys: Vec<(PropertyKey, usize)> = pairs.iter().enumerate()
+            let keys: Vec<(PropertyKey, usize)> = pairs
+                .iter()
+                .enumerate()
                 .map(|(i, (k, _))| (PropertyKey::from_string(k), i))
                 .collect();
             let key_names: Vec<String> = pairs.iter().map(|(k, _)| k.to_string()).collect();
@@ -125,7 +135,8 @@ impl Vm {
         let pop_handle = find_handle(&self.builtins, "Array_prototype_pop");
         if let (Some(push), Some(pop)) = (push_handle, pop_handle) {
             let arr_proto = make_object(gc, &[("push", push), ("pop", pop)]);
-            self.builtin_wrappers.insert("Array.prototype".to_string(), arr_proto);
+            self.builtin_wrappers
+                .insert("Array.prototype".to_string(), arr_proto);
             self.array_prototype = arr_proto;
         }
 
@@ -134,7 +145,8 @@ impl Vm {
         let slice_handle = find_handle(&self.builtins, "String_prototype_slice");
         if let (Some(char_at), Some(slice)) = (char_at_handle, slice_handle) {
             let str_proto = make_object(gc, &[("charAt", char_at), ("slice", slice)]);
-            self.builtin_wrappers.insert("String.prototype".to_string(), str_proto);
+            self.builtin_wrappers
+                .insert("String.prototype".to_string(), str_proto);
             self.string_prototype = str_proto;
         }
 
@@ -169,9 +181,10 @@ impl Vm {
             ("sqrt", find_handle(&self.builtins, "Math_sqrt")),
             ("PI", Some(pi_val)),
             ("E", Some(e_val)),
-        ].iter().filter_map(|(name, val)| {
-            val.map(|v| (*name, v))
-        }).collect();
+        ]
+        .iter()
+        .filter_map(|(name, val)| val.map(|v| (*name, v)))
+        .collect();
         if !math_entries.is_empty() {
             let math_obj = make_object(gc, &math_entries);
             self.builtin_wrappers.insert("Math".to_string(), math_obj);
@@ -193,7 +206,8 @@ impl Vm {
             Value::from_float64_ptr(ptr as *mut u8)
         };
         self.globals.insert("Infinity".to_string(), inf_val);
-        self.globals.insert("undefined".to_string(), Value::undefined());
+        self.globals
+            .insert("undefined".to_string(), Value::undefined());
     }
 
     /// Register a built-in function and return its handle (negative Smi).
@@ -212,6 +226,7 @@ impl Vm {
     }
 
     /// Check if all values in the slice are Smi (tag bit 0 = 1).
+    #[allow(dead_code)]
     fn all_smi(values: &[Value]) -> bool {
         values.iter().all(|v| v.is_smi())
     }
@@ -252,14 +267,25 @@ impl Vm {
     }
 
     /// Execute a bytecode program and return its result.
-    pub fn execute(&mut self, gc: &mut SemiSpace, program: &BytecodeProgram) -> Result<Value, Value> {
+    pub fn execute(
+        &mut self,
+        gc: &mut SemiSpace,
+        program: &BytecodeProgram,
+    ) -> Result<Value, Value> {
         self.frames.clear();
         self.stack.clear();
         self.try_stack.clear();
 
         // Initialize top-level locals from persisted globals
-        let locals: Vec<Value> = program.local_names.iter()
-            .map(|name| self.globals.get(name).copied().unwrap_or(Value::undefined()))
+        let locals: Vec<Value> = program
+            .local_names
+            .iter()
+            .map(|name| {
+                self.globals
+                    .get(name)
+                    .copied()
+                    .unwrap_or(Value::undefined())
+            })
             .collect();
 
         self.frames.push(Frame {
@@ -293,7 +319,12 @@ impl Vm {
 
     /// Resume a suspended generator with `arg` as the yield result value.
     /// Returns the next yielded (or returned) value.
-    pub fn resume_generator(&mut self, gc: &mut SemiSpace, gen_id: usize, arg: Value) -> Result<Value, Value> {
+    pub fn resume_generator(
+        &mut self,
+        gc: &mut SemiSpace,
+        gen_id: usize,
+        arg: Value,
+    ) -> Result<Value, Value> {
         if self.generators[gen_id].done {
             return Ok(Value::undefined());
         }
@@ -455,7 +486,11 @@ impl Vm {
                 }
                 Opcode::Not => {
                     let a = self.pop();
-                    self.push(if a.to_bool() { Value::smi(0) } else { Value::smi(1) });
+                    self.push(if a.to_bool() {
+                        Value::smi(0)
+                    } else {
+                        Value::smi(1)
+                    });
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::BitNot => {
@@ -541,7 +576,11 @@ impl Vm {
                     let b = self.pop();
                     let a = self.pop();
                     let result = if let (Some(av), Some(bv)) = (a.as_smi(), b.as_smi()) {
-                        if bv == 0 { number_result(gc, f64::NAN) } else { Value::smi(av % bv) }
+                        if bv == 0 {
+                            number_result(gc, f64::NAN)
+                        } else {
+                            Value::smi(av % bv)
+                        }
                     } else {
                         let av = to_number(a);
                         let bv = to_number(b);
@@ -554,7 +593,11 @@ impl Vm {
                     let b = self.pop();
                     let a = self.pop();
                     let result = if let (Some(av), Some(bv)) = (a.as_smi(), b.as_smi()) {
-                        if bv < 0 { number_result(gc, (av as f64).powf(bv as f64)) } else { Value::smi(av.wrapping_pow(bv as u32)) }
+                        if bv < 0 {
+                            number_result(gc, (av as f64).powf(bv as f64))
+                        } else {
+                            Value::smi(av.wrapping_pow(bv as u32))
+                        }
                     } else {
                         let av = to_number(a);
                         let bv = to_number(b);
@@ -570,7 +613,9 @@ impl Vm {
                     let a = self.pop();
                     let result = if let (Some(av), Some(bv)) = (a.as_smi(), b.as_smi()) {
                         Value::smi(av.wrapping_shl(bv as u32))
-                    } else { Value::undefined() };
+                    } else {
+                        Value::undefined()
+                    };
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
                 }
@@ -579,7 +624,9 @@ impl Vm {
                     let a = self.pop();
                     let result = if let (Some(av), Some(bv)) = (a.as_smi(), b.as_smi()) {
                         Value::smi(av.wrapping_shr(bv as u32))
-                    } else { Value::undefined() };
+                    } else {
+                        Value::undefined()
+                    };
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
                 }
@@ -589,7 +636,9 @@ impl Vm {
                     let result = if let (Some(av), Some(bv)) = (a.as_smi(), b.as_smi()) {
                         let shifted = (av as u32).wrapping_shr(bv as u32);
                         Value::smi(shifted as i32)
-                    } else { Value::undefined() };
+                    } else {
+                        Value::undefined()
+                    };
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
                 }
@@ -598,7 +647,9 @@ impl Vm {
                     let a = self.pop();
                     let result = if let (Some(av), Some(bv)) = (a.as_smi(), b.as_smi()) {
                         Value::smi(av | bv)
-                    } else { Value::undefined() };
+                    } else {
+                        Value::undefined()
+                    };
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
                 }
@@ -607,7 +658,9 @@ impl Vm {
                     let a = self.pop();
                     let result = if let (Some(av), Some(bv)) = (a.as_smi(), b.as_smi()) {
                         Value::smi(av ^ bv)
-                    } else { Value::undefined() };
+                    } else {
+                        Value::undefined()
+                    };
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
                 }
@@ -616,7 +669,9 @@ impl Vm {
                     let a = self.pop();
                     let result = if let (Some(av), Some(bv)) = (a.as_smi(), b.as_smi()) {
                         Value::smi(av & bv)
-                    } else { Value::undefined() };
+                    } else {
+                        Value::undefined()
+                    };
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
                 }
@@ -626,13 +681,21 @@ impl Vm {
                 Opcode::Eq | Opcode::StrictEq => {
                     let b = self.pop();
                     let a = self.pop();
-                    self.push(if values_strictly_equal(a, b) { Value::smi(1) } else { Value::smi(0) });
+                    self.push(if values_strictly_equal(a, b) {
+                        Value::smi(1)
+                    } else {
+                        Value::smi(0)
+                    });
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::Ne | Opcode::StrictNe => {
                     let b = self.pop();
                     let a = self.pop();
-                    self.push(if !values_strictly_equal(a, b) { Value::smi(1) } else { Value::smi(0) });
+                    self.push(if !values_strictly_equal(a, b) {
+                        Value::smi(1)
+                    } else {
+                        Value::smi(0)
+                    });
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::Lt => {
@@ -742,7 +805,10 @@ impl Vm {
                     let lhs = self.pop();
                     // §13.10.1: If Type(rhs) is not Object → TypeError
                     if !rhs.is_heap_object() {
-                        let msg = HeapString::allocate(gc, "TypeError: invalid 'instanceof' operand (RHS is not an object)");
+                        let msg = HeapString::allocate(
+                            gc,
+                            "TypeError: invalid 'instanceof' operand (RHS is not an object)",
+                        );
                         self.push(Value::from_heap_ptr(msg as *mut u8));
                         return Exit::Throw(self.pop());
                     }
@@ -750,14 +816,20 @@ impl Vm {
                     let rhs_tag = unsafe { (*(rhs_ptr as *const GcHeader)).tag() };
                     // §13.10.1: If IsCallable(rhs) is false → TypeError
                     if rhs_tag != TAG_FUNC {
-                        let msg = HeapString::allocate(gc, "TypeError: RHS of 'instanceof' is not callable");
+                        let msg = HeapString::allocate(
+                            gc,
+                            "TypeError: RHS of 'instanceof' is not callable",
+                        );
                         self.push(Value::from_heap_ptr(msg as *mut u8));
                         return Exit::Throw(self.pop());
                     }
                     // OrdinaryHasInstance §13.10.2
                     let rhs_proto_ptr = unsafe { Func::prototype(rhs_ptr as *mut Func) };
                     if rhs_proto_ptr.is_null() {
-                        let msg = HeapString::allocate(gc, "TypeError: function 'prototype' is not an object");
+                        let msg = HeapString::allocate(
+                            gc,
+                            "TypeError: function 'prototype' is not an object",
+                        );
                         self.push(Value::from_heap_ptr(msg as *mut u8));
                         return Exit::Throw(self.pop());
                     }
@@ -782,11 +854,12 @@ impl Vm {
                     }
                     let shape = Shape::intern(entries, key_names);
                     let obj = JSObject::allocate(gc, shape, &values);
-                    if self.object_prototype.is_heap_object() {
-                        if let Some(proto_ptr) = self.object_prototype.heap_ptr() {
-                            unsafe { JSObject::set_prototype(obj, proto_ptr); }
+                    if self.object_prototype.is_heap_object()
+                        && let Some(proto_ptr) = self.object_prototype.heap_ptr() {
+                            unsafe {
+                                JSObject::set_prototype(obj, proto_ptr);
+                            }
                         }
-                    }
                     self.push(Value::from_heap_ptr(obj as *mut u8));
                     self.frames[fi].pc = pc + 1;
                 }
@@ -801,11 +874,10 @@ impl Vm {
                         let shape_ptr = ptr.add(8) as *mut *const Shape;
                         *shape_ptr = *DENSE_ARRAY_SHAPE as *const Shape;
                         let proto_ptr = ptr.add(24) as *mut *mut u8;
-                        if self.array_prototype.is_heap_object() {
-                            if let Some(proto) = self.array_prototype.heap_ptr() {
+                        if self.array_prototype.is_heap_object()
+                            && let Some(proto) = self.array_prototype.heap_ptr() {
                                 *proto_ptr = proto;
                             }
-                        }
                     }
                     self.push(Value::from_heap_ptr(arr as *mut u8));
                     self.frames[fi].pc = pc + 1;
@@ -829,7 +901,8 @@ impl Vm {
                         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
                         match tag {
                             TAG_ARRAY => {
-                                let len = unsafe { RuneArray::length(ptr as *mut RuneArray) } as usize;
+                                let len =
+                                    unsafe { RuneArray::length(ptr as *mut RuneArray) } as usize;
                                 if index < len {
                                     let key_str = index.to_string();
                                     let key = HeapString::allocate(gc, &key_str);
@@ -876,7 +949,9 @@ impl Vm {
                             // String property access
                             if let Some(index) = value_to_array_index(raw_key) {
                                 // Numeric index: return character at index
-                                let s = unsafe { HeapString::to_string(obj.heap_ptr().unwrap() as *mut HeapString) };
+                                let s = unsafe {
+                                    HeapString::to_string(obj.heap_ptr().unwrap() as *mut HeapString)
+                                };
                                 let ch = s.chars().nth(index);
                                 match ch {
                                     Some(c) => {
@@ -888,19 +963,31 @@ impl Vm {
                             } else if let Some(ptr) = raw_key.heap_ptr() {
                                 let key_tag = unsafe { (*(ptr as *const GcHeader)).tag() };
                                 if key_tag == TAG_STRING {
-                                    let key_str = unsafe { HeapString::to_string(ptr as *mut HeapString) };
+                                    let key_str =
+                                        unsafe { HeapString::to_string(ptr as *mut HeapString) };
                                     if key_str == "length" {
                                         // String length
-                                        let s = unsafe { HeapString::to_string(obj.heap_ptr().unwrap() as *mut HeapString) };
+                                        let s = unsafe {
+                                            HeapString::to_string(
+                                                obj.heap_ptr().unwrap() as *mut HeapString
+                                            )
+                                        };
                                         let len = s.encode_utf16().count();
                                         Value::smi(len as i32)
                                     } else if self.string_prototype.is_heap_object() {
                                         // Look up from String.prototype
                                         if let Some(proto_ptr) = self.string_prototype.heap_ptr() {
                                             let proto_key = PropertyKey::from_string(&key_str);
-                                            let shape = unsafe { JSObject::shape_ptr(proto_ptr as *mut JSObject) };
+                                            let shape = unsafe {
+                                                JSObject::shape_ptr(proto_ptr as *mut JSObject)
+                                            };
                                             if let Some(slot) = shape.lookup(&proto_key) {
-                                                unsafe { JSObject::get_slot(proto_ptr as *mut JSObject, slot) }
+                                                unsafe {
+                                                    JSObject::get_slot(
+                                                        proto_ptr as *mut JSObject,
+                                                        slot,
+                                                    )
+                                                }
                                             } else {
                                                 Value::undefined()
                                             }
@@ -921,23 +1008,39 @@ impl Vm {
                             if instr.ic_index >= 0 {
                                 let ic_idx = instr.ic_index as usize;
                                 self.ic_stats.lookups += 1;
-                                if ic_idx < self.ics.len() {
-                                    if let Some(ptr) = obj.heap_ptr() {
+                                if ic_idx < self.ics.len()
+                                    && let Some(ptr) = obj.heap_ptr() {
                                         if tag == TAG_OBJECT {
-                                            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                                            let shape = unsafe {
+                                                JSObject::shape_ptr(ptr as *mut JSObject)
+                                            };
                                             let ck = ic_cache_key(shape.id, raw_key);
                                             if let Some(entry) = self.ics[ic_idx].entries.get(&ck) {
                                                 self.ic_stats.hits += 1;
-                                                let val = if entry.is_own {
-                                                    unsafe { JSObject::get_slot(ptr as *mut JSObject, entry.offset) }
+                                                 let val = if entry.is_own {
+                                                    unsafe {
+                                                        JSObject::get_slot(
+                                                            ptr as *mut JSObject,
+                                                            entry.offset,
+                                                        )
+                                                    }
                                                 } else {
-                                                    let mut p = ptr as *mut u8;
+                                                    let mut p = ptr;
                                                     for _ in 0..entry.proto_depth {
-                                                        let next = unsafe { JSObject::prototype(p as *mut JSObject) };
-                                                        if next.is_null() { break; }
+                                                        let next = unsafe {
+                                                            JSObject::prototype(p as *mut JSObject)
+                                                        };
+                                                        if next.is_null() {
+                                                            break;
+                                                        }
                                                         p = next;
                                                     }
-                                                    unsafe { JSObject::get_slot(p as *mut JSObject, entry.offset) }
+                                                    unsafe {
+                                                        JSObject::get_slot(
+                                                            p as *mut JSObject,
+                                                            entry.offset,
+                                                        )
+                                                    }
                                                 };
                                                 self.push(val);
                                                 self.frames[fi].pc = pc + 1;
@@ -945,25 +1048,41 @@ impl Vm {
                                             }
                                         } else if tag == TAG_ARRAY {
                                             // Array IC hit: offset is element index
-                                            let ck = ic_cache_key((*DENSE_ARRAY_SHAPE).id, raw_key);
+                                            let ck = ic_cache_key(DENSE_ARRAY_SHAPE.id, raw_key);
                                             if let Some(entry) = self.ics[ic_idx].entries.get(&ck) {
                                                 self.ic_stats.hits += 1;
-                                                let len = unsafe { RuneArray::length(ptr as *mut RuneArray) };
+                                                let len = unsafe {
+                                                    RuneArray::length(ptr as *mut RuneArray)
+                                                };
                                                 let val = if entry.is_own {
                                                     if entry.offset < len as usize {
-                                                        unsafe { RuneArray::get_element(ptr as *mut RuneArray, entry.offset) }
+                                                        unsafe {
+                                                            RuneArray::get_element(
+                                                                ptr as *mut RuneArray,
+                                                                entry.offset,
+                                                            )
+                                                        }
                                                     } else {
                                                         Value::undefined()
                                                     }
                                                 } else {
                                                     // Inherited from Array.prototype
-                                                    let mut p = ptr as *mut u8;
+                                                    let mut p = ptr;
                                                     for _ in 0..entry.proto_depth {
-                                                        let next = unsafe { JSObject::prototype(p as *mut JSObject) };
-                                                        if next.is_null() { break; }
+                                                        let next = unsafe {
+                                                            JSObject::prototype(p as *mut JSObject)
+                                                        };
+                                                        if next.is_null() {
+                                                            break;
+                                                        }
                                                         p = next;
                                                     }
-                                                    unsafe { JSObject::get_slot(p as *mut JSObject, entry.offset) }
+                                                    unsafe {
+                                                        JSObject::get_slot(
+                                                            p as *mut JSObject,
+                                                            entry.offset,
+                                                        )
+                                                    }
                                                 };
                                                 self.push(val);
                                                 self.frames[fi].pc = pc + 1;
@@ -971,11 +1090,16 @@ impl Vm {
                                             }
                                         }
                                     }
-                                }
                                 self.ic_stats.misses += 1;
                                 // Full lookup with IC population
-                                let result = load_property_recursive_ic(gc, &mut self.ics, &instr, obj, raw_key);
-                                result
+                                
+                                load_property_recursive_ic(
+                                    gc,
+                                    &mut self.ics,
+                                    &instr,
+                                    obj,
+                                    raw_key,
+                                )
                             } else {
                                 // No IC attached — fall back to full lookup
                                 load_property_recursive(obj, raw_key)
@@ -997,10 +1121,19 @@ impl Vm {
                             if let Some(key) = value_to_prop_key(raw_key) {
                                 let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
                                 if let Some(slot) = shape.lookup(&key) {
-                                    unsafe { JSObject::set_slot(ptr as *mut JSObject, slot, value) };
+                                    unsafe {
+                                        JSObject::set_slot(ptr as *mut JSObject, slot, value)
+                                    };
                                 } else {
                                     let key_name = value_to_debug_string(raw_key);
-                                    unsafe { JSObject::add_property(ptr as *mut JSObject, key, key_name, value) };
+                                    unsafe {
+                                        JSObject::add_property(
+                                            ptr as *mut JSObject,
+                                            key,
+                                            key_name,
+                                            value,
+                                        )
+                                    };
                                 }
                             }
                         } else if tag == TAG_ARRAY {
@@ -1008,18 +1141,20 @@ impl Vm {
                             if let Some(index) = value_to_array_index(raw_key) {
                                 let len = unsafe { RuneArray::length(ptr as *mut RuneArray) };
                                 if index < len as usize {
-                                    unsafe { RuneArray::set_element(ptr as *mut RuneArray, index, value) };
+                                    unsafe {
+                                        RuneArray::set_element(ptr as *mut RuneArray, index, value)
+                                    };
                                 }
                             }
                         } else if tag == TAG_FUNC {
                             // Function.prototype = value
-                            if let Some(key) = value_to_prop_key(raw_key) {
-                                if key == *PROTOTYPE_KEY {
-                                    if let Some(val_ptr) = value.heap_ptr() {
-                                        unsafe { Func::set_prototype(ptr as *mut Func, val_ptr); }
+                            if let Some(key) = value_to_prop_key(raw_key)
+                                && key == *PROTOTYPE_KEY
+                                    && let Some(val_ptr) = value.heap_ptr() {
+                                        unsafe {
+                                            Func::set_prototype(ptr as *mut Func, val_ptr);
+                                        }
                                     }
-                                }
-                            }
                         }
                     }
                     self.push(value);
@@ -1030,11 +1165,10 @@ impl Vm {
                     let obj = self.pop();
                     let result = if let Some(ptr) = obj.heap_ptr() {
                         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-                        if tag == TAG_OBJECT {
-                            if let Some(key) = value_to_prop_key(raw_key) {
+                        if tag == TAG_OBJECT
+                            && let Some(key) = value_to_prop_key(raw_key) {
                                 unsafe { JSObject::remove_property(ptr as *mut JSObject, &key) };
                             }
-                        }
                         Value::smi(1)
                     } else {
                         Value::smi(1)
@@ -1051,7 +1185,10 @@ impl Vm {
                 Opcode::LoadGlobal => {
                     let name_idx = instr.operands[0] as usize;
                     if let Some(name) = self.frames[fi].prog_str(name_idx) {
-                        let val = self.globals.get(&name).copied()
+                        let val = self
+                            .globals
+                            .get(&name)
+                            .copied()
                             .or_else(|| self.builtin_wrappers.get(&name).copied())
                             .or_else(|| self.get_builtin(&name))
                             .unwrap_or(Value::undefined());
@@ -1108,7 +1245,10 @@ impl Vm {
                     let name_idx = instr.operands[0] as usize;
                     let is_prefix = instr.operands[1] != 0;
                     if let Some(name) = self.frames[fi].prog_str(name_idx) {
-                        let old_val = self.globals.get(&name).copied()
+                        let old_val = self
+                            .globals
+                            .get(&name)
+                            .copied()
                             .or_else(|| self.builtin_wrappers.get(&name).copied())
                             .or_else(|| self.get_builtin(&name))
                             .unwrap_or(Value::undefined());
@@ -1125,7 +1265,10 @@ impl Vm {
                     let name_idx = instr.operands[0] as usize;
                     let is_prefix = instr.operands[1] != 0;
                     if let Some(name) = self.frames[fi].prog_str(name_idx) {
-                        let old_val = self.globals.get(&name).copied()
+                        let old_val = self
+                            .globals
+                            .get(&name)
+                            .copied()
                             .or_else(|| self.builtin_wrappers.get(&name).copied())
                             .or_else(|| self.get_builtin(&name))
                             .unwrap_or(Value::undefined());
@@ -1142,10 +1285,13 @@ impl Vm {
                 // ---- Unary ----
                 Opcode::TypeOf => {
                     let val = self.pop();
-                    let s = if val.is_undefined() { "undefined" }
-                    else if val.is_null() { "object" }
-                    else if val.is_smi() { "number" }
-                    else {
+                    let s = if val.is_undefined() {
+                        "undefined"
+                    } else if val.is_null() {
+                        "object"
+                    } else if val.is_smi() {
+                        "number"
+                    } else {
                         let ptr = val.raw() as *mut GcHeader;
                         let tag = unsafe { (*ptr).tag() };
                         match tag {
@@ -1168,17 +1314,28 @@ impl Vm {
                 Opcode::JumpIfTrue => {
                     let val = self.pop();
                     let target = instr.operands[0] as usize;
-                    if val.to_bool() { self.frames[fi].pc = target } else { self.frames[fi].pc = pc + 1 }
+                    if val.to_bool() {
+                        self.frames[fi].pc = target
+                    } else {
+                        self.frames[fi].pc = pc + 1
+                    }
                 }
                 Opcode::JumpIfFalse => {
                     let val = self.pop();
                     let target = instr.operands[0] as usize;
-                    if !val.to_bool() { self.frames[fi].pc = target } else { self.frames[fi].pc = pc + 1 }
+                    if !val.to_bool() {
+                        self.frames[fi].pc = target
+                    } else {
+                        self.frames[fi].pc = pc + 1
+                    }
                 }
                 Opcode::Throw => {
                     let val = self.pop();
                     // Find in-frame handler
-                    let handler_idx = self.try_stack.iter().rposition(|tf| tf.frame_depth == self.frames.len());
+                    let handler_idx = self
+                        .try_stack
+                        .iter()
+                        .rposition(|tf| tf.frame_depth == self.frames.len());
                     if let Some(idx) = handler_idx {
                         let (catch_pc, finally_pc, stack_depth, in_catch) = {
                             let tf = &self.try_stack[idx];
@@ -1222,7 +1379,10 @@ impl Vm {
                     }
                     // Check for try-catch-finally in the caller frame
                     let new_fi = self.frames.len() - 1;
-                    let caller_idx = self.try_stack.iter().rposition(|tf| tf.frame_depth == self.frames.len());
+                    let caller_idx = self
+                        .try_stack
+                        .iter()
+                        .rposition(|tf| tf.frame_depth == self.frames.len());
                     if let Some(idx) = caller_idx {
                         let (catch_pc, finally_pc, stack_depth, in_catch) = {
                             let tf = &self.try_stack[idx];
@@ -1292,7 +1452,9 @@ impl Vm {
                     let ptr = Func::allocate(gc, func_idx, prog_ptr);
                     // Create default `.prototype` object (§11.2.2)
                     let default_proto = JSObject::allocate(gc, Shape::empty(), &[]);
-                    unsafe { Func::set_prototype(ptr, default_proto as *mut u8); }
+                    unsafe {
+                        Func::set_prototype(ptr, default_proto as *mut u8);
+                    }
                     self.push(Value::from_heap_ptr(ptr as *mut u8));
                     self.frames[fi].pc = pc + 1;
                 }
@@ -1306,11 +1468,12 @@ impl Vm {
                     let obj = JSObject::allocate(gc, shape, &[]);
                     let obj_val = Value::from_heap_ptr(obj as *mut u8);
                     // If constructor is a builtin, call it with the new object as `this`
-                    if let Some(smi_val) = constructor.as_smi() {
-                        if smi_val < 0 {
+                    if let Some(smi_val) = constructor.as_smi()
+                        && smi_val < 0 {
                             let id = ((-smi_val) as usize) - 1;
                             if id < self.builtins.len() {
-                                let result = (self.builtins[id].func)(gc, obj_val, &args, &mut *self);
+                                let result =
+                                    (self.builtins[id].func)(gc, obj_val, &args, &mut *self);
                                 if let Some(exc) = self.pending_exception.take() {
                                     self.push(exc);
                                     return Exit::Throw(exc);
@@ -1324,43 +1487,49 @@ impl Vm {
                                 continue;
                             }
                         }
-                    }
                     // Set prototype from constructor.prototype
                     // §11.2.2 [[Construct]]: new object's [[Prototype]] = constructor.prototype
                     // Use interned PROTOTYPE_KEY to avoid HeapString allocation.
-                    if constructor.is_heap_object() {
-                        if let Some(ptr) = constructor.heap_ptr() {
+                    if constructor.is_heap_object()
+                        && let Some(ptr) = constructor.heap_ptr() {
                             let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
                             if tag == TAG_OBJECT {
                                 let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
-                                if let Some(slot) = shape.lookup(&*PROTOTYPE_KEY) {
-                                    let proto_val = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
-                                    if proto_val.is_heap_object() {
-                                        if let Some(proto_ptr) = proto_val.heap_ptr() {
+                                if let Some(slot) = shape.lookup(&PROTOTYPE_KEY) {
+                                    let proto_val =
+                                        unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+                                    if proto_val.is_heap_object()
+                                        && let Some(proto_ptr) = proto_val.heap_ptr() {
                                             unsafe {
                                                 JSObject::set_prototype(obj, proto_ptr);
                                             }
                                         }
-                                    }
                                 }
                             } else if tag == TAG_FUNC {
                                 // User-defined function: read prototype from Func struct
                                 let proto_ptr = unsafe { Func::prototype(ptr as *mut Func) };
                                 if !proto_ptr.is_null() {
-                                    unsafe { JSObject::set_prototype(obj, proto_ptr); }
+                                    unsafe {
+                                        JSObject::set_prototype(obj, proto_ptr);
+                                    }
                                 }
                             }
                         }
-                    }
                     // If constructor is a user-defined function, call its body with this = new object
                     if let Some(ptr) = constructor.heap_ptr() {
                         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
                         if tag == TAG_FUNC {
                             let func_idx = unsafe { Func::func_index(ptr as *mut Func) } as usize;
-                            let creator_prog = unsafe { &*(Func::prog_ptr(ptr as *mut Func) as *const BytecodeProgram) };
+                            let creator_prog = unsafe {
+                                &*(Func::prog_ptr(ptr as *mut Func) as *const BytecodeProgram)
+                            };
                             if func_idx < creator_prog.functions.len() {
                                 let func_prog = &creator_prog.functions[func_idx];
-                                let mut locals: Vec<Value> = if func_prog.named_function { vec![constructor] } else { vec![] };
+                                let mut locals: Vec<Value> = if func_prog.named_function {
+                                    vec![constructor]
+                                } else {
+                                    vec![]
+                                };
                                 locals.extend(args);
                                 self.frames.push(Frame {
                                     locals,
@@ -1412,11 +1581,14 @@ impl Vm {
                         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
                         if tag == TAG_FUNC {
                             let func_idx = unsafe { Func::func_index(ptr as *mut Func) } as usize;
-                            let creator_prog = unsafe { &*(Func::prog_ptr(ptr as *mut Func) as *const BytecodeProgram) };
+                            let creator_prog = unsafe {
+                                &*(Func::prog_ptr(ptr as *mut Func) as *const BytecodeProgram)
+                            };
                             if func_idx < creator_prog.functions.len() {
                                 let func_prog = &creator_prog.functions[func_idx];
                                 if func_prog.is_generator {
-                                    let g = Generator::new(args, func_prog as *const BytecodeProgram);
+                                    let g =
+                                        Generator::new(args, func_prog as *const BytecodeProgram);
                                     let gen_id = self.generators.len();
                                     self.generators.push(g);
                                     self.push(Value::smi(gen_id as i32));
@@ -1431,18 +1603,31 @@ impl Vm {
                                     const JIT_THRESHOLD: u32 = 50;
 
                                     if unsafe { Func::jit_entry(ptr as *mut Func) }.is_null() {
-                                        if count == JIT_THRESHOLD && rune_jit_baseline::is_jit_compatible(func_prog) {
-                                            let codegen = CodeGen::new(func_prog.instructions.len());
+                                        if count == JIT_THRESHOLD
+                                            && rune_jit_baseline::is_jit_compatible(func_prog)
+                                        {
+                                            let codegen =
+                                                CodeGen::new(func_prog.instructions.len());
                                             let mem = codegen.compile(func_prog);
                                             mem.make_executable();
-                                            unsafe { Func::set_jit_entry(ptr as *mut Func, mem.code_ptr()) };
+                                            unsafe {
+                                                Func::set_jit_entry(
+                                                    ptr as *mut Func,
+                                                    mem.code_ptr(),
+                                                )
+                                            };
                                             std::mem::forget(mem);
                                         }
                                     }
 
                                     let jit_entry = unsafe { Func::jit_entry(ptr as *mut Func) };
                                     if !jit_entry.is_null() {
-                                        let mut jit_locals: Vec<Value> = if func_prog.named_function { vec![callee] } else { vec![] };
+                                        let mut jit_locals: Vec<Value> = if func_prog.named_function
+                                        {
+                                            vec![callee]
+                                        } else {
+                                            vec![]
+                                        };
                                         jit_locals.extend(args.iter().copied());
                                         let local_count = func_prog.local_names.len();
                                         while jit_locals.len() < local_count {
@@ -1450,10 +1635,17 @@ impl Vm {
                                         }
                                         // Safety check: only call JIT if all inputs are Smi
                                         if Self::all_smi(&jit_locals) {
-                                            let func: JitEntryFn = unsafe { std::mem::transmute(jit_entry) };
+                                            let func: JitEntryFn =
+                                                unsafe { std::mem::transmute(jit_entry) };
                                             let vm_ptr = self as *mut Vm as *mut u8;
                                             let gc_ptr = gc as *mut SemiSpace as *mut u8;
-                                            let result_raw = unsafe { func(vm_ptr, gc_ptr, jit_locals.as_mut_ptr() as *mut u64) };
+                                            let result_raw = unsafe {
+                                                func(
+                                                    vm_ptr,
+                                                    gc_ptr,
+                                                    jit_locals.as_mut_ptr() as *mut u64,
+                                                )
+                                            };
                                             self.last_locals = jit_locals;
                                             self.push(Value::from_raw(result_raw));
                                             self.frames[fi].pc = pc + 1;
@@ -1463,7 +1655,11 @@ impl Vm {
                                     }
                                 }
                                 // --- End JIT tier-up ---
-                                let mut locals: Vec<Value> = if func_prog.named_function { vec![callee] } else { vec![] };
+                                let mut locals: Vec<Value> = if func_prog.named_function {
+                                    vec![callee]
+                                } else {
+                                    vec![]
+                                };
                                 locals.extend(args);
                                 self.frames.push(Frame {
                                     locals,
@@ -1556,7 +1752,11 @@ impl Vm {
         }
 
         let result = self.stack.pop().unwrap_or(Value::undefined());
-        let saved_locals = self.frames.first().map(|f| f.locals.clone()).unwrap_or_default();
+        let saved_locals = self
+            .frames
+            .first()
+            .map(|f| f.locals.clone())
+            .unwrap_or_default();
         self.frames.clear();
         self.stack.clear();
         // Save locals for sync by execute()
@@ -1581,27 +1781,24 @@ impl Vm {
     /// Scans stack, all frame locals, and globals for matching heap pointers.
     pub fn update_heap_reference(&mut self, old_ptr: *mut u8, new_ptr: *mut u8) {
         for v in &mut self.stack {
-            if let Some(p) = v.heap_ptr() {
-                if p == old_ptr {
+            if let Some(p) = v.heap_ptr()
+                && p == old_ptr {
                     *v = Value::from_heap_ptr(new_ptr);
                 }
-            }
         }
         for frame in &mut self.frames {
             for v in &mut frame.locals {
-                if let Some(p) = v.heap_ptr() {
-                    if p == old_ptr {
+                if let Some(p) = v.heap_ptr()
+                    && p == old_ptr {
                         *v = Value::from_heap_ptr(new_ptr);
                     }
-                }
             }
         }
         for v in self.globals.values_mut() {
-            if let Some(p) = v.heap_ptr() {
-                if p == old_ptr {
+            if let Some(p) = v.heap_ptr()
+                && p == old_ptr {
                     *v = Value::from_heap_ptr(new_ptr);
                 }
-            }
         }
     }
 }
@@ -1622,10 +1819,20 @@ impl Frame {
 fn values_strictly_equal(a: Value, b: Value) -> bool {
     // Both are Number type (Smi or Float64)
     if a.is_smi() || b.is_smi() || a.is_float64() || b.is_float64() {
-        let na = if a.is_smi() { a.as_smi().map(|s| s as f64) } else { a.as_float64() };
-        let nb = if b.is_smi() { b.as_smi().map(|s| s as f64) } else { b.as_float64() };
+        let na = if a.is_smi() {
+            a.as_smi().map(|s| s as f64)
+        } else {
+            a.as_float64()
+        };
+        let nb = if b.is_smi() {
+            b.as_smi().map(|s| s as f64)
+        } else {
+            b.as_float64()
+        };
         if let (Some(av), Some(bv)) = (na, nb) {
-            if av.is_nan() || bv.is_nan() { return false; }
+            if av.is_nan() || bv.is_nan() {
+                return false;
+            }
             return av == bv;
         }
         return false;
@@ -1672,8 +1879,12 @@ fn compare_strings_lt(a: Value, b: Value) -> Option<bool> {
             for i in 0..min_len {
                 let ca = unsafe { *da.add(i) };
                 let cb = unsafe { *db.add(i) };
-                if ca < cb { return Some(true); }
-                if ca > cb { return Some(false); }
+                if ca < cb {
+                    return Some(true);
+                }
+                if ca > cb {
+                    return Some(false);
+                }
             }
             return Some(la < lb);
         }
@@ -1699,399 +1910,6 @@ fn value_to_debug_string(val: Value) -> String {
         }
     } else {
         "undefined".to_string()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rune_bytecode::opcode::{BytecodeProgram, Instruction};
-
-    fn run(prog: &BytecodeProgram) -> Result<Value, Value> {
-        let mut gc = SemiSpace::new();
-        let mut vm = Vm::new();
-        vm.execute(&mut gc, prog)
-    }
-
-    fn run_ok(prog: &BytecodeProgram) -> Value {
-        run(prog).unwrap()
-    }
-
-    macro_rules! prog {
-        ($($op:expr),* $(,)?) => {
-            BytecodeProgram::new(
-                vec![$(Instruction::new($op, vec![])),*],
-                vec![],
-                vec![],
-            )
-        };
-    }
-
-    #[test]
-    fn test_load_smi() {
-        let p = BytecodeProgram::new(
-            vec![Instruction::new(Opcode::LoadSmi, vec![42])],
-            vec![], vec![],
-        );
-        let v = run_ok(&p);
-        assert_eq!(v.as_smi(), Some(42));
-    }
-
-    #[test]
-    fn test_load_undefined() {
-        let p = prog![Opcode::LoadUndefined];
-        assert!(run_ok(&p).is_undefined());
-    }
-
-    #[test]
-    fn test_load_null() {
-        let p = prog![Opcode::LoadNull];
-        assert!(run_ok(&p).is_null());
-    }
-
-    #[test]
-    fn test_load_boolean_true() {
-        let p = BytecodeProgram::new(
-            vec![Instruction::new(Opcode::LoadBoolean, vec![1])],
-            vec![], vec![],
-        );
-        assert_eq!(run_ok(&p).as_smi(), Some(1));
-    }
-
-    #[test]
-    fn test_load_boolean_false() {
-        let p = BytecodeProgram::new(
-            vec![Instruction::new(Opcode::LoadBoolean, vec![0])],
-            vec![], vec![],
-        );
-        assert_eq!(run_ok(&p).as_smi(), Some(0));
-    }
-
-    #[test]
-    fn test_add_smi() {
-        let p = BytecodeProgram::new(
-            vec![
-                Instruction::new(Opcode::LoadSmi, vec![10]),
-                Instruction::new(Opcode::LoadSmi, vec![20]),
-                Instruction::new(Opcode::Add, vec![]),
-            ],
-            vec![], vec![],
-        );
-        assert_eq!(run_ok(&p).as_smi(), Some(30));
-    }
-
-    #[test]
-    fn test_sub() {
-        let p = BytecodeProgram::new(
-            vec![
-                Instruction::new(Opcode::LoadSmi, vec![20]),
-                Instruction::new(Opcode::LoadSmi, vec![5]),
-                Instruction::new(Opcode::Sub, vec![]),
-            ],
-            vec![], vec![],
-        );
-        assert_eq!(run_ok(&p).as_smi(), Some(15));
-    }
-
-    #[test]
-    fn test_mul() {
-        let p = BytecodeProgram::new(
-            vec![
-                Instruction::new(Opcode::LoadSmi, vec![6]),
-                Instruction::new(Opcode::LoadSmi, vec![7]),
-                Instruction::new(Opcode::Mul, vec![]),
-            ],
-            vec![], vec![],
-        );
-        assert_eq!(run_ok(&p).as_smi(), Some(42));
-    }
-
-    #[test]
-    fn test_div() {
-        let p = BytecodeProgram::new(
-            vec![
-                Instruction::new(Opcode::LoadSmi, vec![10]),
-                Instruction::new(Opcode::LoadSmi, vec![3]),
-                Instruction::new(Opcode::Div, vec![]),
-            ],
-            vec![], vec![],
-        );
-        let v = run_ok(&p);
-        assert!(v.is_float64(), "10/3 should be a float");
-        assert!((v.as_float64().unwrap() - 3.3333333333333335).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_mod() {
-        let p = BytecodeProgram::new(
-            vec![
-                Instruction::new(Opcode::LoadSmi, vec![10]),
-                Instruction::new(Opcode::LoadSmi, vec![3]),
-                Instruction::new(Opcode::Mod, vec![]),
-            ],
-            vec![], vec![],
-        );
-        assert_eq!(run_ok(&p).as_smi(), Some(1));
-    }
-
-    #[test]
-    fn test_neg() {
-        let p = BytecodeProgram::new(
-            vec![
-                Instruction::new(Opcode::LoadSmi, vec![42]),
-                Instruction::new(Opcode::Neg, vec![]),
-            ],
-            vec![], vec![],
-        );
-        assert_eq!(run_ok(&p).as_smi(), Some(-42));
-    }
-
-    #[test]
-    fn test_not() {
-        let p = BytecodeProgram::new(
-            vec![
-                Instruction::new(Opcode::LoadSmi, vec![0]),
-                Instruction::new(Opcode::Not, vec![]),
-            ],
-            vec![], vec![],
-        );
-        assert_eq!(run_ok(&p).as_smi(), Some(1));
-    }
-
-    #[test]
-    fn test_bitnot() {
-        let p = BytecodeProgram::new(
-            vec![
-                Instruction::new(Opcode::LoadSmi, vec![42]),
-                Instruction::new(Opcode::BitNot, vec![]),
-            ],
-            vec![], vec![],
-        );
-        assert_eq!(run_ok(&p).as_smi(), Some(!42));
-    }
-
-    #[test]
-    fn test_void() {
-        let p = BytecodeProgram::new(
-            vec![
-                Instruction::new(Opcode::LoadSmi, vec![99]),
-                Instruction::new(Opcode::Void, vec![]),
-            ],
-            vec![], vec![],
-        );
-        assert!(run_ok(&p).is_undefined());
-    }
-
-    #[test]
-    fn test_jump() {
-        let p = BytecodeProgram::new(
-            vec![
-                Instruction::new(Opcode::Jump, vec![2]),   // skip to instr 2
-                Instruction::new(Opcode::LoadSmi, vec![0]), // skipped
-                Instruction::new(Opcode::LoadSmi, vec![1]), // target
-            ],
-            vec![], vec![],
-        );
-        assert_eq!(run_ok(&p).as_smi(), Some(1));
-    }
-
-    #[test]
-    fn test_jump_if_false_taken() {
-        let p = BytecodeProgram::new(
-            vec![
-                Instruction::new(Opcode::LoadBoolean, vec![0]), // false
-                Instruction::new(Opcode::JumpIfFalse, vec![3]),
-                Instruction::new(Opcode::LoadSmi, vec![0]), // skipped
-                Instruction::new(Opcode::LoadSmi, vec![1]), // target
-            ],
-            vec![], vec![],
-        );
-        assert_eq!(run_ok(&p).as_smi(), Some(1));
-    }
-
-    #[test]
-    fn test_jump_if_true_taken() {
-        let p = BytecodeProgram::new(
-            vec![
-                Instruction::new(Opcode::LoadBoolean, vec![1]), // true
-                Instruction::new(Opcode::JumpIfTrue, vec![3]),
-                Instruction::new(Opcode::LoadSmi, vec![0]), // skipped
-                Instruction::new(Opcode::LoadSmi, vec![1]), // target
-            ],
-            vec![], vec![],
-        );
-        assert_eq!(run_ok(&p).as_smi(), Some(1));
-    }
-
-    #[test]
-    fn test_dup_pop() {
-        let p = BytecodeProgram::new(
-            vec![
-                Instruction::new(Opcode::LoadSmi, vec![42]),
-                Instruction::new(Opcode::Dup, vec![]),
-                Instruction::new(Opcode::Pop, vec![]),
-            ],
-            vec![], vec![],
-        );
-        assert_eq!(run_ok(&p).as_smi(), Some(42));
-    }
-
-    #[test]
-    fn test_eq() {
-        let p = BytecodeProgram::new(
-            vec![
-                Instruction::new(Opcode::LoadSmi, vec![1]),
-                Instruction::new(Opcode::LoadSmi, vec![1]),
-                Instruction::new(Opcode::Eq, vec![]),
-            ],
-            vec![], vec![],
-        );
-        assert_eq!(run_ok(&p).as_smi(), Some(1));
-    }
-
-    #[test]
-    fn test_neq() {
-        let p = BytecodeProgram::new(
-            vec![
-                Instruction::new(Opcode::LoadSmi, vec![1]),
-                Instruction::new(Opcode::LoadSmi, vec![2]),
-                Instruction::new(Opcode::Ne, vec![]),
-            ],
-            vec![], vec![],
-        );
-        assert_eq!(run_ok(&p).as_smi(), Some(1));
-    }
-
-    #[test]
-    fn test_lt() {
-        let p = BytecodeProgram::new(
-            vec![
-                Instruction::new(Opcode::LoadSmi, vec![1]),
-                Instruction::new(Opcode::LoadSmi, vec![2]),
-                Instruction::new(Opcode::Lt, vec![]),
-            ],
-            vec![], vec![],
-        );
-        assert_eq!(run_ok(&p).as_smi(), Some(1));
-    }
-
-    #[test]
-    fn test_bitwise() {
-        let p = BytecodeProgram::new(
-            vec![
-                Instruction::new(Opcode::LoadSmi, vec![0xFF]),
-                Instruction::new(Opcode::LoadSmi, vec![0x0F]),
-                Instruction::new(Opcode::BitAnd, vec![]),
-            ],
-            vec![], vec![],
-        );
-        assert_eq!(run_ok(&p).as_smi(), Some(0x0F));
-    }
-
-    #[test]
-    fn test_shift() {
-        let p = BytecodeProgram::new(
-            vec![
-                Instruction::new(Opcode::LoadSmi, vec![8]),
-                Instruction::new(Opcode::LoadSmi, vec![1]),
-                Instruction::new(Opcode::Shl, vec![]),
-            ],
-            vec![], vec![],
-        );
-        assert_eq!(run_ok(&p).as_smi(), Some(16));
-    }
-
-    #[test]
-    fn test_logical_and_short_circuit() {
-        // false && ... → false (short circuit, RHS not evaluated)
-        // lhs, Dup, JumpIfFalse→end, Pop, rhs, end:
-        // JumpIfFalse POPS and jumps if falsy; Dup preserves lhs copy for result.
-        let p = BytecodeProgram::new(
-            vec![
-                Instruction::new(Opcode::LoadBoolean, vec![0]),
-                Instruction::new(Opcode::Dup, vec![]),
-                Instruction::new(Opcode::JumpIfFalse, vec![5]),
-                Instruction::new(Opcode::Pop, vec![]),
-                Instruction::new(Opcode::LoadBoolean, vec![1]),
-            ],
-            vec![], vec![],
-        );
-        assert_eq!(run_ok(&p).as_smi(), Some(0));
-    }
-
-    #[test]
-    fn test_logical_or_short_circuit() {
-        // true || ... → true (short circuit, RHS not evaluated)
-        let p = BytecodeProgram::new(
-            vec![
-                Instruction::new(Opcode::LoadBoolean, vec![1]),
-                Instruction::new(Opcode::Dup, vec![]),
-                Instruction::new(Opcode::JumpIfTrue, vec![5]),
-                Instruction::new(Opcode::Pop, vec![]),
-                Instruction::new(Opcode::LoadBoolean, vec![0]),
-            ],
-            vec![], vec![],
-        );
-        assert_eq!(run_ok(&p).as_smi(), Some(1));
-    }
-
-    #[test]
-    fn test_logical_and_non_short_circuit() {
-        // true && false → false (no short circuit, both evaluated)
-        let p = BytecodeProgram::new(
-            vec![
-                Instruction::new(Opcode::LoadBoolean, vec![1]),
-                Instruction::new(Opcode::Dup, vec![]),
-                Instruction::new(Opcode::JumpIfFalse, vec![5]),
-                Instruction::new(Opcode::Pop, vec![]),
-                Instruction::new(Opcode::LoadBoolean, vec![0]),
-            ],
-            vec![], vec![],
-        );
-        assert_eq!(run_ok(&p).as_smi(), Some(0));
-    }
-
-    #[test]
-    fn test_logical_or_non_short_circuit() {
-        // false || true → true (no short circuit, both evaluated)
-        let p = BytecodeProgram::new(
-            vec![
-                Instruction::new(Opcode::LoadBoolean, vec![0]),
-                Instruction::new(Opcode::Dup, vec![]),
-                Instruction::new(Opcode::JumpIfTrue, vec![5]),
-                Instruction::new(Opcode::Pop, vec![]),
-                Instruction::new(Opcode::LoadBoolean, vec![1]),
-            ],
-            vec![], vec![],
-        );
-        assert_eq!(run_ok(&p).as_smi(), Some(1));
-    }
-
-    #[test]
-    fn test_typeof_smi() {
-        let p = BytecodeProgram::new(
-            vec![
-                Instruction::new(Opcode::LoadSmi, vec![42]),
-                Instruction::new(Opcode::TypeOf, vec![]),
-            ],
-            vec![], vec![],
-        );
-        let v = run_ok(&p);
-        assert!(v.is_heap_object(), "typeof smi should return heap string");
-    }
-
-    #[test]
-    fn test_throw_returns_error() {
-        let p = BytecodeProgram::new(
-            vec![
-                Instruction::new(Opcode::LoadSmi, vec![99]),
-                Instruction::new(Opcode::Throw, vec![]),
-            ],
-            vec![], vec![],
-        );
-        let result = run(&p);
-        assert!(result.is_err(), "throw should return Err");
-        assert_eq!(result.unwrap_err().as_smi(), Some(99));
     }
 }
 
@@ -2170,14 +1988,13 @@ fn load_property_recursive(obj: Value, raw_key: Value) -> Value {
                 current = Value::from_heap_ptr(proto);
                 continue;
             } else if tag == TAG_FUNC {
-                if let Some(key) = value_to_prop_key(raw_key) {
-                    if key == *PROTOTYPE_KEY {
+                if let Some(key) = value_to_prop_key(raw_key)
+                    && key == *PROTOTYPE_KEY {
                         let proto_ptr = unsafe { Func::prototype(ptr as *mut Func) };
                         if !proto_ptr.is_null() {
                             return Value::from_heap_ptr(proto_ptr);
                         }
                     }
-                }
                 return Value::undefined();
             }
         }
@@ -2195,8 +2012,8 @@ fn load_property_recursive_ic(
 ) -> Value {
     let result = load_property_recursive(obj, raw_key);
     // Populate IC for all result types — Smi, Float64, heap, undefined
-    if instr.ic_index >= 0 {
-        if let Some(ptr) = obj.heap_ptr() {
+    if instr.ic_index >= 0
+        && let Some(ptr) = obj.heap_ptr() {
             let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
             let ic_idx = instr.ic_index as usize;
             while ics.len() <= ic_idx {
@@ -2208,27 +2025,37 @@ fn load_property_recursive_ic(
                     let ck = ic_cache_key(shape.id, raw_key);
                     if let Some(offset) = shape.lookup(&key) {
                         // Own property
-                        ics[ic_idx].entries.insert(ck, IcEntry {
-                            offset,
-                            is_own: true,
-                            proto_depth: 0,
-                        });
+                        ics[ic_idx].entries.insert(
+                            ck,
+                            IcEntry {
+                                offset,
+                                is_own: true,
+                                proto_depth: 0,
+                            },
+                        );
                     } else {
                         // Inherited — walk prototype chain to find offset and depth
                         let mut depth: u8 = 0;
-                        let mut p = ptr as *mut u8;
+                        let mut p = ptr;
                         loop {
                             let next = unsafe { JSObject::prototype(p as *mut JSObject) };
-                            if next.is_null() { break; }
+                            if next.is_null() {
+                                break;
+                            }
                             depth += 1;
-                            if depth >= MAX_PROTOTYPE_DEPTH as u8 { break; }
+                            if depth >= MAX_PROTOTYPE_DEPTH as u8 {
+                                break;
+                            }
                             let next_shape = unsafe { JSObject::shape_ptr(next as *mut JSObject) };
                             if let Some(offset) = next_shape.lookup(&key) {
-                                ics[ic_idx].entries.insert(ck, IcEntry {
-                                    offset,
-                                    is_own: false,
-                                    proto_depth: depth,
-                                });
+                                ics[ic_idx].entries.insert(
+                                    ck,
+                                    IcEntry {
+                                        offset,
+                                        is_own: false,
+                                        proto_depth: depth,
+                                    },
+                                );
                                 break;
                             }
                             p = next;
@@ -2238,29 +2065,39 @@ fn load_property_recursive_ic(
             } else if tag == TAG_ARRAY {
                 // Dense array IC: numeric keys cache element index directly
                 if let Some(index) = value_to_array_index(raw_key) {
-                    let ck = ic_cache_key((*DENSE_ARRAY_SHAPE).id, raw_key);
-                    ics[ic_idx].entries.insert(ck, IcEntry {
-                        offset: index,
-                        is_own: true,
-                        proto_depth: 0,
-                    });
+                    let ck = ic_cache_key(DENSE_ARRAY_SHAPE.id, raw_key);
+                    ics[ic_idx].entries.insert(
+                        ck,
+                        IcEntry {
+                            offset: index,
+                            is_own: true,
+                            proto_depth: 0,
+                        },
+                    );
                 } else if let Some(key) = value_to_prop_key(raw_key) {
                     // Non-numeric key — inherited from Array.prototype
-                    let ck = ic_cache_key((*DENSE_ARRAY_SHAPE).id, raw_key);
+                    let ck = ic_cache_key(DENSE_ARRAY_SHAPE.id, raw_key);
                     let mut depth: u8 = 0;
-                    let mut p = ptr as *mut u8;
+                    let mut p = ptr;
                     loop {
                         let next = unsafe { JSObject::prototype(p as *mut JSObject) };
-                        if next.is_null() { break; }
+                        if next.is_null() {
+                            break;
+                        }
                         depth += 1;
-                        if depth >= MAX_PROTOTYPE_DEPTH as u8 { break; }
+                        if depth >= MAX_PROTOTYPE_DEPTH as u8 {
+                            break;
+                        }
                         let next_shape = unsafe { JSObject::shape_ptr(next as *mut JSObject) };
                         if let Some(offset) = next_shape.lookup(&key) {
-                            ics[ic_idx].entries.insert(ck, IcEntry {
-                                offset,
-                                is_own: false,
-                                proto_depth: depth,
-                            });
+                            ics[ic_idx].entries.insert(
+                                ck,
+                                IcEntry {
+                                    offset,
+                                    is_own: false,
+                                    proto_depth: depth,
+                                },
+                            );
                             break;
                         }
                         p = next;
@@ -2268,7 +2105,6 @@ fn load_property_recursive_ic(
                 }
             }
         }
-    }
     result
 }
 
@@ -2296,11 +2132,10 @@ fn to_number(v: Value) -> f64 {
             }
             // Hex literals like "0x1F"
             let upper = trimmed.to_uppercase();
-            if upper.starts_with("0X") {
-                if let Ok(n) = u64::from_str_radix(&upper[2..], 16) {
+            if upper.starts_with("0X")
+                && let Ok(n) = u64::from_str_radix(&upper[2..], 16) {
                     return n as f64;
                 }
-            }
             // Infinity
             if trimmed.eq_ignore_ascii_case("infinity")
                 || trimmed == "+Infinity"
@@ -2385,7 +2220,8 @@ fn has_property(obj: Value, raw_key: Value) -> bool {
                         if let Some(proto_ptr) = current.heap_ptr() {
                             let proto_tag = unsafe { (*(proto_ptr as *const GcHeader)).tag() };
                             if proto_tag == TAG_OBJECT {
-                                let proto_shape = unsafe { JSObject::shape_ptr(proto_ptr as *mut JSObject) };
+                                let proto_shape =
+                                    unsafe { JSObject::shape_ptr(proto_ptr as *mut JSObject) };
                                 if proto_shape.lookup(&key).is_some() {
                                     return true;
                                 }
@@ -2416,17 +2252,21 @@ fn has_property(obj: Value, raw_key: Value) -> bool {
                 }
             }
             // Walk prototype chain for non-numeric keys on arrays
-            has_property(unsafe {
-                let proto = JSObject::prototype(ptr as *mut JSObject);
-                if proto.is_null() { return false; }
-                Value::from_heap_ptr(proto)
-            }, raw_key)
+            has_property(
+                unsafe {
+                    let proto = JSObject::prototype(ptr as *mut JSObject);
+                    if proto.is_null() {
+                        return false;
+                    }
+                    Value::from_heap_ptr(proto)
+                },
+                raw_key,
+            )
         } else if tag == TAG_FUNC {
-            if let Some(key) = value_to_prop_key(raw_key) {
-                if key == *PROTOTYPE_KEY {
+            if let Some(key) = value_to_prop_key(raw_key)
+                && key == *PROTOTYPE_KEY {
                     return true;
                 }
-            }
             false
         } else if tag == TAG_STRING {
             if let Some(index) = value_to_array_index(raw_key) {
@@ -2496,5 +2336,425 @@ fn value_to_array_index(v: Value) -> Option<usize> {
         }
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rune_bytecode::opcode::{BytecodeProgram, Instruction};
+
+    fn run(prog: &BytecodeProgram) -> Result<Value, Value> {
+        let mut gc = SemiSpace::new();
+        let mut vm = Vm::new();
+        vm.execute(&mut gc, prog)
+    }
+
+    fn run_ok(prog: &BytecodeProgram) -> Value {
+        run(prog).unwrap()
+    }
+
+    macro_rules! prog {
+        ($($op:expr),* $(,)?) => {
+            BytecodeProgram::new(
+                vec![$(Instruction::new($op, vec![])),*],
+                vec![],
+                vec![],
+            )
+        };
+    }
+
+    #[test]
+    fn test_load_smi() {
+        let p = BytecodeProgram::new(
+            vec![Instruction::new(Opcode::LoadSmi, vec![42])],
+            vec![],
+            vec![],
+        );
+        let v = run_ok(&p);
+        assert_eq!(v.as_smi(), Some(42));
+    }
+
+    #[test]
+    fn test_load_undefined() {
+        let p = prog![Opcode::LoadUndefined];
+        assert!(run_ok(&p).is_undefined());
+    }
+
+    #[test]
+    fn test_load_null() {
+        let p = prog![Opcode::LoadNull];
+        assert!(run_ok(&p).is_null());
+    }
+
+    #[test]
+    fn test_load_boolean_true() {
+        let p = BytecodeProgram::new(
+            vec![Instruction::new(Opcode::LoadBoolean, vec![1])],
+            vec![],
+            vec![],
+        );
+        assert_eq!(run_ok(&p).as_smi(), Some(1));
+    }
+
+    #[test]
+    fn test_load_boolean_false() {
+        let p = BytecodeProgram::new(
+            vec![Instruction::new(Opcode::LoadBoolean, vec![0])],
+            vec![],
+            vec![],
+        );
+        assert_eq!(run_ok(&p).as_smi(), Some(0));
+    }
+
+    #[test]
+    fn test_add_smi() {
+        let p = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadSmi, vec![10]),
+                Instruction::new(Opcode::LoadSmi, vec![20]),
+                Instruction::new(Opcode::Add, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        assert_eq!(run_ok(&p).as_smi(), Some(30));
+    }
+
+    #[test]
+    fn test_sub() {
+        let p = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadSmi, vec![20]),
+                Instruction::new(Opcode::LoadSmi, vec![5]),
+                Instruction::new(Opcode::Sub, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        assert_eq!(run_ok(&p).as_smi(), Some(15));
+    }
+
+    #[test]
+    fn test_mul() {
+        let p = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadSmi, vec![6]),
+                Instruction::new(Opcode::LoadSmi, vec![7]),
+                Instruction::new(Opcode::Mul, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        assert_eq!(run_ok(&p).as_smi(), Some(42));
+    }
+
+    #[test]
+    fn test_div() {
+        let p = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadSmi, vec![10]),
+                Instruction::new(Opcode::LoadSmi, vec![3]),
+                Instruction::new(Opcode::Div, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        let v = run_ok(&p);
+        assert!(v.is_float64(), "10/3 should be a float");
+        assert!((v.as_float64().unwrap() - 3.3333333333333335).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_mod() {
+        let p = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadSmi, vec![10]),
+                Instruction::new(Opcode::LoadSmi, vec![3]),
+                Instruction::new(Opcode::Mod, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        assert_eq!(run_ok(&p).as_smi(), Some(1));
+    }
+
+    #[test]
+    fn test_neg() {
+        let p = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadSmi, vec![42]),
+                Instruction::new(Opcode::Neg, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        assert_eq!(run_ok(&p).as_smi(), Some(-42));
+    }
+
+    #[test]
+    fn test_not() {
+        let p = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadSmi, vec![0]),
+                Instruction::new(Opcode::Not, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        assert_eq!(run_ok(&p).as_smi(), Some(1));
+    }
+
+    #[test]
+    fn test_bitnot() {
+        let p = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadSmi, vec![42]),
+                Instruction::new(Opcode::BitNot, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        assert_eq!(run_ok(&p).as_smi(), Some(!42));
+    }
+
+    #[test]
+    fn test_void() {
+        let p = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadSmi, vec![99]),
+                Instruction::new(Opcode::Void, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        assert!(run_ok(&p).is_undefined());
+    }
+
+    #[test]
+    fn test_jump() {
+        let p = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::Jump, vec![2]),    // skip to instr 2
+                Instruction::new(Opcode::LoadSmi, vec![0]), // skipped
+                Instruction::new(Opcode::LoadSmi, vec![1]), // target
+            ],
+            vec![],
+            vec![],
+        );
+        assert_eq!(run_ok(&p).as_smi(), Some(1));
+    }
+
+    #[test]
+    fn test_jump_if_false_taken() {
+        let p = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadBoolean, vec![0]), // false
+                Instruction::new(Opcode::JumpIfFalse, vec![3]),
+                Instruction::new(Opcode::LoadSmi, vec![0]), // skipped
+                Instruction::new(Opcode::LoadSmi, vec![1]), // target
+            ],
+            vec![],
+            vec![],
+        );
+        assert_eq!(run_ok(&p).as_smi(), Some(1));
+    }
+
+    #[test]
+    fn test_jump_if_true_taken() {
+        let p = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadBoolean, vec![1]), // true
+                Instruction::new(Opcode::JumpIfTrue, vec![3]),
+                Instruction::new(Opcode::LoadSmi, vec![0]), // skipped
+                Instruction::new(Opcode::LoadSmi, vec![1]), // target
+            ],
+            vec![],
+            vec![],
+        );
+        assert_eq!(run_ok(&p).as_smi(), Some(1));
+    }
+
+    #[test]
+    fn test_dup_pop() {
+        let p = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadSmi, vec![42]),
+                Instruction::new(Opcode::Dup, vec![]),
+                Instruction::new(Opcode::Pop, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        assert_eq!(run_ok(&p).as_smi(), Some(42));
+    }
+
+    #[test]
+    fn test_eq() {
+        let p = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadSmi, vec![1]),
+                Instruction::new(Opcode::LoadSmi, vec![1]),
+                Instruction::new(Opcode::Eq, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        assert_eq!(run_ok(&p).as_smi(), Some(1));
+    }
+
+    #[test]
+    fn test_neq() {
+        let p = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadSmi, vec![1]),
+                Instruction::new(Opcode::LoadSmi, vec![2]),
+                Instruction::new(Opcode::Ne, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        assert_eq!(run_ok(&p).as_smi(), Some(1));
+    }
+
+    #[test]
+    fn test_lt() {
+        let p = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadSmi, vec![1]),
+                Instruction::new(Opcode::LoadSmi, vec![2]),
+                Instruction::new(Opcode::Lt, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        assert_eq!(run_ok(&p).as_smi(), Some(1));
+    }
+
+    #[test]
+    fn test_bitwise() {
+        let p = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadSmi, vec![0xFF]),
+                Instruction::new(Opcode::LoadSmi, vec![0x0F]),
+                Instruction::new(Opcode::BitAnd, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        assert_eq!(run_ok(&p).as_smi(), Some(0x0F));
+    }
+
+    #[test]
+    fn test_shift() {
+        let p = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadSmi, vec![8]),
+                Instruction::new(Opcode::LoadSmi, vec![1]),
+                Instruction::new(Opcode::Shl, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        assert_eq!(run_ok(&p).as_smi(), Some(16));
+    }
+
+    #[test]
+    fn test_logical_and_short_circuit() {
+        // false && ... → false (short circuit, RHS not evaluated)
+        // lhs, Dup, JumpIfFalse→end, Pop, rhs, end:
+        // JumpIfFalse POPS and jumps if falsy; Dup preserves lhs copy for result.
+        let p = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadBoolean, vec![0]),
+                Instruction::new(Opcode::Dup, vec![]),
+                Instruction::new(Opcode::JumpIfFalse, vec![5]),
+                Instruction::new(Opcode::Pop, vec![]),
+                Instruction::new(Opcode::LoadBoolean, vec![1]),
+            ],
+            vec![],
+            vec![],
+        );
+        assert_eq!(run_ok(&p).as_smi(), Some(0));
+    }
+
+    #[test]
+    fn test_logical_or_short_circuit() {
+        // true || ... → true (short circuit, RHS not evaluated)
+        let p = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadBoolean, vec![1]),
+                Instruction::new(Opcode::Dup, vec![]),
+                Instruction::new(Opcode::JumpIfTrue, vec![5]),
+                Instruction::new(Opcode::Pop, vec![]),
+                Instruction::new(Opcode::LoadBoolean, vec![0]),
+            ],
+            vec![],
+            vec![],
+        );
+        assert_eq!(run_ok(&p).as_smi(), Some(1));
+    }
+
+    #[test]
+    fn test_logical_and_non_short_circuit() {
+        // true && false → false (no short circuit, both evaluated)
+        let p = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadBoolean, vec![1]),
+                Instruction::new(Opcode::Dup, vec![]),
+                Instruction::new(Opcode::JumpIfFalse, vec![5]),
+                Instruction::new(Opcode::Pop, vec![]),
+                Instruction::new(Opcode::LoadBoolean, vec![0]),
+            ],
+            vec![],
+            vec![],
+        );
+        assert_eq!(run_ok(&p).as_smi(), Some(0));
+    }
+
+    #[test]
+    fn test_logical_or_non_short_circuit() {
+        // false || true → true (no short circuit, both evaluated)
+        let p = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadBoolean, vec![0]),
+                Instruction::new(Opcode::Dup, vec![]),
+                Instruction::new(Opcode::JumpIfTrue, vec![5]),
+                Instruction::new(Opcode::Pop, vec![]),
+                Instruction::new(Opcode::LoadBoolean, vec![1]),
+            ],
+            vec![],
+            vec![],
+        );
+        assert_eq!(run_ok(&p).as_smi(), Some(1));
+    }
+
+    #[test]
+    fn test_typeof_smi() {
+        let p = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadSmi, vec![42]),
+                Instruction::new(Opcode::TypeOf, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        let v = run_ok(&p);
+        assert!(v.is_heap_object(), "typeof smi should return heap string");
+    }
+
+    #[test]
+    fn test_throw_returns_error() {
+        let p = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadSmi, vec![99]),
+                Instruction::new(Opcode::Throw, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        let result = run(&p);
+        assert!(result.is_err(), "throw should return Err");
+        assert_eq!(result.unwrap_err().as_smi(), Some(99));
     }
 }

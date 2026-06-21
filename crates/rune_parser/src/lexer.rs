@@ -47,12 +47,12 @@ pub enum TokenKind {
     Async,
     Of,
     // Punctuators
-    LParen,      // (
-    RParen,      // )
-    LBrace,      // {
-    RBrace,      // }
-    LBracket,    // [
-    RBracket,    // ]
+    LParen,   // (
+    RParen,   // )
+    LBrace,   // {
+    RBrace,   // }
+    LBracket, // [
+    RBracket, // ]
     Comma,
     Dot,
     Semicolon,
@@ -65,13 +65,13 @@ pub enum TokenKind {
     Star,
     Slash,
     Percent,
-    StarStar,    // **
-    PlusPlus,    // ++
-    MinusMinus,  // --
-    Eq,          // ==
-    Ne,          // !=
-    StrictEq,    // ===
-    StrictNe,    // !===
+    StarStar,   // **
+    PlusPlus,   // ++
+    MinusMinus, // --
+    Eq,         // ==
+    Ne,         // !=
+    StrictEq,   // ===
+    StrictNe,   // !===
     Lt,
     Gt,
     Le,
@@ -99,8 +99,8 @@ pub enum TokenKind {
     Shr,
     ShrU,
     Not,
-    AndAssign,   // &&=
-    OrAssign,    // ||=
+    AndAssign,        // &&=
+    OrAssign,         // ||=
     QuestionQuestion, // ??
     NullishAssign,    // ??=
     // Misc
@@ -117,7 +117,11 @@ pub struct Token {
 
 impl Token {
     pub fn new(kind: TokenKind, start: usize, end: usize, value: String) -> Self {
-        Token { kind, span: Span { start, end }, value }
+        Token {
+            kind,
+            span: Span { start, end },
+            value,
+        }
     }
 }
 
@@ -254,7 +258,10 @@ impl Lexer {
         }
 
         // Decimal fraction?
-        if !is_hex && self.peek() == Some('.') && self.peek_next().map_or(false, |c| c.is_ascii_digit()) {
+        if !is_hex
+            && self.peek() == Some('.')
+            && self.peek_next().is_some_and(|c| c.is_ascii_digit())
+        {
             self.advance();
             while let Some(ch) = self.peek() {
                 if ch.is_ascii_digit() || ch == '_' {
@@ -304,14 +311,15 @@ impl Lexer {
                         Some('v') => value.push('\u{000B}'),
                         Some('0') => value.push('\0'),
                         Some('x') => {
-                            let hex = self.chars.get(self.pos..self.pos + 2)
+                            let hex = self
+                                .chars
+                                .get(self.pos..self.pos + 2)
                                 .map(|s| s.iter().collect::<String>());
-                            if let Some(hex) = hex {
-                                if let Ok(codepoint) = u32::from_str_radix(&hex, 16) {
+                            if let Some(hex) = hex
+                                && let Ok(codepoint) = u32::from_str_radix(&hex, 16) {
                                     value.push(char::from_u32(codepoint).unwrap_or('\u{FFFD}'));
                                     self.pos += 2;
                                 }
-                            }
                         }
                         Some('u') => {
                             if self.peek() == Some('{') {
@@ -319,23 +327,28 @@ impl Lexer {
                                 self.advance();
                                 let mut code = String::new();
                                 while let Some(ch) = self.peek() {
-                                    if ch == '}' { break; }
+                                    if ch == '}' {
+                                        break;
+                                    }
                                     code.push(ch);
                                     self.advance();
                                 }
-                                if self.peek() == Some('}') { self.advance(); }
+                                if self.peek() == Some('}') {
+                                    self.advance();
+                                }
                                 if let Ok(cp) = u32::from_str_radix(&code, 16) {
                                     value.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
                                 }
                             } else {
-                                let hex = self.chars.get(self.pos..self.pos + 4)
+                                let hex = self
+                                    .chars
+                                    .get(self.pos..self.pos + 4)
                                     .map(|s| s.iter().collect::<String>());
-                                if let Some(hex) = hex {
-                                    if let Ok(codepoint) = u32::from_str_radix(&hex, 16) {
+                                if let Some(hex) = hex
+                                    && let Ok(codepoint) = u32::from_str_radix(&hex, 16) {
                                         value.push(char::from_u32(codepoint).unwrap_or('\u{FFFD}'));
                                         self.pos += 4;
                                     }
-                                }
                             }
                         }
                         Some(ch) => value.push(ch),
@@ -361,7 +374,7 @@ impl Lexer {
                     break;
                 }
                 Some('`') if depth == 0 => break,
-                Some('$') if self.peek() == Some('{' ) => {
+                Some('$') if self.peek() == Some('{') => {
                     // Template expression — stop for now
                     break;
                 }
@@ -464,7 +477,9 @@ impl Lexer {
                         TokenKind::QuestionQuestion
                     };
                     Token::new(kind, self.start, self.pos, "??".into())
-                } else if self.peek() == Some('.') && self.peek_next().map_or(true, |c| !c.is_ascii_digit()) {
+                } else if self.peek() == Some('.')
+                    && self.peek_next().is_none_or(|c| !c.is_ascii_digit())
+                {
                     // ?. optional chaining — treat as .
                     self.advance();
                     Token::new(TokenKind::Dot, self.start, self.pos, "?.".into())
@@ -520,7 +535,12 @@ impl Lexer {
                     self.advance();
                     if self.peek() == Some('=') {
                         self.advance();
-                        Token::new(TokenKind::StarStarAssign, self.start, self.pos, "**=".into())
+                        Token::new(
+                            TokenKind::StarStarAssign,
+                            self.start,
+                            self.pos,
+                            "**=".into(),
+                        )
                     } else {
                         Token::new(TokenKind::StarStar, self.start, self.pos, "**".into())
                     }
@@ -683,18 +703,27 @@ impl Lexer {
                 Some(ch) if ch.is_ascii_whitespace() && ch != '\n' && ch != '\r' => {
                     self.advance();
                 }
-                Some('\n') | Some('\r') => { self.pos = saved; return true; }
+                Some('\n') | Some('\r') => {
+                    self.pos = saved;
+                    return true;
+                }
                 Some('/') if self.peek_next() == Some('/') => {
                     while let Some(c) = self.advance() {
-                        if c == '\n' || c == '\r' { break; }
+                        if c == '\n' || c == '\r' {
+                            break;
+                        }
                     }
                     self.pos = saved;
                     return true;
                 }
                 Some('/') if self.peek_next() == Some('*') => {
-                    self.advance(); self.advance();
+                    self.advance();
+                    self.advance();
                     while let (Some(a), Some(b)) = (self.advance(), self.peek()) {
-                        if a == '*' && b == '/' { self.advance(); break; }
+                        if a == '*' && b == '/' {
+                            self.advance();
+                            break;
+                        }
                     }
                 }
                 _ => break,

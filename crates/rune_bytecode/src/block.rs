@@ -17,7 +17,13 @@ pub struct BasicBlock {
 
 impl BasicBlock {
     pub fn new(id: usize, start: usize) -> Self {
-        BasicBlock { id, start, end: start, successors: vec![], predecessors: vec![] }
+        BasicBlock {
+            id,
+            start,
+            end: start,
+            successors: vec![],
+            predecessors: vec![],
+        }
     }
 }
 
@@ -31,15 +37,23 @@ pub struct ControlFlowGraph {
 
 /// Identify which opcodes terminate a basic block.
 fn is_terminator(op: Opcode) -> bool {
-    matches!(op, Opcode::Jump | Opcode::JumpIfTrue | Opcode::JumpIfFalse
-        | Opcode::Return | Opcode::Throw | Opcode::ForInNext)
+    matches!(
+        op,
+        Opcode::Jump
+            | Opcode::JumpIfTrue
+            | Opcode::JumpIfFalse
+            | Opcode::Return
+            | Opcode::Throw
+            | Opcode::ForInNext
+    )
 }
 
 /// Return the jump target instruction index, if this is a branching opcode.
 fn jump_target(instr: &Instruction) -> Option<usize> {
     match instr.opcode {
-        Opcode::Jump | Opcode::JumpIfTrue | Opcode::JumpIfFalse | Opcode::ForInNext =>
-            Some(instr.operands[0] as usize),
+        Opcode::Jump | Opcode::JumpIfTrue | Opcode::JumpIfFalse | Opcode::ForInNext => {
+            Some(instr.operands[0] as usize)
+        }
         _ => None,
     }
 }
@@ -55,7 +69,10 @@ fn jump_target(instr: &Instruction) -> Option<usize> {
 /// Exception edges (try/catch) are not represented in this CFG.
 pub fn build_cfg(instrs: &[Instruction]) -> ControlFlowGraph {
     if instrs.is_empty() {
-        return ControlFlowGraph { blocks: vec![], entry: 0 };
+        return ControlFlowGraph {
+            blocks: vec![],
+            entry: 0,
+        };
     }
 
     // Phase 1: find leaders
@@ -71,11 +88,10 @@ pub fn build_cfg(instrs: &[Instruction]) -> ControlFlowGraph {
             }
         }
         // Jump targets are leaders
-        if let Some(target) = jump_target(instr) {
-            if target < n {
+        if let Some(target) = jump_target(instr)
+            && target < n {
                 is_leader[target] = true;
             }
-        }
     }
 
     // Phase 2: build blocks
@@ -95,8 +111,8 @@ pub fn build_cfg(instrs: &[Instruction]) -> ControlFlowGraph {
     // Map instruction index → block index
     let mut instr_to_block: Vec<usize> = vec![0; n];
     for b in &blocks {
-        for idx in b.start..b.end {
-            instr_to_block[idx] = b.id;
+        for slot in instr_to_block[b.start..b.end].iter_mut() {
+            *slot = b.id;
         }
     }
 
@@ -104,7 +120,9 @@ pub fn build_cfg(instrs: &[Instruction]) -> ControlFlowGraph {
     for b_idx in 0..blocks.len() {
         let block = &blocks[b_idx];
         let last_idx = block.end.saturating_sub(1);
-        if block.start > block.end { continue; }
+        if block.start > block.end {
+            continue;
+        }
         let last_instr = &instrs[last_idx];
 
         match last_instr.opcode {
@@ -218,7 +236,7 @@ mod tests {
         assert_eq!(cfg.blocks.len(), 3);
         assert!(cfg.blocks[0].successors.contains(&2)); // end
         assert!(cfg.blocks[0].successors.contains(&1)); // body
-        assert_eq!(cfg.blocks[1].successors, vec![0]);  // back-edge
+        assert_eq!(cfg.blocks[1].successors, vec![0]); // back-edge
         assert!(cfg.blocks[2].successors.is_empty());
     }
 
@@ -227,7 +245,7 @@ mod tests {
         // ForInNext is a conditional branch
         let instrs = vec![
             Instruction::new(Opcode::ForInNext, vec![3]), // idx 0 — jump to 3 if done
-            Instruction::new(Opcode::StoreLocal, vec![0]),// idx 1 — body
+            Instruction::new(Opcode::StoreLocal, vec![0]), // idx 1 — body
             Instruction::new(Opcode::Jump, vec![0]),      // idx 2 — back to ForInNext
             Instruction::new(Opcode::Return, vec![]),     // idx 3 — after loop
         ];

@@ -19,11 +19,15 @@ const RESERVED_SLOTS: usize = 4;
 pub struct JSObject;
 
 impl JSObject {
-    pub fn allocate(ss: &mut SemiSpace, shape: &'static Shape, slot_values: &[Value]) -> *mut JSObject {
+    pub fn allocate(
+        ss: &mut SemiSpace,
+        shape: &'static Shape,
+        slot_values: &[Value],
+    ) -> *mut JSObject {
         let slot_count = slot_values.len();
         let capacity = slot_count + RESERVED_SLOTS;
         let obj_size = OBJECT_HEADER_END + capacity * size_of::<Value>();
-        let ptr = ss.alloc(obj_size) as *mut u8;
+        let ptr = ss.alloc(obj_size);
         unsafe {
             let header = &mut *(ptr as *mut GcHeader);
             header.word = std::sync::atomic::AtomicU64::new(TAG_OBJECT);
@@ -134,10 +138,13 @@ impl JSObject {
             let shape = Self::shape_ptr(ptr);
             if let Some(slot) = shape.lookup(key) {
                 let count = Self::slot_count(ptr);
-                let mut new_entries: Vec<(crate::shape::PropertyKey, usize)> = Vec::with_capacity(count - 1);
+                let mut new_entries: Vec<(crate::shape::PropertyKey, usize)> =
+                    Vec::with_capacity(count - 1);
                 let mut new_key_names: Vec<String> = Vec::with_capacity(count - 1);
                 for i in 0..count {
-                    if i == slot { continue; }
+                    if i == slot {
+                        continue;
+                    }
                     let new_offset = new_entries.len();
                     new_entries.push((shape.entries[i].0, new_offset));
                     new_key_names.push(shape.key_names[i].clone());
@@ -158,7 +165,12 @@ impl JSObject {
     /// Add a new property to the object in place, extending the shape and slot array.
     /// Returns the slot index of the new property.
     /// Panics if the object has no reserved capacity left.
-    pub unsafe fn add_property(ptr: *mut JSObject, key: crate::shape::PropertyKey, key_name: String, val: Value) -> usize {
+    pub unsafe fn add_property(
+        ptr: *mut JSObject,
+        key: crate::shape::PropertyKey,
+        key_name: String,
+        val: Value,
+    ) -> usize {
         unsafe {
             let cap = Self::capacity(ptr);
             let count = Self::slot_count(ptr);

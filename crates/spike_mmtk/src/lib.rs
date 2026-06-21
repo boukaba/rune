@@ -1,13 +1,15 @@
-use std::sync::OnceLock;
-use mmtk::vm::slot::SimpleSlot;
-use mmtk::vm::VMBinding;
+// TODO: document safety invariants for each unsafe fn (Sprint 14+)
+#![allow(clippy::missing_safety_doc)]
 use mmtk::MMTK;
+use mmtk::vm::VMBinding;
+use mmtk::vm::slot::SimpleSlot;
+use std::sync::OnceLock;
 
-pub mod object_model;
-pub mod scanning;
-pub mod collection;
 pub mod active_plan;
+pub mod collection;
+pub mod object_model;
 pub mod reference_glue;
+pub mod scanning;
 
 #[derive(Default)]
 pub struct RuneVM;

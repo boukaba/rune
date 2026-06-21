@@ -1,7 +1,7 @@
 use crate::RuneVM;
+use mmtk::Mutator;
 use mmtk::util::opaque_pointer::*;
 use mmtk::vm::ActivePlan;
-use mmtk::Mutator;
 
 pub struct RuneActivePlan;
 

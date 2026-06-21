@@ -23,7 +23,7 @@ impl Value {
     /// Debug-asserts value is within i31 range.
     pub fn smi(value: i32) -> Self {
         debug_assert!(
-            value >= -(1 << 30) && value < (1 << 30),
+            (-(1 << 30)..(1 << 30)).contains(&value),
             "Smi value out of range: {value}"
         );
         let raw = ((value as i64) << 1) | SMI_TAG as i64;

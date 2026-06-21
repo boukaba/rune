@@ -3,7 +3,6 @@
 /// Platform support:
 /// - macOS: mmap with MAP_JIT, mprotect to PROT_READ|PROT_EXEC for finalize
 /// - Linux: mmap with MAP_PRIVATE|MAP_ANONYMOUS, mprotect to PROT_READ|PROT_EXEC
-
 use std::ptr;
 
 pub struct ExecutableMemory {
@@ -27,8 +26,16 @@ impl ExecutableMemory {
                 0,
             )
         };
-        assert_ne!(ptr, libc::MAP_FAILED, "ExecutableMemory::allocate mmap MAP_JIT failed");
-        ExecutableMemory { ptr: ptr as *mut u8, size: alloc_size, offset: 0 }
+        assert_ne!(
+            ptr,
+            libc::MAP_FAILED,
+            "ExecutableMemory::allocate mmap MAP_JIT failed"
+        );
+        ExecutableMemory {
+            ptr: ptr as *mut u8,
+            size: alloc_size,
+            offset: 0,
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -45,31 +52,59 @@ impl ExecutableMemory {
                 0,
             )
         };
-        assert_ne!(ptr, libc::MAP_FAILED, "ExecutableMemory::allocate mmap failed");
-        ExecutableMemory { ptr: ptr as *mut u8, size: alloc_size, offset: 0 }
+        assert_ne!(
+            ptr,
+            libc::MAP_FAILED,
+            "ExecutableMemory::allocate mmap failed"
+        );
+        ExecutableMemory {
+            ptr: ptr as *mut u8,
+            size: alloc_size,
+            offset: 0,
+        }
     }
 
     pub fn emit_byte(&mut self, b: u8) {
-        assert!(self.offset + 1 <= self.size, "ExecutableMemory emit_byte overflow");
-        unsafe { ptr::write(self.ptr.add(self.offset), b); }
+        assert!(
+            self.offset < self.size,
+            "ExecutableMemory emit_byte overflow"
+        );
+        unsafe {
+            ptr::write(self.ptr.add(self.offset), b);
+        }
         self.offset += 1;
     }
 
     pub fn emit_u32(&mut self, v: u32) {
-        assert!(self.offset + 4 <= self.size, "ExecutableMemory emit_u32 overflow");
-        unsafe { ptr::write_unaligned(self.ptr.add(self.offset) as *mut u32, v); }
+        assert!(
+            self.offset + 4 <= self.size,
+            "ExecutableMemory emit_u32 overflow"
+        );
+        unsafe {
+            ptr::write_unaligned(self.ptr.add(self.offset) as *mut u32, v);
+        }
         self.offset += 4;
     }
 
     pub fn emit_u64(&mut self, v: u64) {
-        assert!(self.offset + 8 <= self.size, "ExecutableMemory emit_u64 overflow");
-        unsafe { ptr::write_unaligned(self.ptr.add(self.offset) as *mut u64, v); }
+        assert!(
+            self.offset + 8 <= self.size,
+            "ExecutableMemory emit_u64 overflow"
+        );
+        unsafe {
+            ptr::write_unaligned(self.ptr.add(self.offset) as *mut u64, v);
+        }
         self.offset += 8;
     }
 
     pub fn patch_u32(&mut self, offset: usize, v: u32) {
-        assert!(offset + 4 <= self.size, "ExecutableMemory patch_u32 overflow");
-        unsafe { ptr::write_unaligned(self.ptr.add(offset) as *mut u32, v); }
+        assert!(
+            offset + 4 <= self.size,
+            "ExecutableMemory patch_u32 overflow"
+        );
+        unsafe {
+            ptr::write_unaligned(self.ptr.add(offset) as *mut u32, v);
+        }
     }
 
     pub fn make_executable(&self) {
@@ -105,8 +140,7 @@ impl Drop for ExecutableMemory {
 // ---------------------------------------------------------------------------
 
 fn rex_byte(w: bool, r: bool, x: bool, b: bool) -> u8 {
-    0x40
-        | (if w { 0x08 } else { 0 })
+    0x40 | (if w { 0x08 } else { 0 })
         | (if r { 0x04 } else { 0 })
         | (if x { 0x02 } else { 0 })
         | (if b { 0x01 } else { 0 })
@@ -455,8 +489,8 @@ mod tests {
     #[test]
     fn test_emit_push_pop_r8() {
         let mut mem = ExecutableMemory::allocate(256);
-        mem.emit_push_r64(8);  // push r8  → 41 50
-        mem.emit_pop_r64(8);   // pop r8   → 41 58
+        mem.emit_push_r64(8); // push r8  → 41 50
+        mem.emit_pop_r64(8); // pop r8   → 41 58
         assert_eq!(mem.offset, 4); // REX.B(1) + opcode(1) each
     }
 

@@ -1,4 +1,4 @@
-/// Minimal AArch64 assembler for copy-and-patch JIT spike.
+//! Minimal AArch64 assembler for copy-and-patch JIT spike.
 
 /// Encode ADD Rd, Rn, Rm (64-bit, shifted register, LSL#0)
 ///
@@ -59,8 +59,11 @@ mod tests {
     fn test_add_encoding() {
         let instr = a64_add(0, 0, 1);
         // Verify opcode pattern: bits 31-21 should be 10001011000
-        assert_eq!((instr >> 21) & 0x7FF, 0b10001011000,
-            "ADD encoding pattern wrong");
+        assert_eq!(
+            (instr >> 21) & 0x7FF,
+            0b10001011000,
+            "ADD encoding pattern wrong"
+        );
         assert_eq!((instr >> 16) & 0x1f, 1, "Rm should be 1");
         assert_eq!((instr >> 5) & 0x1f, 0, "Rn should be 0");
         assert_eq!(instr & 0x1f, 0, "Rd should be 0");

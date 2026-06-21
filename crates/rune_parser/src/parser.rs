@@ -11,7 +11,11 @@ impl Parser {
     pub fn new(source: &str) -> Self {
         let mut lexer = Lexer::new(source);
         let tok = lexer.next_token();
-        Parser { lexer, tok, errors: Vec::new() }
+        Parser {
+            lexer,
+            tok,
+            errors: Vec::new(),
+        }
     }
 
     fn advance(&mut self) {
@@ -30,7 +34,8 @@ impl Parser {
     }
 
     fn error(&mut self, msg: String) {
-        self.errors.push(format!("{} at {}", msg, self.tok.span.start));
+        self.errors
+            .push(format!("{} at {}", msg, self.tok.span.start));
     }
 
     fn span(&self) -> Span {
@@ -47,7 +52,10 @@ impl Parser {
             body.push(stmt);
         }
         let end = self.tok.span.end;
-        Program { body, span: Span { start, end } }
+        Program {
+            body,
+            span: Span { start, end },
+        }
     }
 
     // ---- Statements ----
@@ -89,7 +97,13 @@ impl Parser {
         }
         let end = self.span();
         self.expect(TokenKind::RBrace);
-        Stmt::Block(stmts, Span { start: start.start, end: end.end })
+        Stmt::Block(
+            stmts,
+            Span {
+                start: start.start,
+                end: end.end,
+            },
+        )
     }
 
     fn parse_function_decl(&mut self) -> Stmt {
@@ -109,10 +123,22 @@ impl Parser {
             None
         };
         let body = self.parse_function_body(name, is_generator, false, start);
-        Stmt::Function(Box::new(body), Span { start: start.start, end: self.span().end })
+        Stmt::Function(
+            Box::new(body),
+            Span {
+                start: start.start,
+                end: self.span().end,
+            },
+        )
     }
 
-    fn parse_function_body(&mut self, name: Option<Box<str>>, is_generator: bool, is_async: bool, start: Span) -> FnNode {
+    fn parse_function_body(
+        &mut self,
+        name: Option<Box<str>>,
+        is_generator: bool,
+        is_async: bool,
+        start: Span,
+    ) -> FnNode {
         self.expect(TokenKind::LParen);
         let mut params = Vec::new();
         while self.tok.kind != TokenKind::RParen && self.tok.kind != TokenKind::Eof {
@@ -133,15 +159,34 @@ impl Parser {
         } else {
             Stmt::Empty(self.span())
         };
-        FnNode { name, params, body, is_generator, is_async, span: Span { start: start.start, end: self.span().end } }
+        FnNode {
+            name,
+            params,
+            body,
+            is_generator,
+            is_async,
+            span: Span {
+                start: start.start,
+                end: self.span().end,
+            },
+        }
     }
 
     fn parse_var_decl(&mut self) -> Stmt {
         let start = self.span();
         let kind = match self.tok.kind {
-            TokenKind::Var => { self.advance(); VarKind::Var }
-            TokenKind::Let => { self.advance(); VarKind::Let }
-            TokenKind::Const => { self.advance(); VarKind::Const }
+            TokenKind::Var => {
+                self.advance();
+                VarKind::Var
+            }
+            TokenKind::Let => {
+                self.advance();
+                VarKind::Let
+            }
+            TokenKind::Const => {
+                self.advance();
+                VarKind::Const
+            }
             _ => unreachable!(),
         };
         let mut decls = Vec::new();
@@ -161,7 +206,14 @@ impl Parser {
             } else {
                 None
             };
-            decls.push(Decl { name, init, span: Span { start: dstart.start, end: self.span().end } });
+            decls.push(Decl {
+                name,
+                init,
+                span: Span {
+                    start: dstart.start,
+                    end: self.span().end,
+                },
+            });
             if self.tok.kind == TokenKind::Comma {
                 self.advance();
             } else {
@@ -169,7 +221,14 @@ impl Parser {
             }
         }
         self.consume_semicolon();
-        Stmt::Var(kind, decls, Span { start: start.start, end: self.span().end })
+        Stmt::Var(
+            kind,
+            decls,
+            Span {
+                start: start.start,
+                end: self.span().end,
+            },
+        )
     }
 
     fn parse_return(&mut self) -> Stmt {
@@ -181,7 +240,13 @@ impl Parser {
             Some(Box::new(self.parse_expr(0)))
         };
         self.consume_semicolon();
-        Stmt::Return(value, Span { start: start.start, end: self.span().end })
+        Stmt::Return(
+            value,
+            Span {
+                start: start.start,
+                end: self.span().end,
+            },
+        )
     }
 
     fn parse_throw(&mut self) -> Stmt {
@@ -192,7 +257,13 @@ impl Parser {
         }
         let value = self.parse_expr(0);
         self.consume_semicolon();
-        Stmt::Throw(Box::new(value), Span { start: start.start, end: self.span().end })
+        Stmt::Throw(
+            Box::new(value),
+            Span {
+                start: start.start,
+                end: self.span().end,
+            },
+        )
     }
 
     fn parse_try(&mut self) -> Stmt {
@@ -217,7 +288,11 @@ impl Parser {
                 Stmt::Block(stmts, _) => stmts.into_boxed_slice(),
                 _ => vec![].into_boxed_slice(),
             };
-            Some(CatchClause { param: param.into_boxed_str(), body, span: self.span() })
+            Some(CatchClause {
+                param: param.into_boxed_str(),
+                body,
+                span: self.span(),
+            })
         } else {
             None
         };
@@ -230,7 +305,15 @@ impl Parser {
         } else {
             None
         };
-        Stmt::Try(body, catch, finalizer, Span { start: start.start, end: self.span().end })
+        Stmt::Try(
+            body,
+            catch,
+            finalizer,
+            Span {
+                start: start.start,
+                end: self.span().end,
+            },
+        )
     }
 
     fn parse_switch(&mut self) -> Stmt {
@@ -257,7 +340,11 @@ impl Parser {
                     {
                         body.push(self.parse_statement());
                     }
-                    cases.push(SwitchCase { test, body, span: cs });
+                    cases.push(SwitchCase {
+                        test,
+                        body,
+                        span: cs,
+                    });
                 }
                 TokenKind::Default => {
                     self.advance();
@@ -281,7 +368,15 @@ impl Parser {
                 }
             }
         }
-        Stmt::Switch(discriminant, cases, default_body, Span { start: start.start, end: self.span().end })
+        Stmt::Switch(
+            discriminant,
+            cases,
+            default_body,
+            Span {
+                start: start.start,
+                end: self.span().end,
+            },
+        )
     }
 
     fn parse_if(&mut self) -> Stmt {
@@ -297,7 +392,15 @@ impl Parser {
         } else {
             None
         };
-        Stmt::If(Box::new(cond), then, else_branch, Span { start: start.start, end: self.span().end })
+        Stmt::If(
+            Box::new(cond),
+            then,
+            else_branch,
+            Span {
+                start: start.start,
+                end: self.span().end,
+            },
+        )
     }
 
     fn parse_while(&mut self) -> Stmt {
@@ -307,7 +410,14 @@ impl Parser {
         let cond = self.parse_expr(0);
         self.expect(TokenKind::RParen);
         let body = Box::new(self.parse_statement());
-        Stmt::While(Box::new(cond), body, Span { start: start.start, end: self.span().end })
+        Stmt::While(
+            Box::new(cond),
+            body,
+            Span {
+                start: start.start,
+                end: self.span().end,
+            },
+        )
     }
 
     fn parse_do_while(&mut self) -> Stmt {
@@ -319,7 +429,14 @@ impl Parser {
         let cond = self.parse_expr(0);
         self.expect(TokenKind::RParen);
         self.consume_semicolon();
-        Stmt::DoWhile(Box::new(cond), body, Span { start: start.start, end: self.span().end })
+        Stmt::DoWhile(
+            Box::new(cond),
+            body,
+            Span {
+                start: start.start,
+                end: self.span().end,
+            },
+        )
     }
 
     fn parse_for(&mut self) -> Stmt {
@@ -332,7 +449,10 @@ impl Parser {
             return self.parse_for_c_style(None, start);
         }
         // Check for `for (var x in obj)` — peek ahead for `in` after the first var decl
-        if matches!(self.tok.kind, TokenKind::Var | TokenKind::Let | TokenKind::Const) {
+        if matches!(
+            self.tok.kind,
+            TokenKind::Var | TokenKind::Let | TokenKind::Const
+        ) {
             let var_stmt = self.parse_var_decl();
             if self.tok.kind == TokenKind::In {
                 // for (var x in obj)
@@ -346,7 +466,15 @@ impl Parser {
                     _ => panic!("for-in must have exactly one loop variable"),
                 };
                 let lhs = Box::new(Expr::Identifier(name, Span::default()));
-                return Stmt::ForIn(lhs, Box::new(obj), body, Span { start: start.start, end: self.span().end });
+                return Stmt::ForIn(
+                    lhs,
+                    Box::new(obj),
+                    body,
+                    Span {
+                        start: start.start,
+                        end: self.span().end,
+                    },
+                );
             }
             // C-style for with var: cond and update follow
             return self.parse_for_c_style(Some(Box::new(var_stmt)), start);
@@ -358,7 +486,15 @@ impl Parser {
             let obj = self.parse_expr(0);
             self.expect(TokenKind::RParen);
             let body = Box::new(self.parse_statement());
-            return Stmt::ForIn(Box::new(lhs), Box::new(obj), body, Span { start: start.start, end: self.span().end });
+            return Stmt::ForIn(
+                Box::new(lhs),
+                Box::new(obj),
+                body,
+                Span {
+                    start: start.start,
+                    end: self.span().end,
+                },
+            );
         }
         // C-style for: `for (init; cond; update)`
         self.consume_semicolon();
@@ -383,7 +519,16 @@ impl Parser {
         };
         self.expect(TokenKind::RParen);
         let body = Box::new(self.parse_statement());
-        Stmt::For(init, cond, update, body, Span { start: start.start, end: self.span().end })
+        Stmt::For(
+            init,
+            cond,
+            update,
+            body,
+            Span {
+                start: start.start,
+                end: self.span().end,
+            },
+        )
     }
 
     fn parse_break_continue(&mut self, is_break: bool) -> Stmt {
@@ -398,9 +543,21 @@ impl Parser {
         };
         self.consume_semicolon();
         if is_break {
-            Stmt::Break(label, Span { start: start.start, end: self.span().end })
+            Stmt::Break(
+                label,
+                Span {
+                    start: start.start,
+                    end: self.span().end,
+                },
+            )
         } else {
-            Stmt::Continue(label, Span { start: start.start, end: self.span().end })
+            Stmt::Continue(
+                label,
+                Span {
+                    start: start.start,
+                    end: self.span().end,
+                },
+            )
         }
     }
 
@@ -415,40 +572,125 @@ impl Parser {
                 break;
             }
             let op = match self.tok.kind {
-                TokenKind::LogicalOr => { self.advance(); BinaryOp::LogicalOr }
-                TokenKind::LogicalAnd => { self.advance(); BinaryOp::LogicalAnd }
-                TokenKind::BitOr => { self.advance(); BinaryOp::BitOr }
-                TokenKind::BitXor => { self.advance(); BinaryOp::BitXor }
-                TokenKind::BitAnd => { self.advance(); BinaryOp::BitAnd }
-                TokenKind::Eq => { self.advance(); BinaryOp::Eq }
-                TokenKind::Ne => { self.advance(); BinaryOp::Ne }
-                TokenKind::StrictEq => { self.advance(); BinaryOp::StrictEq }
-                TokenKind::StrictNe => { self.advance(); BinaryOp::StrictNe }
-                TokenKind::Lt => { self.advance(); BinaryOp::Lt }
-                TokenKind::Gt => { self.advance(); BinaryOp::Gt }
-                TokenKind::Le => { self.advance(); BinaryOp::Le }
-                TokenKind::Ge => { self.advance(); BinaryOp::Ge }
-                TokenKind::Instanceof => { self.advance(); BinaryOp::Instanceof }
-                TokenKind::In => { self.advance(); BinaryOp::In }
-                TokenKind::Shl => { self.advance(); BinaryOp::Shl }
-                TokenKind::Shr => { self.advance(); BinaryOp::Shr }
-                TokenKind::ShrU => { self.advance(); BinaryOp::ShrU }
-                TokenKind::Plus => { self.advance(); BinaryOp::Add }
-                TokenKind::Minus => { self.advance(); BinaryOp::Sub }
-                TokenKind::Star => { self.advance(); BinaryOp::Mul }
-                TokenKind::Slash => { self.advance(); BinaryOp::Div }
-                TokenKind::Percent => { self.advance(); BinaryOp::Mod }
-                TokenKind::StarStar => { self.advance(); BinaryOp::Exp }
-                TokenKind::EqAssign | TokenKind::PlusAssign | TokenKind::MinusAssign
-                | TokenKind::StarAssign | TokenKind::SlashAssign | TokenKind::PercentAssign
-                | TokenKind::StarStarAssign | TokenKind::ShlAssign | TokenKind::ShrAssign
-                | TokenKind::ShrUAssign | TokenKind::BitAndAssign | TokenKind::BitOrAssign
-                | TokenKind::BitXorAssign | TokenKind::AndAssign | TokenKind::OrAssign
+                TokenKind::LogicalOr => {
+                    self.advance();
+                    BinaryOp::LogicalOr
+                }
+                TokenKind::LogicalAnd => {
+                    self.advance();
+                    BinaryOp::LogicalAnd
+                }
+                TokenKind::BitOr => {
+                    self.advance();
+                    BinaryOp::BitOr
+                }
+                TokenKind::BitXor => {
+                    self.advance();
+                    BinaryOp::BitXor
+                }
+                TokenKind::BitAnd => {
+                    self.advance();
+                    BinaryOp::BitAnd
+                }
+                TokenKind::Eq => {
+                    self.advance();
+                    BinaryOp::Eq
+                }
+                TokenKind::Ne => {
+                    self.advance();
+                    BinaryOp::Ne
+                }
+                TokenKind::StrictEq => {
+                    self.advance();
+                    BinaryOp::StrictEq
+                }
+                TokenKind::StrictNe => {
+                    self.advance();
+                    BinaryOp::StrictNe
+                }
+                TokenKind::Lt => {
+                    self.advance();
+                    BinaryOp::Lt
+                }
+                TokenKind::Gt => {
+                    self.advance();
+                    BinaryOp::Gt
+                }
+                TokenKind::Le => {
+                    self.advance();
+                    BinaryOp::Le
+                }
+                TokenKind::Ge => {
+                    self.advance();
+                    BinaryOp::Ge
+                }
+                TokenKind::Instanceof => {
+                    self.advance();
+                    BinaryOp::Instanceof
+                }
+                TokenKind::In => {
+                    self.advance();
+                    BinaryOp::In
+                }
+                TokenKind::Shl => {
+                    self.advance();
+                    BinaryOp::Shl
+                }
+                TokenKind::Shr => {
+                    self.advance();
+                    BinaryOp::Shr
+                }
+                TokenKind::ShrU => {
+                    self.advance();
+                    BinaryOp::ShrU
+                }
+                TokenKind::Plus => {
+                    self.advance();
+                    BinaryOp::Add
+                }
+                TokenKind::Minus => {
+                    self.advance();
+                    BinaryOp::Sub
+                }
+                TokenKind::Star => {
+                    self.advance();
+                    BinaryOp::Mul
+                }
+                TokenKind::Slash => {
+                    self.advance();
+                    BinaryOp::Div
+                }
+                TokenKind::Percent => {
+                    self.advance();
+                    BinaryOp::Mod
+                }
+                TokenKind::StarStar => {
+                    self.advance();
+                    BinaryOp::Exp
+                }
+                TokenKind::EqAssign
+                | TokenKind::PlusAssign
+                | TokenKind::MinusAssign
+                | TokenKind::StarAssign
+                | TokenKind::SlashAssign
+                | TokenKind::PercentAssign
+                | TokenKind::StarStarAssign
+                | TokenKind::ShlAssign
+                | TokenKind::ShrAssign
+                | TokenKind::ShrUAssign
+                | TokenKind::BitAndAssign
+                | TokenKind::BitOrAssign
+                | TokenKind::BitXorAssign
+                | TokenKind::AndAssign
+                | TokenKind::OrAssign
                 | TokenKind::NullishAssign => {
                     // Assignment is right-associative
                     let op = self.parse_assign_op();
                     let rhs = self.parse_expr(prec); // right-assoc: same precedence
-                    let span = Span { start: self.span().start, end: self.span().end };
+                    let span = Span {
+                        start: self.span().start,
+                        end: self.span().end,
+                    };
                     if op == BinaryOp::Assign {
                         lhs = Expr::Assign(Box::new(lhs), Box::new(rhs), span);
                     } else {
@@ -459,7 +701,10 @@ impl Parser {
                 _ => break,
             };
             let rhs = self.parse_expr(prec + 1);
-            let span = Span { start: self.span().start, end: self.span().end };
+            let span = Span {
+                start: self.span().start,
+                end: self.span().end,
+            };
             lhs = Expr::Binary(op, Box::new(lhs), Box::new(rhs), span);
         }
 
@@ -479,22 +724,59 @@ impl Parser {
     fn parse_unary(&mut self) -> Expr {
         let start = self.span();
         match self.tok.kind {
-            TokenKind::Plus => { self.advance(); self.make_unary(UnaryOp::Plus, start) }
-            TokenKind::Minus => { self.advance(); self.make_unary(UnaryOp::Minus, start) }
-            TokenKind::Not => { self.advance(); self.make_unary(UnaryOp::Not, start) }
-            TokenKind::BitNot => { self.advance(); self.make_unary(UnaryOp::BitNot, start) }
-            TokenKind::Typeof => { self.advance(); self.make_unary(UnaryOp::Typeof, start) }
-            TokenKind::Void => { self.advance(); self.make_unary(UnaryOp::Void, start) }
-            TokenKind::Delete => { self.advance(); self.make_unary(UnaryOp::Delete, start) }
+            TokenKind::Plus => {
+                self.advance();
+                self.make_unary(UnaryOp::Plus, start)
+            }
+            TokenKind::Minus => {
+                self.advance();
+                self.make_unary(UnaryOp::Minus, start)
+            }
+            TokenKind::Not => {
+                self.advance();
+                self.make_unary(UnaryOp::Not, start)
+            }
+            TokenKind::BitNot => {
+                self.advance();
+                self.make_unary(UnaryOp::BitNot, start)
+            }
+            TokenKind::Typeof => {
+                self.advance();
+                self.make_unary(UnaryOp::Typeof, start)
+            }
+            TokenKind::Void => {
+                self.advance();
+                self.make_unary(UnaryOp::Void, start)
+            }
+            TokenKind::Delete => {
+                self.advance();
+                self.make_unary(UnaryOp::Delete, start)
+            }
             TokenKind::PlusPlus => {
                 self.advance();
                 let arg = self.parse_unary();
-                Expr::Update(UpdateOp::PlusPlus, Box::new(arg), true, Span { start: start.start, end: self.span().end })
+                Expr::Update(
+                    UpdateOp::PlusPlus,
+                    Box::new(arg),
+                    true,
+                    Span {
+                        start: start.start,
+                        end: self.span().end,
+                    },
+                )
             }
             TokenKind::MinusMinus => {
                 self.advance();
                 let arg = self.parse_unary();
-                Expr::Update(UpdateOp::MinusMinus, Box::new(arg), true, Span { start: start.start, end: self.span().end })
+                Expr::Update(
+                    UpdateOp::MinusMinus,
+                    Box::new(arg),
+                    true,
+                    Span {
+                        start: start.start,
+                        end: self.span().end,
+                    },
+                )
             }
             TokenKind::New => {
                 self.advance();
@@ -505,20 +787,39 @@ impl Parser {
                     let mut a = Vec::new();
                     while self.tok.kind != TokenKind::RParen && self.tok.kind != TokenKind::Eof {
                         a.push(self.parse_expr(0));
-                        if self.tok.kind == TokenKind::Comma { self.advance(); }
+                        if self.tok.kind == TokenKind::Comma {
+                            self.advance();
+                        }
                     }
                     self.expect(TokenKind::RParen);
                     a
                 } else {
                     Vec::new()
                 };
-                Expr::New(callee, args, Span { start: start.start, end: self.span().end })
+                Expr::New(
+                    callee,
+                    args,
+                    Span {
+                        start: start.start,
+                        end: self.span().end,
+                    },
+                )
             }
             TokenKind::Yield => {
                 self.advance();
                 let has_arg = !self.lexer.had_newline && self.tok_can_start_expr();
-                let arg = if has_arg { Some(Box::new(self.parse_expr(0))) } else { None };
-                Expr::Yield(arg, Span { start: start.start, end: self.span().end })
+                let arg = if has_arg {
+                    Some(Box::new(self.parse_expr(0)))
+                } else {
+                    None
+                };
+                Expr::Yield(
+                    arg,
+                    Span {
+                        start: start.start,
+                        end: self.span().end,
+                    },
+                )
             }
             _ => self.parse_primary(),
         }
@@ -526,7 +827,14 @@ impl Parser {
 
     fn make_unary(&mut self, op: UnaryOp, start: Span) -> Expr {
         let arg = self.parse_unary();
-        Expr::Unary(op, Box::new(arg), Span { start: start.start, end: self.span().end })
+        Expr::Unary(
+            op,
+            Box::new(arg),
+            Span {
+                start: start.start,
+                end: self.span().end,
+            },
+        )
     }
 
     fn parse_primary(&mut self) -> Expr {
@@ -551,34 +859,69 @@ impl Parser {
                 let t = self.tok.clone();
                 self.advance();
                 let val = t.value.replace('_', "").parse::<f64>().unwrap_or(0.0);
-                Expr::Number(val, Span { start: start.start, end: t.span.end })
+                Expr::Number(
+                    val,
+                    Span {
+                        start: start.start,
+                        end: t.span.end,
+                    },
+                )
             }
             TokenKind::String => {
                 let t = self.tok.clone();
                 self.advance();
-                Expr::String(t.value.into_boxed_str(), Span { start: start.start, end: t.span.end })
+                Expr::String(
+                    t.value.into_boxed_str(),
+                    Span {
+                        start: start.start,
+                        end: t.span.end,
+                    },
+                )
             }
             TokenKind::True => {
                 self.advance();
-                Expr::Boolean(true, Span { start: start.start, end: self.span().end })
+                Expr::Boolean(
+                    true,
+                    Span {
+                        start: start.start,
+                        end: self.span().end,
+                    },
+                )
             }
             TokenKind::False => {
                 self.advance();
-                Expr::Boolean(false, Span { start: start.start, end: self.span().end })
+                Expr::Boolean(
+                    false,
+                    Span {
+                        start: start.start,
+                        end: self.span().end,
+                    },
+                )
             }
             TokenKind::Null => {
                 self.advance();
-                Expr::Null(Span { start: start.start, end: self.span().end })
+                Expr::Null(Span {
+                    start: start.start,
+                    end: self.span().end,
+                })
             }
             TokenKind::This => {
                 self.advance();
-                Expr::This(Span { start: start.start, end: self.span().end })
+                Expr::This(Span {
+                    start: start.start,
+                    end: self.span().end,
+                })
             }
             TokenKind::Identifier => {
                 let t = self.tok.clone();
                 self.advance();
-                Expr::Identifier(t.value.clone().into_boxed_str(),
-                    Span { start: start.start, end: t.span.end })
+                Expr::Identifier(
+                    t.value.clone().into_boxed_str(),
+                    Span {
+                        start: start.start,
+                        end: t.span.end,
+                    },
+                )
             }
             TokenKind::LParen => {
                 self.advance();
@@ -591,10 +934,15 @@ impl Parser {
                 let mut elems = Vec::new();
                 while self.tok.kind != TokenKind::RBracket && self.tok.kind != TokenKind::Eof {
                     elems.push(self.parse_expr(0));
-                    if self.tok.kind == TokenKind::Comma { self.advance(); }
+                    if self.tok.kind == TokenKind::Comma {
+                        self.advance();
+                    }
                 }
                 self.expect(TokenKind::RBracket);
-                let span = Span { start: start.start, end: self.span().end };
+                let span = Span {
+                    start: start.start,
+                    end: self.span().end,
+                };
                 Expr::Array(elems, span)
             }
             TokenKind::LBrace => {
@@ -605,26 +953,56 @@ impl Parser {
                     let key = self.parse_prop_key();
                     self.expect(TokenKind::Colon);
                     let value = self.parse_expr(0);
-                    props.push(Property { key, value, span: Span { start: pstart.start, end: self.span().end } });
-                    if self.tok.kind == TokenKind::Comma { self.advance(); }
+                    props.push(Property {
+                        key,
+                        value,
+                        span: Span {
+                            start: pstart.start,
+                            end: self.span().end,
+                        },
+                    });
+                    if self.tok.kind == TokenKind::Comma {
+                        self.advance();
+                    }
                 }
                 self.expect(TokenKind::RBrace);
-                let span = Span { start: start.start, end: self.span().end };
+                let span = Span {
+                    start: start.start,
+                    end: self.span().end,
+                };
                 Expr::Object(props, span)
             }
             TokenKind::Template => {
                 let t = self.tok.clone();
                 self.advance();
-                Expr::Template(t.value.into_boxed_str(), Span { start: start.start, end: t.span.end })
+                Expr::Template(
+                    t.value.into_boxed_str(),
+                    Span {
+                        start: start.start,
+                        end: t.span.end,
+                    },
+                )
             }
             TokenKind::Function => {
                 self.advance();
-                let is_generator = if self.tok.kind == TokenKind::Star { self.advance(); true } else { false };
+                let is_generator = if self.tok.kind == TokenKind::Star {
+                    self.advance();
+                    true
+                } else {
+                    false
+                };
                 let name = if self.tok.kind == TokenKind::Identifier {
-                    let t = self.tok.clone(); self.advance(); Some(t.value.into_boxed_str())
-                } else { None };
+                    let t = self.tok.clone();
+                    self.advance();
+                    Some(t.value.into_boxed_str())
+                } else {
+                    None
+                };
                 let body = self.parse_function_body(name.clone(), is_generator, false, start);
-                let span = Span { start: start.start, end: self.span().end };
+                let span = Span {
+                    start: start.start,
+                    end: self.span().end,
+                };
                 Expr::Function(Box::new(body), span)
             }
             _ => {
@@ -638,15 +1016,18 @@ impl Parser {
     fn parse_prop_key(&mut self) -> PropKey {
         match self.tok.kind {
             TokenKind::String => {
-                let t = self.tok.clone(); self.advance();
+                let t = self.tok.clone();
+                self.advance();
                 PropKey::String(t.value.into_boxed_str())
             }
             TokenKind::Number => {
-                let t = self.tok.clone(); self.advance();
+                let t = self.tok.clone();
+                self.advance();
                 PropKey::Number(t.value.replace('_', "").parse::<f64>().unwrap_or(0.0))
             }
             _ => {
-                let t = self.tok.clone(); self.advance();
+                let t = self.tok.clone();
+                self.advance();
                 PropKey::Identifier(t.value.into_boxed_str())
             }
         }
@@ -661,7 +1042,9 @@ impl Parser {
                     let mut args = Vec::new();
                     while self.tok.kind != TokenKind::RParen && self.tok.kind != TokenKind::Eof {
                         args.push(self.parse_expr(0));
-                        if self.tok.kind == TokenKind::Comma { self.advance(); }
+                        if self.tok.kind == TokenKind::Comma {
+                            self.advance();
+                        }
                     }
                     self.expect(TokenKind::RParen);
                     let span = self.span();
@@ -670,7 +1053,8 @@ impl Parser {
                 TokenKind::Dot => {
                     self.advance();
                     let name = if self.tok.kind == TokenKind::Identifier {
-                        let t = self.tok.clone(); self.advance();
+                        let t = self.tok.clone();
+                        self.advance();
                         Expr::String(t.value.into_boxed_str(), t.span)
                     } else {
                         Expr::Undefined(self.span())
@@ -709,7 +1093,8 @@ impl Parser {
                 TokenKind::Dot => {
                     self.advance();
                     let name = if self.tok.kind == TokenKind::Identifier {
-                        let t = self.tok.clone(); self.advance();
+                        let t = self.tok.clone();
+                        self.advance();
                         Expr::String(t.value.into_boxed_str(), t.span)
                     } else {
                         Expr::Undefined(self.span())
@@ -732,19 +1117,58 @@ impl Parser {
 
     fn parse_assign_op(&mut self) -> BinaryOp {
         match self.tok.kind {
-            TokenKind::EqAssign => { self.advance(); BinaryOp::Assign }
-            TokenKind::PlusAssign => { self.advance(); BinaryOp::Add }
-            TokenKind::MinusAssign => { self.advance(); BinaryOp::Sub }
-            TokenKind::StarAssign => { self.advance(); BinaryOp::Mul }
-            TokenKind::SlashAssign => { self.advance(); BinaryOp::Div }
-            TokenKind::PercentAssign => { self.advance(); BinaryOp::Mod }
-            TokenKind::StarStarAssign => { self.advance(); BinaryOp::Exp }
-            TokenKind::ShlAssign => { self.advance(); BinaryOp::Shl }
-            TokenKind::ShrAssign => { self.advance(); BinaryOp::Shr }
-            TokenKind::ShrUAssign => { self.advance(); BinaryOp::ShrU }
-            TokenKind::BitAndAssign => { self.advance(); BinaryOp::BitAnd }
-            TokenKind::BitOrAssign => { self.advance(); BinaryOp::BitOr }
-            TokenKind::BitXorAssign => { self.advance(); BinaryOp::BitXor }
+            TokenKind::EqAssign => {
+                self.advance();
+                BinaryOp::Assign
+            }
+            TokenKind::PlusAssign => {
+                self.advance();
+                BinaryOp::Add
+            }
+            TokenKind::MinusAssign => {
+                self.advance();
+                BinaryOp::Sub
+            }
+            TokenKind::StarAssign => {
+                self.advance();
+                BinaryOp::Mul
+            }
+            TokenKind::SlashAssign => {
+                self.advance();
+                BinaryOp::Div
+            }
+            TokenKind::PercentAssign => {
+                self.advance();
+                BinaryOp::Mod
+            }
+            TokenKind::StarStarAssign => {
+                self.advance();
+                BinaryOp::Exp
+            }
+            TokenKind::ShlAssign => {
+                self.advance();
+                BinaryOp::Shl
+            }
+            TokenKind::ShrAssign => {
+                self.advance();
+                BinaryOp::Shr
+            }
+            TokenKind::ShrUAssign => {
+                self.advance();
+                BinaryOp::ShrU
+            }
+            TokenKind::BitAndAssign => {
+                self.advance();
+                BinaryOp::BitAnd
+            }
+            TokenKind::BitOrAssign => {
+                self.advance();
+                BinaryOp::BitOr
+            }
+            TokenKind::BitXorAssign => {
+                self.advance();
+                BinaryOp::BitXor
+            }
             _ => BinaryOp::Assign,
         }
     }
@@ -757,18 +1181,32 @@ impl Parser {
             TokenKind::BitXor => 4,
             TokenKind::BitAnd => 5,
             TokenKind::Eq | TokenKind::Ne | TokenKind::StrictEq | TokenKind::StrictNe => 6,
-            TokenKind::Lt | TokenKind::Gt | TokenKind::Le | TokenKind::Ge
-                | TokenKind::Instanceof | TokenKind::In => 7,
+            TokenKind::Lt
+            | TokenKind::Gt
+            | TokenKind::Le
+            | TokenKind::Ge
+            | TokenKind::Instanceof
+            | TokenKind::In => 7,
             TokenKind::Shl | TokenKind::Shr | TokenKind::ShrU => 8,
             TokenKind::Plus | TokenKind::Minus => 9,
             TokenKind::Star | TokenKind::Slash | TokenKind::Percent => 10,
             TokenKind::StarStar => 11,
-            TokenKind::EqAssign | TokenKind::PlusAssign | TokenKind::MinusAssign
-                | TokenKind::StarAssign | TokenKind::SlashAssign | TokenKind::PercentAssign
-                | TokenKind::StarStarAssign | TokenKind::ShlAssign | TokenKind::ShrAssign
-                | TokenKind::ShrUAssign | TokenKind::BitAndAssign | TokenKind::BitOrAssign
-                | TokenKind::BitXorAssign | TokenKind::AndAssign | TokenKind::OrAssign
-                | TokenKind::NullishAssign => 0,
+            TokenKind::EqAssign
+            | TokenKind::PlusAssign
+            | TokenKind::MinusAssign
+            | TokenKind::StarAssign
+            | TokenKind::SlashAssign
+            | TokenKind::PercentAssign
+            | TokenKind::StarStarAssign
+            | TokenKind::ShlAssign
+            | TokenKind::ShrAssign
+            | TokenKind::ShrUAssign
+            | TokenKind::BitAndAssign
+            | TokenKind::BitOrAssign
+            | TokenKind::BitXorAssign
+            | TokenKind::AndAssign
+            | TokenKind::OrAssign
+            | TokenKind::NullishAssign => 0,
             _ => 0,
         }
     }
@@ -789,18 +1227,43 @@ impl Parser {
     }
 
     fn tok_can_start_expr(&self) -> bool {
-        matches!(self.tok.kind,
-            TokenKind::Number | TokenKind::String | TokenKind::Template |
-            TokenKind::True | TokenKind::False | TokenKind::Null |
-            TokenKind::This | TokenKind::Identifier |
-            TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace |
-            TokenKind::Function | TokenKind::Class |
-            TokenKind::Plus | TokenKind::Minus | TokenKind::Not | TokenKind::BitNot |
-            TokenKind::Typeof | TokenKind::Void | TokenKind::Delete |
-            TokenKind::PlusPlus | TokenKind::MinusMinus |
-            TokenKind::Yield | TokenKind::Await |
-            TokenKind::New | TokenKind::Super | TokenKind::Slash |
-            TokenKind::Star)
+        matches!(
+            self.tok.kind,
+            TokenKind::Number
+                | TokenKind::String
+                | TokenKind::Template
+                | TokenKind::True
+                | TokenKind::False
+                | TokenKind::Null
+                | TokenKind::This
+                | TokenKind::Identifier
+                | TokenKind::LParen
+                | TokenKind::LBracket
+                | TokenKind::LBrace
+                | TokenKind::Function
+                | TokenKind::Class
+                | TokenKind::Plus
+                | TokenKind::Minus
+                | TokenKind::Not
+                | TokenKind::BitNot
+                | TokenKind::Typeof
+                | TokenKind::Void
+                | TokenKind::Delete
+                | TokenKind::PlusPlus
+                | TokenKind::MinusMinus
+                | TokenKind::Yield
+                | TokenKind::Await
+                | TokenKind::New
+                | TokenKind::Super
+                | TokenKind::Slash
+                | TokenKind::Star
+        )
+    }
+}
+
+impl std::fmt::Debug for Parser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Parser").finish()
     }
 }
 
@@ -967,11 +1430,5 @@ mod tests {
     fn test_typeof() {
         let prog = parse("typeof x;");
         assert_eq!(prog.body.len(), 1);
-    }
-}
-
-impl std::fmt::Debug for Parser {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Parser").finish()
     }
 }

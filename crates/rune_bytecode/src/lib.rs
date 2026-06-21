@@ -1,3 +1,3 @@
-pub mod opcode;
-pub mod block;
 pub mod analysis;
+pub mod block;
+pub mod opcode;

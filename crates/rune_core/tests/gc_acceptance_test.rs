@@ -80,8 +80,14 @@ fn test_multiple_gc_cycles() {
     ss.collect();
 
     unsafe {
-        assert_eq!(JSObject::get_slot(root_a as *mut JSObject, 0).as_smi(), Some(0));
-        assert_eq!(JSObject::get_slot(root_b as *mut JSObject, 0).as_smi(), Some(1000));
+        assert_eq!(
+            JSObject::get_slot(root_a as *mut JSObject, 0).as_smi(),
+            Some(0)
+        );
+        assert_eq!(
+            JSObject::get_slot(root_b as *mut JSObject, 0).as_smi(),
+            Some(1000)
+        );
     }
     ss.clear_roots();
 }
@@ -132,7 +138,7 @@ fn test_rapid_gc() {
         // Verify root survived with correct value
         unsafe {
             let val = JSObject::get_slot(root as *mut JSObject, 0);
-            assert_eq!(val.as_smi(), Some((cycle * 1000) as i32));
+            assert_eq!(val.as_smi(), Some(cycle * 1000));
         }
         ss.clear_roots();
     }

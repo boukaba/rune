@@ -91,7 +91,10 @@ fn test_gc_object_graph() {
     let mut chain: Vec<u64> = Vec::with_capacity(n);
 
     for _ in 0..n {
-        let inner = chain.first().copied().map(|p| Value::from_heap_ptr(p as *mut u8));
+        let inner = chain
+            .first()
+            .copied()
+            .map(|p| Value::from_heap_ptr(p as *mut u8));
         let val = inner.unwrap_or(Value::smi(42));
         let obj = JSObject::allocate(&mut ss, shape, &[val]);
         chain.insert(0, obj as u64);

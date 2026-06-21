@@ -1,6 +1,6 @@
-use std::collections::HashSet;
-use crate::opcode::{Instruction, Opcode};
 use crate::block::ControlFlowGraph;
+use crate::opcode::{Instruction, Opcode};
+use std::collections::HashSet;
 
 /// Per-block liveness information: which local variables are live
 /// at the entry and exit of each basic block.
@@ -27,7 +27,9 @@ fn compute_use_def(
     for (b_idx, block) in blocks.iter().enumerate() {
         let mut defd = HashSet::new();
         for i in block.start..block.end {
-            if i >= instrs.len() { break; }
+            if i >= instrs.len() {
+                break;
+            }
             match instrs[i].opcode {
                 Opcode::LoadLocal => {
                     let idx = instrs[i].operands[0] as usize;
@@ -55,10 +57,17 @@ fn compute_use_def(
 /// `live_in` / `live_out` sets, bounded by `local_count`.
 ///
 /// Returns live_in and live_out per block (indexed by block ID).
-pub fn liveness(cfg: &ControlFlowGraph, instrs: &[Instruction], _local_count: usize) -> LivenessInfo {
+pub fn liveness(
+    cfg: &ControlFlowGraph,
+    instrs: &[Instruction],
+    _local_count: usize,
+) -> LivenessInfo {
     let n = cfg.blocks.len();
     if n == 0 {
-        return LivenessInfo { live_in: vec![], live_out: vec![] };
+        return LivenessInfo {
+            live_in: vec![],
+            live_out: vec![],
+        };
     }
 
     let (use_set, def_set) = compute_use_def(&cfg.blocks, instrs);
@@ -101,8 +110,8 @@ pub fn liveness(cfg: &ControlFlowGraph, instrs: &[Instruction], _local_count: us
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::opcode::{Instruction, Opcode};
     use crate::block::build_cfg;
+    use crate::opcode::{Instruction, Opcode};
 
     #[test]
     fn test_liveness_multi_block() {
@@ -130,7 +139,10 @@ mod tests {
         // i is used in both B1 (idx 5) and join block (idx 11),
         // so it should be live at exit of B0 and at entry of B1 and join.
         let join_block = cfg.blocks.iter().find(|b| b.start == 11).unwrap();
-        assert!(info.live_in[join_block.id].contains(&0), "i live at join entry");
+        assert!(
+            info.live_in[join_block.id].contains(&0),
+            "i live at join entry"
+        );
     }
 
     #[test]
@@ -140,20 +152,20 @@ mod tests {
         //            LoadLocal 0; LoadSmi 10; Lt; JumpIfFalse end; Jump loop; end: Return
         let instrs = vec![
             Instruction::new(Opcode::LoadSmi, vec![0]),
-            Instruction::new(Opcode::StoreLocal, vec![0]),  // i=0 (def 0)
+            Instruction::new(Opcode::StoreLocal, vec![0]), // i=0 (def 0)
             Instruction::new(Opcode::Pop, vec![]),
             // loop header
-            Instruction::new(Opcode::LoadLocal, vec![0]),   // use 0
+            Instruction::new(Opcode::LoadLocal, vec![0]), // use 0
             Instruction::new(Opcode::LoadSmi, vec![1]),
             Instruction::new(Opcode::Add, vec![]),
-            Instruction::new(Opcode::StoreLocal, vec![0]),  // def 0
+            Instruction::new(Opcode::StoreLocal, vec![0]), // def 0
             Instruction::new(Opcode::Pop, vec![]),
-            Instruction::new(Opcode::LoadLocal, vec![0]),   // use 0
+            Instruction::new(Opcode::LoadLocal, vec![0]), // use 0
             Instruction::new(Opcode::LoadSmi, vec![10]),
             Instruction::new(Opcode::Lt, vec![]),
-            Instruction::new(Opcode::JumpIfFalse, vec![13]),// to end
-            Instruction::new(Opcode::Jump, vec![3]),        // back to loop
-            Instruction::new(Opcode::Return, vec![]),       // end
+            Instruction::new(Opcode::JumpIfFalse, vec![13]), // to end
+            Instruction::new(Opcode::Jump, vec![3]),         // back to loop
+            Instruction::new(Opcode::Return, vec![]),        // end
         ];
         let cfg = build_cfg(&instrs);
         let info = liveness(&cfg, &instrs, 1);
@@ -163,10 +175,19 @@ mod tests {
         // B3: [13..14) — return
 
         // i should be live at entry of loop body
-        assert!(info.live_in[1].contains(&0), "i should be live at entry of loop body");
+        assert!(
+            info.live_in[1].contains(&0),
+            "i should be live at entry of loop body"
+        );
         // i should be live at exit of init block (B0 → B1 needs it)
-        assert!(info.live_out[0].contains(&0), "i should be live at exit of init block");
+        assert!(
+            info.live_out[0].contains(&0),
+            "i should be live at exit of init block"
+        );
         // i should be live at exit of loop body (back-edge to itself)
-        assert!(info.live_out[1].contains(&0), "i should be live at exit of loop body");
+        assert!(
+            info.live_out[1].contains(&0),
+            "i should be live at exit of loop body"
+        );
     }
 }

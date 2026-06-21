@@ -18,6 +18,12 @@ pub struct Generator {
 
 impl Generator {
     pub fn new(locals: Vec<Value>, prog: *const BytecodeProgram) -> Self {
-        Generator { locals, pc: 0, prog, started: false, done: false }
+        Generator {
+            locals,
+            pc: 0,
+            prog,
+            started: false,
+            done: false,
+        }
     }
 }

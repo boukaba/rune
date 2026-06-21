@@ -12,7 +12,7 @@ pub struct Func;
 
 impl Func {
     pub fn allocate(ss: &mut SemiSpace, func_idx: u64, prog_ptr: *const u8) -> *mut Func {
-        let ptr = ss.alloc(48) as *mut u8;
+        let ptr = ss.alloc(48);
         unsafe {
             let header = &mut *(ptr as *mut GcHeader);
             header.word = std::sync::atomic::AtomicU64::new(TAG_FUNC);
@@ -83,7 +83,7 @@ impl Func {
         unsafe {
             let ptr_bytes = ptr as *mut u8;
             let p = ptr_bytes.add(size_of::<GcHeader>() + 24) as *mut u32;
-            *p = *p + 1;
+            *p += 1;
         }
     }
 
@@ -101,7 +101,11 @@ impl Func {
         unsafe {
             let ptr_bytes = ptr as *mut u8;
             let raw = *(ptr_bytes.add(size_of::<GcHeader>() + 32) as *const u64);
-            if raw == 0 { std::ptr::null() } else { raw as *const u8 }
+            if raw == 0 {
+                std::ptr::null()
+            } else {
+                raw as *const u8
+            }
         }
     }
 }

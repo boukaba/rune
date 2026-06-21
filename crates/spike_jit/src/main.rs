@@ -1,4 +1,3 @@
-use libc;
 use std::mem;
 
 mod assembler;
@@ -67,14 +66,20 @@ fn main() {
     let add3: JitFn = unsafe { mem::transmute(add3_ptr) };
 
     let cases: [(&str, i64, i64, i64, i64); 5] = [
-        ("positive",  10, 20, 30,      60),
-        ("mixed",    -5, 10, 100,     105),
-        ("large",     1_000_000_000, 500_000_000, 200_000_000, 1_700_000_000),
-        ("zero",      0, 0, 0,         0),
+        ("positive", 10, 20, 30, 60),
+        ("mixed", -5, 10, 100, 105),
+        (
+            "large",
+            1_000_000_000,
+            500_000_000,
+            200_000_000,
+            1_700_000_000,
+        ),
+        ("zero", 0, 0, 0, 0),
         ("negative", -100, -200, -300, -600),
     ];
 
-    for (name, a, b, c, expected) in cases {
+    for (_name, a, b, c, expected) in cases {
         let result = unsafe { add3(a, b, c) };
         assert_eq!(result, expected);
         println!("  add3({a}, {b}, {c}) = {result}  [PASS]");

@@ -13,7 +13,7 @@ impl HeapString {
         let utf16: Vec<u16> = text.encode_utf16().collect();
         let len = utf16.len();
         let obj_size = size_of::<GcHeader>() + size_of::<u32>() + len * 2;
-        let ptr = ss.alloc(obj_size) as *mut u8;
+        let ptr = ss.alloc(obj_size);
         unsafe {
             let header = &mut *(ptr as *mut GcHeader);
             header.word = std::sync::atomic::AtomicU64::new(TAG_STRING);
@@ -65,11 +65,10 @@ impl HeapString {
                         continue;
                     }
                 }
-                if !(0xDC00..=0xDFFF).contains(&cp) {
-                    if let Some(c) = char::from_u32(cp) {
+                if !(0xDC00..=0xDFFF).contains(&cp)
+                    && let Some(c) = char::from_u32(cp) {
                         s.push(c);
                     }
-                }
                 i += 1;
             }
             s

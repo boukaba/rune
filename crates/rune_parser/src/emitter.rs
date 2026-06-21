@@ -1,5 +1,5 @@
-use rune_bytecode::opcode::{BytecodeProgram, Instruction, Opcode};
 use crate::ast::*;
+use rune_bytecode::opcode::{BytecodeProgram, Instruction, Opcode};
 
 /// Bytecode emitter. Walks an AST and produces instructions.
 pub struct Emitter {
@@ -14,6 +14,12 @@ pub struct Emitter {
     loop_cont_stack: Vec<usize>,
     switch_exit_stack: Vec<usize>,
     switch_break_jumps: Vec<usize>,
+}
+
+impl Default for Emitter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Emitter {
@@ -59,7 +65,11 @@ impl Emitter {
     }
 
     fn intern_float(&mut self, v: f64) -> usize {
-        if let Some(idx) = self.float_pool.iter().position(|x| x.to_bits() == v.to_bits()) {
+        if let Some(idx) = self
+            .float_pool
+            .iter()
+            .position(|x| x.to_bits() == v.to_bits())
+        {
             return idx;
         }
         let idx = self.float_pool.len();
@@ -253,7 +263,9 @@ impl Emitter {
                 self.emit(Opcode::TryBegin, vec![0, 0]);
 
                 // --- try body ---
-                for stmt in body.iter() { self.emit_statement(stmt); }
+                for stmt in body.iter() {
+                    self.emit_statement(stmt);
+                }
 
                 match (catch_opt, finalizer_opt) {
                     (Some(c), None) => {
@@ -267,17 +279,24 @@ impl Emitter {
                             if !self.locals.contains(&c.param.to_string()) {
                                 self.locals.push(c.param.to_string());
                             }
-                            self.emit(Opcode::StoreLocal, vec![self.local_index(&c.param).unwrap() as i64]);
+                            self.emit(
+                                Opcode::StoreLocal,
+                                vec![self.local_index(&c.param).unwrap() as i64],
+                            );
                         }
                         self.emit(Opcode::Pop, vec![]);
-                        for stmt in c.body.iter() { self.emit_statement(stmt); }
+                        for stmt in c.body.iter() {
+                            self.emit_statement(stmt);
+                        }
                         self.patch(past_catch, self.current());
                     }
                     (None, Some(fin)) => {
                         // try-finally (no catch) — no TryEnd, fall through to finally
                         let fin_entry = self.current();
                         self.patch_operand(try_idx, 1, fin_entry as i64);
-                        for stmt in fin.iter() { self.emit_statement(stmt); }
+                        for stmt in fin.iter() {
+                            self.emit_statement(stmt);
+                        }
                         let fd_pc = self.current();
                         let rethrow_pc = fd_pc + 2;
                         self.emit(Opcode::FinallyDone, vec![rethrow_pc as i64]);
@@ -295,14 +314,21 @@ impl Emitter {
                             if !self.locals.contains(&c.param.to_string()) {
                                 self.locals.push(c.param.to_string());
                             }
-                            self.emit(Opcode::StoreLocal, vec![self.local_index(&c.param).unwrap() as i64]);
+                            self.emit(
+                                Opcode::StoreLocal,
+                                vec![self.local_index(&c.param).unwrap() as i64],
+                            );
                         }
                         self.emit(Opcode::Pop, vec![]);
-                        for stmt in c.body.iter() { self.emit_statement(stmt); }
+                        for stmt in c.body.iter() {
+                            self.emit_statement(stmt);
+                        }
                         let fin_entry = self.current();
                         self.patch(past_catch, fin_entry);
                         self.patch_operand(try_idx, 1, fin_entry as i64);
-                        for stmt in fin.iter() { self.emit_statement(stmt); }
+                        for stmt in fin.iter() {
+                            self.emit_statement(stmt);
+                        }
                         let fd_pc = self.current();
                         let rethrow_pc = fd_pc + 2;
                         self.emit(Opcode::FinallyDone, vec![rethrow_pc as i64]);
@@ -320,11 +346,10 @@ impl Emitter {
             Stmt::ForIn(lhs, obj, body, _) => {
                 // for (var key in obj) { body }
                 // Register the loop variable as a local
-                if let Expr::Identifier(name, _) = lhs.as_ref() {
-                    if !self.locals.contains(&name.to_string()) {
+                if let Expr::Identifier(name, _) = lhs.as_ref()
+                    && !self.locals.contains(&name.to_string()) {
                         self.locals.push(name.to_string());
                     }
-                }
                 self.emit_expression(obj);
                 self.emit(Opcode::ForInInit, vec![]);
                 let loop_start = self.current();
@@ -505,49 +530,50 @@ impl Emitter {
                     self.emit_expression(arg);
                     match op {
                         UnaryOp::Minus => self.emit(Opcode::Neg, vec![]),
-                        UnaryOp::Plus => {},
+                        UnaryOp::Plus => {}
                         UnaryOp::Not => self.emit(Opcode::Not, vec![]),
                         UnaryOp::BitNot => self.emit(Opcode::BitNot, vec![]),
                         UnaryOp::Typeof => self.emit(Opcode::TypeOf, vec![]),
-                        UnaryOp::Void => { self.emit(Opcode::Pop, vec![]); self.emit(Opcode::LoadUndefined, vec![]); },
+                        UnaryOp::Void => {
+                            self.emit(Opcode::Pop, vec![]);
+                            self.emit(Opcode::LoadUndefined, vec![]);
+                        }
                         UnaryOp::Delete => unreachable!(),
                     }
                 }
             }
-            Expr::Update(op, arg, prefix, _) => {
-                match arg.as_ref() {
-                    Expr::Identifier(name, _) => {
-                        let opcode = match op {
-                            UpdateOp::PlusPlus => {
-                                if self.local_index(name).is_some() {
-                                    Opcode::IncLocal
-                                } else {
-                                    Opcode::IncGlobal
-                                }
+            Expr::Update(op, arg, prefix, _) => match arg.as_ref() {
+                Expr::Identifier(name, _) => {
+                    let opcode = match op {
+                        UpdateOp::PlusPlus => {
+                            if self.local_index(name).is_some() {
+                                Opcode::IncLocal
+                            } else {
+                                Opcode::IncGlobal
                             }
-                            UpdateOp::MinusMinus => {
-                                if self.local_index(name).is_some() {
-                                    Opcode::DecLocal
-                                } else {
-                                    Opcode::DecGlobal
-                                }
-                            }
-                        };
-                        let is_prefix = if *prefix { 1 } else { 0 };
-                        if let Some(idx) = self.local_index(name) {
-                            self.emit(opcode, vec![idx as i64, is_prefix]);
-                        } else {
-                            let name_idx = self.intern_string(name) as i64;
-                            self.emit(opcode, vec![name_idx, is_prefix]);
                         }
-                    }
-                    _ => {
-                        self.emit_expression(arg);
-                        self.emit(Opcode::Pop, vec![]);
-                        self.emit(Opcode::LoadUndefined, vec![]);
+                        UpdateOp::MinusMinus => {
+                            if self.local_index(name).is_some() {
+                                Opcode::DecLocal
+                            } else {
+                                Opcode::DecGlobal
+                            }
+                        }
+                    };
+                    let is_prefix = if *prefix { 1 } else { 0 };
+                    if let Some(idx) = self.local_index(name) {
+                        self.emit(opcode, vec![idx as i64, is_prefix]);
+                    } else {
+                        let name_idx = self.intern_string(name) as i64;
+                        self.emit(opcode, vec![name_idx, is_prefix]);
                     }
                 }
-            }
+                _ => {
+                    self.emit_expression(arg);
+                    self.emit(Opcode::Pop, vec![]);
+                    self.emit(Opcode::LoadUndefined, vec![]);
+                }
+            },
             Expr::Binary(op, lhs, rhs, _) => {
                 if *op == BinaryOp::Assign {
                     match lhs.as_ref() {
@@ -688,34 +714,32 @@ impl Emitter {
                 }
                 self.emit(Opcode::LoadProperty, vec![]);
             }
-            Expr::Assign(target, value, _) => {
-                match target.as_ref() {
-                    Expr::Identifier(name, _) => {
-                        self.emit_expression(value);
-                        if let Some(idx) = self.local_index(name) {
-                            self.emit(Opcode::StoreLocal, vec![idx as i64]);
-                        } else {
-                            let name_idx = self.intern_string(name) as i64;
-                            self.emit(Opcode::StoreGlobal, vec![name_idx]);
-                        }
-                    }
-                    Expr::Member(obj, prop, computed, _) => {
-                        self.emit_expression(obj);
-                        if *computed {
-                            self.emit_expression(prop);
-                        } else {
-                            let name = prop_name_as_string(prop);
-                            let idx = self.intern_string(&name) as i64;
-                            self.emit(Opcode::LoadStringConst, vec![idx]);
-                        }
-                        self.emit_expression(value);
-                        self.emit(Opcode::StoreProperty, vec![]);
-                    }
-                    _ => {
-                        self.emit_expression(value);
+            Expr::Assign(target, value, _) => match target.as_ref() {
+                Expr::Identifier(name, _) => {
+                    self.emit_expression(value);
+                    if let Some(idx) = self.local_index(name) {
+                        self.emit(Opcode::StoreLocal, vec![idx as i64]);
+                    } else {
+                        let name_idx = self.intern_string(name) as i64;
+                        self.emit(Opcode::StoreGlobal, vec![name_idx]);
                     }
                 }
-            }
+                Expr::Member(obj, prop, computed, _) => {
+                    self.emit_expression(obj);
+                    if *computed {
+                        self.emit_expression(prop);
+                    } else {
+                        let name = prop_name_as_string(prop);
+                        let idx = self.intern_string(&name) as i64;
+                        self.emit(Opcode::LoadStringConst, vec![idx]);
+                    }
+                    self.emit_expression(value);
+                    self.emit(Opcode::StoreProperty, vec![]);
+                }
+                _ => {
+                    self.emit_expression(value);
+                }
+            },
             Expr::CompoundAssign(op, target, rhs, _) => {
                 let bin_opcode = compound_binary_opcode(*op);
                 match target.as_ref() {

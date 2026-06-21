@@ -12,7 +12,7 @@ pub struct HeapFloat64;
 impl HeapFloat64 {
     pub fn allocate(ss: &mut SemiSpace, val: f64) -> *mut HeapFloat64 {
         let obj_size = size_of::<GcHeader>() + size_of::<f64>();
-        let ptr = ss.alloc(obj_size) as *mut u8;
+        let ptr = ss.alloc(obj_size);
         unsafe {
             let header = &mut *(ptr as *mut GcHeader);
             header.word = std::sync::atomic::AtomicU64::new(TAG_FLOAT64);

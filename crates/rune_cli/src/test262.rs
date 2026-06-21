@@ -5,7 +5,6 @@
 ///
 /// Expects the Test262 suite at the given path or the `TEST262_DIR` env var.
 /// If neither is provided, looks for `./test262` relative to the working directory.
-
 use std::path::{Path, PathBuf};
 
 /// Outcome of a single test.
@@ -106,7 +105,7 @@ pub fn run_suite(suite_dir: &Path, subdir: Option<&str>) -> usize {
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "js"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "js"))
     {
         count += 1;
         let path = entry.path().to_path_buf();
@@ -170,10 +169,21 @@ fn build_test_source(test: &TestCase) -> Result<String, String> {
     // Don't inject sta.js — builtins provide Test262Error, $DONOTEVALUATE
     // Don't inject assert.js — uses unsupported features (typeof, JSON, bigint, etc.)
     // Include other requested harness files (skip known ones that use unsupported features)
-    const SKIP_INCLUDES: &[&str] = &["sta.js", "sta", "assert.js", "assert", "fnGlobalObject.js",
-        "doneprintHandle.js", "testTypedArray.js", "testBigIntTypedArray.js",
-        "byteConversionValues.js", "nans.js", "proxyTrapsHelper.js",
-        "dateConstants.js", "propertyHelper.js"];
+    const SKIP_INCLUDES: &[&str] = &[
+        "sta.js",
+        "sta",
+        "assert.js",
+        "assert",
+        "fnGlobalObject.js",
+        "doneprintHandle.js",
+        "testTypedArray.js",
+        "testBigIntTypedArray.js",
+        "byteConversionValues.js",
+        "nans.js",
+        "proxyTrapsHelper.js",
+        "dateConstants.js",
+        "propertyHelper.js",
+    ];
 
     for include in &test.meta.includes {
         if SKIP_INCLUDES.contains(&include.as_str()) {
@@ -195,8 +205,11 @@ fn strip_frontmatter(source: &str) -> String {
     let start = source.find("/*---");
     let end = source.rfind("---*/");
     match (start, end) {
-        (Some(s), Some(e)) if s == 0 => {
-            let after = source[e + 5..].find('\n').map(|i| e + 5 + i + 1).unwrap_or(source.len());
+        (Some(0), Some(e)) => {
+            let after = source[e + 5..]
+                .find('\n')
+                .map(|i| e + 5 + i + 1)
+                .unwrap_or(source.len());
             source[after..].trim().to_string()
         }
         _ => source.to_string(),
@@ -206,14 +219,23 @@ fn strip_frontmatter(source: &str) -> String {
 /// Run a single test case, catching Rust panics to keep the runner alive.
 fn run_test(test: &TestCase) -> Outcome {
     // Skip tests with unsupported features
-    if let Some(features) = test.meta.flags.iter().find(|f| UNSUPPORTED_FEATURES.contains(&f.as_str())) {
-        return Outcome::Skipped { reason: format!("unsupported feature: {features}") };
+    if let Some(features) = test
+        .meta
+        .flags
+        .iter()
+        .find(|f| UNSUPPORTED_FEATURES.contains(&f.as_str()))
+    {
+        return Outcome::Skipped {
+            reason: format!("unsupported feature: {features}"),
+        };
     }
 
     // Skip tests with flags we can't handle
     for flag in &test.meta.flags {
         if UNSKIPPABLE_FLAGS.contains(&flag.as_str()) {
-            return Outcome::Skipped { reason: format!("unsupported flag: {flag}") };
+            return Outcome::Skipped {
+                reason: format!("unsupported flag: {flag}"),
+            };
         }
     }
 
@@ -224,7 +246,9 @@ fn run_test(test: &TestCase) -> Outcome {
 
     // Skip tests containing $DONOTEVALUATE (must not be executed)
     if source.contains("$DONOTEVALUATE") {
-        return Outcome::Skipped { reason: "contains $DONOTEVALUATE".to_string() };
+        return Outcome::Skipped {
+            reason: "contains $DONOTEVALUATE".to_string(),
+        };
     }
 
     // Check for negative tests (expected to fail)
@@ -264,7 +288,9 @@ fn run_test(test: &TestCase) -> Outcome {
                 } else {
                     "unknown panic".to_string()
                 };
-                Outcome::Fail { message: format!("panic: {msg}") }
+                Outcome::Fail {
+                    message: format!("panic: {msg}"),
+                }
             }
         }
     }
@@ -292,11 +318,17 @@ fn parse_metadata(source: &str) -> TestMeta {
         } else if let Some(val) = line.strip_prefix("includes: ") {
             let list = val.trim().strip_prefix('[').unwrap_or(val.trim());
             let list = list.strip_suffix(']').unwrap_or(list.trim());
-            meta.includes = list.split(',').map(|s| s.trim().trim_matches('"').to_string()).collect();
+            meta.includes = list
+                .split(',')
+                .map(|s| s.trim().trim_matches('"').to_string())
+                .collect();
         } else if let Some(val) = line.strip_prefix("flags: ") {
             let list = val.trim().strip_prefix('[').unwrap_or(val.trim());
             let list = list.strip_suffix(']').unwrap_or(list.trim());
-            meta.flags = list.split(',').map(|s| s.trim().trim_matches('"').to_string()).collect();
+            meta.flags = list
+                .split(',')
+                .map(|s| s.trim().trim_matches('"').to_string())
+                .collect();
         } else if line == "negative:" {
             negative_next = true;
         } else if negative_next {

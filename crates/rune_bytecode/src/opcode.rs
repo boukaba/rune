@@ -96,7 +96,11 @@ pub struct Instruction {
 
 impl Instruction {
     pub fn new(opcode: Opcode, operands: Vec<i64>) -> Self {
-        Instruction { opcode, operands, ic_index: -1 }
+        Instruction {
+            opcode,
+            operands,
+            ic_index: -1,
+        }
     }
 }
 
@@ -130,7 +134,15 @@ impl BytecodeProgram {
         string_pool: Vec<String>,
         functions: Vec<BytecodeProgram>,
     ) -> Self {
-        BytecodeProgram { instructions, string_pool, float_pool: vec![], functions, named_function: false, is_generator: false, local_names: vec![] }
+        BytecodeProgram {
+            instructions,
+            string_pool,
+            float_pool: vec![],
+            functions,
+            named_function: false,
+            is_generator: false,
+            local_names: vec![],
+        }
     }
 
     /// Intern a string into the pool and return its index.

@@ -598,3 +598,10 @@ fn test_prototype_shadow() {
     "#).unwrap();
     assert_eq!(r.as_smi(), None, "shadowed value is a string, not a number");
 }
+
+#[test]
+fn test_new_opcode_returns_object() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("new Object()").unwrap();
+    assert!(r.is_heap_object(), "new Object() should return an object");
+}

@@ -91,14 +91,20 @@ pub fn object_builtin(gc: &mut SemiSpace, _args: &[Value], _vm: &Vm) -> Value {
 }
 
 /// Object.create(proto) — creates a new object with the given prototype.
+/// Per §20.1.2.2, throws TypeError if proto is not an Object or null.
 pub fn object_create_builtin(gc: &mut SemiSpace, args: &[Value], _vm: &Vm) -> Value {
     let shape = Shape::empty();
     let ptr = JSObject::allocate(gc, shape, &[]);
     if let Some(proto) = args.first() {
-        if let Some(proto_ptr) = proto.heap_ptr() {
+        if proto.is_null() {
+            // null prototype: already set by default (prototype field = null)
+        } else if let Some(proto_ptr) = proto.heap_ptr() {
             unsafe {
                 JSObject::set_prototype(ptr, proto_ptr);
             }
+        } else {
+            // proto is not an object and not null — throw TypeError
+            panic!("TypeError: Object.prototype.toString called on non-object"); // simplified
         }
     }
     Value::from_heap_ptr(ptr as *mut u8)

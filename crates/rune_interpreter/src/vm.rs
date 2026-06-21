@@ -825,10 +825,7 @@ impl Vm {
                         if smi_val < 0 {
                             let id = ((-smi_val) as usize) - 1;
                             if id < self.builtins.len() {
-                                // Builtins receive the new object as first arg? 
-                                // For now, just call the builtin normally
                                 let result = (self.builtins[id].func)(gc, &args, &*self);
-                                // If result is an object, use it; otherwise use the new object
                                 if result.is_heap_object() {
                                     self.push(result);
                                 } else {
@@ -839,7 +836,21 @@ impl Vm {
                             }
                         }
                     }
-                    // For non-builtin constructors, just return the new empty object
+                    // Set prototype from constructor.prototype
+                    // §11.2.2 [[Construct]]: new object's [[Prototype]] = constructor.prototype
+                    if constructor.is_heap_object() {
+                        let key_val = Value::from_heap_ptr(
+                            HeapString::allocate(gc, "prototype") as *mut u8
+                        );
+                        let proto_val = load_property_recursive(constructor, key_val);
+                        if proto_val.is_heap_object() {
+                            if let Some(proto_ptr) = proto_val.heap_ptr() {
+                                unsafe {
+                                    JSObject::set_prototype(obj, proto_ptr);
+                                }
+                            }
+                        }
+                    }
                     self.push(obj_val);
                     self.frames[fi].pc = pc + 1;
                 }
@@ -1426,11 +1437,20 @@ fn value_to_prop_key(val: Value) -> Option<PropertyKey> {
     None
 }
 
+/// Maximum depth to walk the prototype chain before giving up (cycle guard).
+const MAX_PROTOTYPE_DEPTH: usize = 256;
+
 /// Walk the prototype chain to resolve a property.
 /// Implements OrdinaryGet (§10.1.8.1): check own property, then recurse on [[Prototype]].
+/// Returns undefined if the chain exceeds MAX_PROTOTYPE_DEPTH (prevents infinite loops on cycles).
 fn load_property_recursive(obj: Value, raw_key: Value) -> Value {
     let mut current = obj;
+    let mut depth = 0;
     loop {
+        if depth >= MAX_PROTOTYPE_DEPTH {
+            return Value::undefined();
+        }
+        depth += 1;
         if let Some(ptr) = current.heap_ptr() {
             let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
             if tag == TAG_OBJECT {

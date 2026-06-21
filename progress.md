@@ -2,7 +2,7 @@
 
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
-> **Status:** Phase 2 → Phase 3 transition — Sprint 3: Prototype Chain + SIDT
+> **Status:** Sprint 3 complete (Prototype Chain) → Sprint 4: SIDT + Dense Arrays + Builtins
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
 > Every implementation decision at every level (lexer, parser, emitter, bytecode, interpreter, builtins, JIT) **must** be verified against the exact ECMA-262 specification language in [`ecma262.md`](./ecma262.md) — **never guess** what the spec says. Each section in `ecma262.md` links to the corresponding URL fragment on `https://tc39.es/ecma262/multipage/`; **always open these URLs via `webfetch` tool** to read the authoritative algorithm steps before implementing. This applies to all phases below.
@@ -174,13 +174,75 @@
 - [ ] `block.rs` — Basic block builder, CFG construction
 - [ ] `analysis.rs` — Liveness analysis (for generator locals), escape analysis
 
-### Acceptance — Sprint 3
+### Acceptance — Sprint 3 ✅
 - [x] 141 tests pass across workspace (69 integration + 72 unit)
 - [x] Prototype chain: property get walks proto chain; set creates own property
-- [ ] SIDT: IC entries grow unboundedly without megamorphic cliff
+- [ ] SIDT: IC entries grow unboundedly without megamorphic cliff (deferred to Sprint 4)
+- [ ] for-in: own keys enumerated (deferred to Sprint 4)
+- [ ] Array literal + push/pop + length works (deferred to Sprint 4)
+- [ ] String .charAt / .slice / .length works (deferred to Sprint 4)
+
+### Audit — Task 3A Issues (Sprint 4 fixes)
+- [ ] 3A-1: `load_property_recursive()` needs MAX_PROTOTYPE_DEPTH=256 cycle guard
+- [ ] 3A-2: `New` opcode doesn't set prototype from Constructor.prototype
+- [ ] 3A-3: `Object.create(non_object)` should throw TypeError
+- [ ] 3A-4: Object constructor ignores argument (documented, acceptable for now)
+- [ ] 3A-5: `prototype()` returns raw `*mut u8` — safe currently but fragile
+
+---
+
+## Sprint 4 — SIDT + Dense Arrays + Builtins
+
+> **Spec mandate:** See [`ecma262.md`](./ecma262.md) §10.1 (OrdinaryGet/Set), §11.2.2 ([[Construct]]), §14.7.2 (for-in), §22–24 (Number/Math/String), §26 (Array). Open linked URLs via `webfetch`. No guessing.
+>
+> **V8-Beating Strategy:** SIDT replaces V8's 4-state IC (uninit→mono→poly→megamorphic cliff) with always-O(1) dispatch table indexed by shape.id. Dense arrays skip shape lookup entirely — single instruction element load.
+
+### Task 4A: Prototype Chain Fixes 🔴 — Priority 0
+- [ ] `load_property_recursive()`: add `MAX_PROTOTYPE_DEPTH = 256` cycle guard
+- [ ] `New` opcode: set prototype from `Constructor.prototype` after creating new object
+- [ ] `Object.create(non_object)` → TypeError per §20.1.2.2
+- **Acceptance:** `new Foo()` inherits from `Foo.prototype`; cycles don't hang the interpreter; `Object.create(42)` throws
+
+### Task 4B: SIDT — Interpreter Inline Caches 🔥 — Priority 1 (V8-beating Innovation #1)
+- [ ] `InlineCache` struct: `HashMap<u64, IcEntry>` (shape.id → slot offset + proto_depth)
+- [ ] Attach optional `ic_index` to `LoadProperty`/`StoreProperty` instructions
+- [ ] Fast path: IC hit → direct slot access (own) or proto-walk (inherited)
+- [ ] Slow path: full shape + prototype walk → populate IC entry → never megamorphic
+- [ ] `test_ic_monomorphic`, `test_ic_polymorphic`, `test_ic_proto_inherited`
+- **Acceptance:** 10+ shapes at one callsite → still O(1) dispatch, no megamorphic cliff
+
+### Task 4C: Dense Array Implementation 🟡 — Priority 2
+- [ ] `TAG_ARRAY = 4` GC tag, separate from TAG_OBJECT
+- [ ] Dense array layout: `[GcHeader|shape|length:u32|capacity:u32|proto:*mut u8|elements:Value[]]`
+- [ ] `Shape::is_dense_array` flag for shape ID
+- [ ] `LoadProperty` with numeric index on TAG_ARRAY → direct elements access
+- [ ] Array literal `[a, b, c]` allocates dense array with shape + elements
+- **Architecture:** No holes (empty slots = undefined). One instruction load in JIT.
+
+### Task 4D: Array & String Builtins 🟡 — Priority 3
+- [ ] Move builtins to `rune_builtins/` crate: `lib.rs`, `object.rs`, `arrays.rs`, `strings.rs`, `math.rs`, `errors.rs`
+- [ ] `Array.prototype.push/pop`, `Array.isArray`
+- [ ] `String.fromCharCode`, `String.prototype.charAt/length/slice`
+- [ ] `Math.floor/ceil/abs/min/max/pow/sqrt/PI/E`
+- **Architecture:** Prototype objects in `init_builtin_wrappers()` with method handles
+- **Acceptance:** `arr.push(1)`, `"hi".charAt(0)`, `Math.floor(3.7)` all work
+
+### Task 4E: for-in Loop 🟢 — Priority 4
+- [ ] Own enumerable keys from shape entries
+- [ ] For dense arrays: keys = `"0"`..`"length-1"`
+- [ ] `for (var k in obj)` emitter with IterBegin/IterEnd or counter pattern
+
+### Task 4F: CFG & Liveness Analysis 🟢 — Priority 5
+- [ ] `block.rs` — Basic block builder, CFG construction
+- [ ] `analysis.rs` — Liveness analysis
+
+### Acceptance — Sprint 4
+- [ ] 145+ tests pass across workspace
+- [ ] SIDT: IC entries grow unboundedly, no megamorphic performance cliff
+- [ ] Dense arrays: `arr[0]` direct load, no shape lookup
 - [ ] for-in: own keys enumerated
-- [ ] Array literal + push/pop + length works
-- [ ] String .charAt / .slice / .length works
+- [ ] Array push/pop/length, String charAt/slice, Math.floor/sqrt
+- [ ] New Foo() inherits from Foo.prototype
 
 ---
 

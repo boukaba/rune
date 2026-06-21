@@ -2,7 +2,7 @@
 
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
-> **Status:** Sprint 9 — Baseline JIT Foundation: ExecutableMemory + x86-64 assembler ✅ (9A done)
+> **Status:** Sprint 9 — Baseline JIT Foundation: Smi codegen ✅ (9A, 9B done)
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
 > Every implementation decision at every level (lexer, parser, emitter, bytecode, interpreter, builtins, JIT) **must** be verified against the exact ECMA-262 specification language in [`ecma262.md`](./ecma262.md) — **never guess** what the spec says. Each section in `ecma262.md` links to the corresponding URL fragment on `https://tc39.es/ecma262/multipage/`; **always open these URLs via `webfetch` tool** to read the authoritative algorithm steps before implementing. This applies to all phases below.
@@ -626,7 +626,13 @@
   - [x] x86-64: ret, nop, mov, add/sub/cmp, jmp/je/jne, call, push/pop with REX prefix support
   - [x] 12 unit tests; execution tests cfg-gated to x86_64 (safe on ARM)
   - [x] spike_jit: MAP_JIT conditional for Linux compat
-- [ ] 9B: JIT Compiler — Bytecode-to-native template compiler
+- [x] **9B: Bytecode-to-Native Codegen — Smi Arithmetic** — 190 tests passing (+2 new, +7 cfged)
+  - [x] CodeGen struct: prologue/epilogue with callee-saved registers (R15=VM, R14=GC, RBX=JIT stack)
+  - [x] Value stack: [rbx]-based push/pop (256 slots on native stack, 2KB)
+  - [x] Opcodes: LoadSmi, LoadUndefined, LoadNull, LoadBoolean, Return
+  - [x] Smi arithmetic: Add ((a&~1)+b), Sub ((a-b)|1), Mul (decode→imul→encode)
+  - [x] 2 offset-verification tests + 7 execution tests (cfg-gated to x86_64)
+  - [x] New assembler helpers: and/or imm8, add/sub r64 r64, imul, sar/shl by 1
 - [ ] 9C: IC Integration — Inline cache fast paths in generated code
 
 ## Phase 9 — v2 Features (Stretch)

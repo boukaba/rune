@@ -239,6 +239,75 @@ impl ExecutableMemory {
         }
         self.emit_byte(0x58 | (reg & 7));
     }
+
+    // -- Additional x86-64 helpers for codegen --
+
+    /// Emit just a REX.W prefix byte (0x48).
+    pub fn emit_rex_w(&mut self) {
+        self.emit_byte(0x48);
+    }
+
+    /// AND r64, imm8  (83 /4 ib)
+    pub fn emit_and_r64_imm8(&mut self, reg: u8, imm: i8) {
+        let b = (reg >> 3) & 1;
+        self.emit_rex(true, false, false, b != 0);
+        self.emit_byte(0x83);
+        self.emit_byte(modrm_reg_reg(4, reg));
+        self.emit_byte(imm as u8);
+    }
+
+    /// OR r64, imm8  (83 /1 ib)
+    pub fn emit_or_r64_imm8(&mut self, reg: u8, imm: i8) {
+        let b = (reg >> 3) & 1;
+        self.emit_rex(true, false, false, b != 0);
+        self.emit_byte(0x83);
+        self.emit_byte(modrm_reg_reg(1, reg));
+        self.emit_byte(imm as u8);
+    }
+
+    /// ADD r/m64, r64  (01 /r)  → r/m += reg
+    pub fn emit_add_r64_r64(&mut self, r_m: u8, reg: u8) {
+        let b_rm = (r_m >> 3) & 1;
+        let b_reg = (reg >> 3) & 1;
+        self.emit_rex(true, b_reg != 0, false, b_rm != 0);
+        self.emit_byte(0x01);
+        self.emit_byte(modrm_reg_reg(reg, r_m));
+    }
+
+    /// SUB r/m64, r64  (29 /r)  → r/m -= reg
+    pub fn emit_sub_r64_r64(&mut self, r_m: u8, reg: u8) {
+        let b_rm = (r_m >> 3) & 1;
+        let b_reg = (reg >> 3) & 1;
+        self.emit_rex(true, b_reg != 0, false, b_rm != 0);
+        self.emit_byte(0x29);
+        self.emit_byte(modrm_reg_reg(reg, r_m));
+    }
+
+    /// IMUL r64, r/m64  (0F AF /r)  → dst *= src
+    pub fn emit_imul_r64_r64(&mut self, dst: u8, src: u8) {
+        let r = (dst >> 3) & 1;
+        let b = (src >> 3) & 1;
+        self.emit_rex(true, r != 0, false, b != 0);
+        self.emit_byte(0x0F);
+        self.emit_byte(0xAF);
+        self.emit_byte(modrm_reg_reg(dst, src));
+    }
+
+    /// SAR r/m64, 1  (D1 /7) — arithmetic shift right by 1
+    pub fn emit_sar_r64_1(&mut self, reg: u8) {
+        let b = (reg >> 3) & 1;
+        self.emit_rex(true, false, false, b != 0);
+        self.emit_byte(0xD1);
+        self.emit_byte(modrm_reg_reg(7, reg));
+    }
+
+    /// SHL r/m64, 1  (D1 /4) — logical shift left by 1
+    pub fn emit_shl_r64_1(&mut self, reg: u8) {
+        let b = (reg >> 3) & 1;
+        self.emit_rex(true, false, false, b != 0);
+        self.emit_byte(0xD1);
+        self.emit_byte(modrm_reg_reg(4, reg));
+    }
 }
 
 // ---------------------------------------------------------------------------

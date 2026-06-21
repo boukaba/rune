@@ -64,6 +64,11 @@ impl Value {
         Value(ptr as u64)
     }
 
+    /// Reconstruct a Value from its raw u64 representation (e.g. from JIT output).
+    pub fn from_raw(raw: u64) -> Self {
+        Value(raw)
+    }
+
     pub const fn undefined() -> Self {
         Value(UNDEFINED_RAW)
     }

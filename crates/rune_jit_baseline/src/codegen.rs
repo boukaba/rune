@@ -3,6 +3,7 @@
 /// Registers (callee-saved):
 ///   R15 — VM pointer (from RDI)
 ///   R14 — GC SemiSpace pointer (from RSI)
+///   R13 — locals pointer (from RDX)
 ///   RBX — JIT value stack pointer (points into native stack)
 ///
 /// The JIT allocates a value stack on the native stack in the prologue
@@ -16,10 +17,17 @@ const JIT_STACK_SIZE: i32 = 256 * 8;
 
 /// A JIT-compiled function entry point.
 ///
+/// Arguments (System V AMD64 ABI):
+///   RDI = vm_ptr
+///   RSI = gc_ptr
+///   RDX = locals_ptr (pointer to current frame's Vec<Value>)
+///
+/// Returns a raw u64 Value.
+///
 /// # Safety
 ///
 /// Callers must pass valid pointers and ensure the code is executable.
-pub type JitEntryFn = unsafe fn(vm_ptr: *mut u8, gc_ptr: *mut u8) -> u64;
+pub type JitEntryFn = unsafe fn(vm_ptr: *mut u8, gc_ptr: *mut u8, locals_ptr: *mut u64) -> u64;
 
 pub struct CodeGen {
     mem: ExecutableMemory,
@@ -77,9 +85,11 @@ impl CodeGen {
         self.mem.emit_push_r64(5);   // push rbp
         self.mem.emit_push_r64(15);  // push r15 (VM ptr)
         self.mem.emit_push_r64(14);  // push r14 (GC ptr)
+        self.mem.emit_push_r64(13);  // push r13 (locals ptr)
         self.mem.emit_push_r64(3);   // push rbx (JIT stack ptr)
         self.mem.emit_mov_r64_rm64(15, 7); // r15 = rdi (VM ptr)
         self.mem.emit_mov_r64_rm64(14, 6); // r14 = rsi (GC ptr)
+        self.mem.emit_mov_r64_rm64(13, 2); // r13 = rdx (locals ptr)
         self.mem.emit_sub_r64_imm32(4, JIT_STACK_SIZE); // sub rsp, 2048
         self.mem.emit_mov_r64_rm64(3, 4);  // rbx = rsp
     }
@@ -87,6 +97,7 @@ impl CodeGen {
     fn emit_epilogue(&mut self) {
         self.mem.emit_add_r64_imm32(4, JIT_STACK_SIZE); // add rsp, 2048
         self.mem.emit_pop_r64(3);   // pop rbx
+        self.mem.emit_pop_r64(13);  // pop r13
         self.mem.emit_pop_r64(14);  // pop r14
         self.mem.emit_pop_r64(15);  // pop r15
         self.mem.emit_pop_r64(5);   // pop rbp
@@ -199,6 +210,74 @@ impl CodeGen {
                     let patch = self.mem.emit_jbe_rel32(0);   // jbe target (falsy)
                     self.pending_patches.push((patch, target));
                 }
+                Opcode::LoadLocal => {
+                    let idx = instr.operands[0] as usize;
+                    let disp = (idx * 8) as i32;
+                    self.mem.emit_mov_r64_mem_disp32(0, 13, disp); // rax = locals[idx]
+                    self.emit_jit_stack_push();
+                }
+                Opcode::StoreLocal => {
+                    let idx = instr.operands[0] as usize;
+                    let disp = (idx * 8) as i32;
+                    self.emit_jit_stack_pop();                    // rax = value
+                    self.mem.emit_mov_mem_disp32_r64(13, disp, 0); // locals[idx] = rax
+                    self.emit_jit_stack_push();                   // push value back
+                }
+                Opcode::Pop => {
+                    self.emit_jit_stack_pop();
+                }
+                Opcode::Lt => {
+                    self.emit_jit_stack_pop();                    // rax = b
+                    self.mem.emit_mov_r64_rm64(1, 0);             // rcx = b
+                    self.emit_jit_stack_pop();                    // rax = a
+                    self.mem.emit_cmp_r64_r64(0, 1);              // cmp a, b
+                    // setl al -> movzx eax, al -> shl eax, 1 -> or rax, 1
+                    // setl (0F 9C /0) sets al = 1 if a < b (signed), 0 otherwise
+                    self.mem.emit_byte(0x0F);
+                    self.mem.emit_byte(0x9C);
+                    self.mem.emit_byte(0xC0);                     // setl al
+                    self.mem.emit_byte(0x0F);
+                    self.mem.emit_byte(0xB6);
+                    self.mem.emit_byte(0xC0);                     // movzx eax, al
+                    self.mem.emit_byte(0xD1);
+                    self.mem.emit_byte(0xE0);                     // shl eax, 1
+                    self.mem.emit_or_r64_imm8(0, 1);              // or rax, 1
+                    self.emit_jit_stack_push();
+                }
+                Opcode::IncLocal => {
+                    let idx = instr.operands[0] as usize;
+                    let is_prefix = instr.operands[1] != 0;
+                    let disp = (idx * 8) as i32;
+                    // Load old value
+                    self.mem.emit_mov_r64_mem_disp32(0, 13, disp); // rax = locals[idx]
+                    self.mem.emit_mov_r64_rm64(1, 0);             // rcx = old
+                    // Smi increment: old_raw + 2 = Smi(n+1)
+                    self.mem.emit_add_r64_imm32(0, 2);             // rax = new
+                    self.mem.emit_mov_mem_disp32_r64(13, disp, 0); // locals[idx] = new
+                    // Push result
+                    if is_prefix {
+                        self.emit_jit_stack_push();                // push new
+                    } else {
+                        self.mem.emit_mov_r64_rm64(0, 1);          // rax = old
+                        self.emit_jit_stack_push();                // push old
+                    }
+                }
+                Opcode::DecLocal => {
+                    let idx = instr.operands[0] as usize;
+                    let is_prefix = instr.operands[1] != 0;
+                    let disp = (idx * 8) as i32;
+                    self.mem.emit_mov_r64_mem_disp32(0, 13, disp); // rax = locals[idx]
+                    self.mem.emit_mov_r64_rm64(1, 0);             // rcx = old
+                    // Smi decrement: old_raw - 2 = Smi(n-1)
+                    self.mem.emit_sub_r64_imm32(0, 2);             // rax = new
+                    self.mem.emit_mov_mem_disp32_r64(13, disp, 0); // locals[idx] = new
+                    if is_prefix {
+                        self.emit_jit_stack_push();
+                    } else {
+                        self.mem.emit_mov_r64_rm64(0, 1);
+                        self.emit_jit_stack_push();
+                    }
+                }
                 _ => {
                     self.mem.emit_byte(0xCC);
                 }
@@ -239,7 +318,7 @@ mod tests {
 
         let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
         // vm_ptr and gc_ptr are unused for this simple program
-        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut()) };
+        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
         // Smi(42) = (42 << 1) | 1 = 85
         assert_eq!(result, 85u64);
     }
@@ -257,7 +336,7 @@ mod tests {
         mem.make_executable();
 
         let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
-        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut()) };
+        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
         // Smi(10) + Smi(20) = Smi(30) = (30 << 1) | 1 = 61
         assert_eq!(result, 61u64);
     }
@@ -275,7 +354,7 @@ mod tests {
         mem.make_executable();
 
         let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
-        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut()) };
+        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
         // Smi(30) - Smi(10) = Smi(20) = (20 << 1) | 1 = 41
         assert_eq!(result, 41u64);
     }
@@ -293,7 +372,7 @@ mod tests {
         mem.make_executable();
 
         let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
-        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut()) };
+        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
         // Smi(6) * Smi(7) = Smi(42) = (42 << 1) | 1 = 85
         assert_eq!(result, 85u64);
     }
@@ -309,7 +388,7 @@ mod tests {
         mem.make_executable();
 
         let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
-        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut()) };
+        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
         assert_eq!(result, 0u64); // undefined = Value(0)
     }
 
@@ -324,7 +403,7 @@ mod tests {
         mem.make_executable();
 
         let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
-        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut()) };
+        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
         assert_eq!(result, 2u64); // null = Value(2)
     }
 
@@ -339,7 +418,7 @@ mod tests {
         mem.make_executable();
 
         let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
-        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut()) };
+        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
         assert_eq!(result, 7u64); // true = Value(7) = Smi(3)? No: true=7
     }
 
@@ -361,7 +440,7 @@ mod tests {
         mem.make_executable();
 
         let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
-        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut()) };
+        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
         // Smi(85) = (85 << 1) | 1 = 171
         assert_eq!(result, 171u64);
     }
@@ -386,7 +465,7 @@ mod tests {
         let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
         mem.make_executable();
         let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
-        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut()) };
+        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
         assert_eq!(result, 85u64); // Smi(42) = 85
     }
 
@@ -405,7 +484,7 @@ mod tests {
         let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
         mem.make_executable();
         let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
-        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut()) };
+        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
         assert_eq!(result, 199u64); // Smi(99) = 199
     }
 
@@ -424,7 +503,7 @@ mod tests {
         let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
         mem.make_executable();
         let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
-        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut()) };
+        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
         assert_eq!(result, 199u64); // Smi(99) = 199
     }
 
@@ -442,7 +521,7 @@ mod tests {
         let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
         mem.make_executable();
         let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
-        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut()) };
+        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
         assert_eq!(result, 199u64); // Smi(99) = 199
     }
 
@@ -466,18 +545,294 @@ mod tests {
     #[test]
     fn test_compile_load_smi_offset() {
         // Known byte count for LoadSmi + Return:
-        //   prologue: push rbp(1)+push r15(2)+push r14(2)+push rbx(1)+
-        //             mov r15,rdi(3)+mov r14,rsi(3)+sub rsp,2048(7)+mov rbx,rsp(3) = 22
+        //   prologue: push rbp(1)+push r15(2)+push r14(2)+push r13(2)+push rbx(1)+
+        //             mov r15,rdi(3)+mov r14,rsi(3)+mov r13,rdx(3)+sub rsp,2048(7)+mov rbx,rsp(3) = 27
         //   LoadSmi: mov rax,85(10)+push(3+4=7) = 17
-        //   Return:  pop(3+4=7)+epilogue(7+1+1+2+2+1=14)+ret(1) = 22
-        //   total approx: 22 + 17 + 22 = 61
+        //   Return:  pop(3+4=7)+epilogue(7+1+1+2+2+2+1=16)+ret(1) = 24
+        //   total approx: 27 + 17 + 24 = 68
         let prog = make_prog(vec![
             Instruction::new(Opcode::LoadSmi, vec![42]),
             Instruction::new(Opcode::Return, vec![]),
         ]);
         let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
-        // Verify it emitted a reasonable number of bytes (within 50-75)
-        assert!(mem.offset >= 50, "offset was {}", mem.offset);
-        assert!(mem.offset <= 75, "offset was {}", mem.offset);
+        // Verify it emitted a reasonable number of bytes (within 55-85)
+        assert!(mem.offset >= 55, "offset was {}", mem.offset);
+        assert!(mem.offset <= 85, "offset was {}", mem.offset);
+    }
+
+    // -------------------------------------------------------------------
+    // Local variable + comparison tests — execution (x86_64 only)
+    // -------------------------------------------------------------------
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_jit_load_local() {
+        // locals[0] = Smi(42); return locals[0];
+        // StoreLocal(0), Pop, LoadLocal(0), Return
+        let prog = make_prog(vec![
+            Instruction::new(Opcode::LoadSmi, vec![42]),
+            Instruction::new(Opcode::StoreLocal, vec![0]),
+            Instruction::new(Opcode::Pop, vec![]),
+            Instruction::new(Opcode::LoadLocal, vec![0]),
+            Instruction::new(Opcode::Return, vec![]),
+        ]);
+        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
+        mem.make_executable();
+        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        // Provide a local slot via a stack-allocated array
+        let mut locals: [u64; 1] = [0; 1];
+        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut(), locals.as_mut_ptr()) };
+        // Smi(42) = 85
+        assert_eq!(result, 85u64);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_jit_store_local_roundtrip() {
+        // locals[0] = Smi(10); locals[0] += Smi(20); return locals[0];
+        let prog = make_prog(vec![
+            Instruction::new(Opcode::LoadSmi, vec![10]),
+            Instruction::new(Opcode::StoreLocal, vec![0]),
+            Instruction::new(Opcode::Pop, vec![]),
+            Instruction::new(Opcode::LoadLocal, vec![0]),
+            Instruction::new(Opcode::LoadSmi, vec![20]),
+            Instruction::new(Opcode::Add, vec![]),
+            Instruction::new(Opcode::StoreLocal, vec![0]),
+            Instruction::new(Opcode::Pop, vec![]),
+            Instruction::new(Opcode::LoadLocal, vec![0]),
+            Instruction::new(Opcode::Return, vec![]),
+        ]);
+        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
+        mem.make_executable();
+        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let mut locals: [u64; 1] = [0; 1];
+        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut(), locals.as_mut_ptr()) };
+        // Smi(30) = 61
+        assert_eq!(result, 61u64);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_jit_lt() {
+        // 3 < 5 → Smi(1)=3 (true)
+        let prog = make_prog(vec![
+            Instruction::new(Opcode::LoadSmi, vec![3]),
+            Instruction::new(Opcode::LoadSmi, vec![5]),
+            Instruction::new(Opcode::Lt, vec![]),
+            Instruction::new(Opcode::Return, vec![]),
+        ]);
+        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
+        mem.make_executable();
+        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
+        // Smi(1) = 3
+        assert_eq!(result, 3u64);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_jit_lt_false() {
+        // 5 < 3 → Smi(0)=1 (false)
+        let prog = make_prog(vec![
+            Instruction::new(Opcode::LoadSmi, vec![5]),
+            Instruction::new(Opcode::LoadSmi, vec![3]),
+            Instruction::new(Opcode::Lt, vec![]),
+            Instruction::new(Opcode::Return, vec![]),
+        ]);
+        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
+        mem.make_executable();
+        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
+        // Smi(0) = 1
+        assert_eq!(result, 1u64);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_jit_lt_negative() {
+        // -3 < 5 → Smi(1)=3 (true)
+        let prog = make_prog(vec![
+            Instruction::new(Opcode::LoadSmi, vec![-3]),
+            Instruction::new(Opcode::LoadSmi, vec![5]),
+            Instruction::new(Opcode::Lt, vec![]),
+            Instruction::new(Opcode::Return, vec![]),
+        ]);
+        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
+        mem.make_executable();
+        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
+        // Smi(1) = 3
+        assert_eq!(result, 3u64);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_jit_inc_local_postfix() {
+        // locals[0] = Smi(5); locals[0]++; return locals[0];
+        let prog = make_prog(vec![
+            Instruction::new(Opcode::LoadSmi, vec![5]),
+            Instruction::new(Opcode::StoreLocal, vec![0]),
+            Instruction::new(Opcode::Pop, vec![]),
+            Instruction::new(Opcode::IncLocal, vec![0, 0]), // postfix: pushes old (5), stores 6
+            Instruction::new(Opcode::Pop, vec![]),
+            Instruction::new(Opcode::LoadLocal, vec![0]),
+            Instruction::new(Opcode::Return, vec![]),
+        ]);
+        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
+        mem.make_executable();
+        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let mut locals: [u64; 1] = [0; 1];
+        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut(), locals.as_mut_ptr()) };
+        // Smi(6) = 13
+        assert_eq!(result, 13u64);
+        // Verify local was incremented
+        assert_eq!(locals[0], 13); // Smi(6)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_jit_dec_local_prefix() {
+        // locals[0] = Smi(5); --locals[0]; return locals[0];
+        let prog = make_prog(vec![
+            Instruction::new(Opcode::LoadSmi, vec![5]),
+            Instruction::new(Opcode::StoreLocal, vec![0]),
+            Instruction::new(Opcode::Pop, vec![]),
+            Instruction::new(Opcode::DecLocal, vec![0, 1]), // prefix: pushes new (4), stores 4
+            Instruction::new(Opcode::Pop, vec![]),
+            Instruction::new(Opcode::LoadLocal, vec![0]),
+            Instruction::new(Opcode::Return, vec![]),
+        ]);
+        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
+        mem.make_executable();
+        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let mut locals: [u64; 1] = [0; 1];
+        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut(), locals.as_mut_ptr()) };
+        // Smi(4) = 9
+        assert_eq!(result, 9u64);
+        assert_eq!(locals[0], 9); // Smi(4)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_jit_loop() {
+        // var i = 0; var sum = 0;
+        // while (i < 5) { sum = sum + i; i++; }
+        // return sum;
+        //
+        // Bytecode layout (indices):
+        //   0: LoadSmi(0)        // sum = 0
+        //   1: StoreLocal(0)
+        //   2: Pop
+        //   3: LoadSmi(0)        // i = 0
+        //   4: StoreLocal(1)
+        //   5: Pop
+        //   6: LoadLocal(1)      // loop: load i
+        //   7: LoadSmi(5)
+        //   8: Lt                // i < 5
+        //   9: JumpIfFalse(19)   // exit
+        //  10: LoadLocal(0)      // sum
+        //  11: LoadLocal(1)      // i
+        //  12: Add               // sum + i
+        //  13: StoreLocal(0)
+        //  14: Pop
+        //  15: IncLocal(1, 0)   // i++ (postfix)
+        //  16: Pop
+        //  17: Jump(6)          // back to loop
+        //  18: LoadLocal(0)     // exit: return sum
+        //  19: Return
+
+        // Sum 0..4 = 10. Smi(10) = 21.
+        let instructions = vec![
+            Instruction::new(Opcode::LoadSmi, vec![0]),
+            Instruction::new(Opcode::StoreLocal, vec![0]),
+            Instruction::new(Opcode::Pop, vec![]),
+            Instruction::new(Opcode::LoadSmi, vec![0]),
+            Instruction::new(Opcode::StoreLocal, vec![1]),
+            Instruction::new(Opcode::Pop, vec![]),
+            // Loop header
+            Instruction::new(Opcode::LoadLocal, vec![1]),
+            Instruction::new(Opcode::LoadSmi, vec![5]),
+            Instruction::new(Opcode::Lt, vec![]),
+            Instruction::new(Opcode::JumpIfFalse, vec![19]),
+            // Body
+            Instruction::new(Opcode::LoadLocal, vec![0]),
+            Instruction::new(Opcode::LoadLocal, vec![1]),
+            Instruction::new(Opcode::Add, vec![]),
+            Instruction::new(Opcode::StoreLocal, vec![0]),
+            Instruction::new(Opcode::Pop, vec![]),
+            Instruction::new(Opcode::IncLocal, vec![1, 0]),
+            Instruction::new(Opcode::Pop, vec![]),
+            Instruction::new(Opcode::Jump, vec![6]),
+            // Exit
+            Instruction::new(Opcode::LoadLocal, vec![0]),
+            Instruction::new(Opcode::Return, vec![]),
+        ];
+        let prog = make_prog(instructions);
+        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
+        mem.make_executable();
+        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let mut locals: [u64; 2] = [0; 2];
+        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut(), locals.as_mut_ptr()) };
+        // Smi(10) = 21
+        assert_eq!(result, 21u64);
+    }
+
+    // -------------------------------------------------------------------
+    // Non-execution offset tests (all architectures)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_compile_store_local_offset() {
+        let prog = make_prog(vec![
+            Instruction::new(Opcode::LoadSmi, vec![42]),
+            Instruction::new(Opcode::StoreLocal, vec![0]),
+            Instruction::new(Opcode::Return, vec![]),
+        ]);
+        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
+        assert!(mem.offset >= 60, "offset was {}", mem.offset);
+        assert!(mem.offset <= 100, "offset was {}", mem.offset);
+    }
+
+    #[test]
+    fn test_compile_lt_offset() {
+        let prog = make_prog(vec![
+            Instruction::new(Opcode::LoadSmi, vec![3]),
+            Instruction::new(Opcode::LoadSmi, vec![5]),
+            Instruction::new(Opcode::Lt, vec![]),
+            Instruction::new(Opcode::Return, vec![]),
+        ]);
+        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
+        assert!(mem.offset >= 85, "offset was {}", mem.offset);
+        assert!(mem.offset <= 170, "offset was {}", mem.offset);
+    }
+
+    #[test]
+    fn test_compile_loop_offset() {
+        let instructions = vec![
+            Instruction::new(Opcode::LoadSmi, vec![0]),
+            Instruction::new(Opcode::StoreLocal, vec![0]),
+            Instruction::new(Opcode::Pop, vec![]),
+            Instruction::new(Opcode::LoadSmi, vec![0]),
+            Instruction::new(Opcode::StoreLocal, vec![1]),
+            Instruction::new(Opcode::Pop, vec![]),
+            Instruction::new(Opcode::LoadLocal, vec![1]),
+            Instruction::new(Opcode::LoadSmi, vec![5]),
+            Instruction::new(Opcode::Lt, vec![]),
+            Instruction::new(Opcode::JumpIfFalse, vec![19]),
+            Instruction::new(Opcode::LoadLocal, vec![0]),
+            Instruction::new(Opcode::LoadLocal, vec![1]),
+            Instruction::new(Opcode::Add, vec![]),
+            Instruction::new(Opcode::StoreLocal, vec![0]),
+            Instruction::new(Opcode::Pop, vec![]),
+            Instruction::new(Opcode::IncLocal, vec![1, 0]),
+            Instruction::new(Opcode::Pop, vec![]),
+            Instruction::new(Opcode::Jump, vec![6]),
+            Instruction::new(Opcode::LoadLocal, vec![0]),
+            Instruction::new(Opcode::Return, vec![]),
+        ];
+        let prog = make_prog(instructions);
+        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
+        assert!(mem.offset >= 140, "offset was {}", mem.offset);
+        assert!(mem.offset <= 500, "offset was {}", mem.offset);
     }
 }

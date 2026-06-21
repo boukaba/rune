@@ -156,6 +156,28 @@ impl ExecutableMemory {
         self.emit_byte(modrm_reg_reg(dst, src));
     }
 
+    /// MOV r64, [r64 + disp32]  (REX.W + 8B /r + disp32)
+    /// Loads a 64-bit value from memory at [base + disp32] into `reg`.
+    pub fn emit_mov_r64_mem_disp32(&mut self, reg: u8, base: u8, disp: i32) {
+        let r = (reg >> 3) & 1;
+        let b = (base >> 3) & 1;
+        self.emit_rex(true, r != 0, false, b != 0);
+        self.emit_byte(0x8B);
+        self.emit_byte(0x80 | ((reg & 7) << 3) | (base & 7));
+        self.emit_u32(disp as u32);
+    }
+
+    /// MOV [r64 + disp32], r64  (REX.W + 89 /r + disp32)
+    /// Stores a 64-bit value in `reg` to memory at [base + disp32].
+    pub fn emit_mov_mem_disp32_r64(&mut self, base: u8, disp: i32, reg: u8) {
+        let b = (base >> 3) & 1;
+        let r = (reg >> 3) & 1;
+        self.emit_rex(true, r != 0, false, b != 0);
+        self.emit_byte(0x89);
+        self.emit_byte(0x80 | ((reg & 7) << 3) | (base & 7));
+        self.emit_u32(disp as u32);
+    }
+
     /// Emit 81 /0 id: ADD r64, imm32
     pub fn emit_add_r64_imm32(&mut self, reg: u8, imm: i32) {
         let b = (reg >> 3) & 1;

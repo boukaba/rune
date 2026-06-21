@@ -413,14 +413,17 @@
 - [x] 4 integration tests: object, array, empty, null
 - [x] 170 tests pass (98 integration + 27 interpreter + 10 core + 25 parser + 5 gc + 5 gc acc + 2 spike)
 
-### Task 8E: CFG & Liveness Analysis 🟢 — Priority 6
-- [ ] `block.rs` — Basic block builder, CFG construction
-- [ ] `analysis.rs` — Liveness analysis
+### Task 8E: CFG & Liveness Analysis 🟢 — Priority 6 ✅
+- [x] `block.rs` — `build_cfg()`: leader identification, block partitioning, edge computation (Jump, JumpIfTrue/JumpIfFalse, ForInNext, Return, Throw, fall-through)
+- [x] `analysis.rs` — `liveness()`: iterative dataflow with per-block use/def sets, live_in/live_out computation
+- [x] `BytecodeProgram::build_cfg()` and `::liveness()` convenience methods on `BytecodeProgram`
+- [x] 6 unit tests: linear, if-else, loop, ForInNext CFG + multi-block liveness, loop liveness
+- [x] 176 tests pass (6 new bytecode + 170 existing)
 
 ### Acceptance — Sprint 7
 - [x] `new Foo(42)` works with both `this` binding and prototype inheritance
 - [x] Array auto-grows on push; `a.length` returns correct length
-- [x] 170 tests pass (98 integration + 27 interpreter + 10 core + 25 parser + 5 gc acceptance + 5 gc + 2 spike)
+- [x] 176 tests pass (98 integration + 27 interpreter + 10 core + 25 parser + 6 bytecode + 5 gc + 5 gc acc + 2 spike)
 - [x] `Array.isArray([1,2,3])` returns true; `Array.isArray(42)` returns false
 - [x] `String.fromCharCode(65)` returns a heap string
 - [x] `Math.PI` and `Math.E` are accessible as float64 values

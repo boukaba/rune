@@ -736,6 +736,8 @@ impl Vm {
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::Instanceof => {
+                    // TODO: §13.10.3 — check rhs[Symbol.hasInstance] first when Symbol lands.
+                    // If rhs has @@hasInstance, call it instead of OrdinaryHasInstance.
                     let rhs = self.pop();
                     let lhs = self.pop();
                     // §13.10.1: If Type(rhs) is not Object → TypeError

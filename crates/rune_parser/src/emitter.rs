@@ -12,6 +12,8 @@ pub struct Emitter {
     locals: Vec<String>,
     loop_exit_stack: Vec<usize>,
     loop_cont_stack: Vec<usize>,
+    switch_exit_stack: Vec<usize>,
+    switch_break_jumps: Vec<usize>,
 }
 
 impl Emitter {
@@ -26,6 +28,8 @@ impl Emitter {
             locals: Vec::new(),
             loop_exit_stack: Vec::new(),
             loop_cont_stack: Vec::new(),
+            switch_exit_stack: Vec::new(),
+            switch_break_jumps: Vec::new(),
         }
     }
 
@@ -217,7 +221,12 @@ impl Emitter {
                 }
             }
             Stmt::Break(_label, _) => {
-                if let Some(exit) = self.loop_exit_stack.last() {
+                if self.switch_exit_stack.last().is_some() {
+                    // Inside a switch — emit Jump with placeholder, track for patching
+                    let pos = self.current();
+                    self.emit(Opcode::Jump, vec![0]);
+                    self.switch_break_jumps.push(pos);
+                } else if let Some(exit) = self.loop_exit_stack.last() {
                     self.emit(Opcode::Jump, vec![*exit as i64]);
                 }
             }
@@ -311,32 +320,60 @@ impl Emitter {
             Stmt::ForIn(_, _, _, _) => {}
             Stmt::Switch(discriminant, cases, default_body, _) => {
                 self.emit_expression(discriminant);
-                let mut after_jumps = Vec::new();
+
+                // Mark switch context for break statements
+                let switch_marker = self.switch_break_jumps.len();
+                self.switch_exit_stack.push(switch_marker);
+
+                // === COMPARISON CHAIN ===
+                // Each case: Dup, load test, StrictEq, JumpIfFalse → skip
+                // If matched: Pop (remove dup), Jump → body entry in body section
+                let mut body_targets = Vec::new();
                 for case in cases {
                     self.emit(Opcode::Dup, vec![]);
                     self.emit_expression(&case.test);
                     self.emit(Opcode::StrictEq, vec![]);
                     let skip = self.current();
                     self.emit(Opcode::JumpIfFalse, vec![0]);
+                    // Matched — remove dup and jump to body
                     self.emit(Opcode::Pop, vec![]);
-                    for stmt in &case.body {
-                        self.emit_statement(stmt);
-                    }
-                    let after = self.current();
+                    let body_target = self.current();
                     self.emit(Opcode::Jump, vec![0]);
-                    after_jumps.push(after);
+                    body_targets.push(body_target);
                     self.patch(skip, self.current());
                 }
+
+                // No match — pop discriminant
                 self.emit(Opcode::Pop, vec![]);
+                let no_match_target = self.current();
+                self.emit(Opcode::Jump, vec![0]);
+
+                // === BODY SECTION ===
+                // Patch each case's body jump to its body location
+                for (i, &body_target) in body_targets.iter().enumerate() {
+                    self.patch(body_target, self.current());
+                    for stmt in &cases[i].body {
+                        self.emit_statement(stmt);
+                    }
+                }
+
+                // Default case body (also reachable via fall-through from last case)
+                let default_target = self.current();
                 if let Some(body) = default_body {
                     for stmt in body.iter() {
                         self.emit_statement(stmt);
                     }
                 }
+
                 let after_pc = self.current();
-                for &j in &after_jumps {
-                    self.patch(j, after_pc);
+                // Patch break jumps made inside case bodies
+                for i in switch_marker..self.switch_break_jumps.len() {
+                    self.patch(self.switch_break_jumps[i], after_pc);
                 }
+                self.switch_break_jumps.truncate(switch_marker);
+                // Patch no-match jump to default or past switch
+                self.patch(no_match_target, default_target);
+                self.switch_exit_stack.pop();
             }
         }
     }

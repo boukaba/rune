@@ -4,6 +4,9 @@ use crate::gc::{GcHeader, SemiSpace, TAG_FLOAT64, size_of};
 ///
 /// Memory layout:
 ///   [GcHeader(8) | f64 value(8)]
+///
+/// TODO Phase 5: Replace with NaN-boxing to inline f64 directly in Value,
+/// eliminating GC allocation for every float operation.
 pub struct HeapFloat64;
 
 impl HeapFloat64 {

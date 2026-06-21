@@ -517,3 +517,49 @@ fn test_typeof_float() {
     let r = ctx.eval("typeof 3.14").unwrap();
     assert!(r.heap_ptr().is_some(), "typeof float should return a string");
 }
+
+#[test]
+fn test_switch_fallthrough() {
+    let mut ctx = Context::new();
+    let r = ctx.eval(r#"
+        let x = 1;
+        let result = 0;
+        switch (x) {
+            case 1: result = 1;
+            case 2: result = 2; break;
+            default: result = 3;
+        }
+        result
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(2));
+}
+
+#[test]
+fn test_mod_zero_is_nan() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("5 % 0").unwrap();
+    assert!(r.is_float64() || r.is_smi(), "5 % 0 should be a number");
+    assert!(r.as_float64().map_or(false, |v| v.is_nan()), "5 % 0 should be NaN");
+}
+
+#[test]
+fn test_exp_negative() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("2 ** -1").unwrap();
+    assert!((r.as_float64().unwrap() - 0.5).abs() < 1e-10, "2 ** -1 should be 0.5");
+}
+
+#[test]
+fn test_null_plus_one() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("null + 1").unwrap();
+    assert_eq!(r.as_smi(), Some(1));
+}
+
+#[test]
+fn test_neg_zero_preserved() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("1 / -0").unwrap();
+    assert!(r.as_float64().unwrap().is_infinite(), "1 / -0 should be -Infinity");
+    assert!(r.as_float64().unwrap().is_sign_negative(), "1 / -0 should be negative");
+}

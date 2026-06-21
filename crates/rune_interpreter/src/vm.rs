@@ -279,7 +279,13 @@ impl Vm {
                 Opcode::Neg => {
                     let a = self.pop();
                     let result = if let Some(v) = a.as_smi() {
-                        Value::smi(v.wrapping_neg())
+                        if v == 0 {
+                            // Preserve -0.0 per spec (§13.5.5)
+                            let ptr = HeapFloat64::allocate(gc, -0.0f64);
+                            Value::from_float64_ptr(ptr as *mut u8)
+                        } else {
+                            Value::smi(v.wrapping_neg())
+                        }
                     } else if let Some(v) = a.as_float64() {
                         let ptr = HeapFloat64::allocate(gc, -v);
                         Value::from_float64_ptr(ptr as *mut u8)
@@ -382,7 +388,7 @@ impl Vm {
                     let b = self.pop();
                     let a = self.pop();
                     let result = if let (Some(av), Some(bv)) = (a.as_smi(), b.as_smi()) {
-                        if bv == 0 { Value::undefined() } else { Value::smi(av % bv) }
+                        if bv == 0 { number_result(gc, f64::NAN) } else { Value::smi(av % bv) }
                     } else {
                         let av = to_number(a);
                         let bv = to_number(b);
@@ -395,7 +401,7 @@ impl Vm {
                     let b = self.pop();
                     let a = self.pop();
                     let result = if let (Some(av), Some(bv)) = (a.as_smi(), b.as_smi()) {
-                        if bv < 0 { Value::undefined() } else { Value::smi(av.wrapping_pow(bv as u32)) }
+                        if bv < 0 { number_result(gc, (av as f64).powf(bv as f64)) } else { Value::smi(av.wrapping_pow(bv as u32)) }
                     } else {
                         let av = to_number(a);
                         let bv = to_number(b);
@@ -1421,6 +1427,8 @@ fn to_number(v: Value) -> f64 {
         n as f64
     } else if let Some(n) = v.as_float64() {
         n
+    } else if v.is_null() {
+        0.0
     } else {
         f64::NAN
     }
@@ -1433,11 +1441,17 @@ fn number_result(gc: &mut SemiSpace, val: f64) -> Value {
         return Value::from_float64_ptr(ptr as *mut u8);
     }
     if val.fract() == 0.0 {
+        // Preserve -0.0 as HeapFloat64; Smi would lose the sign bit
+        if val == 0.0 && val.is_sign_negative() {
+            let ptr = HeapFloat64::allocate(gc, val);
+            return Value::from_float64_ptr(ptr as *mut u8);
+        }
         let i = val as i64;
         if i >= -(1 << 30) as i64 && i < (1 << 30) as i64 {
             return Value::smi(val as i32);
         }
     }
+    // TODO Phase 5: Replace HeapFloat64 with NaN-boxing for zero-allocation arithmetic
     let ptr = HeapFloat64::allocate(gc, val);
     Value::from_float64_ptr(ptr as *mut u8)
 }

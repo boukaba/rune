@@ -8,6 +8,7 @@ pub enum Opcode {
     LoadBoolean,
     LoadString,
     LoadStringConst,
+    LoadFloat64,
     // Locals
     LoadLocal,
     StoreLocal,
@@ -104,6 +105,7 @@ impl Instruction {
 pub struct BytecodeProgram {
     pub instructions: Vec<Instruction>,
     pub string_pool: Vec<String>,
+    pub float_pool: Vec<f64>,
     pub functions: Vec<BytecodeProgram>,
     pub named_function: bool,
     pub is_generator: bool,
@@ -116,7 +118,7 @@ impl BytecodeProgram {
         string_pool: Vec<String>,
         functions: Vec<BytecodeProgram>,
     ) -> Self {
-        BytecodeProgram { instructions, string_pool, functions, named_function: false, is_generator: false, local_names: vec![] }
+        BytecodeProgram { instructions, string_pool, float_pool: vec![], functions, named_function: false, is_generator: false, local_names: vec![] }
     }
 
     /// Intern a string into the pool and return its index.

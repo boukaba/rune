@@ -7,6 +7,7 @@ pub struct Emitter {
     pub is_generator: bool,
     pub named_function: bool,
     pub string_pool: Vec<String>,
+    pub float_pool: Vec<f64>,
     pub nested_funcs: Vec<BytecodeProgram>,
     locals: Vec<String>,
     loop_exit_stack: Vec<usize>,
@@ -20,6 +21,7 @@ impl Emitter {
             is_generator: false,
             named_function: false,
             string_pool: Vec::new(),
+            float_pool: Vec::new(),
             nested_funcs: Vec::new(),
             locals: Vec::new(),
             loop_exit_stack: Vec::new(),
@@ -49,6 +51,15 @@ impl Emitter {
         }
         let idx = self.string_pool.len();
         self.string_pool.push(s.to_string());
+        idx
+    }
+
+    fn intern_float(&mut self, v: f64) -> usize {
+        if let Some(idx) = self.float_pool.iter().position(|x| x.to_bits() == v.to_bits()) {
+            return idx;
+        }
+        let idx = self.float_pool.len();
+        self.float_pool.push(v);
         idx
     }
 
@@ -298,6 +309,35 @@ impl Emitter {
             }
             Stmt::Empty(_) => {}
             Stmt::ForIn(_, _, _, _) => {}
+            Stmt::Switch(discriminant, cases, default_body, _) => {
+                self.emit_expression(discriminant);
+                let mut after_jumps = Vec::new();
+                for case in cases {
+                    self.emit(Opcode::Dup, vec![]);
+                    self.emit_expression(&case.test);
+                    self.emit(Opcode::StrictEq, vec![]);
+                    let skip = self.current();
+                    self.emit(Opcode::JumpIfFalse, vec![0]);
+                    self.emit(Opcode::Pop, vec![]);
+                    for stmt in &case.body {
+                        self.emit_statement(stmt);
+                    }
+                    let after = self.current();
+                    self.emit(Opcode::Jump, vec![0]);
+                    after_jumps.push(after);
+                    self.patch(skip, self.current());
+                }
+                self.emit(Opcode::Pop, vec![]);
+                if let Some(body) = default_body {
+                    for stmt in body.iter() {
+                        self.emit_statement(stmt);
+                    }
+                }
+                let after_pc = self.current();
+                for &j in &after_jumps {
+                    self.patch(j, after_pc);
+                }
+            }
         }
     }
 
@@ -335,7 +375,16 @@ impl Emitter {
     fn emit_expression(&mut self, expr: &Expr) {
         match expr {
             Expr::Number(val, _) => {
-                self.emit(Opcode::LoadSmi, vec![*val]);
+                let is_int = val.fract() == 0.0 && val.is_finite();
+                if is_int {
+                    let ival = *val as i64;
+                    if ival >= -(1 << 30) as i64 && ival < (1 << 30) as i64 {
+                        self.emit(Opcode::LoadSmi, vec![ival]);
+                        return;
+                    }
+                }
+                let idx = self.intern_float(*val) as i64;
+                self.emit(Opcode::LoadFloat64, vec![idx]);
             }
             Expr::String(val, _) => {
                 let idx = self.intern_string(val) as i64;
@@ -553,6 +602,7 @@ impl Emitter {
         program.named_function = self.named_function;
         program.is_generator = self.is_generator;
         program.local_names = self.locals;
+        program.float_pool = self.float_pool;
         program
     }
 }

@@ -88,7 +88,39 @@ impl Value {
         if let Some(v) = self.as_smi() {
             return v != 0;
         }
+        if let Some(v) = self.as_float64() {
+            return v != 0.0;
+        }
         true
+    }
+
+    /// Check if this is a heap-allocated float64 value.
+    pub fn is_float64(&self) -> bool {
+        if let Some(ptr) = self.heap_ptr() {
+            unsafe { (*(ptr as *const u64)) & 0b111 == 3 }
+        } else {
+            false
+        }
+    }
+
+    /// Extract f64 value if this is a heap-allocated float64.
+    pub fn as_float64(&self) -> Option<f64> {
+        if let Some(ptr) = self.heap_ptr() {
+            unsafe {
+                let header_word = *(ptr as *const u64);
+                if header_word & 0b111 == 3 {
+                    let val_ptr = ptr.add(8) as *const f64;
+                    return Some(*val_ptr);
+                }
+            }
+        }
+        None
+    }
+
+    /// Create a Value from a heap-allocated float64 pointer.
+    pub fn from_float64_ptr(ptr: *mut u8) -> Self {
+        debug_assert!(ptr as usize & 1 == 0, "misaligned float64 pointer");
+        Value(ptr as u64)
     }
 
     pub fn raw(&self) -> u64 {
@@ -109,6 +141,8 @@ impl fmt::Debug for Value {
         } else if self.is_null() {
             write!(f, "null")
         } else if let Some(v) = self.as_smi() {
+            write!(f, "{v}")
+        } else if let Some(v) = self.as_float64() {
             write!(f, "{v}")
         } else if self.is_heap_object() {
             write!(f, "<object @ {:#x}>", self.0)

@@ -9,7 +9,7 @@ pub struct Span {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
-    Number(i64, Span),
+    Number(f64, Span),
     String(Box<str>, Span),
     Boolean(bool, Span),
     Null(Span),
@@ -40,7 +40,7 @@ pub struct Property {
 #[derive(Clone, Debug, PartialEq)]
 pub enum PropKey {
     String(Box<str>),
-    Number(i64),
+    Number(f64),
     Identifier(Box<str>),
 }
 
@@ -117,8 +117,16 @@ pub enum Stmt {
     Break(Option<Box<str>>, Span),
     Continue(Option<Box<str>>, Span),
     Try(Box<[Stmt]>, Option<CatchClause>, Option<Box<[Stmt]>>, Span),
+    Switch(Box<Expr>, Vec<SwitchCase>, Option<Box<[Stmt]>>, Span),
     Function(Box<FnNode>, Span),
     Empty(Span),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SwitchCase {
+    pub test: Expr,
+    pub body: Vec<Stmt>,
+    pub span: Span,
 }
 
 #[derive(Clone, Debug, PartialEq)]

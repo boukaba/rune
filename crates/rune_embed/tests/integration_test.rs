@@ -456,3 +456,64 @@ fn test_typeof_basic() {
     let r = ctx.eval(r#"typeof 42"#).unwrap();
     assert!(r.heap_ptr().is_some(), "typeof should return a string");
 }
+
+#[test]
+fn test_float_literal() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("3.14").unwrap();
+    assert!(r.is_float64(), "3.14 should be a float");
+    assert!((r.as_float64().unwrap() - 3.14).abs() < 1e-10);
+}
+
+#[test]
+fn test_float_addition() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("1.5 + 2.5").unwrap();
+    assert_eq!(r.as_smi(), Some(4));
+}
+
+#[test]
+fn test_float_mixed_arith() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("1.5 + 3").unwrap();
+    assert!(r.is_float64(), "1.5 + 3 should be a float");
+}
+
+#[test]
+fn test_switch_basic() {
+    let mut ctx = Context::new();
+    let r = ctx.eval(r#"
+        let x = 2;
+        let result = 0;
+        switch (x) {
+            case 1: result = 10; break;
+            case 2: result = 20; break;
+            default: result = 30;
+        }
+        result
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(20));
+}
+
+#[test]
+fn test_switch_default() {
+    let mut ctx = Context::new();
+    let r = ctx.eval(r#"
+        let x = 99;
+        let result = 0;
+        switch (x) {
+            case 1: result = 10; break;
+            case 2: result = 20; break;
+            default: result = 30;
+        }
+        result
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(30));
+}
+
+#[test]
+fn test_typeof_float() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("typeof 3.14").unwrap();
+    assert!(r.heap_ptr().is_some(), "typeof float should return a string");
+}

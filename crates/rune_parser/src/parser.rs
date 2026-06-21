@@ -65,6 +65,7 @@ impl Parser {
             TokenKind::Break => self.parse_break_continue(true),
             TokenKind::Continue => self.parse_break_continue(false),
             TokenKind::Try => self.parse_try(),
+            TokenKind::Switch => self.parse_switch(),
             TokenKind::LBrace => self.parse_block(),
             TokenKind::Semicolon => {
                 let s = self.span();
@@ -230,6 +231,57 @@ impl Parser {
             None
         };
         Stmt::Try(body, catch, finalizer, Span { start: start.start, end: self.span().end })
+    }
+
+    fn parse_switch(&mut self) -> Stmt {
+        let start = self.span();
+        self.expect(TokenKind::Switch);
+        self.expect(TokenKind::LParen);
+        let discriminant = Box::new(self.parse_expr(0));
+        self.expect(TokenKind::RParen);
+        self.expect(TokenKind::LBrace);
+        let mut cases: Vec<SwitchCase> = Vec::new();
+        let mut default_body: Option<Box<[Stmt]>> = None;
+        loop {
+            match self.tok.kind {
+                TokenKind::Case => {
+                    let cs = self.span();
+                    self.advance();
+                    let test = self.parse_expr(0);
+                    self.expect(TokenKind::Colon);
+                    let mut body = Vec::new();
+                    while self.tok.kind != TokenKind::Case
+                        && self.tok.kind != TokenKind::Default
+                        && self.tok.kind != TokenKind::RBrace
+                        && self.tok.kind != TokenKind::Eof
+                    {
+                        body.push(self.parse_statement());
+                    }
+                    cases.push(SwitchCase { test, body, span: cs });
+                }
+                TokenKind::Default => {
+                    self.advance();
+                    self.expect(TokenKind::Colon);
+                    let mut body = Vec::new();
+                    while self.tok.kind != TokenKind::Case
+                        && self.tok.kind != TokenKind::Default
+                        && self.tok.kind != TokenKind::RBrace
+                        && self.tok.kind != TokenKind::Eof
+                    {
+                        body.push(self.parse_statement());
+                    }
+                    default_body = Some(body.into_boxed_slice());
+                }
+                TokenKind::RBrace => {
+                    self.advance();
+                    break;
+                }
+                _ => {
+                    self.advance();
+                }
+            }
+        }
+        Stmt::Switch(discriminant, cases, default_body, Span { start: start.start, end: self.span().end })
     }
 
     fn parse_if(&mut self) -> Stmt {
@@ -451,7 +503,7 @@ impl Parser {
             TokenKind::Number => {
                 let t = self.tok.clone();
                 self.advance();
-                let val = t.value.replace('_', "").parse::<i64>().unwrap_or(0);
+                let val = t.value.replace('_', "").parse::<f64>().unwrap_or(0.0);
                 Expr::Number(val, Span { start: start.start, end: t.span.end })
             }
             TokenKind::String => {
@@ -552,7 +604,7 @@ impl Parser {
             }
             TokenKind::Number => {
                 let t = self.tok.clone(); self.advance();
-                PropKey::Number(t.value.parse().unwrap_or(0))
+                PropKey::Number(t.value.replace('_', "").parse::<f64>().unwrap_or(0.0))
             }
             _ => {
                 let t = self.tok.clone(); self.advance();

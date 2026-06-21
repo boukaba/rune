@@ -1,6 +1,7 @@
 use rune_bytecode::opcode::{BytecodeProgram, Opcode};
+use rune_core::float::HeapFloat64;
 use rune_core::function::Func;
-use rune_core::gc::{GcHeader, SemiSpace, TAG_FUNC, TAG_STRING, TAG_OBJECT};
+use rune_core::gc::{GcHeader, SemiSpace, TAG_FUNC, TAG_STRING, TAG_OBJECT, TAG_FLOAT64};
 use rune_core::object::JSObject;
 use rune_core::shape::{PropertyKey, Shape};
 use rune_core::string::HeapString;
@@ -224,6 +225,22 @@ impl Vm {
                     self.push(Value::from_heap_ptr(ptr as *mut u8));
                     self.frames[fi].pc = pc + 1;
                 }
+                Opcode::LoadFloat64 => {
+                    let idx = instr.operands[0] as usize;
+                    let val = prog.float_pool.get(idx).copied().unwrap_or(0.0);
+                    let is_int = val.fract() == 0.0 && val.is_finite();
+                    if is_int {
+                        let i = val as i64;
+                        if i >= -(1 << 30) as i64 && i < (1 << 30) as i64 {
+                            self.push(Value::smi(val as i32));
+                            self.frames[fi].pc = pc + 1;
+                            continue;
+                        }
+                    }
+                    let ptr = HeapFloat64::allocate(gc, val);
+                    self.push(Value::from_float64_ptr(ptr as *mut u8));
+                    self.frames[fi].pc = pc + 1;
+                }
 
                 // ---- Locals ----
                 Opcode::LoadLocal => {
@@ -263,8 +280,16 @@ impl Vm {
                     let a = self.pop();
                     let result = if let Some(v) = a.as_smi() {
                         Value::smi(v.wrapping_neg())
+                    } else if let Some(v) = a.as_float64() {
+                        let ptr = HeapFloat64::allocate(gc, -v);
+                        Value::from_float64_ptr(ptr as *mut u8)
+                    } else if a.is_undefined() || a.is_null() {
+                        let ptr = HeapFloat64::allocate(gc, f64::NAN);
+                        Value::from_float64_ptr(ptr as *mut u8)
                     } else {
-                        Value::undefined()
+                        self.push(a);
+                        self.frames[fi].pc = pc + 1;
+                        continue;
                     };
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
@@ -294,16 +319,18 @@ impl Vm {
                 Opcode::Add => {
                     let b = self.pop();
                     let a = self.pop();
-                    let result = if let (Some(av), Some(bv)) = (a.as_smi(), b.as_smi()) {
-                        Value::smi(av.wrapping_add(bv))
-                    } else if a.is_heap_object() || b.is_heap_object() {
+                    let a_is_str = value_is_string(a);
+                    let b_is_str = value_is_string(b);
+                    let result = if a_is_str || b_is_str {
                         let sa = value_to_debug_string(a);
                         let sb = value_to_debug_string(b);
                         let combined = sa + &sb;
                         let ptr = HeapString::allocate(gc, &combined);
                         Value::from_heap_ptr(ptr as *mut u8)
                     } else {
-                        Value::undefined()
+                        let av = to_number(a);
+                        let bv = to_number(b);
+                        number_result(gc, av + bv)
                     };
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
@@ -312,9 +339,15 @@ impl Vm {
                     let b = self.pop();
                     let a = self.pop();
                     let result = if let (Some(av), Some(bv)) = (a.as_smi(), b.as_smi()) {
-                        Value::smi(av.wrapping_sub(bv))
+                        if let Some(r) = av.checked_sub(bv) {
+                            Value::smi(r)
+                        } else {
+                            number_result(gc, av as f64 - bv as f64)
+                        }
                     } else {
-                        Value::undefined()
+                        let av = to_number(a);
+                        let bv = to_number(b);
+                        number_result(gc, av - bv)
                     };
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
@@ -323,9 +356,15 @@ impl Vm {
                     let b = self.pop();
                     let a = self.pop();
                     let result = if let (Some(av), Some(bv)) = (a.as_smi(), b.as_smi()) {
-                        Value::smi(av.wrapping_mul(bv))
+                        if let Some(r) = av.checked_mul(bv) {
+                            Value::smi(r)
+                        } else {
+                            number_result(gc, av as f64 * bv as f64)
+                        }
                     } else {
-                        Value::undefined()
+                        let av = to_number(a);
+                        let bv = to_number(b);
+                        number_result(gc, av * bv)
                     };
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
@@ -333,11 +372,9 @@ impl Vm {
                 Opcode::Div => {
                     let b = self.pop();
                     let a = self.pop();
-                    let result = if let (Some(av), Some(bv)) = (a.as_smi(), b.as_smi()) {
-                        if bv == 0 { Value::undefined() } else { Value::smi(av / bv) }
-                    } else {
-                        Value::undefined()
-                    };
+                    let av = to_number(a);
+                    let bv = to_number(b);
+                    let result = number_result(gc, av / bv);
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
                 }
@@ -347,7 +384,9 @@ impl Vm {
                     let result = if let (Some(av), Some(bv)) = (a.as_smi(), b.as_smi()) {
                         if bv == 0 { Value::undefined() } else { Value::smi(av % bv) }
                     } else {
-                        Value::undefined()
+                        let av = to_number(a);
+                        let bv = to_number(b);
+                        number_result(gc, av % bv)
                     };
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
@@ -356,13 +395,11 @@ impl Vm {
                     let b = self.pop();
                     let a = self.pop();
                     let result = if let (Some(av), Some(bv)) = (a.as_smi(), b.as_smi()) {
-                        if bv < 0 {
-                            Value::undefined()
-                        } else {
-                            Value::smi(av.wrapping_pow(bv as u32))
-                        }
+                        if bv < 0 { Value::undefined() } else { Value::smi(av.wrapping_pow(bv as u32)) }
                     } else {
-                        Value::undefined()
+                        let av = to_number(a);
+                        let bv = to_number(b);
+                        number_result(gc, av.powf(bv))
                     };
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
@@ -620,6 +657,7 @@ impl Vm {
                         match tag {
                             TAG_STRING => "string",
                             TAG_FUNC => "function",
+                            TAG_FLOAT64 => "number",
                             _ => "object",
                         }
                     };
@@ -996,6 +1034,8 @@ fn value_to_debug_string(val: Value) -> String {
         "null".to_string()
     } else if let Some(v) = val.as_smi() {
         v.to_string()
+    } else if let Some(v) = val.as_float64() {
+        v.to_string()
     } else if let Some(ptr) = val.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_STRING {
@@ -1122,7 +1162,9 @@ mod tests {
             ],
             vec![], vec![],
         );
-        assert_eq!(run_ok(&p).as_smi(), Some(3));
+        let v = run_ok(&p);
+        assert!(v.is_float64(), "10/3 should be a float");
+        assert!((v.as_float64().unwrap() - 3.3333333333333335).abs() < 1e-10);
     }
 
     #[test]
@@ -1370,4 +1412,41 @@ fn value_to_prop_key(val: Value) -> Option<PropertyKey> {
         return Some(PropertyKey::from_string(&v.to_string()));
     }
     None
+}
+
+/// Convert a Value to an f64 for numeric operations.
+/// Returns NaN for non-numeric types (undefined, null, objects, strings).
+fn to_number(v: Value) -> f64 {
+    if let Some(n) = v.as_smi() {
+        n as f64
+    } else if let Some(n) = v.as_float64() {
+        n
+    } else {
+        f64::NAN
+    }
+}
+
+/// Wrap an f64 result back into a Value, trying to use Smi for small integers.
+fn number_result(gc: &mut SemiSpace, val: f64) -> Value {
+    if val.is_nan() || val.is_infinite() {
+        let ptr = HeapFloat64::allocate(gc, val);
+        return Value::from_float64_ptr(ptr as *mut u8);
+    }
+    if val.fract() == 0.0 {
+        let i = val as i64;
+        if i >= -(1 << 30) as i64 && i < (1 << 30) as i64 {
+            return Value::smi(val as i32);
+        }
+    }
+    let ptr = HeapFloat64::allocate(gc, val);
+    Value::from_float64_ptr(ptr as *mut u8)
+}
+
+/// Check if a Value is a GC-allocated string.
+fn value_is_string(v: Value) -> bool {
+    if let Some(ptr) = v.heap_ptr() {
+        unsafe { (*(ptr as *const GcHeader)).tag() == TAG_STRING }
+    } else {
+        false
+    }
 }

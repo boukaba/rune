@@ -1,11 +1,15 @@
 use std::alloc::Layout;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Object type tags (stored in low 2 bits of header word).
+/// Object type tags (stored in low 3 bits of header word).
 pub const TAG_OBJECT: u64 = 0;
 pub const TAG_STRING: u64 = 1;
 pub const TAG_FUNC: u64 = 2;
-pub const TAG_FORWARDED: u64 = 0b11;
+pub const TAG_FLOAT64: u64 = 3;
+pub const TAG_FORWARDED: u64 = 7;
+
+/// Tag bits mask for GC header tag.
+const GC_TAG_MASK: u64 = 0b111;
 
 /// Tag bits mask for full-word tagging (used in Value checks).
 const TAG_MASK: u64 = 0x03;
@@ -22,15 +26,15 @@ impl GcHeader {
     }
 
     pub fn tag(&self) -> u64 {
-        self.word.load(Ordering::Relaxed) & 0b11
+        self.word.load(Ordering::Relaxed) & GC_TAG_MASK
     }
 
     pub fn is_forwarded(&self) -> bool {
-        self.word.load(Ordering::Relaxed) & 0b11 == TAG_FORWARDED
+        self.word.load(Ordering::Relaxed) & GC_TAG_MASK == TAG_FORWARDED
     }
 
     pub fn forwarding_addr(&self) -> *mut u8 {
-        (self.word.load(Ordering::Relaxed) & !0b11) as *mut u8
+        (self.word.load(Ordering::Relaxed) & !GC_TAG_MASK) as *mut u8
     }
 
     pub fn set_forwarding(&self, to: *mut u8) {
@@ -188,6 +192,9 @@ impl SemiSpace {
                 }
                 TAG_FUNC => {
                     obj_start.add(align_up(16, 8))
+                }
+                TAG_FLOAT64 => {
+                    obj_start.add(size_of::<GcHeader>() + 8)
                 }
                 TAG_OBJECT => {
                     let capacity_ptr = obj_start.add(16) as *const u32;

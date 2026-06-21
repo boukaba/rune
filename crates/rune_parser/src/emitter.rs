@@ -626,7 +626,7 @@ impl Emitter {
                     BinaryOp::Le => Opcode::Le,
                     BinaryOp::Ge => Opcode::Ge,
                     BinaryOp::In => Opcode::In,
-                    BinaryOp::Instanceof => Opcode::Eq,
+                    BinaryOp::Instanceof => Opcode::Instanceof,
                     BinaryOp::LogicalAnd | BinaryOp::LogicalOr | BinaryOp::Assign => unreachable!(),
                 };
                 self.emit(opcode, vec![]);

@@ -54,7 +54,7 @@ rune test262 language/expressions/addition
 
 ## Status
 
-Rune is in early development. Phase 2 (parser, emitter, interpreter) is nearing completion. Phase 3 (JIT compiler) and Phase 4 (full ES2027 builtins) are in progress.
+Rune is in active development. Sprint 11 is complete: operator fixes (strict equality, `in`, compound assignment, short-circuit `&&`/`||`, `delete`). The baseline JIT (Phase 3) supports 18 opcodes with Smi-only hot-function tier-up. Sprint 12 focuses on stabilization: CI, `instanceof`, exceptions, and block-scoped `let`/`const`. See [`progress.md`](./progress.md) for detailed status.
 
 ## License
 

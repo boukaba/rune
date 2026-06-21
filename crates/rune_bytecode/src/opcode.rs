@@ -46,6 +46,7 @@ pub enum Opcode {
     Le,
     Ge,
     In,
+    Instanceof,
     // Objects
     NewObject,
     NewArray,

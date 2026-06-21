@@ -1245,3 +1245,53 @@ fn test_jit_bailout_on_float() {
     let f = r.as_float64().unwrap_or(0.0);
     assert!((f - 5.5).abs() < 0.001, "JIT bail-out: add(3.5, 2) should be ~5.5, got {}", f);
 }
+
+mod instanceof_tests {
+    use rune_embed::Context;
+
+    #[test]
+    fn test_instanceof_instance() {
+        let mut ctx = Context::new();
+        let r = ctx.eval(r#"
+            function Foo() {}
+            var f = new Foo();
+            f instanceof Foo
+        "#).unwrap();
+        assert_eq!(r.as_smi(), Some(1), "instance instanceof constructor");
+    }
+
+    #[test]
+    fn test_instanceof_false() {
+        let mut ctx = Context::new();
+        let r = ctx.eval(r#"
+            function Foo() {}
+            function Bar() {}
+            var f = new Foo();
+            f instanceof Bar
+        "#).unwrap();
+        assert_eq!(r.as_smi(), Some(0), "instance should not be instanceof different constructor");
+    }
+
+    #[test]
+    fn test_instanceof_prototype_chain() {
+        let mut ctx = Context::new();
+        let r = ctx.eval(r#"
+            function Parent() {}
+            function Child() {}
+            Child.prototype = new Parent();
+            var c = new Child();
+            c instanceof Parent
+        "#).unwrap();
+        assert_eq!(r.as_smi(), Some(1), "child instance should be instanceof grandparent via prototype chain");
+    }
+
+    #[test]
+    fn test_instanceof_primitive_lhs() {
+        let mut ctx = Context::new();
+        let r = ctx.eval(r#"
+            function Foo() {}
+            42 instanceof Foo
+        "#).unwrap();
+        assert_eq!(r.as_smi(), Some(0), "primitive instanceof constructor should be false (empty proto chain)");
+    }
+}

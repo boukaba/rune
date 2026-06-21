@@ -71,6 +71,8 @@ pub struct Vm {
     pub string_prototype: Value,
     /// Reference to Object.prototype for setting on newly created objects.
     pub object_prototype: Value,
+    /// Pending exception set by a builtin (checked after builtin dispatch).
+    pub pending_exception: Option<Value>,
 }
 
 impl Vm {
@@ -90,6 +92,7 @@ impl Vm {
             array_prototype: Value::undefined(),
             string_prototype: Value::undefined(),
             object_prototype: Value::undefined(),
+            pending_exception: None,
         }
     }
 
@@ -211,6 +214,11 @@ impl Vm {
     /// Check if all values in the slice are Smi (tag bit 0 = 1).
     fn all_smi(values: &[Value]) -> bool {
         values.iter().all(|v| v.is_smi())
+    }
+
+    /// Set a pending exception (used by builtins that cannot return Exit).
+    pub fn set_pending_exception(&mut self, val: Value) {
+        self.pending_exception = Some(val);
     }
 
     /// Register all GC root slots (stack, locals, try_stack saved values).
@@ -725,6 +733,35 @@ impl Vm {
                     let key = self.pop();
                     let found = has_property(obj, key);
                     self.push(if found { Value::smi(1) } else { Value::smi(0) });
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::Instanceof => {
+                    let rhs = self.pop();
+                    let lhs = self.pop();
+                    // §13.10.1: If Type(rhs) is not Object → TypeError
+                    if !rhs.is_heap_object() {
+                        let msg = HeapString::allocate(gc, "TypeError: invalid 'instanceof' operand (RHS is not an object)");
+                        self.push(Value::from_heap_ptr(msg as *mut u8));
+                        return Exit::Throw(self.pop());
+                    }
+                    let rhs_ptr = rhs.heap_ptr().unwrap();
+                    let rhs_tag = unsafe { (*(rhs_ptr as *const GcHeader)).tag() };
+                    // §13.10.1: If IsCallable(rhs) is false → TypeError
+                    if rhs_tag != TAG_FUNC {
+                        let msg = HeapString::allocate(gc, "TypeError: RHS of 'instanceof' is not callable");
+                        self.push(Value::from_heap_ptr(msg as *mut u8));
+                        return Exit::Throw(self.pop());
+                    }
+                    // OrdinaryHasInstance §13.10.2
+                    let rhs_proto_ptr = unsafe { Func::prototype(rhs_ptr as *mut Func) };
+                    if rhs_proto_ptr.is_null() {
+                        let msg = HeapString::allocate(gc, "TypeError: function 'prototype' is not an object");
+                        self.push(Value::from_heap_ptr(msg as *mut u8));
+                        return Exit::Throw(self.pop());
+                    }
+                    // Walk lhs prototype chain
+                    let result = ordinary_has_instance(lhs, rhs_proto_ptr);
+                    self.push(if result { Value::smi(1) } else { Value::smi(0) });
                     self.frames[fi].pc = pc + 1;
                 }
 
@@ -1272,6 +1309,10 @@ impl Vm {
                             let id = ((-smi_val) as usize) - 1;
                             if id < self.builtins.len() {
                                 let result = (self.builtins[id].func)(gc, obj_val, &args, &mut *self);
+                                if let Some(exc) = self.pending_exception.take() {
+                                    self.push(exc);
+                                    return Exit::Throw(exc);
+                                }
                                 if result.is_heap_object() {
                                     self.push(result);
                                 } else {
@@ -1349,6 +1390,10 @@ impl Vm {
                             let id = ((-smi_val) as usize) - 1;
                             if id < self.builtins.len() {
                                 let result = (self.builtins[id].func)(gc, this, &args, &mut *self);
+                                if let Some(exc) = self.pending_exception.take() {
+                                    self.push(exc);
+                                    return Exit::Throw(exc);
+                                }
                                 self.push(result);
                                 self.frames[fi].pc = pc + 1;
                                 continue;
@@ -1396,7 +1441,7 @@ impl Vm {
                                     let jit_entry = unsafe { Func::jit_entry(ptr as *mut Func) };
                                     if !jit_entry.is_null() {
                                         let mut jit_locals: Vec<Value> = if func_prog.named_function { vec![callee] } else { vec![] };
-                                        jit_locals.extend(args);
+                                        jit_locals.extend(args.iter().copied());
                                         let local_count = func_prog.local_names.len();
                                         while jit_locals.len() < local_count {
                                             jit_locals.push(Value::undefined());
@@ -1557,6 +1602,11 @@ impl Vm {
             }
         }
     }
+}
+
+/// Allocate a GC-managed string and return it as a raw pointer (for builtins).
+pub fn heap_string(gc: &mut SemiSpace, s: &str) -> *mut u8 {
+    HeapString::allocate(gc, s) as *mut u8
 }
 
 impl Frame {
@@ -2388,6 +2438,35 @@ fn has_property(obj: Value, raw_key: Value) -> bool {
         }
     } else {
         false
+    }
+}
+
+/// OrdinaryHasInstance per §13.10.2: walk lhs prototype chain looking for rhs_proto.
+fn ordinary_has_instance(lhs: Value, rhs_proto_ptr: *mut u8) -> bool {
+    let mut current = lhs;
+    let mut depth = 0;
+    loop {
+        if depth >= MAX_PROTOTYPE_DEPTH {
+            return false;
+        }
+        depth += 1;
+        if let Some(ptr) = current.heap_ptr() {
+            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+            let proto = if tag == TAG_OBJECT || tag == TAG_ARRAY {
+                unsafe { JSObject::prototype(ptr as *mut JSObject) }
+            } else {
+                return false;
+            };
+            if proto.is_null() {
+                return false;
+            }
+            if proto == rhs_proto_ptr {
+                return true;
+            }
+            current = Value::from_heap_ptr(proto);
+        } else {
+            return false;
+        }
     }
 }
 

@@ -401,9 +401,17 @@
 - [x] `charAt` OOB returns `""` per §22.1.3.1 (was `undefined`; also fixed bogus `ch == '\0'` guard)
 - [x] String `.length` counts UTF-16 code units per §22.1.4.1 via `encode_utf16().count()`
 
-### Task 8D: `for-in` Loop 🟢 — Priority 5
-- [ ] Own enumerable shape entries as string keys
-- [ ] Dense array: `0..length-1` as string keys
+### Task 8D: `for-in` Loop 🟢 — Priority 5 ✅
+- [x] Parser: detect `for (var x in obj)` and `for (expr in obj)` in `parse_for()`
+- [x] Emitter: `ForInInit` + `ForInNext` opcodes, register loop variable as local
+- [x] VM: `ForInInit` pushes obj + smi(0); `ForInNext` iterates shape `key_names` (objects) or `0..length-1` (arrays)
+- [x] Shape: `key_names: Vec<String>` field, `key_name_at()` for for-in enumeration
+- [x] `add_property`/`intern`/`intern_with_parent` thread key names through
+- [x] `Pop` after `StoreLocal` in ForIn emitter (StoreLocal pushes back)
+- [x] `value_to_array_index` handles numeric strings for array for-in access
+- [x] **IC key fix**: `(shape.id, key_hash)` instead of `shape.id` — computed property access with changing keys (e.g. for-in body `o[k]`) no longer hits stale cache entries
+- [x] 4 integration tests: object, array, empty, null
+- [x] 170 tests pass (98 integration + 27 interpreter + 10 core + 25 parser + 5 gc + 5 gc acc + 2 spike)
 
 ### Task 8E: CFG & Liveness Analysis 🟢 — Priority 6
 - [ ] `block.rs` — Basic block builder, CFG construction
@@ -412,12 +420,12 @@
 ### Acceptance — Sprint 7
 - [x] `new Foo(42)` works with both `this` binding and prototype inheritance
 - [x] Array auto-grows on push; `a.length` returns correct length
-- [x] 168 tests pass (94 integration + 27 interpreter + 10 core + 25 parser + 5 gc acceptance + 5 gc + 2 spike)
+- [x] 170 tests pass (98 integration + 27 interpreter + 10 core + 25 parser + 5 gc acceptance + 5 gc + 2 spike)
 - [x] `Array.isArray([1,2,3])` returns true; `Array.isArray(42)` returns false
 - [x] `String.fromCharCode(65)` returns a heap string
 - [x] `Math.PI` and `Math.E` are accessible as float64 values
 - [x] `charAt` OOB returns empty string; string `.length` counts UTF-16 code units
-- [ ] `for (var k in obj)` iterates own keys (deferred)
+- [x] `for (var k in obj)` iterates own keys — object properties (shape key_names) and array indices
 
 ---
 

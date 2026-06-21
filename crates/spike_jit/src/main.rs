@@ -12,13 +12,19 @@ fn main() {
     // transition to RX, and call it as a function.
     let page_size = 4096;
 
+    // --- MAP_JIT is macOS-only; Linux uses MAP_PRIVATE|MAP_ANONYMOUS ---
+    #[cfg(target_os = "macos")]
+    const JIT_FLAGS: i32 = libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_JIT;
+    #[cfg(target_os = "linux")]
+    const JIT_FLAGS: i32 = libc::MAP_PRIVATE | libc::MAP_ANONYMOUS;
+
     // --- Identity function (just RET) ---
     let ptr = unsafe {
         libc::mmap(
             std::ptr::null_mut(),
             page_size,
             libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_JIT,
+            JIT_FLAGS,
             -1,
             0,
         )
@@ -47,7 +53,7 @@ fn main() {
             std::ptr::null_mut(),
             page_size,
             libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_JIT,
+            JIT_FLAGS,
             -1,
             0,
         )

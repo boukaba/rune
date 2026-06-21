@@ -170,6 +170,19 @@ impl Vm {
             let math_obj = make_object(gc, &math_entries);
             self.builtin_wrappers.insert("Math".to_string(), math_obj);
         }
+
+        // Global constants: NaN, Infinity, undefined
+        let nan_val = {
+            let ptr = HeapFloat64::allocate(gc, f64::NAN);
+            Value::from_float64_ptr(ptr as *mut u8)
+        };
+        self.globals.insert("NaN".to_string(), nan_val);
+        let inf_val = {
+            let ptr = HeapFloat64::allocate(gc, f64::INFINITY);
+            Value::from_float64_ptr(ptr as *mut u8)
+        };
+        self.globals.insert("Infinity".to_string(), inf_val);
+        self.globals.insert("undefined".to_string(), Value::undefined());
     }
 
     /// Register a built-in function and return its handle (negative Smi).
@@ -1536,11 +1549,23 @@ impl Frame {
     }
 }
 
-/// Convert a Value to its string representation for concatenation.
+/// Per §7.2.14 IsStrictlyEqual.
 fn values_strictly_equal(a: Value, b: Value) -> bool {
+    // Both are Number type (Smi or Float64)
+    if a.is_smi() || b.is_smi() || a.is_float64() || b.is_float64() {
+        let na = if a.is_smi() { a.as_smi().map(|s| s as f64) } else { a.as_float64() };
+        let nb = if b.is_smi() { b.as_smi().map(|s| s as f64) } else { b.as_float64() };
+        if let (Some(av), Some(bv)) = (na, nb) {
+            if av.is_nan() || bv.is_nan() { return false; }
+            return av == bv;
+        }
+        return false;
+    }
+    // Same raw value (same Smi or same heap pointer)
     if a == b {
         return true;
     }
+    // String content comparison
     if let (Some(pa), Some(pb)) = (a.heap_ptr(), b.heap_ptr()) {
         let ta = unsafe { (*(pa as *const GcHeader)).tag() };
         let tb = unsafe { (*(pb as *const GcHeader)).tag() };

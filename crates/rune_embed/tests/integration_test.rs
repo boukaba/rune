@@ -1018,6 +1018,37 @@ fn test_mixed_comparison() {
 }
 
 #[test]
+fn test_strict_eq_smi_float() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("1 === 1.0").unwrap();
+    assert_eq!(r.as_smi(), Some(1), "1 === 1.0 should be true (Smi↔Float64 same number)");
+    let r2 = ctx.eval("1.0 === 1").unwrap();
+    assert_eq!(r2.as_smi(), Some(1), "1.0 === 1 should be true");
+    let r3 = ctx.eval("1 !== 1.0").unwrap();
+    assert_eq!(r3.as_smi(), Some(0), "1 !== 1.0 should be false");
+}
+
+#[test]
+fn test_strict_eq_nan() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("NaN === NaN").unwrap();
+    assert_eq!(r.as_smi(), Some(0), "NaN === NaN should be false per §7.2.14");
+    let r2 = ctx.eval("NaN !== NaN").unwrap();
+    assert_eq!(r2.as_smi(), Some(1), "NaN !== NaN should be true");
+}
+
+#[test]
+fn test_strict_eq_neg_zero() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("(-0) === 0").unwrap();
+    assert_eq!(r.as_smi(), Some(1), "-0 === 0 should be true per §7.2.14");
+    let r2 = ctx.eval("0 === (-0)").unwrap();
+    assert_eq!(r2.as_smi(), Some(1), "0 === -0 should be true");
+    let r3 = ctx.eval("(-0) !== 0").unwrap();
+    assert_eq!(r3.as_smi(), Some(0), "-0 !== 0 should be false");
+}
+
+#[test]
 fn test_nan_comparison() {
     let mut ctx = Context::new();
     let r = ctx.eval("NaN < 5").unwrap();

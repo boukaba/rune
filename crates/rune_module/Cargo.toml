@@ -1,0 +1,10 @@
+[package]
+name = "rune_module"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rune_core = { path = "../rune_core" }
+rune_bytecode = { path = "../rune_bytecode" }
+rune_parser = { path = "../rune_parser" }
+tracing = { workspace = true }

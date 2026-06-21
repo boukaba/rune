@@ -1,0 +1,8 @@
+[package]
+name = "rune_regex"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rune_core = { path = "../rune_core" }
+tracing = { workspace = true }

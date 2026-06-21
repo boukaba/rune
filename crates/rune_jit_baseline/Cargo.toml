@@ -1,0 +1,10 @@
+[package]
+name = "rune_jit_baseline"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rune_core = { path = "../rune_core" }
+rune_bytecode = { path = "../rune_bytecode" }
+libc = { workspace = true }
+tracing = { workspace = true }

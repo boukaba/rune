@@ -1,0 +1,11 @@
+[package]
+name = "rune_core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+mmtk = { workspace = true, optional = true }
+tracing = { workspace = true }
+serde = { workspace = true, optional = true }
+lazy_static = "1.5"
+fxhash = "0.2"

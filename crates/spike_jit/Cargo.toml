@@ -1,0 +1,7 @@
+[package]
+name = "spike_jit"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+libc = { workspace = true }

@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rune_core",
+    "crates/rune_bytecode",
+    "crates/rune_parser",
+    "crates/rune_interpreter",
+    "crates/rune_jit_baseline",
+    "crates/rune_builtins",
+    "crates/rune_regex",
+    "crates/rune_module",
+    "crates/rune_debugger",
+    "crates/rune_embed",
+    "crates/rune_capi",
+    "crates/rune_cli",
+    "crates/spike_mmtk",
+    "crates/spike_jit",
+]
+# rune_jit_cranelift excluded until Phase 5 (requires Rust ≥1.94)
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+mmtk = { git = "https://github.com/mmtk/mmtk-core.git" }
+libc = "0.2"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -1,0 +1,11 @@
+[package]
+name = "rune_debugger"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rune_core = { path = "../rune_core" }
+rune_interpreter = { path = "../rune_interpreter" }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

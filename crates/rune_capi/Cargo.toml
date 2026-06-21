@@ -1,0 +1,9 @@
+[package]
+name = "rune_capi"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rune_core = { path = "../rune_core" }
+rune_embed = { path = "../rune_embed" }
+libc = { workspace = true }

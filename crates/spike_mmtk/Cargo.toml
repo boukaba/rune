@@ -1,0 +1,7 @@
+[package]
+name = "spike_mmtk"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+mmtk = { workspace = true }

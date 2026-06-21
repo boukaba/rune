@@ -1,0 +1,156 @@
+use std::fmt;
+
+/// Source location span.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Span {
+    pub start: usize,
+    pub end: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Expr {
+    Number(i64, Span),
+    String(Box<str>, Span),
+    Boolean(bool, Span),
+    Null(Span),
+    Undefined(Span),
+    Identifier(Box<str>, Span),
+    Array(Vec<Expr>, Span),
+    Object(Vec<Property>, Span),
+    Unary(UnaryOp, Box<Expr>, Span),
+    Binary(BinaryOp, Box<Expr>, Box<Expr>, Span),
+    Conditional(Box<Expr>, Box<Expr>, Box<Expr>, Span),
+    Call(Box<Expr>, Vec<Expr>, Span),
+    New(Box<Expr>, Vec<Expr>, Span),
+    Member(Box<Expr>, Box<Expr>, bool, Span), // computed = true for a[b]
+    Assign(Box<Expr>, Box<Expr>, Span),
+    Function(Box<FnNode>, Span),
+    Template(Box<str>, Span),
+    This(Span),
+    Yield(Option<Box<Expr>>, Span),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Property {
+    pub key: PropKey,
+    pub value: Expr,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum PropKey {
+    String(Box<str>),
+    Number(i64),
+    Identifier(Box<str>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum UnaryOp {
+    Plus,
+    Minus,
+    Not,
+    BitNot,
+    Typeof,
+    Void,
+    Delete,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum BinaryOp {
+    // Assignment
+    Assign,
+    // Logical
+    LogicalOr,
+    LogicalAnd,
+    // Bitwise
+    BitOr,
+    BitXor,
+    BitAnd,
+    // Equality
+    Eq,
+    Ne,
+    StrictEq,
+    StrictNe,
+    // Relational
+    Lt,
+    Gt,
+    Le,
+    Ge,
+    Instanceof,
+    In,
+    // Shift
+    Shl,
+    Shr,
+    ShrU,
+    // Additive
+    Add,
+    Sub,
+    // Multiplicative
+    Mul,
+    Div,
+    Mod,
+    Exp,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FnNode {
+    pub name: Option<Box<str>>,
+    pub params: Vec<Box<str>>,
+    pub body: Stmt,
+    pub is_generator: bool,
+    pub is_async: bool,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Stmt {
+    Expr(Expr, Span),
+    Block(Vec<Stmt>, Span),
+    If(Box<Expr>, Box<Stmt>, Option<Box<Stmt>>, Span),
+    While(Box<Expr>, Box<Stmt>, Span),
+    DoWhile(Box<Expr>, Box<Stmt>, Span),
+    For(Option<Box<Stmt>>, Option<Box<Expr>>, Option<Box<Expr>>, Box<Stmt>, Span),
+    ForIn(Box<Expr>, Box<Expr>, Box<Stmt>, Span),
+    Var(VarKind, Vec<Decl>, Span),
+    Return(Option<Box<Expr>>, Span),
+    Throw(Box<Expr>, Span),
+    Break(Option<Box<str>>, Span),
+    Continue(Option<Box<str>>, Span),
+    Try(Box<[Stmt]>, Option<CatchClause>, Option<Box<[Stmt]>>, Span),
+    Function(Box<FnNode>, Span),
+    Empty(Span),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CatchClause {
+    pub param: Box<str>,
+    pub body: Box<[Stmt]>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum VarKind {
+    Var,
+    Let,
+    Const,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Decl {
+    pub name: Box<str>,
+    pub init: Option<Box<Expr>>,
+    pub span: Span,
+}
+
+/// A parsed program (top-level statements).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Program {
+    pub body: Vec<Stmt>,
+    pub span: Span,
+}
+
+impl fmt::Display for BinaryOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self:?}")
+    }
+}

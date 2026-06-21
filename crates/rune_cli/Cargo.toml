@@ -1,0 +1,20 @@
+[package]
+name = "rune_cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "rune"
+path = "src/main.rs"
+
+[dependencies]
+rune_core = { path = "../rune_core" }
+rune_bytecode = { path = "../rune_bytecode" }
+rune_parser = { path = "../rune_parser" }
+rune_interpreter = { path = "../rune_interpreter" }
+rune_embed = { path = "../rune_embed" }
+rune_builtins = { path = "../rune_builtins" }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde_json = { workspace = true }
+walkdir = "2"

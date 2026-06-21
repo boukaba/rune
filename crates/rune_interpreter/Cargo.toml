@@ -7,4 +7,9 @@ edition.workspace = true
 rune_core = { path = "../rune_core" }
 rune_bytecode = { path = "../rune_bytecode" }
 rune_builtins = { path = "../rune_builtins" }
+rune_jit_baseline = { path = "../rune_jit_baseline", optional = true }
 tracing = { workspace = true }
+
+[features]
+default = ["jit"]
+jit = ["rune_jit_baseline"]

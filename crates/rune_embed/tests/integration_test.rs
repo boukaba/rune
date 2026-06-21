@@ -1104,3 +1104,20 @@ fn test_negate_undefined() {
     let r = ctx.eval("-undefined").unwrap();
     assert!(r.as_float64().unwrap().is_nan(), "-undefined should be NaN per spec");
 }
+
+#[test]
+#[cfg(target_arch = "x86_64")]
+fn test_jit_tier_up() {
+    // add(a, b) uses only Smi arithmetic — JIT-compatible, will tier-up at 50 calls
+    let mut ctx = Context::new();
+    let r = ctx.eval(r#"
+        function add(a, b) { return a + b; }
+        var sum = 0;
+        for (var i = 0; i < 100; i++) {
+            sum = add(sum, i);
+        }
+        sum
+    "#).unwrap();
+    // sum = 0+1+2+...+99 = 4950
+    assert_eq!(r.as_smi(), Some(4950), "JIT tier-up: sum should be 4950");
+}

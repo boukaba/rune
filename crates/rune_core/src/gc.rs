@@ -204,8 +204,9 @@ impl SemiSpace {
                     obj_start.add(align_up(total, 8))
                 }
                 TAG_FUNC => {
-                    // Func layout: GcHeader(8) + func_idx(8) + prog_ptr(8) + prototype(8) = 32 bytes
-                    obj_start.add(32)
+                    // Func layout: GcHeader(8) + func_idx(8) + prog_ptr(8) + prototype(8)
+                    //   + call_count(4) + pad(4) + jit_entry(8) = 48 bytes
+                    obj_start.add(48)
                 }
                 TAG_FLOAT64 => {
                     obj_start.add(size_of::<GcHeader>() + 8)

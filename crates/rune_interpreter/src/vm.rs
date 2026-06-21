@@ -10,6 +10,8 @@ use rune_core::value::Value;
 use crate::builtins::{Builtin, BuiltinFn};
 use crate::generator::Generator;
 use crate::ic::{IcEntry, IcStats, InlineCache};
+#[cfg(all(feature = "jit", target_arch = "x86_64"))]
+use rune_jit_baseline::{CodeGen, JitEntryFn};
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 
@@ -1339,6 +1341,42 @@ impl Vm {
                                     self.frames[fi].pc = pc + 1;
                                     continue;
                                 }
+                                // --- JIT tier-up (if enabled on x86-64) ---
+                                #[cfg(all(feature = "jit", target_arch = "x86_64"))]
+                                {
+                                    unsafe { Func::increment_call_count(ptr as *mut Func) };
+                                    let count = unsafe { Func::call_count(ptr as *mut Func) };
+                                    const JIT_THRESHOLD: u32 = 50;
+
+                                    if unsafe { Func::jit_entry(ptr as *mut Func) }.is_null() {
+                                        if count == JIT_THRESHOLD && rune_jit_baseline::is_jit_compatible(func_prog) {
+                                            let codegen = CodeGen::new(func_prog.instructions.len());
+                                            let mem = codegen.compile(func_prog);
+                                            mem.make_executable();
+                                            unsafe { Func::set_jit_entry(ptr as *mut Func, mem.code_ptr()) };
+                                            std::mem::forget(mem);
+                                        }
+                                    }
+
+                                    let jit_entry = unsafe { Func::jit_entry(ptr as *mut Func) };
+                                    if !jit_entry.is_null() {
+                                        let mut jit_locals: Vec<Value> = if func_prog.named_function { vec![callee] } else { vec![] };
+                                        jit_locals.extend(args);
+                                        let local_count = func_prog.local_names.len();
+                                        while jit_locals.len() < local_count {
+                                            jit_locals.push(Value::undefined());
+                                        }
+                                        let func: JitEntryFn = unsafe { std::mem::transmute(jit_entry) };
+                                        let vm_ptr = self as *mut Vm as *mut u8;
+                                        let gc_ptr = gc as *mut SemiSpace as *mut u8;
+                                        let result_raw = unsafe { func(vm_ptr, gc_ptr, jit_locals.as_mut_ptr() as *mut u64) };
+                                        self.last_locals = jit_locals;
+                                        self.push(Value::from_raw(result_raw));
+                                        self.frames[fi].pc = pc + 1;
+                                        continue;
+                                    }
+                                }
+                                // --- End JIT tier-up ---
                                 let mut locals: Vec<Value> = if func_prog.named_function { vec![callee] } else { vec![] };
                                 locals.extend(args);
                                 self.frames.push(Frame {

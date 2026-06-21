@@ -777,6 +777,7 @@ dependencies = [
  "rune_builtins",
  "rune_bytecode",
  "rune_core",
+ "rune_jit_baseline",
  "tracing",
 ]
 

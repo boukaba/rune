@@ -2,7 +2,7 @@
 
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
-> **Status:** Sprint 9 — Baseline JIT: control flow + branches ✅ (9A-9D done)
+> **Status:** Sprint 9 — Baseline JIT: locals + loops ✅ (9A-9E done)
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
 > Every implementation decision at every level (lexer, parser, emitter, bytecode, interpreter, builtins, JIT) **must** be verified against the exact ECMA-262 specification language in [`ecma262.md`](./ecma262.md) — **never guess** what the spec says. Each section in `ecma262.md` links to the corresponding URL fragment on `https://tc39.es/ecma262/multipage/`; **always open these URLs via `webfetch` tool** to read the authoritative algorithm steps before implementing. This applies to all phases below.
@@ -649,6 +649,17 @@
   - [x] resolve_patches(): rel32 = target_native - (patch_offset + 4) after all instrs
   - [x] 5 offset-verification + 4 execution tests (cfg-gated x86_64): truthy/falsy/undefined conditionals + unconditional jump
   - [x] 208 tests pass across workspace (19 JIT baseline + 109 integration + 52 interpreter + 10 core + 6 bytecode + 5 parser + 5 emitter + 2 spike)
+- [x] **9E: JIT Local Variables + Comparison + Loop Execution** — 22 JIT baseline tests (+3 offset + 8 execution)
+  - [x] emit_mov_r64_mem_disp32 / emit_mov_mem_disp32_r64 assembler helpers
+  - [x] JitEntryFn 3-arg convention: fn(vm, gc, locals_ptr); R13 = locals ptr in prologue/epilogue
+  - [x] LoadLocal: mov rax, [r13 + idx*8]; push
+  - [x] StoreLocal: pop; mov [r13 + idx*8], rax; push back
+  - [x] Pop: discard JIT stack top
+  - [x] Lt: setl + movzx + shl + or → Smi(0)=1 or Smi(1)=3
+  - [x] IncLocal/DecLocal: load old, add/sub 2 (Smi +1/-1), store back, push new/old
+  - [x] Value::from_raw() in rune_core
+  - [x] 8 execution tests: local load/store, Lt (true/false/negative), inc postfix, dec prefix, full counting loop sum(0..4)=10
+  - [x] 211 tests pass across workspace (22 JIT baseline + 109 integration + 52 interpreter + 10 core + 6 bytecode + 5 parser + 5 emitter + 2 spike)
 
 ## Phase 9 — v2 Features (Stretch)
 

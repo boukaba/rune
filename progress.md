@@ -2,7 +2,7 @@
 
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
-> **Status:** Sprint 13A, 13B, 13C ✅ — 13F next
+> **Status:** Sprint 13A, 13B, 13C, 13F ✅
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
 > Every implementation decision at every level (lexer, parser, emitter, bytecode, interpreter, builtins, JIT) **must** be verified against the exact ECMA-262 specification language in [`ecma262.md`](./ecma262.md) — **never guess** what the spec says. Each section in `ecma262.md` links to the corresponding URL fragment on `https://tc39.es/ecma262/multipage/`; **always open these URLs via `webfetch` tool** to read the authoritative algorithm steps before implementing. This applies to all phases below.
@@ -754,6 +754,7 @@
 | **13C: Arrow functions** | 🟡 P2 | ✅ done | (params) => body, param => body, () => body; expression body (implicit return) and block body. `new ArrowFunction()` throws TypeError per §16.2.1.1.1 (`is_arrow` flag on `Func` + check in `Opcode::New`). **Known gap:** `arguments` inheritance (§10.4.4) deferred to Sprint 14 — arrows inherit enclosing function's `arguments` instead of creating their own. |
 | **13D: Stub crate hygiene (done)** | 🟢 P3 | 0.1d | ✅ One-line comments in `rune_regex`/`rune_module`/`rune_debugger`/`rune_jit_cranelift` lib.rs. |
 | **13E: `Symbol.hasInstance` TODO (done)** | 🟢 P3 | 0.1d | ✅ TODO comment above `Opcode::Instanceof` handler in vm.rs. |
+| **13F: Microbenchmark harness** | 🟡 P2 | ✅ done | `crates/rune_bench/` with criterion. 3 workloads: `loop_sum_smi_1M` (220ms), `array_push_grow_100k` (45ms), `proto_chain_lookup_5deep_1M` (387ms). Baseline saved in `results/20250622.txt`. `make bench` to re-run. |
 
 ## Phase 9 — v2 Features (Stretch)
 

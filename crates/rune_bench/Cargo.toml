@@ -1,0 +1,12 @@
+[package]
+name = "rune_bench"
+version.workspace = true
+edition.workspace = true
+
+[dev-dependencies]
+criterion = "0.5"
+rune_embed = { path = "../rune_embed" }
+
+[[bench]]
+name = "runtime"
+harness = false

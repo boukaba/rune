@@ -1853,22 +1853,18 @@ impl Vm {
                                     let count = unsafe { Func::call_count(ptr as *mut Func) };
                                     const JIT_THRESHOLD: u32 = 50;
 
-                                    if unsafe { Func::jit_entry(ptr as *mut Func) }.is_null() {
-                                        if count == JIT_THRESHOLD
-                                            && rune_jit_baseline::is_jit_compatible(func_prog)
-                                        {
-                                            let codegen =
-                                                CodeGen::new(func_prog.instructions.len());
-                                            let mem = codegen.compile(func_prog);
-                                            mem.make_executable();
-                                            unsafe {
-                                                Func::set_jit_entry(
-                                                    ptr as *mut Func,
-                                                    mem.code_ptr(),
-                                                )
-                                            };
-                                            std::mem::forget(mem);
+                                    if unsafe { Func::jit_entry(ptr as *mut Func) }.is_null()
+                                        && count == JIT_THRESHOLD
+                                        && rune_jit_baseline::is_jit_compatible(func_prog)
+                                    {
+                                        let codegen =
+                                            CodeGen::new(func_prog.instructions.len());
+                                        let mem = codegen.compile(func_prog);
+                                        mem.make_executable();
+                                        unsafe {
+                                            Func::set_jit_entry(ptr as *mut Func, mem.code_ptr());
                                         }
+                                        std::mem::forget(mem);
                                     }
 
                                     let jit_entry = unsafe { Func::jit_entry(ptr as *mut Func) };

@@ -1,0 +1,5 @@
+#!/bin/sh
+set -e
+cargo fmt --all -- --check 2>&1 | tail -3
+echo "--- cargo clippy ---"
+cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tail -5

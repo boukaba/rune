@@ -458,9 +458,7 @@ pub fn default_builtins() -> Vec<Builtin> {
 fn value_eq_strict(a: Value, b: Value) -> bool {
     if let (Some(av), Some(bv)) = (a.as_smi(), b.as_smi()) {
         av == bv
-    } else if a.is_undefined() && b.is_undefined() {
-        true
-    } else if a.is_null() && b.is_null() {
+    } else if (a.is_undefined() && b.is_undefined()) || (a.is_null() && b.is_null()) {
         true
     } else if let (Some(ap), Some(bp)) = (a.heap_ptr(), b.heap_ptr()) {
         ap == bp
@@ -494,18 +492,10 @@ fn make_error(gc: &mut SemiSpace, msg: &str) -> Value {
 }
 
 /// assert.sameValue(actual, expected, description)
-pub fn assert_same_value(
-    gc: &mut SemiSpace,
-    _this: Value,
-    args: &[Value],
-    _vm: &mut Vm,
-) -> Value {
+pub fn assert_same_value(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     let actual = args.first().copied().unwrap_or(Value::undefined());
     let expected = args.get(1).copied().unwrap_or(Value::undefined());
-    let desc = args
-        .get(2)
-        .map(|v| value_to_debug(*v))
-        .unwrap_or_default();
+    let desc = args.get(2).map(|v| value_to_debug(*v)).unwrap_or_default();
     if !value_eq_strict(actual, expected) {
         let msg = if desc.is_empty() {
             format!(
@@ -536,10 +526,7 @@ pub fn assert_not_same_value(
 ) -> Value {
     let actual = args.first().copied().unwrap_or(Value::undefined());
     let expected = args.get(1).copied().unwrap_or(Value::undefined());
-    let desc = args
-        .get(2)
-        .map(|v| value_to_debug(*v))
-        .unwrap_or_default();
+    let desc = args.get(2).map(|v| value_to_debug(*v)).unwrap_or_default();
     if value_eq_strict(actual, expected) {
         let msg = if desc.is_empty() {
             format!(
@@ -561,14 +548,12 @@ pub fn assert_not_same_value(
 
 /// assert.throws(errorConstructor, func, message)
 /// Calls func and checks that it throws an error of the expected type.
-pub fn assert_throws(
-    gc: &mut SemiSpace,
-    _this: Value,
-    args: &[Value],
-    _vm: &mut Vm,
-) -> Value {
+pub fn assert_throws(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     if args.len() < 2 {
-        let err = make_error(gc, "assert.throws: expected errorConstructor and func arguments");
+        let err = make_error(
+            gc,
+            "assert.throws: expected errorConstructor and func arguments",
+        );
         _vm.set_pending_exception(err);
         return Value::undefined();
     }

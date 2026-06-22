@@ -95,24 +95,32 @@ pub fn alloc_rune_object(mutator: &mut mmtk::Mutator<RuneVM>, num_slots: usize) 
     object
 }
 
-pub unsafe fn set_shape_id(object: ObjectReference, shape_id: u64) { unsafe {
-    let addr = object.to_raw_address();
-    std::ptr::write(addr.to_mut_ptr::<u64>(), shape_id);
-}}
+pub unsafe fn set_shape_id(object: ObjectReference, shape_id: u64) {
+    unsafe {
+        let addr = object.to_raw_address();
+        std::ptr::write(addr.to_mut_ptr::<u64>(), shape_id);
+    }
+}
 
-pub unsafe fn get_shape_id(object: ObjectReference) -> u64 { unsafe {
-    let addr = object.to_raw_address();
-    std::ptr::read(addr.to_ptr::<u64>())
-}}
+pub unsafe fn get_shape_id(object: ObjectReference) -> u64 {
+    unsafe {
+        let addr = object.to_raw_address();
+        std::ptr::read(addr.to_ptr::<u64>())
+    }
+}
 
-pub unsafe fn set_slot(object: ObjectReference, index: usize, value: u64) { unsafe {
-    let addr = object.to_raw_address();
-    let slot_ptr = addr.add(HEADER_SIZE + index * SLOT_SIZE);
-    std::ptr::write(slot_ptr.to_mut_ptr::<u64>(), value);
-}}
+pub unsafe fn set_slot(object: ObjectReference, index: usize, value: u64) {
+    unsafe {
+        let addr = object.to_raw_address();
+        let slot_ptr = addr.add(HEADER_SIZE + index * SLOT_SIZE);
+        std::ptr::write(slot_ptr.to_mut_ptr::<u64>(), value);
+    }
+}
 
-pub unsafe fn get_slot(object: ObjectReference, index: usize) -> u64 { unsafe {
-    let addr = object.to_raw_address();
-    let slot_ptr = addr.add(HEADER_SIZE + index * SLOT_SIZE);
-    std::ptr::read(slot_ptr.to_ptr::<u64>())
-}}
+pub unsafe fn get_slot(object: ObjectReference, index: usize) -> u64 {
+    unsafe {
+        let addr = object.to_raw_address();
+        let slot_ptr = addr.add(HEADER_SIZE + index * SLOT_SIZE);
+        std::ptr::read(slot_ptr.to_ptr::<u64>())
+    }
+}

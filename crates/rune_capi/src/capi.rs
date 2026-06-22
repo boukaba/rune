@@ -52,6 +52,8 @@ pub unsafe extern "C" fn rune_context_eval(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rune_free_string(s: *mut c_char) {
     if !s.is_null() {
-        unsafe { let _ = std::ffi::CString::from_raw(s); }
+        unsafe {
+            let _ = std::ffi::CString::from_raw(s);
+        }
     }
 }

@@ -1837,6 +1837,23 @@ mod instanceof_tests {
     }
 
     #[test]
+    fn test_arrow_is_not_constructable() {
+        let mut ctx = Context::new();
+        // §16.2.1.1.1: Arrow functions have [[Construct]]: undefined
+        let r = ctx
+            .eval("var F=()=>1; var caught=0; try { new F(); } catch(e) { caught=1; } caught")
+            .unwrap();
+        assert_eq!(
+            r.as_smi(),
+            Some(1),
+            "new on arrow should throw and be caught"
+        );
+        // Regular functions should still work with new
+        let r = ctx.eval("function F(){}; new F(); 99;").unwrap();
+        assert_eq!(r.as_smi(), Some(99), "new on regular function should work");
+    }
+
+    #[test]
     fn test_let_shadowing_in_block() {
         let mut ctx = Context::new();
         // inner block's `x` should shadow outer `x`
@@ -1853,10 +1870,6 @@ mod instanceof_tests {
         "#,
             )
             .unwrap();
-        assert_eq!(
-            r.as_smi(),
-            Some(2),
-            "inner x should shadow outer x"
-        );
+        assert_eq!(r.as_smi(), Some(2), "inner x should shadow outer x");
     }
 }

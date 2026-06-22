@@ -406,9 +406,10 @@ impl Emitter {
                 // for (var key in obj) { body }
                 // Register the loop variable as a local
                 if let Expr::Identifier(name, _) = lhs.as_ref()
-                    && !self.locals.contains(&name.to_string()) {
-                        self.locals.push(name.to_string());
-                    }
+                    && !self.locals.contains(&name.to_string())
+                {
+                    self.locals.push(name.to_string());
+                }
                 self.emit_expression(obj);
                 self.emit(Opcode::ForInInit, vec![]);
                 let loop_start = self.current();
@@ -887,7 +888,8 @@ impl Emitter {
             }
             Expr::Function(func, _) => {
                 let func_idx = self.compile_function(func) as i64;
-                self.emit(Opcode::MakeFunction, vec![func_idx]);
+                let flags = if func.is_arrow { 1 } else { 0 };
+                self.emit(Opcode::MakeFunction, vec![func_idx, flags]);
             }
             Expr::Yield(arg, _) => {
                 if let Some(val) = arg {
@@ -920,14 +922,14 @@ impl Emitter {
     fn enter_lexical_scope(&mut self, stmts: &[Stmt], _count: usize) {
         let mut bindings = Vec::new();
         for stmt in stmts {
-            if let Stmt::Var(kind, decls, _) = stmt {
-                if matches!(kind, VarKind::Let | VarKind::Const) {
-                    for decl in decls {
-                        bindings.push(LexicalBinding {
-                            name: decl.name.to_string(),
-                            slot: self.lexical_slot_count + bindings.len(),
-                        });
-                    }
+            if let Stmt::Var(kind, decls, _) = stmt
+                && matches!(kind, VarKind::Let | VarKind::Const)
+            {
+                for decl in decls {
+                    bindings.push(LexicalBinding {
+                        name: decl.name.to_string(),
+                        slot: self.lexical_slot_count + bindings.len(),
+                    });
                 }
             }
         }

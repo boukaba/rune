@@ -316,10 +316,11 @@ impl Lexer {
                                 .get(self.pos..self.pos + 2)
                                 .map(|s| s.iter().collect::<String>());
                             if let Some(hex) = hex
-                                && let Ok(codepoint) = u32::from_str_radix(&hex, 16) {
-                                    value.push(char::from_u32(codepoint).unwrap_or('\u{FFFD}'));
-                                    self.pos += 2;
-                                }
+                                && let Ok(codepoint) = u32::from_str_radix(&hex, 16)
+                            {
+                                value.push(char::from_u32(codepoint).unwrap_or('\u{FFFD}'));
+                                self.pos += 2;
+                            }
                         }
                         Some('u') => {
                             if self.peek() == Some('{') {
@@ -345,10 +346,11 @@ impl Lexer {
                                     .get(self.pos..self.pos + 4)
                                     .map(|s| s.iter().collect::<String>());
                                 if let Some(hex) = hex
-                                    && let Ok(codepoint) = u32::from_str_radix(&hex, 16) {
-                                        value.push(char::from_u32(codepoint).unwrap_or('\u{FFFD}'));
-                                        self.pos += 4;
-                                    }
+                                    && let Ok(codepoint) = u32::from_str_radix(&hex, 16)
+                                {
+                                    value.push(char::from_u32(codepoint).unwrap_or('\u{FFFD}'));
+                                    self.pos += 4;
+                                }
                             }
                         }
                         Some(ch) => value.push(ch),

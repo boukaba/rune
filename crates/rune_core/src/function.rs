@@ -6,12 +6,19 @@ use crate::gc::{GcHeader, SemiSpace, TAG_FUNC, size_of};
 ///
 /// Memory layout:
 ///   [GcHeader(8) | func_idx(8) | prog_ptr(8) | prototype(8) |
-///    call_count(4) | padding(4) | jit_entry(8)]
+///    call_count(4) | flags(4) | jit_entry(8)]
 ///   Total: 48 bytes
+///
+/// flags: bit 0 = is_arrow
 pub struct Func;
 
 impl Func {
-    pub fn allocate(ss: &mut SemiSpace, func_idx: u64, prog_ptr: *const u8) -> *mut Func {
+    pub fn allocate(
+        ss: &mut SemiSpace,
+        func_idx: u64,
+        prog_ptr: *const u8,
+        is_arrow: bool,
+    ) -> *mut Func {
         let ptr = ss.alloc(48);
         unsafe {
             let header = &mut *(ptr as *mut GcHeader);
@@ -23,11 +30,12 @@ impl Func {
             // prototype starts as null; set by MakeFunction
             let proto_ptr = ptr.add(size_of::<GcHeader>() + 16) as *mut u64;
             *proto_ptr = 0;
-            // call_count = 0, padding = 0
+            // call_count = 0
             let count_ptr = ptr.add(size_of::<GcHeader>() + 24) as *mut u32;
             *count_ptr = 0;
-            let pad_ptr = ptr.add(size_of::<GcHeader>() + 28) as *mut u32;
-            *pad_ptr = 0;
+            // flags: bit 0 = is_arrow
+            let flags_ptr = ptr.add(size_of::<GcHeader>() + 28) as *mut u32;
+            *flags_ptr = if is_arrow { 1 } else { 0 };
             // jit_entry = null
             let jit_ptr = ptr.add(size_of::<GcHeader>() + 32) as *mut u64;
             *jit_ptr = 0;
@@ -68,6 +76,15 @@ impl Func {
 
     pub unsafe fn gc_header(ptr: *mut Func) -> *mut GcHeader {
         ptr as *mut GcHeader
+    }
+
+    /// Check if this function is an arrow function (not constructable).
+    pub unsafe fn is_arrow(ptr: *mut Func) -> bool {
+        unsafe {
+            let ptr_bytes = ptr as *mut u8;
+            let flags = *(ptr_bytes.add(size_of::<GcHeader>() + 28) as *const u32);
+            flags & 1 != 0
+        }
     }
 
     /// Get the call count.

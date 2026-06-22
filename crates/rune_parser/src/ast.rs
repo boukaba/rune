@@ -108,6 +108,7 @@ pub struct FnNode {
     pub body: Stmt,
     pub is_generator: bool,
     pub is_async: bool,
+    pub is_arrow: bool,
     pub span: Span,
 }
 

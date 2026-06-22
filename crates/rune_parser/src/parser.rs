@@ -165,6 +165,7 @@ impl Parser {
             body,
             is_generator,
             is_async,
+            is_arrow: false,
             span: Span {
                 start: start.start,
                 end: self.span().end,
@@ -207,7 +208,7 @@ impl Parser {
                 None
             };
             if kind == VarKind::Const && init.is_none() {
-                self.error(format!("const declaration must be initialized"));
+                self.error("const declaration must be initialized".to_string());
             }
             decls.push(Decl {
                 name,
@@ -938,7 +939,10 @@ impl Parser {
                     if self.tok.kind == TokenKind::Arrow {
                         return self.parse_arrow_body(Vec::new(), start);
                     }
-                    return Expr::Undefined(Span { start: start.start, end: self.span().end });
+                    return Expr::Undefined(Span {
+                        start: start.start,
+                        end: self.span().end,
+                    });
                 }
                 // Try to parse as single identifier first (arrow candidate)
                 if self.tok.kind == TokenKind::Identifier {
@@ -960,7 +964,13 @@ impl Parser {
                         }
                         // Not an arrow — reconstruct as comma expression
                         // For now, just return the first identifier
-                        return Expr::Identifier(name, Span { start: start.start, end: self.span().end });
+                        return Expr::Identifier(
+                            name,
+                            Span {
+                                start: start.start,
+                                end: self.span().end,
+                            },
+                        );
                     } else if self.tok.kind == TokenKind::RParen {
                         self.advance();
                         if self.tok.kind == TokenKind::Arrow {
@@ -968,7 +978,13 @@ impl Parser {
                             return self.parse_arrow_body(vec![name], start);
                         }
                         // (name) — just a parenthesized identifier
-                        return Expr::Identifier(name, Span { start: start.start, end: self.span().end });
+                        return Expr::Identifier(
+                            name,
+                            Span {
+                                start: start.start,
+                                end: self.span().end,
+                            },
+                        );
                     }
                     // Not `)` after identifier — parse normally
                     // We consumed the token, reconstruct it
@@ -978,10 +994,10 @@ impl Parser {
                 let expr = self.parse_expr(0);
                 self.expect(TokenKind::RParen);
                 // Single-param arrow: (expr) => body
-                if self.tok.kind == TokenKind::Arrow {
-                    if let Expr::Identifier(name, _) = &expr {
-                        return self.parse_arrow_body(vec![name.clone()], start);
-                    }
+                if self.tok.kind == TokenKind::Arrow
+                    && let Expr::Identifier(name, _) = &expr
+                {
+                    return self.parse_arrow_body(vec![name.clone()], start);
                 }
                 expr
             }
@@ -1190,6 +1206,7 @@ impl Parser {
                 body,
                 is_generator: false,
                 is_async: false,
+                is_arrow: true,
                 span: Span {
                     start: start.start,
                     end: self.span().end,

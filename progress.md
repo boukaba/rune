@@ -2,7 +2,7 @@
 
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
-> **Status:** Sprint 13 in progress — 13A, 13B, 13C ✅
+> **Status:** Sprint 13A, 13B, 13C ✅ — 13F next
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
 > Every implementation decision at every level (lexer, parser, emitter, bytecode, interpreter, builtins, JIT) **must** be verified against the exact ECMA-262 specification language in [`ecma262.md`](./ecma262.md) — **never guess** what the spec says. Each section in `ecma262.md` links to the corresponding URL fragment on `https://tc39.es/ecma262/multipage/`; **always open these URLs via `webfetch` tool** to read the authoritative algorithm steps before implementing. This applies to all phases below.
@@ -751,7 +751,7 @@
 |---|---|---|---|
 | **13A: `let`/`const` block scope + TDZ** | 🔴 P0 | ✅ done | BlockEnter/BlockLeave/DeclareLet/DeclareConst/LoadLexical/StoreLexical opcodes; emitter scope tracking; VM lexical slot management; TDZ → ReferenceError; const reassignment → TypeError; 9 integration tests. |
 | **13B: Test262 harness shim** | 🟠 P1 | ✅ done | assert.sameValue/notSameValue/throws builtins + wrapper object; error builtins for sta.js replacement. |
-| **13C: Arrow functions** | 🟡 P2 | ✅ done | (params) => body, param => body, () => body; expression body (implicit return) and block body. No lexical `this`/`arguments` yet. |
+| **13C: Arrow functions** | 🟡 P2 | ✅ done | (params) => body, param => body, () => body; expression body (implicit return) and block body. `new ArrowFunction()` throws TypeError per §16.2.1.1.1 (`is_arrow` flag on `Func` + check in `Opcode::New`). **Known gap:** `arguments` inheritance (§10.4.4) deferred to Sprint 14 — arrows inherit enclosing function's `arguments` instead of creating their own. |
 | **13D: Stub crate hygiene (done)** | 🟢 P3 | 0.1d | ✅ One-line comments in `rune_regex`/`rune_module`/`rune_debugger`/`rune_jit_cranelift` lib.rs. |
 | **13E: `Symbol.hasInstance` TODO (done)** | 🟢 P3 | 0.1d | ✅ TODO comment above `Opcode::Instanceof` handler in vm.rs. |
 

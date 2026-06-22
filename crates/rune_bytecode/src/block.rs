@@ -89,9 +89,10 @@ pub fn build_cfg(instrs: &[Instruction]) -> ControlFlowGraph {
         }
         // Jump targets are leaders
         if let Some(target) = jump_target(instr)
-            && target < n {
-                is_leader[target] = true;
-            }
+            && target < n
+        {
+            is_leader[target] = true;
+        }
     }
 
     // Phase 2: build blocks

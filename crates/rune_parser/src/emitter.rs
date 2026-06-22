@@ -1,6 +1,12 @@
 use crate::ast::*;
 use rune_bytecode::opcode::{BytecodeProgram, Instruction, Opcode};
 
+/// A lexical scope binding with its allocated absolute slot index.
+struct LexicalBinding {
+    name: String,
+    slot: usize,
+}
+
 /// Bytecode emitter. Walks an AST and produces instructions.
 pub struct Emitter {
     pub instructions: Vec<Instruction>,
@@ -10,6 +16,11 @@ pub struct Emitter {
     pub float_pool: Vec<f64>,
     pub nested_funcs: Vec<BytecodeProgram>,
     locals: Vec<String>,
+    /// Lexical scope stack (let/const per block). Each scope knows its
+    /// outermost lexicals + the base slot index in the flat lexical slot array.
+    lexical_scopes: Vec<Vec<LexicalBinding>>,
+    /// Total lexical slots allocated in the current function.
+    lexical_slot_count: usize,
     loop_exit_stack: Vec<usize>,
     loop_cont_stack: Vec<usize>,
     switch_exit_stack: Vec<usize>,
@@ -32,6 +43,8 @@ impl Emitter {
             float_pool: Vec::new(),
             nested_funcs: Vec::new(),
             locals: Vec::new(),
+            lexical_scopes: Vec::new(),
+            lexical_slot_count: 0,
             loop_exit_stack: Vec::new(),
             loop_cont_stack: Vec::new(),
             switch_exit_stack: Vec::new(),
@@ -83,11 +96,21 @@ impl Emitter {
             self.emit(Opcode::Return, vec![]);
             return;
         }
+        // Wrap program body in an implicit lexical scope for let/const/TDZ
+        let lexical_count = self.count_lexicals(&prog.body);
+        if lexical_count > 0 {
+            self.enter_lexical_scope(&prog.body, lexical_count);
+            self.emit(Opcode::BlockEnter, vec![lexical_count as i64]);
+        }
         let last_idx = prog.body.len() - 1;
         for stmt in &prog.body[..last_idx] {
             self.emit_statement(stmt);
         }
         self.emit_last_statement(&prog.body[last_idx]);
+        if lexical_count > 0 {
+            self.emit(Opcode::BlockLeave, vec![]);
+            self.leave_lexical_scope();
+        }
     }
 
     /// Compile a function node into a nested BytecodeProgram and return its index.
@@ -134,8 +157,17 @@ impl Emitter {
                 self.emit(Opcode::Pop, vec![]);
             }
             Stmt::Block(stmts, _) => {
+                let lexical_count = self.count_lexicals(stmts);
+                if lexical_count > 0 {
+                    self.enter_lexical_scope(stmts, lexical_count);
+                    self.emit(Opcode::BlockEnter, vec![lexical_count as i64]);
+                }
                 for s in stmts {
                     self.emit_statement(s);
+                }
+                if lexical_count > 0 {
+                    self.emit(Opcode::BlockLeave, vec![]);
+                    self.leave_lexical_scope();
                 }
             }
             Stmt::If(cond, then, else_, _) => {
@@ -216,17 +248,39 @@ impl Emitter {
                 self.emit_expression(value);
                 self.emit(Opcode::Throw, vec![]);
             }
-            Stmt::Var(_, decls, _) => {
-                for decl in decls {
-                    if !self.locals.contains(&decl.name.to_string()) {
-                        self.locals.push(decl.name.to_string());
-                    }
-                    if let Some(init) = &decl.init {
-                        self.emit_expression(init);
-                        if let Some(idx) = self.local_index(&decl.name) {
-                            self.emit(Opcode::StoreLocal, vec![idx as i64]);
+            Stmt::Var(kind, decls, _) => {
+                match kind {
+                    VarKind::Var => {
+                        for decl in decls {
+                            if !self.locals.contains(&decl.name.to_string()) {
+                                self.locals.push(decl.name.to_string());
+                            }
+                            if let Some(init) = &decl.init {
+                                self.emit_expression(init);
+                                if let Some(idx) = self.local_index(&decl.name) {
+                                    self.emit(Opcode::StoreLocal, vec![idx as i64]);
+                                }
+                                self.emit(Opcode::Pop, vec![]);
+                            }
                         }
-                        self.emit(Opcode::Pop, vec![]);
+                    }
+                    VarKind::Let | VarKind::Const => {
+                        for decl in decls {
+                            if let Some(slot) = self.lexical_slot(&decl.name) {
+                                if let Some(init) = &decl.init {
+                                    self.emit_expression(init);
+                                } else {
+                                    self.emit(Opcode::LoadUndefined, vec![]);
+                                }
+                                let op = if *kind == VarKind::Const {
+                                    Opcode::DeclareConst
+                                } else {
+                                    Opcode::DeclareLet
+                                };
+                                self.emit(op, vec![slot as i64]);
+                                self.emit(Opcode::Pop, vec![]);
+                            }
+                        }
                     }
                 }
             }
@@ -494,7 +548,9 @@ impl Emitter {
                 self.emit(Opcode::LoadStringConst, vec![idx]);
             }
             Expr::Identifier(name, _) => {
-                if let Some(idx) = self.local_index(name) {
+                if let Some(slot) = self.lexical_slot(name) {
+                    self.emit(Opcode::LoadLexical, vec![slot as i64]);
+                } else if let Some(idx) = self.local_index(name) {
                     self.emit(Opcode::LoadLocal, vec![idx as i64]);
                 } else {
                     let name_idx = self.intern_string(name) as i64;
@@ -544,26 +600,35 @@ impl Emitter {
             }
             Expr::Update(op, arg, prefix, _) => match arg.as_ref() {
                 Expr::Identifier(name, _) => {
-                    let opcode = match op {
-                        UpdateOp::PlusPlus => {
-                            if self.local_index(name).is_some() {
-                                Opcode::IncLocal
-                            } else {
-                                Opcode::IncGlobal
-                            }
-                        }
-                        UpdateOp::MinusMinus => {
-                            if self.local_index(name).is_some() {
-                                Opcode::DecLocal
-                            } else {
-                                Opcode::DecGlobal
-                            }
-                        }
-                    };
                     let is_prefix = if *prefix { 1 } else { 0 };
-                    if let Some(idx) = self.local_index(name) {
+                    if self.lexical_slot(name).is_some() {
+                        let slot = self.lexical_slot(name).unwrap();
+                        let is_pre = *prefix;
+                        self.emit(Opcode::LoadLexical, vec![slot as i64]);
+                        if !is_pre {
+                            self.emit(Opcode::Dup, vec![]);
+                        }
+                        self.emit(Opcode::LoadSmi, vec![1]);
+                        let opcode = match op {
+                            UpdateOp::PlusPlus => Opcode::Add,
+                            UpdateOp::MinusMinus => Opcode::Sub,
+                        };
+                        self.emit(opcode, vec![]);
+                        self.emit(Opcode::StoreLexical, vec![slot as i64]);
+                        if !is_pre {
+                            self.emit(Opcode::Pop, vec![]);
+                        }
+                    } else if let Some(idx) = self.local_index(name) {
+                        let opcode = match op {
+                            UpdateOp::PlusPlus => Opcode::IncLocal,
+                            UpdateOp::MinusMinus => Opcode::DecLocal,
+                        };
                         self.emit(opcode, vec![idx as i64, is_prefix]);
                     } else {
+                        let opcode = match op {
+                            UpdateOp::PlusPlus => Opcode::IncGlobal,
+                            UpdateOp::MinusMinus => Opcode::DecGlobal,
+                        };
                         let name_idx = self.intern_string(name) as i64;
                         self.emit(opcode, vec![name_idx, is_prefix]);
                     }
@@ -717,7 +782,9 @@ impl Emitter {
             Expr::Assign(target, value, _) => match target.as_ref() {
                 Expr::Identifier(name, _) => {
                     self.emit_expression(value);
-                    if let Some(idx) = self.local_index(name) {
+                    if let Some(slot) = self.lexical_slot(name) {
+                        self.emit(Opcode::StoreLexical, vec![slot as i64]);
+                    } else if let Some(idx) = self.local_index(name) {
                         self.emit(Opcode::StoreLocal, vec![idx as i64]);
                     } else {
                         let name_idx = self.intern_string(name) as i64;
@@ -744,7 +811,12 @@ impl Emitter {
                 let bin_opcode = compound_binary_opcode(*op);
                 match target.as_ref() {
                     Expr::Identifier(name, _) => {
-                        if let Some(idx) = self.local_index(name) {
+                        if let Some(slot) = self.lexical_slot(name) {
+                            self.emit(Opcode::LoadLexical, vec![slot as i64]);
+                            self.emit_expression(rhs);
+                            self.emit(bin_opcode, vec![]);
+                            self.emit(Opcode::StoreLexical, vec![slot as i64]);
+                        } else if let Some(idx) = self.local_index(name) {
                             self.emit(Opcode::LoadLocal, vec![idx as i64]);
                             self.emit_expression(rhs);
                             self.emit(bin_opcode, vec![]);
@@ -821,6 +893,61 @@ impl Emitter {
                 self.emit(Opcode::Yield, vec![]);
             }
         }
+    }
+
+    // ---- Lexical scope helpers ----
+
+    /// Count the number of direct `let`/`const` declarations in a list of statements
+    /// (does not recurse into nested blocks).
+    fn count_lexicals(&mut self, stmts: &[Stmt]) -> usize {
+        stmts
+            .iter()
+            .filter(|s| matches!(s, Stmt::Var(VarKind::Let | VarKind::Const, _, _)))
+            .map(|s| match s {
+                Stmt::Var(_, decls, _) => decls.len(),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    /// Enter a lexical scope: register all direct `let`/`const` bindings
+    /// and assign them absolute slot indices.
+    fn enter_lexical_scope(&mut self, stmts: &[Stmt], _count: usize) {
+        let mut bindings = Vec::new();
+        for stmt in stmts {
+            if let Stmt::Var(kind, decls, _) = stmt {
+                if matches!(kind, VarKind::Let | VarKind::Const) {
+                    for decl in decls {
+                        bindings.push(LexicalBinding {
+                            name: decl.name.to_string(),
+                            slot: self.lexical_slot_count + bindings.len(),
+                        });
+                    }
+                }
+            }
+        }
+        self.lexical_slot_count += bindings.len();
+        self.lexical_scopes.push(bindings);
+    }
+
+    /// Leave the current lexical scope.
+    fn leave_lexical_scope(&mut self) {
+        if let Some(scope) = self.lexical_scopes.pop() {
+            self.lexical_slot_count -= scope.len();
+        }
+    }
+
+    /// Look up a name in the lexical scope stack.
+    /// Returns Some(absolute_slot) if found, None if not lexical.
+    fn lexical_slot(&self, name: &str) -> Option<usize> {
+        for scope in self.lexical_scopes.iter().rev() {
+            for binding in scope.iter() {
+                if binding.name == name {
+                    return Some(binding.slot);
+                }
+            }
+        }
+        None
     }
 
     fn local_index(&self, name: &str) -> Option<usize> {

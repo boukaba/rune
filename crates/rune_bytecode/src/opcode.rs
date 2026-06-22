@@ -75,6 +75,13 @@ pub enum Opcode {
     YieldStar,
     Resume,
     InitGenerator,
+    // Lexical scoping (let/const/TDZ)
+    BlockEnter,
+    BlockLeave,
+    DeclareLet,
+    DeclareConst,
+    LoadLexical,
+    StoreLexical,
     // for-in
     ForInInit,
     ForInNext,

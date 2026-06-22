@@ -206,6 +206,9 @@ impl Parser {
             } else {
                 None
             };
+            if kind == VarKind::Const && init.is_none() {
+                self.error(format!("const declaration must be initialized"));
+            }
             decls.push(Decl {
                 name,
                 init,

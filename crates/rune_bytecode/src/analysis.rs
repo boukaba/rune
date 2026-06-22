@@ -42,6 +42,22 @@ fn compute_use_def(
                     defd.insert(idx);
                     def_set[b_idx].insert(idx);
                 }
+                Opcode::DeclareLet | Opcode::DeclareConst => {
+                    let idx = instrs[i].operands[0] as usize;
+                    defd.insert(idx);
+                    def_set[b_idx].insert(idx);
+                }
+                Opcode::LoadLexical => {
+                    let idx = instrs[i].operands[0] as usize;
+                    if !defd.contains(&idx) {
+                        use_set[b_idx].insert(idx);
+                    }
+                }
+                Opcode::StoreLexical => {
+                    let idx = instrs[i].operands[0] as usize;
+                    defd.insert(idx);
+                    def_set[b_idx].insert(idx);
+                }
                 _ => {}
             }
         }

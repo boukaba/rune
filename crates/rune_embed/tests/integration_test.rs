@@ -1615,4 +1615,145 @@ mod instanceof_tests {
             "primitive instanceof constructor should be false (empty proto chain)"
         );
     }
+
+    // ---- let/const/TDZ tests ----
+
+    #[test]
+    fn test_let_decl() {
+        let mut ctx = Context::new();
+        let r = ctx.eval("let a = 1; a").unwrap();
+        assert_eq!(r.as_smi(), Some(1));
+    }
+
+    #[test]
+    fn test_let_reassign() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(
+                r#"
+            let a = 1;
+            a = 2;
+            a
+        "#,
+            )
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(2));
+    }
+
+    #[test]
+    fn test_let_block_scope() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(
+                r#"
+            let x = 1;
+            {
+                let x = 2;
+            }
+            x
+        "#,
+            )
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(1), "outer x should still be 1");
+    }
+
+    #[test]
+    fn test_tdz_access_before_init() {
+        let mut ctx = Context::new();
+        let e = ctx.eval(
+            r#"
+            {
+                let x = x + 1;
+            }
+        "#,
+        );
+        assert!(e.is_err(), "TDZ access before init should error");
+    }
+
+    #[test]
+    fn test_const_decl() {
+        let mut ctx = Context::new();
+        let r = ctx.eval("const c = 42; c").unwrap();
+        assert_eq!(r.as_smi(), Some(42));
+    }
+
+    #[test]
+    fn test_const_reassign_error() {
+        let mut ctx = Context::new();
+        let e = ctx.eval(
+            r#"
+            const c = 1;
+            c = 2;
+        "#,
+        );
+        assert!(
+            e.is_err(),
+            "const reassignment should produce a runtime error"
+        );
+    }
+
+    #[test]
+    fn test_let_nested_block_scopes() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(
+                r#"
+            let a = 1;
+            let r;
+            {
+                let b = 2;
+                r = a + b;
+            }
+            r
+        "#,
+            )
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(3), "nested block access");
+    }
+
+    #[test]
+    fn test_let_double_nested() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(
+                r#"
+            let a = 1;
+            let r;
+            {
+                let b = 2;
+                {
+                    let c = 3;
+                    r = a + b + c;
+                }
+            }
+            r
+        "#,
+            )
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(6), "double nested block access");
+    }
+
+    #[test]
+    fn test_let_shadowing_in_block() {
+        let mut ctx = Context::new();
+        // inner block's `x` should shadow outer `x`
+        let r = ctx
+            .eval(
+                r#"
+            let x = 1;
+            let r;
+            {
+                let x = 2;
+                r = x;
+            }
+            r
+        "#,
+            )
+            .unwrap();
+        assert_eq!(
+            r.as_smi(),
+            Some(2),
+            "inner x should shadow outer x"
+        );
+    }
 }

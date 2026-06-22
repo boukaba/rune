@@ -22,6 +22,14 @@ pub type EvalFn = Box<dyn FnMut(&mut SemiSpace, &str) -> Result<Value, String>>;
 
 struct Frame {
     locals: Vec<Value>,
+    /// Lexical (let/const) slots for block-scoped bindings.
+    lexical_slots: Vec<Value>,
+    /// Parallel TDZ flags: true = binding is in temporal dead zone.
+    lexical_tdz: Vec<bool>,
+    /// Parallel const flags: true = binding is immutable.
+    lexical_const: Vec<bool>,
+    /// Stack of scope boundary indices into the lexical arrays.
+    scope_boundaries: Vec<usize>,
     pc: usize,
     stack_base: usize,
     prog: *const BytecodeProgram,
@@ -236,6 +244,22 @@ impl Vm {
         self.pending_exception = Some(val);
     }
 
+    /// Throw a ReferenceError from the run loop.
+    fn throw_reference_error(&mut self, gc: &mut SemiSpace, msg: &str) -> Exit {
+        let full_msg = format!("ReferenceError: {}", msg);
+        let ptr = HeapString::allocate(gc, &full_msg);
+        self.push(Value::from_heap_ptr(ptr as *mut u8));
+        Exit::Throw(self.pop())
+    }
+
+    /// Throw a TypeError from the run loop.
+    fn throw_type_error(&mut self, gc: &mut SemiSpace, msg: &str) -> Exit {
+        let full_msg = format!("TypeError: {}", msg);
+        let ptr = HeapString::allocate(gc, &full_msg);
+        self.push(Value::from_heap_ptr(ptr as *mut u8));
+        Exit::Throw(self.pop())
+    }
+
     /// Register all GC root slots (stack, locals, try_stack saved values).
     /// Must be called after any change to stack/frames/try_stack before GC can run.
     pub fn register_roots(&mut self, gc: &mut SemiSpace) {
@@ -246,6 +270,9 @@ impl Vm {
         for frame in &self.frames {
             for local in &frame.locals {
                 gc.push_root(local as *const Value as *mut u64);
+            }
+            for slot in &frame.lexical_slots {
+                gc.push_root(slot as *const Value as *mut u64);
             }
         }
         for tf in &self.try_stack {
@@ -259,6 +286,9 @@ impl Vm {
         for g in &self.generators {
             for local in &g.locals {
                 gc.push_root(local as *const Value as *mut u64);
+            }
+            for slot in &g.lexical_slots {
+                gc.push_root(slot as *const Value as *mut u64);
             }
         }
         for val in self.globals.values() {
@@ -290,6 +320,10 @@ impl Vm {
 
         self.frames.push(Frame {
             locals,
+            lexical_slots: Vec::new(),
+            lexical_tdz: Vec::new(),
+            lexical_const: Vec::new(),
+            scope_boundaries: Vec::new(),
             pc: 0,
             stack_base: 0,
             prog: program as *const BytecodeProgram,
@@ -330,13 +364,26 @@ impl Vm {
         }
         self.try_stack.clear();
 
-        let (locals, pc, prog, started) = {
+        let (locals, lexical_slots, lexical_tdz, lexical_const, scope_boundaries, pc, prog, started) = {
             let g = &self.generators[gen_id];
-            (g.locals.clone(), g.pc, g.prog, g.started)
+            (
+                g.locals.clone(),
+                g.lexical_slots.clone(),
+                g.lexical_tdz.clone(),
+                g.lexical_const.clone(),
+                g.scope_boundaries.clone(),
+                g.pc,
+                g.prog,
+                g.started,
+            )
         };
 
         self.frames.push(Frame {
             locals,
+            lexical_slots,
+            lexical_tdz,
+            lexical_const,
+            scope_boundaries,
             pc,
             stack_base: self.stack.len(),
             prog,
@@ -1282,6 +1329,93 @@ impl Vm {
                     self.frames[fi].pc = pc + 1;
                 }
 
+                // ---- Lexical scoping (let/const/TDZ) ----
+                Opcode::BlockEnter => {
+                    let count = instr.operands[0] as usize;
+                    let fi = self.frames.len() - 1;
+                    let f = &mut self.frames[fi];
+                    f.scope_boundaries.push(f.lexical_slots.len());
+                    f.lexical_slots
+                        .extend(std::iter::repeat(Value::undefined()).take(count));
+                    f.lexical_tdz.extend(std::iter::repeat(true).take(count));
+                    f.lexical_const.extend(std::iter::repeat(false).take(count));
+                    f.pc = pc + 1;
+                }
+                Opcode::BlockLeave => {
+                    let fi = self.frames.len() - 1;
+                    let f = &mut self.frames[fi];
+                    if let Some(boundary) = f.scope_boundaries.pop() {
+                        f.lexical_slots.truncate(boundary);
+                        f.lexical_tdz.truncate(boundary);
+                        f.lexical_const.truncate(boundary);
+                    }
+                    f.pc = pc + 1;
+                }
+                Opcode::DeclareLet => {
+                    let slot = instr.operands[0] as usize;
+                    let fi = self.frames.len() - 1;
+                    let val = self.pop();
+                    let f = &mut self.frames[fi];
+                    if slot < f.lexical_slots.len() {
+                        f.lexical_slots[slot] = val;
+                        f.lexical_tdz[slot] = false;
+                    }
+                    f.pc = pc + 1;
+                }
+                Opcode::DeclareConst => {
+                    let slot = instr.operands[0] as usize;
+                    let fi = self.frames.len() - 1;
+                    let val = self.pop();
+                    let f = &mut self.frames[fi];
+                    if slot < f.lexical_slots.len() {
+                        f.lexical_slots[slot] = val;
+                        f.lexical_tdz[slot] = false;
+                        f.lexical_const[slot] = true;
+                    }
+                    f.pc = pc + 1;
+                }
+                Opcode::LoadLexical => {
+                    let slot = instr.operands[0] as usize;
+                    let fi = self.frames.len() - 1;
+                    let f = &self.frames[fi];
+                    if slot < f.lexical_slots.len() {
+                        if f.lexical_tdz[slot] {
+                            return self.throw_reference_error(
+                                gc,
+                                &format!("Cannot access '{}' before initialization", slot),
+                            );
+                        }
+                        self.push(f.lexical_slots[slot]);
+                    } else {
+                        self.push(Value::undefined());
+                    }
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::StoreLexical => {
+                    let slot = instr.operands[0] as usize;
+                    let fi = self.frames.len() - 1;
+                    let val = self.pop();
+                    // Check TDZ before store (per spec §8.1.1.4.4, SetMutableBinding
+                    // throws ReferenceError if binding is uninitialized)
+                    if slot < self.frames[fi].lexical_slots.len() {
+                        if self.frames[fi].lexical_tdz[slot] {
+                            return self.throw_reference_error(
+                                gc,
+                                &format!("Cannot access '{}' before initialization", slot),
+                            );
+                        }
+                        if self.frames[fi].lexical_const[slot] {
+                            return self.throw_type_error(
+                                gc,
+                                "Assignment to constant variable",
+                            );
+                        }
+                        self.frames[fi].lexical_slots[slot] = val;
+                    }
+                    self.push(val);
+                    self.frames[fi].pc = pc + 1;
+                }
+
                 // ---- Unary ----
                 Opcode::TypeOf => {
                     let val = self.pop();
@@ -1533,6 +1667,10 @@ impl Vm {
                                 locals.extend(args);
                                 self.frames.push(Frame {
                                     locals,
+                                    lexical_slots: Vec::new(),
+                                    lexical_tdz: Vec::new(),
+                                    lexical_const: Vec::new(),
+                                    scope_boundaries: Vec::new(),
                                     pc: 0,
                                     stack_base: self.stack.len(),
                                     prog: func_prog as *const BytecodeProgram,
@@ -1663,6 +1801,10 @@ impl Vm {
                                 locals.extend(args);
                                 self.frames.push(Frame {
                                     locals,
+                                    lexical_slots: Vec::new(),
+                                    lexical_tdz: Vec::new(),
+                                    lexical_const: Vec::new(),
+                                    scope_boundaries: Vec::new(),
                                     pc: 0,
                                     stack_base: self.stack.len(),
                                     prog: func_prog as *const BytecodeProgram,
@@ -1720,6 +1862,10 @@ impl Vm {
                     if let Some(gen_id) = self.frames[fi].generator_id {
                         let g = &mut self.generators[gen_id];
                         g.locals = self.frames[fi].locals.clone();
+                        g.lexical_slots = self.frames[fi].lexical_slots.clone();
+                        g.lexical_tdz = self.frames[fi].lexical_tdz.clone();
+                        g.lexical_const = self.frames[fi].lexical_const.clone();
+                        g.scope_boundaries = self.frames[fi].scope_boundaries.clone();
                         g.pc = pc + 1;
                         g.prog = self.frames[fi].prog;
                         g.started = true;

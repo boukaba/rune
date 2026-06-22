@@ -754,7 +754,7 @@
 | **13C: Arrow functions** | 🟡 P2 | ✅ done | (params) => body, param => body, () => body; expression body (implicit return) and block body. `new ArrowFunction()` throws TypeError per §16.2.1.1.1 (`is_arrow` flag on `Func` + check in `Opcode::New`). **Known gap:** `arguments` inheritance (§10.4.4) deferred to Sprint 14 — arrows inherit enclosing function's `arguments` instead of creating their own. |
 | **13D: Stub crate hygiene (done)** | 🟢 P3 | 0.1d | ✅ One-line comments in `rune_regex`/`rune_module`/`rune_debugger`/`rune_jit_cranelift` lib.rs. |
 | **13E: `Symbol.hasInstance` TODO (done)** | 🟢 P3 | 0.1d | ✅ TODO comment above `Opcode::Instanceof` handler in vm.rs. |
-| **13F: Microbenchmark harness** | 🟡 P2 | ✅ done | `crates/rune_bench/` with criterion. 3 workloads: `loop_sum_smi_1M` (220ms), `array_push_grow_100k` (45ms), `proto_chain_lookup_5deep_1M` (387ms). Baseline saved in `results/20250622.txt`. `make bench` to re-run. |
+| **13F: Microbenchmark harness** | 🟡 P2 | ✅ done | `crates/rune_bench/` with criterion. 6 workloads: `loop_sum_smi_1M` (247ms), `array_push_grow_100k` (52ms), `proto_chain_lookup_5deep_1M` (442ms), `jit_hot_function_1M` (456ms — interpreter on aarch64, JIT x86_64 only), `poly_prop_10shapes_1M` (396ms — SIDT benchmark), `parse_emit_execute_hello` (380ns — full pipeline). All use `iter_batched` to exclude Context creation. `make bench` (JIT on) and `make bench-no-jit` available. Baseline saved in `results/20250622_jit_on.txt`. |
 
 ## Phase 9 — v2 Features (Stretch)
 

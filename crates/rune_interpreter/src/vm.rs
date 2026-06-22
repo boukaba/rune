@@ -1857,8 +1857,7 @@ impl Vm {
                                         && count == JIT_THRESHOLD
                                         && rune_jit_baseline::is_jit_compatible(func_prog)
                                     {
-                                        let codegen =
-                                            CodeGen::new(func_prog.instructions.len());
+                                        let codegen = CodeGen::new(func_prog.instructions.len());
                                         let mem = codegen.compile(func_prog);
                                         mem.make_executable();
                                         unsafe {

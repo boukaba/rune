@@ -2,7 +2,7 @@
 
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
-> **Status:** Sprint 12 closed ✅ — Pre-Sprint-13 cleanup done (fmt + clippy green)
+> **Status:** Sprint 13 in progress — 13A, 13B, 13C ✅
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
 > Every implementation decision at every level (lexer, parser, emitter, bytecode, interpreter, builtins, JIT) **must** be verified against the exact ECMA-262 specification language in [`ecma262.md`](./ecma262.md) — **never guess** what the spec says. Each section in `ecma262.md` links to the corresponding URL fragment on `https://tc39.es/ecma262/multipage/`; **always open these URLs via `webfetch` tool** to read the authoritative algorithm steps before implementing. This applies to all phases below.
@@ -749,9 +749,9 @@
 
 | Task | Priority | Est. | Description |
 |---|---|---|---|
-| **13A: `let`/`const` block scope + TDZ** | 🔴 P0 | 5–7d | Emitter scope-stack, per-block binding tables, TDZ sentinel, `const` immutability. §9.1.1, §14.3.1. |
-| **13B: Test262 harness shim** | 🟠 P1 | 1–2d | `assert.sameValue`/`notSameValue`/`throws` as Rust builtins; negative tests check `error.name`. Parallel to 13A. |
-| **13C: Modern-syntax wedge (pick one)** | 🟡 P2 | 3–4d | Arrow functions, destructuring, or template literal substitutions. Defer the rest to Sprint 14+. |
+| **13A: `let`/`const` block scope + TDZ** | 🔴 P0 | ✅ done | BlockEnter/BlockLeave/DeclareLet/DeclareConst/LoadLexical/StoreLexical opcodes; emitter scope tracking; VM lexical slot management; TDZ → ReferenceError; const reassignment → TypeError; 9 integration tests. |
+| **13B: Test262 harness shim** | 🟠 P1 | ✅ done | assert.sameValue/notSameValue/throws builtins + wrapper object; error builtins for sta.js replacement. |
+| **13C: Arrow functions** | 🟡 P2 | ✅ done | (params) => body, param => body, () => body; expression body (implicit return) and block body. No lexical `this`/`arguments` yet. |
 | **13D: Stub crate hygiene (done)** | 🟢 P3 | 0.1d | ✅ One-line comments in `rune_regex`/`rune_module`/`rune_debugger`/`rune_jit_cranelift` lib.rs. |
 | **13E: `Symbol.hasInstance` TODO (done)** | 🟢 P3 | 0.1d | ✅ TODO comment above `Opcode::Instanceof` handler in vm.rs. |
 

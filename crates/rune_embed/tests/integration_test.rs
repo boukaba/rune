@@ -1734,6 +1734,109 @@ mod instanceof_tests {
     }
 
     #[test]
+    fn test_assert_same_value() {
+        let mut ctx = Context::new();
+        // assert.sameValue with matching values should not throw
+        let r = ctx.eval("assert.sameValue(1, 1); 'ok'").unwrap();
+        assert!(r.is_heap_object(), "sameValue passed");
+    }
+
+    #[test]
+    fn test_assert_not_same_value() {
+        let mut ctx = Context::new();
+        let r = ctx.eval("assert.notSameValue(1, 2); 'ok'").unwrap();
+        assert!(r.is_heap_object(), "notSameValue passed");
+    }
+
+    #[test]
+    fn test_assert_same_value_fails() {
+        let mut ctx = Context::new();
+        let e = ctx.eval("assert.sameValue(1, 2)");
+        assert!(e.is_err(), "sameValue mismatch should error");
+    }
+
+    // ---- Arrow function tests ----
+
+    #[test]
+    fn test_arrow_single_param() {
+        let mut ctx = Context::new();
+        let r = ctx.eval("let f = x => x + 1; f(5)").unwrap();
+        assert_eq!(r.as_smi(), Some(6));
+    }
+
+    #[test]
+    fn test_arrow_multi_param() {
+        let mut ctx = Context::new();
+        let r = ctx.eval("let f = (a, b) => a + b; f(3, 4)").unwrap();
+        assert_eq!(r.as_smi(), Some(7));
+    }
+
+    #[test]
+    fn test_arrow_zero_params() {
+        let mut ctx = Context::new();
+        let r = ctx.eval("let f = () => 42; f()").unwrap();
+        assert_eq!(r.as_smi(), Some(42));
+    }
+
+    #[test]
+    fn test_arrow_block_body_with_let() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(
+                r#"
+            let f = (a, b) => {
+                let r = a + b;
+                return r;
+            };
+            f(10, 20)
+        "#,
+            )
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(30));
+    }
+
+    #[test]
+    fn test_fn_block_with_let() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(
+                r#"
+            function add(a, b) {
+                let r = a + b;
+                return r;
+            }
+            add(10, 20)
+        "#,
+            )
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(30));
+    }
+
+    #[test]
+    fn test_arrow_block_body_simple() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(
+                r#"
+            let f = (a, b) => {
+                return a + b;
+            };
+            f(10, 20)
+        "#,
+            )
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(30));
+    }
+
+    #[test]
+    fn test_arrow_in_map_like() {
+        let mut ctx = Context::new();
+        // Use a simple arrow call pattern (no Array.map, just direct call)
+        let r = ctx.eval("let double = n => n * 2; double(21)").unwrap();
+        assert_eq!(r.as_smi(), Some(42));
+    }
+
+    #[test]
     fn test_let_shadowing_in_block() {
         let mut ctx = Context::new();
         // inner block's `x` should shadow outer `x`

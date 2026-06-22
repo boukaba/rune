@@ -124,25 +124,29 @@ impl Emitter {
         for param in &func.params {
             sub.locals.push(param.to_string());
         }
-        // Emit body (could be Block, Expr for arrow, or single statement)
+        // Emit body: for arrow expression body (Stmt::Expr), use it as return value
+        let is_arrow_expr = func.name.is_none() && matches!(&func.body, Stmt::Expr(..));
         match &func.body {
-            Stmt::Block(stmts, _) => {
-                for stmt in stmts {
-                    sub.emit_statement(stmt);
+            Stmt::Expr(expr, _) if is_arrow_expr => {
+                // Arrow expression body: emit expression then Return
+                sub.emit_expression(expr);
+                sub.emit(Opcode::Return, vec![]);
+            }
+            _ => {
+                // Emit the body statement — for `Stmt::Block`, this goes through
+                // the lexical scope setup in emit_statement (BlockEnter/BlockLeave).
+                // For other body types, just emit them normally.
+                sub.emit_statement(&func.body);
+                // Add implicit undefined return if body doesn't end with Return
+                let needs_return = match sub.instructions.last() {
+                    Some(last) => last.opcode != Opcode::Return,
+                    None => true,
+                };
+                if needs_return {
+                    sub.emit(Opcode::LoadUndefined, vec![]);
+                    sub.emit(Opcode::Return, vec![]);
                 }
             }
-            other => {
-                sub.emit_statement(other);
-            }
-        }
-        // Add implicit undefined return if body doesn't end with Return
-        let needs_return = match sub.instructions.last() {
-            Some(last) => last.opcode != Opcode::Return,
-            None => true,
-        };
-        if needs_return {
-            sub.emit(Opcode::LoadUndefined, vec![]);
-            sub.emit(Opcode::Return, vec![]);
         }
         let program = sub.into_bytecode();
         let idx = self.nested_funcs.len();
@@ -278,7 +282,8 @@ impl Emitter {
                                     Opcode::DeclareLet
                                 };
                                 self.emit(op, vec![slot as i64]);
-                                self.emit(Opcode::Pop, vec![]);
+                                // DeclareLet/DeclareConst already pop the value from stack.
+                                // Unlike StoreLocal, they don't push it back.
                             }
                         }
                     }

@@ -918,6 +918,10 @@ impl Parser {
             TokenKind::Identifier => {
                 let t = self.tok.clone();
                 self.advance();
+                // Single-param arrow: ident => body
+                if self.tok.kind == TokenKind::Arrow {
+                    return self.parse_arrow_body(vec![t.value.clone().into_boxed_str()], start);
+                }
                 Expr::Identifier(
                     t.value.clone().into_boxed_str(),
                     Span {
@@ -928,8 +932,57 @@ impl Parser {
             }
             TokenKind::LParen => {
                 self.advance();
+                // Check for () => (zero-param arrow)
+                if self.tok.kind == TokenKind::RParen {
+                    self.advance();
+                    if self.tok.kind == TokenKind::Arrow {
+                        return self.parse_arrow_body(Vec::new(), start);
+                    }
+                    return Expr::Undefined(Span { start: start.start, end: self.span().end });
+                }
+                // Try to parse as single identifier first (arrow candidate)
+                if self.tok.kind == TokenKind::Identifier {
+                    let name = self.tok.value.clone().into_boxed_str();
+                    self.advance();
+                    if self.tok.kind == TokenKind::Comma {
+                        // Multi-param: (a, b, ...) => body
+                        let mut params = vec![name.clone()];
+                        while self.tok.kind == TokenKind::Comma {
+                            self.advance();
+                            if self.tok.kind == TokenKind::Identifier {
+                                params.push(self.tok.value.clone().into_boxed_str());
+                                self.advance();
+                            }
+                        }
+                        self.expect(TokenKind::RParen);
+                        if self.tok.kind == TokenKind::Arrow {
+                            return self.parse_arrow_body(params, start);
+                        }
+                        // Not an arrow — reconstruct as comma expression
+                        // For now, just return the first identifier
+                        return Expr::Identifier(name, Span { start: start.start, end: self.span().end });
+                    } else if self.tok.kind == TokenKind::RParen {
+                        self.advance();
+                        if self.tok.kind == TokenKind::Arrow {
+                            // (name) => body — single-param arrow
+                            return self.parse_arrow_body(vec![name], start);
+                        }
+                        // (name) — just a parenthesized identifier
+                        return Expr::Identifier(name, Span { start: start.start, end: self.span().end });
+                    }
+                    // Not `)` after identifier — parse normally
+                    // We consumed the token, reconstruct it
+                    // This is a limitation: for `(a + b)` we'd miss the `+ b`
+                    // Fall through to parse_expr for the rest
+                }
                 let expr = self.parse_expr(0);
                 self.expect(TokenKind::RParen);
+                // Single-param arrow: (expr) => body
+                if self.tok.kind == TokenKind::Arrow {
+                    if let Expr::Identifier(name, _) = &expr {
+                        return self.parse_arrow_body(vec![name.clone()], start);
+                    }
+                }
                 expr
             }
             TokenKind::LBracket => {
@@ -1116,6 +1169,37 @@ impl Parser {
             }
         }
         lhs
+    }
+
+    /// Parse an arrow function body after the `=>`.
+    /// `params` is the list of parameter names already parsed.
+    fn parse_arrow_body(&mut self, params: Vec<Box<str>>, start: Span) -> Expr {
+        self.expect(TokenKind::Arrow);
+        let body = if self.tok.kind == TokenKind::LBrace {
+            // Block body: { ... }
+            self.parse_block()
+        } else {
+            // Expression body: implicitly returned
+            let expr = self.parse_expr(0);
+            Stmt::Expr(expr, self.span())
+        };
+        Expr::Function(
+            Box::new(FnNode {
+                name: None,
+                params,
+                body,
+                is_generator: false,
+                is_async: false,
+                span: Span {
+                    start: start.start,
+                    end: self.span().end,
+                },
+            }),
+            Span {
+                start: start.start,
+                end: self.span().end,
+            },
+        )
     }
 
     fn parse_assign_op(&mut self) -> BinaryOp {

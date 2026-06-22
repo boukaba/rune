@@ -216,6 +216,24 @@ impl Vm {
         self.globals.insert("Infinity".to_string(), inf_val);
         self.globals
             .insert("undefined".to_string(), Value::undefined());
+
+        // assert wrapper object for Test262: assert.sameValue, assert.notSameValue, assert.throws
+        let assert_same = find_handle(&self.builtins, "assert_sameValue");
+        let assert_not_same = find_handle(&self.builtins, "assert_notSameValue");
+        let assert_throws = find_handle(&self.builtins, "assert_throws");
+        if let (Some(same), Some(not_same), Some(th)) =
+            (assert_same, assert_not_same, assert_throws)
+        {
+            let assert_obj = make_object(
+                gc,
+                &[
+                    ("sameValue", same),
+                    ("notSameValue", not_same),
+                    ("throws", th),
+                ],
+            );
+            self.builtin_wrappers.insert("assert".to_string(), assert_obj);
+        }
     }
 
     /// Register a built-in function and return its handle (negative Smi).

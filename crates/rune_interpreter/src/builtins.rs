@@ -435,7 +435,156 @@ pub fn default_builtins() -> Vec<Builtin> {
             name: "Math_sqrt",
             func: math_sqrt,
         },
+        // Test262 assert builtins
+        Builtin {
+            name: "assert_sameValue",
+            func: assert_same_value,
+        },
+        Builtin {
+            name: "assert_notSameValue",
+            func: assert_not_same_value,
+        },
+        Builtin {
+            name: "assert_throws",
+            func: assert_throws,
+        },
     ]
+}
+
+// ---- Test262 assert builtins ----
+
+/// `assert.sameValue(actual, expected, description)`
+/// Performs StrictEqual comparison and throws Test262Error if mismatch.
+fn value_eq_strict(a: Value, b: Value) -> bool {
+    if let (Some(av), Some(bv)) = (a.as_smi(), b.as_smi()) {
+        av == bv
+    } else if a.is_undefined() && b.is_undefined() {
+        true
+    } else if a.is_null() && b.is_null() {
+        true
+    } else if let (Some(ap), Some(bp)) = (a.heap_ptr(), b.heap_ptr()) {
+        ap == bp
+    } else {
+        false
+    }
+}
+
+fn value_to_debug(v: Value) -> String {
+    if v.is_undefined() {
+        "undefined".to_string()
+    } else if v.is_null() {
+        "null".to_string()
+    } else if let Some(n) = v.as_smi() {
+        n.to_string()
+    } else if let Some(ptr) = v.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_STRING {
+            unsafe { HeapString::to_string(ptr as *mut HeapString) }
+        } else {
+            format!("{:p}", ptr)
+        }
+    } else {
+        "undefined".to_string()
+    }
+}
+
+fn make_error(gc: &mut SemiSpace, msg: &str) -> Value {
+    let s = HeapString::allocate(gc, msg);
+    make_simple_object(gc, "message", Value::from_heap_ptr(s as *mut u8))
+}
+
+/// assert.sameValue(actual, expected, description)
+pub fn assert_same_value(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    _vm: &mut Vm,
+) -> Value {
+    let actual = args.first().copied().unwrap_or(Value::undefined());
+    let expected = args.get(1).copied().unwrap_or(Value::undefined());
+    let desc = args
+        .get(2)
+        .map(|v| value_to_debug(*v))
+        .unwrap_or_default();
+    if !value_eq_strict(actual, expected) {
+        let msg = if desc.is_empty() {
+            format!(
+                "assert.sameValue: expected {} but got {}",
+                value_to_debug(expected),
+                value_to_debug(actual)
+            )
+        } else {
+            format!(
+                "{}: assert.sameValue: expected {} but got {}",
+                desc,
+                value_to_debug(expected),
+                value_to_debug(actual)
+            )
+        };
+        let err = make_error(gc, &msg);
+        _vm.set_pending_exception(err);
+    }
+    Value::undefined()
+}
+
+/// assert.notSameValue(actual, expected, description)
+pub fn assert_not_same_value(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    _vm: &mut Vm,
+) -> Value {
+    let actual = args.first().copied().unwrap_or(Value::undefined());
+    let expected = args.get(1).copied().unwrap_or(Value::undefined());
+    let desc = args
+        .get(2)
+        .map(|v| value_to_debug(*v))
+        .unwrap_or_default();
+    if value_eq_strict(actual, expected) {
+        let msg = if desc.is_empty() {
+            format!(
+                "assert.notSameValue: expected different value but got {}",
+                value_to_debug(actual)
+            )
+        } else {
+            format!(
+                "{}: assert.notSameValue: expected different value but got {}",
+                desc,
+                value_to_debug(actual)
+            )
+        };
+        let err = make_error(gc, &msg);
+        _vm.set_pending_exception(err);
+    }
+    Value::undefined()
+}
+
+/// assert.throws(errorConstructor, func, message)
+/// Calls func and checks that it throws an error of the expected type.
+pub fn assert_throws(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    _vm: &mut Vm,
+) -> Value {
+    if args.len() < 2 {
+        let err = make_error(gc, "assert.throws: expected errorConstructor and func arguments");
+        _vm.set_pending_exception(err);
+        return Value::undefined();
+    }
+    let _error_ctor = args[0];
+    let _func = args[1];
+    let _msg = args.get(2).map(|v| value_to_debug(*v)).unwrap_or_default();
+
+    // For now, we can't easily call a JS function from a builtin, so we'll
+    // implement a simplified check that expects the pending_exception
+    // mechanism. Full implementation deferred to Sprint 14+.
+    let err = make_error(
+        gc,
+        "assert.throws: not yet fully implemented (see Sprint 14)",
+    );
+    _vm.set_pending_exception(err);
+    Value::undefined()
 }
 
 /// Build a wrapper object for the Object constructor, exposing methods like .create().

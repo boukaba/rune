@@ -1,7 +1,7 @@
 use crate::vm::Vm;
 use rune_core::array::RuneArray;
 use rune_core::float::HeapFloat64;
-use rune_core::gc::{GcHeader, SemiSpace, TAG_ARRAY, TAG_STRING};
+use rune_core::gc::{GcHeader, SemiSpace, TAG_ARRAY, TAG_FLOAT64, TAG_STRING};
 use rune_core::object::JSObject;
 use rune_core::shape::{PropertyKey, Shape};
 use rune_core::string::HeapString;
@@ -28,6 +28,8 @@ fn value_to_js_string(v: Value) -> String {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_STRING {
             unsafe { HeapString::to_string(ptr as *mut HeapString) }
+        } else if tag == TAG_FLOAT64 {
+            unsafe { HeapFloat64::value(ptr as *mut HeapFloat64).to_string() }
         } else {
             "[object Object]".to_string()
         }
@@ -40,7 +42,7 @@ fn value_to_js_string(v: Value) -> String {
 pub fn print_builtin(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     let s = args
         .iter()
-        .map(|v| format!("{v:?}"))
+        .map(|v| value_to_js_string(*v))
         .collect::<Vec<_>>()
         .join(" ");
     println!("{s}");

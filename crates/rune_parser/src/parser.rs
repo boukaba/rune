@@ -944,35 +944,40 @@ impl Parser {
                         end: self.span().end,
                     });
                 }
-                // Try to parse as single identifier first (arrow candidate)
+                // Peek-ahead arrow detection: only consume the identifier
+                // if what follows is `,` or `)` (arrow param candidates).
+                // Otherwise fall through to parse_expr (regular paren expr).
                 if self.tok.kind == TokenKind::Identifier {
-                    let name = self.tok.value.clone().into_boxed_str();
-                    self.advance();
-                    if self.tok.kind == TokenKind::Comma {
-                        // Multi-param: (a, b, ...) => body
-                        let mut params = vec![name.clone()];
-                        while self.tok.kind == TokenKind::Comma {
-                            self.advance();
-                            if self.tok.kind == TokenKind::Identifier {
-                                params.push(self.tok.value.clone().into_boxed_str());
-                                self.advance();
-                            }
-                        }
-                        self.expect(TokenKind::RParen);
-                        if self.tok.kind == TokenKind::Arrow {
-                            return self.parse_arrow_body(params, start);
-                        }
-                        // Not an arrow — reconstruct as comma expression
-                        // For now, just return the first identifier
-                        return Expr::Identifier(
-                            name,
-                            Span {
-                                start: start.start,
-                                end: self.span().end,
-                            },
-                        );
-                    } else if self.tok.kind == TokenKind::RParen {
+                    let next = self.lexer.peek_token().kind;
+                    if matches!(next, TokenKind::Comma | TokenKind::RParen) {
+                        let name = self.tok.value.clone().into_boxed_str();
                         self.advance();
+                        if next == TokenKind::Comma {
+                            // Multi-param: (a, b, ...) => body or comma expr
+                            let mut params = vec![name.clone()];
+                            while self.tok.kind == TokenKind::Comma {
+                                self.advance();
+                                if self.tok.kind == TokenKind::Identifier {
+                                    params.push(self.tok.value.clone().into_boxed_str());
+                                    self.advance();
+                                }
+                            }
+                            self.expect(TokenKind::RParen);
+                            if self.tok.kind == TokenKind::Arrow {
+                                return self.parse_arrow_body(params, start);
+                            }
+                            // Not an arrow — reconstruct as comma expression
+                            // For now, just return the first identifier
+                            return Expr::Identifier(
+                                name,
+                                Span {
+                                    start: start.start,
+                                    end: self.span().end,
+                                },
+                            );
+                        }
+                        // next == RParen
+                        self.expect(TokenKind::RParen);
                         if self.tok.kind == TokenKind::Arrow {
                             // (name) => body — single-param arrow
                             return self.parse_arrow_body(vec![name], start);
@@ -986,10 +991,8 @@ impl Parser {
                             },
                         );
                     }
-                    // Not `)` after identifier — parse normally
-                    // We consumed the token, reconstruct it
-                    // This is a limitation: for `(a + b)` we'd miss the `+ b`
-                    // Fall through to parse_expr for the rest
+                    // Next token is not `,` or `)` — not an arrow.
+                    // DON'T consume the identifier; fall through to parse_expr.
                 }
                 let expr = self.parse_expr(0);
                 self.expect(TokenKind::RParen);

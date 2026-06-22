@@ -755,6 +755,7 @@
 | **13D: Stub crate hygiene (done)** | 🟢 P3 | 0.1d | ✅ One-line comments in `rune_regex`/`rune_module`/`rune_debugger`/`rune_jit_cranelift` lib.rs. |
 | **13E: `Symbol.hasInstance` TODO (done)** | 🟢 P3 | 0.1d | ✅ TODO comment above `Opcode::Instanceof` handler in vm.rs. |
 | **13F: Microbenchmark harness** | 🟡 P2 | ✅ done | `crates/rune_bench/` with criterion. 6 workloads: `loop_sum_smi_1M` (247ms), `array_push_grow_100k` (52ms), `proto_chain_lookup_5deep_1M` (442ms), `jit_hot_function_1M` (456ms — interpreter on aarch64, JIT x86_64 only), `poly_prop_10shapes_1M` (396ms — SIDT benchmark), `parse_emit_execute_hello` (380ns — full pipeline). All use `iter_batched` to exclude Context creation. `make bench` (JIT on) and `make bench-no-jit` available. Baseline saved in `results/20250622_jit_on.txt`. |
+| **13G: Parser fix — parenthesized binary expressions** | 🔴 P0 | ✅ done | Arrow-detection in `parse_primary_inner` (`TokenKind::LParen` branch) consumed the identifier before confirming it was an arrow param, silently dropping the LHS of binary ops like `(a + b)` → parsed as `(+ b)`. Fixed with peek-ahead: use `lexer.peek_token()` to check if the next token is `,` or `)` before consuming the identifier. Added 12 integration tests covering `(a+b)`, `(a-b)`, `(a*b)`, `(a/b)`, `(a>b)`, `(a<b)`, `(a===b)`, `(a+b)*c` (nested), `f((a+b))` (arg), `if((x>5)&&(x<20))` (conditional), `(x)` (grouped ident). All arrows (single, multi, zero-param) still pass. |
 
 ## Phase 9 — v2 Features (Stretch)
 

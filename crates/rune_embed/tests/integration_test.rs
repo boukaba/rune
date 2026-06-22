@@ -1872,4 +1872,102 @@ mod instanceof_tests {
             .unwrap();
         assert_eq!(r.as_smi(), Some(2), "inner x should shadow outer x");
     }
+
+    // ---- Parenthesized expressions (Sprint 13G parser fix) ----
+
+    #[test]
+    fn test_paren_add() {
+        let mut ctx = Context::new();
+        let r = ctx.eval("var i = 7; var k = (i + 10); k").unwrap();
+        assert_eq!(r.as_smi(), Some(17), "(i + 10) should be 17");
+    }
+
+    #[test]
+    fn test_paren_sub() {
+        let mut ctx = Context::new();
+        let r = ctx.eval("var i = 7; var k = (i - 10); k").unwrap();
+        assert_eq!(r.as_smi(), Some(-3), "(i - 10) should be -3");
+    }
+
+    #[test]
+    fn test_paren_mul() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval("var a = 5; var b = 3; var k = (a + b) * 2; k")
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(16), "(a + b) * 2 should be 16");
+    }
+
+    #[test]
+    fn test_paren_nested() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval("var a = 5; var b = 3; var k = ((a + b) * 2); k")
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(16), "((a + b) * 2) should be 16");
+    }
+
+    #[test]
+    fn test_paren_in_call_arg() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval("function f(x){ return x; } var a = 5; var b = 3; f((a + b))")
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(8), "f((a + b)) should be 8");
+    }
+
+    #[test]
+    fn test_paren_conditional() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval("var result; var x = 10; if ((x > 5) && (x < 20)) { result = 1; } else { result = 0; } result")
+            .unwrap();
+        assert_eq!(
+            r.as_smi(),
+            Some(1),
+            "if ((x > 5) && (x < 20)) should be true"
+        );
+    }
+
+    #[test]
+    fn test_paren_gt() {
+        let mut ctx = Context::new();
+        let r = ctx.eval("var x = 10; var r = (x > 5); r").unwrap();
+        assert_eq!(r.as_smi(), Some(1), "(x > 5) should be 1 (true)");
+    }
+
+    #[test]
+    fn test_paren_lt() {
+        let mut ctx = Context::new();
+        let r = ctx.eval("var x = 10; var r = (x < 5); r").unwrap();
+        assert_eq!(r.as_smi(), Some(0), "(x < 5) should be 0 (false)");
+    }
+
+    #[test]
+    fn test_paren_strict_eq() {
+        let mut ctx = Context::new();
+        let r = ctx.eval("var x = 10; var r = (x === 10); r").unwrap();
+        assert_eq!(r.as_smi(), Some(1), "(x === 10) should be 1 (true)");
+    }
+
+    #[test]
+    fn test_paren_mul_parse() {
+        let mut ctx = Context::new();
+        let r = ctx.eval("var i = 7; var k = (i * 10); k").unwrap();
+        assert_eq!(r.as_smi(), Some(70), "(i * 10) should be 70");
+    }
+
+    #[test]
+    fn test_paren_div_parse() {
+        let mut ctx = Context::new();
+        let r = ctx.eval("var i = 100; var k = (i / 10); k").unwrap();
+        assert_eq!(r.as_smi(), Some(10), "(i / 10) should be 10");
+    }
+
+    #[test]
+    fn test_paren_identifier_grouped() {
+        let mut ctx = Context::new();
+        let r = ctx.eval("var x = 42; (x)").unwrap();
+        assert_eq!(r.as_smi(), Some(42), "(x) should be 42");
+    }
 }

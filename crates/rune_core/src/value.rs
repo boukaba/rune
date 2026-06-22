@@ -5,9 +5,11 @@ use std::fmt;
 /// Tag scheme (lowest bit):
 ///   - bit 0 = 1: Smi (value = n << 1 | 1; decode = (raw >> 1) as i32)
 ///   - bit 0 = 0: heap pointer or sentinel
-///     - raw == 0: `undefined`
-///     - raw == 2: `null`
-///     - else: heap pointer (aligned, ≥4 bytes)
+///     - raw == 0x00: `undefined`
+///     - raw == 0x02: `null`
+///     - raw == 0x04: `false`
+///     - raw == 0x06: `true`
+///     - else: heap pointer (8-byte aligned, lowest 3 bits = 0)
 ///
 /// Smi range: -(2^30) .. (2^30 - 1)
 #[derive(Copy, Clone)]
@@ -17,6 +19,8 @@ const SMI_TAG: u64 = 0x01;
 const TAG_MASK: u64 = 0x01;
 const UNDEFINED_RAW: u64 = 0x00;
 const NULL_RAW: u64 = 0x02;
+const FALSE_RAW: u64 = 0x04;
+const TRUE_RAW: u64 = 0x06;
 
 impl Value {
     /// Create a Smi value (small integer).
@@ -43,9 +47,13 @@ impl Value {
         }
     }
 
-    /// Check if this is a heap pointer (bit 0 = 0, non-zero, not null sentinel).
+    /// Check if this is a heap pointer (bit 0 = 0, non-zero, not a sentinel).
     pub fn is_heap_object(&self) -> bool {
-        self.0 & TAG_MASK == 0 && self.0 != 0 && self.0 != 2
+        self.0 & TAG_MASK == 0 && !self.is_sentinel()
+    }
+
+    fn is_sentinel(&self) -> bool {
+        self.0 <= 6 && self.0 & 1 == 0
     }
 
     /// Get the raw heap address, if this is a heap object.
@@ -77,6 +85,24 @@ impl Value {
         Value(NULL_RAW)
     }
 
+    pub const fn boolean(b: bool) -> Self {
+        Value(if b { TRUE_RAW } else { FALSE_RAW })
+    }
+
+    pub fn is_boolean(&self) -> bool {
+        self.0 == TRUE_RAW || self.0 == FALSE_RAW
+    }
+
+    pub fn to_boolean(&self) -> Option<bool> {
+        if self.0 == TRUE_RAW {
+            Some(true)
+        } else if self.0 == FALSE_RAW {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
     pub fn is_undefined(&self) -> bool {
         self.0 == UNDEFINED_RAW
     }
@@ -89,6 +115,9 @@ impl Value {
     pub fn to_bool(&self) -> bool {
         if self.is_undefined() || self.is_null() {
             return false;
+        }
+        if let Some(b) = self.to_boolean() {
+            return b;
         }
         if let Some(v) = self.as_smi() {
             return v != 0;
@@ -145,6 +174,8 @@ impl fmt::Debug for Value {
             write!(f, "undefined")
         } else if self.is_null() {
             write!(f, "null")
+        } else if let Some(b) = self.to_boolean() {
+            write!(f, "{b}")
         } else if let Some(v) = self.as_smi() {
             write!(f, "{v}")
         } else if let Some(v) = self.as_float64() {
@@ -206,9 +237,29 @@ mod tests {
     }
 
     #[test]
+    fn test_boolean_type() {
+        let t = Value::boolean(true);
+        let f = Value::boolean(false);
+        assert!(t.is_boolean());
+        assert!(f.is_boolean());
+        assert_eq!(t.to_boolean(), Some(true));
+        assert_eq!(f.to_boolean(), Some(false));
+        assert!(t.to_bool());
+        assert!(!f.to_bool());
+        assert!(!t.is_heap_object());
+        assert!(!f.is_heap_object());
+        assert!(!t.is_smi());
+        assert!(!f.is_smi());
+        assert!(!t.is_undefined());
+        assert!(!f.is_null());
+    }
+
+    #[test]
     fn test_boolean_conversion() {
         assert!(!Value::undefined().to_bool());
         assert!(!Value::null().to_bool());
+        assert!(!Value::boolean(false).to_bool());
+        assert!(Value::boolean(true).to_bool());
         assert!(!Value::smi(0).to_bool());
         assert!(Value::smi(1).to_bool());
         assert!(Value::smi(-1).to_bool());
@@ -229,5 +280,6 @@ mod tests {
         assert!(!v.is_heap_object());
         assert!(!v.is_undefined());
         assert!(!v.is_null());
+        assert!(!v.is_boolean());
     }
 }

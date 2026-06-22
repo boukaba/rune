@@ -176,7 +176,8 @@ impl CodeGen {
                     self.emit_jit_stack_push();
                 }
                 Opcode::LoadBoolean => {
-                    let val = if instr.operands[0] != 0 { 7u64 } else { 3u64 };
+                    // Value::boolean(true) = 0x06, Value::boolean(false) = 0x04
+                    let val = if instr.operands[0] != 0 { 6u64 } else { 4u64 };
                     self.mem.emit_mov_r64_imm64(0, val);
                     self.emit_jit_stack_push();
                 }
@@ -204,10 +205,14 @@ impl CodeGen {
                 Opcode::JumpIfFalse => {
                     let target = instr.operands[0] as usize;
                     self.emit_jit_stack_pop(); // rax = condition
-                    self.mem.emit_mov_r64_imm64(1, 2); // rcx = 2
-                    self.mem.emit_cmp_r64_r64(0, 1); // cmp rax, rcx
-                    let patch = self.mem.emit_jbe_rel32(0); // jbe target (falsy)
-                    self.pending_patches.push((patch, target));
+                    self.mem.emit_mov_r64_imm64(1, 2); // rcx = 2 (null sentinel)
+                    self.mem.emit_cmp_r64_r64(0, 1); // cmp rax, 2
+                    let patch1 = self.mem.emit_jbe_rel32(0); // ≤2: falsy (undefined, Smi(0), null)
+                    self.pending_patches.push((patch1, target));
+                    self.mem.emit_mov_r64_imm64(1, 4); // rcx = 4 (false sentinel)
+                    self.mem.emit_cmp_r64_r64(0, 1); // cmp rax, 4
+                    let patch2 = self.mem.emit_je_rel32(0); // =4: falsy (false)
+                    self.pending_patches.push((patch2, target));
                 }
                 Opcode::LoadLocal => {
                     let idx = instr.operands[0] as usize;
@@ -460,7 +465,28 @@ mod tests {
                 std::ptr::null_mut(),
             )
         };
-        assert_eq!(result, 7u64); // true = Value(7) = Smi(3)? No: true=7
+        assert_eq!(result, 6u64); // Value::boolean(true) = 0x06
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_jit_load_false() {
+        let prog = make_prog(vec![
+            Instruction::new(Opcode::LoadBoolean, vec![0]),
+            Instruction::new(Opcode::Return, vec![]),
+        ]);
+        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
+        mem.make_executable();
+
+        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let result = unsafe {
+            func(
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(result, 4u64); // Value::boolean(false) = 0x04
     }
 
     #[cfg(target_arch = "x86_64")]

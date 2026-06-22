@@ -763,6 +763,30 @@
 - `sprint-13` tag at `b213b31` on `main`
 - All fmt + clippy + tests green
 
+## Sprint 14 — Modern Syntax Arc
+
+> **Theme:** Boolean type, destructuring, spread/rest, object extensions, template literals, comma operator, V8 baseline.
+
+| Task | Priority | Est. | Description |
+|---|---|---|---|
+| **14A-0: Boolean type (sentinel heap pointers)** | 🔴 P0 | ✅ done | `0x04` = `false`, `0x06` = `true`. `Value::boolean()`, `is_boolean()`, `to_boolean()`. Updated `is_heap_object()` to exclude new sentinels. `TypeOf` → `"boolean"`. `LoadBoolean` → `Value::boolean()`. All comparison/relational opcodes (`Not`, `Eq`, `Ne`, `StrictEq`, `StrictNe`, `Lt`, `Gt`, `Le`, `Ge`, `In`, `Instanceof`, `DeleteProperty`) return `Value::boolean()` instead of `Smi(1)/Smi(0)`. `value_to_js_string` prints `"true"`/`"false"`. `array_is_array` returns booleans. JIT `LoadBoolean` fixed (was emitting wrong raw values `7`/`3` instead of `6`/`4`). JIT `JumpIfFalse` updated to check false sentinel. 21 tests updated from `as_smi() == Some(1/0)` to `to_boolean()`. **Also fixes** latent JIT bug: `LoadBoolean` emitted `Smi(3)` for true (raw `7`) and `Smi(1)` for false (raw `3`) while interpreter used `Smi(1)`/`Smi(0)`. |
+| **14A: Destructuring** | 🔴 P0 | pending | Object + array, nested, default values, in function params. §14.5.1, §14.1.3. |
+| **14B: Spread / rest** | 🔴 P0 | pending | `[...arr]`, `{...obj}`, `f(...args)`, `function f(...args)`. §13.2.8, §14.2. |
+| **14C: Object literal extensions** | 🟠 P1 | pending | Shorthand `{ a, b }`, method shorthand `{ foo() {} }`, computed keys `{ [k]: v }`. §14.6. |
+| **14D: Template literal substitutions** | 🟠 P1 | pending | Rewrite `scan_template` in lexer.rs to parse `${...}`. §12.2.9.6. |
+| **14E: Arrow `arguments` + per-iteration `let`** | 🟠 P1 | pending | Materialize `arguments` in non-arrow function prologue. Per-iteration `let` binding in `for (let i …)` loops. §10.4.4, §14.7.4.2. |
+| **14F: Default parameters** | 🟢 P2 | pending | `function f(a = 1, b = a + 1) {}`. §14.1.3. |
+| **14G: Comma operator** | 🟢 P2 | pending | `(a, b)` returns `b`. §13.16. |
+| **14H: V8 baseline comparison** | 🟢 P2 | pending | `run_v8_baseline.sh` + Rune-vs-V8 columns in `progress.md`. |
+
+### Test Results — Sprint 14A-0
+- **All tests pass** (fmt + clippy + test green)
+- `typeof true === "boolean"` ✅
+- `print(true) === "true"` ✅ (was `"1"`)
+- `print(false) === "false"` ✅
+- `true === 1` is `false` ✅
+- `1 === true` is `false` ✅
+
 ## Phase 9 — v2 Features (Stretch)
 
 > **Spec mandate:** See [`ecma262.md`](./ecma262.md) for any spec-level features — open linked `https://tc39.es/ecma262/multipage/` URLs via `webfetch`. No guessing.

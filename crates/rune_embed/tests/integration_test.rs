@@ -107,10 +107,10 @@ fn test_eval_for() {
 fn test_eval_comparison() {
     let mut ctx = Context::new();
     let r1 = ctx.eval("1 < 2").unwrap();
-    assert_eq!(r1.as_smi(), Some(1));
+    assert_eq!(r1.to_boolean(), Some(true));
 
     let r2 = ctx.eval("3 > 5").unwrap();
-    assert_eq!(r2.as_smi(), Some(0));
+    assert_eq!(r2.to_boolean(), Some(false));
 }
 
 #[test]
@@ -120,7 +120,7 @@ fn test_eval_unary() {
     assert_eq!(r1.as_smi(), Some(-5));
 
     let r2 = ctx.eval("!true").unwrap();
-    assert_eq!(r2.as_smi(), Some(0));
+    assert_eq!(r2.to_boolean(), Some(false));
 }
 
 #[test]
@@ -976,14 +976,14 @@ fn test_array_is_array() {
     let mut ctx = Context::new();
     let r = ctx.eval("Array.isArray([1,2,3])").unwrap();
     assert_eq!(
-        r.as_smi(),
-        Some(1),
+        r.to_boolean(),
+        Some(true),
         "Array.isArray should return true for arrays"
     );
     let r2 = ctx.eval("Array.isArray(42)").unwrap();
     assert_eq!(
-        r2.as_smi(),
-        Some(0),
+        r2.to_boolean(),
+        Some(false),
         "Array.isArray should return false for non-arrays"
     );
 }
@@ -1208,20 +1208,20 @@ fn test_constructor_prototype_inheritance() {
 fn test_float_comparison() {
     let mut ctx = Context::new();
     let r = ctx.eval("3.5 > 2").unwrap();
-    assert_eq!(r.as_smi(), Some(1), "3.5 > 2 should be true");
+    assert_eq!(r.to_boolean(), Some(true), "3.5 > 2 should be true");
     let r2 = ctx.eval("Math.PI > 3").unwrap();
-    assert_eq!(r2.as_smi(), Some(1), "Math.PI > 3 should be true");
+    assert_eq!(r2.to_boolean(), Some(true), "Math.PI > 3 should be true");
     let r3 = ctx.eval("1.5 < 2.5").unwrap();
-    assert_eq!(r3.as_smi(), Some(1), "1.5 < 2.5 should be true");
+    assert_eq!(r3.to_boolean(), Some(true), "1.5 < 2.5 should be true");
 }
 
 #[test]
 fn test_mixed_comparison() {
     let mut ctx = Context::new();
     let r = ctx.eval("3 > 2.5").unwrap();
-    assert_eq!(r.as_smi(), Some(1), "Smi > Float64 should work");
+    assert_eq!(r.to_boolean(), Some(true), "Smi > Float64 should work");
     let r2 = ctx.eval("2.5 < 3").unwrap();
-    assert_eq!(r2.as_smi(), Some(1), "Float64 < Smi should work");
+    assert_eq!(r2.to_boolean(), Some(true), "Float64 < Smi should work");
 }
 
 #[test]
@@ -1262,9 +1262,9 @@ fn test_logical_and() {
     );
     let r3 = ctx.eval("false && true").unwrap();
     assert_eq!(
-        r3.as_smi(),
-        Some(0),
-        "false && true should return false (0)"
+        r3.to_boolean(),
+        Some(false),
+        "false && true should return false"
     );
     let r4 = ctx.eval("true && 42").unwrap();
     assert_eq!(r4.as_smi(), Some(42), "true && 42 should return 42");
@@ -1286,7 +1286,11 @@ fn test_logical_or() {
         "0 || 2 should return 2 (falsy, evaluates RHS)"
     );
     let r3 = ctx.eval("true || false").unwrap();
-    assert_eq!(r3.as_smi(), Some(1), "true || false should return true (1)");
+    assert_eq!(
+        r3.to_boolean(),
+        Some(true),
+        "true || false should return true"
+    );
     let r4 = ctx.eval("false || 42").unwrap();
     assert_eq!(r4.as_smi(), Some(42), "false || 42 should return 42");
 }
@@ -1296,8 +1300,8 @@ fn test_delete_property() {
     let mut ctx = Context::new();
     let r = ctx.eval(r#"var o = {a: 1}; delete o.a; "a" in o"#).unwrap();
     assert_eq!(
-        r.as_smi(),
-        Some(0),
+        r.to_boolean(),
+        Some(false),
         "delete o.a should remove property; 'a' in o should be false"
     );
     let r2 = ctx
@@ -1310,32 +1314,44 @@ fn test_delete_property() {
     );
     let r3 = ctx.eval(r#"var o = {a: 1}; delete o.b; "a" in o"#).unwrap();
     assert_eq!(
-        r3.as_smi(),
-        Some(1),
+        r3.to_boolean(),
+        Some(true),
         "delete non-existent property returns true, 'a' in o still true"
     );
     let r4 = ctx.eval("delete 42").unwrap();
-    assert_eq!(r4.as_smi(), Some(1), "delete 42 should return true");
+    assert_eq!(r4.to_boolean(), Some(true), "delete 42 should return true");
 }
 
 #[test]
 fn test_in_operator() {
     let mut ctx = Context::new();
     let r = ctx.eval(r#"var o = {a: 1}; "a" in o"#).unwrap();
-    assert_eq!(r.as_smi(), Some(1), r#""a" in o should be true"#);
+    assert_eq!(r.to_boolean(), Some(true), r#""a" in o should be true"#);
     let r2 = ctx.eval(r#"var o = {a: 1}; "b" in o"#).unwrap();
-    assert_eq!(r2.as_smi(), Some(0), r#""b" in o should be false"#);
+    assert_eq!(r2.to_boolean(), Some(false), r#""b" in o should be false"#);
     let r3 = ctx.eval(r#"var a = [10, 20]; 0 in a"#).unwrap();
-    assert_eq!(r3.as_smi(), Some(1), "0 in [10,20] should be true");
+    assert_eq!(r3.to_boolean(), Some(true), "0 in [10,20] should be true");
     let r4 = ctx.eval(r#"var a = [10, 20]; 2 in a"#).unwrap();
-    assert_eq!(r4.as_smi(), Some(0), "2 in [10,20] should be false (OOB)");
+    assert_eq!(
+        r4.to_boolean(),
+        Some(false),
+        "2 in [10,20] should be false (OOB)"
+    );
     let r5 = ctx.eval(r#"var a = [10, 20]; "length" in a"#).unwrap();
-    assert_eq!(r5.as_smi(), Some(1), "\"length\" in [10,20] should be true");
+    assert_eq!(
+        r5.to_boolean(),
+        Some(true),
+        "\"length\" in [10,20] should be true"
+    );
     // Nested object literal: property access via bracket notation
     let r6 = ctx
         .eval(r#"var o = {nested: {key: 1}}; "key" in o.nested"#)
         .unwrap();
-    assert_eq!(r6.as_smi(), Some(1), "key in nested object should be true");
+    assert_eq!(
+        r6.to_boolean(),
+        Some(true),
+        "key in nested object should be true"
+    );
 }
 
 #[test]
@@ -1343,14 +1359,14 @@ fn test_strict_eq_smi_float() {
     let mut ctx = Context::new();
     let r = ctx.eval("1 === 1.0").unwrap();
     assert_eq!(
-        r.as_smi(),
-        Some(1),
+        r.to_boolean(),
+        Some(true),
         "1 === 1.0 should be true (Smi↔Float64 same number)"
     );
     let r2 = ctx.eval("1.0 === 1").unwrap();
-    assert_eq!(r2.as_smi(), Some(1), "1.0 === 1 should be true");
+    assert_eq!(r2.to_boolean(), Some(true), "1.0 === 1 should be true");
     let r3 = ctx.eval("1 !== 1.0").unwrap();
-    assert_eq!(r3.as_smi(), Some(0), "1 !== 1.0 should be false");
+    assert_eq!(r3.to_boolean(), Some(false), "1 !== 1.0 should be false");
 }
 
 #[test]
@@ -1358,23 +1374,27 @@ fn test_strict_eq_nan() {
     let mut ctx = Context::new();
     let r = ctx.eval("NaN === NaN").unwrap();
     assert_eq!(
-        r.as_smi(),
-        Some(0),
+        r.to_boolean(),
+        Some(false),
         "NaN === NaN should be false per §7.2.14"
     );
     let r2 = ctx.eval("NaN !== NaN").unwrap();
-    assert_eq!(r2.as_smi(), Some(1), "NaN !== NaN should be true");
+    assert_eq!(r2.to_boolean(), Some(true), "NaN !== NaN should be true");
 }
 
 #[test]
 fn test_strict_eq_neg_zero() {
     let mut ctx = Context::new();
     let r = ctx.eval("(-0) === 0").unwrap();
-    assert_eq!(r.as_smi(), Some(1), "-0 === 0 should be true per §7.2.14");
+    assert_eq!(
+        r.to_boolean(),
+        Some(true),
+        "-0 === 0 should be true per §7.2.14"
+    );
     let r2 = ctx.eval("0 === (-0)").unwrap();
-    assert_eq!(r2.as_smi(), Some(1), "0 === -0 should be true");
+    assert_eq!(r2.to_boolean(), Some(true), "0 === -0 should be true");
     let r3 = ctx.eval("(-0) !== 0").unwrap();
-    assert_eq!(r3.as_smi(), Some(0), "-0 !== 0 should be false");
+    assert_eq!(r3.to_boolean(), Some(false), "-0 !== 0 should be false");
 }
 
 #[test]
@@ -1383,18 +1403,30 @@ fn test_nan_comparison() {
     let r = ctx.eval("NaN < 5").unwrap();
     assert!(r.is_undefined(), "NaN < 5 should be undefined per §12.9");
     let r2 = ctx.eval("NaN >= 5").unwrap();
-    assert_eq!(r2.as_smi(), Some(0), "NaN >= 5 should be false per §12.10");
+    assert_eq!(
+        r2.to_boolean(),
+        Some(false),
+        "NaN >= 5 should be false per §12.10"
+    );
     let r3 = ctx.eval("NaN <= 5").unwrap();
-    assert_eq!(r3.as_smi(), Some(0), "NaN <= 5 should be false per §12.10");
+    assert_eq!(
+        r3.to_boolean(),
+        Some(false),
+        "NaN <= 5 should be false per §12.10"
+    );
 }
 
 #[test]
 fn test_to_number_string() {
     let mut ctx = Context::new();
     let r = ctx.eval(r#""5" > 3"#).unwrap();
-    assert_eq!(r.as_smi(), Some(1), "ToNumber('5') = 5 > 3");
+    assert_eq!(r.to_boolean(), Some(true), "ToNumber('5') = 5 > 3");
     let r2 = ctx.eval(r#"3 > "5""#).unwrap();
-    assert_eq!(r2.as_smi(), Some(0), "3 > ToNumber('5') should be false");
+    assert_eq!(
+        r2.to_boolean(),
+        Some(false),
+        "3 > ToNumber('5') should be false"
+    );
 }
 
 #[test]
@@ -1554,7 +1586,11 @@ mod instanceof_tests {
         "#,
             )
             .unwrap();
-        assert_eq!(r.as_smi(), Some(1), "instance instanceof constructor");
+        assert_eq!(
+            r.to_boolean(),
+            Some(true),
+            "instance instanceof constructor"
+        );
     }
 
     #[test]
@@ -1571,8 +1607,8 @@ mod instanceof_tests {
             )
             .unwrap();
         assert_eq!(
-            r.as_smi(),
-            Some(0),
+            r.to_boolean(),
+            Some(false),
             "instance should not be instanceof different constructor"
         );
     }
@@ -1592,8 +1628,8 @@ mod instanceof_tests {
             )
             .unwrap();
         assert_eq!(
-            r.as_smi(),
-            Some(1),
+            r.to_boolean(),
+            Some(true),
             "child instance should be instanceof grandparent via prototype chain"
         );
     }
@@ -1610,8 +1646,8 @@ mod instanceof_tests {
             )
             .unwrap();
         assert_eq!(
-            r.as_smi(),
-            Some(0),
+            r.to_boolean(),
+            Some(false),
             "primitive instanceof constructor should be false (empty proto chain)"
         );
     }
@@ -1933,21 +1969,21 @@ mod instanceof_tests {
     fn test_paren_gt() {
         let mut ctx = Context::new();
         let r = ctx.eval("var x = 10; var r = (x > 5); r").unwrap();
-        assert_eq!(r.as_smi(), Some(1), "(x > 5) should be 1 (true)");
+        assert_eq!(r.to_boolean(), Some(true), "(x > 5) should be true");
     }
 
     #[test]
     fn test_paren_lt() {
         let mut ctx = Context::new();
         let r = ctx.eval("var x = 10; var r = (x < 5); r").unwrap();
-        assert_eq!(r.as_smi(), Some(0), "(x < 5) should be 0 (false)");
+        assert_eq!(r.to_boolean(), Some(false), "(x < 5) should be false");
     }
 
     #[test]
     fn test_paren_strict_eq() {
         let mut ctx = Context::new();
         let r = ctx.eval("var x = 10; var r = (x === 10); r").unwrap();
-        assert_eq!(r.as_smi(), Some(1), "(x === 10) should be 1 (true)");
+        assert_eq!(r.to_boolean(), Some(true), "(x === 10) should be true");
     }
 
     #[test]

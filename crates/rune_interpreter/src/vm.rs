@@ -463,7 +463,7 @@ impl Vm {
                 }
                 Opcode::LoadBoolean => {
                     let val = instr.operands[0] != 0;
-                    self.push(if val { Value::smi(1) } else { Value::smi(0) });
+                    self.push(Value::boolean(val));
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::LoadString => {
@@ -562,9 +562,9 @@ impl Vm {
                 Opcode::Not => {
                     let a = self.pop();
                     self.push(if a.to_bool() {
-                        Value::smi(0)
+                        Value::boolean(false)
                     } else {
-                        Value::smi(1)
+                        Value::boolean(true)
                     });
                     self.frames[fi].pc = pc + 1;
                 }
@@ -757,9 +757,9 @@ impl Vm {
                     let b = self.pop();
                     let a = self.pop();
                     self.push(if values_strictly_equal(a, b) {
-                        Value::smi(1)
+                        Value::boolean(true)
                     } else {
-                        Value::smi(0)
+                        Value::boolean(false)
                     });
                     self.frames[fi].pc = pc + 1;
                 }
@@ -767,9 +767,9 @@ impl Vm {
                     let b = self.pop();
                     let a = self.pop();
                     self.push(if !values_strictly_equal(a, b) {
-                        Value::smi(1)
+                        Value::boolean(true)
                     } else {
-                        Value::smi(0)
+                        Value::boolean(false)
                     });
                     self.frames[fi].pc = pc + 1;
                 }
@@ -777,17 +777,17 @@ impl Vm {
                     let b = self.pop();
                     let a = self.pop();
                     let result = match (a.as_smi(), b.as_smi()) {
-                        (Some(av), Some(bv)) => Value::smi(if av < bv { 1 } else { 0 }),
+                        (Some(av), Some(bv)) => Value::boolean(av < bv),
                         _ => {
                             if let Some(v) = compare_strings_lt(a, b) {
-                                Value::smi(if v { 1 } else { 0 })
+                                Value::boolean(v)
                             } else {
                                 let av = to_number(a);
                                 let bv = to_number(b);
                                 if av.is_nan() || bv.is_nan() {
                                     Value::undefined()
                                 } else {
-                                    Value::smi(if av < bv { 1 } else { 0 })
+                                    Value::boolean(av < bv)
                                 }
                             }
                         }
@@ -799,17 +799,17 @@ impl Vm {
                     let b = self.pop();
                     let a = self.pop();
                     let result = match (a.as_smi(), b.as_smi()) {
-                        (Some(av), Some(bv)) => Value::smi(if av > bv { 1 } else { 0 }),
+                        (Some(av), Some(bv)) => Value::boolean(av > bv),
                         _ => {
                             if let Some(v) = compare_strings_lt(b, a) {
-                                Value::smi(if v { 1 } else { 0 })
+                                Value::boolean(v)
                             } else {
                                 let av = to_number(a);
                                 let bv = to_number(b);
                                 if av.is_nan() || bv.is_nan() {
                                     Value::undefined()
                                 } else {
-                                    Value::smi(if av > bv { 1 } else { 0 })
+                                    Value::boolean(av > bv)
                                 }
                             }
                         }
@@ -821,20 +821,20 @@ impl Vm {
                     let b = self.pop();
                     let a = self.pop();
                     let result = match (a.as_smi(), b.as_smi()) {
-                        (Some(av), Some(bv)) => Value::smi(if av <= bv { 1 } else { 0 }),
+                        (Some(av), Some(bv)) => Value::boolean(av <= bv),
                         _ => {
                             if let Some(v) = compare_strings_lt(a, b) {
-                                Value::smi(if v { 1 } else { 0 })
+                                Value::boolean(v)
                             } else if let Some(v) = compare_strings_lt(b, a) {
                                 // Both are strings: if b < a then a <= b is false, else equal → true
-                                Value::smi(if v { 0 } else { 1 })
+                                Value::boolean(!v)
                             } else {
                                 let av = to_number(a);
                                 let bv = to_number(b);
                                 if av.is_nan() || bv.is_nan() {
-                                    Value::smi(0)
+                                    Value::boolean(false)
                                 } else {
-                                    Value::smi(if av <= bv { 1 } else { 0 })
+                                    Value::boolean(av <= bv)
                                 }
                             }
                         }
@@ -846,19 +846,19 @@ impl Vm {
                     let b = self.pop();
                     let a = self.pop();
                     let result = match (a.as_smi(), b.as_smi()) {
-                        (Some(av), Some(bv)) => Value::smi(if av >= bv { 1 } else { 0 }),
+                        (Some(av), Some(bv)) => Value::boolean(av >= bv),
                         _ => {
                             if let Some(v) = compare_strings_lt(b, a) {
-                                Value::smi(if v { 1 } else { 0 })
+                                Value::boolean(v)
                             } else if let Some(v) = compare_strings_lt(a, b) {
-                                Value::smi(if v { 0 } else { 1 })
+                                Value::boolean(!v)
                             } else {
                                 let av = to_number(a);
                                 let bv = to_number(b);
                                 if av.is_nan() || bv.is_nan() {
-                                    Value::smi(0)
+                                    Value::boolean(false)
                                 } else {
-                                    Value::smi(if av >= bv { 1 } else { 0 })
+                                    Value::boolean(av >= bv)
                                 }
                             }
                         }
@@ -870,7 +870,7 @@ impl Vm {
                     let obj = self.pop();
                     let key = self.pop();
                     let found = has_property(obj, key);
-                    self.push(if found { Value::smi(1) } else { Value::smi(0) });
+                    self.push(Value::boolean(found));
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::Instanceof => {
@@ -910,7 +910,7 @@ impl Vm {
                     }
                     // Walk lhs prototype chain
                     let result = ordinary_has_instance(lhs, rhs_proto_ptr);
-                    self.push(if result { Value::smi(1) } else { Value::smi(0) });
+                    self.push(Value::boolean(result));
                     self.frames[fi].pc = pc + 1;
                 }
 
@@ -1241,9 +1241,9 @@ impl Vm {
                         {
                             unsafe { JSObject::remove_property(ptr as *mut JSObject, &key) };
                         }
-                        Value::smi(1)
+                        Value::boolean(true)
                     } else {
-                        Value::smi(1)
+                        Value::boolean(true)
                     };
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
@@ -1445,6 +1445,8 @@ impl Vm {
                         "undefined"
                     } else if val.is_null() {
                         "object"
+                    } else if val.is_boolean() {
+                        "boolean"
                     } else if val.is_smi() {
                         "number"
                     } else {
@@ -2655,7 +2657,7 @@ mod tests {
             vec![],
             vec![],
         );
-        assert_eq!(run_ok(&p).as_smi(), Some(1));
+        assert_eq!(run_ok(&p).to_boolean(), Some(true));
     }
 
     #[test]
@@ -2665,7 +2667,7 @@ mod tests {
             vec![],
             vec![],
         );
-        assert_eq!(run_ok(&p).as_smi(), Some(0));
+        assert_eq!(run_ok(&p).to_boolean(), Some(false));
     }
 
     #[test]
@@ -2763,7 +2765,7 @@ mod tests {
             vec![],
             vec![],
         );
-        assert_eq!(run_ok(&p).as_smi(), Some(1));
+        assert_eq!(run_ok(&p).to_boolean(), Some(true));
     }
 
     #[test]
@@ -2861,7 +2863,7 @@ mod tests {
             vec![],
             vec![],
         );
-        assert_eq!(run_ok(&p).as_smi(), Some(1));
+        assert_eq!(run_ok(&p).to_boolean(), Some(true));
     }
 
     #[test]
@@ -2875,7 +2877,7 @@ mod tests {
             vec![],
             vec![],
         );
-        assert_eq!(run_ok(&p).as_smi(), Some(1));
+        assert_eq!(run_ok(&p).to_boolean(), Some(true));
     }
 
     #[test]
@@ -2889,7 +2891,7 @@ mod tests {
             vec![],
             vec![],
         );
-        assert_eq!(run_ok(&p).as_smi(), Some(1));
+        assert_eq!(run_ok(&p).to_boolean(), Some(true));
     }
 
     #[test]
@@ -2936,7 +2938,7 @@ mod tests {
             vec![],
             vec![],
         );
-        assert_eq!(run_ok(&p).as_smi(), Some(0));
+        assert_eq!(run_ok(&p).to_boolean(), Some(false));
     }
 
     #[test]
@@ -2953,7 +2955,7 @@ mod tests {
             vec![],
             vec![],
         );
-        assert_eq!(run_ok(&p).as_smi(), Some(1));
+        assert_eq!(run_ok(&p).to_boolean(), Some(true));
     }
 
     #[test]
@@ -2970,7 +2972,7 @@ mod tests {
             vec![],
             vec![],
         );
-        assert_eq!(run_ok(&p).as_smi(), Some(0));
+        assert_eq!(run_ok(&p).to_boolean(), Some(false));
     }
 
     #[test]
@@ -2987,7 +2989,7 @@ mod tests {
             vec![],
             vec![],
         );
-        assert_eq!(run_ok(&p).as_smi(), Some(1));
+        assert_eq!(run_ok(&p).to_boolean(), Some(true));
     }
 
     #[test]

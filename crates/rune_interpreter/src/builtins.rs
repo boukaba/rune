@@ -22,6 +22,8 @@ fn value_to_js_string(v: Value) -> String {
         "undefined".to_string()
     } else if v.is_null() {
         "null".to_string()
+    } else if let Some(b) = v.to_boolean() {
+        b.to_string()
     } else if let Some(n) = v.as_smi() {
         n.to_string()
     } else if let Some(ptr) = v.heap_ptr() {
@@ -143,10 +145,10 @@ pub fn array_is_array(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &m
     if let Some(ptr) = val.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_ARRAY {
-            return Value::smi(1);
+            return Value::boolean(true);
         }
     }
-    Value::smi(0)
+    Value::boolean(false)
 }
 
 /// Array.prototype.push(value) — pushes value to the array, returns new length.

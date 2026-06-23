@@ -2549,4 +2549,64 @@ mod instanceof_tests {
             "spreading empty array should be a no-op"
         );
     }
+
+    // ---- 14B-3.1: Arrow rest params ---
+
+    #[test]
+    fn test_arrow_rest_param_basic() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var f = (...args) => args.length; f(1, 2)"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(2), "arrow rest param should capture args");
+    }
+
+    #[test]
+    fn test_arrow_rest_param_single() {
+        let mut ctx = Context::new();
+        let r = ctx.eval(r#"var f = (...args) => args[0]; f(42)"#).unwrap();
+        assert_eq!(
+            r.as_smi(),
+            Some(42),
+            "arrow rest param should access first arg"
+        );
+    }
+
+    #[test]
+    fn test_arrow_rest_param_mixed() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var f = (a, ...rest) => a + rest[0]; f(1, 2)"#)
+            .unwrap();
+        assert_eq!(
+            r.as_smi(),
+            Some(3),
+            "arrow mixed params with rest should work"
+        );
+    }
+
+    #[test]
+    fn test_arrow_rest_param_zero_args() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var f = (...args) => args.length; f()"#)
+            .unwrap();
+        assert_eq!(
+            r.as_smi(),
+            Some(0),
+            "arrow rest param with zero args should be empty"
+        );
+    }
+
+    #[test]
+    fn test_arrow_rest_param_is_array() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var f = (...args) => typeof args; f(42)"#)
+            .unwrap();
+        assert!(
+            r.is_heap_object(),
+            "typeof args should be a string (heap object)"
+        );
+    }
 }

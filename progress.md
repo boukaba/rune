@@ -784,7 +784,7 @@
 
 ### Test Results — Sprint 14A / 14B-1 / 14B-3 / 14B-3.1
 - **All tests pass** (fmt + clippy + test green)
-- **337 tests passing** (213 integration + 29 VM + 22 JIT baseline + 25 interpreter + 11 bytecode/builtins + 6 core + 5 parser + 5 emitter + 2 spike)
+- **318 tests passing** (213 integration + 29 VM + 22 JIT baseline + 25 interpreter + 11 bytecode + 6 core + 5 parser + 5 parser tests + 2 spike)
 - `typeof true === "boolean"` ✅
 - `print(true) === "true"` ✅ (was `"1"`)
 - `print(false) === "false"` ✅

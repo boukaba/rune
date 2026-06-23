@@ -362,7 +362,9 @@ impl Emitter {
     fn emit_store_binding(&mut self, name: &str, kind: &VarKind) {
         match kind {
             VarKind::Var => {
-                if !self.locals.contains(&name.to_string()) {
+                let is_top_level =
+                    self.env_scope_stack.is_empty() && self.captured_names.is_empty();
+                if !is_top_level && !self.locals.contains(&name.to_string()) {
                     self.locals.push(name.to_string());
                 }
                 if let Some((depth, env_slot)) = self.env_captured_slot(name) {
@@ -370,6 +372,10 @@ impl Emitter {
                     self.emit(Opcode::StoreCaptured, vec![depth as i64, env_slot as i64]);
                 } else if let Some(idx) = self.local_index(name) {
                     self.emit(Opcode::StoreLocal, vec![idx as i64]);
+                    self.emit(Opcode::Pop, vec![]);
+                } else if is_top_level {
+                    let name_idx = self.intern_string(name) as i64;
+                    self.emit(Opcode::StoreGlobal, vec![name_idx]);
                     self.emit(Opcode::Pop, vec![]);
                 }
             }
@@ -398,8 +404,38 @@ impl Emitter {
                     self.enter_lexical_scope(stmts, lexical_count);
                     self.emit(Opcode::BlockEnter, vec![lexical_count as i64]);
                 }
+                // Block-scope env for closure capture
+                let saved_env_depth = self.env_scope_stack.len();
+                if lexical_count > 0 && stmts.iter().any(contains_inner_function_stmt) {
+                    // Create a block env so inner functions can capture lexical bindings
+                    let block_names: Vec<String> = stmts
+                        .iter()
+                        .filter_map(|s| match s {
+                            Stmt::Var(VarKind::Let | VarKind::Const, decls, _) => Some(decls),
+                            _ => None,
+                        })
+                        .flatten()
+                        .filter_map(|d| {
+                            if d.pattern.is_none() {
+                                Some(d.name.to_string())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if !block_names.is_empty() {
+                        let name_count = block_names.len();
+                        self.env_scope_stack.push(block_names);
+                        self.emit(Opcode::MakeEnv, vec![name_count as i64]);
+                    }
+                }
                 for s in stmts {
                     self.emit_statement(s);
+                }
+                // Restore block-scope env
+                if self.env_scope_stack.len() > saved_env_depth {
+                    self.emit(Opcode::RestoreEnv, vec![]);
+                    self.env_scope_stack.truncate(saved_env_depth);
                 }
                 if lexical_count > 0 {
                     self.emit(Opcode::BlockLeave, vec![]);
@@ -582,16 +618,26 @@ impl Emitter {
                                 self.emit_destructuring(pattern, kind);
                             }
                         } else {
-                            if !self.locals.contains(&decl.name.to_string()) {
+                            let is_top_level =
+                                self.env_scope_stack.is_empty() && self.captured_names.is_empty();
+                            if !is_top_level && !self.locals.contains(&decl.name.to_string()) {
                                 self.locals.push(decl.name.to_string());
                             }
                             if let Some(init) = &decl.init {
                                 self.emit_expression(init);
-                                if let Some((depth, env_slot)) = self.env_captured_slot(&decl.name) {
+                                if let Some((depth, env_slot)) = self.env_captured_slot(&decl.name)
+                                {
                                     // StoreCaptured pops the value — no Pop needed
-                                    self.emit(Opcode::StoreCaptured, vec![depth as i64, env_slot as i64]);
+                                    self.emit(
+                                        Opcode::StoreCaptured,
+                                        vec![depth as i64, env_slot as i64],
+                                    );
                                 } else if let Some(idx) = self.local_index(&decl.name) {
                                     self.emit(Opcode::StoreLocal, vec![idx as i64]);
+                                    self.emit(Opcode::Pop, vec![]);
+                                } else if is_top_level {
+                                    let name_idx = self.intern_string(&decl.name) as i64;
+                                    self.emit(Opcode::StoreGlobal, vec![name_idx]);
                                     self.emit(Opcode::Pop, vec![]);
                                 }
                             }
@@ -617,6 +663,14 @@ impl Emitter {
                                 Opcode::DeclareLet
                             };
                             self.emit(op, vec![slot as i64]);
+                            // If this lexical binding is captured in a block env,
+                            // copy from lexical slot to env slot so closures see it
+                            if let Some((depth, env_slot)) = self.env_captured_slot(&decl.name) {
+                                if depth == 0 {
+                                    self.emit(Opcode::LoadLexical, vec![slot as i64]);
+                                    self.emit(Opcode::StoreCaptured, vec![0, env_slot as i64]);
+                                }
+                            }
                         }
                     }
                 }
@@ -1554,9 +1608,7 @@ fn contains_inner_function_stmt(stmt: &Stmt) -> bool {
         Stmt::For(init, cond, update, body, _) => {
             init.as_deref().is_some_and(contains_inner_function_stmt)
                 || cond.as_deref().is_some_and(contains_inner_function_expr)
-                || update
-                    .as_deref()
-                    .is_some_and(contains_inner_function_expr)
+                || update.as_deref().is_some_and(contains_inner_function_expr)
                 || contains_inner_function_stmt(body)
         }
         Stmt::ForIn(_, _, body, _) => contains_inner_function_stmt(body),
@@ -1566,18 +1618,18 @@ fn contains_inner_function_stmt(stmt: &Stmt) -> bool {
                     contains_inner_function_expr(&c.test)
                         || c.body.iter().any(contains_inner_function_stmt)
                 })
-                || default_body.as_deref().is_some_and(|stmts| {
-                    stmts.iter().any(contains_inner_function_stmt)
-                })
+                || default_body
+                    .as_deref()
+                    .is_some_and(|stmts| stmts.iter().any(contains_inner_function_stmt))
         }
         Stmt::Try(body, catch, finally, _) => {
             body.iter().any(contains_inner_function_stmt)
                 || catch
                     .as_ref()
                     .is_some_and(|c| c.body.iter().any(contains_inner_function_stmt))
-                || finally.as_deref().is_some_and(|stmts| {
-                    stmts.iter().any(contains_inner_function_stmt)
-                })
+                || finally
+                    .as_deref()
+                    .is_some_and(|stmts| stmts.iter().any(contains_inner_function_stmt))
         }
         Stmt::Function(_, _) => true,
         Stmt::Break(_, _) | Stmt::Continue(_, _) | Stmt::Return(None, _) | Stmt::Empty(_) => false,

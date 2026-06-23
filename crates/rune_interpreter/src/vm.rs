@@ -341,9 +341,11 @@ impl Vm {
                 gc.push_root(slot as *const Value as *mut u64);
             }
         }
-        for val in self.globals.values() {
-            gc.push_root(val as *const Value as *mut u64);
-        }
+        // Root builtin prototype objects that are stored as Vm fields
+        // (these are not on the stack but are used after GC cycles)
+        gc.push_root(&self.object_prototype as *const Value as *mut u64);
+        gc.push_root(&self.array_prototype as *const Value as *mut u64);
+        gc.push_root(&self.string_prototype as *const Value as *mut u64);
     }
 
     /// Execute a bytecode program and return its result.
@@ -2034,25 +2036,52 @@ impl Vm {
                     let func_idx = instr.operands[0] as u64;
                     let is_arrow = instr.operands.get(1).copied().unwrap_or(0) != 0;
                     let prog_ptr = prog as *const BytecodeProgram as *const u8;
+                    // Allocate the default `.prototype` FIRST so that if GC triggers
+                    // during Func::allocate, we can resolve the forwarding address.
+                    let default_proto = if !is_arrow {
+                        JSObject::allocate(gc, Shape::empty(), &[])
+                    } else {
+                        std::ptr::null_mut()
+                    };
                     let ptr = Func::allocate(gc, func_idx, prog_ptr, is_arrow, self.frames[fi].env);
-                    // env_ptr may be stale after GC-triggered collection during allocate;
-                    // re-read from frame.env which was updated by forward_value.
-                    unsafe { Func::set_env_ptr(ptr, self.frames[fi].env); }
-                    // Create default `.prototype` object (§11.2.2)
-                    let default_proto = JSObject::allocate(gc, Shape::empty(), &[]);
+                    // Both default_proto and ptr may be stale after GC-triggered
+                    // collection during either allocate. Resolve via forwarding.
                     unsafe {
-                        Func::set_prototype(ptr, default_proto as *mut u8);
+                        let resolved_ptr = if (*(ptr as *const GcHeader)).is_forwarded() {
+                            (*(ptr as *const GcHeader)).forwarding_addr() as *mut Func
+                        } else {
+                            ptr
+                        };
+                        Func::set_env_ptr(resolved_ptr, self.frames[fi].env);
+                        if !is_arrow {
+                            let resolved_proto = if !default_proto.is_null()
+                                && (*(default_proto as *const GcHeader)).is_forwarded()
+                            {
+                                (*(default_proto as *const GcHeader)).forwarding_addr()
+                            } else {
+                                default_proto as *mut u8
+                            };
+                            Func::set_prototype(resolved_ptr, resolved_proto);
+                        }
+                        self.push(Value::from_heap_ptr(resolved_ptr as *mut u8));
                     }
-                    self.push(Value::from_heap_ptr(ptr as *mut u8));
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::MakeEnv => {
                     let count = instr.operands[0] as usize;
-                    let new_env = EnvObject::allocate(gc, count, self.frames[fi].env as *mut EnvObject);
-                    // parent may be stale after GC-triggered collection during allocate;
-                    // update to the (possibly forwarded) frame.env value.
-                    unsafe { EnvObject::set_parent(new_env, self.frames[fi].env as *mut EnvObject); }
-                    self.frames[fi].env = new_env as *mut u8;
+                    let new_env =
+                        EnvObject::allocate(gc, count, self.frames[fi].env as *mut EnvObject);
+                    // new_env and parent may be stale after GC-triggered collection;
+                    // resolve forwarding and re-read from the (updated) root.
+                    unsafe {
+                        let resolved = if (*(new_env as *const GcHeader)).is_forwarded() {
+                            (*(new_env as *const GcHeader)).forwarding_addr() as *mut EnvObject
+                        } else {
+                            new_env
+                        };
+                        EnvObject::set_parent(resolved, self.frames[fi].env as *mut EnvObject);
+                        self.frames[fi].env = resolved as *mut u8;
+                    }
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::RestoreEnv => {
@@ -2499,6 +2528,18 @@ impl Vm {
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::Return => {
+                    debug_assert!(
+                        self.stack.len() > self.frames.last().unwrap().stack_base,
+                        "Return: stack underflow (len={}, base={})",
+                        self.stack.len(),
+                        self.frames.last().unwrap().stack_base,
+                    );
+                    debug_assert!(
+                        self.stack.len() <= self.frames.last().unwrap().stack_base + 2,
+                        "Return: stack too deep (len={}, base={})",
+                        self.stack.len(),
+                        self.frames.last().unwrap().stack_base,
+                    );
                     let result = self.pop();
                     let callee_base = self.frames.last().unwrap().stack_base;
                     let gen_id = self.frames.last().unwrap().generator_id;

@@ -100,31 +100,36 @@ impl RuneArray {
     }
 
     /// Grow the array to ~1.5x capacity, copying all elements and header.
-    /// Returns the new array pointer (old pointer becomes stale).
-    pub unsafe fn grow(ss: &mut SemiSpace, arr: *mut RuneArray) -> *mut RuneArray {
+    /// Returns (resolved_old_ptr, new_array).
+    /// `resolved_old_ptr` is the pointer that roots should be updated from
+    /// (after any GC forwarding during the allocation).
+    pub unsafe fn grow(ss: &mut SemiSpace, arr: *mut RuneArray) -> (*mut u8, *mut RuneArray) {
         unsafe {
             let old_len = Self::length(arr) as usize;
             let old_cap = Self::capacity(arr) as usize;
             let new_cap = (old_cap * 3 / 2).max(old_cap + 8);
             let total_size = crate::object::OBJECT_HEADER_END + new_cap * size_of::<Value>();
             let new_ptr = ss.alloc(total_size);
+            // If GC ran during alloc, `arr` may be a stale from-space pointer
+            // with a forwarded header. Resolve to the to-space copy.
+            let src = if (*(arr as *const GcHeader)).is_forwarded() {
+                (*(arr as *const GcHeader)).forwarding_addr()
+            } else {
+                arr as *mut u8
+            };
             // Copy header (GcHeader + shape + length + capacity + prototype) = 32 bytes
-            std::ptr::copy_nonoverlapping(
-                arr as *const u8,
-                new_ptr,
-                crate::object::OBJECT_HEADER_END,
-            );
+            std::ptr::copy_nonoverlapping(src, new_ptr, crate::object::OBJECT_HEADER_END);
             // Update capacity in new header
             *(new_ptr.add(20) as *mut u32) = new_cap as u32;
             // Copy elements
-            let old_elems = (arr as *mut u8).add(crate::object::OBJECT_HEADER_END) as *const Value;
+            let old_elems = src.add(crate::object::OBJECT_HEADER_END) as *const Value;
             let new_elems = new_ptr.add(crate::object::OBJECT_HEADER_END) as *mut Value;
             std::ptr::copy_nonoverlapping(old_elems, new_elems, old_len);
             // Zero out new element slots
             for i in old_len..new_cap {
                 *new_elems.add(i) = Value::undefined();
             }
-            new_ptr as *mut RuneArray
+            (src, new_ptr as *mut RuneArray)
         }
     }
 
@@ -135,10 +140,10 @@ impl RuneArray {
         unsafe {
             let len = Self::length(arr);
             let cap = Self::capacity(arr);
-            let current = if (len as usize) >= cap as usize {
+            let (_, current) = if (len as usize) >= cap as usize {
                 Self::grow(ss, arr)
             } else {
-                arr
+                (arr as *mut u8, arr)
             };
             Self::set_element(current, len as usize, val);
             Self::set_length(current, len + 1);

@@ -171,14 +171,26 @@ impl SemiSpace {
                 let obj_end = self.scan_end(scan_ptr, tag);
 
                 match tag {
-                    TAG_OBJECT | TAG_ARRAY => {
+                    TAG_OBJECT => {
                         // Forward prototype pointer (if non-null)
                         let proto_ptr = scan_ptr.add(OBJECT_PROTOTYPE_OFFSET) as *mut u64;
                         self.forward_value(proto_ptr);
-                        // Forward property slots / array elements
+                        // Forward property slots
                         let slots_ptr = scan_ptr.add(OBJECT_SLOTS_OFFSET) as *mut u64;
-                        let capacity_ptr = scan_ptr.add(16) as *const u32;
-                        let cap = *capacity_ptr as usize;
+                        // Object layout: offset +16 = capacity, offset +20 = slot_count
+                        let cap = *(scan_ptr.add(16) as *const u32) as usize;
+                        for i in 0..cap {
+                            self.forward_value(slots_ptr.add(i));
+                        }
+                    }
+                    TAG_ARRAY => {
+                        // Forward prototype pointer (if non-null)
+                        let proto_ptr = scan_ptr.add(OBJECT_PROTOTYPE_OFFSET) as *mut u64;
+                        self.forward_value(proto_ptr);
+                        // Forward array elements
+                        let slots_ptr = scan_ptr.add(OBJECT_SLOTS_OFFSET) as *mut u64;
+                        // Array layout: offset +16 = length, offset +20 = capacity
+                        let cap = *(scan_ptr.add(20) as *const u32) as usize;
                         for i in 0..cap {
                             self.forward_value(slots_ptr.add(i));
                         }
@@ -227,8 +239,15 @@ impl SemiSpace {
                     obj_start.add(56)
                 }
                 TAG_FLOAT64 => obj_start.add(size_of::<GcHeader>() + 8),
-                TAG_OBJECT | TAG_ARRAY => {
+                TAG_OBJECT => {
                     let capacity_ptr = obj_start.add(16) as *const u32;
+                    let capacity = *capacity_ptr as usize;
+                    let total = OBJECT_SLOTS_OFFSET + capacity * size_of::<u64>();
+                    obj_start.add(align_up(total, 8))
+                }
+                TAG_ARRAY => {
+                    // Array layout: offset +20 = capacity
+                    let capacity_ptr = obj_start.add(20) as *const u32;
                     let capacity = *capacity_ptr as usize;
                     let total = OBJECT_SLOTS_OFFSET + capacity * size_of::<u64>();
                     obj_start.add(align_up(total, 8))
@@ -248,7 +267,7 @@ impl SemiSpace {
     unsafe fn forward_value(&mut self, slot: *mut u64) {
         unsafe {
             let raw = *slot;
-            if raw & TAG_MASK == 0 && raw != 0 && raw != 2 {
+            if raw & TAG_MASK == 0 && raw > 6 {
                 let obj = raw as *mut GcHeader;
                 let new_addr = self.forward_object(obj);
                 *slot = new_addr as u64;

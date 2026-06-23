@@ -162,7 +162,16 @@ pub fn array_push(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
                 let old_ptr = ptr;
                 let new_arr = RuneArray::push(gc, old_ptr as *mut RuneArray, val);
                 if new_arr as *mut u8 != old_ptr {
-                    vm.update_heap_reference(old_ptr, new_arr as *mut u8);
+                    // If GC ran during push, old_ptr may be a stale from-space address.
+                    // Resolve to the current to-space address for the root update.
+                    let resolved_old = if (*(old_ptr as *const GcHeader)).is_forwarded() {
+                        (*(old_ptr as *const GcHeader)).forwarding_addr()
+                    } else {
+                        old_ptr
+                    };
+                    if resolved_old != new_arr as *mut u8 {
+                        vm.update_heap_reference(resolved_old, new_arr as *mut u8);
+                    }
                 }
                 let len = RuneArray::length(new_arr);
                 return Value::smi(len as i32);

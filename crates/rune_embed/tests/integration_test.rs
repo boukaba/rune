@@ -753,7 +753,9 @@ fn test_ic_populates_and_hits() {
         Instruction::new(Opcode::LoadStringConst, vec![0]),
         Instruction::new(Opcode::LoadProperty, vec![]),
         Instruction::new(Opcode::Pop, vec![]),
-        Instruction::new(Opcode::Dup, vec![]),
+        // Final access: store obj in local, load, read property, return
+        Instruction::new(Opcode::StoreLocal, vec![0]),
+        Instruction::new(Opcode::LoadLocal, vec![0]),
         Instruction::new(Opcode::LoadStringConst, vec![0]),
         Instruction::new(Opcode::LoadProperty, vec![]),
         Instruction::new(Opcode::Return, vec![]),
@@ -3229,7 +3231,11 @@ mod instanceof_tests {
                 r#"var funcs = []; for (let i = 0; i < 3; i++) { funcs.push(function() { return i; }); }; funcs[0]()"#,
             )
             .unwrap();
-        assert_eq!(r.as_smi(), Some(0), "for (let i) per-iteration closure — funcs[0]() = 0");
+        assert_eq!(
+            r.as_smi(),
+            Some(0),
+            "for (let i) per-iteration closure — funcs[0]() = 0"
+        );
     }
 
     #[test]
@@ -3251,7 +3257,11 @@ mod instanceof_tests {
                 r#"var funcs = []; for (let i = 0; i < 3; i++) { funcs.push(() => i); }; funcs[1]()"#,
             )
             .unwrap();
-        assert_eq!(r.as_smi(), Some(1), "for (let i) arrow closure — funcs[1]() = 1");
+        assert_eq!(
+            r.as_smi(),
+            Some(1),
+            "for (let i) arrow closure — funcs[1]() = 1"
+        );
     }
 
     #[test]
@@ -3330,6 +3340,27 @@ mod instanceof_tests {
             .eval(r#"function f() { var x = 42; return () => x; } f()()"#)
             .unwrap();
         assert_eq!(r.as_smi(), Some(42), "arrow capture");
+    }
+
+    #[test]
+    fn test_gc_stress_50k_objects() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(
+                r#"
+            function f() {
+                var x = { val: 42 };
+                var arr = [];
+                for (var i = 0; i < 50000; i++) {
+                    arr.push({ junk: i });
+                }
+                return () => x.val;
+            }
+            f()()
+            "#,
+            )
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(42), "GC stress: 50K allocs + closure");
     }
 
     #[test]

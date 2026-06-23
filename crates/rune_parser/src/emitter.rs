@@ -1537,12 +1537,12 @@ fn contains_inner_function_stmt(stmt: &Stmt) -> bool {
         Stmt::Var(_, decls, _) => decls.iter().any(|d| {
             d.init
                 .as_ref()
-                .map_or(false, |e| contains_inner_function_expr(e))
+                .is_some_and(|e| contains_inner_function_expr(e))
         }),
         Stmt::If(cond, then, else_, _) => {
             contains_inner_function_expr(cond)
                 || contains_inner_function_stmt(then)
-                || else_.as_deref().map_or(false, contains_inner_function_stmt)
+                || else_.as_deref().is_some_and(contains_inner_function_stmt)
         }
         Stmt::While(cond, body, _) => {
             contains_inner_function_expr(cond) || contains_inner_function_stmt(body)
@@ -1551,11 +1551,11 @@ fn contains_inner_function_stmt(stmt: &Stmt) -> bool {
             contains_inner_function_expr(cond) || contains_inner_function_stmt(body)
         }
         Stmt::For(init, cond, update, body, _) => {
-            init.as_deref().map_or(false, contains_inner_function_stmt)
-                || cond.as_deref().map_or(false, contains_inner_function_expr)
+            init.as_deref().is_some_and(contains_inner_function_stmt)
+                || cond.as_deref().is_some_and(contains_inner_function_expr)
                 || update
                     .as_deref()
-                    .map_or(false, contains_inner_function_expr)
+                    .is_some_and(contains_inner_function_expr)
                 || contains_inner_function_stmt(body)
         }
         Stmt::ForIn(_, _, body, _) => contains_inner_function_stmt(body),
@@ -1565,7 +1565,7 @@ fn contains_inner_function_stmt(stmt: &Stmt) -> bool {
                     contains_inner_function_expr(&c.test)
                         || c.body.iter().any(contains_inner_function_stmt)
                 })
-                || default_body.as_deref().map_or(false, |stmts| {
+                || default_body.as_deref().is_some_and(|stmts| {
                     stmts.iter().any(contains_inner_function_stmt)
                 })
         }
@@ -1573,8 +1573,8 @@ fn contains_inner_function_stmt(stmt: &Stmt) -> bool {
             body.iter().any(contains_inner_function_stmt)
                 || catch
                     .as_ref()
-                    .map_or(false, |c| c.body.iter().any(contains_inner_function_stmt))
-                || finally.as_deref().map_or(false, |stmts| {
+                    .is_some_and(|c| c.body.iter().any(contains_inner_function_stmt))
+                || finally.as_deref().is_some_and(|stmts| {
                     stmts.iter().any(contains_inner_function_stmt)
                 })
         }

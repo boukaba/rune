@@ -1284,16 +1284,56 @@ impl Parser {
                 };
                 Expr::Object(props, span)
             }
-            TokenKind::Template => {
+            TokenKind::TemplateNoSub => {
                 let t = self.tok.clone();
                 self.advance();
-                Expr::Template(
-                    t.value.into_boxed_str(),
-                    Span {
+                Expr::Template {
+                    parts: vec![t.value],
+                    exprs: vec![],
+                    span: Span {
                         start: start.start,
                         end: t.span.end,
                     },
-                )
+                }
+            }
+            TokenKind::TemplateHead => {
+                let t = self.tok.clone();
+                self.advance();
+                let mut parts = vec![t.value];
+                let mut exprs = Vec::new();
+                // Parse first expression
+                let expr = self.parse_expr(0);
+                exprs.push(expr);
+                // After the expression, lexer produces TemplateMiddle or TemplateTail
+                loop {
+                    match &self.tok.kind {
+                        TokenKind::TemplateMiddle => {
+                            let mid = self.tok.clone();
+                            self.advance();
+                            parts.push(mid.value);
+                            let e = self.parse_expr(0);
+                            exprs.push(e);
+                        }
+                        TokenKind::TemplateTail => {
+                            let tail = self.tok.clone();
+                            self.advance();
+                            parts.push(tail.value);
+                            break;
+                        }
+                        _ => {
+                            self.error("Expected template continuation after expression".into());
+                            break;
+                        }
+                    }
+                }
+                Expr::Template {
+                    parts,
+                    exprs,
+                    span: Span {
+                        start: start.start,
+                        end: self.span().end,
+                    },
+                }
             }
             TokenKind::Function => {
                 self.advance();
@@ -1737,7 +1777,8 @@ impl Parser {
             self.tok.kind,
             TokenKind::Number
                 | TokenKind::String
-                | TokenKind::Template
+                | TokenKind::TemplateNoSub
+                | TokenKind::TemplateHead
                 | TokenKind::True
                 | TokenKind::False
                 | TokenKind::Null

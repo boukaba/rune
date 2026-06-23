@@ -1,4 +1,4 @@
-use crate::builtins::{Builtin, BuiltinFn};
+use crate::builtins::{Builtin, BuiltinFn, value_to_js_string};
 use crate::generator::Generator;
 use crate::ic::{IcEntry, IcStats, InlineCache};
 use rune_bytecode::opcode::{BytecodeProgram, Instruction, Opcode};
@@ -1070,6 +1070,23 @@ impl Vm {
                     } else {
                         self.push(Value::undefined());
                     }
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::ToString => {
+                    let val = self.pop();
+                    let s = value_to_js_string(val);
+                    let ptr = HeapString::allocate(gc, &s);
+                    self.push(Value::from_heap_ptr(ptr as *mut u8));
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::StringConcat => {
+                    let rhs = self.pop();
+                    let lhs = self.pop();
+                    let lhs_s = value_to_js_string(lhs);
+                    let rhs_s = value_to_js_string(rhs);
+                    let combined = lhs_s + &rhs_s;
+                    let ptr = HeapString::allocate(gc, &combined);
+                    self.push(Value::from_heap_ptr(ptr as *mut u8));
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::ForInInit => {

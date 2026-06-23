@@ -3043,4 +3043,96 @@ mod instanceof_tests {
             .unwrap();
         assert_eq!(r.as_smi(), Some(1), "computed key destructuring");
     }
+
+    // --- Sprint 14D: Template literal substitutions ---
+
+    #[test]
+    fn test_template_no_substitution() {
+        let mut ctx = Context::new();
+        let r = ctx.eval(r#"var s = `hello`; s"#).unwrap();
+        assert!(r.heap_ptr().is_some(), "plain template produces string");
+    }
+
+    #[test]
+    fn test_template_single_substitution() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var name = "world"; var s = `hello ${name}`; s"#)
+            .unwrap();
+        assert!(
+            r.heap_ptr().is_some(),
+            "template with substitution produces string"
+        );
+    }
+
+    #[test]
+    fn test_template_expression_substitution() {
+        let mut ctx = Context::new();
+        let r = ctx.eval(r#"var s = `${1 + 2}`; s"#).unwrap();
+        assert!(
+            r.heap_ptr().is_some(),
+            "template with expression produces string"
+        );
+    }
+
+    #[test]
+    fn test_template_multiple_substitutions() {
+        let mut ctx = Context::new();
+        let r = ctx.eval(r#"var s = `a${1}b${2}c`; s"#).unwrap();
+        assert!(
+            r.heap_ptr().is_some(),
+            "template with multiple substitutions produces string"
+        );
+    }
+
+    #[test]
+    fn test_template_empty_with_substitution() {
+        let mut ctx = Context::new();
+        let r = ctx.eval(r#"var x = 42; var s = `${x}`; s"#).unwrap();
+        assert!(
+            r.heap_ptr().is_some(),
+            "template starting with substitution produces string"
+        );
+    }
+
+    #[test]
+    fn test_template_undefined_null_true() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var s = `${undefined}${null}${true}`; s"#)
+            .unwrap();
+        assert!(
+            r.heap_ptr().is_some(),
+            "template with undefined/null/true coercion produces string"
+        );
+    }
+
+    #[test]
+    fn test_template_nested() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var x = "inner"; var s = `nested ${`${x}`}`; s"#)
+            .unwrap();
+        assert!(r.heap_ptr().is_some(), "nested template produces string");
+    }
+
+    #[test]
+    fn test_template_escape_backtick() {
+        let mut ctx = Context::new();
+        let r = ctx.eval(r#"var s = `\`hello\``; s"#).unwrap();
+        assert!(
+            r.heap_ptr().is_some(),
+            "template with escaped backtick produces string"
+        );
+    }
+
+    #[test]
+    fn test_template_multi_line() {
+        let mut ctx = Context::new();
+        let r = ctx.eval("var s = `line 1\nline 2`; s").unwrap();
+        assert!(
+            r.heap_ptr().is_some(),
+            "multi-line template produces string"
+        );
+    }
 }

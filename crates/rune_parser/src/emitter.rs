@@ -742,9 +742,24 @@ impl Emitter {
             Expr::Undefined(_) => {
                 self.emit(Opcode::LoadUndefined, vec![]);
             }
-            Expr::Template(val, _) => {
-                let idx = self.intern_string(val) as i64;
-                self.emit(Opcode::LoadStringConst, vec![idx]);
+            Expr::Template { parts, exprs, .. } => {
+                if exprs.is_empty() {
+                    let idx = self.intern_string(&parts[0]) as i64;
+                    self.emit(Opcode::LoadStringConst, vec![idx]);
+                } else {
+                    let idx = self.intern_string(&parts[0]) as i64;
+                    self.emit(Opcode::LoadStringConst, vec![idx]);
+                    for (i, expr) in exprs.iter().enumerate() {
+                        self.emit_expression(expr);
+                        self.emit(Opcode::ToString, vec![]);
+                        self.emit(Opcode::StringConcat, vec![]);
+                        if let Some(next) = parts.get(i + 1) {
+                            let idx = self.intern_string(next) as i64;
+                            self.emit(Opcode::LoadStringConst, vec![idx]);
+                            self.emit(Opcode::StringConcat, vec![]);
+                        }
+                    }
+                }
             }
             Expr::Identifier(name, _) => {
                 if let Some(slot) = self.lexical_slot(name) {

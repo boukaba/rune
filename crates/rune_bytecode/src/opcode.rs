@@ -59,6 +59,9 @@ pub enum Opcode {
     StoreProperty,
     DeleteProperty,
     DefineProperty,
+    // Template literals
+    ToString,
+    StringConcat,
     // Globals
     LoadGlobal,
     StoreGlobal,

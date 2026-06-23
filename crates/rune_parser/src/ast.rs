@@ -33,7 +33,11 @@ pub enum Expr {
     Assign(Box<Expr>, Box<Expr>, Span),
     CompoundAssign(BinaryOp, Box<Expr>, Box<Expr>, Span),
     Function(Box<FnNode>, Span),
-    Template(Box<str>, Span),
+    Template {
+        parts: Vec<String>,
+        exprs: Vec<Expr>,
+        span: Span,
+    },
     This(Span),
     Update(UpdateOp, Box<Expr>, bool, Span), // op, argument, is_prefix, span
     Yield(Option<Box<Expr>>, Span),

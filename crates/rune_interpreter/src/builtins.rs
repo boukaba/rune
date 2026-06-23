@@ -17,7 +17,7 @@ pub struct Builtin {
 pub type BuiltinFn = fn(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value;
 
 /// Format a Value into its JS string representation.
-fn value_to_js_string(v: Value) -> String {
+pub fn value_to_js_string(v: Value) -> String {
     if v.is_undefined() {
         "undefined".to_string()
     } else if v.is_null() {

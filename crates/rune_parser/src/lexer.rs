@@ -6,6 +6,10 @@ pub enum TokenKind {
     Number,
     String,
     Template,
+    TemplateHead,
+    TemplateMiddle,
+    TemplateTail,
+    TemplateNoSub,
     Identifier,
     True,
     False,
@@ -132,6 +136,7 @@ pub struct Lexer {
     start: usize,
     pub errors: Vec<String>,
     pub had_newline: bool,
+    template_brace_stack: Vec<usize>,
 }
 
 impl Lexer {
@@ -142,6 +147,7 @@ impl Lexer {
             start: 0,
             errors: Vec::new(),
             had_newline: false,
+            template_brace_stack: Vec::new(),
         }
     }
 
@@ -366,30 +372,166 @@ impl Lexer {
     }
 
     fn scan_template(&mut self) -> Token {
-        // For simplicity, scan until }
         self.start = self.pos - 1;
         let mut value = String::new();
-        let mut depth = 0;
         loop {
             match self.advance() {
                 None => {
                     self.errors.push("Unterminated template literal".into());
                     break;
                 }
-                Some('`') if depth == 0 => break,
+                Some('`') => {
+                    let end = self.pos;
+                    return Token::new(TokenKind::TemplateNoSub, self.start, end, value);
+                }
                 Some('$') if self.peek() == Some('{') => {
-                    // Template expression — stop for now
-                    break;
+                    self.advance(); // consume {
+                    self.template_brace_stack.push(0);
+                    let end = self.pos;
+                    return Token::new(TokenKind::TemplateHead, self.start, end, value);
                 }
-                Some('}') if depth > 0 => {
-                    depth -= 1;
-                    value.push('}');
-                }
+                Some('\\') => match self.advance() {
+                    Some('n') => value.push('\n'),
+                    Some('t') => value.push('\t'),
+                    Some('r') => value.push('\r'),
+                    Some('b') => value.push('\u{0008}'),
+                    Some('f') => value.push('\u{000C}'),
+                    Some('v') => value.push('\u{000B}'),
+                    Some('0') => value.push('\0'),
+                    Some('`') => value.push('`'),
+                    Some('$') => value.push('$'),
+                    Some('\\') => value.push('\\'),
+                    Some('x') => {
+                        let hex = self
+                            .chars
+                            .get(self.pos..self.pos + 2)
+                            .map(|s| s.iter().collect::<String>());
+                        if let Some(hex) = hex
+                            && let Ok(codepoint) = u32::from_str_radix(&hex, 16)
+                        {
+                            value.push(char::from_u32(codepoint).unwrap_or('\u{FFFD}'));
+                            self.pos += 2;
+                        }
+                    }
+                    Some('u') => {
+                        if self.peek() == Some('{') {
+                            self.advance();
+                            let mut code = String::new();
+                            while let Some(ch) = self.peek() {
+                                if ch == '}' {
+                                    break;
+                                }
+                                code.push(ch);
+                                self.advance();
+                            }
+                            if self.peek() == Some('}') {
+                                self.advance();
+                            }
+                            if let Ok(cp) = u32::from_str_radix(&code, 16) {
+                                value.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+                            }
+                        } else {
+                            let hex = self
+                                .chars
+                                .get(self.pos..self.pos + 4)
+                                .map(|s| s.iter().collect::<String>());
+                            if let Some(hex) = hex
+                                && let Ok(codepoint) = u32::from_str_radix(&hex, 16)
+                            {
+                                value.push(char::from_u32(codepoint).unwrap_or('\u{FFFD}'));
+                                self.pos += 4;
+                            }
+                        }
+                    }
+                    Some(c) => value.push(c),
+                    None => {}
+                },
                 Some(c) => value.push(c),
             }
         }
         let end = self.pos;
-        Token::new(TokenKind::Template, self.start, end, value)
+        Token::new(TokenKind::TemplateNoSub, self.start, end, value)
+    }
+
+    fn scan_template_continuation(&mut self, start: usize) -> Token {
+        let mut value = String::new();
+        loop {
+            match self.advance() {
+                None => {
+                    self.errors.push("Unterminated template literal".into());
+                    break;
+                }
+                Some('`') => {
+                    let end = self.pos;
+                    return Token::new(TokenKind::TemplateTail, start, end, value);
+                }
+                Some('$') if self.peek() == Some('{') => {
+                    self.advance(); // consume {
+                    self.template_brace_stack.push(0);
+                    let end = self.pos;
+                    return Token::new(TokenKind::TemplateMiddle, start, end, value);
+                }
+                Some('\\') => match self.advance() {
+                    Some('n') => value.push('\n'),
+                    Some('t') => value.push('\t'),
+                    Some('r') => value.push('\r'),
+                    Some('b') => value.push('\u{0008}'),
+                    Some('f') => value.push('\u{000C}'),
+                    Some('v') => value.push('\u{000B}'),
+                    Some('0') => value.push('\0'),
+                    Some('`') => value.push('`'),
+                    Some('$') => value.push('$'),
+                    Some('\\') => value.push('\\'),
+                    Some('x') => {
+                        let hex = self
+                            .chars
+                            .get(self.pos..self.pos + 2)
+                            .map(|s| s.iter().collect::<String>());
+                        if let Some(hex) = hex
+                            && let Ok(codepoint) = u32::from_str_radix(&hex, 16)
+                        {
+                            value.push(char::from_u32(codepoint).unwrap_or('\u{FFFD}'));
+                            self.pos += 2;
+                        }
+                    }
+                    Some('u') => {
+                        if self.peek() == Some('{') {
+                            self.advance();
+                            let mut code = String::new();
+                            while let Some(ch) = self.peek() {
+                                if ch == '}' {
+                                    break;
+                                }
+                                code.push(ch);
+                                self.advance();
+                            }
+                            if self.peek() == Some('}') {
+                                self.advance();
+                            }
+                            if let Ok(cp) = u32::from_str_radix(&code, 16) {
+                                value.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+                            }
+                        } else {
+                            let hex = self
+                                .chars
+                                .get(self.pos..self.pos + 4)
+                                .map(|s| s.iter().collect::<String>());
+                            if let Some(hex) = hex
+                                && let Ok(codepoint) = u32::from_str_radix(&hex, 16)
+                            {
+                                value.push(char::from_u32(codepoint).unwrap_or('\u{FFFD}'));
+                                self.pos += 4;
+                            }
+                        }
+                    }
+                    Some(c) => value.push(c),
+                    None => {}
+                },
+                Some(c) => value.push(c),
+            }
+        }
+        let end = self.pos;
+        Token::new(TokenKind::TemplateTail, start, end, value)
     }
 
     fn scan_identifier(&mut self, _first: char) -> Token {
@@ -463,8 +605,25 @@ impl Lexer {
             // Punctuation
             '(' => Token::new(TokenKind::LParen, self.start, self.pos, "(".into()),
             ')' => Token::new(TokenKind::RParen, self.start, self.pos, ")".into()),
-            '{' => Token::new(TokenKind::LBrace, self.start, self.pos, "{".into()),
-            '}' => Token::new(TokenKind::RBrace, self.start, self.pos, "}".into()),
+            '{' => {
+                if !self.template_brace_stack.is_empty() {
+                    *self.template_brace_stack.last_mut().unwrap() += 1;
+                }
+                Token::new(TokenKind::LBrace, self.start, self.pos, "{".into())
+            }
+            '}' => {
+                if let Some(depth) = self.template_brace_stack.last_mut() {
+                    if *depth > 0 {
+                        *depth -= 1;
+                        Token::new(TokenKind::RBrace, self.start, self.pos, "}".into())
+                    } else {
+                        self.template_brace_stack.pop();
+                        self.scan_template_continuation(self.pos)
+                    }
+                } else {
+                    Token::new(TokenKind::RBrace, self.start, self.pos, "}".into())
+                }
+            }
             '[' => Token::new(TokenKind::LBracket, self.start, self.pos, "[".into()),
             ']' => Token::new(TokenKind::RBracket, self.start, self.pos, "]".into()),
             ',' => Token::new(TokenKind::Comma, self.start, self.pos, ",".into()),

@@ -63,6 +63,7 @@ pub enum Opcode {
     JumpIfTrue,
     JumpIfFalse,
     Throw,
+    ThrowIfNullish,
     TryBegin,
     TryEnd,
     FinallyDone,

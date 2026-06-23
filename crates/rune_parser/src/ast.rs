@@ -162,7 +162,7 @@ pub enum VarKind {
 /// A binding pattern for destructuring.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Pattern {
-    Identifier(Box<str>, Span),
+    Identifier(Box<str>, Span, Option<Box<Expr>>),
     Object(Vec<ObjectPatternProp>, Span),
     Array(Vec<Option<Pattern>>, Span),
 }

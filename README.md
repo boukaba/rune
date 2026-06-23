@@ -56,6 +56,16 @@ rune test262 language/expressions/addition
 
 Rune is in active development. Sprint 11 is complete: operator fixes (strict equality, `in`, compound assignment, short-circuit `&&`/`||`, `delete`). The baseline JIT (Phase 3) supports 18 opcodes with Smi-only hot-function tier-up. Sprint 12 focuses on stabilization: CI, `instanceof`, exceptions, and block-scoped `let`/`const`. See [`progress.md`](./progress.md) for detailed status.
 
+## Development
+
+### Pre-commit Hooks
+
+Enable fmt + clippy checks before every commit:
+
+```sh
+git config core.hooksPath .githooks
+```
+
 ## License
 
 MIT OR Apache-2.0

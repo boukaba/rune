@@ -117,15 +117,28 @@ impl Emitter {
     fn compile_function(&mut self, func: &FnNode) -> usize {
         let mut sub = Emitter::new();
         sub.is_generator = func.is_generator;
-        if let Some(name) = &func.name {
+        let named_offset = if let Some(name) = &func.name {
             sub.named_function = true;
             sub.locals.push(name.to_string());
-        }
-        for param in &func.params {
+            1
+        } else {
+            0
+        };
+        for (i, param) in func.params.iter().enumerate() {
+            let param_idx = named_offset + i;
             match param {
-                Pattern::Identifier(name, _) => sub.locals.push(name.to_string()),
-                // Destructuring params deferred to later in 14A
-                _ => sub.locals.push("_destructure".to_string()),
+                Pattern::Identifier(name, _, default) => {
+                    sub.locals.push(name.to_string());
+                    if default.is_some() {
+                        sub.emit(Opcode::LoadLocal, vec![param_idx as i64]);
+                        sub.emit_store_with_default(name.as_ref(), &VarKind::Var, default);
+                    }
+                }
+                _ => {
+                    sub.locals.push("_destructure".to_string());
+                    sub.emit(Opcode::LoadLocal, vec![param_idx as i64]);
+                    sub.emit_destructuring(param, &VarKind::Var);
+                }
             }
         }
         // Emit body: for arrow expression body (Stmt::Expr), use it as return value
@@ -160,13 +173,12 @@ impl Emitter {
 
     /// Emit bytecode for destructuring a value according to the pattern.
     fn emit_destructuring(&mut self, pattern: &Pattern, kind: &VarKind) {
+        // §14.5.1 step 4: throw TypeError if value is null or undefined
+        self.emit(Opcode::ThrowIfNullish, vec![]);
         match pattern {
             Pattern::Object(props, _) => {
-                let len = props.len();
-                for (i, prop) in props.iter().enumerate() {
-                    if i + 1 < len {
-                        self.emit(Opcode::Dup, vec![]);
-                    }
+                for prop in props {
+                    self.emit(Opcode::Dup, vec![]);
                     match &prop.key {
                         PropKey::Identifier(id) => {
                             let idx = self.intern_string(id);
@@ -188,38 +200,49 @@ impl Emitter {
                 self.emit(Opcode::Pop, vec![]);
             }
             Pattern::Array(items, _) => {
-                let len = items.len();
                 for (i, item) in items.iter().enumerate() {
+                    self.emit(Opcode::Dup, vec![]);
                     if let Some(pattern) = item {
-                        if i + 1 < len {
-                            self.emit(Opcode::Dup, vec![]);
-                        }
                         self.emit(Opcode::LoadSmi, vec![i as i64]);
                         self.emit(Opcode::LoadProperty, vec![]);
                         self.emit_destructuring_binding(pattern, kind);
                     }
                 }
-                if len > 0 {
-                    self.emit(Opcode::Pop, vec![]);
-                }
+                self.emit(Opcode::Pop, vec![]);
             }
-            Pattern::Identifier(name, _) => {
-                self.emit_store_binding(name, kind);
+            Pattern::Identifier(name, _, default) => {
+                self.emit_store_with_default(name, kind, default);
             }
         }
     }
 
     /// Emit a store operation for a single binding in a destructuring pattern.
+    /// Recurses into nested patterns.
     fn emit_destructuring_binding(&mut self, pattern: &Pattern, kind: &VarKind) {
         match pattern {
-            Pattern::Identifier(name, _) => {
-                self.emit_store_binding(name, kind);
+            Pattern::Identifier(name, _, default) => {
+                self.emit_store_with_default(name, kind, default);
             }
-            // Nested patterns deferred — consume the value to keep stack balanced
-            _ => {
-                self.emit(Opcode::Pop, vec![]);
+            Pattern::Object(_, _) | Pattern::Array(_, _) => {
+                self.emit_destructuring(pattern, kind);
             }
         }
+    }
+
+    /// Store a value to a binding (var → StoreLocal+Pop, let/const → DeclareLet/DeclareConst).
+    /// With an optional default: if the value is undefined, evaluate the default instead.
+    fn emit_store_with_default(&mut self, name: &str, kind: &VarKind, default: &Option<Box<Expr>>) {
+        if let Some(expr) = default {
+            self.emit(Opcode::Dup, vec![]);
+            self.emit(Opcode::LoadUndefined, vec![]);
+            self.emit(Opcode::StrictEq, vec![]);
+            self.emit(Opcode::JumpIfFalse, vec![0]);
+            let jump_pos = self.current() - 1;
+            self.emit(Opcode::Pop, vec![]);
+            self.emit_expression(expr);
+            self.instructions[jump_pos].operands[0] = self.current() as i64;
+        }
+        self.emit_store_binding(name, kind);
     }
 
     /// Store a value to a binding (var → StoreLocal+Pop, let/const → DeclareLet/DeclareConst).
@@ -1036,7 +1059,7 @@ impl Emitter {
                     None => 0,
                 })
                 .sum(),
-            Some(Pattern::Identifier(_, _)) => 1,
+            Some(Pattern::Identifier(_, _, _)) => 1,
         }
     }
 
@@ -1074,26 +1097,15 @@ impl Emitter {
             }
             Some(Pattern::Object(props, _)) => {
                 for prop in props {
-                    if let Pattern::Identifier(n, _) = &prop.pattern {
-                        bindings.push(LexicalBinding {
-                            name: n.to_string(),
-                            slot: self.lexical_slot_count + bindings.len(),
-                        });
-                    }
+                    self.collect_lexical_bindings(&Some(prop.pattern.clone()), name, bindings);
                 }
             }
             Some(Pattern::Array(items, _)) => {
-                for item in items {
-                    if let Some(Pattern::Identifier(n, _)) = item {
-                        bindings.push(LexicalBinding {
-                            name: n.to_string(),
-                            slot: self.lexical_slot_count + bindings.len(),
-                        });
-                    }
-                    // Nested patterns deferred
+                for pattern in items.iter().flatten() {
+                    self.collect_lexical_bindings(&Some(pattern.clone()), name, bindings);
                 }
             }
-            Some(Pattern::Identifier(n, _)) => {
+            Some(Pattern::Identifier(n, _, _)) => {
                 bindings.push(LexicalBinding {
                     name: n.to_string(),
                     slot: self.lexical_slot_count + bindings.len(),

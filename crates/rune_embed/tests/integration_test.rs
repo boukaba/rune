@@ -2104,81 +2104,70 @@ mod instanceof_tests {
     #[test]
     fn test_object_destructure_var() {
         let mut ctx = Context::new();
-        let r = ctx
-            .eval(r#"var {a, b} = {a: 1, b: 2}; a"#)
-            .unwrap();
+        let r = ctx.eval(r#"var {a, b} = {a: 1, b: 2}; a"#).unwrap();
         assert_eq!(r.as_smi(), Some(1), "var {{a, b}} = obj, a should be 1");
     }
 
     #[test]
     fn test_object_destructure_var_second() {
         let mut ctx = Context::new();
-        let r = ctx
-            .eval(r#"var {a, b} = {a: 1, b: 2}; b"#)
-            .unwrap();
+        let r = ctx.eval(r#"var {a, b} = {a: 1, b: 2}; b"#).unwrap();
         assert_eq!(r.as_smi(), Some(2), "var {{a, b}} = obj, b should be 2");
     }
 
     #[test]
     fn test_object_destructure_let() {
         let mut ctx = Context::new();
-        let r = ctx
-            .eval(r#"let {a, b} = {a: 10, b: 20}; a"#)
-            .unwrap();
+        let r = ctx.eval(r#"let {a, b} = {a: 10, b: 20}; a"#).unwrap();
         assert_eq!(r.as_smi(), Some(10), "let {{a, b}} = obj, a should be 10");
     }
 
     #[test]
     fn test_object_destructure_rename() {
         let mut ctx = Context::new();
-        let r = ctx
-            .eval(r#"var {a: x} = {a: 42}; x"#)
-            .unwrap();
+        let r = ctx.eval(r#"var {a: x} = {a: 42}; x"#).unwrap();
         assert_eq!(r.as_smi(), Some(42), "var {{a: x}} = obj, x should be 42");
     }
 
     #[test]
     fn test_object_destructure_const() {
         let mut ctx = Context::new();
-        let r = ctx
-            .eval(r#"const {a, b} = {a: 5, b: 7}; a + b"#)
-            .unwrap();
-        assert_eq!(r.as_smi(), Some(12), "const {{a, b}} = obj, a+b should be 12");
+        let r = ctx.eval(r#"const {a, b} = {a: 5, b: 7}; a + b"#).unwrap();
+        assert_eq!(
+            r.as_smi(),
+            Some(12),
+            "const {{a, b}} = obj, a+b should be 12"
+        );
     }
 
     #[test]
     fn test_object_destructure_missing_prop() {
         let mut ctx = Context::new();
-        let r = ctx
-            .eval(r#"var {a, b} = {a: 1}; b"#)
-            .unwrap();
-        assert!(r.is_undefined(), "missing destructure prop should be undefined");
+        let r = ctx.eval(r#"var {a, b} = {a: 1}; b"#).unwrap();
+        assert!(
+            r.is_undefined(),
+            "missing destructure prop should be undefined"
+        );
     }
 
     #[test]
     fn test_array_destructure_var() {
         let mut ctx = Context::new();
-        let r = ctx
-            .eval(r#"var [a, b] = [1, 2]; a"#)
-            .unwrap();
+        let r = ctx.eval(r#"var [a, b] = [1, 2]; a"#).unwrap();
         assert_eq!(r.as_smi(), Some(1), "var [a, b] = arr, a should be 1");
     }
 
     #[test]
     fn test_array_destructure_var_second() {
         let mut ctx = Context::new();
-        let r = ctx
-            .eval(r#"var [a, b] = [1, 2]; b"#)
-            .unwrap();
+        let r = ctx.eval(r#"var [a, b] = [1, 2]; b"#).unwrap();
         assert_eq!(r.as_smi(), Some(2), "var [a, b] = arr, b should be 2");
     }
 
     #[test]
     fn test_array_destructure_let() {
         let mut ctx = Context::new();
-        let r = ctx
-            .eval(r#"let [a, b] = [10, 20]; a"#)
-            .unwrap();
+        let r = ctx.eval(r#"let [a, b] = [10, 20]; a"#).unwrap();
         assert_eq!(r.as_smi(), Some(10), "let [a, b] = arr, a should be 10");
     }
 
@@ -2188,7 +2177,11 @@ mod instanceof_tests {
         let r = ctx
             .eval(r#"var {a} = {a: 1}, {b} = {b: 2}; a + b"#)
             .unwrap();
-        assert_eq!(r.as_smi(), Some(3), "multiple destructured decls should work");
+        assert_eq!(
+            r.as_smi(),
+            Some(3),
+            "multiple destructured decls should work"
+        );
     }
 
     #[test]
@@ -2196,6 +2189,100 @@ mod instanceof_tests {
         let mut ctx = Context::new();
         // Without initializer, var should work (initialized to undefined)
         let r = ctx.eval(r#"var {a, b} = {a: 1}; b"#).unwrap();
-        assert!(r.is_undefined(), "missing destructure prop should be undefined");
+        assert!(
+            r.is_undefined(),
+            "missing destructure prop should be undefined"
+        );
+    }
+
+    // ── Function param destructuring ──────────────────────────────────────
+
+    #[test]
+    fn test_fn_param_destructure_object() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"function f({a, b}) { return a + b; }; f({a: 1, b: 2})"#)
+            .unwrap();
+        assert_eq!(
+            r.as_smi(),
+            Some(3),
+            "fn({{a,b}}), obj destructure should work"
+        );
+    }
+
+    #[test]
+    fn test_fn_param_destructure_array() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"function f([a, b]) { return a + b; }; f([10, 20])"#)
+            .unwrap();
+        assert_eq!(
+            r.as_smi(),
+            Some(30),
+            "fn([a,b]), arr destructure should work"
+        );
+    }
+
+    #[test]
+    fn test_fn_param_destructure_nested() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"function f({a: {b, c}}) { return b + c; }; f({a: {b: 3, c: 4}})"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(7), "fn nested destructure should work");
+    }
+
+    #[test]
+    fn test_fn_param_destructure_default() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"function f({a = 99}) { return a; }; f({}) + f({a: 5})"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(104), "fn destructure default should work");
+    }
+
+    #[test]
+    fn test_fn_param_destructure_mixed() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"function f(x, {a, b}) { return x + a + b; }; f(10, {a: 1, b: 2})"#)
+            .unwrap();
+        assert_eq!(
+            r.as_smi(),
+            Some(13),
+            "fn mixed simple+destructure params should work"
+        );
+    }
+
+    #[test]
+    fn test_fn_param_destructure_null_throws() {
+        let mut ctx = Context::new();
+        // TypeError is thrown but try/catch in caller doesn't
+        // catch across function frames yet; verify error is raised
+        let r = ctx.eval(r#"function f({a}) { return a; }; f(null)"#);
+        assert!(r.is_err(), "fn destructure null should throw TypeError");
+    }
+
+    #[test]
+    fn test_fn_param_destructure_undefined_throws() {
+        let mut ctx = Context::new();
+        let r = ctx.eval(r#"function f({a}) { return a; }; f(undefined)"#);
+        assert!(
+            r.is_err(),
+            "fn destructure undefined should throw TypeError"
+        );
+    }
+
+    #[test]
+    fn test_fn_param_destructure_named_function() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"function foo({a, b}) { return a * b; }; foo({a: 6, b: 7})"#)
+            .unwrap();
+        assert_eq!(
+            r.as_smi(),
+            Some(42),
+            "named fn with destructure params should work"
+        );
     }
 }

@@ -1582,6 +1582,100 @@ impl Vm {
                     self.frames[new_fi].pc += 1;
                     return Exit::Throw(val);
                 }
+                Opcode::ThrowIfNullish => {
+                    let val = self.peek();
+                    if val.is_null() || val.is_undefined() {
+                        self.pop();
+                        self.register_roots(gc);
+                        let full_msg = "TypeError: Cannot destructure null or undefined";
+                        let ptr = HeapString::allocate(gc, full_msg);
+                        self.push(Value::from_heap_ptr(ptr as *mut u8));
+                        // Now behave like Opcode::Throw
+                        let exc = self.pop();
+                        let handler_idx = self
+                            .try_stack
+                            .iter()
+                            .rposition(|tf| tf.frame_depth == self.frames.len());
+                        if let Some(idx) = handler_idx {
+                            let (catch_pc, finally_pc, stack_depth, in_catch) = {
+                                let tf = &self.try_stack[idx];
+                                (tf.catch_pc, tf.finally_pc, tf.stack_depth, tf.in_catch)
+                            };
+                            if in_catch && finally_pc != 0 {
+                                self.try_stack[idx].saved_exception = Some(exc);
+                                self.stack.truncate(stack_depth);
+                                self.frames[fi].pc = finally_pc;
+                                continue;
+                            }
+                            if catch_pc != 0 && !in_catch {
+                                if finally_pc != 0 {
+                                    self.try_stack[idx].in_catch = true;
+                                } else {
+                                    self.try_stack.remove(idx);
+                                }
+                                self.stack.truncate(stack_depth);
+                                self.push(exc);
+                                self.frames[fi].pc = catch_pc;
+                                continue;
+                            }
+                            if finally_pc != 0 {
+                                self.try_stack[idx].saved_exception = Some(exc);
+                                self.stack.truncate(stack_depth);
+                                self.frames[fi].pc = finally_pc;
+                                continue;
+                            }
+                        }
+                        // No handler — pop frame and check caller
+                        let callee_base = self.frames.last().unwrap().stack_base;
+                        let popped_frame = self.frames.len() - 1;
+                        self.last_locals = self.frames[popped_frame].locals.clone();
+                        self.frames.pop();
+                        self.try_stack.retain(|tf| tf.frame_depth != popped_frame);
+                        if self.frames.is_empty() {
+                            self.stack.clear();
+                            return Exit::Throw(exc);
+                        }
+                        let new_fi = self.frames.len() - 1;
+                        let caller_idx = self
+                            .try_stack
+                            .iter()
+                            .rposition(|tf| tf.frame_depth == self.frames.len());
+                        if let Some(idx) = caller_idx {
+                            let (catch_pc, finally_pc, stack_depth, in_catch) = {
+                                let tf = &self.try_stack[idx];
+                                (tf.catch_pc, tf.finally_pc, tf.stack_depth, tf.in_catch)
+                            };
+                            if in_catch && finally_pc != 0 {
+                                self.try_stack[idx].saved_exception = Some(exc);
+                                self.stack.truncate(stack_depth);
+                                self.frames[new_fi].pc = finally_pc;
+                                continue;
+                            }
+                            if catch_pc != 0 && !in_catch {
+                                if finally_pc != 0 {
+                                    self.try_stack[idx].in_catch = true;
+                                } else {
+                                    self.try_stack.remove(idx);
+                                }
+                                self.stack.truncate(stack_depth);
+                                self.push(exc);
+                                self.frames[new_fi].pc = catch_pc;
+                                continue;
+                            }
+                            if finally_pc != 0 {
+                                self.try_stack[idx].saved_exception = Some(exc);
+                                self.stack.truncate(stack_depth);
+                                self.frames[new_fi].pc = finally_pc;
+                                continue;
+                            }
+                        }
+                        self.stack.truncate(callee_base);
+                        self.push(exc);
+                        self.frames[new_fi].pc += 1;
+                        return Exit::Throw(exc);
+                    }
+                    self.frames[fi].pc += 1;
+                }
                 Opcode::TryBegin => {
                     let catch_pc = instr.operands[0] as usize;
                     let finally_pc = instr.operands[1] as usize;

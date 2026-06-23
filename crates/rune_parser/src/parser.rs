@@ -151,7 +151,10 @@ impl Parser {
                         start: t.span.start,
                         end: t.span.end,
                     },
+                    None,
                 ));
+            } else if matches!(self.tok.kind, TokenKind::LBrace | TokenKind::LBracket) {
+                params.push(self.parse_binding_pattern());
             }
             if self.tok.kind == TokenKind::Comma {
                 self.advance();
@@ -937,7 +940,11 @@ impl Parser {
                         end: t.span.end,
                     };
                     return self.parse_arrow_body(
-                        vec![Pattern::Identifier(t.value.clone().into_boxed_str(), span)],
+                        vec![Pattern::Identifier(
+                            t.value.clone().into_boxed_str(),
+                            span,
+                            None,
+                        )],
                         start,
                     );
                 }
@@ -973,7 +980,8 @@ impl Parser {
                         self.advance();
                         if next == TokenKind::Comma {
                             // Multi-param: (a, b, ...) => body or comma expr
-                            let mut params = vec![Pattern::Identifier(name.clone(), name_span)];
+                            let mut params =
+                                vec![Pattern::Identifier(name.clone(), name_span, None)];
                             while self.tok.kind == TokenKind::Comma {
                                 self.advance();
                                 if self.tok.kind == TokenKind::Identifier {
@@ -981,6 +989,7 @@ impl Parser {
                                     params.push(Pattern::Identifier(
                                         self.tok.value.clone().into_boxed_str(),
                                         p_span,
+                                        None,
                                     ));
                                     self.advance();
                                 }
@@ -1007,7 +1016,7 @@ impl Parser {
                                 start: start.start,
                                 end: self.span().end,
                             };
-                            let ident = Pattern::Identifier(name, p_span);
+                            let ident = Pattern::Identifier(name, p_span, None);
                             return self.parse_arrow_body(vec![ident], start);
                         }
                         // (name) — just a parenthesized identifier
@@ -1029,7 +1038,7 @@ impl Parser {
                     && let Expr::Identifier(name, id_span) = &expr
                 {
                     return self.parse_arrow_body(
-                        vec![Pattern::Identifier(name.clone(), *id_span)],
+                        vec![Pattern::Identifier(name.clone(), *id_span, None)],
                         start,
                     );
                 }
@@ -1152,16 +1161,24 @@ impl Parser {
                         self.advance();
                         self.parse_binding_pattern()
                     } else if let PropKey::Identifier(id) = &key {
+                        // Check for default: {a = expr}
+                        let default = if self.tok.kind == TokenKind::EqAssign {
+                            self.advance();
+                            Some(Box::new(self.parse_expr(0)))
+                        } else {
+                            None
+                        };
                         Pattern::Identifier(
                             id.clone(),
                             Span {
                                 start: pstart.start,
                                 end: self.span().end,
                             },
+                            default,
                         )
                     } else {
                         self.error("Expected binding identifier after property name".into());
-                        Pattern::Identifier(Box::from("_error"), self.span())
+                        Pattern::Identifier(Box::from("_error"), self.span(), None)
                     };
                     props.push(ObjectPatternProp {
                         key,
@@ -1222,6 +1239,7 @@ impl Parser {
                         start: t.span.start,
                         end: t.span.end,
                     },
+                    None,
                 )
             }
         }

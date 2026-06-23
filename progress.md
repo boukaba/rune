@@ -2,7 +2,7 @@
 
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
-> **Status:** Sprint 14E-1 🟢 (Day 1-4 complete — P0 GC crash fixed, 276 tests)
+> **Status:** Sprint 14E-1 🟢 (Day 1-5 complete — P0 GC crash fixed, 277 tests)
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
 > Every implementation decision at every level (lexer, parser, emitter, bytecode, interpreter, builtins, JIT) **must** be verified against the exact ECMA-262 specification language in [`ecma262.md`](./ecma262.md) — **never guess** what the spec says. Each section in `ecma262.md` links to the corresponding URL fragment on `https://tc39.es/ecma262/multipage/`; **always open these URLs via `webfetch` tool** to read the authoritative algorithm steps before implementing. This applies to all phases below.
@@ -781,7 +781,7 @@
 | **14C-2: Method shorthand `{ foo() {} }`** | 🟠 P1 | ✅ done | `{ foo() { body } }` sugar for `{ foo: function() { body } }`. Parser detects `(` after property key, parses function body via `parse_function_body` with key as function name. Works with `String`, `Number`, and `Identifier` keys. 4 integration tests: basic, this, multiple, params. |
 | **14C-3: Computed keys `{ [expr]: val }`** | 🟠 P1 | ✅ done | `{ [k]: v }` evaluates `k` at runtime as property key. New `PropKey::Computed(Box<Expr>)` AST variant. Parser detects `[` after `{` or `,`. Emitter: for computed keys uses `Dup` + key expr + value expr + `StoreProperty` + `Pop` (incremental path). Works with computed method names `{ [k]() {} }`. Also added computed key support in destructuring patterns (`var { [k]: val } = obj`), closing the 14A deferral. 6 integration tests: basic, string concat, numeric, multiple, method, destructuring. |
 | **14D: Template literal substitutions** | 🟠 P1 | ✅ done | `${expr}` in template literals. Lexer: new TokenKind variants (TemplateHead/Middle/Tail/NoSub), `template_brace_stack` for nested `${}` brace tracking, escape sequences in template strings (backtick, `${`, standard escapes, unicode). Parser: `Expr::Template { parts, exprs }` loops over head→middle→tail segments. Emitter: `LoadStringConst` + `ToString` + `StringConcat` chain. New opcodes: `ToString`, `StringConcat`. 9 integration tests: no-sub, single, expression, multiple, empty-start, coercion, nested, escaped backtick, multi-line. Known gaps: tagged templates (deferred), `String.raw` (deferred). |
-| **14E: Arrow `arguments` + per-iteration `let`** | 🟠 P1 | ✅ done | `MakeArgumentsArray` opcode → `Frame.passed_argc` for `arguments.length`/`arguments[i]`. `CopyLexical` opcode for per-iteration `let` in `for (let i…)` loops. §10.4.4, §14.7.4.2. Committed `1df5024`. **Known P0 gap:** ALL closures over enclosing variables return `undefined` — blocks callbacks, event handlers, currying, Promise executors. |
+| **14E: Arrow `arguments` + per-iteration `let`** | 🟠 P1 | ✅ done | `MakeArgumentsArray` opcode → `Frame.passed_argc` for `arguments.length`/`arguments[i]`. `CopyLexical` opcode for per-iteration `let` in `for (let i…)` loops. §10.4.4, §14.7.4.2. Committed `1df5024`. Closure capture via heap-allocated environments resolved in 14E-1 (Days 2-5). |
 | **14E-1: Heap-allocated environments for closure capture** | 🔴 P0 | ✅ done | GC-managed `EnvObject` chain for captured variables. `MakeEnv`/`LoadCaptured`/`StoreCaptured` opcodes. Emitter escape analysis per function. GC env rooting. Day 1: structural layer (env.rs, gc tagging, Func layout, Frame.env, opcodes, VM handlers). Day 2: emitter escape analysis + fix two bugs (env_scope_stack inheritance, assign-to-captured). 273 tests pass, 2 pre-existing failures. |
 | **14F: Default parameters** | 🟢 P2 | pending | `function f(a = 1)`. §14.1.3. Overlaps with 14A defaults. |
 | **14G: Comma operator** | 🟢 P2 | pending | `(a, b)` returns `b`. §13.16. |
@@ -805,6 +805,7 @@
 - `e.message` is `"Cannot destructure null or undefined"` ✅
 - `e.name` is `"TypeError"` ✅
 - **Closure capture FIXED**: all closure tests pass — basic capture, mutation, same-storage, param capture, arrow capture, nested closure (`f()()()`). P0 gap resolved at `62e84be`.
+- **GC root re-registration FIXED**: 100K closure stress test passes (was failing at 70K+). `RootProvider` trait + `root_provider` callback on `SemiSpace`. Committed `249c586`.
 
 ### 14E-1 Day 1-2 — Structural Layer + Closure Capture Complete
 - **273 tests pass** (271 integration, 2 pre-existing failures: arguments in nested fn, arrow arguments inheritance)
@@ -849,6 +850,21 @@
 - `cargo fmt --check` clean
 - **New GC stress test**: `function f() { var x = { val: 42 }; var arr = []; for (var i = 0; i < 50000; i++) arr.push({ junk: i }); return () => x.val; } f()()` → prints `42`. Validates GC correctness with 50K object allocations + closure capture across multiple collection cycles.
 - Committed `72adb3e`.
+
+### 14E-1 Day 5 — Final P0 GC Root Re-Registration (70K+ Closure Crash FIXED)
+
+**Root Cause:** `register_roots` stored `*mut u64` pointers to `Vec<Value>` elements (stack, frame.locals, frame.lexical_slots) once at `execute` start. Any subsequent `Vec::push`/`resize` reallocation invalidated all root pointers — GC scanned stale memory and missed live objects. Non-closure path survived because arrays stayed within initial stack capacity and small arrays fit in the semispace.
+
+**Fix:**
+- Added `RootProvider` trait + `root_provider: Option<*mut dyn RootProvider>` field on `SemiSpace`.
+- Before each GC cycle, `alloc()` calls `root_provider.register_roots(self)` which clears stale roots and re-registers with current `Vec` element addresses.
+- `Vm` implements `RootProvider` and sets `gc.root_provider` during `execute()`.
+
+### Test Results — Sprint 14E-1 Day 5
+- **277 integration tests passing** (0 failed, 2 ignored)
+- `cargo clippy` clean, `cargo fmt --check` clean
+- **New GC stress test 100K**: same closure pattern at 100,000 allocations → prints `42`. Previously crashed at ~70K with `undefined` (objects missing from roots after Vec reallocation).
+- Committed `249c586`.
 
 | Task | Priority | Est. | Description |
 |---|---|---|---|

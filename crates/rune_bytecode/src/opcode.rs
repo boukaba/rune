@@ -102,6 +102,7 @@ pub enum Opcode {
     ForInNext,
     // Environment (closure capture)
     MakeEnv,
+    RestoreEnv,
     LoadCaptured,
     StoreCaptured,
     // Increment / decrement

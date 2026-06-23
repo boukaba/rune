@@ -365,9 +365,9 @@ impl Emitter {
                 if !self.locals.contains(&name.to_string()) {
                     self.locals.push(name.to_string());
                 }
-                if let Some(env_slot) = self.captured_slot(name) {
+                if let Some((depth, env_slot)) = self.env_captured_slot(name) {
                     // StoreCaptured pops the value — no Pop needed
-                    self.emit(Opcode::StoreCaptured, vec![0, env_slot as i64]);
+                    self.emit(Opcode::StoreCaptured, vec![depth as i64, env_slot as i64]);
                 } else if let Some(idx) = self.local_index(name) {
                     self.emit(Opcode::StoreLocal, vec![idx as i64]);
                     self.emit(Opcode::Pop, vec![]);
@@ -498,6 +498,20 @@ impl Emitter {
                     self.lexical_slot_count += per_iteration_count;
                     self.lexical_scopes.push(shadow_bindings);
                 }
+                // ── Per-iteration env for closure capture ──
+                // Create a child env per iteration so closures capture the
+                // per-iteration binding value (e.g., each iteration's `i`).
+                let saved_env_depth = self.env_scope_stack.len();
+                if per_iteration_count > 0 {
+                    let per_iter_names: Vec<String> =
+                        per_iteration_vars.iter().map(|(n, _)| n.clone()).collect();
+                    self.env_scope_stack.push(per_iter_names);
+                    self.emit(Opcode::MakeEnv, vec![per_iteration_count as i64]);
+                    for (i, (_, inner_slot)) in per_iteration_vars.iter().enumerate() {
+                        self.emit(Opcode::LoadLexical, vec![*inner_slot as i64]);
+                        self.emit(Opcode::StoreCaptured, vec![0, i as i64]);
+                    }
+                }
                 let exit_jump = if let Some(c) = cond {
                     self.emit_expression(c);
                     let j = self.current();
@@ -511,6 +525,11 @@ impl Emitter {
                 self.emit_statement(body);
                 self.loop_cont_stack.pop();
                 self.loop_exit_stack.pop();
+                // ── Restore env after body ──
+                if per_iteration_count > 0 {
+                    self.emit(Opcode::RestoreEnv, vec![]);
+                    self.env_scope_stack.truncate(saved_env_depth);
+                }
                 if let Some(upd) = update {
                     self.emit_expression(upd);
                     self.emit(Opcode::Pop, vec![]);
@@ -529,7 +548,13 @@ impl Emitter {
                     self.lexical_slot_count -= per_iteration_count;
                 }
                 self.emit(Opcode::Jump, vec![loop_start as i64]);
-                self.patch(exit_jump, self.current());
+                // Exit path (JumpIfFalse lands here): restore env before leaving
+                if per_iteration_count > 0 {
+                    self.patch(exit_jump, self.current());
+                    self.emit(Opcode::RestoreEnv, vec![]);
+                } else {
+                    self.patch(exit_jump, self.current());
+                }
                 // Leave for-init lexical scope
                 if init_has_scope {
                     self.emit(Opcode::BlockLeave, vec![]);
@@ -562,9 +587,9 @@ impl Emitter {
                             }
                             if let Some(init) = &decl.init {
                                 self.emit_expression(init);
-                                if let Some(env_slot) = self.captured_slot(&decl.name) {
+                                if let Some((depth, env_slot)) = self.env_captured_slot(&decl.name) {
                                     // StoreCaptured pops the value — no Pop needed
-                                    self.emit(Opcode::StoreCaptured, vec![0, env_slot as i64]);
+                                    self.emit(Opcode::StoreCaptured, vec![depth as i64, env_slot as i64]);
                                 } else if let Some(idx) = self.local_index(&decl.name) {
                                     self.emit(Opcode::StoreLocal, vec![idx as i64]);
                                     self.emit(Opcode::Pop, vec![]);
@@ -876,9 +901,7 @@ impl Emitter {
                 }
             }
             Expr::Identifier(name, _) => {
-                if let Some(env_slot) = self.captured_slot(name) {
-                    self.emit(Opcode::LoadCaptured, vec![0, env_slot as i64]);
-                } else if let Some((depth, slot)) = self.env_captured_slot(name) {
+                if let Some((depth, slot)) = self.env_captured_slot(name) {
                     self.emit(Opcode::LoadCaptured, vec![depth as i64, slot as i64]);
                 } else if let Some(slot) = self.lexical_slot(name) {
                     self.emit(Opcode::LoadLexical, vec![slot as i64]);
@@ -933,22 +956,7 @@ impl Emitter {
             Expr::Update(op, arg, prefix, _) => match arg.as_ref() {
                 Expr::Identifier(name, _) => {
                     let is_pre = *prefix;
-                    if let Some(env_slot) = self.captured_slot(name) {
-                        self.emit(Opcode::LoadCaptured, vec![0, env_slot as i64]);
-                        if !is_pre {
-                            self.emit(Opcode::Dup, vec![]);
-                        }
-                        self.emit(Opcode::LoadSmi, vec![1]);
-                        let opcode = match op {
-                            UpdateOp::PlusPlus => Opcode::Add,
-                            UpdateOp::MinusMinus => Opcode::Sub,
-                        };
-                        self.emit(opcode, vec![]);
-                        self.emit(Opcode::StoreCaptured, vec![0, env_slot as i64]);
-                        if !is_pre {
-                            self.emit(Opcode::Pop, vec![]);
-                        }
-                    } else if let Some((depth, slot)) = self.env_captured_slot(name) {
+                    if let Some((depth, slot)) = self.env_captured_slot(name) {
                         self.emit(Opcode::LoadCaptured, vec![depth as i64, slot as i64]);
                         if !is_pre {
                             self.emit(Opcode::Dup, vec![]);
@@ -1193,9 +1201,7 @@ impl Emitter {
             Expr::Assign(target, value, _) => match target.as_ref() {
                 Expr::Identifier(name, _) => {
                     self.emit_expression(value);
-                    if let Some(env_slot) = self.captured_slot(name) {
-                        self.emit(Opcode::StoreCaptured, vec![0, env_slot as i64]);
-                    } else if let Some((depth, slot)) = self.env_captured_slot(name) {
+                    if let Some((depth, slot)) = self.env_captured_slot(name) {
                         self.emit(Opcode::StoreCaptured, vec![depth as i64, slot as i64]);
                     } else if let Some(slot) = self.lexical_slot(name) {
                         self.emit(Opcode::StoreLexical, vec![slot as i64]);
@@ -1226,12 +1232,7 @@ impl Emitter {
                 let bin_opcode = compound_binary_opcode(*op);
                 match target.as_ref() {
                     Expr::Identifier(name, _) => {
-                        if let Some(env_slot) = self.captured_slot(name) {
-                            self.emit(Opcode::LoadCaptured, vec![0, env_slot as i64]);
-                            self.emit_expression(rhs);
-                            self.emit(bin_opcode, vec![]);
-                            self.emit(Opcode::StoreCaptured, vec![0, env_slot as i64]);
-                        } else if let Some((depth, slot)) = self.env_captured_slot(name) {
+                        if let Some((depth, slot)) = self.env_captured_slot(name) {
                             self.emit(Opcode::LoadCaptured, vec![depth as i64, slot as i64]);
                             self.emit_expression(rhs);
                             self.emit(bin_opcode, vec![]);

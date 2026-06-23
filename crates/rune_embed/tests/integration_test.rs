@@ -3229,14 +3229,29 @@ mod instanceof_tests {
                 r#"var funcs = []; for (let i = 0; i < 3; i++) { funcs.push(function() { return i; }); }; funcs[0]()"#,
             )
             .unwrap();
-        // Per spec: each iteration creates a fresh binding, so funcs[0]() should return 0.
-        // However Rune doesn't implement closure captures of lexical slots yet,
-        // so the closure's `i` resolves to undefined in its own frame. We accept this
-        // for now — the per-iteration value is correct when accessed directly in the body.
-        assert!(
-            r.as_smi().is_none(),
-            "for (let i) closure capture not yet supported — returns undefined"
-        );
+        assert_eq!(r.as_smi(), Some(0), "for (let i) per-iteration closure — funcs[0]() = 0");
+    }
+
+    #[test]
+    fn test_for_let_closure_all_iterations() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(
+                r#"var funcs = []; for (let i = 0; i < 3; i++) { funcs.push(function() { return i; }); }; funcs[0]() * 100 + funcs[1]() * 10 + funcs[2]()"#,
+            )
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(12), "for (let i) all iterations: 0,1,2");
+    }
+
+    #[test]
+    fn test_for_let_arrow_closure() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(
+                r#"var funcs = []; for (let i = 0; i < 3; i++) { funcs.push(() => i); }; funcs[1]()"#,
+            )
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(1), "for (let i) arrow closure — funcs[1]() = 1");
     }
 
     #[test]

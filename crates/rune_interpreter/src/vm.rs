@@ -2034,8 +2034,10 @@ impl Vm {
                     let func_idx = instr.operands[0] as u64;
                     let is_arrow = instr.operands.get(1).copied().unwrap_or(0) != 0;
                     let prog_ptr = prog as *const BytecodeProgram as *const u8;
-                    let env_ptr = self.frames[fi].env;
-                    let ptr = Func::allocate(gc, func_idx, prog_ptr, is_arrow, env_ptr);
+                    let ptr = Func::allocate(gc, func_idx, prog_ptr, is_arrow, self.frames[fi].env);
+                    // env_ptr may be stale after GC-triggered collection during allocate;
+                    // re-read from frame.env which was updated by forward_value.
+                    unsafe { Func::set_env_ptr(ptr, self.frames[fi].env); }
                     // Create default `.prototype` object (§11.2.2)
                     let default_proto = JSObject::allocate(gc, Shape::empty(), &[]);
                     unsafe {
@@ -2046,9 +2048,19 @@ impl Vm {
                 }
                 Opcode::MakeEnv => {
                     let count = instr.operands[0] as usize;
-                    let parent = self.frames[fi].env as *mut EnvObject;
-                    let new_env = EnvObject::allocate(gc, count, parent);
+                    let new_env = EnvObject::allocate(gc, count, self.frames[fi].env as *mut EnvObject);
+                    // parent may be stale after GC-triggered collection during allocate;
+                    // update to the (possibly forwarded) frame.env value.
+                    unsafe { EnvObject::set_parent(new_env, self.frames[fi].env as *mut EnvObject); }
                     self.frames[fi].env = new_env as *mut u8;
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::RestoreEnv => {
+                    let env = self.frames[fi].env as *mut EnvObject;
+                    if !env.is_null() {
+                        let parent = unsafe { EnvObject::parent(env) };
+                        self.frames[fi].env = parent as *mut u8;
+                    }
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::LoadCaptured => {

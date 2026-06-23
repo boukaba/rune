@@ -812,15 +812,36 @@
 - **`Func` layout**: env_ptr at offset +40, jit_entry moved to +48. `Func::allocate` takes env_ptr. Accessors: `env_ptr`, `set_env_ptr`.
 - **`Frame.env`**: new `env: *mut u8` field. Set from `func.env_ptr` at Call/New/CallFromArray.
 - **GC rooting**: `register_roots` saves each `frame.env`. `TAG_ENV` scanning forwards parent + all slot values.
-- **New opcodes**: `MakeEnv(count)`, `LoadCaptured(depth, slot)`, `StoreCaptured(depth, slot)`
+- **New opcodes**: `MakeEnv(count)`, `RestoreEnv`, `LoadCaptured(depth, slot)`, `StoreCaptured(depth, slot)`
 - **`captured_env_size: usize`** on `BytecodeProgram` (default 0)
-- **VM handlers**: all three env opcodes integrated and working.
+- **VM handlers**: all env opcodes integrated and working.
 - **Emitter escape analysis**: `contains_inner_function_stmt`/`contains_inner_function_expr` recursive scan; `collect_var_names_stmt` pre-registers var names before escape analysis; all identifier resolution paths check captured/env_captured slots.
 - **Three bugs fixed in Day 2:**
   1. `env_scope_stack` not inherited by nested `compile_function` — inner functions couldn't resolve captured vars. Fixed: `sub.env_scope_stack = self.env_scope_stack.clone()`.
   2. `Expr::Assign` (simple assignment) didn't check captured slots — wrote to locals/globals instead of env. Fixed: add `captured_slot`/`env_captured_slot` checks.
   3. `StoreCaptured` already pops the value but emitter emitted redundant `Pop` after it (matching `StoreLocal` pattern). Fixed in prologue copy loop, `Stmt::Var` init, and `emit_store_binding`.
 - Committed at `62e84be`.
+
+### 14E-1 Day 3 — P0 Fixes for Stack Corruption & Per-Iteration let
+- **P0-3: Stack corruption on direct-arg closure calls FIXED** — `Pop` opcode unconditionally called `self.pop()` after `StoreCaptured` already consumed the value, stealing an item from the parent frame (e.g., `print_func`). Fix: made `Pop` stack_base-aware — only pops if `stack.len() > stack_base`. Committed `c862bf5`.
+- **P0-1: Per-iteration `let` + closures FIXED** — `for (let i ...) { fns.push(() => i); }` now works both at top level and inside functions.
+  - Added `RestoreEnv` opcode to restore `frame.env` to parent after iteration body.
+  - All `captured_slot` calls replaced with `env_captured_slot` which correctly computes depth when per-iteration names are pushed onto `env_scope_stack`.
+  - **Root cause of inside-function corruption:** The `for (let ...)` loop's `JumpIfFalse` exit path skipped `RestoreEnv`, leaving `frame.env` pointing to the last iteration env. After the loop, captured variable reads used the wrong env (iteration env instead of function env), reading garbage/undefined. **Fix:** emit `RestoreEnv` on the exit path (before `patch`), so `JumpIfFalse` lands on a `RestoreEnv` that restores `frame.env` to the function env.
+  - Defense-in-depth: GC stale-pointer fix in `MakeEnv`/`MakeFunction` handlers (re-read `frame.env` after allocation, since allocation may trigger GC collection that moves env objects and invalidates local variables).
+
+### Test Results — Sprint 14E-1 Day 3
+- **275 integration tests passing** (0 failed, 2 ignored)
+- All 9 acceptance tests pass:
+  - Basic read-only closure (`() => x`, `function() { return x; }`)
+  - Closure mutation via var (`count++`)
+  - Closure mutation via param (`x = x + n`)
+  - Nested closures (`f()()()`)
+  - Arrow closure (`() => x`)
+  - Per-iteration `for (let i...){arr.push(() => i)}` — arrows, function expressions, function declarations
+  - Inside-function for-let + closure + other captured vars
+- `cargo clippy` clean
+- **P0-2 (block-scope shadowing) remains open** — escape analysis and env_scope_stack not yet block-aware
 
 | Task | Priority | Est. | Description |
 |---|---|---|---|

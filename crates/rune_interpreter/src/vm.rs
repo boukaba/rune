@@ -51,6 +51,8 @@ struct Frame {
     lexical_const: Vec<bool>,
     /// Stack of scope boundary indices into the lexical arrays.
     scope_boundaries: Vec<usize>,
+    /// Number of arguments passed to this function (for `arguments` object).
+    passed_argc: usize,
     pc: usize,
     stack_base: usize,
     prog: *const BytecodeProgram,
@@ -364,6 +366,7 @@ impl Vm {
             lexical_tdz: Vec::new(),
             lexical_const: Vec::new(),
             scope_boundaries: Vec::new(),
+            passed_argc: 0,
             pc: 0,
             stack_base: 0,
             prog: program as *const BytecodeProgram,
@@ -433,6 +436,7 @@ impl Vm {
             lexical_tdz,
             lexical_const,
             scope_boundaries,
+            passed_argc: 0,
             pc,
             stack_base: self.stack.len(),
             prog,
@@ -1965,6 +1969,51 @@ impl Vm {
                     self.push(Value::from_heap_ptr(arr as *mut u8));
                     self.frames[fi].pc = pc + 1;
                 }
+                Opcode::MakeArgumentsArray => {
+                    let named_offset = if unsafe { (*self.frames[fi].prog).named_function } {
+                        1
+                    } else {
+                        0
+                    };
+                    let argc = self.frames[fi].passed_argc;
+                    let mut elems: Vec<Value> = Vec::with_capacity(argc);
+                    for i in 0..argc {
+                        elems.push(self.frames[fi].locals[named_offset + i]);
+                    }
+                    let arr = RuneArray::allocate(gc, &elems);
+                    unsafe {
+                        let ptr = arr as *mut u8;
+                        let shape_ptr = ptr.add(8) as *mut *const Shape;
+                        *shape_ptr = *DENSE_ARRAY_SHAPE as *const Shape;
+                        let proto_ptr = ptr.add(24) as *mut *mut u8;
+                        if self.array_prototype.is_heap_object()
+                            && let Some(proto) = self.array_prototype.heap_ptr()
+                        {
+                            *proto_ptr = proto;
+                        }
+                    }
+                    self.push(Value::from_heap_ptr(arr as *mut u8));
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::CopyLexical => {
+                    let src_slot = instr.operands[0] as usize;
+                    let dst_slot = instr.operands[1] as usize;
+                    let f = &self.frames[fi];
+                    let val = if src_slot < f.lexical_slots.len() {
+                        f.lexical_slots[src_slot]
+                    } else {
+                        Value::undefined()
+                    };
+                    let f = &mut self.frames[fi];
+                    if dst_slot >= f.lexical_slots.len() {
+                        f.lexical_slots.resize(dst_slot + 1, Value::undefined());
+                        f.lexical_tdz.resize(dst_slot + 1, false);
+                        f.lexical_const.resize(dst_slot + 1, false);
+                    }
+                    f.lexical_slots[dst_slot] = val;
+                    f.lexical_tdz[dst_slot] = false;
+                    f.pc = pc + 1;
+                }
                 Opcode::MakeFunction => {
                     let func_idx = instr.operands[0] as u64;
                     let is_arrow = instr.operands.get(1).copied().unwrap_or(0) != 0;
@@ -2140,6 +2189,7 @@ impl Vm {
                                 } else {
                                     vec![]
                                 };
+                                let passed_argc = args.len();
                                 locals.extend(args);
                                 self.frames.push(Frame {
                                     locals,
@@ -2147,6 +2197,7 @@ impl Vm {
                                     lexical_tdz: Vec::new(),
                                     lexical_const: Vec::new(),
                                     scope_boundaries: Vec::new(),
+                                    passed_argc,
                                     pc: 0,
                                     stack_base: self.stack.len(),
                                     prog: func_prog as *const BytecodeProgram,
@@ -2269,6 +2320,7 @@ impl Vm {
                                 } else {
                                     vec![]
                                 };
+                                let passed_argc = args.len();
                                 locals.extend(args);
                                 self.frames.push(Frame {
                                     locals,
@@ -2276,6 +2328,7 @@ impl Vm {
                                     lexical_tdz: Vec::new(),
                                     lexical_const: Vec::new(),
                                     scope_boundaries: Vec::new(),
+                                    passed_argc,
                                     pc: 0,
                                     stack_base: self.stack.len(),
                                     prog: func_prog as *const BytecodeProgram,
@@ -2358,6 +2411,7 @@ impl Vm {
                                 } else {
                                     vec![]
                                 };
+                                let passed_argc = args.len();
                                 locals.extend(args);
                                 self.frames.push(Frame {
                                     locals,
@@ -2365,6 +2419,7 @@ impl Vm {
                                     lexical_tdz: Vec::new(),
                                     lexical_const: Vec::new(),
                                     scope_boundaries: Vec::new(),
+                                    passed_argc,
                                     pc: 0,
                                     stack_base: self.stack.len(),
                                     prog: func_prog as *const BytecodeProgram,

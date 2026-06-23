@@ -81,6 +81,8 @@ pub enum Opcode {
     New,
     Return,
     MakeRestArray,
+    MakeArgumentsArray,
+    CopyLexical,
     // Stack
     Swap,
     // Generators

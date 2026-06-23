@@ -781,14 +781,17 @@
 | **14C-2: Method shorthand `{ foo() {} }`** | 🟠 P1 | ✅ done | `{ foo() { body } }` sugar for `{ foo: function() { body } }`. Parser detects `(` after property key, parses function body via `parse_function_body` with key as function name. Works with `String`, `Number`, and `Identifier` keys. 4 integration tests: basic, this, multiple, params. |
 | **14C-3: Computed keys `{ [expr]: val }`** | 🟠 P1 | ✅ done | `{ [k]: v }` evaluates `k` at runtime as property key. New `PropKey::Computed(Box<Expr>)` AST variant. Parser detects `[` after `{` or `,`. Emitter: for computed keys uses `Dup` + key expr + value expr + `StoreProperty` + `Pop` (incremental path). Works with computed method names `{ [k]() {} }`. Also added computed key support in destructuring patterns (`var { [k]: val } = obj`), closing the 14A deferral. 6 integration tests: basic, string concat, numeric, multiple, method, destructuring. |
 | **14D: Template literal substitutions** | 🟠 P1 | ✅ done | `${expr}` in template literals. Lexer: new TokenKind variants (TemplateHead/Middle/Tail/NoSub), `template_brace_stack` for nested `${}` brace tracking, escape sequences in template strings (backtick, `${`, standard escapes, unicode). Parser: `Expr::Template { parts, exprs }` loops over head→middle→tail segments. Emitter: `LoadStringConst` + `ToString` + `StringConcat` chain. New opcodes: `ToString`, `StringConcat`. 9 integration tests: no-sub, single, expression, multiple, empty-start, coercion, nested, escaped backtick, multi-line. Known gaps: tagged templates (deferred), `String.raw` (deferred). |
-| **14E: Arrow `arguments` + per-iteration `let`** | 🟠 P1 | pending | Materialize `arguments` in non-arrow function prologue. Per-iteration `let` binding in `for (let i …)` loops. §10.4.4, §14.7.4.2. |
+| **14E: Arrow `arguments` + per-iteration `let`** | 🟠 P1 | ✅ done | Materialize `arguments` in non-arrow function prologue (`MakeArgumentsArray` opcode → `Frame.passed_argc`). Per-iteration `let` binding in `for (let i …)` loops (`CopyLexical` opcode copies outer slot → fresh inner slot at each iteration). §10.4.4, §14.7.4.2. Known gaps: closure capture of `arguments`/`let` variables deferred (requires parent-frame linking). |
 | **14F: Default parameters** | 🟢 P2 | pending | `function f(a = 1)`. §14.1.3. Overlaps with 14A defaults. |
 | **14G: Comma operator** | 🟢 P2 | pending | `(a, b)` returns `b`. §13.16. |
 | **14H: V8 baseline comparison** | 🟢 P2 | pending | `run_v8_baseline.sh` + Rune-vs-V8 columns in `progress.md`. |
 
-### Test Results — Sprint 14D
+### Test Results — Sprint 14E
 - **All tests pass** (fmt + clippy + test green)
-- **362 tests passing** (257 integration + 29 VM + 22 JIT baseline + 25 interpreter + 11 bytecode + 6 core + 5 parser + 5 parser tests + 2 spike)
+- **374 tests passing** (269 integration + 29 VM + 22 JIT baseline + 25 interpreter + 11 bytecode + 6 core + 5 parser + 5 parser tests + 2 spike)
+- New opcodes: `MakeArgumentsArray`, `CopyLexical`
+- `arguments.length`, `arguments[i]` work in regular functions; arrows don't create own `arguments` (inheritance deferred)
+- `for (let i = 0; i < N; i++)` creates fresh per-iteration binding; `var` in for-loop unchanged
 - Known gap: tagged templates deferred
 - `function f([a, b]) { return a + b; }; f([10, 20])` → `30` ✅ (array fn param destructuring)
 - `function f({a: {b, c}}) { return b + c; }; f({a: {b: 3, c: 4}})` → `7` ✅ (nested fn param destructuring)

@@ -157,6 +157,15 @@ impl Emitter {
                 }
             }
         }
+        // For non-arrow functions: materialize `arguments` object
+        if !func.is_arrow {
+            sub.locals.push("arguments".to_string());
+            sub.emit(Opcode::MakeArgumentsArray, vec![]);
+            if let Some(idx) = sub.local_index("arguments") {
+                sub.emit(Opcode::StoreLocal, vec![idx as i64]);
+                sub.emit(Opcode::Pop, vec![]);
+            }
+        }
         // Emit body: for arrow expression body (Stmt::Expr), use it as return value
         let is_arrow_expr = func.name.is_none() && matches!(&func.body, Stmt::Expr(..));
         match &func.body {
@@ -401,10 +410,56 @@ impl Emitter {
                 }
             }
             Stmt::For(init, cond, update, body, _) => {
+                // Enter lexical scope for for-init's let/const declarations
+                let init_has_scope = if let Some(init_stmt) = init {
+                    let init_ref: &Stmt = init_stmt.as_ref();
+                    if matches!(init_ref, Stmt::Var(VarKind::Let | VarKind::Const, _, _)) {
+                        let count = self.count_lexicals(std::slice::from_ref(init_ref));
+                        if count > 0 {
+                            self.enter_lexical_scope(std::slice::from_ref(init_ref), count);
+                            self.emit(Opcode::BlockEnter, vec![count as i64]);
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                // Emit init
                 if let Some(init_stmt) = init {
                     self.emit_statement(init_stmt);
                 }
+                // Collect per-iteration let variable info
+                let mut per_iteration_vars: Vec<(String, usize)> = Vec::new();
+                if init_has_scope && let Some(scope) = self.lexical_scopes.last() {
+                    for b in scope {
+                        per_iteration_vars.push((b.name.clone(), b.slot));
+                    }
+                }
+                let per_iteration_count = per_iteration_vars.len();
+                let shadow_start_slot = self.lexical_slot_count;
                 let loop_start = self.current();
+                // Create per-iteration shadow scope (copy outer → inner)
+                if per_iteration_count > 0 {
+                    self.emit(Opcode::BlockEnter, vec![per_iteration_count as i64]);
+                    let mut shadow_bindings = Vec::new();
+                    for (i, (name, outer_slot)) in per_iteration_vars.iter().enumerate() {
+                        let inner_slot = shadow_start_slot + i;
+                        self.emit(
+                            Opcode::CopyLexical,
+                            vec![*outer_slot as i64, inner_slot as i64],
+                        );
+                        shadow_bindings.push(LexicalBinding {
+                            name: name.clone(),
+                            slot: inner_slot,
+                        });
+                    }
+                    self.lexical_slot_count += per_iteration_count;
+                    self.lexical_scopes.push(shadow_bindings);
+                }
                 let exit_jump = if let Some(c) = cond {
                     self.emit_expression(c);
                     let j = self.current();
@@ -422,8 +477,26 @@ impl Emitter {
                     self.emit_expression(upd);
                     self.emit(Opcode::Pop, vec![]);
                 }
+                // Pop per-iteration scope and copy back (inner → outer)
+                if per_iteration_count > 0 {
+                    for (i, (_, outer_slot)) in per_iteration_vars.iter().enumerate() {
+                        let inner_slot = shadow_start_slot + i;
+                        self.emit(
+                            Opcode::CopyLexical,
+                            vec![inner_slot as i64, *outer_slot as i64],
+                        );
+                    }
+                    self.emit(Opcode::BlockLeave, vec![]);
+                    self.lexical_scopes.pop();
+                    self.lexical_slot_count -= per_iteration_count;
+                }
                 self.emit(Opcode::Jump, vec![loop_start as i64]);
                 self.patch(exit_jump, self.current());
+                // Leave for-init lexical scope
+                if init_has_scope {
+                    self.emit(Opcode::BlockLeave, vec![]);
+                    self.leave_lexical_scope();
+                }
             }
             Stmt::Return(value, _) => {
                 if let Some(val) = value {

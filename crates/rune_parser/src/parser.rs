@@ -1213,7 +1213,12 @@ impl Parser {
                         self.advance();
                         continue;
                     }
-                    let pattern = self.parse_binding_pattern();
+                    let mut pattern = self.parse_binding_pattern();
+                    if self.tok.kind == TokenKind::EqAssign {
+                        self.advance();
+                        let default = self.parse_expr(0);
+                        pattern = Pattern::Default(Box::new(pattern), Box::new(default));
+                    }
                     items.push(Some(pattern));
                     if self.tok.kind == TokenKind::Comma {
                         self.advance();

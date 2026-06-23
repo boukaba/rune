@@ -2285,4 +2285,149 @@ mod instanceof_tests {
             "named fn with destructure params should work"
         );
     }
+
+    // ── Array destructuring defaults ──────────────────────────────────────
+
+    #[test]
+    fn test_array_destructure_default_basic() {
+        let mut ctx = Context::new();
+        let r = ctx.eval(r#"var [a = 99] = []; a"#).unwrap();
+        assert_eq!(r.as_smi(), Some(99), "[a = 99] = [], a should be 99");
+    }
+
+    #[test]
+    fn test_array_destructure_default_not_undefined() {
+        let mut ctx = Context::new();
+        let r = ctx.eval(r#"var [a = 99] = [0]; a"#).unwrap();
+        assert_eq!(
+            r.as_smi(),
+            Some(0),
+            "[a = 99] = [0], a should be 0 (not 99)"
+        );
+    }
+
+    #[test]
+    fn test_array_destructure_default_explicit_undefined() {
+        let mut ctx = Context::new();
+        let r = ctx.eval(r#"var [a = 99] = [undefined]; a"#).unwrap();
+        assert_eq!(
+            r.as_smi(),
+            Some(99),
+            "[a = 99] = [undefined], a should be 99"
+        );
+    }
+
+    #[test]
+    fn test_array_destructure_default_null_not_triggered() {
+        let mut ctx = Context::new();
+        let r = ctx.eval(r#"var [a = 99] = [null]; a"#).unwrap();
+        assert!(
+            r.is_null(),
+            "[a = 99] = [null], a should be null (default not triggered)"
+        );
+    }
+
+    #[test]
+    fn test_array_destructure_multi_element_defaults() {
+        let mut ctx = Context::new();
+        let r = ctx.eval(r#"var [a, b = 5] = [1]; a + b"#).unwrap();
+        assert_eq!(r.as_smi(), Some(6), "[a, b = 5] = [1], a+b should be 6");
+    }
+
+    #[test]
+    fn test_array_destructure_defaults_all_have_defaults() {
+        let mut ctx = Context::new();
+        let r = ctx.eval(r#"var [a = 1, b = 2] = [10]; a + b"#).unwrap();
+        assert_eq!(r.as_smi(), Some(12), "[a=1, b=2] = [10], a+b should be 12");
+    }
+
+    #[test]
+    fn test_array_destructure_default_fn_param() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"function f([a = 1, b = 2]) { return a + b; }; f([])"#)
+            .unwrap();
+        assert_eq!(
+            r.as_smi(),
+            Some(3),
+            "fn([a=1, b=2]) with empty array should use defaults"
+        );
+    }
+
+    #[test]
+    fn test_array_destructure_default_nested() {
+        let mut ctx = Context::new();
+        let r = ctx.eval(r#"var [a, [b = 99]] = [1, []]; a + b"#).unwrap();
+        assert_eq!(
+            r.as_smi(),
+            Some(100),
+            "nested default [b=99] in array should work"
+        );
+    }
+
+    // ── TypeError object for destructuring null/undefined ────────────────
+    // Note: try-catch at top level doesn't propagate the catch-block's
+    // last value as the program result, so we store to a var and read it.
+
+    #[test]
+    fn test_type_error_is_object() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(
+                r#"
+            var t;
+            try { var {a} = null; } catch(e) { t = typeof e; }
+            t
+        "#,
+            )
+            .unwrap();
+        assert_eq!(
+            r.to_boolean(),
+            None,
+            "typeof error should be a string, not boolean"
+        );
+    }
+
+    #[test]
+    fn test_type_error_has_message() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(
+                r#"
+            var msg;
+            try { var {a} = null; } catch(e) { msg = e.message; }
+            msg
+        "#,
+            )
+            .unwrap();
+        assert!(
+            r.is_heap_object(),
+            "error.message should be a heap object (string)"
+        );
+    }
+
+    #[test]
+    fn test_type_error_has_name() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(
+                r#"
+            var n;
+            try { var {a} = null; } catch(e) { n = e.name; }
+            n
+        "#,
+            )
+            .unwrap();
+        assert!(
+            r.is_heap_object(),
+            "error.name should be a heap object (string)"
+        );
+    }
+
+    #[test]
+    fn test_array_destructure_throws_type_error() {
+        let mut ctx = Context::new();
+        let r = ctx.eval(r#"var [a] = null"#);
+        assert!(r.is_err(), "[a] = null should throw TypeError");
+    }
 }

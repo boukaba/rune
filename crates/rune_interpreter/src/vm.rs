@@ -17,6 +17,27 @@ use rune_jit_baseline::{CodeGen, JitEntryFn};
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 
+/// Create a minimal Error object with `name` and `message` properties.
+fn make_error_object(gc: &mut SemiSpace, name: &str, msg: &str) -> Value {
+    let name_str: *mut u8 = HeapString::allocate(gc, name) as *mut u8;
+    let msg_str: *mut u8 = HeapString::allocate(gc, msg) as *mut u8;
+    let entries = vec![
+        (PropertyKey::from_string("name"), 0usize),
+        (PropertyKey::from_string("message"), 1usize),
+    ];
+    let key_names = vec!["name".to_string(), "message".to_string()];
+    let shape = Shape::intern(entries, key_names);
+    let obj = JSObject::allocate(
+        gc,
+        shape,
+        &[
+            Value::from_heap_ptr(name_str),
+            Value::from_heap_ptr(msg_str),
+        ],
+    );
+    Value::from_heap_ptr(obj as *mut u8)
+}
+
 /// Callback for the `eval` builtin: parses and executes JS source, returns result.
 pub type EvalFn = Box<dyn FnMut(&mut SemiSpace, &str) -> Result<Value, String>>;
 
@@ -1587,11 +1608,12 @@ impl Vm {
                     if val.is_null() || val.is_undefined() {
                         self.pop();
                         self.register_roots(gc);
-                        let full_msg = "TypeError: Cannot destructure null or undefined";
-                        let ptr = HeapString::allocate(gc, full_msg);
-                        self.push(Value::from_heap_ptr(ptr as *mut u8));
+                        let exc = make_error_object(
+                            gc,
+                            "TypeError",
+                            "Cannot destructure null or undefined",
+                        );
                         // Now behave like Opcode::Throw
-                        let exc = self.pop();
                         let handler_idx = self
                             .try_stack
                             .iter()

@@ -213,6 +213,9 @@ impl Emitter {
             Pattern::Identifier(name, _, default) => {
                 self.emit_store_with_default(name, kind, default);
             }
+            Pattern::Default(_, _) => {
+                unreachable!("Pattern::Default should be handled by emit_destructuring_binding");
+            }
         }
     }
 
@@ -222,6 +225,19 @@ impl Emitter {
         match pattern {
             Pattern::Identifier(name, _, default) => {
                 self.emit_store_with_default(name, kind, default);
+            }
+            Pattern::Default(inner, expr) => {
+                // Check if the value is undefined; if so, replace with default expr
+                self.emit(Opcode::Dup, vec![]);
+                self.emit(Opcode::LoadUndefined, vec![]);
+                self.emit(Opcode::StrictEq, vec![]);
+                self.emit(Opcode::JumpIfFalse, vec![0]);
+                let jump_pos = self.current() - 1;
+                self.emit(Opcode::Pop, vec![]);
+                self.emit_expression(expr);
+                self.instructions[jump_pos].operands[0] = self.current() as i64;
+                // Recurse with the (possibly defaulted) value
+                self.emit_destructuring_binding(inner, kind);
             }
             Pattern::Object(_, _) | Pattern::Array(_, _) => {
                 self.emit_destructuring(pattern, kind);
@@ -1060,6 +1076,7 @@ impl Emitter {
                 })
                 .sum(),
             Some(Pattern::Identifier(_, _, _)) => 1,
+            Some(Pattern::Default(p, _)) => self.count_pattern_bindings(&Some((**p).clone())),
         }
     }
 
@@ -1110,6 +1127,9 @@ impl Emitter {
                     name: n.to_string(),
                     slot: self.lexical_slot_count + bindings.len(),
                 });
+            }
+            Some(Pattern::Default(p, _)) => {
+                self.collect_lexical_bindings(&Some((**p).clone()), name, bindings);
             }
         }
     }

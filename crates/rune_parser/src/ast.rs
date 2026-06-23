@@ -165,6 +165,7 @@ pub enum Pattern {
     Identifier(Box<str>, Span, Option<Box<Expr>>),
     Object(Vec<ObjectPatternProp>, Span),
     Array(Vec<Option<Pattern>>, Span),
+    Default(Box<Pattern>, Box<Expr>),
 }
 
 #[derive(Clone, Debug, PartialEq)]

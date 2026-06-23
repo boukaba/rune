@@ -1,4 +1,4 @@
-use crate::gc::{GcHeader, SemiSpace, TAG_ENV, size_of, align_up};
+use crate::gc::{GcHeader, SemiSpace, TAG_ENV, align_up, size_of};
 use crate::value::Value;
 
 /// A GC-allocated lexical environment object for closure capture.
@@ -68,9 +68,7 @@ impl EnvObject {
 
     /// Read a slot value by index.
     pub unsafe fn get_slot(env: *mut EnvObject, index: usize) -> Value {
-        unsafe {
-            *Self::slots_ptr(env).add(index)
-        }
+        unsafe { *Self::slots_ptr(env).add(index) }
     }
 
     /// Write a slot value by index.

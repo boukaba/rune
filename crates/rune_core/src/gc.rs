@@ -171,7 +171,7 @@ impl SemiSpace {
                 let obj_end = self.scan_end(scan_ptr, tag);
 
                 match tag {
-                TAG_OBJECT | TAG_ARRAY => {
+                    TAG_OBJECT | TAG_ARRAY => {
                         // Forward prototype pointer (if non-null)
                         let proto_ptr = scan_ptr.add(OBJECT_PROTOTYPE_OFFSET) as *mut u64;
                         self.forward_value(proto_ptr);

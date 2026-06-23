@@ -2,12 +2,13 @@ use crate::gc::{GcHeader, SemiSpace, TAG_FUNC, size_of};
 
 /// A GC-allocated function object storing an index into the bytecode function table,
 /// a pointer to the bytecode program that owns the function table,
-/// and a pointer to the function's `.prototype` object.
+/// a pointer to the function's `.prototype` object,
+/// and a pointer to the function's captured lexical environment.
 ///
 /// Memory layout:
 ///   [GcHeader(8) | func_idx(8) | prog_ptr(8) | prototype(8) |
-///    call_count(4) | flags(4) | jit_entry(8)]
-///   Total: 48 bytes
+///    call_count(4) | flags(4) | env_ptr(8) | jit_entry(8)]
+///   Total: 56 bytes
 ///
 /// flags: bit 0 = is_arrow
 pub struct Func;
@@ -18,8 +19,9 @@ impl Func {
         func_idx: u64,
         prog_ptr: *const u8,
         is_arrow: bool,
+        env_ptr: *mut u8,
     ) -> *mut Func {
-        let ptr = ss.alloc(48);
+        let ptr = ss.alloc(56);
         unsafe {
             let header = &mut *(ptr as *mut GcHeader);
             header.word = std::sync::atomic::AtomicU64::new(TAG_FUNC);
@@ -36,8 +38,11 @@ impl Func {
             // flags: bit 0 = is_arrow
             let flags_ptr = ptr.add(size_of::<GcHeader>() + 28) as *mut u32;
             *flags_ptr = if is_arrow { 1 } else { 0 };
+            // env_ptr = captured lexical environment
+            let env_field_ptr = ptr.add(size_of::<GcHeader>() + 32) as *mut u64;
+            *env_field_ptr = env_ptr as u64;
             // jit_entry = null
-            let jit_ptr = ptr.add(size_of::<GcHeader>() + 32) as *mut u64;
+            let jit_ptr = ptr.add(size_of::<GcHeader>() + 40) as *mut u64;
             *jit_ptr = 0;
         }
         ptr as *mut Func
@@ -54,6 +59,23 @@ impl Func {
         unsafe {
             let ptr_bytes = ptr as *mut u8;
             *(ptr_bytes.add(size_of::<GcHeader>() + 8) as *const u64) as *const u8
+        }
+    }
+
+    /// Get the captured environment pointer (may be null).
+    pub unsafe fn env_ptr(ptr: *mut Func) -> *mut u8 {
+        unsafe {
+            let ptr_bytes = ptr as *mut u8;
+            *(ptr_bytes.add(size_of::<GcHeader>() + 32) as *const u64) as *mut u8
+        }
+    }
+
+    /// Set the captured environment pointer.
+    pub unsafe fn set_env_ptr(ptr: *mut Func, env: *mut u8) {
+        unsafe {
+            let ptr_bytes = ptr as *mut u8;
+            let field = ptr_bytes.add(size_of::<GcHeader>() + 32) as *mut u64;
+            *field = env as u64;
         }
     }
 
@@ -108,7 +130,7 @@ impl Func {
     pub unsafe fn set_jit_entry(ptr: *mut Func, entry: *const u8) {
         unsafe {
             let ptr_bytes = ptr as *mut u8;
-            let p = ptr_bytes.add(size_of::<GcHeader>() + 32) as *mut u64;
+            let p = ptr_bytes.add(size_of::<GcHeader>() + 40) as *mut u64;
             *p = entry as u64;
         }
     }
@@ -117,7 +139,7 @@ impl Func {
     pub unsafe fn jit_entry(ptr: *mut Func) -> *const u8 {
         unsafe {
             let ptr_bytes = ptr as *mut u8;
-            let raw = *(ptr_bytes.add(size_of::<GcHeader>() + 32) as *const u64);
+            let raw = *(ptr_bytes.add(size_of::<GcHeader>() + 40) as *const u64);
             if raw == 0 {
                 std::ptr::null()
             } else {

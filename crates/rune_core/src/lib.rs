@@ -3,6 +3,7 @@
 
 pub mod array;
 pub mod barrier;
+pub mod env;
 pub mod float;
 pub mod function;
 pub mod gc;

@@ -7,6 +7,7 @@ pub const TAG_STRING: u64 = 1;
 pub const TAG_FUNC: u64 = 2;
 pub const TAG_FLOAT64: u64 = 3;
 pub const TAG_ARRAY: u64 = 4;
+pub const TAG_ENV: u64 = 5;
 pub const TAG_FORWARDED: u64 = 7;
 
 /// Tag bits mask for GC header tag.
@@ -170,7 +171,7 @@ impl SemiSpace {
                 let obj_end = self.scan_end(scan_ptr, tag);
 
                 match tag {
-                    TAG_OBJECT | TAG_ARRAY => {
+                TAG_OBJECT | TAG_ARRAY => {
                         // Forward prototype pointer (if non-null)
                         let proto_ptr = scan_ptr.add(OBJECT_PROTOTYPE_OFFSET) as *mut u64;
                         self.forward_value(proto_ptr);
@@ -186,6 +187,20 @@ impl SemiSpace {
                         // Forward the prototype pointer (byte offset 24 from object start)
                         let proto_ptr = scan_ptr.add(size_of::<GcHeader>() + 16) as *mut u64;
                         self.forward_value(proto_ptr);
+                        // Forward the environment pointer (byte offset 40 from object start)
+                        let env_ptr = scan_ptr.add(40) as *mut u64;
+                        self.forward_value(env_ptr);
+                    }
+                    TAG_ENV => {
+                        // Forward parent pointer at byte offset 16 from object start
+                        let parent_ptr = scan_ptr.add(16) as *mut u64;
+                        self.forward_value(parent_ptr);
+                        // Forward each slot (slots start at offset 24)
+                        let count = *(scan_ptr.add(size_of::<GcHeader>()) as *const u32) as usize;
+                        let slots_ptr = scan_ptr.add(24) as *mut u64;
+                        for i in 0..count {
+                            self.forward_value(slots_ptr.add(i));
+                        }
                     }
                     TAG_STRING => {}
                     _ => {}
@@ -208,14 +223,19 @@ impl SemiSpace {
                 }
                 TAG_FUNC => {
                     // Func layout: GcHeader(8) + func_idx(8) + prog_ptr(8) + prototype(8)
-                    //   + call_count(4) + pad(4) + jit_entry(8) = 48 bytes
-                    obj_start.add(48)
+                    //   + call_count(4) + flags(4) + env_ptr(8) + jit_entry(8) = 56 bytes
+                    obj_start.add(56)
                 }
                 TAG_FLOAT64 => obj_start.add(size_of::<GcHeader>() + 8),
                 TAG_OBJECT | TAG_ARRAY => {
                     let capacity_ptr = obj_start.add(16) as *const u32;
                     let capacity = *capacity_ptr as usize;
                     let total = OBJECT_SLOTS_OFFSET + capacity * size_of::<u64>();
+                    obj_start.add(align_up(total, 8))
+                }
+                TAG_ENV => {
+                    let count = *(obj_start.add(size_of::<GcHeader>()) as *const u32) as usize;
+                    let total = 24 + count * size_of::<u64>();
                     obj_start.add(align_up(total, 8))
                 }
                 _ => obj_start.add(8),
@@ -280,7 +300,7 @@ unsafe fn alloc_zeroed(size: usize) -> *mut u8 {
     }
 }
 
-fn align_up(size: usize, align: usize) -> usize {
+pub(crate) fn align_up(size: usize, align: usize) -> usize {
     (size + align - 1) & !(align - 1)
 }
 

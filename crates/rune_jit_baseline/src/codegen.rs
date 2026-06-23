@@ -307,6 +307,7 @@ mod tests {
             named_function: false,
             is_generator: false,
             local_names: vec![],
+            captured_env_size: 0,
         }
     }
 

@@ -3,6 +3,7 @@ use crate::generator::Generator;
 use crate::ic::{IcEntry, IcStats, InlineCache};
 use rune_bytecode::opcode::{BytecodeProgram, Instruction, Opcode};
 use rune_core::array::RuneArray;
+use rune_core::env::EnvObject;
 use rune_core::float::HeapFloat64;
 use rune_core::function::Func;
 use rune_core::gc::{
@@ -60,6 +61,9 @@ struct Frame {
     this: Value,
     is_constructor_call: bool,
     constructed_object: Value,
+    /// Pointer to this frame's lexical environment object (may be null).
+    /// Set by MakeEnv at function entry. Child closures capture this pointer.
+    env: *mut u8,
 }
 
 /// Result of the bytecode loop: normal return, generator yield, or throw.
@@ -316,6 +320,10 @@ impl Vm {
             for slot in &frame.lexical_slots {
                 gc.push_root(slot as *const Value as *mut u64);
             }
+            // Root the frame's captured environment pointer (a valid GC heap pointer)
+            if !frame.env.is_null() {
+                gc.push_root(&frame.env as *const *mut u8 as *mut u64);
+            }
         }
         for tf in &self.try_stack {
             if let Some(ref val) = tf.saved_exception {
@@ -374,6 +382,7 @@ impl Vm {
             this: Value::undefined(),
             is_constructor_call: false,
             constructed_object: Value::undefined(),
+            env: std::ptr::null_mut(),
         });
 
         self.register_roots(gc);
@@ -444,6 +453,7 @@ impl Vm {
             this: Value::undefined(),
             is_constructor_call: false,
             constructed_object: Value::undefined(),
+            env: std::ptr::null_mut(),
         });
 
         if started {
@@ -2018,13 +2028,39 @@ impl Vm {
                     let func_idx = instr.operands[0] as u64;
                     let is_arrow = instr.operands.get(1).copied().unwrap_or(0) != 0;
                     let prog_ptr = prog as *const BytecodeProgram as *const u8;
-                    let ptr = Func::allocate(gc, func_idx, prog_ptr, is_arrow);
+                    let env_ptr = self.frames[fi].env;
+                    let ptr = Func::allocate(gc, func_idx, prog_ptr, is_arrow, env_ptr);
                     // Create default `.prototype` object (§11.2.2)
                     let default_proto = JSObject::allocate(gc, Shape::empty(), &[]);
                     unsafe {
                         Func::set_prototype(ptr, default_proto as *mut u8);
                     }
                     self.push(Value::from_heap_ptr(ptr as *mut u8));
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::MakeEnv => {
+                    let count = instr.operands[0] as usize;
+                    let parent = self.frames[fi].env as *mut EnvObject;
+                    let new_env = EnvObject::allocate(gc, count, parent);
+                    self.frames[fi].env = new_env as *mut u8;
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::LoadCaptured => {
+                    let depth = instr.operands[0] as usize;
+                    let slot = instr.operands[1] as usize;
+                    let env = self.frames[fi].env as *mut EnvObject;
+                    let target = unsafe { EnvObject::ancestor(env, depth) };
+                    let val = unsafe { EnvObject::get_slot(target, slot) };
+                    self.push(val);
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::StoreCaptured => {
+                    let depth = instr.operands[0] as usize;
+                    let slot = instr.operands[1] as usize;
+                    let val = self.pop();
+                    let env = self.frames[fi].env as *mut EnvObject;
+                    let target = unsafe { EnvObject::ancestor(env, depth) };
+                    unsafe { EnvObject::set_slot(target, slot, val) };
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::New => {
@@ -2191,6 +2227,8 @@ impl Vm {
                                 };
                                 let passed_argc = args.len();
                                 locals.extend(args);
+                                let func_ptr = ptr as *mut Func;
+                                let func_env = unsafe { Func::env_ptr(func_ptr) };
                                 self.frames.push(Frame {
                                     locals,
                                     lexical_slots: Vec::new(),
@@ -2205,6 +2243,7 @@ impl Vm {
                                     this: obj_val,
                                     is_constructor_call: true,
                                     constructed_object: obj_val,
+                                    env: func_env,
                                 });
                                 continue;
                             }
@@ -2315,6 +2354,8 @@ impl Vm {
                                     }
                                 }
                                 // --- End JIT tier-up ---
+                                let func_ptr = ptr as *mut Func;
+                                let func_env = unsafe { Func::env_ptr(func_ptr) };
                                 let mut locals: Vec<Value> = if func_prog.named_function {
                                     vec![callee]
                                 } else {
@@ -2336,6 +2377,7 @@ impl Vm {
                                     this,
                                     is_constructor_call: false,
                                     constructed_object: Value::undefined(),
+                                    env: func_env,
                                 });
                                 continue;
                             }
@@ -2406,6 +2448,8 @@ impl Vm {
                                     self.frames[fi].pc = pc + 1;
                                     continue;
                                 }
+                                let func_ptr = ptr as *mut Func;
+                                let func_env = unsafe { Func::env_ptr(func_ptr) };
                                 let mut locals: Vec<Value> = if func_prog.named_function {
                                     vec![callee]
                                 } else {
@@ -2427,6 +2471,7 @@ impl Vm {
                                     this,
                                     is_constructor_call: false,
                                     constructed_object: Value::undefined(),
+                                    env: func_env,
                                 });
                                 continue;
                             }

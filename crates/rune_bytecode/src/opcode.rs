@@ -100,6 +100,10 @@ pub enum Opcode {
     // for-in
     ForInInit,
     ForInNext,
+    // Environment (closure capture)
+    MakeEnv,
+    LoadCaptured,
+    StoreCaptured,
     // Increment / decrement
     IncLocal,
     DecLocal,
@@ -148,6 +152,10 @@ pub struct BytecodeProgram {
     pub named_function: bool,
     pub is_generator: bool,
     pub local_names: Vec<String>,
+    /// Number of slots in this function's lexical environment object (0 = no env).
+    /// Set by the emitter when escape analysis detects that variables in this
+    /// function are captured by nested closures.
+    pub captured_env_size: usize,
 }
 
 impl BytecodeProgram {
@@ -164,6 +172,7 @@ impl BytecodeProgram {
             named_function: false,
             is_generator: false,
             local_names: vec![],
+            captured_env_size: 0,
         }
     }
 

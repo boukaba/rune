@@ -2859,4 +2859,64 @@ mod instanceof_tests {
             "fn with object-rest param, combined return"
         );
     }
+
+    #[test]
+    fn test_spread_call_basic() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval("function f(a,b,c) { return a + b + c; } let arr = [1,2,3]; f(...arr)")
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(6), "f(...[1,2,3])");
+    }
+
+    #[test]
+    fn test_spread_call_mixed() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval("function f(a,b,c) { return a + b + c; } f(0, ...[1,2])")
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(3), "f(0, ...[1,2])");
+    }
+
+    #[test]
+    fn test_spread_call_multiple_spreads() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval("function f(a,b,c) { return a + b + c; } f(...[1], 2, ...[3])")
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(6), "f(...[1], 2, ...[3])");
+    }
+
+    #[test]
+    fn test_spread_call_empty() {
+        let mut ctx = Context::new();
+        let r = ctx.eval("function f() { return 42; } f(...[])").unwrap();
+        assert_eq!(r.as_smi(), Some(42), "f(...[]) with no-arg fn");
+    }
+
+    #[test]
+    fn test_spread_call_builtin() {
+        let mut ctx = Context::new();
+        let r = ctx.eval("Math.max(...[1,2,3])").unwrap();
+        assert_eq!(r.as_smi(), Some(3), "Math.max(...[1,2,3])");
+    }
+
+    #[test]
+    fn test_spread_call_print() {
+        let mut ctx = Context::new();
+        let r = ctx.eval("let s = ''; function capture(...args) { s = args.join(','); } capture(...[10,20,30]); s").unwrap();
+        assert!(
+            r.heap_ptr().is_some(),
+            "spread call with rest param should yield joined string"
+        );
+    }
+
+    #[test]
+    fn test_spread_call_rest_param() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval("function f(...args) { return args.length; } f(...[1,2,3])")
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(3), "f(...[1,2,3]) with rest param");
+    }
 }

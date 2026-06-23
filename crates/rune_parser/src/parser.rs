@@ -817,7 +817,20 @@ impl Parser {
                     self.advance();
                     let mut a = Vec::new();
                     while self.tok.kind != TokenKind::RParen && self.tok.kind != TokenKind::Eof {
-                        a.push(self.parse_expr(0));
+                        let arg_start = self.span();
+                        let is_spread = self.tok.kind == TokenKind::Ellipsis;
+                        if is_spread {
+                            self.advance();
+                        }
+                        let expr = self.parse_expr(0);
+                        a.push(ArrayElement {
+                            expr,
+                            is_spread,
+                            span: Span {
+                                start: arg_start.start,
+                                end: self.span().end,
+                            },
+                        });
                         if self.tok.kind == TokenKind::Comma {
                             self.advance();
                         }
@@ -1378,7 +1391,20 @@ impl Parser {
                     self.advance();
                     let mut args = Vec::new();
                     while self.tok.kind != TokenKind::RParen && self.tok.kind != TokenKind::Eof {
-                        args.push(self.parse_expr(0));
+                        let arg_start = self.span();
+                        let is_spread = self.tok.kind == TokenKind::Ellipsis;
+                        if is_spread {
+                            self.advance();
+                        }
+                        let expr = self.parse_expr(0);
+                        args.push(ArrayElement {
+                            expr,
+                            is_spread,
+                            span: Span {
+                                start: arg_start.start,
+                                end: self.span().end,
+                            },
+                        });
                         if self.tok.kind == TokenKind::Comma {
                             self.advance();
                         }

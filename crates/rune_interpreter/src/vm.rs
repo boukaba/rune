@@ -2274,6 +2274,95 @@ impl Vm {
                     self.push(Value::undefined());
                     self.frames[fi].pc = pc + 1;
                 }
+                Opcode::CallFromArray => {
+                    let args_arr = self.pop();
+                    let callee = self.pop();
+                    let this = self.pop();
+                    let argc = if let Some(ptr) = args_arr.heap_ptr() {
+                        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+                        if tag == TAG_ARRAY {
+                            unsafe { RuneArray::length(ptr as *mut RuneArray) as usize }
+                        } else {
+                            0
+                        }
+                    } else {
+                        0
+                    };
+                    let mut args: Vec<Value> = Vec::with_capacity(argc);
+                    if let Some(ptr) = args_arr.heap_ptr() {
+                        let arr_ptr = ptr as *mut RuneArray;
+                        for i in 0..argc {
+                            let v = unsafe { RuneArray::get_element(arr_ptr, i) };
+                            args.push(v);
+                        }
+                    }
+
+                    // Builtin dispatch: negative Smi handles
+                    if let Some(smi_val) = callee.as_smi() {
+                        if smi_val < 0 {
+                            let id = ((-smi_val) as usize) - 1;
+                            if id < self.builtins.len() {
+                                let result = (self.builtins[id].func)(gc, this, &args, &mut *self);
+                                if let Some(exc) = self.pending_exception.take() {
+                                    self.push(exc);
+                                    return Exit::Throw(exc);
+                                }
+                                self.push(result);
+                                self.frames[fi].pc = pc + 1;
+                                continue;
+                            }
+                        } else {
+                            self.push(Value::undefined());
+                            self.frames[fi].pc = pc + 1;
+                            continue;
+                        }
+                    }
+
+                    if let Some(ptr) = callee.heap_ptr() {
+                        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+                        if tag == TAG_FUNC {
+                            let func_idx = unsafe { Func::func_index(ptr as *mut Func) } as usize;
+                            let creator_prog = unsafe {
+                                &*(Func::prog_ptr(ptr as *mut Func) as *const BytecodeProgram)
+                            };
+                            if func_idx < creator_prog.functions.len() {
+                                let func_prog = &creator_prog.functions[func_idx];
+                                if func_prog.is_generator {
+                                    let g =
+                                        Generator::new(args, func_prog as *const BytecodeProgram);
+                                    let gen_id = self.generators.len();
+                                    self.generators.push(g);
+                                    self.push(Value::smi(gen_id as i32));
+                                    self.frames[fi].pc = pc + 1;
+                                    continue;
+                                }
+                                let mut locals: Vec<Value> = if func_prog.named_function {
+                                    vec![callee]
+                                } else {
+                                    vec![]
+                                };
+                                locals.extend(args);
+                                self.frames.push(Frame {
+                                    locals,
+                                    lexical_slots: Vec::new(),
+                                    lexical_tdz: Vec::new(),
+                                    lexical_const: Vec::new(),
+                                    scope_boundaries: Vec::new(),
+                                    pc: 0,
+                                    stack_base: self.stack.len(),
+                                    prog: func_prog as *const BytecodeProgram,
+                                    generator_id: None,
+                                    this,
+                                    is_constructor_call: false,
+                                    constructed_object: Value::undefined(),
+                                });
+                                continue;
+                            }
+                        }
+                    }
+                    self.push(Value::undefined());
+                    self.frames[fi].pc = pc + 1;
+                }
                 Opcode::Return => {
                     let result = self.pop();
                     let callee_base = self.frames.last().unwrap().stack_base;

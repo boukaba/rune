@@ -929,37 +929,83 @@ impl Emitter {
                 self.patch(exit_jump, self.current());
             }
             Expr::Call(callee, args, _) => {
-                match callee.as_ref() {
-                    Expr::Member(obj, prop, computed, _) => {
-                        // Method call: preserve receiver (this) below the method
-                        self.emit_expression(obj);
-                        self.emit(Opcode::Dup, vec![]);
-                        if *computed {
-                            self.emit_expression(prop);
-                        } else {
-                            let name = prop_name_as_string(prop);
-                            let idx = self.intern_string(&name) as i64;
-                            self.emit(Opcode::LoadStringConst, vec![idx]);
+                let has_spread = args.iter().any(|a| a.is_spread);
+                if has_spread {
+                    // Build args array for spread calls
+                    match callee.as_ref() {
+                        Expr::Member(obj, prop, computed, _) => {
+                            self.emit_expression(obj);
+                            self.emit(Opcode::Dup, vec![]);
+                            if *computed {
+                                self.emit_expression(prop);
+                            } else {
+                                let name = prop_name_as_string(prop);
+                                let idx = self.intern_string(&name) as i64;
+                                self.emit(Opcode::LoadStringConst, vec![idx]);
+                            }
+                            self.emit(Opcode::LoadProperty, vec![]);
+                            // stack: [receiver, method]
+                            self.emit(Opcode::NewArray, vec![0]);
+                            for arg in args {
+                                self.emit_expression(&arg.expr);
+                                if arg.is_spread {
+                                    self.emit(Opcode::ArrayExtend, vec![]);
+                                } else {
+                                    self.emit(Opcode::ArrayPush, vec![]);
+                                }
+                            }
+                            // stack: [receiver, method, args_array] — correct for CallFromArray
                         }
-                        self.emit(Opcode::LoadProperty, vec![]);
+                        _ => {
+                            self.emit(Opcode::LoadUndefined, vec![]);
+                            self.emit_expression(callee);
+                            // stack: [this, callee]
+                            self.emit(Opcode::NewArray, vec![0]);
+                            for arg in args {
+                                self.emit_expression(&arg.expr);
+                                if arg.is_spread {
+                                    self.emit(Opcode::ArrayExtend, vec![]);
+                                } else {
+                                    self.emit(Opcode::ArrayPush, vec![]);
+                                }
+                            }
+                            // stack: [this, callee, args_array] — correct for CallFromArray
+                        }
                     }
-                    _ => {
-                        // Regular call: this = undefined
-                        self.emit(Opcode::LoadUndefined, vec![]);
-                        self.emit_expression(callee);
+                    // stack: [args_array, callee, this] (or [args_array, method, receiver] after Swap)
+                    self.emit(Opcode::CallFromArray, vec![]);
+                } else {
+                    match callee.as_ref() {
+                        Expr::Member(obj, prop, computed, _) => {
+                            // Method call: preserve receiver (this) below the method
+                            self.emit_expression(obj);
+                            self.emit(Opcode::Dup, vec![]);
+                            if *computed {
+                                self.emit_expression(prop);
+                            } else {
+                                let name = prop_name_as_string(prop);
+                                let idx = self.intern_string(&name) as i64;
+                                self.emit(Opcode::LoadStringConst, vec![idx]);
+                            }
+                            self.emit(Opcode::LoadProperty, vec![]);
+                        }
+                        _ => {
+                            // Regular call: this = undefined
+                            self.emit(Opcode::LoadUndefined, vec![]);
+                            self.emit_expression(callee);
+                        }
                     }
+                    // stack: [this, callee] or [receiver, method]
+                    for arg in args {
+                        self.emit_expression(&arg.expr);
+                    }
+                    self.emit(Opcode::Call, vec![args.len() as i64]);
                 }
-                // stack: [this, callee] or [receiver, method]
-                for arg in args {
-                    self.emit_expression(arg);
-                }
-                // stack: [this, callee, arg0, ..., argN-1]
-                self.emit(Opcode::Call, vec![args.len() as i64]);
             }
             Expr::New(callee, args, _) => {
                 self.emit_expression(callee);
                 for arg in args {
-                    self.emit_expression(arg);
+                    self.emit_expression(&arg.expr);
                 }
                 self.emit(Opcode::New, vec![args.len() as i64]);
             }

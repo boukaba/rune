@@ -27,8 +27,8 @@ pub enum Expr {
     Unary(UnaryOp, Box<Expr>, Span),
     Binary(BinaryOp, Box<Expr>, Box<Expr>, Span),
     Conditional(Box<Expr>, Box<Expr>, Box<Expr>, Span),
-    Call(Box<Expr>, Vec<Expr>, Span),
-    New(Box<Expr>, Vec<Expr>, Span),
+    Call(Box<Expr>, Vec<ArrayElement>, Span),
+    New(Box<Expr>, Vec<ArrayElement>, Span),
     Member(Box<Expr>, Box<Expr>, bool, Span), // computed = true for a[b]
     Assign(Box<Expr>, Box<Expr>, Span),
     CompoundAssign(BinaryOp, Box<Expr>, Box<Expr>, Span),

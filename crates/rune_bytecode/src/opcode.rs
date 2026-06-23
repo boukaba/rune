@@ -74,6 +74,7 @@ pub enum Opcode {
     // Functions
     MakeFunction,
     Call,
+    CallFromArray,
     New,
     Return,
     MakeRestArray,

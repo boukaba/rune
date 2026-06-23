@@ -770,7 +770,7 @@
 | Task | Priority | Est. | Description |
 |---|---|---|---|
 | **14A-0: Boolean type (sentinel heap pointers)** | 🔴 P0 | ✅ done | `0x04` = `false`, `0x06` = `true`. `Value::boolean()`, `is_boolean()`, `to_boolean()`. Updated `is_heap_object()` to exclude new sentinels. `TypeOf` → `"boolean"`. `LoadBoolean` → `Value::boolean()`. All comparison/relational opcodes (`Not`, `Eq`, `Ne`, `StrictEq`, `StrictNe`, `Lt`, `Gt`, `Le`, `Ge`, `In`, `Instanceof`, `DeleteProperty`) return `Value::boolean()` instead of `Smi(1)/Smi(0)`. `value_to_js_string` prints `"true"`/`"false"`. `array_is_array` returns booleans. JIT `LoadBoolean` fixed (was emitting wrong raw values `7`/`3` instead of `6`/`4`). JIT `JumpIfFalse` updated to check false sentinel. 21 tests updated from `as_smi() == Some(1/0)` to `to_boolean()`. **Also fixes** latent JIT bug: `LoadBoolean` emitted `Smi(3)` for true (raw `7`) and `Smi(1)` for false (raw `3`) while interpreter used `Smi(1)`/`Smi(0)`. |
-| **14A: Destructuring** | 🔴 P0 | pending | Object + array, nested, default values, in function params. §14.5.1, §14.1.3. |
+| **14A: Destructuring** | 🔴 P0 | 🟡 3d/4d | AST migration: `Pattern` enum (`Identifier`/`Object`/`Array`), `Decl.pattern`, `FnNode.params: Vec<Pattern>` (commit `8817791`). Next: parser `parse_binding_pattern()`, emitter for per-property `LoadProperty` + `StoreLocal`. |
 | **14B: Spread / rest** | 🔴 P0 | pending | `[...arr]`, `{...obj}`, `f(...args)`, `function f(...args)`. §13.2.8, §14.2. |
 | **14C: Object literal extensions** | 🟠 P1 | pending | Shorthand `{ a, b }`, method shorthand `{ foo() {} }`, computed keys `{ [k]: v }`. §14.6. |
 | **14D: Template literal substitutions** | 🟠 P1 | pending | Rewrite `scan_template` in lexer.rs to parse `${...}`. §12.2.9.6. |

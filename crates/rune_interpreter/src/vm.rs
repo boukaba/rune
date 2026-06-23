@@ -553,6 +553,13 @@ impl Vm {
                     self.push(val);
                     self.frames[fi].pc = pc + 1;
                 }
+                Opcode::Swap => {
+                    let a = self.pop();
+                    let b = self.pop();
+                    self.push(a);
+                    self.push(b);
+                    self.frames[fi].pc = pc + 1;
+                }
 
                 // ---- Unary ----
                 Opcode::UnaryPlus => {
@@ -993,9 +1000,9 @@ impl Vm {
                     if let Some(heap) = arr_val.heap_ptr() {
                         let arr_ptr = heap as *mut RuneArray;
                         unsafe {
-                            RuneArray::push(gc, arr_ptr, val);
+                            let new_arr = RuneArray::push(gc, arr_ptr, val);
+                            self.push(Value::from_heap_ptr(new_arr as *mut u8));
                         }
-                        self.push(arr_val);
                     } else {
                         self.push(make_error_object(gc, "TypeError", "ArrayPush on non-array"));
                         return Exit::Throw(self.pop());
@@ -1009,15 +1016,15 @@ impl Vm {
                         (src_val.heap_ptr(), tgt_val.heap_ptr())
                     {
                         let src_arr = src_heap as *mut RuneArray;
-                        let tgt_arr = tgt_heap as *mut RuneArray;
+                        let mut tgt_arr = tgt_heap as *mut RuneArray;
                         let src_len = unsafe { RuneArray::length(src_arr) };
                         for i in 0..src_len {
                             let elem = unsafe { RuneArray::get_element(src_arr, i as usize) };
                             unsafe {
-                                RuneArray::push(gc, tgt_arr, elem);
+                                tgt_arr = RuneArray::push(gc, tgt_arr, elem);
                             }
                         }
-                        self.push(tgt_val);
+                        self.push(Value::from_heap_ptr(tgt_arr as *mut u8));
                     } else {
                         self.push(make_error_object(
                             gc,
@@ -1025,6 +1032,43 @@ impl Vm {
                             "ArrayExtend on non-array",
                         ));
                         return Exit::Throw(self.pop());
+                    }
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::ArraySlice => {
+                    let start_idx = self.pop();
+                    let arr_val = self.pop();
+                    let start = start_idx.as_smi().unwrap_or(0) as usize;
+                    if let Some(heap) = arr_val.heap_ptr() {
+                        let tag = unsafe { (*(heap as *const GcHeader)).tag() };
+                        if tag == TAG_ARRAY {
+                            let arr_ptr = heap as *mut RuneArray;
+                            let len = unsafe { RuneArray::length(arr_ptr) } as usize;
+                            let slice_len = len.saturating_sub(start);
+                            let mut elems: Vec<Value> = Vec::with_capacity(slice_len);
+                            for i in start..len {
+                                let v = unsafe { RuneArray::get_element(arr_ptr, i) };
+                                elems.push(v);
+                            }
+                            let new_arr = RuneArray::allocate(gc, &elems);
+                            // Set shape and prototype
+                            unsafe {
+                                let ptr = new_arr as *mut u8;
+                                let shape_ptr = ptr.add(8) as *mut *const Shape;
+                                *shape_ptr = *DENSE_ARRAY_SHAPE as *const Shape;
+                                let proto_ptr = ptr.add(24) as *mut *mut u8;
+                                if self.array_prototype.is_heap_object()
+                                    && let Some(proto) = self.array_prototype.heap_ptr()
+                                {
+                                    *proto_ptr = proto;
+                                }
+                            }
+                            self.push(Value::from_heap_ptr(new_arr as *mut u8));
+                        } else {
+                            self.push(Value::from_heap_ptr(heap));
+                        }
+                    } else {
+                        self.push(Value::undefined());
                     }
                     self.frames[fi].pc = pc + 1;
                 }

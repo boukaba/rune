@@ -192,7 +192,7 @@ impl Emitter {
         // §14.5.1 step 4: throw TypeError if value is null or undefined
         self.emit(Opcode::ThrowIfNullish, vec![]);
         match pattern {
-            Pattern::Object(props, _) => {
+            Pattern::Object(props, rest, _) => {
                 for prop in props {
                     self.emit(Opcode::Dup, vec![]);
                     match &prop.key {
@@ -213,14 +213,38 @@ impl Emitter {
                     self.emit(Opcode::LoadProperty, vec![]);
                     self.emit_destructuring_binding(&prop.pattern, kind);
                 }
+                if let Some(rest_pattern) = rest {
+                    // rest = copy of source minus already-destructured keys
+                    self.emit(Opcode::NewObject, vec![0]);
+                    self.emit(Opcode::Swap, vec![]);
+                    self.emit(Opcode::SpreadIntoObject, vec![]);
+                    for prop in props {
+                        self.emit(Opcode::Dup, vec![]);
+                        let key_str = match &prop.key {
+                            PropKey::Identifier(s) => s.to_string(),
+                            PropKey::String(s) => s.to_string(),
+                            PropKey::Number(n) => n.to_string(),
+                        };
+                        let idx = self.intern_string(&key_str);
+                        self.emit(Opcode::LoadStringConst, vec![idx as i64]);
+                        self.emit(Opcode::DeleteProperty, vec![]);
+                        self.emit(Opcode::Pop, vec![]);
+                    }
+                    self.emit_destructuring_binding(rest_pattern, kind);
+                }
                 self.emit(Opcode::Pop, vec![]);
             }
             Pattern::Array(items, _) => {
                 for (i, item) in items.iter().enumerate() {
                     self.emit(Opcode::Dup, vec![]);
                     if let Some(pattern) = item {
-                        self.emit(Opcode::LoadSmi, vec![i as i64]);
-                        self.emit(Opcode::LoadProperty, vec![]);
+                        if matches!(pattern, Pattern::Rest(..)) {
+                            self.emit(Opcode::LoadSmi, vec![i as i64]);
+                            self.emit(Opcode::ArraySlice, vec![]);
+                        } else {
+                            self.emit(Opcode::LoadSmi, vec![i as i64]);
+                            self.emit(Opcode::LoadProperty, vec![]);
+                        }
                         self.emit_destructuring_binding(pattern, kind);
                     }
                 }
@@ -231,6 +255,9 @@ impl Emitter {
             }
             Pattern::Default(_, _) => {
                 unreachable!("Pattern::Default should be handled by emit_destructuring_binding");
+            }
+            Pattern::Rest(inner, _) => {
+                self.emit_destructuring_binding(inner, kind);
             }
         }
     }
@@ -255,8 +282,11 @@ impl Emitter {
                 // Recurse with the (possibly defaulted) value
                 self.emit_destructuring_binding(inner, kind);
             }
-            Pattern::Object(_, _) | Pattern::Array(_, _) => {
+            Pattern::Object(_, _, _) | Pattern::Array(_, _) => {
                 self.emit_destructuring(pattern, kind);
+            }
+            Pattern::Rest(inner, _) => {
+                self.emit_destructuring_binding(inner, kind);
             }
         }
     }
@@ -1112,10 +1142,16 @@ impl Emitter {
     fn count_pattern_bindings(&self, pattern: &Option<Pattern>) -> usize {
         match pattern {
             None => 1,
-            Some(Pattern::Object(props, _)) => props
-                .iter()
-                .map(|p| self.count_pattern_bindings(&Some(p.pattern.clone())))
-                .sum(),
+            Some(Pattern::Object(props, rest, _)) => {
+                let mut count: usize = props
+                    .iter()
+                    .map(|p| self.count_pattern_bindings(&Some(p.pattern.clone())))
+                    .sum();
+                if let Some(rest) = rest {
+                    count += self.count_pattern_bindings(&Some((**rest).clone()));
+                }
+                count
+            }
             Some(Pattern::Array(items, _)) => items
                 .iter()
                 .map(|item| match item {
@@ -1125,6 +1161,7 @@ impl Emitter {
                 .sum(),
             Some(Pattern::Identifier(_, _, _)) => 1,
             Some(Pattern::Default(p, _)) => self.count_pattern_bindings(&Some((**p).clone())),
+            Some(Pattern::Rest(inner, _)) => self.count_pattern_bindings(&Some((**inner).clone())),
         }
     }
 
@@ -1160,9 +1197,12 @@ impl Emitter {
                     slot: self.lexical_slot_count + bindings.len(),
                 });
             }
-            Some(Pattern::Object(props, _)) => {
+            Some(Pattern::Object(props, rest, _)) => {
                 for prop in props {
                     self.collect_lexical_bindings(&Some(prop.pattern.clone()), name, bindings);
+                }
+                if let Some(rest) = rest {
+                    self.collect_lexical_bindings(&Some((**rest).clone()), name, bindings);
                 }
             }
             Some(Pattern::Array(items, _)) => {
@@ -1178,6 +1218,9 @@ impl Emitter {
             }
             Some(Pattern::Default(p, _)) => {
                 self.collect_lexical_bindings(&Some((**p).clone()), name, bindings);
+            }
+            Some(Pattern::Rest(inner, _)) => {
+                self.collect_lexical_bindings(&Some((**inner).clone()), name, bindings);
             }
         }
     }

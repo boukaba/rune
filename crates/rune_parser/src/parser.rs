@@ -1249,8 +1249,15 @@ impl Parser {
                 let start = self.span();
                 self.advance();
                 let mut props = Vec::new();
+                let mut rest = None;
                 while self.tok.kind != TokenKind::RBrace && self.tok.kind != TokenKind::Eof {
                     let pstart = self.span();
+                    if self.tok.kind == TokenKind::Ellipsis {
+                        self.advance();
+                        let inner = self.parse_binding_pattern();
+                        rest = Some(Box::new(inner));
+                        break;
+                    }
                     let key = self.parse_prop_key();
                     let pattern = if self.tok.kind == TokenKind::Colon {
                         self.advance();
@@ -1292,6 +1299,7 @@ impl Parser {
                 self.expect(TokenKind::RBrace);
                 Pattern::Object(
                     props,
+                    rest,
                     Span {
                         start: start.start,
                         end: self.span().end,
@@ -1307,6 +1315,23 @@ impl Parser {
                         items.push(None);
                         self.advance();
                         continue;
+                    }
+                    // Rest pattern: ...rest
+                    if self.tok.kind == TokenKind::Ellipsis {
+                        self.advance();
+                        let inner = self.parse_binding_pattern();
+                        items.push(Some(Pattern::Rest(Box::new(inner), start)));
+                        // Rest must be last — consume remaining up to RBracket
+                        while self.tok.kind != TokenKind::RBracket
+                            && self.tok.kind != TokenKind::Eof
+                        {
+                            if self.tok.kind == TokenKind::Comma {
+                                self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                        break;
                     }
                     let mut pattern = self.parse_binding_pattern();
                     if self.tok.kind == TokenKind::EqAssign {

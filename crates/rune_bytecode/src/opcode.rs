@@ -53,6 +53,7 @@ pub enum Opcode {
     NewArray,
     ArrayPush,
     ArrayExtend,
+    ArraySlice,
     SpreadIntoObject,
     LoadProperty,
     StoreProperty,
@@ -76,6 +77,8 @@ pub enum Opcode {
     New,
     Return,
     MakeRestArray,
+    // Stack
+    Swap,
     // Generators
     Yield,
     YieldStar,

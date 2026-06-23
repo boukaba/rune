@@ -2698,4 +2698,111 @@ mod instanceof_tests {
         let r = ctx.eval(r#"var a = {...undefined}; typeof a"#).unwrap();
         assert!(r.is_heap_object(), "typeof a should be a string");
     }
+
+    // ---- 14B-5: Rest in destructuring ---
+
+    #[test]
+    fn test_array_rest_basic() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var [a, ...rest] = [1, 2, 3]; a + rest[0] + rest[1]"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(6), "1 + 2 + 3 = 6");
+    }
+
+    #[test]
+    fn test_array_rest_single() {
+        let mut ctx = Context::new();
+        let r = ctx.eval(r#"var [a, ...rest] = [1]; rest.length"#).unwrap();
+        assert_eq!(
+            r.as_smi(),
+            Some(0),
+            "rest should be empty when only one element"
+        );
+    }
+
+    #[test]
+    fn test_array_rest_only() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var [...rest] = [1, 2, 3]; rest.length"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(3), "rest-only should capture all elements");
+    }
+
+    #[test]
+    fn test_array_rest_multi() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var [a, b, ...rest] = [1, 2, 3, 4, 5]; rest.length"#)
+            .unwrap();
+        assert_eq!(
+            r.as_smi(),
+            Some(3),
+            "multi-param rest should capture remaining"
+        );
+    }
+
+    #[test]
+    fn test_object_rest_basic() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var {a, ...rest} = {a: 1, b: 2, c: 3}; a + rest.b + rest.c"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(6), "1 + 2 + 3 = 6");
+    }
+
+    #[test]
+    fn test_object_rest_excludes() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var {a, ...rest} = {a: 1, b: 2}; typeof rest.a"#)
+            .unwrap();
+        assert!(
+            r.is_heap_object(),
+            "typeof rest.a should be a string (undefined)"
+        );
+    }
+
+    #[test]
+    fn test_object_rest_only() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var {...rest} = {x: 10, y: 20}; rest.x + rest.y"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(30), "rest-only should capture all props");
+    }
+
+    #[test]
+    fn test_object_rest_multi_exclude() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var {a, b, ...rest} = {a: 1, b: 2, c: 3, d: 4}; rest.c + rest.d"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(7), "multi-exclude rest should work");
+    }
+
+    #[test]
+    fn test_object_rest_no_leftover() {
+        let mut ctx = Context::new();
+        let r = ctx.eval(r#"var {a, ...rest} = {a: 1}; rest.b"#).unwrap();
+        // rest.b should be undefined, which is the default
+        assert!(
+            r.is_undefined(),
+            "no-leftover rest should have undefined props"
+        );
+    }
+
+    #[test]
+    fn test_object_rest_let() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"let {a, ...rest} = {a: 1, b: 2}; rest.b"#)
+            .unwrap();
+        assert_eq!(
+            r.as_smi(),
+            Some(2),
+            "let destructuring with rest should work"
+        );
+    }
 }

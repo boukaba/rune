@@ -775,6 +775,7 @@
 | **14B-3: Array spread** | 🔴 P0 | ✅ done | `[...arr]` in array literals. New `ArrayElement` AST struct with `is_spread: bool` flag. `ArrayPush` and `ArrayExtend` opcodes. Parser detects `...` before array elements. Emitter: `NewArray 0` → push/extend each element. VM: push/extend handlers. Works: basic, mixed with literals, multiple spreads, empty spreads. |
 | **14B-3.1: Arrow rest params** | 🟠 P1 | ✅ done | Arrow functions now support `(...args) => body` and `(a, ...rest) => body`. `parse_arrow_body` accepts `rest_param: Option<Box<str>>`. `LParen` handler in `parse_primary_inner` detects `Ellipsis` token for rest-only and mixed arrows. 5 integration tests. |
 | **14B-4: Object spread** | 🔴 P0 | ✅ done | `{...obj}` in object literals. `Property.is_spread: bool` flag. Parser detects `...` before object properties (no key: expected). New `SpreadIntoObject` opcode. Emitter: incremental path via `NewObject 0 → DefineProperty/SpreadIntoObject`. VM: `SpreadIntoObject` walks source shape's own enumerable string-keyed entries, copies each to target (lookup→set_slot or add_property). `DefineProperty` fixed to use lookup-then-set-or-add pattern (was always add, breaking override order). Works: shallow copy, override ordering (`{...a, x:2}` → `x=2`, `{x:1, ...a}` → `x=a.x`), null/undefined no-op, array→object spread (numeric keys + length). |
+| **14B-5: Rest in destructuring** | 🔴 P0 | ✅ done | `let [a, ...rest] = arr` and `let {a, ...rest} = obj`. `Pattern::Rest(Box<Pattern>, Span)` and `Pattern::Object(_, Option<Box<Pattern>>, _)` variants. Parser detects `...` in array/object patterns and enforces "must be last". `ArraySlice` opcode creates sub-array `arr[start..]`. Object rest: `SpreadIntoObject` full copy then `DeleteProperty` for each destructured key. `Swap` stack opcode added. `ArrayPush`/`ArrayExtend` fixed to handle array growth (return value of `RuneArray::push` was ignored, causing stale pointers after 4th element). Works: rest-only, mixed, multi-exclude, empty rest, `let`/`var`, fn params. 10 integration tests. |
 | **14C: Object literal extensions** | 🟠 P1 | pending | Shorthand `{ a, b }`, method shorthand `{ foo() {} }`, computed keys `{ [k]: v }`. §14.6. |
 | **14D: Template literal substitutions** | 🟠 P1 | pending | Rewrite `scan_template` in lexer.rs to parse `${...}`. §12.2.9.6. |
 | **14E: Arrow `arguments` + per-iteration `let`** | 🟠 P1 | pending | Materialize `arguments` in non-arrow function prologue. Per-iteration `let` binding in `for (let i …)` loops. §10.4.4, §14.7.4.2. |
@@ -784,7 +785,7 @@
 
 ### Test Results — Sprint 14A / 14B-1 / 14B-3 / 14B-3.1
 - **All tests pass** (fmt + clippy + test green)
-- **318 tests passing** (213 integration + 29 VM + 22 JIT baseline + 25 interpreter + 11 bytecode + 6 core + 5 parser + 5 parser tests + 2 spike)
+- **328 tests passing** (223 integration + 29 VM + 22 JIT baseline + 25 interpreter + 11 bytecode + 6 core + 5 parser + 5 parser tests + 2 spike)
 - `typeof true === "boolean"` ✅
 - `print(true) === "true"` ✅ (was `"1"`)
 - `print(false) === "false"` ✅

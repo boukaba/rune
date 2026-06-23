@@ -172,9 +172,10 @@ pub enum VarKind {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Pattern {
     Identifier(Box<str>, Span, Option<Box<Expr>>),
-    Object(Vec<ObjectPatternProp>, Span),
+    Object(Vec<ObjectPatternProp>, Option<Box<Pattern>>, Span),
     Array(Vec<Option<Pattern>>, Span),
     Default(Box<Pattern>, Box<Expr>),
+    Rest(Box<Pattern>, Span),
 }
 
 #[derive(Clone, Debug, PartialEq)]

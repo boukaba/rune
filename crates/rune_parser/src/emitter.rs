@@ -215,6 +215,9 @@ impl Emitter {
                 }
                 if let Some(rest_pattern) = rest {
                     // rest = copy of source minus already-destructured keys
+                    // Dup so SpreadIntoObject can consume the copy while
+                    // the original stays on stack for the final Pop
+                    self.emit(Opcode::Dup, vec![]);
                     self.emit(Opcode::NewObject, vec![0]);
                     self.emit(Opcode::Swap, vec![]);
                     self.emit(Opcode::SpreadIntoObject, vec![]);

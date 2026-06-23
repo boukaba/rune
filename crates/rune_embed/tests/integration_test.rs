@@ -2805,4 +2805,58 @@ mod instanceof_tests {
             "let destructuring with rest should work"
         );
     }
+
+    // ---- Regression: object-rest param as direct call arg ---
+
+    #[test]
+    fn test_object_rest_param_direct_call_basic() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"function f({a, ...rest}) { return a; } f({a: 1, b: 2})"#)
+            .unwrap();
+        assert_eq!(
+            r.as_smi(),
+            Some(1),
+            "fn with object-rest param, direct call"
+        );
+    }
+
+    #[test]
+    fn test_object_rest_param_direct_call_rest_value() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"function f({a, ...rest}) { return rest.b; } f({a: 1, b: 2, c: 3})"#)
+            .unwrap();
+        assert_eq!(
+            r.as_smi(),
+            Some(2),
+            "fn with object-rest param, return rest value"
+        );
+    }
+
+    #[test]
+    fn test_object_rest_param_direct_call_nested() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"function g(x) { return x * 10; } function f({a, ...rest}) { return a; } g(f({a: 5, b: 2}))"#)
+            .unwrap();
+        assert_eq!(
+            r.as_smi(),
+            Some(50),
+            "fn with object-rest param, nested direct call"
+        );
+    }
+
+    #[test]
+    fn test_object_rest_param_direct_call_combined() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"function f({a, ...rest}) { return a + rest.b; } f({a: 1, b: 2})"#)
+            .unwrap();
+        assert_eq!(
+            r.as_smi(),
+            Some(3),
+            "fn with object-rest param, combined return"
+        );
+    }
 }

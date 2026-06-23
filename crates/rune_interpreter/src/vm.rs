@@ -559,7 +559,13 @@ impl Vm {
 
                 // ---- Stack ----
                 Opcode::Pop => {
-                    self.pop();
+                    // Only pop if the stack is above this frame's base, so we
+                    // don't steal an item belonging to a parent frame (this
+                    // matters after StoreCaptured already consumed the value).
+                    let stack_base = self.frames[fi].stack_base;
+                    if self.stack.len() > stack_base {
+                        self.stack.pop();
+                    }
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::Dup => {

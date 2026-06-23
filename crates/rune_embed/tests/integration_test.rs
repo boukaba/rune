@@ -1430,6 +1430,98 @@ fn test_to_number_string() {
 }
 
 #[test]
+fn test_boolean_arithmetic() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("true + 1").unwrap();
+    assert_eq!(r.as_smi(), Some(2), "true + 1 = 2 per §7.1.4");
+    let r = ctx.eval("false + 1").unwrap();
+    assert_eq!(r.as_smi(), Some(1), "false + 1 = 1");
+    let r = ctx.eval("true + false").unwrap();
+    assert_eq!(r.as_smi(), Some(1), "true + false = 1");
+    let r = ctx.eval("true * 3").unwrap();
+    assert_eq!(r.as_smi(), Some(3), "true * 3 = 3");
+    let r = ctx.eval("false * 100").unwrap();
+    assert_eq!(r.as_smi(), Some(0), "false * 100 = 0");
+    let r = ctx.eval("true / 2").unwrap();
+    assert_eq!(r.as_float64(), Some(0.5), "true / 2 = 0.5");
+    let r = ctx.eval("true - false").unwrap();
+    assert_eq!(r.as_smi(), Some(1), "true - false = 1");
+}
+
+#[test]
+fn test_boolean_unary_plus() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("+true").unwrap();
+    assert_eq!(r.as_smi(), Some(1), "+true = 1 per §13.5.3");
+    let r = ctx.eval("+false").unwrap();
+    assert_eq!(r.as_smi(), Some(0), "+false = 0");
+    let r = ctx.eval("+1").unwrap();
+    assert_eq!(r.as_smi(), Some(1), "+1 = 1 (identity)");
+}
+
+#[test]
+fn test_boolean_comparison() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("true < 2").unwrap();
+    assert_eq!(r.to_boolean(), Some(true), "true < 2 should be true");
+    let r = ctx.eval("false < -1").unwrap();
+    assert_eq!(r.to_boolean(), Some(false), "false < -1 should be false");
+    let r = ctx.eval("true > 0").unwrap();
+    assert_eq!(r.to_boolean(), Some(true), "true > 0 should be true");
+}
+
+#[test]
+fn test_boolean_bitwise() {
+    let mut ctx = Context::new();
+    let r = ctx.eval("0 | true").unwrap();
+    assert_eq!(r.as_smi(), Some(1), "0 | true = 1 per §13.3.3");
+    let r = ctx.eval("5 & true").unwrap();
+    assert_eq!(r.as_smi(), Some(1), "5 & true = 1");
+    let r = ctx.eval("true ^ false").unwrap();
+    assert_eq!(r.as_smi(), Some(1), "true ^ false = 1");
+    let r = ctx.eval("true << 1").unwrap();
+    assert_eq!(r.as_smi(), Some(2), "true << 1 = 2");
+    let r = ctx.eval("true >> 1").unwrap();
+    assert_eq!(r.as_smi(), Some(0), "true >> 1 = 0");
+}
+
+#[test]
+fn test_loose_equality() {
+    let mut ctx = Context::new();
+    // Boolean == Number
+    let r = ctx.eval("true == 1").unwrap();
+    assert_eq!(r.to_boolean(), Some(true), "true == 1 per §7.2.13");
+    let r = ctx.eval("false == 0").unwrap();
+    assert_eq!(r.to_boolean(), Some(true), "false == 0");
+    // String == Number
+    let r = ctx.eval(r#"1 == "1""#).unwrap();
+    assert_eq!(r.to_boolean(), Some(true), r#"1 == "1" per §7.2.13"#);
+    let r = ctx.eval(r#"0 == """#).unwrap();
+    assert_eq!(r.to_boolean(), Some(true), r#"0 == "" per §7.2.13"#);
+    // null == undefined
+    let r = ctx.eval("null == undefined").unwrap();
+    assert_eq!(r.to_boolean(), Some(true), "null == undefined per §7.2.13");
+    // Strict equality still rejects cross-type
+    let r = ctx.eval("true === 1").unwrap();
+    assert_eq!(
+        r.to_boolean(),
+        Some(false),
+        "true === 1 is false per §7.2.14"
+    );
+    // Negative cases
+    let r = ctx.eval("true == 0").unwrap();
+    assert_eq!(r.to_boolean(), Some(false), "true == 0 is false");
+    let r = ctx.eval(r#"1 == "2""#).unwrap();
+    assert_eq!(r.to_boolean(), Some(false), r#"1 == "2" is false"#);
+    let r = ctx.eval("null == 0").unwrap();
+    assert_eq!(
+        r.to_boolean(),
+        Some(false),
+        "null == 0 is false per §7.2.13"
+    );
+}
+
+#[test]
 fn test_increment_prefix() {
     let mut ctx = Context::new();
     let r = ctx.eval("var x = 5; ++x").unwrap();

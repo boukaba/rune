@@ -534,6 +534,14 @@ impl Vm {
                 }
 
                 // ---- Unary ----
+                Opcode::UnaryPlus => {
+                    let a = self.pop();
+                    // §13.5.3: Return ToNumber(UnaryExpression)
+                    let n = to_number(a);
+                    let result = number_result(gc, n);
+                    self.push(result);
+                    self.frames[fi].pc = pc + 1;
+                }
                 Opcode::Neg => {
                     let a = self.pop();
                     let result = if let Some(v) = a.as_smi() {
@@ -686,74 +694,65 @@ impl Vm {
                 Opcode::Shl => {
                     let b = self.pop();
                     let a = self.pop();
-                    let result = if let (Some(av), Some(bv)) = (a.as_smi(), b.as_smi()) {
-                        Value::smi(av.wrapping_shl(bv as u32))
-                    } else {
-                        Value::undefined()
-                    };
-                    self.push(result);
+                    let av = to_int32(a);
+                    let bv = to_int32(b);
+                    self.push(Value::smi(av.wrapping_shl(bv as u32)));
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::Shr => {
                     let b = self.pop();
                     let a = self.pop();
-                    let result = if let (Some(av), Some(bv)) = (a.as_smi(), b.as_smi()) {
-                        Value::smi(av.wrapping_shr(bv as u32))
-                    } else {
-                        Value::undefined()
-                    };
-                    self.push(result);
+                    let av = to_int32(a);
+                    let bv = to_int32(b);
+                    self.push(Value::smi(av.wrapping_shr(bv as u32)));
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::ShrU => {
                     let b = self.pop();
                     let a = self.pop();
-                    let result = if let (Some(av), Some(bv)) = (a.as_smi(), b.as_smi()) {
-                        let shifted = (av as u32).wrapping_shr(bv as u32);
-                        Value::smi(shifted as i32)
-                    } else {
-                        Value::undefined()
-                    };
-                    self.push(result);
+                    let av = to_int32(a);
+                    let bv = to_int32(b);
+                    self.push(Value::smi((av as u32).wrapping_shr(bv as u32) as i32));
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::BitOr => {
                     let b = self.pop();
                     let a = self.pop();
-                    let result = if let (Some(av), Some(bv)) = (a.as_smi(), b.as_smi()) {
-                        Value::smi(av | bv)
-                    } else {
-                        Value::undefined()
-                    };
-                    self.push(result);
+                    let av = to_int32(a);
+                    let bv = to_int32(b);
+                    self.push(Value::smi(av | bv));
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::BitXor => {
                     let b = self.pop();
                     let a = self.pop();
-                    let result = if let (Some(av), Some(bv)) = (a.as_smi(), b.as_smi()) {
-                        Value::smi(av ^ bv)
-                    } else {
-                        Value::undefined()
-                    };
-                    self.push(result);
+                    let av = to_int32(a);
+                    let bv = to_int32(b);
+                    self.push(Value::smi(av ^ bv));
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::BitAnd => {
                     let b = self.pop();
                     let a = self.pop();
-                    let result = if let (Some(av), Some(bv)) = (a.as_smi(), b.as_smi()) {
-                        Value::smi(av & bv)
-                    } else {
-                        Value::undefined()
-                    };
-                    self.push(result);
+                    let av = to_int32(a);
+                    let bv = to_int32(b);
+                    self.push(Value::smi(av & bv));
                     self.frames[fi].pc = pc + 1;
                 }
 
                 // ---- Logical ----
                 // ---- Comparisons ----
-                Opcode::Eq | Opcode::StrictEq => {
+                Opcode::Eq => {
+                    let b = self.pop();
+                    let a = self.pop();
+                    self.push(if values_loosely_equal(a, b) {
+                        Value::boolean(true)
+                    } else {
+                        Value::boolean(false)
+                    });
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::StrictEq => {
                     let b = self.pop();
                     let a = self.pop();
                     self.push(if values_strictly_equal(a, b) {
@@ -763,7 +762,17 @@ impl Vm {
                     });
                     self.frames[fi].pc = pc + 1;
                 }
-                Opcode::Ne | Opcode::StrictNe => {
+                Opcode::Ne => {
+                    let b = self.pop();
+                    let a = self.pop();
+                    self.push(if !values_loosely_equal(a, b) {
+                        Value::boolean(true)
+                    } else {
+                        Value::boolean(false)
+                    });
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::StrictNe => {
                     let b = self.pop();
                     let a = self.pop();
                     self.push(if !values_strictly_equal(a, b) {
@@ -2075,6 +2084,81 @@ impl Frame {
 }
 
 /// Per §7.2.14 IsStrictlyEqual.
+/// §7.2.13 Abstract Equality Comparison.
+/// Returns true if `a == b` per the spec.
+fn values_loosely_equal(a: Value, b: Value) -> bool {
+    // Same type or same-heap-tag → strict equality
+    if a.is_boolean() && b.is_boolean() {
+        return a == b;
+    }
+    if (a.is_smi() || a.is_float64()) && (b.is_smi() || b.is_float64()) {
+        return values_strictly_equal(a, b);
+    }
+    // null == undefined → true (and vice versa)
+    if (a.is_null() && b.is_undefined()) || (a.is_undefined() && b.is_null()) {
+        return true;
+    }
+    // §7.2.13 step 6-7: Boolean → ToNumber(b), then compare
+    if a.is_boolean() {
+        return values_loosely_equal(
+            if a.to_boolean() == Some(true) {
+                Value::smi(1)
+            } else {
+                Value::smi(0)
+            },
+            b,
+        );
+    }
+    if b.is_boolean() {
+        return values_loosely_equal(
+            a,
+            if b.to_boolean() == Some(true) {
+                Value::smi(1)
+            } else {
+                Value::smi(0)
+            },
+        );
+    }
+    // §7.2.13 step 8-9: Number vs String → compare ToNumber(string) with number
+    let (num_val, str_val) = if (a.is_smi() || a.is_float64()) && values_is_string(b) {
+        (a, b)
+    } else if (b.is_smi() || b.is_float64()) && values_is_string(a) {
+        (b, a)
+    } else {
+        // §7.2.13 step 10: Object vs String/Number/Symbol → ToPrimitive (deferred)
+        // Fall back to strict equality for now.
+        return values_strictly_equal(a, b);
+    };
+    let na = value_to_f64(num_val);
+    let nb = to_number(str_val);
+    if na.is_nan() || nb.is_nan() {
+        return false;
+    }
+    if na == 0.0 && nb == 0.0 {
+        // +0 === -0 per loose equality too
+        return true;
+    }
+    na == nb
+}
+
+fn values_is_string(v: Value) -> bool {
+    if let Some(ptr) = v.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        tag == TAG_STRING
+    } else {
+        false
+    }
+}
+
+/// Extract f64 from a value known to be numeric (Smi or Float64).
+fn value_to_f64(v: Value) -> f64 {
+    if let Some(n) = v.as_smi() {
+        n as f64
+    } else {
+        v.as_float64().unwrap_or(f64::NAN)
+    }
+}
+
 fn values_strictly_equal(a: Value, b: Value) -> bool {
     // Both are Number type (Smi or Float64)
     if a.is_smi() || b.is_smi() || a.is_float64() || b.is_float64() {
@@ -2380,6 +2464,13 @@ fn to_number(v: Value) -> f64 {
         0.0
     } else if v.is_undefined() {
         f64::NAN
+    } else if v.is_boolean() {
+        // §7.1.4: ToNumber(Boolean) — true → 1, false → 0
+        if v.to_boolean() == Some(true) {
+            1.0
+        } else {
+            0.0
+        }
     } else if let Some(ptr) = v.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_STRING {
@@ -2415,6 +2506,24 @@ fn to_number(v: Value) -> f64 {
         }
     } else {
         f64::NAN
+    }
+}
+
+/// §7.1.6 ToInt32: Convert a Value to a signed 32-bit integer.
+fn to_int32(v: Value) -> i32 {
+    let n = to_number(v);
+    if n.is_nan() || n.is_infinite() {
+        return 0;
+    }
+    // Truncate toward zero
+    let int = n.trunc();
+    // Mod 2^32 (positive)
+    let int32bit = int.rem_euclid(4294967296.0);
+    // If ≥ 2^31, wrap to negative
+    if int32bit >= 2147483648.0 {
+        (int32bit - 4294967296.0) as i32
+    } else {
+        int32bit as i32
     }
 }
 

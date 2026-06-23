@@ -592,7 +592,7 @@ impl Emitter {
                     self.emit_expression(arg);
                     match op {
                         UnaryOp::Minus => self.emit(Opcode::Neg, vec![]),
-                        UnaryOp::Plus => {}
+                        UnaryOp::Plus => self.emit(Opcode::UnaryPlus, vec![]),
                         UnaryOp::Not => self.emit(Opcode::Not, vec![]),
                         UnaryOp::BitNot => self.emit(Opcode::BitNot, vec![]),
                         UnaryOp::Typeof => self.emit(Opcode::TypeOf, vec![]),

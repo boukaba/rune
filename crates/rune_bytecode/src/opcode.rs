@@ -20,6 +20,7 @@ pub enum Opcode {
     Neg,
     Not,
     BitNot,
+    UnaryPlus,
     TypeOf,
     Void,
     // Binary

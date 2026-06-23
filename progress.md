@@ -787,6 +787,10 @@
 - `true === 1` is `false` ✅
 - `1 === true` is `false` ✅
 
+| Task | Priority | Est. | Description |
+|---|---|---|---|
+| **14A-1: Boolean coercion hotfix** | 🔴 P0 | ✅ done | Three fixes: (1) `to_number()` boolean branch per §7.1.4 (true→1, false→0). Fixes all arithmetic (`true+1`→2), relational (`true<2`→true), `Neg`, and unary `+`. (2) `to_int32()` helper per §7.1.6 + bitwise ops rewritten to use it. Fixes `0|true`→1, `true<<1`→2, etc. (3) `values_loosely_equal()` per §7.2.13 with boolean→Number coercion, null==undefined, Number↔String coercion. `Opcode::Eq`/`Ne` use loose equality; `StrictEq`/`StrictNe` remain strict. Added `UnaryPlus` opcode for `+expr`. 5 new integration test functions with 20+ assertions. |
+
 ## Phase 9 — v2 Features (Stretch)
 
 > **Spec mandate:** See [`ecma262.md`](./ecma262.md) for any spec-level features — open linked `https://tc39.es/ecma262/multipage/` URLs via `webfetch`. No guessing.

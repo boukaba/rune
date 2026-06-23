@@ -145,7 +145,13 @@ impl Parser {
             if self.tok.kind == TokenKind::Identifier {
                 let t = self.tok.clone();
                 self.advance();
-                params.push(t.value.into_boxed_str());
+                params.push(Pattern::Identifier(
+                    t.value.into_boxed_str(),
+                    Span {
+                        start: t.span.start,
+                        end: t.span.end,
+                    },
+                ));
             }
             if self.tok.kind == TokenKind::Comma {
                 self.advance();
@@ -212,6 +218,7 @@ impl Parser {
             }
             decls.push(Decl {
                 name,
+                pattern: None,
                 init,
                 span: Span {
                     start: dstart.start,
@@ -921,7 +928,14 @@ impl Parser {
                 self.advance();
                 // Single-param arrow: ident => body
                 if self.tok.kind == TokenKind::Arrow {
-                    return self.parse_arrow_body(vec![t.value.clone().into_boxed_str()], start);
+                    let span = Span {
+                        start: t.span.start,
+                        end: t.span.end,
+                    };
+                    return self.parse_arrow_body(
+                        vec![Pattern::Identifier(t.value.clone().into_boxed_str(), span)],
+                        start,
+                    );
                 }
                 Expr::Identifier(
                     t.value.clone().into_boxed_str(),
@@ -951,14 +965,19 @@ impl Parser {
                     let next = self.lexer.peek_token().kind;
                     if matches!(next, TokenKind::Comma | TokenKind::RParen) {
                         let name = self.tok.value.clone().into_boxed_str();
+                        let name_span = self.span();
                         self.advance();
                         if next == TokenKind::Comma {
                             // Multi-param: (a, b, ...) => body or comma expr
-                            let mut params = vec![name.clone()];
+                            let mut params = vec![Pattern::Identifier(name.clone(), name_span)];
                             while self.tok.kind == TokenKind::Comma {
                                 self.advance();
                                 if self.tok.kind == TokenKind::Identifier {
-                                    params.push(self.tok.value.clone().into_boxed_str());
+                                    let p_span = self.span();
+                                    params.push(Pattern::Identifier(
+                                        self.tok.value.clone().into_boxed_str(),
+                                        p_span,
+                                    ));
                                     self.advance();
                                 }
                             }
@@ -980,7 +999,12 @@ impl Parser {
                         self.expect(TokenKind::RParen);
                         if self.tok.kind == TokenKind::Arrow {
                             // (name) => body — single-param arrow
-                            return self.parse_arrow_body(vec![name], start);
+                            let p_span = Span {
+                                start: start.start,
+                                end: self.span().end,
+                            };
+                            let ident = Pattern::Identifier(name, p_span);
+                            return self.parse_arrow_body(vec![ident], start);
                         }
                         // (name) — just a parenthesized identifier
                         return Expr::Identifier(
@@ -998,9 +1022,12 @@ impl Parser {
                 self.expect(TokenKind::RParen);
                 // Single-param arrow: (expr) => body
                 if self.tok.kind == TokenKind::Arrow
-                    && let Expr::Identifier(name, _) = &expr
+                    && let Expr::Identifier(name, id_span) = &expr
                 {
-                    return self.parse_arrow_body(vec![name.clone()], start);
+                    return self.parse_arrow_body(
+                        vec![Pattern::Identifier(name.clone(), *id_span)],
+                        start,
+                    );
                 }
                 expr
             }
@@ -1192,7 +1219,7 @@ impl Parser {
 
     /// Parse an arrow function body after the `=>`.
     /// `params` is the list of parameter names already parsed.
-    fn parse_arrow_body(&mut self, params: Vec<Box<str>>, start: Span) -> Expr {
+    fn parse_arrow_body(&mut self, params: Vec<Pattern>, start: Span) -> Expr {
         self.expect(TokenKind::Arrow);
         let body = if self.tok.kind == TokenKind::LBrace {
             // Block body: { ... }

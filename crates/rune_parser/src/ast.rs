@@ -104,7 +104,7 @@ pub enum BinaryOp {
 #[derive(Clone, Debug, PartialEq)]
 pub struct FnNode {
     pub name: Option<Box<str>>,
-    pub params: Vec<Box<str>>,
+    pub params: Vec<Pattern>,
     pub body: Stmt,
     pub is_generator: bool,
     pub is_async: bool,
@@ -159,9 +159,25 @@ pub enum VarKind {
     Const,
 }
 
+/// A binding pattern for destructuring.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Pattern {
+    Identifier(Box<str>, Span),
+    Object(Vec<ObjectPatternProp>, Span),
+    Array(Vec<Option<Pattern>>, Span),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ObjectPatternProp {
+    pub key: PropKey,
+    pub pattern: Pattern,
+    pub span: Span,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Decl {
     pub name: Box<str>,
+    pub pattern: Option<Pattern>,
     pub init: Option<Box<Expr>>,
     pub span: Span,
 }

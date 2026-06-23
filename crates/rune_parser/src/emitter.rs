@@ -122,7 +122,11 @@ impl Emitter {
             sub.locals.push(name.to_string());
         }
         for param in &func.params {
-            sub.locals.push(param.to_string());
+            match param {
+                Pattern::Identifier(name, _) => sub.locals.push(name.to_string()),
+                // Destructuring params deferred to later in 14A
+                _ => sub.locals.push("_destructure".to_string()),
+            }
         }
         // Emit body: for arrow expression body (Stmt::Expr), use it as return value
         let is_arrow_expr = func.name.is_none() && matches!(&func.body, Stmt::Expr(..));

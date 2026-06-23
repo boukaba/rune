@@ -578,11 +578,9 @@ impl Vm {
                 }
                 Opcode::BitNot => {
                     let a = self.pop();
-                    let result = if let Some(v) = a.as_smi() {
-                        Value::smi(!v)
-                    } else {
-                        Value::undefined()
-                    };
+                    let n = to_int32(a);
+                    // !n always fits in i32; use number_result for i31 safety
+                    let result = number_result(gc, (!n) as f64);
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
                 }

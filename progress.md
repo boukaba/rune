@@ -790,6 +790,7 @@
 | Task | Priority | Est. | Description |
 |---|---|---|---|
 | **14A-1: Boolean coercion hotfix** | 🔴 P0 | ✅ done | Three fixes: (1) `to_number()` boolean branch per §7.1.4 (true→1, false→0). Fixes all arithmetic (`true+1`→2), relational (`true<2`→true), `Neg`, and unary `+`. (2) `to_int32()` helper per §7.1.6 + bitwise ops rewritten to use it. Fixes `0|true`→1, `true<<1`→2, etc. (3) `values_loosely_equal()` per §7.2.13 with boolean→Number coercion, null==undefined, Number↔String coercion. `Opcode::Eq`/`Ne` use loose equality; `StrictEq`/`StrictNe` remain strict. Added `UnaryPlus` opcode for `+expr`. 5 new integration test functions with 20+ assertions. |
+| **14A-1.1+1.2: to_bool string/NaN + BitNot coercion** | 🔴 P0 | ✅ done | `Value::to_bool()` now handles HeapString (empty string → false per §7.1.2) and NaN (NaN → false — `NaN != 0.0` was accidentally truthy). `Opcode::BitNot` uses `to_int32()` per §13.5.4 instead of only handling Smi. Fixes `~true`→`-2`, `~"5"`→`-6`, `~null`→`-1`. |
 
 ## Phase 9 — v2 Features (Stretch)
 

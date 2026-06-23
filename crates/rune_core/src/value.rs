@@ -1,5 +1,8 @@
 use std::fmt;
 
+use crate::gc::{GcHeader, TAG_STRING};
+use crate::string::HeapString;
+
 /// 64-bit tagged value (V8-style).
 ///
 /// Tag scheme (lowest bit):
@@ -111,7 +114,7 @@ impl Value {
         self.0 == NULL_RAW
     }
 
-    /// ECMAScript ToBoolean.
+    /// ECMAScript ToBoolean (§7.1.2).
     pub fn to_bool(&self) -> bool {
         if self.is_undefined() || self.is_null() {
             return false;
@@ -123,8 +126,17 @@ impl Value {
             return v != 0;
         }
         if let Some(v) = self.as_float64() {
-            return v != 0.0;
+            return !v.is_nan() && v != 0.0;
         }
+        // §7.1.2: String → false if empty, true otherwise
+        if let Some(ptr) = self.heap_ptr() {
+            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+            if tag == TAG_STRING {
+                let len = unsafe { HeapString::len(ptr as *mut HeapString) };
+                return len > 0;
+            }
+        }
+        // Other heap objects (Object, Array, Function) → true
         true
     }
 

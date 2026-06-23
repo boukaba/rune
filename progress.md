@@ -2,7 +2,7 @@
 
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
-> **Status:** Sprint 14E-1 🟢 (Day 1-2 complete — closure capture fixed)
+> **Status:** Sprint 14E-1 🟢 (Day 1-4 complete — P0 GC crash fixed, 276 tests)
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
 > Every implementation decision at every level (lexer, parser, emitter, bytecode, interpreter, builtins, JIT) **must** be verified against the exact ECMA-262 specification language in [`ecma262.md`](./ecma262.md) — **never guess** what the spec says. Each section in `ecma262.md` links to the corresponding URL fragment on `https://tc39.es/ecma262/multipage/`; **always open these URLs via `webfetch` tool** to read the authoritative algorithm steps before implementing. This applies to all phases below.
@@ -830,18 +830,25 @@
   - **Root cause of inside-function corruption:** The `for (let ...)` loop's `JumpIfFalse` exit path skipped `RestoreEnv`, leaving `frame.env` pointing to the last iteration env. After the loop, captured variable reads used the wrong env (iteration env instead of function env), reading garbage/undefined. **Fix:** emit `RestoreEnv` on the exit path (before `patch`), so `JumpIfFalse` lands on a `RestoreEnv` that restores `frame.env` to the function env.
   - Defense-in-depth: GC stale-pointer fix in `MakeEnv`/`MakeFunction` handlers (re-read `frame.env` after allocation, since allocation may trigger GC collection that moves env objects and invalidates local variables).
 
-### Test Results — Sprint 14E-1 Day 3
-- **275 integration tests passing** (0 failed, 2 ignored)
-- All 9 acceptance tests pass:
-  - Basic read-only closure (`() => x`, `function() { return x; }`)
-  - Closure mutation via var (`count++`)
-  - Closure mutation via param (`x = x + n`)
-  - Nested closures (`f()()()`)
-  - Arrow closure (`() => x`)
-  - Per-iteration `for (let i...){arr.push(() => i)}` — arrows, function expressions, function declarations
-  - Inside-function for-let + closure + other captured vars
-- `cargo clippy` clean
-- **P0-2 (block-scope shadowing) remains open** — escape analysis and env_scope_stack not yet block-aware
+### 14E-1 Day 4 — P0 GC Crash at ~38K Allocations FIXED
+
+**Root Cause:** The GC scanned `TAG_ARRAY` objects identically to `TAG_OBJECT`, reading capacity from **offset +16**. For objects this is `capacity`, but for arrays offset +16 is **`length`** (offset +20 is `capacity`). For arrays with 50K+ elements, `scan_end` computed object size as `32 + length*8` instead of `32 + capacity*8`. After GC, the scan pointer advanced inside the array's element region, interpreting element Values as GcHeaders — corrupting shape pointers of adjacent objects.
+
+**Six bugs found and fixed in one session:**
+
+1. **gc.rs `scan_end` / scan loop** — separated `TAG_ARRAY` handling: reads capacity from offset +20 instead of +16. `scan_end` now returns correct object size for large arrays.
+2. **gc.rs `forward_value`** — `false` (raw `0x04`) treated as heap pointer because sentinel check only excluded `0` and `2`. Fixed: `raw > 6` check covers all 4 sentinels (undefined=0, null=2, false=4, true=6).
+3. **array.rs `grow`** — `ss.alloc()` inside `grow` triggers GC, forwarding the source array to to-space. The `copy_nonoverlapping` from the stale from-space address copied a `TAG_FORWARDED` header into the new allocation. Fixed: resolve forwarding address before copying.
+4. **builtins.rs `array_push`** — after GC, `old_ptr` (captured before push) points to from-space. `update_heap_reference(old_ptr, new_arr)` walked the stack looking for a pointer that was already updated by GC. Fixed: resolve `old_ptr` via forwarding address before the call.
+5. **vm.rs `MakeEnv` / `MakeFunction`** — `EnvObject::allocate` / `Func::allocate` return raw pointers that become stale if GC triggers during a subsequent `JSObject::allocate` (prototype). Fixed: check forwarding address on all returned pointers; allocate prototype before Func to minimize stale-window.
+6. **vm.rs `register_roots`** — builtin prototypes (`object_prototype`, `array_prototype`, `string_prototype`) were not registered as GC roots. After a GC cycle they pointed to from-space memory that gets overwritten on the next allocation. Fixed: register all three prototype `Value` fields as roots.
+
+### Test Results — Sprint 14E-1 Day 4
+- **276 integration tests passing** (0 failed, 2 ignored)
+- `cargo clippy` clean (1 pre-existing parser warning)
+- `cargo fmt --check` clean
+- **New GC stress test**: `function f() { var x = { val: 42 }; var arr = []; for (var i = 0; i < 50000; i++) arr.push({ junk: i }); return () => x.val; } f()()` → prints `42`. Validates GC correctness with 50K object allocations + closure capture across multiple collection cycles.
+- Committed `72adb3e`.
 
 | Task | Priority | Est. | Description |
 |---|---|---|---|

@@ -2,7 +2,7 @@
 
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
-> **Status:** Sprint 13 ✅
+> **Status:** Sprint 14B ✅
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
 > Every implementation decision at every level (lexer, parser, emitter, bytecode, interpreter, builtins, JIT) **must** be verified against the exact ECMA-262 specification language in [`ecma262.md`](./ecma262.md) — **never guess** what the spec says. Each section in `ecma262.md` links to the corresponding URL fragment on `https://tc39.es/ecma262/multipage/`; **always open these URLs via `webfetch` tool** to read the authoritative algorithm steps before implementing. This applies to all phases below.
@@ -772,6 +772,7 @@
 | **14A-0: Boolean type (sentinel heap pointers)** | 🔴 P0 | ✅ done | `0x04` = `false`, `0x06` = `true`. `Value::boolean()`, `is_boolean()`, `to_boolean()`. Updated `is_heap_object()` to exclude new sentinels. `TypeOf` → `"boolean"`. `LoadBoolean` → `Value::boolean()`. All comparison/relational opcodes (`Not`, `Eq`, `Ne`, `StrictEq`, `StrictNe`, `Lt`, `Gt`, `Le`, `Ge`, `In`, `Instanceof`, `DeleteProperty`) return `Value::boolean()` instead of `Smi(1)/Smi(0)`. `value_to_js_string` prints `"true"`/`"false"`. `array_is_array` returns booleans. JIT `LoadBoolean` fixed (was emitting wrong raw values `7`/`3` instead of `6`/`4`). JIT `JumpIfFalse` updated to check false sentinel. 21 tests updated from `as_smi() == Some(1/0)` to `to_boolean()`. **Also fixes** latent JIT bug: `LoadBoolean` emitted `Smi(3)` for true (raw `7`) and `Smi(1)` for false (raw `3`) while interpreter used `Smi(1)`/`Smi(0)`. |
 | **14A: Destructuring** | 🔴 P0 | ✅ done | Object destructuring (`var {a, b}`, `let {a, b}`, `const {a, b}`, rename `{a: x}`). Array destructuring (`var [a, b]`). Nested destructuring (`{a: {b, c}}`, `[a, [b, c]]`). Default values (`{a = 99}`, `[a = 99]`) with `=== undefined` check per §8.3.4 (not falsy — `0`, `false`, `""` do NOT trigger). Null/undefined rhs throws TypeError via `ThrowIfNullish` opcode — error is now a proper TypeError object (`e.name === "TypeError"`, `e.message === "Cannot destructure..."`). Function param destructuring (`function f({a, b}) { ... }`) with object, array, nested, defaults, and mixed params. `parse_binding_pattern()` with `Pattern` enum + `Pattern::Default` wrapper. Emitter: `emit_destructuring()` recursive pattern walk. 189 integration tests. **Remaining gaps (deferred):** spread/rest (needs 14B), computed keys (needs 14C), destructuring assignment expressions, for-of destructuring (needs Sprint 16). |
 | **14B-1: Rest parameter** | 🔴 P0 | ✅ done | `function f(...args) {}`. New `Ellipsis` token kind, `FnNode.rest_param` field, `MakeRestArray` opcode pushes array of overflow args at function entry. Works with zero args, mixed with regular params, and arrays. |
+| **14B-2: Spread in call arguments** | 🔴 P0 | ✅ done | `f(...arr)`, `f(a, ...[b], c)`. `CallFromArray` opcode builds args array on stack and expands in VM handler. Works: basic, mixed, multiple spreads, empty spread, builtins (Math.max), rest params. 7 integration tests. |
 | **14B-3: Array spread** | 🔴 P0 | ✅ done | `[...arr]` in array literals. New `ArrayElement` AST struct with `is_spread: bool` flag. `ArrayPush` and `ArrayExtend` opcodes. Parser detects `...` before array elements. Emitter: `NewArray 0` → push/extend each element. VM: push/extend handlers. Works: basic, mixed with literals, multiple spreads, empty spreads. |
 | **14B-3.1: Arrow rest params** | 🟠 P1 | ✅ done | Arrow functions now support `(...args) => body` and `(a, ...rest) => body`. `parse_arrow_body` accepts `rest_param: Option<Box<str>>`. `LParen` handler in `parse_primary_inner` detects `Ellipsis` token for rest-only and mixed arrows. 5 integration tests. |
 | **14B-4: Object spread** | 🔴 P0 | ✅ done | `{...obj}` in object literals. `Property.is_spread: bool` flag. Parser detects `...` before object properties (no key: expected). New `SpreadIntoObject` opcode. Emitter: incremental path via `NewObject 0 → DefineProperty/SpreadIntoObject`. VM: `SpreadIntoObject` walks source shape's own enumerable string-keyed entries, copies each to target (lookup→set_slot or add_property). `DefineProperty` fixed to use lookup-then-set-or-add pattern (was always add, breaking override order). Works: shallow copy, override ordering (`{...a, x:2}` → `x=2`, `{x:1, ...a}` → `x=a.x`), null/undefined no-op, array→object spread (numeric keys + length). |
@@ -783,9 +784,9 @@
 | **14G: Comma operator** | 🟢 P2 | pending | `(a, b)` returns `b`. §13.16. |
 | **14H: V8 baseline comparison** | 🟢 P2 | pending | `run_v8_baseline.sh` + Rune-vs-V8 columns in `progress.md`. |
 
-### Test Results — Sprint 14A / 14B-1 / 14B-3 / 14B-3.1
+### Test Results — Sprint 14A / 14B
 - **All tests pass** (fmt + clippy + test green)
-- **332 tests passing** (227 integration + 29 VM + 22 JIT baseline + 25 interpreter + 11 bytecode + 6 core + 5 parser + 5 parser tests + 2 spike)
+- **339 tests passing** (234 integration + 29 VM + 22 JIT baseline + 25 interpreter + 11 bytecode + 6 core + 5 parser + 5 parser tests + 2 spike)
 - `typeof true === "boolean"` ✅
 - `print(true) === "true"` ✅ (was `"1"`)
 - `print(false) === "false"` ✅

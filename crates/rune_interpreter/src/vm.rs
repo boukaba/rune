@@ -7,7 +7,7 @@ use rune_core::env::EnvObject;
 use rune_core::float::HeapFloat64;
 use rune_core::function::Func;
 use rune_core::gc::{
-    GcHeader, SemiSpace, TAG_ARRAY, TAG_FLOAT64, TAG_FUNC, TAG_OBJECT, TAG_STRING,
+    GcHeader, RootProvider, SemiSpace, TAG_ARRAY, TAG_FLOAT64, TAG_FUNC, TAG_OBJECT, TAG_STRING,
 };
 use rune_core::object::JSObject;
 use rune_core::shape::{DENSE_ARRAY_SHAPE, PROTOTYPE_KEY, PropertyKey, Shape};
@@ -389,11 +389,17 @@ impl Vm {
 
         self.register_roots(gc);
 
+        // Enable automatic root refresh before each GC cycle
+        gc.root_provider = Some(self as *mut dyn RootProvider);
+
         let result = match self.run_loop(gc) {
             Exit::Return(v) => Ok(v),
             Exit::Yield(_) => Ok(Value::undefined()),
             Exit::Throw(v) => Err(v),
         };
+
+        // Disable root provider until next execute
+        gc.root_provider = None;
 
         // Sync locals back to globals for persistence
         for (i, name) in program.local_names.iter().enumerate() {
@@ -2668,6 +2674,13 @@ impl Vm {
                 *v = Value::from_heap_ptr(new_ptr);
             }
         }
+    }
+}
+
+impl RootProvider for Vm {
+    fn register_roots(&mut self, gc: &mut SemiSpace) {
+        gc.clear_roots();
+        self.register_roots(gc);
     }
 }
 

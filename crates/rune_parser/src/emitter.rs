@@ -665,11 +665,11 @@ impl Emitter {
                             self.emit(op, vec![slot as i64]);
                             // If this lexical binding is captured in a block env,
                             // copy from lexical slot to env slot so closures see it
-                            if let Some((depth, env_slot)) = self.env_captured_slot(&decl.name) {
-                                if depth == 0 {
-                                    self.emit(Opcode::LoadLexical, vec![slot as i64]);
-                                    self.emit(Opcode::StoreCaptured, vec![0, env_slot as i64]);
-                                }
+                            if let Some((depth, env_slot)) = self.env_captured_slot(&decl.name)
+                                && depth == 0
+                            {
+                                self.emit(Opcode::LoadLexical, vec![slot as i64]);
+                                self.emit(Opcode::StoreCaptured, vec![0, env_slot as i64]);
                             }
                         }
                     }

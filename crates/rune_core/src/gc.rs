@@ -54,6 +54,12 @@ const OBJECT_PROTOTYPE_OFFSET: usize = 24;
 /// Offset in bytes from object start to first property slot (matches object.rs OBJECT_HEADER_END)
 const OBJECT_SLOTS_OFFSET: usize = 32;
 
+/// Trait for providing current GC root slots.
+/// Implemented by Vm to register stack/frame/locals roots.
+pub trait RootProvider {
+    fn register_roots(&mut self, gc: &mut SemiSpace);
+}
+
 /// A simple Cheney-style semispace copying GC.
 ///
 /// GC is always manual — call `collect()` after registering roots
@@ -66,6 +72,9 @@ pub struct SemiSpace {
     limit: *mut u8,
     scan: *mut u8,
     roots: Vec<*mut u64>,
+    /// Optional root provider called before each collection to refresh
+    /// the root set (handles Vec reallocation invalidating root pointers).
+    pub root_provider: Option<*mut dyn RootProvider>,
 }
 
 unsafe impl Send for SemiSpace {}
@@ -81,6 +90,7 @@ impl SemiSpace {
             limit: unsafe { r0.add(SEMISPACE_SIZE) },
             scan: r0,
             roots: Vec::new(),
+            root_provider: None,
         }
     }
 
@@ -118,6 +128,11 @@ impl SemiSpace {
                     "GC: out of memory (need {aligned} bytes, {} remaining) and no roots registered.",
                     self.remaining()
                 );
+            }
+            if let Some(provider) = self.root_provider {
+                unsafe {
+                    (*provider).register_roots(self);
+                }
             }
             self.collect();
             let ptr2 = self.bump;

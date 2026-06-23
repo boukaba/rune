@@ -28,6 +28,11 @@ impl EnvObject {
             // parent at offset 16 from allocation start
             let parent_ptr = ptr.add(16) as *mut u64;
             *parent_ptr = parent as u64;
+            // Initialize all slots to undefined (prevents GC from forwarding garbage)
+            let slots_ptr = ptr.add(24) as *mut Value;
+            for i in 0..slot_count {
+                *slots_ptr.add(i) = Value::undefined();
+            }
         }
         ptr as *mut EnvObject
     }

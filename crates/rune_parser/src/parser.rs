@@ -1170,19 +1170,108 @@ impl Parser {
                                 end: self.span().end,
                             },
                         });
+                    } else if self.tok.kind == TokenKind::LBracket {
+                        // Computed property key: { [expr]: value }
+                        self.advance();
+                        let key_expr = self.parse_expr(0);
+                        self.expect(TokenKind::RBracket);
+                        if self.tok.kind == TokenKind::LParen {
+                            // Computed method name: { [expr]() { body } }
+                            let name = None;
+                            let fn_body = self.parse_function_body(name, false, false, pstart);
+                            props.push(Property {
+                                key: PropKey::Computed(Box::new(key_expr)),
+                                value: Expr::Function(
+                                    Box::new(fn_body),
+                                    Span {
+                                        start: pstart.start,
+                                        end: self.span().end,
+                                    },
+                                ),
+                                is_spread: false,
+                                span: Span {
+                                    start: pstart.start,
+                                    end: self.span().end,
+                                },
+                            });
+                        } else {
+                            self.expect(TokenKind::Colon);
+                            let value = self.parse_expr(0);
+                            props.push(Property {
+                                key: PropKey::Computed(Box::new(key_expr)),
+                                value,
+                                is_spread: false,
+                                span: Span {
+                                    start: pstart.start,
+                                    end: self.span().end,
+                                },
+                            });
+                        }
                     } else {
                         let key = self.parse_prop_key();
-                        self.expect(TokenKind::Colon);
-                        let value = self.parse_expr(0);
-                        props.push(Property {
-                            key,
-                            value,
-                            is_spread: false,
-                            span: Span {
-                                start: pstart.start,
-                                end: self.span().end,
-                            },
-                        });
+                        if self.tok.kind == TokenKind::LParen {
+                            // Method shorthand: { foo() { body } }
+                            let name = match &key {
+                                PropKey::Identifier(n) => Some(n.clone()),
+                                PropKey::String(n) => Some(n.clone()),
+                                PropKey::Number(n) => Some(Box::from(n.to_string())),
+                                _ => None,
+                            };
+                            let fn_body = self.parse_function_body(name, false, false, pstart);
+                            props.push(Property {
+                                key,
+                                value: Expr::Function(
+                                    Box::new(fn_body),
+                                    Span {
+                                        start: pstart.start,
+                                        end: self.span().end,
+                                    },
+                                ),
+                                is_spread: false,
+                                span: Span {
+                                    start: pstart.start,
+                                    end: self.span().end,
+                                },
+                            });
+                        } else if self.tok.kind == TokenKind::Colon {
+                            // Regular property: { key: value }
+                            self.advance();
+                            let value = self.parse_expr(0);
+                            props.push(Property {
+                                key,
+                                value,
+                                is_spread: false,
+                                span: Span {
+                                    start: pstart.start,
+                                    end: self.span().end,
+                                },
+                            });
+                        } else {
+                            // Shorthand: { key } === { key: key }
+                            let name = match &key {
+                                PropKey::Identifier(n) => n.clone(),
+                                _ => {
+                                    self.error("Invalid shorthand property".into());
+                                    Box::from("_error")
+                                }
+                            };
+                            let value = Expr::Identifier(
+                                name,
+                                Span {
+                                    start: pstart.start,
+                                    end: self.span().end,
+                                },
+                            );
+                            props.push(Property {
+                                key,
+                                value,
+                                is_spread: false,
+                                span: Span {
+                                    start: pstart.start,
+                                    end: self.span().end,
+                                },
+                            });
+                        }
                     }
                     if self.tok.kind == TokenKind::Comma {
                         self.advance();
@@ -1271,29 +1360,45 @@ impl Parser {
                         rest = Some(Box::new(inner));
                         break;
                     }
-                    let key = self.parse_prop_key();
-                    let pattern = if self.tok.kind == TokenKind::Colon {
+                    let (key, pattern) = if self.tok.kind == TokenKind::LBracket {
+                        // Computed property key in destructuring: { [expr]: pattern }
                         self.advance();
-                        self.parse_binding_pattern()
-                    } else if let PropKey::Identifier(id) = &key {
-                        // Check for default: {a = expr}
-                        let default = if self.tok.kind == TokenKind::EqAssign {
+                        let key_expr = self.parse_expr(0);
+                        self.expect(TokenKind::RBracket);
+                        self.expect(TokenKind::Colon);
+                        let mut pat = self.parse_binding_pattern();
+                        if self.tok.kind == TokenKind::EqAssign {
                             self.advance();
-                            Some(Box::new(self.parse_expr(0)))
-                        } else {
-                            None
-                        };
-                        Pattern::Identifier(
-                            id.clone(),
-                            Span {
-                                start: pstart.start,
-                                end: self.span().end,
-                            },
-                            default,
-                        )
+                            let default = self.parse_expr(0);
+                            pat = Pattern::Default(Box::new(pat), Box::new(default));
+                        }
+                        (PropKey::Computed(Box::new(key_expr)), pat)
                     } else {
-                        self.error("Expected binding identifier after property name".into());
-                        Pattern::Identifier(Box::from("_error"), self.span(), None)
+                        let key = self.parse_prop_key();
+                        let pattern = if self.tok.kind == TokenKind::Colon {
+                            self.advance();
+                            self.parse_binding_pattern()
+                        } else if let PropKey::Identifier(id) = &key {
+                            // Check for default: {a = expr}
+                            let default = if self.tok.kind == TokenKind::EqAssign {
+                                self.advance();
+                                Some(Box::new(self.parse_expr(0)))
+                            } else {
+                                None
+                            };
+                            Pattern::Identifier(
+                                id.clone(),
+                                Span {
+                                    start: pstart.start,
+                                    end: self.span().end,
+                                },
+                                default,
+                            )
+                        } else {
+                            self.error("Expected binding identifier after property name".into());
+                            Pattern::Identifier(Box::from("_error"), self.span(), None)
+                        };
+                        (key, pattern)
                     };
                     props.push(ObjectPatternProp {
                         key,

@@ -209,6 +209,9 @@ impl Emitter {
                             let idx = self.intern_string(&s);
                             self.emit(Opcode::LoadStringConst, vec![idx as i64]);
                         }
+                        PropKey::Computed(expr) => {
+                            self.emit_expression(expr);
+                        }
                     }
                     self.emit(Opcode::LoadProperty, vec![]);
                     self.emit_destructuring_binding(&prop.pattern, kind);
@@ -227,6 +230,7 @@ impl Emitter {
                             PropKey::Identifier(s) => s.to_string(),
                             PropKey::String(s) => s.to_string(),
                             PropKey::Number(n) => n.to_string(),
+                            PropKey::Computed(_) => continue,
                         };
                         let idx = self.intern_string(&key_str);
                         self.emit(Opcode::LoadStringConst, vec![idx as i64]);
@@ -1111,25 +1115,34 @@ impl Emitter {
                 }
             }
             Expr::Object(props, _) => {
-                let mut has_spread = false;
+                let mut has_spread_or_computed = false;
                 for prop in props {
-                    if prop.is_spread {
-                        has_spread = true;
+                    if prop.is_spread || matches!(prop.key, PropKey::Computed(_)) {
+                        has_spread_or_computed = true;
                         break;
                     }
                 }
-                if has_spread {
+                if has_spread_or_computed {
                     self.emit(Opcode::NewObject, vec![0]);
                     for prop in props {
                         if prop.is_spread {
                             self.emit_expression(&prop.value);
                             self.emit(Opcode::SpreadIntoObject, vec![]);
+                        } else if matches!(prop.key, PropKey::Computed(_)) {
+                            self.emit(Opcode::Dup, vec![]);
+                            if let PropKey::Computed(key_expr) = &prop.key {
+                                self.emit_expression(key_expr);
+                            }
+                            self.emit_expression(&prop.value);
+                            self.emit(Opcode::StoreProperty, vec![]);
+                            self.emit(Opcode::Pop, vec![]);
                         } else {
                             self.emit_expression(&prop.value);
                             let key_str = match &prop.key {
                                 PropKey::String(s) => s.to_string(),
                                 PropKey::Identifier(s) => s.to_string(),
                                 PropKey::Number(n) => n.to_string(),
+                                PropKey::Computed(_) => unreachable!(),
                             };
                             let idx = self.intern_string(&key_str) as i64;
                             self.emit(Opcode::DefineProperty, vec![idx]);
@@ -1146,6 +1159,7 @@ impl Emitter {
                             PropKey::String(s) => s.to_string(),
                             PropKey::Identifier(s) => s.to_string(),
                             PropKey::Number(n) => n.to_string(),
+                            PropKey::Computed(_) => unreachable!(),
                         };
                         let idx = self.intern_string(&key_str) as i64;
                         operands.push(idx);

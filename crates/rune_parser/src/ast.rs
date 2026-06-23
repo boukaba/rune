@@ -52,6 +52,7 @@ pub enum PropKey {
     String(Box<str>),
     Number(f64),
     Identifier(Box<str>),
+    Computed(Box<Expr>),
 }
 
 #[derive(Clone, Debug, PartialEq)]

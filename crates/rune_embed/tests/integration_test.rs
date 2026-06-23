@@ -2919,4 +2919,128 @@ mod instanceof_tests {
             .unwrap();
         assert_eq!(r.as_smi(), Some(3), "f(...[1,2,3]) with rest param");
     }
+
+    // --- Sprint 14C: Object literal extensions ---
+
+    #[test]
+    fn test_shorthand_property() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval("var a = 1, b = 2; var o = { a, b }; o.a === 1 && o.b === 2")
+            .unwrap();
+        assert_eq!(r.to_boolean(), Some(true), "shorthand");
+    }
+
+    #[test]
+    fn test_shorthand_single() {
+        let mut ctx = Context::new();
+        let r = ctx.eval("var x = 42; var o = { x }; o.x").unwrap();
+        assert_eq!(r.as_smi(), Some(42), "shorthand single");
+    }
+
+    #[test]
+    fn test_shorthand_mixed() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval("var a = 1; var o = { a, b: 2 }; o.a === 1 && o.b === 2")
+            .unwrap();
+        assert_eq!(r.to_boolean(), Some(true), "shorthand mixed");
+    }
+
+    #[test]
+    fn test_shorthand_fn_ref() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval("function f() { return 42; } var o = { f }; o.f()")
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(42), "shorthand function ref");
+    }
+
+    #[test]
+    fn test_method_shorthand_basic() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval("var o = { foo() { return 42; } }; o.foo()")
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(42), "method shorthand basic");
+    }
+
+    #[test]
+    fn test_method_shorthand_this() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval("var o = { x: 1, getX() { return this.x; } }; o.getX()")
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(1), "method shorthand this");
+    }
+
+    #[test]
+    fn test_method_shorthand_multiple() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval("var o = { a() { return 1; }, b() { return 2; } }; o.a() + o.b()")
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(3), "multiple methods");
+    }
+
+    #[test]
+    fn test_method_shorthand_arguments() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval("var o = { f(a, b) { return a + b; } }; o.f(10, 20)")
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(30), "method shorthand with params");
+    }
+
+    #[test]
+    fn test_computed_key_basic() {
+        let mut ctx = Context::new();
+        let r = ctx.eval("var k = 'x'; var o = { [k]: 1 }; o.x").unwrap();
+        assert_eq!(r.as_smi(), Some(1), "computed key basic");
+    }
+
+    #[test]
+    fn test_computed_key_string_concat() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval("var i = 0; var o = { ['key' + i]: 42 }; o.key0")
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(42), "computed string concatenation");
+    }
+
+    #[test]
+    fn test_computed_key_numeric() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval("var n = 5; var o = { [n]: 'five' }; o[5]")
+            .unwrap();
+        assert!(r.heap_ptr().is_some(), "computed numeric key");
+    }
+
+    #[test]
+    fn test_computed_key_multiple() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval("var k = 'x'; var o = { [k]: 1, [k + '2']: 2 }; o.x === 1 && o.x2 === 2")
+            .unwrap();
+        assert_eq!(r.to_boolean(), Some(true), "multiple computed keys");
+    }
+
+    #[test]
+    fn test_computed_method_name() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval("var k = 'x'; var o = { [k]() { return 42; } }; o.x()")
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(42), "computed method name");
+    }
+
+    #[test]
+    fn test_computed_destructuring() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval("var k = 'x'; var { [k]: val } = { x: 1 }; val")
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(1), "computed key destructuring");
+    }
 }

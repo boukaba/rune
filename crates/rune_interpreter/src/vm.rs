@@ -1318,9 +1318,121 @@ impl Vm {
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::DefineProperty => {
-                    let _value = self.pop();
-                    let _raw_key = self.pop();
-                    let _obj = self.pop();
+                    let value = self.pop();
+                    let obj = self.pop();
+                    let key_idx = instr.operands[0] as usize;
+                    if let Some(key_str) = self.frames[fi].prog_str(key_idx) {
+                        if let Some(ptr) = obj.heap_ptr() {
+                            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+                            if tag == TAG_OBJECT {
+                                let key = PropertyKey::from_string(&key_str);
+                                let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                                if let Some(slot) = shape.lookup(&key) {
+                                    unsafe {
+                                        JSObject::set_slot(ptr as *mut JSObject, slot, value)
+                                    };
+                                } else {
+                                    unsafe {
+                                        JSObject::add_property(
+                                            ptr as *mut JSObject,
+                                            key,
+                                            key_str.to_string(),
+                                            value,
+                                        )
+                                    };
+                                }
+                            }
+                        }
+                    }
+                    self.push(obj);
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::SpreadIntoObject => {
+                    let source = self.pop();
+                    let tgt = self.pop();
+                    // §13.2.6.5 step 4: null/undefined → no-op
+                    if !source.is_null() && !source.is_undefined() {
+                        if let (Some(src_ptr), Some(tgt_ptr)) = (source.heap_ptr(), tgt.heap_ptr())
+                        {
+                            let tag = unsafe { (*(src_ptr as *const GcHeader)).tag() };
+                            if tag == TAG_OBJECT {
+                                let src_shape =
+                                    unsafe { JSObject::shape_ptr(src_ptr as *mut JSObject) };
+                                let count = src_shape.entries.len();
+                                for i in 0..count {
+                                    let key = src_shape.entries[i].0;
+                                    let key_name = src_shape.key_names[i].clone();
+                                    let val =
+                                        unsafe { JSObject::get_slot(src_ptr as *mut JSObject, i) };
+                                    let tgt_shape =
+                                        unsafe { JSObject::shape_ptr(tgt_ptr as *mut JSObject) };
+                                    if let Some(slot) = tgt_shape.lookup(&key) {
+                                        unsafe {
+                                            JSObject::set_slot(tgt_ptr as *mut JSObject, slot, val)
+                                        };
+                                    } else {
+                                        unsafe {
+                                            JSObject::add_property(
+                                                tgt_ptr as *mut JSObject,
+                                                key,
+                                                key_name,
+                                                val,
+                                            )
+                                        };
+                                    }
+                                }
+                            } else if tag == TAG_ARRAY {
+                                let src_len =
+                                    unsafe { RuneArray::length(src_ptr as *mut RuneArray) };
+                                for i in 0..src_len as usize {
+                                    let elem = unsafe {
+                                        RuneArray::get_element(src_ptr as *mut RuneArray, i)
+                                    };
+                                    let key_str = i.to_string();
+                                    let key = PropertyKey::from_string(&key_str);
+                                    let tgt_shape =
+                                        unsafe { JSObject::shape_ptr(tgt_ptr as *mut JSObject) };
+                                    if let Some(slot) = tgt_shape.lookup(&key) {
+                                        unsafe {
+                                            JSObject::set_slot(tgt_ptr as *mut JSObject, slot, elem)
+                                        };
+                                    } else {
+                                        unsafe {
+                                            JSObject::add_property(
+                                                tgt_ptr as *mut JSObject,
+                                                key,
+                                                key_str,
+                                                elem,
+                                            )
+                                        };
+                                    }
+                                }
+                                let len_str = "length".to_string();
+                                let len_key = PropertyKey::from_string(&len_str);
+                                let tgt_shape =
+                                    unsafe { JSObject::shape_ptr(tgt_ptr as *mut JSObject) };
+                                if let Some(slot) = tgt_shape.lookup(&len_key) {
+                                    unsafe {
+                                        JSObject::set_slot(
+                                            tgt_ptr as *mut JSObject,
+                                            slot,
+                                            Value::smi(src_len as i32),
+                                        )
+                                    };
+                                } else {
+                                    unsafe {
+                                        JSObject::add_property(
+                                            tgt_ptr as *mut JSObject,
+                                            len_key,
+                                            len_str,
+                                            Value::smi(src_len as i32),
+                                        )
+                                    };
+                                }
+                            }
+                        }
+                    }
+                    self.push(tgt);
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::LoadGlobal => {

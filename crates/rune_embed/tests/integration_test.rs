@@ -2609,4 +2609,93 @@ mod instanceof_tests {
             "typeof args should be a string (heap object)"
         );
     }
+
+    // ---- 14B-4: Object spread ---
+
+    #[test]
+    fn test_object_spread_shallow_copy() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var a = {x: 1, y: 2}; var b = {...a}; b.x + b.y"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(3), "shallow copy should preserve values");
+    }
+
+    #[test]
+    fn test_object_spread_not_same() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var a = {x: 1}; var b = {...a}; b !== a"#)
+            .unwrap();
+        assert_eq!(
+            r.to_boolean(),
+            Some(true),
+            "spread should create new object"
+        );
+    }
+
+    #[test]
+    fn test_object_spread_mutation_independent() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var a = {x: 1}; var b = {...a}; b.x = 99; a.x"#)
+            .unwrap();
+        assert_eq!(
+            r.as_smi(),
+            Some(1),
+            "mutating copy should not affect source"
+        );
+    }
+
+    #[test]
+    fn test_object_spread_literal_after_spread() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var a = {x: 1}; var b = {...a, x: 2}; b.x"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(2), "literal after spread should override");
+    }
+
+    #[test]
+    fn test_object_spread_spread_after_literal() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var a = {x: 2}; var b = {x: 1, ...a}; b.x"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(2), "spread after literal should override");
+    }
+
+    #[test]
+    fn test_object_spread_merge() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var a = {x: 1}; var b = {y: 2}; var c = {...a, ...b}; c.x + c.y"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(3), "merge two objects via spread");
+    }
+
+    #[test]
+    fn test_object_spread_empty() {
+        let mut ctx = Context::new();
+        let r = ctx.eval(r#"var a = {...{}}; typeof a"#).unwrap();
+        assert!(
+            r.is_heap_object(),
+            "empty object spread should return an object"
+        );
+    }
+
+    #[test]
+    fn test_object_spread_null_noop() {
+        let mut ctx = Context::new();
+        let r = ctx.eval(r#"var a = {...null}; typeof a"#).unwrap();
+        // typeof a === "object" — null spread is no-op, a is {}
+        assert!(r.is_heap_object(), "typeof a should be a string");
+    }
+
+    #[test]
+    fn test_object_spread_undefined_noop() {
+        let mut ctx = Context::new();
+        let r = ctx.eval(r#"var a = {...undefined}; typeof a"#).unwrap();
+        assert!(r.is_heap_object(), "typeof a should be a string");
+    }
 }

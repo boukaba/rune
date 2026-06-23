@@ -43,6 +43,7 @@ pub enum Expr {
 pub struct Property {
     pub key: PropKey,
     pub value: Expr,
+    pub is_spread: bool,
     pub span: Span,
 }
 

@@ -1032,21 +1032,47 @@ impl Emitter {
                 }
             }
             Expr::Object(props, _) => {
-                let count = props.len() as i64;
+                let mut has_spread = false;
                 for prop in props {
-                    self.emit_expression(&prop.value);
+                    if prop.is_spread {
+                        has_spread = true;
+                        break;
+                    }
                 }
-                let mut operands = vec![count];
-                for prop in props {
-                    let key_str = match &prop.key {
-                        PropKey::String(s) => s.to_string(),
-                        PropKey::Identifier(s) => s.to_string(),
-                        PropKey::Number(n) => n.to_string(),
-                    };
-                    let idx = self.intern_string(&key_str) as i64;
-                    operands.push(idx);
+                if has_spread {
+                    self.emit(Opcode::NewObject, vec![0]);
+                    for prop in props {
+                        if prop.is_spread {
+                            self.emit_expression(&prop.value);
+                            self.emit(Opcode::SpreadIntoObject, vec![]);
+                        } else {
+                            self.emit_expression(&prop.value);
+                            let key_str = match &prop.key {
+                                PropKey::String(s) => s.to_string(),
+                                PropKey::Identifier(s) => s.to_string(),
+                                PropKey::Number(n) => n.to_string(),
+                            };
+                            let idx = self.intern_string(&key_str) as i64;
+                            self.emit(Opcode::DefineProperty, vec![idx]);
+                        }
+                    }
+                } else {
+                    let count = props.len() as i64;
+                    for prop in props {
+                        self.emit_expression(&prop.value);
+                    }
+                    let mut operands = vec![count];
+                    for prop in props {
+                        let key_str = match &prop.key {
+                            PropKey::String(s) => s.to_string(),
+                            PropKey::Identifier(s) => s.to_string(),
+                            PropKey::Number(n) => n.to_string(),
+                        };
+                        let idx = self.intern_string(&key_str) as i64;
+                        operands.push(idx);
+                    }
+                    self.emit(Opcode::NewObject, operands);
                 }
-                self.emit(Opcode::NewObject, operands);
             }
             Expr::Function(func, _) => {
                 let func_idx = self.compile_function(func) as i64;

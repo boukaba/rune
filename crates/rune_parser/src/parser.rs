@@ -1145,17 +1145,32 @@ impl Parser {
                 let mut props = Vec::new();
                 while self.tok.kind != TokenKind::RBrace && self.tok.kind != TokenKind::Eof {
                     let pstart = self.span();
-                    let key = self.parse_prop_key();
-                    self.expect(TokenKind::Colon);
-                    let value = self.parse_expr(0);
-                    props.push(Property {
-                        key,
-                        value,
-                        span: Span {
-                            start: pstart.start,
-                            end: self.span().end,
-                        },
-                    });
+                    if self.tok.kind == TokenKind::Ellipsis {
+                        self.advance();
+                        let value = self.parse_expr(0);
+                        props.push(Property {
+                            key: PropKey::String(Box::from("")),
+                            value,
+                            is_spread: true,
+                            span: Span {
+                                start: pstart.start,
+                                end: self.span().end,
+                            },
+                        });
+                    } else {
+                        let key = self.parse_prop_key();
+                        self.expect(TokenKind::Colon);
+                        let value = self.parse_expr(0);
+                        props.push(Property {
+                            key,
+                            value,
+                            is_spread: false,
+                            span: Span {
+                                start: pstart.start,
+                                end: self.span().end,
+                            },
+                        });
+                    }
                     if self.tok.kind == TokenKind::Comma {
                         self.advance();
                     }

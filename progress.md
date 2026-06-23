@@ -770,7 +770,7 @@
 | Task | Priority | Est. | Description |
 |---|---|---|---|
 | **14A-0: Boolean type (sentinel heap pointers)** | 🔴 P0 | ✅ done | `0x04` = `false`, `0x06` = `true`. `Value::boolean()`, `is_boolean()`, `to_boolean()`. Updated `is_heap_object()` to exclude new sentinels. `TypeOf` → `"boolean"`. `LoadBoolean` → `Value::boolean()`. All comparison/relational opcodes (`Not`, `Eq`, `Ne`, `StrictEq`, `StrictNe`, `Lt`, `Gt`, `Le`, `Ge`, `In`, `Instanceof`, `DeleteProperty`) return `Value::boolean()` instead of `Smi(1)/Smi(0)`. `value_to_js_string` prints `"true"`/`"false"`. `array_is_array` returns booleans. JIT `LoadBoolean` fixed (was emitting wrong raw values `7`/`3` instead of `6`/`4`). JIT `JumpIfFalse` updated to check false sentinel. 21 tests updated from `as_smi() == Some(1/0)` to `to_boolean()`. **Also fixes** latent JIT bug: `LoadBoolean` emitted `Smi(3)` for true (raw `7`) and `Smi(1)` for false (raw `3`) while interpreter used `Smi(1)`/`Smi(0)`. |
-| **14A: Destructuring** | 🔴 P0 | 🟡 3d/4d | AST migration: `Pattern` enum (`Identifier`/`Object`/`Array`), `Decl.pattern`, `FnNode.params: Vec<Pattern>` (commit `8817791`). Next: parser `parse_binding_pattern()`, emitter for per-property `LoadProperty` + `StoreLocal`. |
+| **14A: Destructuring** | 🔴 P0 | ✅ done | Basic object destructuring (`var {a, b} = obj`, `let {a, b} = obj`, `const {a, b} = obj`, rename `{a: x}`). Basic array destructuring (`var [a, b] = arr`). `parse_binding_pattern()` with `Pattern` enum. Emitter uses `Dup`/`LoadStringConst`/`LoadProperty`/`StoreLocal`/`DeclareLet` pattern. 11 integration tests. **Remaining gaps (deferred):** default values, nested patterns, function params, null/undefined TypeError, rest in destructuring (needs 14B), computed keys (needs 14C), destructuring assignment expressions (deferred to 14A-2), for-of destructuring (needs Sprint 16). |
 | **14B: Spread / rest** | 🔴 P0 | pending | `[...arr]`, `{...obj}`, `f(...args)`, `function f(...args)`. §13.2.8, §14.2. |
 | **14C: Object literal extensions** | 🟠 P1 | pending | Shorthand `{ a, b }`, method shorthand `{ foo() {} }`, computed keys `{ [k]: v }`. §14.6. |
 | **14D: Template literal substitutions** | 🟠 P1 | pending | Rewrite `scan_template` in lexer.rs to parse `${...}`. §12.2.9.6. |
@@ -779,13 +779,20 @@
 | **14G: Comma operator** | 🟢 P2 | pending | `(a, b)` returns `b`. §13.16. |
 | **14H: V8 baseline comparison** | 🟢 P2 | pending | `run_v8_baseline.sh` + Rune-vs-V8 columns in `progress.md`. |
 
-### Test Results — Sprint 14A-0
+### Test Results — Sprint 14A
 - **All tests pass** (fmt + clippy + test green)
+- **274 tests passing** (169 integration + 29 VM + 22 JIT baseline + 25 interpreter + 11 bytecode/builtins + 6 core + 5 parser + 5 emitter + 2 spike)
 - `typeof true === "boolean"` ✅
 - `print(true) === "true"` ✅ (was `"1"`)
 - `print(false) === "false"` ✅
 - `true === 1` is `false` ✅
 - `1 === true` is `false` ✅
+- `true + 1 === 2` ✅ (boolean→Number coercion)
+- `~true === -2` ✅ (BitNot via to_int32)
+- `"" == false` is `true` ✅ (loose equality)
+- `var {a, b} = {a: 1, b: 2}; a === 1` ✅ (object destructuring)
+- `var {a: x} = {a: 42}; x === 42` ✅ (rename in destructuring)
+- `var [a, b] = [1, 2]; a === 1` ✅ (array destructuring)
 
 | Task | Priority | Est. | Description |
 |---|---|---|---|

@@ -2098,4 +2098,104 @@ mod instanceof_tests {
         let r = ctx.eval("var x = 42; (x)").unwrap();
         assert_eq!(r.as_smi(), Some(42), "(x) should be 42");
     }
+
+    // ---- Destructuring (Sprint 14A) ----
+
+    #[test]
+    fn test_object_destructure_var() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var {a, b} = {a: 1, b: 2}; a"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(1), "var {{a, b}} = obj, a should be 1");
+    }
+
+    #[test]
+    fn test_object_destructure_var_second() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var {a, b} = {a: 1, b: 2}; b"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(2), "var {{a, b}} = obj, b should be 2");
+    }
+
+    #[test]
+    fn test_object_destructure_let() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"let {a, b} = {a: 10, b: 20}; a"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(10), "let {{a, b}} = obj, a should be 10");
+    }
+
+    #[test]
+    fn test_object_destructure_rename() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var {a: x} = {a: 42}; x"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(42), "var {{a: x}} = obj, x should be 42");
+    }
+
+    #[test]
+    fn test_object_destructure_const() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"const {a, b} = {a: 5, b: 7}; a + b"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(12), "const {{a, b}} = obj, a+b should be 12");
+    }
+
+    #[test]
+    fn test_object_destructure_missing_prop() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var {a, b} = {a: 1}; b"#)
+            .unwrap();
+        assert!(r.is_undefined(), "missing destructure prop should be undefined");
+    }
+
+    #[test]
+    fn test_array_destructure_var() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var [a, b] = [1, 2]; a"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(1), "var [a, b] = arr, a should be 1");
+    }
+
+    #[test]
+    fn test_array_destructure_var_second() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var [a, b] = [1, 2]; b"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(2), "var [a, b] = arr, b should be 2");
+    }
+
+    #[test]
+    fn test_array_destructure_let() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"let [a, b] = [10, 20]; a"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(10), "let [a, b] = arr, a should be 10");
+    }
+
+    #[test]
+    fn test_destructure_multi_decl() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var {a} = {a: 1}, {b} = {b: 2}; a + b"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(3), "multiple destructured decls should work");
+    }
+
+    #[test]
+    fn test_var_destructure_undefined_rhs() {
+        let mut ctx = Context::new();
+        // Without initializer, var should work (initialized to undefined)
+        let r = ctx.eval(r#"var {a, b} = {a: 1}; b"#).unwrap();
+        assert!(r.is_undefined(), "missing destructure prop should be undefined");
+    }
 }

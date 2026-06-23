@@ -199,14 +199,18 @@ impl Parser {
         let mut decls = Vec::new();
         loop {
             let dstart = self.span();
-            let name = if self.tok.kind == TokenKind::Identifier {
-                let t = self.tok.clone();
-                self.advance();
-                t.value.into_boxed_str()
-            } else {
-                self.error("Expected identifier".into());
-                Box::from("_error")
-            };
+            let (name, pattern) =
+                if matches!(self.tok.kind, TokenKind::LBrace | TokenKind::LBracket) {
+                    let pat = self.parse_binding_pattern();
+                    (Box::from("_destructure"), Some(pat))
+                } else if self.tok.kind == TokenKind::Identifier {
+                    let t = self.tok.clone();
+                    self.advance();
+                    (t.value.into_boxed_str(), None)
+                } else {
+                    self.error("Expected identifier".into());
+                    (Box::from("_error"), None)
+                };
             let init = if self.tok.kind == TokenKind::EqAssign {
                 self.advance();
                 Some(Box::new(self.parse_expr(0)))
@@ -218,7 +222,7 @@ impl Parser {
             }
             decls.push(Decl {
                 name,
-                pattern: None,
+                pattern,
                 init,
                 span: Span {
                     start: dstart.start,
@@ -1131,6 +1135,94 @@ impl Parser {
                 let t = self.tok.clone();
                 self.advance();
                 PropKey::Identifier(t.value.into_boxed_str())
+            }
+        }
+    }
+
+    fn parse_binding_pattern(&mut self) -> Pattern {
+        match self.tok.kind {
+            TokenKind::LBrace => {
+                let start = self.span();
+                self.advance();
+                let mut props = Vec::new();
+                while self.tok.kind != TokenKind::RBrace && self.tok.kind != TokenKind::Eof {
+                    let pstart = self.span();
+                    let key = self.parse_prop_key();
+                    let pattern = if self.tok.kind == TokenKind::Colon {
+                        self.advance();
+                        self.parse_binding_pattern()
+                    } else if let PropKey::Identifier(id) = &key {
+                        Pattern::Identifier(
+                            id.clone(),
+                            Span {
+                                start: pstart.start,
+                                end: self.span().end,
+                            },
+                        )
+                    } else {
+                        self.error("Expected binding identifier after property name".into());
+                        Pattern::Identifier(Box::from("_error"), self.span())
+                    };
+                    props.push(ObjectPatternProp {
+                        key,
+                        pattern,
+                        span: Span {
+                            start: pstart.start,
+                            end: self.span().end,
+                        },
+                    });
+                    if self.tok.kind == TokenKind::Comma {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.expect(TokenKind::RBrace);
+                Pattern::Object(
+                    props,
+                    Span {
+                        start: start.start,
+                        end: self.span().end,
+                    },
+                )
+            }
+            TokenKind::LBracket => {
+                let start = self.span();
+                self.advance();
+                let mut items = Vec::new();
+                while self.tok.kind != TokenKind::RBracket && self.tok.kind != TokenKind::Eof {
+                    if self.tok.kind == TokenKind::Comma {
+                        items.push(None);
+                        self.advance();
+                        continue;
+                    }
+                    let pattern = self.parse_binding_pattern();
+                    items.push(Some(pattern));
+                    if self.tok.kind == TokenKind::Comma {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.expect(TokenKind::RBracket);
+                Pattern::Array(
+                    items,
+                    Span {
+                        start: start.start,
+                        end: self.span().end,
+                    },
+                )
+            }
+            _ => {
+                let t = self.tok.clone();
+                self.advance();
+                Pattern::Identifier(
+                    t.value.into_boxed_str(),
+                    Span {
+                        start: t.span.start,
+                        end: t.span.end,
+                    },
+                )
             }
         }
     }

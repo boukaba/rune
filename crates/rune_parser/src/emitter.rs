@@ -158,6 +158,95 @@ impl Emitter {
         idx
     }
 
+    /// Emit bytecode for destructuring a value according to the pattern.
+    fn emit_destructuring(&mut self, pattern: &Pattern, kind: &VarKind) {
+        match pattern {
+            Pattern::Object(props, _) => {
+                let len = props.len();
+                for (i, prop) in props.iter().enumerate() {
+                    if i + 1 < len {
+                        self.emit(Opcode::Dup, vec![]);
+                    }
+                    match &prop.key {
+                        PropKey::Identifier(id) => {
+                            let idx = self.intern_string(id);
+                            self.emit(Opcode::LoadStringConst, vec![idx as i64]);
+                        }
+                        PropKey::String(s) => {
+                            let idx = self.intern_string(s);
+                            self.emit(Opcode::LoadStringConst, vec![idx as i64]);
+                        }
+                        PropKey::Number(n) => {
+                            let s = n.to_string();
+                            let idx = self.intern_string(&s);
+                            self.emit(Opcode::LoadStringConst, vec![idx as i64]);
+                        }
+                    }
+                    self.emit(Opcode::LoadProperty, vec![]);
+                    self.emit_destructuring_binding(&prop.pattern, kind);
+                }
+                self.emit(Opcode::Pop, vec![]);
+            }
+            Pattern::Array(items, _) => {
+                let len = items.len();
+                for (i, item) in items.iter().enumerate() {
+                    if let Some(pattern) = item {
+                        if i + 1 < len {
+                            self.emit(Opcode::Dup, vec![]);
+                        }
+                        self.emit(Opcode::LoadSmi, vec![i as i64]);
+                        self.emit(Opcode::LoadProperty, vec![]);
+                        self.emit_destructuring_binding(pattern, kind);
+                    }
+                }
+                if len > 0 {
+                    self.emit(Opcode::Pop, vec![]);
+                }
+            }
+            Pattern::Identifier(name, _) => {
+                self.emit_store_binding(name, kind);
+            }
+        }
+    }
+
+    /// Emit a store operation for a single binding in a destructuring pattern.
+    fn emit_destructuring_binding(&mut self, pattern: &Pattern, kind: &VarKind) {
+        match pattern {
+            Pattern::Identifier(name, _) => {
+                self.emit_store_binding(name, kind);
+            }
+            // Nested patterns deferred — consume the value to keep stack balanced
+            _ => {
+                self.emit(Opcode::Pop, vec![]);
+            }
+        }
+    }
+
+    /// Store a value to a binding (var → StoreLocal+Pop, let/const → DeclareLet/DeclareConst).
+    fn emit_store_binding(&mut self, name: &str, kind: &VarKind) {
+        match kind {
+            VarKind::Var => {
+                if !self.locals.contains(&name.to_string()) {
+                    self.locals.push(name.to_string());
+                }
+                if let Some(idx) = self.local_index(name) {
+                    self.emit(Opcode::StoreLocal, vec![idx as i64]);
+                }
+                self.emit(Opcode::Pop, vec![]);
+            }
+            VarKind::Let | VarKind::Const => {
+                if let Some(slot) = self.lexical_slot(name) {
+                    let op = if *kind == VarKind::Const {
+                        Opcode::DeclareConst
+                    } else {
+                        Opcode::DeclareLet
+                    };
+                    self.emit(op, vec![slot as i64]);
+                }
+            }
+        }
+    }
+
     fn emit_statement(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Expr(expr, _) => {
@@ -256,10 +345,15 @@ impl Emitter {
                 self.emit_expression(value);
                 self.emit(Opcode::Throw, vec![]);
             }
-            Stmt::Var(kind, decls, _) => {
-                match kind {
-                    VarKind::Var => {
-                        for decl in decls {
+            Stmt::Var(kind, decls, _) => match kind {
+                VarKind::Var => {
+                    for decl in decls {
+                        if let Some(pattern) = &decl.pattern {
+                            if let Some(init) = &decl.init {
+                                self.emit_expression(init);
+                                self.emit_destructuring(pattern, kind);
+                            }
+                        } else {
                             if !self.locals.contains(&decl.name.to_string()) {
                                 self.locals.push(decl.name.to_string());
                             }
@@ -272,27 +366,30 @@ impl Emitter {
                             }
                         }
                     }
-                    VarKind::Let | VarKind::Const => {
-                        for decl in decls {
-                            if let Some(slot) = self.lexical_slot(&decl.name) {
-                                if let Some(init) = &decl.init {
-                                    self.emit_expression(init);
-                                } else {
-                                    self.emit(Opcode::LoadUndefined, vec![]);
-                                }
-                                let op = if *kind == VarKind::Const {
-                                    Opcode::DeclareConst
-                                } else {
-                                    Opcode::DeclareLet
-                                };
-                                self.emit(op, vec![slot as i64]);
-                                // DeclareLet/DeclareConst already pop the value from stack.
-                                // Unlike StoreLocal, they don't push it back.
+                }
+                VarKind::Let | VarKind::Const => {
+                    for decl in decls {
+                        if let Some(pattern) = &decl.pattern {
+                            if let Some(init) = &decl.init {
+                                self.emit_expression(init);
+                                self.emit_destructuring(pattern, kind);
                             }
+                        } else if let Some(slot) = self.lexical_slot(&decl.name) {
+                            if let Some(init) = &decl.init {
+                                self.emit_expression(init);
+                            } else {
+                                self.emit(Opcode::LoadUndefined, vec![]);
+                            }
+                            let op = if *kind == VarKind::Const {
+                                Opcode::DeclareConst
+                            } else {
+                                Opcode::DeclareLet
+                            };
+                            self.emit(op, vec![slot as i64]);
                         }
                     }
                 }
-            }
+            },
             Stmt::Break(_label, _) => {
                 if self.switch_exit_stack.last().is_some() {
                     // Inside a switch — emit Jump with placeholder, track for patching
@@ -909,20 +1006,42 @@ impl Emitter {
     // ---- Lexical scope helpers ----
 
     /// Count the number of direct `let`/`const` declarations in a list of statements
-    /// (does not recurse into nested blocks).
+    /// (does not recurse into nested blocks). Handles destructuring patterns.
     fn count_lexicals(&mut self, stmts: &[Stmt]) -> usize {
         stmts
             .iter()
             .filter(|s| matches!(s, Stmt::Var(VarKind::Let | VarKind::Const, _, _)))
             .map(|s| match s {
-                Stmt::Var(_, decls, _) => decls.len(),
+                Stmt::Var(_, decls, _) => decls
+                    .iter()
+                    .map(|d| self.count_pattern_bindings(&d.pattern))
+                    .sum(),
                 _ => 0,
             })
             .sum()
     }
 
+    /// Count the number of binding identifiers in a pattern (1 if None = simple identifier).
+    fn count_pattern_bindings(&self, pattern: &Option<Pattern>) -> usize {
+        match pattern {
+            None => 1,
+            Some(Pattern::Object(props, _)) => props
+                .iter()
+                .map(|p| self.count_pattern_bindings(&Some(p.pattern.clone())))
+                .sum(),
+            Some(Pattern::Array(items, _)) => items
+                .iter()
+                .map(|item| match item {
+                    Some(p) => self.count_pattern_bindings(&Some(p.clone())),
+                    None => 0,
+                })
+                .sum(),
+            Some(Pattern::Identifier(_, _)) => 1,
+        }
+    }
+
     /// Enter a lexical scope: register all direct `let`/`const` bindings
-    /// and assign them absolute slot indices.
+    /// (including destructured bindings) and assign them absolute slot indices.
     fn enter_lexical_scope(&mut self, stmts: &[Stmt], _count: usize) {
         let mut bindings = Vec::new();
         for stmt in stmts {
@@ -930,15 +1049,57 @@ impl Emitter {
                 && matches!(kind, VarKind::Let | VarKind::Const)
             {
                 for decl in decls {
-                    bindings.push(LexicalBinding {
-                        name: decl.name.to_string(),
-                        slot: self.lexical_slot_count + bindings.len(),
-                    });
+                    self.collect_lexical_bindings(&decl.pattern, &decl.name, &mut bindings);
                 }
             }
         }
         self.lexical_slot_count += bindings.len();
         self.lexical_scopes.push(bindings);
+    }
+
+    /// Collect all binding names from a pattern into the bindings vector.
+    /// For simple declarations (pattern is None), uses the decl name directly.
+    fn collect_lexical_bindings(
+        &self,
+        pattern: &Option<Pattern>,
+        name: &str,
+        bindings: &mut Vec<LexicalBinding>,
+    ) {
+        match pattern {
+            None => {
+                bindings.push(LexicalBinding {
+                    name: name.to_string(),
+                    slot: self.lexical_slot_count + bindings.len(),
+                });
+            }
+            Some(Pattern::Object(props, _)) => {
+                for prop in props {
+                    if let Pattern::Identifier(n, _) = &prop.pattern {
+                        bindings.push(LexicalBinding {
+                            name: n.to_string(),
+                            slot: self.lexical_slot_count + bindings.len(),
+                        });
+                    }
+                }
+            }
+            Some(Pattern::Array(items, _)) => {
+                for item in items {
+                    if let Some(Pattern::Identifier(n, _)) = item {
+                        bindings.push(LexicalBinding {
+                            name: n.to_string(),
+                            slot: self.lexical_slot_count + bindings.len(),
+                        });
+                    }
+                    // Nested patterns deferred
+                }
+            }
+            Some(Pattern::Identifier(n, _)) => {
+                bindings.push(LexicalBinding {
+                    name: n.to_string(),
+                    slot: self.lexical_slot_count + bindings.len(),
+                });
+            }
+        }
     }
 
     /// Leave the current lexical scope.

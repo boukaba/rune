@@ -3265,4 +3265,63 @@ mod instanceof_tests {
             .unwrap();
         assert_eq!(r.as_smi(), Some(9), "nested for (let) runs 9 times");
     }
+
+    #[test]
+    fn test_closure_basic_capture() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"function f() { var x = 42; return function() { return x; }; } f()()"#)
+            .unwrap();
+        assert!(r.is_smi(), "result should be Smi, got {:?}", r);
+        assert_eq!(r.as_smi(), Some(42), "basic closure capture");
+    }
+
+    #[test]
+    fn test_closure_mutation() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(
+                r#"function counter() { var c = 0; return function() { c = c + 1; return c; }; }
+               var cc = counter(); cc(); cc(); cc()"#,
+            )
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(3), "closure mutation via captured var");
+    }
+
+    #[test]
+    fn test_closure_same_storage() {
+        let mut ctx = Context::new();
+        let r = ctx.eval(
+            r#"function f() { var x = 1; var g = function() { return x; }; x = 2; return g(); } f()"#,
+        ).unwrap();
+        assert_eq!(r.as_smi(), Some(2), "f's body writes affect closure reads");
+    }
+
+    #[test]
+    fn test_closure_param_capture() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"function add(a) { return function(b) { return a + b; }; } add(2)(3)"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(5), "param capture via closure");
+    }
+
+    #[test]
+    fn test_arrow_capture() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"function f() { var x = 42; return () => x; } f()()"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(42), "arrow capture");
+    }
+
+    #[test]
+    fn test_nested_closure() {
+        let mut ctx = Context::new();
+        let r = ctx.eval(
+            r#"function f() { var x = 1; return function() { var y = 2; return function() { return x + y; }; }; }
+               f()()()"#,
+        ).unwrap();
+        assert_eq!(r.as_smi(), Some(3), "nested closures (depth 0 + depth 1)");
+    }
 }

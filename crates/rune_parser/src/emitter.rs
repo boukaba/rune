@@ -21,6 +21,13 @@ pub struct Emitter {
     lexical_scopes: Vec<Vec<LexicalBinding>>,
     /// Total lexical slots allocated in the current function.
     lexical_slot_count: usize,
+    /// Names of variables in THIS function that are captured by inner closures.
+    captured_names: Vec<String>,
+    /// How many env slots this function's env object has (0 = no env).
+    captured_env_size: usize,
+    /// Captured_names of enclosing functions, ordered closest-first.
+    /// Used by inner functions to resolve free variables via LoadCaptured(depth, slot).
+    env_scope_stack: Vec<Vec<String>>,
     loop_exit_stack: Vec<usize>,
     loop_cont_stack: Vec<usize>,
     switch_exit_stack: Vec<usize>,
@@ -45,6 +52,9 @@ impl Emitter {
             locals: Vec::new(),
             lexical_scopes: Vec::new(),
             lexical_slot_count: 0,
+            captured_names: Vec::new(),
+            captured_env_size: 0,
+            env_scope_stack: Vec::new(),
             loop_exit_stack: Vec::new(),
             loop_cont_stack: Vec::new(),
             switch_exit_stack: Vec::new(),
@@ -116,6 +126,7 @@ impl Emitter {
     /// Compile a function node into a nested BytecodeProgram and return its index.
     fn compile_function(&mut self, func: &FnNode) -> usize {
         let mut sub = Emitter::new();
+        sub.env_scope_stack = self.env_scope_stack.clone();
         sub.is_generator = func.is_generator;
         let named_offset = if let Some(name) = &func.name {
             sub.named_function = true;
@@ -165,6 +176,30 @@ impl Emitter {
                 sub.emit(Opcode::StoreLocal, vec![idx as i64]);
                 sub.emit(Opcode::Pop, vec![]);
             }
+        }
+        // --- Escape analysis: does this function contain any inner function? ---
+        // Pre-scan: collect all var declaration names so locals is complete before capture
+        let mut all_var_names: Vec<String> = Vec::new();
+        collect_var_names_stmt(&func.body, &mut all_var_names);
+        for name in &all_var_names {
+            if !sub.locals.contains(name) {
+                sub.locals.push(name.clone());
+            }
+        }
+        let has_inner = contains_inner_function_stmt(&func.body);
+        if has_inner && !sub.locals.is_empty() {
+            // Conservative approach: capture ALL local variables into the env
+            sub.captured_names = sub.locals.clone();
+            sub.captured_env_size = sub.locals.len();
+            sub.emit(Opcode::MakeEnv, vec![sub.captured_env_size as i64]);
+            // Copy each local's initial value from Frame.locals into the env slot.
+            // StoreCaptured pops the value, so NO Pop after it.
+            for i in 0..sub.captured_env_size {
+                sub.emit(Opcode::LoadLocal, vec![i as i64]);
+                sub.emit(Opcode::StoreCaptured, vec![0, i as i64]);
+            }
+            // Push captured_names onto env_scope_stack so inner functions can resolve
+            sub.env_scope_stack.push(sub.captured_names.clone());
         }
         // Emit body: for arrow expression body (Stmt::Expr), use it as return value
         let is_arrow_expr = func.name.is_none() && matches!(&func.body, Stmt::Expr(..));
@@ -323,17 +358,20 @@ impl Emitter {
         self.emit_store_binding(name, kind);
     }
 
-    /// Store a value to a binding (var → StoreLocal+Pop, let/const → DeclareLet/DeclareConst).
+    /// Store a value to a binding (var → StoreLocal/StoreCaptured+Pop, let/const → DeclareLet/DeclareConst).
     fn emit_store_binding(&mut self, name: &str, kind: &VarKind) {
         match kind {
             VarKind::Var => {
                 if !self.locals.contains(&name.to_string()) {
                     self.locals.push(name.to_string());
                 }
-                if let Some(idx) = self.local_index(name) {
+                if let Some(env_slot) = self.captured_slot(name) {
+                    // StoreCaptured pops the value — no Pop needed
+                    self.emit(Opcode::StoreCaptured, vec![0, env_slot as i64]);
+                } else if let Some(idx) = self.local_index(name) {
                     self.emit(Opcode::StoreLocal, vec![idx as i64]);
+                    self.emit(Opcode::Pop, vec![]);
                 }
-                self.emit(Opcode::Pop, vec![]);
             }
             VarKind::Let | VarKind::Const => {
                 if let Some(slot) = self.lexical_slot(name) {
@@ -524,10 +562,13 @@ impl Emitter {
                             }
                             if let Some(init) = &decl.init {
                                 self.emit_expression(init);
-                                if let Some(idx) = self.local_index(&decl.name) {
+                                if let Some(env_slot) = self.captured_slot(&decl.name) {
+                                    // StoreCaptured pops the value — no Pop needed
+                                    self.emit(Opcode::StoreCaptured, vec![0, env_slot as i64]);
+                                } else if let Some(idx) = self.local_index(&decl.name) {
                                     self.emit(Opcode::StoreLocal, vec![idx as i64]);
+                                    self.emit(Opcode::Pop, vec![]);
                                 }
-                                self.emit(Opcode::Pop, vec![]);
                             }
                         }
                     }
@@ -835,7 +876,11 @@ impl Emitter {
                 }
             }
             Expr::Identifier(name, _) => {
-                if let Some(slot) = self.lexical_slot(name) {
+                if let Some(env_slot) = self.captured_slot(name) {
+                    self.emit(Opcode::LoadCaptured, vec![0, env_slot as i64]);
+                } else if let Some((depth, slot)) = self.env_captured_slot(name) {
+                    self.emit(Opcode::LoadCaptured, vec![depth as i64, slot as i64]);
+                } else if let Some(slot) = self.lexical_slot(name) {
                     self.emit(Opcode::LoadLexical, vec![slot as i64]);
                 } else if let Some(idx) = self.local_index(name) {
                     self.emit(Opcode::LoadLocal, vec![idx as i64]);
@@ -887,10 +932,39 @@ impl Emitter {
             }
             Expr::Update(op, arg, prefix, _) => match arg.as_ref() {
                 Expr::Identifier(name, _) => {
-                    let is_prefix = if *prefix { 1 } else { 0 };
-                    if self.lexical_slot(name).is_some() {
+                    let is_pre = *prefix;
+                    if let Some(env_slot) = self.captured_slot(name) {
+                        self.emit(Opcode::LoadCaptured, vec![0, env_slot as i64]);
+                        if !is_pre {
+                            self.emit(Opcode::Dup, vec![]);
+                        }
+                        self.emit(Opcode::LoadSmi, vec![1]);
+                        let opcode = match op {
+                            UpdateOp::PlusPlus => Opcode::Add,
+                            UpdateOp::MinusMinus => Opcode::Sub,
+                        };
+                        self.emit(opcode, vec![]);
+                        self.emit(Opcode::StoreCaptured, vec![0, env_slot as i64]);
+                        if !is_pre {
+                            self.emit(Opcode::Pop, vec![]);
+                        }
+                    } else if let Some((depth, slot)) = self.env_captured_slot(name) {
+                        self.emit(Opcode::LoadCaptured, vec![depth as i64, slot as i64]);
+                        if !is_pre {
+                            self.emit(Opcode::Dup, vec![]);
+                        }
+                        self.emit(Opcode::LoadSmi, vec![1]);
+                        let opcode = match op {
+                            UpdateOp::PlusPlus => Opcode::Add,
+                            UpdateOp::MinusMinus => Opcode::Sub,
+                        };
+                        self.emit(opcode, vec![]);
+                        self.emit(Opcode::StoreCaptured, vec![depth as i64, slot as i64]);
+                        if !is_pre {
+                            self.emit(Opcode::Pop, vec![]);
+                        }
+                    } else if self.lexical_slot(name).is_some() {
                         let slot = self.lexical_slot(name).unwrap();
-                        let is_pre = *prefix;
                         self.emit(Opcode::LoadLexical, vec![slot as i64]);
                         if !is_pre {
                             self.emit(Opcode::Dup, vec![]);
@@ -910,14 +984,14 @@ impl Emitter {
                             UpdateOp::PlusPlus => Opcode::IncLocal,
                             UpdateOp::MinusMinus => Opcode::DecLocal,
                         };
-                        self.emit(opcode, vec![idx as i64, is_prefix]);
+                        self.emit(opcode, vec![idx as i64, is_pre as i64]);
                     } else {
                         let opcode = match op {
                             UpdateOp::PlusPlus => Opcode::IncGlobal,
                             UpdateOp::MinusMinus => Opcode::DecGlobal,
                         };
                         let name_idx = self.intern_string(name) as i64;
-                        self.emit(opcode, vec![name_idx, is_prefix]);
+                        self.emit(opcode, vec![name_idx, is_pre as i64]);
                     }
                 }
                 _ => {
@@ -931,7 +1005,11 @@ impl Emitter {
                     match lhs.as_ref() {
                         Expr::Identifier(name, _) => {
                             self.emit_expression(rhs);
-                            if let Some(idx) = self.local_index(name) {
+                            if let Some(env_slot) = self.captured_slot(name) {
+                                self.emit(Opcode::StoreCaptured, vec![0, env_slot as i64]);
+                            } else if let Some((depth, slot)) = self.env_captured_slot(name) {
+                                self.emit(Opcode::StoreCaptured, vec![depth as i64, slot as i64]);
+                            } else if let Some(idx) = self.local_index(name) {
                                 self.emit(Opcode::StoreLocal, vec![idx as i64]);
                             } else {
                                 let name_idx = self.intern_string(name) as i64;
@@ -1115,7 +1193,11 @@ impl Emitter {
             Expr::Assign(target, value, _) => match target.as_ref() {
                 Expr::Identifier(name, _) => {
                     self.emit_expression(value);
-                    if let Some(slot) = self.lexical_slot(name) {
+                    if let Some(env_slot) = self.captured_slot(name) {
+                        self.emit(Opcode::StoreCaptured, vec![0, env_slot as i64]);
+                    } else if let Some((depth, slot)) = self.env_captured_slot(name) {
+                        self.emit(Opcode::StoreCaptured, vec![depth as i64, slot as i64]);
+                    } else if let Some(slot) = self.lexical_slot(name) {
                         self.emit(Opcode::StoreLexical, vec![slot as i64]);
                     } else if let Some(idx) = self.local_index(name) {
                         self.emit(Opcode::StoreLocal, vec![idx as i64]);
@@ -1144,7 +1226,17 @@ impl Emitter {
                 let bin_opcode = compound_binary_opcode(*op);
                 match target.as_ref() {
                     Expr::Identifier(name, _) => {
-                        if let Some(slot) = self.lexical_slot(name) {
+                        if let Some(env_slot) = self.captured_slot(name) {
+                            self.emit(Opcode::LoadCaptured, vec![0, env_slot as i64]);
+                            self.emit_expression(rhs);
+                            self.emit(bin_opcode, vec![]);
+                            self.emit(Opcode::StoreCaptured, vec![0, env_slot as i64]);
+                        } else if let Some((depth, slot)) = self.env_captured_slot(name) {
+                            self.emit(Opcode::LoadCaptured, vec![depth as i64, slot as i64]);
+                            self.emit_expression(rhs);
+                            self.emit(bin_opcode, vec![]);
+                            self.emit(Opcode::StoreCaptured, vec![depth as i64, slot as i64]);
+                        } else if let Some(slot) = self.lexical_slot(name) {
                             self.emit(Opcode::LoadLexical, vec![slot as i64]);
                             self.emit_expression(rhs);
                             self.emit(bin_opcode, vec![]);
@@ -1400,6 +1492,24 @@ impl Emitter {
         self.locals.iter().position(|l| l == name)
     }
 
+    /// Return the env slot index if `name` is captured by THIS function.
+    fn captured_slot(&self, name: &str) -> Option<usize> {
+        self.captured_names.iter().position(|n| n == name)
+    }
+
+    /// Return (depth, slot) if `name` is captured by an ANCESTOR function's env.
+    /// depth 0 = parent, 1 = grandparent, etc.
+    fn env_captured_slot(&self, name: &str) -> Option<(usize, usize)> {
+        // Walk from closest ancestor (last in vec) to farthest (first in vec)
+        let len = self.env_scope_stack.len();
+        for (i, names) in self.env_scope_stack.iter().enumerate().rev() {
+            if let Some(slot) = names.iter().position(|n| n == name) {
+                return Some((len - 1 - i, slot));
+            }
+        }
+        None
+    }
+
     pub fn into_bytecode(self) -> BytecodeProgram {
         let mut instructions = Vec::new();
         if self.is_generator {
@@ -1410,9 +1520,159 @@ impl Emitter {
         program.named_function = self.named_function;
         program.is_generator = self.is_generator;
         program.local_names = self.locals;
+        program.captured_env_size = self.captured_env_size;
         program.float_pool = self.float_pool;
         program.assign_ic_indices();
         program
+    }
+}
+
+/// Recursively check if a statement contains any inner function or arrow.
+fn contains_inner_function_stmt(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Expr(expr, _) => contains_inner_function_expr(expr),
+        Stmt::Return(Some(expr), _) => contains_inner_function_expr(expr),
+        Stmt::Throw(expr, _) => contains_inner_function_expr(expr),
+        Stmt::Block(stmts, _) => stmts.iter().any(contains_inner_function_stmt),
+        Stmt::Var(_, decls, _) => decls.iter().any(|d| {
+            d.init
+                .as_ref()
+                .map_or(false, |e| contains_inner_function_expr(e))
+        }),
+        Stmt::If(cond, then, else_, _) => {
+            contains_inner_function_expr(cond)
+                || contains_inner_function_stmt(then)
+                || else_.as_deref().map_or(false, contains_inner_function_stmt)
+        }
+        Stmt::While(cond, body, _) => {
+            contains_inner_function_expr(cond) || contains_inner_function_stmt(body)
+        }
+        Stmt::DoWhile(cond, body, _) => {
+            contains_inner_function_expr(cond) || contains_inner_function_stmt(body)
+        }
+        Stmt::For(init, cond, update, body, _) => {
+            init.as_deref().map_or(false, contains_inner_function_stmt)
+                || cond.as_deref().map_or(false, contains_inner_function_expr)
+                || update
+                    .as_deref()
+                    .map_or(false, contains_inner_function_expr)
+                || contains_inner_function_stmt(body)
+        }
+        Stmt::ForIn(_, _, body, _) => contains_inner_function_stmt(body),
+        Stmt::Switch(target, cases, default_body, _) => {
+            contains_inner_function_expr(target)
+                || cases.iter().any(|c| {
+                    contains_inner_function_expr(&c.test)
+                        || c.body.iter().any(contains_inner_function_stmt)
+                })
+                || default_body.as_deref().map_or(false, |stmts| {
+                    stmts.iter().any(contains_inner_function_stmt)
+                })
+        }
+        Stmt::Try(body, catch, finally, _) => {
+            body.iter().any(contains_inner_function_stmt)
+                || catch
+                    .as_ref()
+                    .map_or(false, |c| c.body.iter().any(contains_inner_function_stmt))
+                || finally.as_deref().map_or(false, |stmts| {
+                    stmts.iter().any(contains_inner_function_stmt)
+                })
+        }
+        Stmt::Function(_, _) => true,
+        Stmt::Break(_, _) | Stmt::Continue(_, _) | Stmt::Return(None, _) | Stmt::Empty(_) => false,
+    }
+}
+
+/// Recursively check if an expression contains any inner function or arrow.
+fn contains_inner_function_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Function(_, _) => true,
+        Expr::Call(callee, args, _) => {
+            contains_inner_function_expr(callee)
+                || args.iter().any(|a| contains_inner_function_expr(&a.expr))
+        }
+        Expr::New(callee, args, _) => {
+            contains_inner_function_expr(callee)
+                || args.iter().any(|a| contains_inner_function_expr(&a.expr))
+        }
+        Expr::Member(obj, prop, _, _) => {
+            contains_inner_function_expr(obj) || contains_inner_function_expr(prop)
+        }
+        Expr::Unary(_, arg, _) => contains_inner_function_expr(arg),
+        Expr::Update(_, arg, _, _) => contains_inner_function_expr(arg),
+        Expr::Binary(_, lhs, rhs, _) | Expr::CompoundAssign(_, lhs, rhs, _) => {
+            contains_inner_function_expr(lhs) || contains_inner_function_expr(rhs)
+        }
+        Expr::Conditional(cond, then, else_, _) => {
+            contains_inner_function_expr(cond)
+                || contains_inner_function_expr(then)
+                || contains_inner_function_expr(else_)
+        }
+        Expr::Array(elems, _) => elems.iter().any(|e| contains_inner_function_expr(&e.expr)),
+        Expr::Object(props, _) => props.iter().any(|p| {
+            let key_fn = match &p.key {
+                PropKey::Computed(e) => contains_inner_function_expr(e),
+                _ => false,
+            };
+            key_fn || contains_inner_function_expr(&p.value)
+        }),
+        Expr::Template { exprs, .. } => exprs.iter().any(contains_inner_function_expr),
+        Expr::Identifier(_, _)
+        | Expr::Number(_, _)
+        | Expr::String(_, _)
+        | Expr::Boolean(_, _)
+        | Expr::Null(_)
+        | Expr::Undefined(_)
+        | Expr::This(_)
+        | Expr::Assign(_, _, _)
+        | Expr::Yield(_, _) => false,
+    }
+}
+
+/// Collect all `var` declaration names from a statement tree.
+fn collect_var_names_stmt(stmt: &Stmt, names: &mut Vec<String>) {
+    match stmt {
+        Stmt::Var(VarKind::Var, decls, _) => {
+            for d in decls {
+                if !names.contains(&d.name.to_string()) {
+                    names.push(d.name.to_string());
+                }
+            }
+        }
+        Stmt::Block(stmts, _) => stmts.iter().for_each(|s| collect_var_names_stmt(s, names)),
+        Stmt::If(_, then, else_, _) => {
+            collect_var_names_stmt(then, names);
+            if let Some(s) = else_ {
+                collect_var_names_stmt(s, names);
+            }
+        }
+        Stmt::While(_, body, _) => collect_var_names_stmt(body, names),
+        Stmt::DoWhile(_, body, _) => collect_var_names_stmt(body, names),
+        Stmt::For(init, _, _, body, _) => {
+            if let Some(s) = init {
+                collect_var_names_stmt(s, names);
+            }
+            collect_var_names_stmt(body, names);
+        }
+        Stmt::ForIn(_, _, body, _) => collect_var_names_stmt(body, names),
+        Stmt::Switch(_, cases, default, _) => {
+            for c in cases {
+                c.body.iter().for_each(|s| collect_var_names_stmt(s, names));
+            }
+            if let Some(stmts) = default {
+                stmts.iter().for_each(|s| collect_var_names_stmt(s, names));
+            }
+        }
+        Stmt::Try(body, catch, finally, _) => {
+            body.iter().for_each(|s| collect_var_names_stmt(s, names));
+            if let Some(c) = catch {
+                c.body.iter().for_each(|s| collect_var_names_stmt(s, names));
+            }
+            if let Some(stmts) = finally {
+                stmts.iter().for_each(|s| collect_var_names_stmt(s, names));
+            }
+        }
+        _ => {}
     }
 }
 

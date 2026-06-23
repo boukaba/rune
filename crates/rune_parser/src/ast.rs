@@ -8,6 +8,13 @@ pub struct Span {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct ArrayElement {
+    pub expr: Expr,
+    pub is_spread: bool,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
     Number(f64, Span),
     String(Box<str>, Span),
@@ -15,7 +22,7 @@ pub enum Expr {
     Null(Span),
     Undefined(Span),
     Identifier(Box<str>, Span),
-    Array(Vec<Expr>, Span),
+    Array(Vec<ArrayElement>, Span),
     Object(Vec<Property>, Span),
     Unary(UnaryOp, Box<Expr>, Span),
     Binary(BinaryOp, Box<Expr>, Box<Expr>, Span),

@@ -987,6 +987,47 @@ impl Vm {
                     self.push(Value::from_heap_ptr(arr as *mut u8));
                     self.frames[fi].pc = pc + 1;
                 }
+                Opcode::ArrayPush => {
+                    let val = self.pop();
+                    let arr_val = self.pop();
+                    if let Some(heap) = arr_val.heap_ptr() {
+                        let arr_ptr = heap as *mut RuneArray;
+                        unsafe {
+                            RuneArray::push(gc, arr_ptr, val);
+                        }
+                        self.push(arr_val);
+                    } else {
+                        self.push(make_error_object(gc, "TypeError", "ArrayPush on non-array"));
+                        return Exit::Throw(self.pop());
+                    }
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::ArrayExtend => {
+                    let src_val = self.pop();
+                    let tgt_val = self.pop();
+                    if let (Some(src_heap), Some(tgt_heap)) =
+                        (src_val.heap_ptr(), tgt_val.heap_ptr())
+                    {
+                        let src_arr = src_heap as *mut RuneArray;
+                        let tgt_arr = tgt_heap as *mut RuneArray;
+                        let src_len = unsafe { RuneArray::length(src_arr) };
+                        for i in 0..src_len {
+                            let elem = unsafe { RuneArray::get_element(src_arr, i as usize) };
+                            unsafe {
+                                RuneArray::push(gc, tgt_arr, elem);
+                            }
+                        }
+                        self.push(tgt_val);
+                    } else {
+                        self.push(make_error_object(
+                            gc,
+                            "TypeError",
+                            "ArrayExtend on non-array",
+                        ));
+                        return Exit::Throw(self.pop());
+                    }
+                    self.frames[fi].pc = pc + 1;
+                }
                 Opcode::ForInInit => {
                     let obj = self.pop();
                     if obj.is_null() || obj.is_undefined() {

@@ -1061,7 +1061,21 @@ impl Parser {
                 self.advance();
                 let mut elems = Vec::new();
                 while self.tok.kind != TokenKind::RBracket && self.tok.kind != TokenKind::Eof {
-                    elems.push(self.parse_expr(0));
+                    let estart = self.span();
+                    let is_spread = self.tok.kind == TokenKind::Ellipsis;
+                    if is_spread {
+                        self.advance();
+                    }
+                    let expr = self.parse_expr(0);
+                    let eend = self.span();
+                    elems.push(ArrayElement {
+                        expr,
+                        is_spread,
+                        span: Span {
+                            start: estart.start,
+                            end: eend.end,
+                        },
+                    });
                     if self.tok.kind == TokenKind::Comma {
                         self.advance();
                     }

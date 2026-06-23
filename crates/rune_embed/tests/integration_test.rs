@@ -2498,4 +2498,55 @@ mod instanceof_tests {
             "typeof args should be a string (heap object)"
         );
     }
+
+    // ---- 14B-3: Array spread ---
+
+    #[test]
+    fn test_array_spread_basic() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var a = [1, 2]; var b = [...a, 3]; b.length"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(3), "b should have 3 elements");
+    }
+
+    #[test]
+    fn test_array_spread_values() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var a = [1, 2]; var b = [...a, 3]; b[0] + b[1] + b[2]"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(6), "1 + 2 + 3 should be 6");
+    }
+
+    #[test]
+    fn test_array_spread_multiple() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var a = [1, 2]; var b = [3, 4]; var c = [...a, ...b]; c.length"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(4), "c should have 4 elements");
+    }
+
+    #[test]
+    fn test_array_spread_mixed() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var a = [2, 3]; var b = [1, ...a, 4]; b[0] + b[1] + b[2] + b[3]"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(10), "1 + 2 + 3 + 4 should be 10");
+    }
+
+    #[test]
+    fn test_array_spread_empty() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"var a = []; var b = [1, ...a, 2]; b.length"#)
+            .unwrap();
+        assert_eq!(
+            r.as_smi(),
+            Some(2),
+            "spreading empty array should be a no-op"
+        );
+    }
 }

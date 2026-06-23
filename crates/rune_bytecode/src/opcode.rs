@@ -51,6 +51,8 @@ pub enum Opcode {
     // Objects
     NewObject,
     NewArray,
+    ArrayPush,
+    ArrayExtend,
     LoadProperty,
     StoreProperty,
     DeleteProperty,

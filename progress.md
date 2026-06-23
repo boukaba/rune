@@ -772,6 +772,7 @@
 | **14A-0: Boolean type (sentinel heap pointers)** | 🔴 P0 | ✅ done | `0x04` = `false`, `0x06` = `true`. `Value::boolean()`, `is_boolean()`, `to_boolean()`. Updated `is_heap_object()` to exclude new sentinels. `TypeOf` → `"boolean"`. `LoadBoolean` → `Value::boolean()`. All comparison/relational opcodes (`Not`, `Eq`, `Ne`, `StrictEq`, `StrictNe`, `Lt`, `Gt`, `Le`, `Ge`, `In`, `Instanceof`, `DeleteProperty`) return `Value::boolean()` instead of `Smi(1)/Smi(0)`. `value_to_js_string` prints `"true"`/`"false"`. `array_is_array` returns booleans. JIT `LoadBoolean` fixed (was emitting wrong raw values `7`/`3` instead of `6`/`4`). JIT `JumpIfFalse` updated to check false sentinel. 21 tests updated from `as_smi() == Some(1/0)` to `to_boolean()`. **Also fixes** latent JIT bug: `LoadBoolean` emitted `Smi(3)` for true (raw `7`) and `Smi(1)` for false (raw `3`) while interpreter used `Smi(1)`/`Smi(0)`. |
 | **14A: Destructuring** | 🔴 P0 | ✅ done | Object destructuring (`var {a, b}`, `let {a, b}`, `const {a, b}`, rename `{a: x}`). Array destructuring (`var [a, b]`). Nested destructuring (`{a: {b, c}}`, `[a, [b, c]]`). Default values (`{a = 99}`, `[a = 99]`) with `=== undefined` check per §8.3.4 (not falsy — `0`, `false`, `""` do NOT trigger). Null/undefined rhs throws TypeError via `ThrowIfNullish` opcode — error is now a proper TypeError object (`e.name === "TypeError"`, `e.message === "Cannot destructure..."`). Function param destructuring (`function f({a, b}) { ... }`) with object, array, nested, defaults, and mixed params. `parse_binding_pattern()` with `Pattern` enum + `Pattern::Default` wrapper. Emitter: `emit_destructuring()` recursive pattern walk. 189 integration tests. **Remaining gaps (deferred):** spread/rest (needs 14B), computed keys (needs 14C), destructuring assignment expressions, for-of destructuring (needs Sprint 16). |
 | **14B-1: Rest parameter** | 🔴 P0 | ✅ done | `function f(...args) {}`. New `Ellipsis` token kind, `FnNode.rest_param` field, `MakeRestArray` opcode pushes array of overflow args at function entry. Works with zero args, mixed with regular params, and arrays. |
+| **14B-3: Array spread** | 🔴 P0 | ✅ done | `[...arr]` in array literals. New `ArrayElement` AST struct with `is_spread: bool` flag. `ArrayPush` and `ArrayExtend` opcodes. Parser detects `...` before array elements. Emitter: `NewArray 0` → push/extend each element. VM: push/extend handlers. Works: basic, mixed with literals, multiple spreads, empty spreads. |
 | **14C: Object literal extensions** | 🟠 P1 | pending | Shorthand `{ a, b }`, method shorthand `{ foo() {} }`, computed keys `{ [k]: v }`. §14.6. |
 | **14D: Template literal substitutions** | 🟠 P1 | pending | Rewrite `scan_template` in lexer.rs to parse `${...}`. §12.2.9.6. |
 | **14E: Arrow `arguments` + per-iteration `let`** | 🟠 P1 | pending | Materialize `arguments` in non-arrow function prologue. Per-iteration `let` binding in `for (let i …)` loops. §10.4.4, §14.7.4.2. |
@@ -779,9 +780,9 @@
 | **14G: Comma operator** | 🟢 P2 | pending | `(a, b)` returns `b`. §13.16. |
 | **14H: V8 baseline comparison** | 🟢 P2 | pending | `run_v8_baseline.sh` + Rune-vs-V8 columns in `progress.md`. |
 
-### Test Results — Sprint 14A / 14B-1
+### Test Results — Sprint 14A / 14B-1 / 14B-3
 - **All tests pass** (fmt + clippy + test green)
-- **327 tests passing** (194 integration + 29 VM + 22 JIT baseline + 25 interpreter + 11 bytecode/builtins + 6 core + 5 parser + 5 emitter + 2 spike)
+- **332 tests passing** (199 integration + 29 VM + 22 JIT baseline + 25 interpreter + 11 bytecode/builtins + 6 core + 5 parser + 5 emitter + 2 spike)
 - `typeof true === "boolean"` ✅
 - `print(true) === "true"` ✅ (was `"1"`)
 - `print(false) === "false"` ✅

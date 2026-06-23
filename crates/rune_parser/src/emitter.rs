@@ -1020,10 +1020,16 @@ impl Emitter {
                 }
             }
             Expr::Array(elems, _) => {
+                self.emit(Opcode::NewArray, vec![0]);
                 for elem in elems {
-                    self.emit_expression(elem);
+                    if elem.is_spread {
+                        self.emit_expression(&elem.expr);
+                        self.emit(Opcode::ArrayExtend, vec![]);
+                    } else {
+                        self.emit_expression(&elem.expr);
+                        self.emit(Opcode::ArrayPush, vec![]);
+                    }
                 }
-                self.emit(Opcode::NewArray, vec![elems.len() as i64]);
             }
             Expr::Object(props, _) => {
                 let count = props.len() as i64;

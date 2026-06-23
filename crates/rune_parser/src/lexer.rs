@@ -103,6 +103,7 @@ pub enum TokenKind {
     OrAssign,         // ||=
     QuestionQuestion, // ??
     NullishAssign,    // ??=
+    Ellipsis,         // ...
     // Misc
     Eof,
     Illegal,
@@ -493,7 +494,7 @@ impl Lexer {
                 if self.peek() == Some('.') && self.peek_next() == Some('.') {
                     self.advance();
                     self.advance();
-                    Token::new(TokenKind::Dot, self.start, self.pos, "...".into())
+                    Token::new(TokenKind::Ellipsis, self.start, self.pos, "...".into())
                 } else {
                     Token::new(TokenKind::Dot, self.start, self.pos, ".".into())
                 }

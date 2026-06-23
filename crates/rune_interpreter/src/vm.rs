@@ -1727,6 +1727,34 @@ impl Vm {
                 }
 
                 // ---- Functions ----
+                Opcode::MakeRestArray => {
+                    let regular_count = instr.operands[0] as usize;
+                    let named_offset = if unsafe { (*self.frames[fi].prog).named_function } {
+                        1
+                    } else {
+                        0
+                    };
+                    let rest_start = named_offset + regular_count;
+                    let rest_end = self.frames[fi].locals.len();
+                    let mut elems: Vec<Value> = Vec::new();
+                    for i in rest_start..rest_end {
+                        elems.push(self.frames[fi].locals[i]);
+                    }
+                    let arr = RuneArray::allocate(gc, &elems);
+                    unsafe {
+                        let ptr = arr as *mut u8;
+                        let shape_ptr = ptr.add(8) as *mut *const Shape;
+                        *shape_ptr = *DENSE_ARRAY_SHAPE as *const Shape;
+                        let proto_ptr = ptr.add(24) as *mut *mut u8;
+                        if self.array_prototype.is_heap_object()
+                            && let Some(proto) = self.array_prototype.heap_ptr()
+                        {
+                            *proto_ptr = proto;
+                        }
+                    }
+                    self.push(Value::from_heap_ptr(arr as *mut u8));
+                    self.frames[fi].pc = pc + 1;
+                }
                 Opcode::MakeFunction => {
                     let func_idx = instr.operands[0] as u64;
                     let is_arrow = instr.operands.get(1).copied().unwrap_or(0) != 0;

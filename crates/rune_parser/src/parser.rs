@@ -141,7 +141,19 @@ impl Parser {
     ) -> FnNode {
         self.expect(TokenKind::LParen);
         let mut params = Vec::new();
+        let mut rest_param = None;
         while self.tok.kind != TokenKind::RParen && self.tok.kind != TokenKind::Eof {
+            if self.tok.kind == TokenKind::Ellipsis {
+                self.advance();
+                if self.tok.kind == TokenKind::Identifier {
+                    let t = self.tok.clone();
+                    self.advance();
+                    rest_param = Some(t.value.into_boxed_str());
+                    break;
+                }
+                self.error("Expected parameter name after ...".into());
+                break;
+            }
             if self.tok.kind == TokenKind::Identifier {
                 let t = self.tok.clone();
                 self.advance();
@@ -171,6 +183,7 @@ impl Parser {
         FnNode {
             name,
             params,
+            rest_param,
             body,
             is_generator,
             is_async,
@@ -1348,6 +1361,7 @@ impl Parser {
             Box::new(FnNode {
                 name: None,
                 params,
+                rest_param: None,
                 body,
                 is_generator: false,
                 is_async: false,

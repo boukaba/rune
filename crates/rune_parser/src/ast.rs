@@ -105,6 +105,7 @@ pub enum BinaryOp {
 pub struct FnNode {
     pub name: Option<Box<str>>,
     pub params: Vec<Pattern>,
+    pub rest_param: Option<Box<str>>,
     pub body: Stmt,
     pub is_generator: bool,
     pub is_async: bool,

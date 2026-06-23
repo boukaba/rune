@@ -72,6 +72,7 @@ pub enum Opcode {
     Call,
     New,
     Return,
+    MakeRestArray,
     // Generators
     Yield,
     YieldStar,

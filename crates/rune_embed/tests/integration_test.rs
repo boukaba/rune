@@ -2430,4 +2430,72 @@ mod instanceof_tests {
         let r = ctx.eval(r#"var [a] = null"#);
         assert!(r.is_err(), "[a] = null should throw TypeError");
     }
+
+    // ── Spread / rest (14B) ─────────────────────────────────────────────
+
+    // 14B-1: Rest parameter
+
+    #[test]
+    fn test_rest_param_basic() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"function f(...args) { return args.length; }; f(1, 2, 3)"#)
+            .unwrap();
+        assert_eq!(
+            r.as_smi(),
+            Some(3),
+            "rest param should capture all arguments"
+        );
+    }
+
+    #[test]
+    fn test_rest_param_empty() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"function f(...args) { return args.length; }; f()"#)
+            .unwrap();
+        assert_eq!(
+            r.as_smi(),
+            Some(0),
+            "rest param should be empty for no args"
+        );
+    }
+
+    #[test]
+    fn test_rest_param_after_regular() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"function f(a, ...rest) { return rest.length; }; f(1, 2, 3, 4)"#)
+            .unwrap();
+        assert_eq!(
+            r.as_smi(),
+            Some(3),
+            "rest should capture args after regular params"
+        );
+    }
+
+    #[test]
+    fn test_rest_param_access_elements() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"function f(...args) { return args[0] + args[1]; }; f(10, 20)"#)
+            .unwrap();
+        assert_eq!(
+            r.as_smi(),
+            Some(30),
+            "rest param elements should be accessible by index"
+        );
+    }
+
+    #[test]
+    fn test_rest_param_is_array() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(r#"function f(...args) { return typeof args; }; f(42)"#)
+            .unwrap();
+        assert!(
+            r.is_heap_object(),
+            "typeof args should be a string (heap object)"
+        );
+    }
 }

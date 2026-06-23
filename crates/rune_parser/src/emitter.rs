@@ -124,18 +124,34 @@ impl Emitter {
         } else {
             0
         };
+        // First pass: register all param locals (placeholders for patterns)
+        for param in &func.params {
+            match param {
+                Pattern::Identifier(name, _, _) => sub.locals.push(name.to_string()),
+                _ => sub.locals.push("_destructure".to_string()),
+            }
+        }
+        // Register rest param and emit MakeRestArray BEFORE destructuring
+        // so MakeRestArray reads the original overflow args (not yet overwritten)
+        if let Some(rest_name) = &func.rest_param {
+            sub.locals.push(rest_name.to_string());
+            sub.emit(Opcode::MakeRestArray, vec![func.params.len() as i64]);
+            if let Some(idx) = sub.local_index(rest_name) {
+                sub.emit(Opcode::StoreLocal, vec![idx as i64]);
+                sub.emit(Opcode::Pop, vec![]);
+            }
+        }
+        // Second pass: emit destructuring/default code for regular params
         for (i, param) in func.params.iter().enumerate() {
             let param_idx = named_offset + i;
             match param {
                 Pattern::Identifier(name, _, default) => {
-                    sub.locals.push(name.to_string());
                     if default.is_some() {
                         sub.emit(Opcode::LoadLocal, vec![param_idx as i64]);
                         sub.emit_store_with_default(name.as_ref(), &VarKind::Var, default);
                     }
                 }
                 _ => {
-                    sub.locals.push("_destructure".to_string());
                     sub.emit(Opcode::LoadLocal, vec![param_idx as i64]);
                     sub.emit_destructuring(param, &VarKind::Var);
                 }

@@ -1109,12 +1109,14 @@ append delta to cache → future runs use cached delta
 |---|---|---|---|---|
 | **5g** | rkyv bytecode snapshots (zero-copy, skip parse/emit) | 1d | 🟠 P1 | ✅ Done | Source-level cache: `--snapshot` saves to `.rune-cache`, load on next run. First run 340ms → cached 50ms (6.8× faster). rkyv dep added (Archive derive pending). |
 | **5a** | Fix trace compiler Add/Sub/Mul SIGBUS | 0.5d | 🔴 P0 | ✅ Done | Moved JIT value stack from `sp` to VM heap memory (`JitVmState::jit_stack`). All AArch64 trace tests pass. |
-| **5b** | Full function AOT compiler (bytecode→native for all opcodes) | 3d | 🔴 P0 | ✅ Done | x86-64 Smi-only baseline JIT + AArch64 function baseline JIT (`Aarch64CodeGen`). Both compile all JIT-compatible functions; blobs persisted in `AfpcCache::compiled_funcs`. Full opcode coverage remains future work. |
+| **5b** | Full function AOT compiler (bytecode→native for all opcodes) | 3d | 🔴 P0 | 🟡 In progress | AArch64 + x86-64 baseline JIT covers 19/61 opcodes (Smi arithmetic, comparison, branches, locals). Missing: floats, strings, property access, calls, bitwise ops. |
 | **5c** | rkyv cache format: serialize shapes + compiled code + IC + strings | 2d | 🔴 P0 | ✅ Done | `AfpcCache` serializes bytecode, shape table, IC table, and native code blobs. Shape IDs made content-addressed/stable. |
 | **5d** | Cache loader: mmap → validate shape IDs → install entry points | 1d | 🔴 P0 | ✅ Done | `InstalledNativeCode::from_cache` mmap's function blobs into RX memory; `Context::install_native_code` maps func_idx → entry pointer; `MakeFunction` installs cached JIT entry on function creation. |
 | **5e** | Delta JIT: shape miss → record → compile delta → append cache | 2d | 🟠 P1 | ⬜ New |
 | **5f** | CLI `--cache` flag: auto-save on exit, auto-load on start | 1d | 🟠 P1 | ✅ Done | CLI `--cache <path>` / `--cache=<path>` first-run compiles, AOT-compiles functions, executes, and saves cache; subsequent runs restore shapes/ICs/native code and execute cached bytecode. |
-| **5g** | rkyv bytecode snapshots (zero-copy load, skip parse/emit) | 1d | 🟠 P1 | ✅ Done | Binary rkyv bytecode cache implemented in `rune_embed::afpc`; CLI `--cache` loads and executes cached bytecode. |
+| **5j** | AArch64 trace compiler wired to loop execution | 1d | 🔴 P0 | ✅ Done | Hot loops (>50 iterations) auto-compile to native via Aarch64CodeGen. Trace records operands, remaps branches (back-edge→0, exit→return). Compiled traces execute natively on subsequent back-edges, fully bypassing interpreter dispatch for the loop body. |
+| **5k** | JIT opcode coverage expansion (Smi comparison ops) | 0.5d | 🟠 P1 | ✅ Done | Added Gt, Le, Ge, StrictEq to both backends (19/61 opcodes). Fixed AArch64 CSET encoding (CSEL→CSINC) and MOVK lsl shift. Added `MIN_JIT_FUNCTION_SIZE` threshold (skip JIT for <20-instruction functions). |
+| **5l** | Remaining JIT opcodes (floats, property access, calls, bitwise) | 2d | 🟠 P1 | ⬜ New | Next priority: LoadFloat64, LoadPropertyIC, StoreProperty, Call, bitwise ops (Shl/Shr/BitAnd/BitOr/BitXor). |
 | **5h** | Benchmark: first-run vs cached vs V8, 100/1K/10K iterations | 1d | 🟠 P1 | ⬜ New |
 | **5i** | Integration tests: cache round-trip, delta correctness, deopt recovery | 1d | 🟠 P1 | 🟡 In progress | AFPC round-trip test added; delta/deopt tests deferred to Delta JIT. |
 
@@ -1138,10 +1140,12 @@ Tagged `v0.0.1` at `0067e41`. Honest positioning: NOT FOR PRODUCTION USE.
 - Syntax: destructuring (object/array/nested/rest/defaults), spread/rest, template literals with substitutions, arrow functions, default params, comma operator, delete void typeof (Sprint 14)
 - IC hardening: LoadPropertyIC → SIDT fused check, StorePropertyIC, get-by-value IC, proto chain IC, LoadPropertyIC shape-installing, IC miss stats, ~2.3× poly speedup (Sprint 15.5)
 - AFPC: rkyv binary bytecode cache, CLI --cache flag, shape/IC table persistence, x86-64 + AArch64 function baseline JIT with native code mmap on load, 13.5× compile speedup (Sprint 16)
-- AArch64 function AOT: `Aarch64CodeGen` matches x86-64 Smi-only opcode subset (LoadSmi, Add, Sub, Mul, Lt, LoadLocal, StoreLocal, Jump/JumpIfFalse, IncLocal/DecLocal, Pop, Dup)
+- AArch64 function AOT + trace compiler: `Aarch64CodeGen` covers 19/61 opcodes (Smi arithmetic + comparison + branches + locals). Hot loops auto-compile to native at >50 iterations and execute directly, bypassing interpreter dispatch.
+- JIT: 19/61 opcodes covered. Skipped for tiny functions (<20 instrs). Both x86-64 and AArch64 backends functional.
+- Bug fixes: P0 (AArch64 trace SIGBUS), P7 (IC stats), P10 (JIT skip tiny), P12 (trace execution), P13 (Smi display), MOVK lsl fix, CSET CSINC fix.
 - Test count: 297 integration → 424 total (297 integration + 127 unit/doctest)
 
-**Gaps (documented):** No standard library, optimizing JIT (full opcode coverage), modules, classes, async/await. 5–230× slower than V8 on hot loops. JIT covers 15/61 opcodes (Smi-only).
+**Gaps (documented):** No standard library, optimizing JIT (remaining 42/61 opcodes), modules, classes, async/await. 5–230× slower than V8 on hot loops. JIT covers 19/61 opcodes (Smi arithmetic + comparison; missing floats, property access, calls).
 
 ## Global Testing Strategy
 

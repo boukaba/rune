@@ -1290,8 +1290,10 @@ impl Vm {
                                     if tag == TAG_OBJECT {
                                         let shape =
                                             unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
-                                        let ck = ic_cache_key(shape.id, raw_key);
-                                        if let Some(entry) = self.ics[ic_idx].entries.get(&ck) {
+                                        let (shape_id, key_hash) = ic_cache_key(shape.id, raw_key);
+                                        if let Some(entry) =
+                                            self.ics[ic_idx].get(shape_id, key_hash)
+                                        {
                                             self.ic_stats.hits += 1;
                                             // Hot-path specialization: after 8 hits, patch
                                             // LoadProperty → LoadPropertyIC for shape-guarded access.
@@ -1313,7 +1315,7 @@ impl Vm {
                                                         entry.offset as i64,
                                                         entry.proto_depth as i64,
                                                     ]);
-                                                    self.ic_entries[ic_idx] = *entry;
+                                                    self.ic_entries[ic_idx] = entry;
                                                 }
                                             }
                                             let val = if entry.is_own {
@@ -1346,9 +1348,11 @@ impl Vm {
                                             continue;
                                         }
                                     } else if tag == TAG_ARRAY {
-                                        // Array IC hit: offset is element index
-                                        let ck = ic_cache_key(DENSE_ARRAY_SHAPE.id, raw_key);
-                                        if let Some(entry) = self.ics[ic_idx].entries.get(&ck) {
+                                        let (shape_id, key_hash) =
+                                            ic_cache_key(DENSE_ARRAY_SHAPE.id, raw_key);
+                                        if let Some(entry) =
+                                            self.ics[ic_idx].get(shape_id, key_hash)
+                                        {
                                             self.ic_stats.hits += 1;
                                             let len =
                                                 unsafe { RuneArray::length(ptr as *mut RuneArray) };
@@ -3164,11 +3168,12 @@ fn load_property_recursive_ic(
         if tag == TAG_OBJECT {
             if let Some(key) = value_to_prop_key(raw_key) {
                 let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
-                let ck = ic_cache_key(shape.id, raw_key);
+                let (shape_id, key_hash) = ic_cache_key(shape.id, raw_key);
                 if let Some(offset) = shape.lookup(&key) {
                     // Own property
-                    ics[ic_idx].entries.insert(
-                        ck,
+                    ics[ic_idx].insert(
+                        shape_id,
+                        key_hash,
                         IcEntry {
                             offset,
                             is_own: true,
@@ -3190,8 +3195,9 @@ fn load_property_recursive_ic(
                         }
                         let next_shape = unsafe { JSObject::shape_ptr(next as *mut JSObject) };
                         if let Some(offset) = next_shape.lookup(&key) {
-                            ics[ic_idx].entries.insert(
-                                ck,
+                            ics[ic_idx].insert(
+                                shape_id,
+                                key_hash,
                                 IcEntry {
                                     offset,
                                     is_own: false,
@@ -3207,9 +3213,10 @@ fn load_property_recursive_ic(
         } else if tag == TAG_ARRAY {
             // Dense array IC: numeric keys cache element index directly
             if let Some(index) = value_to_array_index(raw_key) {
-                let ck = ic_cache_key(DENSE_ARRAY_SHAPE.id, raw_key);
-                ics[ic_idx].entries.insert(
-                    ck,
+                let (shape_id, key_hash) = ic_cache_key(DENSE_ARRAY_SHAPE.id, raw_key);
+                ics[ic_idx].insert(
+                    shape_id,
+                    key_hash,
                     IcEntry {
                         offset: index,
                         is_own: true,
@@ -3218,7 +3225,7 @@ fn load_property_recursive_ic(
                 );
             } else if let Some(key) = value_to_prop_key(raw_key) {
                 // Non-numeric key — inherited from Array.prototype
-                let ck = ic_cache_key(DENSE_ARRAY_SHAPE.id, raw_key);
+                let (shape_id, key_hash) = ic_cache_key(DENSE_ARRAY_SHAPE.id, raw_key);
                 let mut depth: u8 = 0;
                 let mut p = ptr;
                 loop {
@@ -3232,8 +3239,9 @@ fn load_property_recursive_ic(
                     }
                     let next_shape = unsafe { JSObject::shape_ptr(next as *mut JSObject) };
                     if let Some(offset) = next_shape.lookup(&key) {
-                        ics[ic_idx].entries.insert(
-                            ck,
+                        ics[ic_idx].insert(
+                            shape_id,
+                            key_hash,
                             IcEntry {
                                 offset,
                                 is_own: false,

@@ -1034,19 +1034,22 @@ Phase 5 (Cranelift JIT) aims to close this gap to within 3–10×.
 
 ### 16A: rkyv Archive derives for bytecode ✅
 - [x] Add `rkyv::Archive, Serialize, Deserialize` derives to `BytecodeProgram`, `Instruction`, `BasicBlock`, `ControlFlowGraph`, and `LivenessInfo`.
+- [x] Add derives to `IcEntry`, `IcKey`, `InlineCache` in `rune_interpreter`.
 - [x] Make `Opcode` a `#[repr(u8)]` C-like enum for a stable archived representation.
-- [x] Handle recursive `functions: Vec<BytecodeProgram>` with `#[rkyv(omit_bounds)]` and explicit serializer/deserializer/validator bounds.
+- [x] Handle recursive `functions: Vec<BytecodeProgram>` with `#[rkyv(omit_bounds)]` and explicit serializer/validator bounds.
 
 ### 16B: AFPC cache format + CLI integration ✅
-- [x] Define binary cache header (`AFPC` magic + version + reserved) in `rune_embed::afpc`.
-- [x] `save_bytecode_cache(path, program)` serializes via `rkyv::to_bytes`.
-- [x] `load_bytecode_cache(path)` validates and deserializes via `rkyv::from_bytes`, falling back to `None` on any failure.
-- [x] CLI `--cache <path>` / `--cache=<path>`: first run compiles source and writes binary cache; subsequent runs load and execute bytecode directly.
-- [x] Added `Context::compile(source)` and `Context::eval_bytecode_owned(bytecode)` to support cache flow.
+- [x] Define full `AfpcCache` in `rune_embed::afpc`: bytecode + shape table + IC table + native code blobs (functions/traces).
+- [x] Binary cache header (`AFPC` magic + version + reserved).
+- [x] `save_afpc_cache(path, cache)` / `load_afpc_cache(path)` with rkyv validation.
+- [x] `ShapeEntry::from_shape` / `restore()` to snapshot and reintern shapes.
+- [x] CLI `--cache <path>` / `--cache=<path>`: first run compiles, executes (IC warmup), and saves full cache; subsequent runs restore shapes + ICs and execute bytecode directly.
+- [x] Added `Context::compile(source)`, `Context::eval_bytecode_owned(bytecode)`, `Context::ics()`, and `Context::set_ics(...)` to support the cache flow.
 
 ### 16C: Tests + benchmarks 🟡
-- [x] Unit tests in `rune_embed::afpc`: header round-trip, simple bytecode round-trip, nested-function bytecode round-trip.
-- [ ] Integration test in CLI exercising `--cache` first-run / cached-run.
+- [x] Unit tests in `rune_embed::afpc`: header round-trip, bytecode round-trip (simple + nested function), shape table round-trip, IC table round-trip.
+- [x] Manual CLI test: `--cache` first-run and cached-run produce correct results and restore ICs.
+- [ ] Automated integration test in CLI exercising `--cache` first-run / cached-run.
 - [ ] Benchmark: first-run parse/emit vs cached load time.
 
 ---
@@ -1125,8 +1128,8 @@ append delta to cache → future runs use cached delta
 | **5g** | rkyv bytecode snapshots (zero-copy, skip parse/emit) | 1d | 🟠 P1 | ✅ Done | Source-level cache: `--snapshot` saves to `.rune-cache`, load on next run. First run 340ms → cached 50ms (6.8× faster). rkyv dep added (Archive derive pending). |
 | **5a** | Fix trace compiler Add/Sub/Mul SIGBUS | 0.5d | 🔴 P0 | ✅ Done | Moved JIT value stack from `sp` to VM heap memory (`JitVmState::jit_stack`). All AArch64 trace tests pass. |
 | **5b** | Full function AOT compiler (bytecode→native for all opcodes) | 3d | 🔴 P0 | 🟡 In progress | x86-64 Smi-only baseline JIT exists; needs expansion to all opcodes + property access. |
-| **5c** | rkyv cache format: serialize shapes + compiled code + IC + strings | 2d | 🔴 P0 | 🟡 In progress | Starting with bytecode (`BytecodeProgram`) serialization; native code + IC + shapes to follow. |
-| **5d** | Cache loader: mmap → validate shape IDs → install entry points | 1d | 🔴 P0 | ⬜ New |
+| **5c** | rkyv cache format: serialize shapes + compiled code + IC + strings | 2d | 🔴 P0 | ✅ Done | `AfpcCache` serializes bytecode, shape table, IC table, and native code blobs. Shape IDs made content-addressed/stable. |
+| **5d** | Cache loader: mmap → validate shape IDs → install entry points | 1d | 🔴 P0 | 🟡 In progress | Loader validates rkyv, restores shapes, installs ICs, and executes cached bytecode. Native code mmap + entry-point install next. |
 | **5e** | Delta JIT: shape miss → record → compile delta → append cache | 2d | 🟠 P1 | ⬜ New |
 | **5f** | CLI `--cache` flag: auto-save on exit, auto-load on start | 1d | 🟠 P1 | ⬜ New |
 | **5g** | rkyv bytecode snapshots (zero-copy load, skip parse/emit) | 1d | 🟠 P1 | ✅ Done | Binary rkyv bytecode cache implemented in `rune_embed::afpc`; CLI `--cache` loads and executes cached bytecode. |

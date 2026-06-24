@@ -117,6 +117,18 @@ impl Context {
     pub fn vm(&mut self) -> &mut Vm {
         &mut self.vm
     }
+
+    /// Return a clone of the VM's inline-cache (SIDT) table.
+    /// Useful for AFPC cache serialization after a warm-up run.
+    pub fn ics(&self) -> Vec<rune_interpreter::ic::InlineCache> {
+        self.vm.ics.clone()
+    }
+
+    /// Install a previously-captured inline-cache table into the VM.
+    /// Called during AFPC cache load before executing cached bytecode.
+    pub fn set_ics(&mut self, ics: Vec<rune_interpreter::ic::InlineCache>) {
+        self.vm.ics = ics;
+    }
 }
 
 /// Opaque context handle for C FFI.

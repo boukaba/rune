@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A property key (interned string index or symbol).
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -19,7 +18,20 @@ pub struct Shape {
     pub is_dense_array: bool,
 }
 
-static SHAPE_COUNTER: AtomicU64 = AtomicU64::new(1);
+/// Compute a stable, content-addressed shape id from its defining data.
+/// This makes shape ids deterministic across process restarts, which is
+/// required for AFPC native-code caches to remain valid after load.
+fn shape_id(entries: &[(PropertyKey, usize)], parent: Option<u64>, is_dense_array: bool) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = fxhash::FxHasher64::default();
+    for (key, offset) in entries {
+        key.as_u64().hash(&mut hasher);
+        (*offset as u64).hash(&mut hasher);
+    }
+    parent.hash(&mut hasher);
+    is_dense_array.hash(&mut hasher);
+    hasher.finish()
+}
 
 lazy_static::lazy_static! {
     static ref SHAPE_TABLE: Mutex<HashMap<Vec<(PropertyKey, usize)>, &'static Shape>> =
@@ -28,12 +40,13 @@ lazy_static::lazy_static! {
     pub static ref PROTOTYPE_KEY: PropertyKey = PropertyKey::from_string("prototype");
     /// Shared shape for all dense arrays.
     pub static ref DENSE_ARRAY_SHAPE: &'static Shape = {
-        let id = SHAPE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let entries: Vec<(PropertyKey, usize)> = Vec::new();
+        let id = shape_id(&entries, None, true);
         let shape = Box::new(Shape {
             id,
             property_count: 0,
             slot_count: 0,
-            entries: Vec::new(),
+            entries,
             key_names: Vec::new(),
             parent: None,
             is_dense_array: true,
@@ -51,7 +64,7 @@ impl Shape {
             return existing;
         }
         let slot_count = entries.len();
-        let id = SHAPE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let id = shape_id(&entries, None, false);
         let shape = Shape {
             id,
             property_count: entries.len(),
@@ -85,7 +98,7 @@ impl Shape {
     /// Create a new shape (for tests or temporary use).
     /// Prefer `intern()` in production code.
     pub fn new(entries: Vec<(PropertyKey, usize)>, key_names: Vec<String>) -> Box<Self> {
-        let id = SHAPE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let id = shape_id(&entries, None, false);
         let slot_count = entries.len();
         Box::new(Shape {
             id,
@@ -109,6 +122,13 @@ impl Shape {
     pub fn key_name_at(&self, index: usize) -> Option<&str> {
         self.key_names.get(index).map(|s| s.as_str())
     }
+}
+
+/// Snapshot all currently-interned shapes. Used by AFPC to persist the
+/// global shape table so cached native code remains valid across runs.
+pub fn snapshot_shapes() -> Vec<&'static Shape> {
+    let table = SHAPE_TABLE.lock().unwrap();
+    table.values().copied().collect()
 }
 
 impl PropertyKey {

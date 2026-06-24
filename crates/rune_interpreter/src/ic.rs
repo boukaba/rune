@@ -1,5 +1,6 @@
 /// Entry in an inline cache for a specific (shape, key) pair.
 #[derive(Copy, Clone, Debug, Default)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct IcEntry {
     /// Slot offset in the object (or prototype at proto_depth).
     pub offset: usize,
@@ -11,6 +12,7 @@ pub struct IcEntry {
 
 /// Cache key stored alongside IcEntry for linear-scan matching.
 #[derive(Copy, Clone, Debug, Default)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct IcKey {
     pub shape_id: u64,
     pub key_hash: u64,
@@ -23,6 +25,7 @@ pub struct IcKey {
 /// scan is faster than HashMap hashing. The flat layout is SIMD-ready:
 /// shape_ids can be loaded into a vector register and compared in parallel.
 #[derive(Clone, Debug)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct InlineCache {
     pub entries: Vec<(IcKey, IcEntry)>,
 }

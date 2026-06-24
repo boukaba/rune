@@ -80,14 +80,21 @@ fn main() {
 
             let mut ctx = rune_embed::Context::new_small();
             let result = if let Some(ref path) = cache_path {
-                // AFPC bytecode cache: try binary cache first.
-                if let Some(bytecode) = rune_embed::afpc::load_bytecode_cache(path) {
-                    ctx.eval_bytecode_owned(bytecode)
+                // AFPC cache: try full cache (bytecode + shapes + ICs) first.
+                if let Some(cache) = rune_embed::afpc::load_afpc_cache(path) {
+                    cache.restore_shapes();
+                    ctx.set_ics(cache.ic_table);
+                    ctx.eval_bytecode_owned(cache.bytecode)
                 } else {
                     match ctx.compile(&source) {
                         Ok(bytecode) => {
-                            let _ = rune_embed::afpc::save_bytecode_cache(path, &bytecode);
-                            ctx.eval_bytecode_owned(bytecode)
+                            // Execute once to warm up ICs, then save the cache.
+                            let exec_result = ctx.eval_bytecode_owned(bytecode.clone());
+                            let ics = ctx.ics();
+                            let cache =
+                                rune_embed::afpc::AfpcCache::from_runtime(bytecode, ics);
+                            let _ = rune_embed::afpc::save_afpc_cache(path, &cache);
+                            exec_result
                         }
                         Err(e) => Err(e),
                     }

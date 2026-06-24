@@ -45,9 +45,8 @@ impl Context {
         ctx
     }
 
-    /// Parse, compile, and execute JavaScript source code.
-    /// Returns the top-of-stack Value after execution.
-    pub fn eval(&mut self, source: &str) -> Result<Value, String> {
+    /// Parse and emit JavaScript source code into a `BytecodeProgram`.
+    pub fn compile(&self, source: &str) -> Result<BytecodeProgram, String> {
         // Parse
         let mut parser = rune_parser::Parser::new(source);
         let program = parser.parse();
@@ -58,13 +57,29 @@ impl Context {
         // Emit bytecode
         let mut emitter = rune_parser::emitter::Emitter::new();
         emitter.emit_program(&program);
-        let bytecode = emitter.into_bytecode();
+        Ok(emitter.into_bytecode())
+    }
+
+    /// Parse, compile, and execute JavaScript source code.
+    /// Returns the top-of-stack Value after execution.
+    pub fn eval(&mut self, source: &str) -> Result<Value, String> {
+        let bytecode = self.compile(source)?;
 
         // Execute — keep bytecode alive for dangling prog_ptr refs from Func
         let pinned = Box::pin(bytecode);
         self.programs.push(pinned);
         let prog_ref: &BytecodeProgram = &self.programs.last().unwrap().as_ref();
 
+        self.vm
+            .execute(&mut self.gc, prog_ref)
+            .map_err(|v| format!("Uncaught: {v:?}"))
+    }
+
+    /// Execute a bytecode program and keep it alive in this context.
+    pub fn eval_bytecode_owned(&mut self, bytecode: BytecodeProgram) -> Result<Value, String> {
+        let pinned = Box::pin(bytecode);
+        self.programs.push(pinned);
+        let prog_ref: &BytecodeProgram = &self.programs.last().unwrap().as_ref();
         self.vm
             .execute(&mut self.gc, prog_ref)
             .map_err(|v| format!("Uncaught: {v:?}"))

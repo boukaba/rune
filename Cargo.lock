@@ -1132,6 +1132,7 @@ dependencies = [
 name = "rune_embed"
 version = "0.1.0"
 dependencies = [
+ "rkyv",
  "rune_bytecode",
  "rune_core",
  "rune_interpreter",

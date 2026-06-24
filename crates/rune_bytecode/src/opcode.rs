@@ -1,5 +1,7 @@
 /// All bytecode opcodes.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(u8)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub enum Opcode {
     // Literals
     LoadSmi,
@@ -114,6 +116,7 @@ pub enum Opcode {
 }
 
 #[derive(Clone, Debug)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct Instruction {
     pub opcode: Opcode,
     pub operands: Vec<i64>,
@@ -146,10 +149,17 @@ impl Instruction {
 /// placeholder for future try/catch/finally restore logic — it currently
 /// pushes `undefined` onto the stack for the resumption value position.
 #[derive(Clone, Debug)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[rkyv(
+    serialize_bounds(__S: rkyv::ser::Allocator + rkyv::ser::Writer + rkyv::ser::Sharing),
+    deserialize_bounds(__D: rkyv::rancor::Fallible<Error: rkyv::rancor::Source>),
+    bytecheck(bounds(__C: rkyv::validation::ArchiveContext + rkyv::rancor::Fallible<Error: rkyv::rancor::Source>))
+)]
 pub struct BytecodeProgram {
     pub instructions: Vec<Instruction>,
     pub string_pool: Vec<String>,
     pub float_pool: Vec<f64>,
+    #[rkyv(omit_bounds)]
     pub functions: Vec<BytecodeProgram>,
     pub named_function: bool,
     pub is_generator: bool,

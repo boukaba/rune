@@ -5,6 +5,7 @@ fn main() {
     let mut ic_stats = false;
     let mut trace_stats = false;
     let mut snapshot_path: Option<String> = None;
+    let mut cache_path: Option<String> = None;
 
     let mut source_args = Vec::new();
     for arg in args {
@@ -18,6 +19,10 @@ fn main() {
             snapshot_path = Some(".rune-cache".to_string());
         } else if let Some(rest) = arg.strip_prefix("--snapshot=") {
             snapshot_path = Some(rest.to_string());
+        } else if arg == "--cache" {
+            cache_path = Some(".rune-cache".to_string());
+        } else if let Some(rest) = arg.strip_prefix("--cache=") {
+            cache_path = Some(rest.to_string());
         } else {
             source_args.push(arg);
         }
@@ -57,10 +62,15 @@ fn main() {
             }
         }
         source => {
-            // AFPC: check if snapshot exists — load from cache, skip parse+emit
-            let source = if let Some(ref snap_path) = snapshot_path {
-                if let Ok(cached) = std::fs::read_to_string(snap_path) {
-                    cached
+            // Source-level snapshot cache (text). If both --snapshot and --cache
+            // are provided, --cache takes precedence for execution.
+            let source = if snapshot_path.is_some() && cache_path.is_none() {
+                if let Some(ref snap_path) = snapshot_path {
+                    if let Ok(cached) = std::fs::read_to_string(snap_path) {
+                        cached
+                    } else {
+                        source.to_string()
+                    }
                 } else {
                     source.to_string()
                 }
@@ -69,10 +79,27 @@ fn main() {
             };
 
             let mut ctx = rune_embed::Context::new_small();
-            match ctx.eval(&source) {
+            let result = if let Some(ref path) = cache_path {
+                // AFPC bytecode cache: try binary cache first.
+                if let Some(bytecode) = rune_embed::afpc::load_bytecode_cache(path) {
+                    ctx.eval_bytecode_owned(bytecode)
+                } else {
+                    match ctx.compile(&source) {
+                        Ok(bytecode) => {
+                            let _ = rune_embed::afpc::save_bytecode_cache(path, &bytecode);
+                            ctx.eval_bytecode_owned(bytecode)
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+            } else {
+                ctx.eval(&source)
+            };
+
+            match result {
                 Ok(val) => {
                     println!("=> {:?}", val);
-                    // AFPC: save snapshot for next run
+                    // Source-level snapshot save for next run.
                     if let Some(ref snap_path) = snapshot_path {
                         let _ = std::fs::write(snap_path, &source);
                     }

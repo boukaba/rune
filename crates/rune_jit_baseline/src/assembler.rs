@@ -108,20 +108,14 @@ impl ExecutableMemory {
     }
 
     pub fn make_executable(&self) {
-        // On macOS with MAP_JIT, mprotect(PROT_EXEC) prevents writes on the page.
-        // sp-based operations in JIT code crash with SIGBUS. Skip mprotect.
-        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-        {
-            let ret = unsafe {
-                libc::mprotect(
-                    self.ptr as *mut libc::c_void,
-                    self.size,
-                    libc::PROT_READ | libc::PROT_EXEC,
-                )
-            };
-            assert_eq!(ret, 0, "ExecutableMemory mprotect to RX failed");
-        }
-        // Flush instruction cache (Apple Silicon requires this)
+        let ret = unsafe {
+            libc::mprotect(
+                self.ptr as *mut libc::c_void,
+                self.size,
+                libc::PROT_READ | libc::PROT_EXEC,
+            )
+        };
+        assert_eq!(ret, 0, "ExecutableMemory mprotect to RX failed");
         #[cfg(any(target_os = "macos", target_os = "ios"))]
         {
             unsafe extern "C" {

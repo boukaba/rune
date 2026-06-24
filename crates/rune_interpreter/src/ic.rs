@@ -132,3 +132,41 @@ pub struct IcStats {
     pub hits: u64,
     pub misses: u64,
 }
+
+/// A recorded opcode from a hot-loop trace.
+#[derive(Copy, Clone, Debug)]
+pub struct TraceOp {
+    /// The opcode executed.
+    pub opcode: u8,
+    /// Shape ID hit during LoadProperty (0 if not a property access or miss).
+    pub shape_id: u64,
+    /// Number of times this opcode would dispatch in the interpreter.
+    pub cost: u32,
+}
+
+/// A recorded trace of one hot-loop iteration.
+#[derive(Clone, Debug, Default)]
+pub struct LoopTrace {
+    pub target_pc: usize,
+    pub ops: Vec<TraceOp>,
+    /// Total iteration count when trace was recorded.
+    pub total_iterations: u64,
+    /// Unique shape_ids seen (for monomorphism check).
+    pub shape_ids: Vec<u64>,
+}
+
+impl LoopTrace {
+    pub fn is_monomorphic(&self) -> bool {
+        self.shape_ids.len() <= 1
+    }
+
+    pub fn estimated_interpreter_cost(&self) -> u32 {
+        // Each opcode: ~10 cycles for dispatch + execution
+        self.ops.len() as u32 * 10
+    }
+
+    pub fn estimated_native_cost(&self) -> u32 {
+        // Native: ~1-2 cycles per opcode (register-based, no dispatch overhead)
+        self.ops.len() as u32 * 2
+    }
+}

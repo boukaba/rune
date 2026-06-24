@@ -1,6 +1,6 @@
 use crate::builtins::{Builtin, BuiltinFn, value_to_js_string};
 use crate::generator::Generator;
-use crate::ic::{IcEntry, IcStats, InlineCache};
+use crate::ic::{IcEntry, IcStats, InlineCache, LoopTrace, TraceOp};
 use rune_bytecode::opcode::{BytecodeProgram, Instruction, Opcode};
 use rune_core::array::RuneArray;
 use rune_core::env::EnvObject;
@@ -106,6 +106,10 @@ pub struct Vm {
     /// Loop back-edge hotness: target_pc → execution count.
     /// Back-edges are Jump targets where target < current_pc.
     loop_counts: HashMap<usize, u64>,
+    /// Recorded traces for hot loops (target_pc → LoopTrace).
+    loop_traces: HashMap<usize, LoopTrace>,
+    /// If Some(target_pc), we're currently recording a trace for that loop.
+    recording_trace: Option<usize>,
     /// Pre-built constructor objects (like `Object`) that expose methods via property access.
     builtin_wrappers: HashMap<String, Value>,
     last_locals: Vec<Value>,
@@ -141,6 +145,8 @@ impl Vm {
             ic_stats: IcStats::default(),
             string_cache: HashMap::new(),
             loop_counts: HashMap::new(),
+            loop_traces: HashMap::new(),
+            recording_trace: None,
             builtin_wrappers: HashMap::new(),
             last_locals: Vec::new(),
             eval_fn: UnsafeCell::new(None),
@@ -508,6 +514,23 @@ impl Vm {
             }
 
             let instr = prog.instructions[pc].clone();
+
+            // Trace recording: capture opcodes while recording a hot loop
+            if let Some(target_pc) = self.recording_trace
+                && let Some(trace) = self.loop_traces.get_mut(&target_pc)
+            {
+                if trace.ops.len() < 200 {
+                    trace.ops.push(TraceOp {
+                        opcode: instr.opcode as u8,
+                        shape_id: 0,
+                        cost: 1,
+                    });
+                }
+                // Stop recording when we've looped back to the target
+                if pc == target_pc && trace.ops.len() > 1 {
+                    self.recording_trace = None;
+                }
+            }
 
             match instr.opcode {
                 // ---- Literals ----
@@ -1299,6 +1322,18 @@ impl Vm {
                                             self.ics[ic_idx].get(shape_id, key_hash)
                                         {
                                             self.ic_stats.hits += 1;
+                                            // Record shape_id for trace analysis
+                                            if let Some(target) = self.recording_trace
+                                                && let Some(trace) =
+                                                    self.loop_traces.get_mut(&target)
+                                            {
+                                                if !trace.shape_ids.contains(&shape.id) {
+                                                    trace.shape_ids.push(shape.id);
+                                                }
+                                                if let Some(last) = trace.ops.last_mut() {
+                                                    last.shape_id = shape.id;
+                                                }
+                                            }
                                             // Hot-path specialization: after 8 hits, patch
                                             // LoadProperty → LoadPropertyIC for shape-guarded access.
                                             if ic_idx < self.ic_hit_counts.len()
@@ -1435,6 +1470,17 @@ impl Vm {
                         if tag == TAG_OBJECT {
                             let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
                             if shape.id == cached_shape_id {
+                                // Record shape_id for trace analysis (fast path)
+                                if let Some(target) = self.recording_trace
+                                    && let Some(trace) = self.loop_traces.get_mut(&target)
+                                {
+                                    if !trace.shape_ids.contains(&cached_shape_id) {
+                                        trace.shape_ids.push(cached_shape_id);
+                                    }
+                                    if let Some(last) = trace.ops.last_mut() {
+                                        last.shape_id = cached_shape_id;
+                                    }
+                                }
                                 // Shape guard passes — direct slot access
                                 let val = if proto_depth == 0 {
                                     unsafe { JSObject::get_slot(ptr as *mut JSObject, offset) }
@@ -1877,10 +1923,23 @@ impl Vm {
                 // ---- Control flow ----
                 Opcode::Jump => {
                     let target = instr.operands[0] as usize;
-                    if target < pc {
+                    if target < pc && self.recording_trace.is_none() {
                         // Back-edge: loop iteration
                         let entry = self.loop_counts.entry(target).or_insert(0);
                         *entry += 1;
+                        // Start recording a trace at threshold
+                        if *entry == 50 {
+                            self.recording_trace = Some(target);
+                            self.loop_traces.insert(
+                                target,
+                                LoopTrace {
+                                    target_pc: target,
+                                    ops: Vec::new(),
+                                    total_iterations: *entry,
+                                    shape_ids: Vec::new(),
+                                },
+                            );
+                        }
                     }
                     self.frames[fi].pc = target;
                 }
@@ -2864,7 +2923,7 @@ impl Vm {
         )
     }
 
-    /// Return a summary of loop hotness (for --trace-stats).
+    /// Return a summary of loop hotness and recorded traces (for --trace-stats).
     pub fn dump_trace_stats(&self) -> String {
         if self.loop_counts.is_empty() {
             return "Trace stats: no loops detected.".to_string();
@@ -2876,9 +2935,35 @@ impl Vm {
         for (target, count) in self.loop_counts.iter() {
             let label = if *count >= 50 { "HOT" } else { "warm" };
             lines.push(format!(
-                "  pc={} → {} iterations ({} — would compile at ≥50)",
+                "  pc={} → {} iterations ({})",
                 target, count, label
             ));
+            if let Some(trace) = self.loop_traces.get(target) {
+                let mono = if trace.is_monomorphic() {
+                    "MONO (1 shape)"
+                } else {
+                    "POLY"
+                };
+                let icost = trace.estimated_interpreter_cost();
+                let ncost = trace.estimated_native_cost();
+                let speedup = if ncost > 0 {
+                    (icost as f64 / ncost as f64) as u32
+                } else {
+                    0
+                };
+                lines.push(format!(
+                    "    trace: {} ops, {} shapes ({})",
+                    trace.ops.len(),
+                    trace.shape_ids.len(),
+                    mono
+                ));
+                lines.push(format!(
+                    "    estimated speedup: {}→{} instrs ≈ {}×",
+                    icost,
+                    ncost,
+                    speedup.max(1)
+                ));
+            }
         }
         lines.join("\n")
     }

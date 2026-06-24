@@ -85,12 +85,10 @@ fn and_reg(mem: &mut ExecutableMemory, xd: u32, xn: u32, xm: u32) {
     emit(mem, 0x8A000000 | (xm << 16) | (xn << 5) | xd);
 }
 
-/// ORR xd, xn, #imm — only certain patterns work.
-/// For simple mask like #1: use ORR immediate form
+/// ORR xd, xn, #1 — set bit 0 (Smi tag)
 fn orr_imm1(mem: &mut ExecutableMemory, xd: u32, xn: u32) {
-    // ORR xd, xn, #1 encoded as bitmask immediate
-    // immr=0, imms=0, N=0 → encodes #1
-    emit(mem, 0xB2400000 | ((1) << 10) | (xn << 5) | xd);
+    // ORR xd, xn, #1: bitmask encoding N:immr:imms = 0:000000:000000
+    emit(mem, 0xB2400000 | (xn << 5) | xd);
 }
 
 /// LDR xd, [xn, #uoffset]  — unsigned offset, scaled by 8
@@ -132,31 +130,20 @@ fn nop(mem: &mut ExecutableMemory) {
     emit(mem, 0xD503201F);
 }
 
-/// Save callee-saved registers: x19-x26 (8 regs, 64 bytes)
 fn push_callee_saved(mem: &mut ExecutableMemory) {
-    // STP x29, x30, [sp, #-16]! — frame record
-    emit(mem, 0xA9BF7BFD);
-    // STP x19, x20, [sp, #-16]!
-    emit(mem, 0xA9BF13F3);
-    // STP x21, x22, [sp, #-16]!
-    emit(mem, 0xA9BF17F5);
-    // STP x23, x24, [sp, #-16]!
-    emit(mem, 0xA9BF1BF7);
-    // STP x25, x26, [sp, #-16]!
-    emit(mem, 0xA9BF1FF9);
+    emit(mem, 0xA9BF7BFD); // STP x29, x30, [sp, #-16]!
+    emit(mem, 0xA9BF13F3); // STP x19, x20, [sp, #-16]!
+    emit(mem, 0xA9BF17F5); // STP x21, x22, [sp, #-16]!
+    emit(mem, 0xA9BF1BF7); // STP x23, x24, [sp, #-16]!
+    emit(mem, 0xA9BF1FF9); // STP x25, x26, [sp, #-16]!
 }
 
 fn pop_callee_saved(mem: &mut ExecutableMemory) {
-    // LDP x25, x26, [sp], #16
-    emit(mem, 0xA8C11FF9);
-    // LDP x23, x24, [sp], #16
-    emit(mem, 0xA8C11BF7);
-    // LDP x21, x22, [sp], #16
-    emit(mem, 0xA8C117F5);
-    // LDP x19, x20, [sp], #16
-    emit(mem, 0xA8C113F3);
-    // LDP x29, x30, [sp], #16 — frame record
-    emit(mem, 0xA8C17BFD);
+    emit(mem, 0xA8C11FF9); // LDP x25, x26, [sp], #16
+    emit(mem, 0xA8C11BF7); // LDP x23, x24, [sp], #16
+    emit(mem, 0xA8C117F5); // LDP x21, x22, [sp], #16
+    emit(mem, 0xA8C113F3); // LDP x19, x20, [sp], #16
+    emit(mem, 0xA8C17BFD); // LDP x29, x30, [sp], #16
 }
 
 /// Compile a trace into the given ExecutableMemory buffer.

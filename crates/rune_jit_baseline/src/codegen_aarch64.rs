@@ -153,10 +153,106 @@ pub fn emit_trace_into(mem: &mut ExecutableMemory, ops: &[(Opcode, Vec<i64>, u64
     mov_reg(mem, VM_REG, 0);
     mov_reg(mem, GC_REG, 1);
     mov_reg(mem, LOC_REG, 2);
-    sub_imm(mem, 31, 31, 128);
+    sub_imm(mem, 31, 31, 128); // JIT stack allocation
+    // Track net sp delta through the trace body
+    let mut sp_delta: i32 = 0;
     for &(ref opcode, ref operands, _shape_id) in ops {
         compile_op(mem, *opcode, operands);
+        sp_delta += match *opcode {
+            Opcode::LoadSmi
+            | Opcode::LoadUndefined
+            | Opcode::LoadNull
+            | Opcode::LoadBoolean
+            | Opcode::LoadLocal
+            | Opcode::LoadThis
+            | Opcode::LoadGlobal
+            | Opcode::LoadLexical
+            | Opcode::LoadCaptured
+            | Opcode::LoadStringConst
+            | Opcode::LoadFloat64
+            | Opcode::NewObject
+            | Opcode::NewArray
+            | Opcode::MakeFunction
+            | Opcode::MakeRestArray
+            | Opcode::MakeArgumentsArray
+            | Opcode::Call
+            | Opcode::CallFromArray
+            | Opcode::New
+            | Opcode::UnaryPlus
+            | Opcode::Neg
+            | Opcode::Not
+            | Opcode::BitNot
+            | Opcode::TypeOf
+            | Opcode::LoadProperty
+            | Opcode::LoadPropertyIC
+            | Opcode::ToString
+            | Opcode::StringConcat
+            | Opcode::ThrowIfNullish
+            | Opcode::SpreadIntoObject
+            | Opcode::ArraySlice
+            | Opcode::ForInInit
+            | Opcode::ForInNext
+            | Opcode::Yield
+            | Opcode::InitGenerator => 1, // pushes 1 value
+            Opcode::StoreLocal
+            | Opcode::StoreProperty
+            | Opcode::Pop
+            | Opcode::Dup
+            | Opcode::DefineProperty
+            | Opcode::StoreCaptured
+            | Opcode::StoreLexical
+            | Opcode::StoreGlobal
+            | Opcode::DeleteProperty
+            | Opcode::Resume
+            | Opcode::Swap
+            | Opcode::BlockLeave
+            | Opcode::BlockEnter => 0, // no net stack change after handling
+            Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Lt => -1, // pops 2, pushes 1
+            Opcode::IncLocal
+            | Opcode::DecLocal
+            | Opcode::IncGlobal
+            | Opcode::DecGlobal
+            | Opcode::Return
+            | Opcode::Jump
+            | Opcode::JumpIfFalse
+            | Opcode::JumpIfTrue
+            | Opcode::Throw
+            | Opcode::RestoreEnv
+            | Opcode::MakeEnv
+            | Opcode::CopyLexical
+            | Opcode::DeclareLet
+            | Opcode::DeclareConst
+            | Opcode::ArrayPush
+            | Opcode::ArrayExtend
+            | Opcode::Eq
+            | Opcode::Ne
+            | Opcode::StrictEq
+            | Opcode::StrictNe
+            | Opcode::Gt
+            | Opcode::Ge
+            | Opcode::Le
+            | Opcode::Shl
+            | Opcode::Shr
+            | Opcode::ShrU
+            | Opcode::BitAnd
+            | Opcode::BitOr
+            | Opcode::BitXor
+            | Opcode::Exp
+            | Opcode::Div
+            | Opcode::Mod
+            | Opcode::In
+            | Opcode::Instanceof
+            | Opcode::Void => 0,
+            _ => 0,
+        };
     }
+    // Pop the sp_delta values down to the result, then read it
+    // Unwind stack by popping excess values
+    while sp_delta > 1 {
+        sub_imm(mem, 31, 31, 8); // discard one value
+        sp_delta -= 1;
+    }
+    // Read result (exactly 1 value left on stack)
     sub_imm(mem, 31, 31, 8);
     ldr_off(mem, 0, 31, 0);
     add_imm(mem, 31, 31, 128);

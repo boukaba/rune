@@ -3342,8 +3342,41 @@ fn load_property_recursive_ic(
     obj: Value,
     raw_key: Value,
 ) -> Value {
+    // Check IC first before doing full lookup
+    if instr.ic_index >= 0
+        && let Some(ptr) = obj.heap_ptr()
+    {
+        let ic_idx = instr.ic_index as usize;
+        if ic_idx < ics.len() {
+            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+            if tag == TAG_OBJECT {
+                let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                let (shape_id, key_hash) = ic_cache_key(shape.id, raw_key);
+                if let Some(entry) = ics[ic_idx].get(shape_id, key_hash) {
+                    if entry.is_own {
+                        unsafe {
+                            return JSObject::get_slot(ptr as *mut JSObject, entry.offset);
+                        }
+                    } else {
+                        let mut p = ptr;
+                        for _ in 0..entry.proto_depth {
+                            let next = unsafe { JSObject::prototype(p as *mut JSObject) };
+                            if next.is_null() {
+                                break;
+                            }
+                            p = next;
+                        }
+                        unsafe {
+                            return JSObject::get_slot(p as *mut JSObject, entry.offset);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let result = load_property_recursive(obj, raw_key);
-    // Populate IC for all result types — Smi, Float64, heap, undefined
+    // Populate IC for all result types
     if instr.ic_index >= 0
         && let Some(ptr) = obj.heap_ptr()
     {

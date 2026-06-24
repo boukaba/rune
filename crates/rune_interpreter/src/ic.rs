@@ -162,10 +162,8 @@ impl InlineCache {
             existing.1 = entry;
             return;
         }
-        // Insert new entry; cap at 8 (evict LRU)
-        if self.entries.len() >= 8 {
-            self.entries.remove(0);
-        }
+        // No cap — SIDT means no megamorphic cliff.
+        // With SIMD, each iteration compares 2 entries; 50 shapes = 25 SIMD ops.
         self.entries.push((key, entry));
     }
 }

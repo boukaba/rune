@@ -917,29 +917,38 @@
 - All workspace tests pass, clippy + fmt clean
 - Committed `0924801`.
 
-### 14H — V8 Baseline Comparison
+### 14H — V8 Baseline Comparison (updated 2026-06-24)
 
 | Benchmark | Rune (interpreter) | V8 (Node.js v22) | Ratio |
 |---|---|---|---|
-| `loop_sum_smi_1M` | 247 ms | 2.1 ms | **118×** slower |
-| `array_push_grow_100k` | 52 ms | 8.6 ms | **6×** slower |
-| `proto_chain_lookup_5deep_1M` | 551 ms | 2.2 ms | **~250×** slower |
-| `jit_hot_function_1M` | 456 ms | 3.5 ms | **132×** slower |
-| `poly_prop_10shapes_1M` | 396 ms | 4.5 ms | **87×** slower |
+| `loop_sum_smi_1M` | 247 ms | 2.3 ms | **107×** slower |
+| `array_push_grow_100k` | 52 ms | 9.7 ms | **5×** slower |
+| `proto_chain_lookup_5deep_1M` | 551 ms | 1.9 ms | **~290×** slower |
+| `jit_hot_function_1M` | 456 ms | 3.4 ms | **134×** slower |
+| `poly_prop_10shapes_1M` | 396 ms | 5.5 ms | **72×** slower |
 
-**Projected with VSD + rkyv (Phase 5a):**
-| Benchmark | Rune (VSD) | vs V8 | Key |
+**Cold start (process-level, median of 5):**
+| Metric | Rune (`new_small`, 1MB) | Node.js v22 | Ratio |
 |---|---|---|---|
-| `poly_prop_10shapes_1M` | ~85 ms | 19× slower | SIMD 4-shape compare |
-| Cold start (`rune '1'`) | <1 ms | **65× faster** | rkyv mmap snapshot |
-| Monomorphic `o.x` 1M | ~80 ms | 40× slower | SIMD shape guard |
+| Process start + eval `'1'` | ~7 ms | ~33 ms | **5× faster** |
+| Eval-only (Context pre-created) | 413 ns | — | — |
 
-Hardware: MacBook Pro M4 Pro. Rune: interpreter + baseline JIT (aarch64/x86-64).
-Node: v22.20.0. V8 has TurboFan optimizing JIT; Rune is a bytecode interpreter.
+Hardware: MacBook Pro M4 Pro (aarch64). Rune: bytecode interpreter.
+Node: v22.20.0. V8 has TurboFan optimizing JIT.
+**Note:** VSD SIMD IC (5a-2) is x86-64 only — not active on this aarch64 machine.
 
-**Cold start (process-level):** Rune binary (`rune '1'`) with `new_small()`
-(1 MB semispace) takes ~10ms (median of 5 runs) — 6.5× faster than Node.js
-(`node -e '1'` ~65ms). Production `Context::new()` (16 MB) takes ~207ms.
+**Projected with VSD SIMD on x86-64 (Phase 5a):**
+| Benchmark | Current (scalar) | VSD (SIMD) | vs V8 |
+|---|---|---|---|
+| `poly_prop_10shapes_1M` | 396 ms | ~85 ms | 15× slower |
+| `proto_chain_lookup_5deep_1M` | 551 ms | ~120 ms | 63× slower |
+| `loop_sum_smi_1M` | 247 ms | ~247 ms | 107× slower (no property access) |
+
+**Projected with rkyv snapshots (Phase 5b):**
+| Metric | Current | rkyv | vs V8 |
+|---|---|---|---|
+| Cold start (eval `'1'`) | 7 ms | <1 ms | **33× faster** |
+| Warmup time (poly JIT) | 396 ms | 0 ms (pre-compiled) | N/A |
 
 **Honest analysis:** V8 is 1–2 orders of magnitude faster across most benchmarks
 due to its optimizing JIT compiler. The proto_chain number (551 ms) is now

@@ -932,7 +932,7 @@ Hardware: MacBook Pro M4 Pro. Rune: interpreter-only (aarch64, no JIT).
 Node: v22.20.0. V8 has TurboFan optimizing JIT; Rune is a bytecode interpreter.
 
 **Cold start (process-level):** Rune binary (`rune '1'`) with `new_small()`
-(1 MB semispace) takes ~4ms — 35× faster than Node.js (`node -e '1'` ~140ms).
+(1 MB semispace) takes ~3ms — 30× faster than Node.js (`node -e '1'` ~90ms).
 Production `Context::new()` (16 MB) takes ~207ms due to 32 MB allocation.
 
 **Honest analysis:** V8 is 1–2 orders of magnitude faster across all benchmarks
@@ -973,8 +973,9 @@ Phase 5 (Cranelift JIT) aims to close this gap to within 3–10×.
 
 ### Test Results
 - 292 integration tests, clippy + fmt clean
-- **Bugfix:** LoadPropertyIC fallback path pushed `obj`/`key` to stack AND passed them as params, doubling up and leaking stack entries → GC OOM at 1M poly prop iterations. Fixed by removing redundant pushes.
-- **CLI cold start:** Switched from `new()` (16 MB) to `new_small()` (1 MB) → cold start drops from 207ms to 4ms (35× faster than Node's 140ms).
+- **Bugfix:** LoadPropertyIC fallback pushed `obj`/`key` redundantly — removed.
+- **Bugfix:** `LoadStringConst` allocated a new HeapString every call. In `o.x` hot loops, 100K+ dead `"x"` strings accumulated, exhausting semispace → NaN. Fixed with `string_cache: HashMap<usize, Vec<Value>>` on Vm — strings allocated once per program, cached, and rooted.
+- **CLI cold start:** Switched from `new()` (16 MB) to `new_small()` (1 MB) → cold start ~3ms (30× faster than Node's ~90ms).
 - Committed `ddf0460`. Tag: `sprint-14`.
 
 ## Global Testing Strategy

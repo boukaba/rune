@@ -100,6 +100,9 @@ pub struct Vm {
     ic_hit_counts: Vec<u32>,
     /// Aggregate IC statistics.
     pub ic_stats: IcStats,
+    /// Cache of allocated HeapString pointers for each program's constant pool.
+    /// Key: program pointer as usize, Value: Vec of string Value handles.
+    string_cache: HashMap<usize, Vec<Value>>,
     /// Pre-built constructor objects (like `Object`) that expose methods via property access.
     builtin_wrappers: HashMap<String, Value>,
     last_locals: Vec<Value>,
@@ -133,6 +136,7 @@ impl Vm {
             ic_entries: Vec::new(),
             ic_hit_counts: Vec::new(),
             ic_stats: IcStats::default(),
+            string_cache: HashMap::new(),
             builtin_wrappers: HashMap::new(),
             last_locals: Vec::new(),
             eval_fn: UnsafeCell::new(None),
@@ -352,6 +356,12 @@ impl Vm {
         gc.push_root(&self.object_prototype as *const Value as *mut u64);
         gc.push_root(&self.array_prototype as *const Value as *mut u64);
         gc.push_root(&self.string_prototype as *const Value as *mut u64);
+        // Root cached string constant handles (LoadStringConst cache)
+        for handles in self.string_cache.values() {
+            for v in handles {
+                gc.push_root(v as *const Value as *mut u64);
+            }
+        }
     }
 
     /// Execute a bytecode program and return its result.
@@ -521,9 +531,34 @@ impl Vm {
                 }
                 Opcode::LoadStringConst => {
                     let idx = instr.operands[0] as usize;
-                    let s = prog.string_pool.get(idx).map(|s| s.as_str()).unwrap_or("");
-                    let ptr = HeapString::allocate(gc, s);
-                    self.push(Value::from_heap_ptr(ptr as *mut u8));
+                    let cache_key = prog_ptr as usize;
+                    // Look up or allocate cached string handle
+                    let val = if let Some(handles) = self.string_cache.get_mut(&cache_key) {
+                        if let Some(v) = handles.get(idx) {
+                            if v.is_undefined() {
+                                let s = prog.string_pool.get(idx).map(|s| s.as_str()).unwrap_or("");
+                                let ptr = HeapString::allocate(gc, s);
+                                let new_val = Value::from_heap_ptr(ptr as *mut u8);
+                                handles[idx] = new_val;
+                                new_val
+                            } else {
+                                *v
+                            }
+                        } else {
+                            let s = prog.string_pool.get(idx).map(|s| s.as_str()).unwrap_or("");
+                            let ptr = HeapString::allocate(gc, s);
+                            Value::from_heap_ptr(ptr as *mut u8)
+                        }
+                    } else {
+                        let mut handles = vec![Value::undefined(); prog.string_pool.len()];
+                        let s = prog.string_pool.get(idx).map(|s| s.as_str()).unwrap_or("");
+                        let ptr = HeapString::allocate(gc, s);
+                        let new_val = Value::from_heap_ptr(ptr as *mut u8);
+                        handles[idx] = new_val;
+                        self.string_cache.insert(cache_key, handles);
+                        new_val
+                    };
+                    self.push(val);
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::LoadFloat64 => {

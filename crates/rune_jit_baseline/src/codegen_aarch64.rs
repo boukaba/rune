@@ -153,13 +153,13 @@ pub fn emit_trace_into(mem: &mut ExecutableMemory, ops: &[(Opcode, Vec<i64>, u64
     mov_reg(mem, VM_REG, 0);
     mov_reg(mem, GC_REG, 1);
     mov_reg(mem, LOC_REG, 2);
-    sub_imm(mem, 31, 31, 512);
+    sub_imm(mem, 31, 31, 128);
     for &(ref opcode, ref operands, _shape_id) in ops {
         compile_op(mem, *opcode, operands);
     }
     sub_imm(mem, 31, 31, 8);
     ldr_off(mem, 0, 31, 0);
-    add_imm(mem, 31, 31, 512);
+    add_imm(mem, 31, 31, 128);
     pop_callee_saved(mem);
     ret(mem);
 }
@@ -237,7 +237,7 @@ fn compile_op(mem: &mut ExecutableMemory, opcode: Opcode, operands: &[i64]) {
             sub_imm(mem, 31, 31, 8);
             ldr_off(mem, 0, 31, 0); // x0 = a
             sub_reg(mem, 0, 0, 1); // x0 = a - b
-            orr_imm1(mem, 0, 0); // x0 |= 1 (re-tag)
+            add_imm(mem, 0, 0, 1); // x0 |= 1 (re-tag, same as ORR #1 since bit0 is 0)
             str_off(mem, 0, 31, 0);
             add_imm(mem, 31, 31, 8);
         }
@@ -246,15 +246,11 @@ fn compile_op(mem: &mut ExecutableMemory, opcode: Opcode, operands: &[i64]) {
             ldr_off(mem, 1, 31, 0); // x1 = b
             sub_imm(mem, 31, 31, 8);
             ldr_off(mem, 0, 31, 0); // x0 = a
-            // Smi mul: (a >> 1) * (b >> 1) << 1 | 1
-            // ASR x0, x0, #1
             emit(mem, 0x9341FC00 | (0 << 5) | 0); // ASR x0, x0, #1
             emit(mem, 0x9341FC21 | (1 << 5) | 1); // ASR x1, x1, #1
-            // MUL x0, x0, x1
             emit(mem, 0x9B007C00 | (1 << 16) | (0 << 5) | 0); // MUL x0, x0, x1
-            // LSL x0, x0, #1
             emit(mem, 0xD37EF800 | (0 << 5) | 0); // LSL x0, x0, #1
-            orr_imm1(mem, 0, 0); // x0 |= 1
+            add_imm(mem, 0, 0, 1); // x0 |= 1
             str_off(mem, 0, 31, 0);
             add_imm(mem, 31, 31, 8);
         }

@@ -103,6 +103,9 @@ pub struct Vm {
     /// Cache of allocated HeapString pointers for each program's constant pool.
     /// Key: program pointer as usize, Value: Vec of string Value handles.
     string_cache: HashMap<usize, Vec<Value>>,
+    /// Loop back-edge hotness: target_pc → execution count.
+    /// Back-edges are Jump targets where target < current_pc.
+    loop_counts: HashMap<usize, u64>,
     /// Pre-built constructor objects (like `Object`) that expose methods via property access.
     builtin_wrappers: HashMap<String, Value>,
     last_locals: Vec<Value>,
@@ -137,6 +140,7 @@ impl Vm {
             ic_hit_counts: Vec::new(),
             ic_stats: IcStats::default(),
             string_cache: HashMap::new(),
+            loop_counts: HashMap::new(),
             builtin_wrappers: HashMap::new(),
             last_locals: Vec::new(),
             eval_fn: UnsafeCell::new(None),
@@ -1873,6 +1877,11 @@ impl Vm {
                 // ---- Control flow ----
                 Opcode::Jump => {
                     let target = instr.operands[0] as usize;
+                    if target < pc {
+                        // Back-edge: loop iteration
+                        let entry = self.loop_counts.entry(target).or_insert(0);
+                        *entry += 1;
+                    }
                     self.frames[fi].pc = target;
                 }
                 Opcode::JumpIfTrue => {
@@ -2853,6 +2862,25 @@ impl Vm {
             "IC stats: {} lookups, {} hits, {} misses ({:.1}% hit rate)",
             self.ic_stats.lookups, self.ic_stats.hits, self.ic_stats.misses, hit_pct
         )
+    }
+
+    /// Return a summary of loop hotness (for --trace-stats).
+    pub fn dump_trace_stats(&self) -> String {
+        if self.loop_counts.is_empty() {
+            return "Trace stats: no loops detected.".to_string();
+        }
+        let mut lines = vec![format!(
+            "Trace stats: {} loop(s) detected",
+            self.loop_counts.len()
+        )];
+        for (target, count) in self.loop_counts.iter() {
+            let label = if *count >= 50 { "HOT" } else { "warm" };
+            lines.push(format!(
+                "  pc={} → {} iterations ({} — would compile at ≥50)",
+                target, count, label
+            ));
+        }
+        lines.join("\n")
     }
 }
 

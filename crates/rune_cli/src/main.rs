@@ -3,12 +3,15 @@ mod test262;
 fn main() {
     let args = std::env::args().skip(1);
     let mut ic_stats = false;
+    let mut trace_stats = false;
 
     // Handle flags
     let mut source_args = Vec::new();
     for arg in args {
         if arg == "--ic-stats" {
             ic_stats = true;
+        } else if arg == "--trace-stats" {
+            trace_stats = true;
         } else {
             source_args.push(arg);
         }
@@ -23,6 +26,9 @@ fn main() {
         }
         if ic_stats {
             eprintln!("{}", ctx.vm().dump_ic_stats());
+        }
+        if trace_stats {
+            eprintln!("{}", ctx.vm().dump_trace_stats());
         }
         return;
     }
@@ -52,6 +58,9 @@ fn main() {
             }
             if ic_stats {
                 eprintln!("{}", ctx.vm().dump_ic_stats());
+            }
+            if trace_stats {
+                eprintln!("{}", ctx.vm().dump_trace_stats());
             }
         }
     }

@@ -2,7 +2,7 @@
 
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
-> **Status:** Sprint 14E-1 🟢 (Day 1-6 complete — GC crash fixed, 278 tests, non-closure 100K verified)
+> **Status:** Sprint 14 🟢 (Day 1-7 — 14E-1 done, 14F+14G done, 290 tests)
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
 > Every implementation decision at every level (lexer, parser, emitter, bytecode, interpreter, builtins, JIT) **must** be verified against the exact ECMA-262 specification language in [`ecma262.md`](./ecma262.md) — **never guess** what the spec says. Each section in `ecma262.md` links to the corresponding URL fragment on `https://tc39.es/ecma262/multipage/`; **always open these URLs via `webfetch` tool** to read the authoritative algorithm steps before implementing. This applies to all phases below.
@@ -783,8 +783,8 @@
 | **14D: Template literal substitutions** | 🟠 P1 | ✅ done | `${expr}` in template literals. Lexer: new TokenKind variants (TemplateHead/Middle/Tail/NoSub), `template_brace_stack` for nested `${}` brace tracking, escape sequences in template strings (backtick, `${`, standard escapes, unicode). Parser: `Expr::Template { parts, exprs }` loops over head→middle→tail segments. Emitter: `LoadStringConst` + `ToString` + `StringConcat` chain. New opcodes: `ToString`, `StringConcat`. 9 integration tests: no-sub, single, expression, multiple, empty-start, coercion, nested, escaped backtick, multi-line. Known gaps: tagged templates (deferred), `String.raw` (deferred). |
 | **14E: Arrow `arguments` + per-iteration `let`** | 🟠 P1 | ✅ done | `MakeArgumentsArray` opcode → `Frame.passed_argc` for `arguments.length`/`arguments[i]`. `CopyLexical` opcode for per-iteration `let` in `for (let i…)` loops. §10.4.4, §14.7.4.2. Committed `1df5024`. Closure capture via heap-allocated environments resolved in 14E-1 (Days 2-5). |
 | **14E-1: Heap-allocated environments for closure capture** | 🔴 P0 | ✅ done | GC-managed `EnvObject` chain for captured variables. `MakeEnv`/`LoadCaptured`/`StoreCaptured` opcodes. Emitter escape analysis per function. GC env rooting. Day 1: structural layer (env.rs, gc tagging, Func layout, Frame.env, opcodes, VM handlers). Day 2: emitter escape analysis + fix two bugs (env_scope_stack inheritance, assign-to-captured). 273 tests pass, 2 pre-existing failures. |
-| **14F: Default parameters** | 🟢 P2 | pending | `function f(a = 1)`. §14.1.3. Overlaps with 14A defaults. |
-| **14G: Comma operator** | 🟢 P2 | pending | `(a, b)` returns `b`. §13.16. |
+| **14F: Default parameters** | 🟢 P2 | ✅ done | `function f(a = 1, b = a + 1)`. Parser parses `= expr` after param identifiers and destructuring patterns. Emitter: `emit_destructuring_binding` handles `Pattern::Default` wrapping. 8 integration tests: basic, explicit arg, ref earlier param, undefined triggers default, 0/null no trigger, destructure object/array default. |
+| **14G: Comma operator** | 🟢 P2 | ✅ done | `(a, b)` returns `b`. `Expr::Binary(BinaryOp::Comma, ...)`. `parse_expr_comma()` wrapper with comma loop, only active in expression-stmt and paren-expr contexts (not arg lists, array elements). Emitter: emit lhs, Pop, emit rhs. 4 integration tests. |
 | **14H: V8 baseline comparison** | 🟢 P2 | pending | `run_v8_baseline.sh` + Rune-vs-V8 columns in `progress.md`. |
 
 ### Test Results — Sprint 14E
@@ -898,6 +898,24 @@
 |---|---|---|---|
 | **14A-1: Boolean coercion hotfix** | 🔴 P0 | ✅ done | Three fixes: (1) `to_number()` boolean branch per §7.1.4 (true→1, false→0). Fixes all arithmetic (`true+1`→2), relational (`true<2`→true), `Neg`, and unary `+`. (2) `to_int32()` helper per §7.1.6 + bitwise ops rewritten to use it. Fixes `0|true`→1, `true<<1`→2, etc. (3) `values_loosely_equal()` per §7.2.13 with boolean→Number coercion, null==undefined, Number↔String coercion. `Opcode::Eq`/`Ne` use loose equality; `StrictEq`/`StrictNe` remain strict. Added `UnaryPlus` opcode for `+expr`. 5 new integration test functions with 20+ assertions. |
 | **14A-1.1+1.2: to_bool string/NaN + BitNot coercion** | 🔴 P0 | ✅ done | `Value::to_bool()` now handles HeapString (empty string → false per §7.1.2) and NaN (NaN → false — `NaN != 0.0` was accidentally truthy). `Opcode::BitNot` uses `to_int32()` per §13.5.4 instead of only handling Smi. Fixes `~true`→`-2`, `~"5"`→`-6`, `~null`→`-1`. |
+
+### 14F+14G — Default Parameters + Comma Operator (Day 7)
+
+**14F (Default parameters):**
+- Parser: `parse_function_body` checks for `EqAssign` (`=`) after parameter identifiers and destructuring patterns, parses the default expression via `parse_expr(0)`
+- Emitter: fallthrough arm of `compile_function` changed from `emit_destructuring` to `emit_destructuring_binding` so `Pattern::Default` wrapping destructuring patterns is handled correctly
+- 8 integration tests cover: basic default, explicit arg override, ref-earlier-param, undefined triggers default, 0/zero no trigger, null no trigger, destructured object default, destructured array default
+
+**14G (Comma operator):**
+- `ast.rs`: added `BinaryOp::Comma` variant
+- `parser.rs`: added `parse_expr_comma()` wrapper that calls `parse_expr(0)` followed by a comma loop. Only used in expression-statement, parenthesized-expression, return, and for-init contexts. Separator contexts (argument lists, array elements) call `parse_expr(0)` directly — comma not active.
+- `emitter.rs`: handle `BinaryOp::Comma` by emitting lhs, Pop, then rhs (last value stays on stack)
+- 4 integration tests: comma in parens, comma expr statement, comma with function calls, comma in return
+
+### Test Results — Sprint 14 (14F+14G)
+- **290 integration tests** (286 passing, 0 failed, 2 ignored — +8 default params, +4 comma operator)
+- All workspace tests pass, clippy + fmt clean
+- Committed `0924801`.
 
 ## Phase 9 — v2 Features (Stretch)
 

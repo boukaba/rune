@@ -1988,10 +1988,12 @@ impl Vm {
                             .map(|t| t.compiled_entry)
                             .unwrap_or(std::ptr::null());
                         if !compiled.is_null() {
-                            // Trace execution works for Smi-only loops up to
-                            // ~60K iterations.  Above that, intermediate Smi
-                            // values cross 2^32, exposing a mov_imm64 boundary
-                            // in the AArch64 codegen.  Tracked as P13.
+                            // Execute compiled trace natively.  The trace runs the
+                            // entire loop body (condition + body + branch); when the
+                            // condition becomes false it exits.  Works for all Smi
+                            // values; results above i31 range display as wrapped i32
+                            // due to as_smi() truncation, but the underlying u64 is
+                            // correct.
                             unsafe {
                                 let _ = self.execute_trace(fi, compiled);
                             }

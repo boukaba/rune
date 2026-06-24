@@ -909,6 +909,133 @@ mod tests {
     }
 
     #[test]
+    fn test_aarch64_codegen_large_sum_65537_iterations() {
+        use rune_bytecode::opcode::{BytecodeProgram, Instruction};
+        // Sum 0..65536 = 2,147,516,416 → Smi = 4,295,032,833 (> 2^32).
+        let prog = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadSmi, vec![0]),
+                Instruction::new(Opcode::StoreLocal, vec![2]),
+                Instruction::new(Opcode::Pop, vec![]),
+                Instruction::new(Opcode::LoadSmi, vec![0]),
+                Instruction::new(Opcode::StoreLocal, vec![3]),
+                Instruction::new(Opcode::Pop, vec![]),
+                Instruction::new(Opcode::LoadLocal, vec![3]),
+                Instruction::new(Opcode::LoadSmi, vec![65537]),
+                Instruction::new(Opcode::Lt, vec![]),
+                Instruction::new(Opcode::JumpIfFalse, vec![18]),
+                Instruction::new(Opcode::LoadLocal, vec![2]),
+                Instruction::new(Opcode::LoadLocal, vec![3]),
+                Instruction::new(Opcode::Add, vec![]),
+                Instruction::new(Opcode::StoreLocal, vec![2]),
+                Instruction::new(Opcode::Pop, vec![]),
+                Instruction::new(Opcode::IncLocal, vec![3, 1]),
+                Instruction::new(Opcode::Pop, vec![]),
+                Instruction::new(Opcode::Jump, vec![6]),
+                Instruction::new(Opcode::LoadLocal, vec![2]),
+                Instruction::new(Opcode::Return, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        let mem = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+        mem.make_executable();
+        let vm = jit_vm_ptr();
+        let mut locals: Vec<u64> = vec![0, 0, 0, 0];
+        let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
+            unsafe { std::mem::transmute(mem.code_ptr()) };
+        let r = unsafe { func(vm, std::ptr::null_mut(), locals.as_mut_ptr()) };
+        let expected = (2147516416u64 << 1) | 1;
+        assert_eq!(r, expected, "65537 iters: got {}, expected {}", r, expected);
+    }
+
+    #[test]
+    fn test_aarch64_codegen_large_sum_loop_trace_indices() {
+        use rune_bytecode::opcode::{BytecodeProgram, Instruction};
+        // Same loop as trace-level, but locals at indices [2] and [3] (matching
+        // the recorded trace). Uses 4-element locals vec.
+        let prog = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadSmi, vec![0]),
+                Instruction::new(Opcode::StoreLocal, vec![2]),
+                Instruction::new(Opcode::Pop, vec![]),
+                Instruction::new(Opcode::LoadSmi, vec![0]),
+                Instruction::new(Opcode::StoreLocal, vec![3]),
+                Instruction::new(Opcode::Pop, vec![]),
+                Instruction::new(Opcode::LoadLocal, vec![3]),
+                Instruction::new(Opcode::LoadSmi, vec![70000]),
+                Instruction::new(Opcode::Lt, vec![]),
+                Instruction::new(Opcode::JumpIfFalse, vec![18]),
+                Instruction::new(Opcode::LoadLocal, vec![2]),
+                Instruction::new(Opcode::LoadLocal, vec![3]),
+                Instruction::new(Opcode::Add, vec![]),
+                Instruction::new(Opcode::StoreLocal, vec![2]),
+                Instruction::new(Opcode::Pop, vec![]),
+                Instruction::new(Opcode::IncLocal, vec![3, 1]),
+                Instruction::new(Opcode::Pop, vec![]),
+                Instruction::new(Opcode::Jump, vec![6]),
+                Instruction::new(Opcode::LoadLocal, vec![2]),
+                Instruction::new(Opcode::Return, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        let mem = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+        mem.make_executable();
+        let vm = jit_vm_ptr();
+        // 4-element locals: [0]=unused, [1]=unused, [2]=s, [3]=i
+        let mut locals: Vec<u64> = vec![0, 0, 0, 0];
+        let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
+            unsafe { std::mem::transmute(mem.code_ptr()) };
+        let r = unsafe { func(vm, std::ptr::null_mut(), locals.as_mut_ptr()) };
+        let expected = (2449965000u64 << 1) | 1;
+        assert_eq!(r, expected, "got {}, expected {}", r, expected);
+    }
+
+    #[test]
+    fn test_aarch64_codegen_large_sum_loop() {
+        use rune_bytecode::opcode::{BytecodeProgram, Instruction};
+        // Sum 0..70000 = 2,449,965,000 → Smi = 4,899,930,001 (> 2^32).
+        // This exercises arithmetic across the 32-bit boundary.
+        let prog = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadSmi, vec![0]),
+                Instruction::new(Opcode::StoreLocal, vec![0]),
+                Instruction::new(Opcode::Pop, vec![]),
+                Instruction::new(Opcode::LoadSmi, vec![0]),
+                Instruction::new(Opcode::StoreLocal, vec![1]),
+                Instruction::new(Opcode::Pop, vec![]),
+                Instruction::new(Opcode::LoadLocal, vec![1]),
+                Instruction::new(Opcode::LoadSmi, vec![70000]),
+                Instruction::new(Opcode::Lt, vec![]),
+                Instruction::new(Opcode::JumpIfFalse, vec![18]),
+                Instruction::new(Opcode::LoadLocal, vec![0]),
+                Instruction::new(Opcode::LoadLocal, vec![1]),
+                Instruction::new(Opcode::Add, vec![]),
+                Instruction::new(Opcode::StoreLocal, vec![0]),
+                Instruction::new(Opcode::Pop, vec![]),
+                Instruction::new(Opcode::IncLocal, vec![1, 1]),
+                Instruction::new(Opcode::Pop, vec![]),
+                Instruction::new(Opcode::Jump, vec![6]),
+                Instruction::new(Opcode::LoadLocal, vec![0]),
+                Instruction::new(Opcode::Return, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        let mem = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+        mem.make_executable();
+        let vm = jit_vm_ptr();
+        let mut locals: Vec<u64> = vec![0, 0];
+        let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
+            unsafe { std::mem::transmute(mem.code_ptr()) };
+        let r = unsafe { func(vm, std::ptr::null_mut(), locals.as_mut_ptr()) };
+        // sum 0..69999 = 2,449,965,000 → Smi = 4,899,930,001
+        let expected = (2449965000u64 << 1) | 1;
+        assert_eq!(r, expected, "got {}, expected {}", r, expected);
+    }
+
+    #[test]
     fn test_aarch64_codegen_loop() {
         use rune_bytecode::opcode::{BytecodeProgram, Instruction};
         // i = 0; s = 0; while (i < 10) { s += i; i++; } return s;

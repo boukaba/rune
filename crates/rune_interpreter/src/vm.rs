@@ -2666,6 +2666,22 @@ impl Vm {
                     *v = Value::from_heap_ptr(new_ptr);
                 }
             }
+            // Also update env object slots (the GC-managed EnvObject)
+            if !frame.env.is_null() {
+                let env_ptr = frame.env;
+                unsafe {
+                    let slot_count = *(env_ptr.add(8) as *const u32) as usize;
+                    let slots = env_ptr.add(24) as *mut Value;
+                    for i in 0..slot_count {
+                        let slot = &mut *slots.add(i);
+                        if let Some(p) = slot.heap_ptr()
+                            && p == old_ptr
+                        {
+                            *slot = Value::from_heap_ptr(new_ptr);
+                        }
+                    }
+                }
+            }
         }
         for v in self.globals.values_mut() {
             if let Some(p) = v.heap_ptr()

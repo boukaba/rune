@@ -48,7 +48,7 @@ impl GcHeader {
 }
 
 /// Size of each semispace region in bytes.
-const SEMISPACE_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
+const SEMISPACE_SIZE: usize = 16 * 1024 * 1024; // 16 MiB
 /// Offset in bytes from object start to prototype pointer (matches object.rs OBJECT_HEADER_PROTOTYPE)
 const OBJECT_PROTOTYPE_OFFSET: usize = 24;
 /// Offset in bytes from object start to first property slot (matches object.rs OBJECT_HEADER_END)

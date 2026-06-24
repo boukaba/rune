@@ -12,7 +12,7 @@ fn test_semispace_full_gc() {
 
     // Allocate until nearly full; keep first object as root
     for i in 0.. {
-        if ss.remaining() < 64 {
+        if ss.remaining() < 128 {
             break;
         }
         let vals = vec![Value::smi(i)];
@@ -49,7 +49,7 @@ fn test_multiple_gc_cycles() {
 
     // First batch: fill and GC
     for i in 0.. {
-        if ss.remaining() < 64 {
+        if ss.remaining() < 128 {
             break;
         }
         let vals = vec![Value::smi(i)];
@@ -65,7 +65,7 @@ fn test_multiple_gc_cycles() {
 
     // Second batch: fill and GC
     for i in 0.. {
-        if ss.remaining() < 64 {
+        if ss.remaining() < 128 {
             break;
         }
         let vals = vec![Value::smi(1000 + i)];

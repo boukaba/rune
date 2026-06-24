@@ -3393,4 +3393,25 @@ mod instanceof_tests {
             .unwrap();
         assert_eq!(r.as_smi(), Some(42), "GC stress: 100K allocs + closure");
     }
+
+    #[test]
+    fn test_gc_stress_100k_non_closure() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(
+                r#"
+            function f() {
+                var x = { val: 42 };
+                var arr = [];
+                for (var i = 0; i < 100000; i++) {
+                    arr.push({ junk: i });
+                }
+                return x.val;
+            }
+            f()
+            "#,
+            )
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(42), "GC stress: 100K allocs (non-closure)");
+    }
 }

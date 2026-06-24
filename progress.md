@@ -926,10 +926,15 @@
 | `proto_chain_lookup_5deep_1M` | 442 ms | 2.2 ms | **197×** slower |
 | `jit_hot_function_1M` | 456 ms | 3.5 ms | **132×** slower |
 | `poly_prop_10shapes_1M` | 396 ms | 4.5 ms | **87×** slower |
-| `parse_emit_execute_hello` | 413 ns | — | cold-start (no V8 equivalent) |
+| `parse_emit_execute_hello` | 413 ns | — | eval-only (Context pre-created) |
 
 Hardware: MacBook Pro M4 Pro. Rune: interpreter-only (aarch64, no JIT).
 Node: v22.20.0. V8 has TurboFan optimizing JIT; Rune is a bytecode interpreter.
+
+**Cold start (process-level):** Rune binary (`rune '1'`) takes ~207ms due to
+32 MB semispace allocation (16 MB × 2). Node.js (`node -e '1'`) takes ~140ms.
+Rune is slower on cold start because of the upfront memory allocation; `Context::new_small()`
+(1 MB semispace) would start in ~4ms for embedders that don't need 16 MB.
 
 **Honest analysis:** V8 is 1–2 orders of magnitude faster across all benchmarks
 due to its optimizing JIT compiler. Rune's interpreter is competitive only in

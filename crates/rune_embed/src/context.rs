@@ -10,6 +10,9 @@ pub struct Context {
     gc: SemiSpace,
     vm: Vm,
     programs: Vec<Pin<Box<BytecodeProgram>>>,
+    /// Opaque keep-alive objects (e.g. mmap'd native code) that must outlive
+    /// any references held by the VM.
+    _keep_alive: Vec<Box<dyn std::any::Any>>,
 }
 
 impl Default for Context {
@@ -35,6 +38,7 @@ impl Context {
             gc: SemiSpace::with_size(size),
             vm: Vm::new(),
             programs: Vec::new(),
+            _keep_alive: Vec::new(),
         };
         // Register default builtins
         for b in rune_interpreter::builtins::default_builtins() {
@@ -129,8 +133,60 @@ impl Context {
     pub fn set_ics(&mut self, ics: Vec<rune_interpreter::ic::InlineCache>) {
         self.vm.ics = ics;
     }
+
+    /// Install cached native code entry points into the VM.
+    /// The `InstalledNativeCode` object must be kept alive; storing it in the
+    /// context guarantees the executable mapping outlives any calls.
+    pub fn install_native_code(&mut self, mut native: crate::afpc::InstalledNativeCode) {
+        self.vm.cached_jit_entries = native.take_entries();
+        // Keep the mapping alive by storing it alongside the pinned programs.
+        // `InstalledNativeCode` is not Send/Sync, so we box it as an opaque object.
+        let boxed: Box<dyn std::any::Any> = Box::new(native);
+        self._keep_alive.push(boxed);
+    }
 }
 
 /// Opaque context handle for C FFI.
 #[allow(dead_code)]
 pub struct ContextHandle(*mut Context);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_afpc_cache_roundtrip_and_install() {
+        let source = "function f(n) { let s = 0; for (let i = 0; i < n; i++) s += i; return s; } f(100);";
+        let tmp = std::env::temp_dir().join("rune_embed_afpc_roundtrip_test.cache");
+        let _ = std::fs::remove_file(&tmp);
+
+        // First run: compile, AOT compile, execute, save cache.
+        {
+            let mut ctx = Context::new_small();
+            let bytecode = ctx.compile(source).expect("compile failed");
+            let compiled_funcs = crate::afpc::aot_compile_functions(&bytecode);
+            let result = ctx.eval_bytecode_owned(bytecode.clone()).expect("execute failed");
+            assert_eq!(result.as_smi(), Some(4950));
+            let ics = ctx.ics();
+            let mut cache = crate::afpc::AfpcCache::from_runtime(bytecode, ics);
+            cache.compiled_funcs = compiled_funcs;
+            crate::afpc::save_afpc_cache(&tmp, &cache).expect("save failed");
+        }
+
+        // Second run: load cache, install native code, execute from bytecode.
+        {
+            let cache = crate::afpc::load_afpc_cache(&tmp).expect("load failed");
+            let mut ctx = Context::new_small();
+            cache.restore_shapes();
+            if !cache.compiled_funcs.is_empty() {
+                let native = crate::afpc::InstalledNativeCode::from_cache(&cache);
+                ctx.install_native_code(native);
+            }
+            ctx.set_ics(cache.ic_table);
+            let result = ctx.eval_bytecode_owned(cache.bytecode).expect("execute failed");
+            assert_eq!(result.as_smi(), Some(4950));
+        }
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+}

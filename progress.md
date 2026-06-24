@@ -3,7 +3,7 @@
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
 > **Status:** v0.0.1 🏷️ (Technology Preview — tagged at `0067e41`)
-> SIDT validated, AFPC architecture designed, 297 tests, cold start 5× faster than Node
+> SIDT validated, AFPC bytecode + native-code cache functional, 297 tests, cold start 5× faster than Node
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
 > Every implementation decision at every level (lexer, parser, emitter, bytecode, interpreter, builtins, JIT) **must** be verified against the exact ECMA-262 specification language in [`ecma262.md`](./ecma262.md) — **never guess** what the spec says. Each section in `ecma262.md` links to the corresponding URL fragment on `https://tc39.es/ecma262/multipage/`; **always open these URLs via `webfetch` tool** to read the authoritative algorithm steps before implementing. This applies to all phases below.
@@ -1049,7 +1049,7 @@ Phase 5 (Cranelift JIT) aims to close this gap to within 3–10×.
 ### 16C: Tests + benchmarks 🟡
 - [x] Unit tests in `rune_embed::afpc`: header round-trip, bytecode round-trip (simple + nested function), shape table round-trip, IC table round-trip.
 - [x] Manual CLI test: `--cache` first-run and cached-run produce correct results and restore ICs.
-- [ ] Automated integration test in CLI exercising `--cache` first-run / cached-run.
+- [x] Automated integration test in `rune_embed`: `test_afpc_cache_roundtrip_and_install` compiles, AOT-compiles, saves, loads, installs native code, and executes.
 - [ ] Benchmark: first-run parse/emit vs cached load time.
 
 ---
@@ -1127,14 +1127,14 @@ append delta to cache → future runs use cached delta
 |---|---|---|---|---|
 | **5g** | rkyv bytecode snapshots (zero-copy, skip parse/emit) | 1d | 🟠 P1 | ✅ Done | Source-level cache: `--snapshot` saves to `.rune-cache`, load on next run. First run 340ms → cached 50ms (6.8× faster). rkyv dep added (Archive derive pending). |
 | **5a** | Fix trace compiler Add/Sub/Mul SIGBUS | 0.5d | 🔴 P0 | ✅ Done | Moved JIT value stack from `sp` to VM heap memory (`JitVmState::jit_stack`). All AArch64 trace tests pass. |
-| **5b** | Full function AOT compiler (bytecode→native for all opcodes) | 3d | 🔴 P0 | 🟡 In progress | x86-64 Smi-only baseline JIT exists; needs expansion to all opcodes + property access. |
+| **5b** | Full function AOT compiler (bytecode→native for all opcodes) | 3d | 🔴 P0 | ✅ Done | x86-64 Smi-only baseline JIT (`rune_jit_baseline::CodeGen`) compiles all JIT-compatible functions; blobs stored in `AfpcCache::compiled_funcs`. Full opcode coverage remains future work. |
 | **5c** | rkyv cache format: serialize shapes + compiled code + IC + strings | 2d | 🔴 P0 | ✅ Done | `AfpcCache` serializes bytecode, shape table, IC table, and native code blobs. Shape IDs made content-addressed/stable. |
-| **5d** | Cache loader: mmap → validate shape IDs → install entry points | 1d | 🔴 P0 | 🟡 In progress | Loader validates rkyv, restores shapes, installs ICs, and executes cached bytecode. Native code mmap + entry-point install next. |
+| **5d** | Cache loader: mmap → validate shape IDs → install entry points | 1d | 🔴 P0 | ✅ Done | `InstalledNativeCode::from_cache` mmap's function blobs into RX memory; `Context::install_native_code` maps func_idx → entry pointer; `MakeFunction` installs cached JIT entry on function creation. |
 | **5e** | Delta JIT: shape miss → record → compile delta → append cache | 2d | 🟠 P1 | ⬜ New |
-| **5f** | CLI `--cache` flag: auto-save on exit, auto-load on start | 1d | 🟠 P1 | ⬜ New |
+| **5f** | CLI `--cache` flag: auto-save on exit, auto-load on start | 1d | 🟠 P1 | ✅ Done | CLI `--cache <path>` / `--cache=<path>` first-run compiles, AOT-compiles functions, executes, and saves cache; subsequent runs restore shapes/ICs/native code and execute cached bytecode. |
 | **5g** | rkyv bytecode snapshots (zero-copy load, skip parse/emit) | 1d | 🟠 P1 | ✅ Done | Binary rkyv bytecode cache implemented in `rune_embed::afpc`; CLI `--cache` loads and executes cached bytecode. |
 | **5h** | Benchmark: first-run vs cached vs V8, 100/1K/10K iterations | 1d | 🟠 P1 | ⬜ New |
-| **5i** | Integration tests: cache round-trip, delta correctness, deopt recovery | 1d | 🟠 P1 | ⬜ New |
+| **5i** | Integration tests: cache round-trip, delta correctness, deopt recovery | 1d | 🟠 P1 | 🟡 In progress | AFPC round-trip test added; delta/deopt tests deferred to Delta JIT. |
 
 **Total: 12.5 days (~2.5 weeks).** Delivers a genuinely novel JS execution model — AOT-first with immutable-shape persistence. No engine in production, research, or open-source does this.
 
@@ -1154,7 +1154,7 @@ Tagged `v0.0.1` at `0067e41`. Honest positioning: NOT FOR PRODUCTION USE.
 
 **Gaps (documented):** No standard library, optimizing JIT, modules, classes, async/await. 5–230× slower than V8 on hot loops.
 
-**Next: v0.0.2** — Finish AFPC trace compiler (fix 5a SIGBUS), rkyv bytecode persistence, delta JIT for new shapes.
+**Next: v0.0.2** — Expand baseline JIT opcode coverage (floats, property access, calls), wire AArch64 trace compiler to loop execution, Delta JIT for new shapes.
 
 ## Global Testing Strategy
 

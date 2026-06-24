@@ -121,6 +121,10 @@ pub struct Vm {
     loop_patched: HashSet<usize>,
     /// Pre-built constructor objects (like `Object`) that expose methods via property access.
     builtin_wrappers: HashMap<String, Value>,
+    /// AFPC: cached JIT entry points by function index. When a cache is loaded,
+    /// native code blobs are mmap'd and their addresses stored here; MakeFunction
+    /// installs them on the newly-created Func objects.
+    pub cached_jit_entries: HashMap<usize, *const u8>,
     last_locals: Vec<Value>,
     pub eval_fn: UnsafeCell<Option<EvalFn>>,
     /// Reference to Array.prototype for setting on newly created arrays.
@@ -159,6 +163,7 @@ impl Vm {
             recording_trace: None,
             loop_patched: HashSet::new(),
             builtin_wrappers: HashMap::new(),
+            cached_jit_entries: HashMap::new(),
             last_locals: Vec::new(),
             eval_fn: UnsafeCell::new(None),
             array_prototype: Value::undefined(),
@@ -2290,6 +2295,10 @@ impl Vm {
                         } else {
                             ptr
                         };
+                        // AFPC: install a cached native entry point if one exists.
+                        if let Some(&entry) = self.cached_jit_entries.get(&(func_idx as usize)) {
+                            Func::set_jit_entry(resolved_ptr, entry);
+                        }
                         Func::set_env_ptr(resolved_ptr, self.frames[fi].env);
                         if !is_arrow {
                             let resolved_proto = if !default_proto.is_null()

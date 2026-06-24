@@ -8,6 +8,7 @@ rune_core = { path = "../rune_core" }
 rune_bytecode = { path = "../rune_bytecode" }
 rune_parser = { path = "../rune_parser" }
 rune_interpreter = { path = "../rune_interpreter" }
+rune_jit_baseline = { path = "../rune_jit_baseline" }
 rkyv = "0.8"
 tracing = { workspace = true }
 

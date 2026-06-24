@@ -15,6 +15,8 @@
 use rune_bytecode::opcode::BytecodeProgram;
 use rune_core::shape::{Shape, snapshot_shapes};
 use rune_interpreter::ic::InlineCache;
+use rune_jit_baseline::assembler::ExecutableMemory;
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -146,11 +148,12 @@ impl AfpcCache {
             .into_iter()
             .map(ShapeEntry::from_shape)
             .collect();
+        let compiled_funcs = aot_compile_functions(&bytecode);
         Self {
             bytecode,
             shape_table,
             ic_table: ics,
-            compiled_funcs: Vec::new(),
+            compiled_funcs,
             compiled_traces: Vec::new(),
         }
     }
@@ -197,6 +200,86 @@ pub fn load_afpc_cache<P: AsRef<Path>>(path: P) -> Option<AfpcCache> {
     rkyv::from_bytes::<AfpcCache, rkyv::rancor::Error>(body)
         .map_err(|e| eprintln!("AFPC cache load failed: {e:?}"))
         .ok()
+}
+
+/// Installs cached native code blobs into executable memory and returns a map
+/// from function index to entry point address.
+///
+/// The returned `InstalledNativeCode` must be kept alive as long as the entry
+/// points may be called; dropping it unmaps the memory.
+pub struct InstalledNativeCode {
+    _mem: ExecutableMemory,
+    entries: HashMap<usize, *const u8>,
+}
+
+impl InstalledNativeCode {
+    /// Install all compiled function blobs from `cache`.
+    pub fn from_cache(cache: &AfpcCache) -> Self {
+        let total_size: usize = cache.compiled_funcs.iter().map(|f| f.code.len()).sum();
+        let mem = ExecutableMemory::allocate(total_size.max(1));
+        let mut entries = HashMap::new();
+        let mut offset = 0usize;
+        for func in &cache.compiled_funcs {
+            let len = func.code.len();
+            if len == 0 {
+                continue;
+            }
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    func.code.as_ptr(),
+                    mem.ptr.add(offset),
+                    len,
+                );
+            }
+            entries.insert(func.func_idx, unsafe { mem.ptr.add(offset) as *const u8 });
+            offset += len;
+            // Pad to 4-byte alignment for the next blob (ARM/Thumb friendly).
+            while !offset.is_multiple_of(4) && offset < mem.size {
+                unsafe { std::ptr::write(mem.ptr.add(offset), 0); }
+                offset += 1;
+            }
+        }
+        mem.make_executable();
+        Self { _mem: mem, entries }
+    }
+
+    /// Take the entry map, leaving an empty map in `self`. The executable
+    /// memory remains held by `self`.
+    pub fn take_entries(&mut self) -> HashMap<usize, *const u8> {
+        std::mem::take(&mut self.entries)
+    }
+}
+
+/// AOT-compile all JIT-compatible functions in `program`.
+///
+/// On x86-64 this uses the existing baseline JIT. On other architectures the
+/// baseline JIT is not available, so this returns an empty list; trace-based
+/// AOT is planned for AArch64.
+pub fn aot_compile_functions(program: &BytecodeProgram) -> Vec<CompiledFunc> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use rune_jit_baseline::{CodeGen, is_jit_compatible};
+        let mut out = Vec::new();
+        for (idx, func_prog) in program.functions.iter().enumerate() {
+            if is_jit_compatible(func_prog) {
+                let codegen = CodeGen::new(func_prog.instructions.len());
+                let mem = codegen.compile(func_prog);
+                // Copy emitted bytes; the cache owns them and will mmap them
+                // into executable memory on load.
+                let code = unsafe {
+                    std::slice::from_raw_parts(mem.code_ptr(), mem.offset).to_vec()
+                };
+                out.push(CompiledFunc { func_idx: idx, code });
+                // `mem` is dropped here, freeing the temporary writable buffer.
+            }
+        }
+        out
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = program;
+        Vec::new()
+    }
 }
 
 // ---------------------------------------------------------------------------

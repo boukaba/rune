@@ -80,19 +80,27 @@ fn main() {
 
             let mut ctx = rune_embed::Context::new_small();
             let result = if let Some(ref path) = cache_path {
-                // AFPC cache: try full cache (bytecode + shapes + ICs) first.
+                // AFPC cache: try full cache (bytecode + shapes + ICs + native code) first.
                 if let Some(cache) = rune_embed::afpc::load_afpc_cache(path) {
                     cache.restore_shapes();
+                    if !cache.compiled_funcs.is_empty() {
+                        let native = rune_embed::afpc::InstalledNativeCode::from_cache(&cache);
+                        ctx.install_native_code(native);
+                    }
                     ctx.set_ics(cache.ic_table);
                     ctx.eval_bytecode_owned(cache.bytecode)
                 } else {
                     match ctx.compile(&source) {
                         Ok(bytecode) => {
+                            // Compile hot functions to native code on supported platforms.
+                            let compiled_funcs =
+                                rune_embed::afpc::aot_compile_functions(&bytecode);
                             // Execute once to warm up ICs, then save the cache.
                             let exec_result = ctx.eval_bytecode_owned(bytecode.clone());
                             let ics = ctx.ics();
-                            let cache =
+                            let mut cache =
                                 rune_embed::afpc::AfpcCache::from_runtime(bytecode, ics);
+                            cache.compiled_funcs = compiled_funcs;
                             let _ = rune_embed::afpc::save_afpc_cache(path, &cache);
                             exec_result
                         }

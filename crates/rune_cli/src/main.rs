@@ -16,8 +16,8 @@ fn main() {
             // Next arg is the snapshot path, or use ".rune-cache"
             // Actually — save snapshot AFTER eval to the given path
             snapshot_path = Some(".rune-cache".to_string());
-        } else if arg.starts_with("--snapshot=") {
-            snapshot_path = Some(arg[11..].to_string());
+        } else if let Some(rest) = arg.strip_prefix("--snapshot=") {
+            snapshot_path = Some(rest.to_string());
         } else {
             source_args.push(arg);
         }

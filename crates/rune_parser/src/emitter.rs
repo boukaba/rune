@@ -164,7 +164,7 @@ impl Emitter {
                 }
                 _ => {
                     sub.emit(Opcode::LoadLocal, vec![param_idx as i64]);
-                    sub.emit_destructuring(param, &VarKind::Var);
+                    sub.emit_destructuring_binding(param, &VarKind::Var);
                 }
             }
         }
@@ -1096,6 +1096,13 @@ impl Emitter {
                     }
                     return;
                 }
+                // Comma operator: evaluate lhs, discard, then evaluate rhs
+                if *op == BinaryOp::Comma {
+                    self.emit_expression(lhs);
+                    self.emit(Opcode::Pop, vec![]);
+                    self.emit_expression(rhs);
+                    return;
+                }
                 // Short-circuit logical operators
                 // JumpIfFalse/JumpIfTrue POP the value, so we Dup first to preserve the result.
                 if *op == BinaryOp::LogicalAnd {
@@ -1145,7 +1152,10 @@ impl Emitter {
                     BinaryOp::Ge => Opcode::Ge,
                     BinaryOp::In => Opcode::In,
                     BinaryOp::Instanceof => Opcode::Instanceof,
-                    BinaryOp::LogicalAnd | BinaryOp::LogicalOr | BinaryOp::Assign => unreachable!(),
+                    BinaryOp::LogicalAnd
+                    | BinaryOp::LogicalOr
+                    | BinaryOp::Comma
+                    | BinaryOp::Assign => unreachable!(),
                 };
                 self.emit(opcode, vec![]);
             }

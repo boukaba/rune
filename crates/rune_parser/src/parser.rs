@@ -81,7 +81,7 @@ impl Parser {
                 Stmt::Empty(s)
             }
             _ => {
-                let expr = self.parse_expr(0);
+                let expr = self.parse_expr_comma();
                 self.consume_semicolon();
                 Stmt::Expr(expr, self.span())
             }
@@ -157,16 +157,33 @@ impl Parser {
             if self.tok.kind == TokenKind::Identifier {
                 let t = self.tok.clone();
                 self.advance();
+                let default = if self.tok.kind == TokenKind::EqAssign {
+                    self.advance(); // skip =
+                    Some(Box::new(self.parse_expr(0)))
+                } else {
+                    None
+                };
                 params.push(Pattern::Identifier(
                     t.value.into_boxed_str(),
                     Span {
                         start: t.span.start,
                         end: t.span.end,
                     },
-                    None,
+                    default,
                 ));
             } else if matches!(self.tok.kind, TokenKind::LBrace | TokenKind::LBracket) {
-                params.push(self.parse_binding_pattern());
+                let pat = self.parse_binding_pattern();
+                let default = if self.tok.kind == TokenKind::EqAssign {
+                    self.advance();
+                    Some(Box::new(self.parse_expr(0)))
+                } else {
+                    None
+                };
+                if let Some(expr) = default {
+                    params.push(Pattern::Default(Box::new(pat), expr));
+                } else {
+                    params.push(pat);
+                }
             }
             if self.tok.kind == TokenKind::Comma {
                 self.advance();
@@ -268,7 +285,7 @@ impl Parser {
         let value = if self.has_semicolon_or_asi() {
             None
         } else {
-            Some(Box::new(self.parse_expr(0)))
+            Some(Box::new(self.parse_expr_comma()))
         };
         self.consume_semicolon();
         Stmt::Return(
@@ -511,7 +528,7 @@ impl Parser {
             return self.parse_for_c_style(Some(Box::new(var_stmt)), start);
         }
         // Try `for (lhs in obj)` — parse expression and check for `in`
-        let lhs = self.parse_expr(0);
+        let lhs = self.parse_expr_comma();
         if self.tok.kind == TokenKind::In {
             self.advance();
             let obj = self.parse_expr(0);
@@ -749,6 +766,26 @@ impl Parser {
             lhs = Expr::Conditional(Box::new(lhs), Box::new(then), Box::new(else_), span);
         }
 
+        lhs
+    }
+
+    /// Parse an expression allowing the comma operator at the top level.
+    /// Only called from expression-statement and parenthesized-expression contexts.
+    fn parse_expr_comma(&mut self) -> Expr {
+        let mut lhs = self.parse_expr(0);
+        while self.tok.kind == TokenKind::Comma {
+            self.advance();
+            let rhs = self.parse_expr(0);
+            lhs = Expr::Binary(
+                BinaryOp::Comma,
+                Box::new(lhs),
+                Box::new(rhs),
+                Span {
+                    start: self.span().start,
+                    end: self.span().end,
+                },
+            );
+        }
         lhs
     }
 
@@ -1109,7 +1146,7 @@ impl Parser {
                     // Next token is not `,` or `)` — not an arrow.
                     // DON'T consume the identifier; fall through to parse_expr.
                 }
-                let expr = self.parse_expr(0);
+                let expr = self.parse_expr_comma();
                 self.expect(TokenKind::RParen);
                 // Single-param arrow: (expr) => body
                 if self.tok.kind == TokenKind::Arrow

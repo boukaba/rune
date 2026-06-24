@@ -81,6 +81,8 @@ pub enum UpdateOp {
 pub enum BinaryOp {
     // Assignment
     Assign,
+    // Comma (lowest precedence)
+    Comma,
     // Logical
     LogicalOr,
     LogicalAnd,

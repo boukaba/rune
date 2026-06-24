@@ -2501,6 +2501,116 @@ mod instanceof_tests {
         );
     }
 
+    // ---- 14F: Default parameters ---
+
+    #[test]
+    fn test_default_param_basic() {
+        let mut ctx = Context::new_small();
+        let r = ctx.eval(r#"function f(a = 1) { return a; } f()"#).unwrap();
+        assert_eq!(r.as_smi(), Some(1), "default param a=1 should work");
+    }
+
+    #[test]
+    fn test_default_param_explicit_arg() {
+        let mut ctx = Context::new_small();
+        let r = ctx
+            .eval(r#"function f(a = 1) { return a; } f(10)"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(10), "explicit arg overrides default");
+    }
+
+    #[test]
+    fn test_default_param_ref_earlier() {
+        let mut ctx = Context::new_small();
+        let r = ctx
+            .eval(r#"function f(a = 1, b = a + 1) { return a + b; } f()"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(3), "b=a+1 with a=1 → b=2, a+b=3");
+    }
+
+    #[test]
+    fn test_default_param_undefined_triggers() {
+        let mut ctx = Context::new_small();
+        let r = ctx
+            .eval(r#"function f(a = 99) { return a; } f(undefined)"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(99), "undefined triggers default");
+    }
+
+    #[test]
+    fn test_default_param_zero_no_default() {
+        let mut ctx = Context::new_small();
+        let r = ctx
+            .eval(r#"function f(a = 99) { return a; } f(0)"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(0), "0 does NOT trigger default");
+    }
+
+    #[test]
+    fn test_default_param_null_no_default() {
+        let mut ctx = Context::new_small();
+        let r = ctx
+            .eval(r#"function f(a = 99) { return a; } f(null)"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), None, "null does NOT trigger default");
+    }
+
+    #[test]
+    fn test_default_param_destructure_object() {
+        let mut ctx = Context::new_small();
+        let r = ctx
+            .eval(r#"function f({a, b} = {a: 1, b: 2}) { return a + b; } f()"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(3), "destructured object default");
+    }
+
+    #[test]
+    fn test_default_param_destructure_array() {
+        let mut ctx = Context::new_small();
+        let r = ctx
+            .eval(r#"function f([a, b] = [10, 20]) { return a + b; } f()"#)
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(30), "destructured array default");
+    }
+
+    // ---- 14G: Comma operator ---
+
+    #[test]
+    fn test_comma_parens() {
+        let mut ctx = Context::new_small();
+        let r = ctx.eval(r#"(1, 2, 3)"#).unwrap();
+        assert_eq!(r.as_smi(), Some(3), "comma in parens returns last");
+    }
+
+    #[test]
+    fn test_comma_expr_stmt() {
+        let mut ctx = Context::new_small();
+        let r = ctx.eval(r#"var x = (1, 2); x"#).unwrap();
+        assert_eq!(r.as_smi(), Some(2), "comma expression returns last");
+    }
+
+    #[test]
+    fn test_comma_func_calls() {
+        let mut ctx = Context::new_small();
+        let r = ctx
+            .eval(
+                r#"function f() { return 10; } function g() { return 20; } var y = (f(), g()); y"#,
+            )
+            .unwrap();
+        assert_eq!(
+            r.as_smi(),
+            Some(20),
+            "comma calls both funcs, returns last result"
+        );
+    }
+
+    #[test]
+    fn test_comma_return() {
+        let mut ctx = Context::new_small();
+        let r = ctx.eval(r#"function f() { return (1, 2); } f()"#).unwrap();
+        assert_eq!(r.as_smi(), Some(2), "return with comma returns last");
+    }
+
     // ---- 14B-3: Array spread ---
 
     #[test]

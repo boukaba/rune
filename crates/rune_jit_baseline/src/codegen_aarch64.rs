@@ -159,23 +159,28 @@ fn pop_callee_saved(mem: &mut ExecutableMemory) {
     emit(mem, 0xA8C17BFD);
 }
 
-/// Compile a recorded trace (list of opcodes) into native aarch64 code.
-/// Returns ExecutableMemory containing the compiled trace function.
-///
-/// Signature: fn(vm: *mut u8, gc: *mut u8, locals: *mut u64) -> u64
+/// Compile a trace into the given ExecutableMemory buffer.
+/// The caller is responsible for calling make_executable() and managing lifetime.
+pub fn emit_trace_into(mem: &mut ExecutableMemory, ops: &[(Opcode, Vec<i64>, u64)]) {
+    push_callee_saved(mem);
+    mov_reg(mem, VM_REG, 0);
+    mov_reg(mem, GC_REG, 1);
+    mov_reg(mem, LOC_REG, 2);
+    sub_imm(mem, 31, 31, 512);
+    for &(ref opcode, ref operands, _shape_id) in ops {
+        compile_op(mem, *opcode, operands);
+    }
+    sub_imm(mem, 31, 31, 8);
+    ldr_off(mem, 0, 31, 0);
+    add_imm(mem, 31, 31, 512);
+    pop_callee_saved(mem);
+    ret(mem);
+}
+
+/// Compile a recorded trace into native aarch64 code.
 pub fn compile_trace(ops: &[(Opcode, Vec<i64>, u64)]) -> ExecutableMemory {
     let mut mem = ExecutableMemory::allocate(4096);
-    push_callee_saved(&mut mem);
-    mov_reg(&mut mem, VM_REG, 0);
-    mov_reg(&mut mem, GC_REG, 1);
-    mov_reg(&mut mem, LOC_REG, 2);
-    sub_imm(&mut mem, 31, 31, 512);
-    for &(ref opcode, ref operands, _shape_id) in ops {
-        compile_op(&mut mem, *opcode, operands);
-    }
-    add_imm(&mut mem, 31, 31, 512);
-    pop_callee_saved(&mut mem);
-    ret(&mut mem);
+    emit_trace_into(&mut mem, ops);
     mem.make_executable();
     mem
 }
@@ -367,9 +372,10 @@ mod tests {
 
     #[test]
     fn test_compile_trace_smi() {
-        // Call the actual compile_trace function
+        let mut mem = ExecutableMemory::allocate(4096);
         let ops = vec![(Opcode::LoadSmi, vec![42], 0)];
-        let mem = compile_trace(&ops);
+        emit_trace_into(&mut mem, &ops);
+        mem.make_executable();
         let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
             unsafe { std::mem::transmute(mem.code_ptr()) };
         let result = unsafe {
@@ -432,13 +438,14 @@ mod tests {
 
     #[test]
     fn test_trace_add() {
-        // Push two Smis, add them, return result
         let ops = vec![
             (Opcode::LoadSmi, vec![10], 0),
             (Opcode::LoadSmi, vec![32], 0),
             (Opcode::Add, vec![], 0),
         ];
-        let mem = compile_trace(&ops);
+        let mut mem = ExecutableMemory::allocate(4096);
+        emit_trace_into(&mut mem, &ops);
+        mem.make_executable();
         let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
             unsafe { std::mem::transmute(mem.code_ptr()) };
         let result = unsafe {
@@ -458,7 +465,9 @@ mod tests {
             (Opcode::LoadSmi, vec![8], 0),
             (Opcode::Sub, vec![], 0),
         ];
-        let mem = compile_trace(&ops);
+        let mut mem = ExecutableMemory::allocate(4096);
+        emit_trace_into(&mut mem, &ops);
+        mem.make_executable();
         let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
             unsafe { std::mem::transmute(mem.code_ptr()) };
         let result = unsafe {

@@ -560,7 +560,7 @@ impl Parser {
             None
         };
         let update = if self.tok.kind != TokenKind::RParen {
-            let e = self.parse_expr(0);
+            let e = self.parse_expr_comma();
             Some(Box::new(e))
         } else {
             None

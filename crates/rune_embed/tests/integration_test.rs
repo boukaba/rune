@@ -2611,6 +2611,28 @@ mod instanceof_tests {
         assert_eq!(r.as_smi(), Some(2), "return with comma returns last");
     }
 
+    #[test]
+    fn test_comma_for_update() {
+        let mut ctx = Context::new_small();
+        let r = ctx
+            .eval(
+                r#"var s = 0; for (var i = 0, j = 10; i < 3; i = i + 1, j = j - 1) { s = s + i + j; } s"#,
+            )
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(30), "comma in for-update: (0+10)+(1+9)+(2+8)=30");
+    }
+
+    #[test]
+    fn test_comma_for_init_expr() {
+        let mut ctx = Context::new_small();
+        let r = ctx
+            .eval(
+                r#"var c = 0; for (i = 0, j = 10; i < j; i = i + 1, j = j - 1) { c = c + 1; } c"#,
+            )
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(5), "comma in for-init: 5 iterations");
+    }
+
     // ---- 14B-3: Array spread ---
 
     #[test]

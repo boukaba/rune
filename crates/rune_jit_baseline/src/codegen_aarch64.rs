@@ -188,6 +188,7 @@ pub fn compile_trace(ops: &[(Opcode, Vec<i64>, u64)]) -> ExecutableMemory {
 }
 
 /// Compile a single trace opcode to aarch64 instructions.
+#[allow(clippy::identity_op)] // instruction encoding uses explicit bit-field slots
 fn compile_op(mem: &mut ExecutableMemory, opcode: Opcode, operands: &[i64]) {
     match opcode {
         Opcode::LoadSmi => {

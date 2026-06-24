@@ -3342,6 +3342,7 @@ fn load_property_recursive(obj: Value, raw_key: Value) -> Value {
 }
 
 /// Full property lookup that populates the inline cache on miss.
+#[allow(clippy::too_many_arguments)] // several distinct mutable VM subsystems are required
 fn load_property_recursive_ic(
     _gc: &mut SemiSpace,
     ics: &mut Vec<InlineCache>,

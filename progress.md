@@ -923,7 +923,7 @@
 |---|---|---|---|
 | `loop_sum_smi_1M` | 247 ms | 2.1 ms | **118×** slower |
 | `array_push_grow_100k` | 52 ms | 8.6 ms | **6×** slower |
-| `proto_chain_lookup_5deep_1M` | 442 ms | 2.2 ms | **197×** slower |
+| `proto_chain_lookup_5deep_1M` | 551 ms | 2.2 ms | **~250×** slower |
 | `jit_hot_function_1M` | 456 ms | 3.5 ms | **132×** slower |
 | `poly_prop_10shapes_1M` | 396 ms | 4.5 ms | **87×** slower |
 | `parse_emit_execute_hello` | 413 ns | — | eval-only (Context pre-created) |
@@ -932,13 +932,13 @@ Hardware: MacBook Pro M4 Pro. Rune: interpreter-only (aarch64, no JIT).
 Node: v22.20.0. V8 has TurboFan optimizing JIT; Rune is a bytecode interpreter.
 
 **Cold start (process-level):** Rune binary (`rune '1'`) with `new_small()`
-(1 MB semispace) takes ~3ms — 30× faster than Node.js (`node -e '1'` ~90ms).
-Production `Context::new()` (16 MB) takes ~207ms due to 32 MB allocation.
+(1 MB semispace) takes ~10ms (median of 5 runs) — 6.5× faster than Node.js
+(`node -e '1'` ~65ms). Production `Context::new()` (16 MB) takes ~207ms.
 
-**Honest analysis:** V8 is 1–2 orders of magnitude faster across all benchmarks
-due to its optimizing JIT compiler. Rune's interpreter is competitive only in
-array-intensive workloads (6× gap — array push/grow benefits from dense array
-layout). The SIDT claim (beating V8 on polymorphic property access) does not
+**Honest analysis:** V8 is 1–2 orders of magnitude faster across most benchmarks
+due to its optimizing JIT compiler. The proto_chain number (551 ms) is now
+testing a real 5-deep prototype chain (was `undefined` lookups before the
+`__proto__` fix in Sprint 15.5). The SIDT claim (beating V8 on polymorphic property access) does not
 hold against TurboFan, which recompiles hot loops into monomorphic code.
 Phase 5 (Cranelift JIT) aims to close this gap to within 3–10×.
 
@@ -972,11 +972,12 @@ Phase 5 (Cranelift JIT) aims to close this gap to within 3–10×.
 - Polymorphic: dominant shape handled by LoadPropertyIC, others by IC fallback
 
 ### Test Results
-- 292 integration tests, clippy + fmt clean
-- **Bugfix:** LoadPropertyIC fallback pushed `obj`/`key` redundantly — removed.
-- **Bugfix:** `LoadStringConst` allocated a new HeapString every call. In `o.x` hot loops, 100K+ dead `"x"` strings accumulated, exhausting semispace → NaN. Fixed with `string_cache: HashMap<usize, Vec<Value>>` on Vm — strings allocated once per program, cached, and rooted.
-- **CLI cold start:** Switched from `new()` (16 MB) to `new_small()` (1 MB) → cold start ~3ms (30× faster than Node's ~90ms).
-- Committed `ddf0460`. Tag: `sprint-14`.
+- **427 tests passing** (297 integration + 5 new proto/hot-property + 125 other workspace)
+- **Bugfixes:** LoadPropertyIC fallback stack leak (ddf0460), LoadStringConst per-call allocation → NaN at 100K (9310b97, string_cache)
+- **__proto__ fix:** StoreProperty with key `__proto__` now calls `set_prototype()` (1636edc). Proto chain benchmark now returns 42,000,000 (was NaN — testing broken chain)
+- **CLI cold start:** `new_small()` → ~10ms (6.5× faster than Node ~65ms)
+- **Regression tests:** `test_hot_property_mono_1m`, `test_hot_property_poly_1m`, `test_proto_set`, `test_proto_null`, `test_proto_deep_chain`
+- Committed `1636edc`. Tag: `sprint-15.5`.
 
 ## Global Testing Strategy
 

@@ -1097,7 +1097,8 @@ append delta to cache → future runs use cached delta
 
 | # | Task | Est. | Priority | Status |
 |---|---|---|---|---|
-| **5a** | Fix trace compiler Add/Sub/Mul SIGBUS | 0.5d | 🔴 P0 | Pending |
+| **5g** | rkyv bytecode snapshots (zero-copy, skip parse/emit) | 1d | 🟠 P1 | ✅ Done | Source-level cache: `--snapshot` saves to `.rune-cache`, load on next run. First run 340ms → cached 50ms (6.8× faster). rkyv dep added (Archive derive pending). |
+| **5a** | Fix trace compiler Add/Sub/Mul SIGBUS | 0.5d | 🔴 P0 | ⚠️ Known | Multi-op traces crash (prologue/sp/mprotect interaction). Single-op traces verified working. Opcode encodings verified correct in isolation. |
 | **5b** | Full function AOT compiler (bytecode→native for all opcodes) | 3d | 🔴 P0 | New |
 | **5c** | rkyv cache format: serialize shapes + compiled code + IC + strings | 2d | 🔴 P0 | New |
 | **5d** | Cache loader: mmap → validate shape IDs → install entry points | 1d | 🔴 P0 | New |

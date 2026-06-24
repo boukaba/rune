@@ -1414,8 +1414,6 @@ impl Vm {
                         }
                     }
                     // Shape guard failed — fall back to generic LoadProperty
-                    self.push(obj);
-                    self.push(raw_key);
                     let result = load_property_recursive_ic(
                         gc,
                         &mut self.ics,

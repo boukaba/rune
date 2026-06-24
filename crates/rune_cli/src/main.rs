@@ -16,7 +16,7 @@ fn main() {
 
     if source_args.is_empty() {
         let source = "1 + 2;";
-        let mut ctx = rune_embed::Context::new();
+        let mut ctx = rune_embed::Context::new_small();
         match ctx.eval(source) {
             Ok(val) => println!("=> {:?}", val),
             Err(e) => eprintln!("Error: {e}"),
@@ -45,7 +45,7 @@ fn main() {
             }
         }
         source => {
-            let mut ctx = rune_embed::Context::new();
+            let mut ctx = rune_embed::Context::new_small();
             match ctx.eval(source) {
                 Ok(val) => println!("=> {:?}", val),
                 Err(e) => eprintln!("Error: {e}"),

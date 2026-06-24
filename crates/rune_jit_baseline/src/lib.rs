@@ -1,9 +1,13 @@
 pub mod assembler;
 pub mod codegen;
+#[cfg(target_arch = "aarch64")]
+pub mod codegen_aarch64;
 pub mod ic;
 pub mod templates;
 
 pub use codegen::{CodeGen, JitEntryFn};
+#[cfg(target_arch = "aarch64")]
+pub use codegen_aarch64::compile_trace;
 
 /// Check if a BytecodeProgram only uses opcodes the JIT can currently handle.
 pub fn is_jit_compatible(prog: &rune_bytecode::opcode::BytecodeProgram) -> bool {

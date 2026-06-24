@@ -116,6 +116,15 @@ impl ExecutableMemory {
             )
         };
         assert_eq!(ret, 0, "ExecutableMemory mprotect to RX failed");
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        {
+            unsafe extern "C" {
+                fn sys_icache_invalidate(addr: *const u8, size: usize);
+            }
+            unsafe {
+                sys_icache_invalidate(self.ptr as *const u8, self.offset);
+            }
+        }
     }
 
     pub fn code_ptr(&self) -> *const u8 {

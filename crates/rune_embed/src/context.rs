@@ -189,4 +189,97 @@ mod tests {
 
         let _ = std::fs::remove_file(&tmp);
     }
+
+    /// Benchmark: parse+emit vs cache load for a realistic 128-line program.
+    /// Run with: cargo test -p rune_embed bench_real_cache --release -- --nocapture
+    #[test]
+    fn bench_real_cache() {
+        let src = r#"
+function range(start, end) { var arr = []; for (var i = start; i < end; i = i + 1) { arr.push(i); } return arr; }
+function sum(arr) { var s = 0; for (var i = 0; i < arr.length; i = i + 1) { s = s + arr[i]; } return s; }
+function map(arr, fn) { var out = []; for (var i = 0; i < arr.length; i = i + 1) { out.push(fn(arr[i])); } return out; }
+function filter(arr, fn) { var out = []; for (var i = 0; i < arr.length; i = i + 1) { if (fn(arr[i])) out.push(arr[i]); } return out; }
+function square(x) { return x * x; }
+function cube(x) { return x * x * x; }
+function isEven(x) { return x % 2 === 0; }
+function Point(x, y) { this.x = x; this.y = y; }
+Point.prototype.distance = function() { return this.x * this.x + this.y * this.y; };
+Point.prototype.add = function(p) { return new Point(this.x + p.x, this.y + p.y); };
+function Vector3(x, y, z) { this.x = x; this.y = y; this.z = z; }
+Vector3.prototype.length = function() { return this.x * this.x + this.y * this.y + this.z * this.z; };
+Vector3.prototype.dot = function(v) { return this.x * v.x + this.y * v.y + this.z * v.z; };
+function factorial(n) { if (n <= 1) return 1; return n * factorial(n - 1); }
+function fibonacci(n) { if (n <= 1) return n; return fibonacci(n - 1) + fibonacci(n - 2); }
+function gcd(a, b) { if (b === 0) return a; return gcd(b, a % b); }
+function isPrime(n) { if (n < 2) return false; for (var i = 2; i * i <= n; i = i + 1) { if (n % i === 0) return false; } return true; }
+var nums = range(1, 100);
+var s = sum(map(nums, square));
+var r = sum(filter(nums, isEven));
+var p1 = new Point(3, 4);
+var d = p1.distance();
+var v1 = new Vector3(1, 2, 3);
+var len = v1.length();
+var f10 = factorial(10);
+var fib20 = fibonacci(20);
+s + r + d + len + f10 + fib20;
+"#;
+        let cache_path = std::env::temp_dir().join("rune_real_bench.cache");
+        let _ = std::fs::remove_file(&cache_path);
+
+        let n = 500;
+
+        // 1. Compile only (parse + emit, no execute)
+        let t0 = std::time::Instant::now();
+        for _ in 0..n {
+            let ctx = Context::new_small();
+            ctx.compile(src).unwrap();
+        }
+        let compile_us = t0.elapsed().as_micros() as f64 / n as f64;
+
+        // 2. Build + save cache once, then load from disk
+        {
+            let ctx = Context::new_small();
+            let bc = ctx.compile(src).unwrap();
+            let cache = crate::afpc::AfpcCache::from_runtime(bc, vec![]);
+            crate::afpc::save_afpc_cache(&cache_path, &cache).unwrap();
+        }
+        let t0 = std::time::Instant::now();
+        for _ in 0..n {
+            let _cache = crate::afpc::load_afpc_cache(&cache_path).unwrap();
+        }
+        let load_us = t0.elapsed().as_micros() as f64 / n as f64;
+
+        // 3. Compile + execute (full cold)
+        let t0 = std::time::Instant::now();
+        for _ in 0..n {
+            let mut ctx = Context::new_small();
+            ctx.eval(src).unwrap();
+        }
+        let cold_us = t0.elapsed().as_micros() as f64 / n as f64;
+
+        // 4. Cache load + execute
+        let t0 = std::time::Instant::now();
+        for _ in 0..n {
+            let cache = crate::afpc::load_afpc_cache(&cache_path).unwrap();
+            let mut ctx = Context::new_small();
+            cache.restore_shapes();
+            ctx.set_ics(cache.ic_table.clone());
+            ctx.eval_bytecode_owned(cache.bytecode).unwrap();
+        }
+        let cached_us = t0.elapsed().as_micros() as f64 / n as f64;
+
+        eprintln!("\n╔══════════════════════════════════════════╗");
+        eprintln!("║  AFPC Cache — Real 20-fn program        ║");
+        eprintln!("╠══════════════════════════════════════════╣");
+        eprintln!("║  Compile (parse+emit): {:>8.1} µs       ║", compile_us);
+        eprintln!("║  Cache load (disk):    {:>8.1} µs       ║", load_us);
+        eprintln!("║  Speedup (compile):    {:>8.1}x          ║", compile_us / load_us);
+        eprintln!("╠══════════════════════════════════════════╣");
+        eprintln!("║  Cold (parse+emit+exec):{:>8.1} µs      ║", cold_us);
+        eprintln!("║  Cached (load+exec):   {:>8.1} µs       ║", cached_us);
+        eprintln!("║  Speedup (end-to-end): {:>8.1}x          ║", cold_us / cached_us);
+        eprintln!("╚══════════════════════════════════════════╝");
+
+        let _ = std::fs::remove_file(&cache_path);
+    }
 }

@@ -2,8 +2,8 @@
 
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
-> **Status:** Sprint 15.5 🟢 (IC hardened + SIDT fixed, 297 integration / 425+ total tests)
-> — AArch64 trace compiler foundation laid, PPTS design validated
+> **Status:** v0.0.1 🏷️ (Technology Preview — tagged at `0067e41`)
+> SIDT validated, AFPC architecture designed, 297 tests, cold start 5× faster than Node
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
 > Every implementation decision at every level (lexer, parser, emitter, bytecode, interpreter, builtins, JIT) **must** be verified against the exact ECMA-262 specification language in [`ecma262.md`](./ecma262.md) — **never guess** what the spec says. Each section in `ecma262.md` links to the corresponding URL fragment on `https://tc39.es/ecma262/multipage/`; **always open these URLs via `webfetch` tool** to read the authoritative algorithm steps before implementing. This applies to all phases below.
@@ -1110,34 +1110,23 @@ append delta to cache → future runs use cached delta
 
 **Total: 12.5 days (~2.5 weeks).** Delivers a genuinely novel JS execution model — AOT-first with immutable-shape persistence. No engine in production, research, or open-source does this.
 
-### Sub-tasks detail
+---
 
-**5a — Fix SIGBUS:** The `orr_imm1` bitmask encoding in `compile_op` Add/Sub/Mul is wrong. Test with `test_trace_add` to verify fix.
+## v0.0.1 — Technology Preview 🏷️
 
-**5b — Full function AOT:** Extend `emit_trace_into` to `emit_program_into`. For each bytecode instruction, emit native aarch64/x86-64 code. Start with the opcodes that already work (LoadSmi, Add, Sub, LoadLocal, StoreLocal, Jump, Return). Add property access (LoadPropertyIC with shape guard). Add control flow (JumpIfFalse, JumpIfTrue).
+Tagged `v0.0.1` at `0067e41`. Honest positioning: NOT FOR PRODUCTION USE.
 
-**5c — rkyv cache format:** Define a `struct AfpcCache` with rkyv's `Archive` macro. Contains: compiled program entry points (vec of ptr/len), shape table, IC entries, string constant handles. On save: rkyv::to_bytes the cache → write to `.rune-cache`.
+**What shipped:**
+- Language core: arithmetic, scoping, functions (all forms), objects (all forms), arrays, control flow, destructuring, spread/rest, template literals, generators, try/catch/finally, prototype chains, closures
+- SIDT: immutable shapes, SIMD IC (NEON + SSE4.1), LoadPropertyIC shape-guarded bytecode patching, loop trace recording
+- GC: Cheney semi-space, sound at 500K+ allocations, string constant caching
+- AFPC snapshot cache: first run 340ms → cached 50ms (6.8× faster)
+- CLI: new_small() default (1MB heap, ~7ms cold start), --snapshot, --ic-stats, --trace-stats
+- 4 examples, honest README
 
-**5d — Cache loader:** On startup, check for `.rune-cache`. If exists: mmap the file, validate the archive, verify shape IDs are still valid (they are — immutable), install native entry points into the VM's function table.
+**Gaps (documented):** No standard library, optimizing JIT, modules, classes, async/await. 5–230× slower than V8 on hot loops.
 
-**5e — Delta JIT:** When a shape guard misses (new shape not in cache), fall back to interpreter for that one call. Record the new shape+offset. At the end of execution, compile the delta (just the new shape guard) and append to cache.
-
-**5f — CLI:** `rune --cache program.js` compiles AOT and saves. `rune program.js` checks for cache, loads if found, otherwise falls back to interpreter.
-
-**5g — rkyv bytecode:** `BytecodeProgram` gets `#[derive(Archive)]`. On cache miss, load bytecode from rkyv instead of parsing.
-
-**5h — Benchmark:** Compare first-run (AOT compile), subsequent-run (cached native), and V8 at 100, 1K, 10K, 100K, 1M iterations. Measure cold start, memory, and total CPU time.
-
-**5i — Integration tests:** Verify: cache round-trip produces identical results, delta JIT doesn't corrupt cache, deoptimization (shape miss) falls back correctly, cache loads on next run.
-
-### Relationship to prior work
-
-| Prior design | How AFPC improves it |
-|---|---|
-| Phase 5a (VSD) | VSD was SIMD-only property access. AFPC compiles ALL opcodes to native, not just property access. |
-| PPTS (traces only) | PPTS compiled hot loop traces only. AFPC compiles entire programs. |
-| rkyv snapshots | rkyv was for bytecode serialization. AFPC serializes compiled native code + shape state. |
-| Cranelift JIT | AFPC replaces the full Cranelift plan. No IR, no optimization passes — direct bytecode→native emission. |
+**Next: v0.0.2** — Finish AFPC trace compiler (fix 5a SIGBUS), rkyv bytecode persistence, delta JIT for new shapes.
 
 ## Global Testing Strategy
 

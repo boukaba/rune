@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 /// Entry in an inline cache for a specific (shape, key) pair.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Default)]
 pub struct IcEntry {
     /// Slot offset in the object (or prototype at proto_depth).
     pub offset: usize,

@@ -94,6 +94,10 @@ pub struct Vm {
     pub globals: HashMap<String, Value>,
     /// Shape-Indexed Dispatch Tables for property access caching.
     pub ics: Vec<InlineCache>,
+    /// Cached IC entries for bytecode-specialized callsites (LoadPropertyIC).
+    pub ic_entries: Vec<IcEntry>,
+    /// Per-callsite hit counters for bytecode patching threshold.
+    ic_hit_counts: Vec<u32>,
     /// Aggregate IC statistics.
     pub ic_stats: IcStats,
     /// Pre-built constructor objects (like `Object`) that expose methods via property access.
@@ -126,6 +130,8 @@ impl Vm {
             builtins: Vec::new(),
             globals: HashMap::new(),
             ics: Vec::new(),
+            ic_entries: Vec::new(),
+            ic_hit_counts: Vec::new(),
             ic_stats: IcStats::default(),
             builtin_wrappers: HashMap::new(),
             last_locals: Vec::new(),
@@ -1252,6 +1258,29 @@ impl Vm {
                                         let ck = ic_cache_key(shape.id, raw_key);
                                         if let Some(entry) = self.ics[ic_idx].entries.get(&ck) {
                                             self.ic_stats.hits += 1;
+                                            // Hot-path specialization: after 8 hits, patch
+                                            // LoadProperty → LoadPropertyIC for shape-guarded access.
+                                            if ic_idx < self.ic_hit_counts.len()
+                                                && self.ic_hit_counts[ic_idx] < 8
+                                            {
+                                                self.ic_hit_counts[ic_idx] += 1;
+                                                if self.ic_hit_counts[ic_idx] == 8 {
+                                                    let instr_mut = unsafe {
+                                                        let instrs_ptr =
+                                                            (*prog_ptr).instructions.as_ptr()
+                                                                as *mut Instruction;
+                                                        &mut *instrs_ptr.add(pc)
+                                                    };
+                                                    instr_mut.opcode = Opcode::LoadPropertyIC;
+                                                    instr_mut.operands.clear();
+                                                    instr_mut.operands.extend_from_slice(&[
+                                                        shape.id as i64,
+                                                        entry.offset as i64,
+                                                        entry.proto_depth as i64,
+                                                    ]);
+                                                    self.ic_entries[ic_idx] = *entry;
+                                                }
+                                            }
                                             let val = if entry.is_own {
                                                 unsafe {
                                                     JSObject::get_slot(
@@ -1327,7 +1356,15 @@ impl Vm {
                                 self.ic_stats.misses += 1;
                                 // Full lookup with IC population
 
-                                load_property_recursive_ic(gc, &mut self.ics, &instr, obj, raw_key)
+                                load_property_recursive_ic(
+                                    gc,
+                                    &mut self.ics,
+                                    &mut self.ic_entries,
+                                    &mut self.ic_hit_counts,
+                                    &instr,
+                                    obj,
+                                    raw_key,
+                                )
                             } else {
                                 // No IC attached — fall back to full lookup
                                 load_property_recursive(obj, raw_key)
@@ -1336,6 +1373,58 @@ impl Vm {
                     } else {
                         Value::undefined()
                     };
+                    self.push(result);
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::LoadPropertyIC => {
+                    // Shape-guarded fast path. Operands: [cached_shape_id, offset, proto_depth]
+                    let raw_key = self.pop();
+                    let obj = self.pop();
+                    let ic_idx = instr.ic_index as usize;
+                    let cached_shape_id = instr.operands.first().copied().unwrap_or(0) as u64;
+                    let offset = instr.operands.get(1).copied().unwrap_or(0) as usize;
+                    let proto_depth = instr.operands.get(2).copied().unwrap_or(0) as u8;
+
+                    if ic_idx < self.ic_entries.len()
+                        && let Some(ptr) = obj.heap_ptr()
+                    {
+                        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+                        if tag == TAG_OBJECT {
+                            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                            if shape.id == cached_shape_id {
+                                // Shape guard passes — direct slot access
+                                let val = if proto_depth == 0 {
+                                    unsafe { JSObject::get_slot(ptr as *mut JSObject, offset) }
+                                } else {
+                                    let mut p = ptr;
+                                    for _ in 0..proto_depth {
+                                        let next =
+                                            unsafe { JSObject::prototype(p as *mut JSObject) };
+                                        if next.is_null() {
+                                            break;
+                                        }
+                                        p = next;
+                                    }
+                                    unsafe { JSObject::get_slot(p as *mut JSObject, offset) }
+                                };
+                                self.push(val);
+                                self.frames[fi].pc = pc + 1;
+                                continue;
+                            }
+                        }
+                    }
+                    // Shape guard failed — fall back to generic LoadProperty
+                    self.push(obj);
+                    self.push(raw_key);
+                    let result = load_property_recursive_ic(
+                        gc,
+                        &mut self.ics,
+                        &mut self.ic_entries,
+                        &mut self.ic_hit_counts,
+                        &instr,
+                        obj,
+                        raw_key,
+                    );
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
                 }
@@ -2995,6 +3084,8 @@ fn load_property_recursive(obj: Value, raw_key: Value) -> Value {
 fn load_property_recursive_ic(
     _gc: &mut SemiSpace,
     ics: &mut Vec<InlineCache>,
+    ic_entries: &mut Vec<IcEntry>,
+    ic_hit_counts: &mut Vec<u32>,
     instr: &Instruction,
     obj: Value,
     raw_key: Value,
@@ -3008,6 +3099,8 @@ fn load_property_recursive_ic(
         let ic_idx = instr.ic_index as usize;
         while ics.len() <= ic_idx {
             ics.push(InlineCache::new());
+            ic_entries.push(IcEntry::default());
+            ic_hit_counts.push(0);
         }
         if tag == TAG_OBJECT {
             if let Some(key) = value_to_prop_key(raw_key) {

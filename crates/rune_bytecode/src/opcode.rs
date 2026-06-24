@@ -56,6 +56,7 @@ pub enum Opcode {
     ArraySlice,
     SpreadIntoObject,
     LoadProperty,
+    LoadPropertyIC, // shape-guarded fast path (after N hits)
     StoreProperty,
     DeleteProperty,
     DefineProperty,

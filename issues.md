@@ -121,6 +121,38 @@
 
 ---
 
+## P10: JIT SLOWER than interpreter on tiny functions ⚠️ Known
+
+**Status:** ⚠️ Known, not blocking v0.0.1
+
+**Symptom:** `jit_hot_function_1M` benchmark (1M calls to `add(a,b){return a+b;}`) takes ~701ms with JIT vs ~455ms interpreter-only. JIT prologue/epilogue + locals setup overhead dominates a 4-instruction function body.
+
+**Root cause:** Function-level JIT has fixed overhead (callee-saved push/pop, locals Vec allocation, all_smi check). For tiny leaf functions, this exceeds the interpreter's per-opcode dispatch cost. Trace-level compilation (whole loop body) doesn't have this problem.
+
+**Fix (v0.0.2):** Wire AArch64 trace compiler to loop execution for hot loops. Use function JIT only for functions above a size threshold (e.g. > 20 bytecode instructions).
+
+---
+
+## P11: JIT opcode coverage is Smi-only (15/61 opcodes) ⚠️ Known
+
+**Status:** ⚠️ Known, active work item
+
+**Symptom:** Only LoadSmi, LoadUndefined, LoadNull, LoadBoolean, LoadLocal, StoreLocal, Pop, Dup, Add, Sub, Mul, Lt, Jump, JumpIfFalse, IncLocal, DecLocal are JIT-compiled. Missing: LoadFloat64, LoadStringConst, LoadProperty/IC, StoreProperty, Call, Return (with value), all object/array/string ops, type conversions.
+
+**Fix:** Expand baseline JIT opcode coverage incrementally. Priority: LoadFloat64, LoadPropertyIC, StoreProperty, Call.
+
+---
+
+## P12: Trace compiler not wired to loop execution ⚠️ Known
+
+**Status:** ⚠️ Known, active work item
+
+**Symptom:** The AArch64 trace compiler (`compile_trace`) exists and passes unit tests, but is never invoked during loop execution. Hot loops always run in interpreter, even though trace recording infrastructure is in place (`LoopTrace`, `TraceOp`, `record_trace()`).
+
+**Fix:** Wire trace compilation into the VM's loop tier-up path. On Nth loop iteration, compile trace, install entry point, and execute natively.
+
+---
+
 ## Summary
 
 | # | Issue | Status | Commit |
@@ -135,3 +167,6 @@
 | P7 | IC stats undercounted | ✅ Fixed | current |
 | P8 | CLI -e flag | ⚠️ Known | — |
 | P9 | Return assertion relaxed | ⚠️ Deferred | — |
+| P10 | JIT slower than interpreter on tiny functions | ⚠️ Known | — |
+| P11 | JIT coverage Smi-only (15/61 opcodes) | ⚠️ Known | — |
+| P12 | Trace compiler not wired to loop execution | ⚠️ Known | — |

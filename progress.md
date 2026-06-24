@@ -3,7 +3,7 @@
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
 > **Status:** v0.0.1 🏷️ (Technology Preview — tagged at `0067e41`)
-> SIDT validated, AFPC bytecode + native-code cache functional (x86_64 + AArch64), 300+ tests, cold start 5× faster than Node
+> SIDT validated, AFPC bytecode + native-code cache functional (x86_64 + AArch64), 424 tests, cold start 5× faster than Node
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
 > Every implementation decision at every level (lexer, parser, emitter, bytecode, interpreter, builtins, JIT) **must** be verified against the exact ECMA-262 specification language in [`ecma262.md`](./ecma262.md) — **never guess** what the spec says. Each section in `ecma262.md` links to the corresponding URL fragment on `https://tc39.es/ecma262/multipage/`; **always open these URLs via `webfetch` tool** to read the authoritative algorithm steps before implementing. This applies to all phases below.
@@ -462,36 +462,18 @@
 
 ---
 
-## Phase 4 — Generators & Async Generators Runtime
+## Phase 4–8 — Deferred/Superseded
 
-> **Spec mandate:** See [`ecma262.md`](./ecma262.md) §15.6 (generator definitions), §29.3 (Generator objects, GeneratorYield, YieldStar) — open each linked `https://tc39.es/ecma262/multipage/` URL via `webfetch` for exact yield/resume/throw semantics. No guessing.
+These phases (Generators/Cranelift/Modules/GenImmix/Fuzzing) were early roadmap planning that predates the **AFPC strategy pivot**. They have been superseded by:
 
-**Goal:** Full heap-frame with try/catch/finally + `yield*` semantics. Async generators.
+- **Sprint 16 + Phase 5 (AFPC)** below for compilation/caching strategy
+- **Sprint 14** for modern syntax (destructuring, spread/rest, template literals, closures)
+- **Sprint 13** for scoping and Test262
+- **Sprint 11** for operator fixes
 
-### `rune_core`
-- [ ] `GeneratorFrame` object: state, resume_mode, locals, try_stack
-- [ ] Shape for `GeneratorFrame`
+Generators have basic `function*` / `yield` / `next()` support in the interpreter. Full async generators, Cranelift, ESM modules, standard library, GenImmix GC, and fuzzing remain deferred to v0.1.0+.
 
-### `rune_interpreter/generator.rs`
-- [ ] `Resume` opcode: switch on state + resume_mode
-- [ ] `Yield` opcode: store state, pack frame, return
-- [ ] try_stack push/pop on try block entry/exit
-- [ ] `YieldStar` helper (full spec semantics)
-
-### Async generators
-- [ ] Extend `GeneratorFrame` with promise for `next()` result
-- [ ] Wire through existing Promise builtin
-
-### JIT integration
-- [ ] Multi-entry dispatch works in baseline JIT
-
-### Tests
-- [ ] Test262 §25.3 generator tests
-- [ ] Test262 §25.5 async generator tests
-- [ ] Complex: yield inside try/catch, nested try/finally, return() during suspend
-
-### Acceptance Criteria
-- [ ] All Test262 generator tests pass
+The AFPC Phase 5 section below is now the **canonical roadmap** for the next 2-3 milestones.
 
 ---
 
@@ -1144,17 +1126,22 @@ append delta to cache → future runs use cached delta
 
 Tagged `v0.0.1` at `0067e41`. Honest positioning: NOT FOR PRODUCTION USE.
 
-**What shipped:**
+**What shipped (at tag):**
 - Language core: arithmetic, scoping, functions (all forms), objects (all forms), arrays, control flow, destructuring, spread/rest, template literals, generators, try/catch/finally, prototype chains, closures
 - SIDT: immutable shapes, SIMD IC (NEON + SSE4.1), LoadPropertyIC shape-guarded bytecode patching, loop trace recording
 - GC: Cheney semi-space, sound at 500K+ allocations, string constant caching
-- AFPC snapshot cache: first run 340ms → cached 50ms (6.8× faster)
 - CLI: new_small() default (1MB heap, ~7ms cold start), --snapshot, --ic-stats, --trace-stats
 - 4 examples, honest README
 
-**Gaps (documented):** No standard library, optimizing JIT, modules, classes, async/await. 5–230× slower than V8 on hot loops.
+**Added post-tag (Sprint 14–16, current HEAD):**
+- Scoping: full let/const block scoping with TDZ, per-iteration let in for-loops (Sprint 13)
+- Syntax: destructuring (object/array/nested/rest/defaults), spread/rest, template literals with substitutions, arrow functions, default params, comma operator, delete void typeof (Sprint 14)
+- IC hardening: LoadPropertyIC → SIDT fused check, StorePropertyIC, get-by-value IC, proto chain IC, LoadPropertyIC shape-installing, IC miss stats, ~2.3× poly speedup (Sprint 15.5)
+- AFPC: rkyv binary bytecode cache, CLI --cache flag, shape/IC table persistence, x86-64 + AArch64 function baseline JIT with native code mmap on load, 13.5× compile speedup (Sprint 16)
+- AArch64 function AOT: `Aarch64CodeGen` matches x86-64 Smi-only opcode subset (LoadSmi, Add, Sub, Mul, Lt, LoadLocal, StoreLocal, Jump/JumpIfFalse, IncLocal/DecLocal, Pop, Dup)
+- Test count: 297 integration → 424 total (297 integration + 127 unit/doctest)
 
-**Next: v0.0.2** — Expand baseline JIT opcode coverage (floats, property access, calls), wire AArch64 trace compiler to loop execution, Delta JIT for new shapes.
+**Gaps (documented):** No standard library, optimizing JIT (full opcode coverage), modules, classes, async/await. 5–230× slower than V8 on hot loops. JIT covers 15/61 opcodes (Smi-only).
 
 ## Global Testing Strategy
 

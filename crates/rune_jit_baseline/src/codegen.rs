@@ -316,6 +316,76 @@ impl CodeGen {
                     self.mem.emit_or_r64_imm8(0, 1);
                     self.emit_jit_stack_push();
                 }
+                Opcode::Shl => {
+                    self.emit_jit_stack_pop();
+                    self.mem.emit_mov_r64_rm64(1, 0); // rcx = b
+                    self.emit_jit_stack_pop(); // rax = a
+                    self.mem.emit_sar_r64_1(0); // sar rax, 1 (untag)
+                    self.mem.emit_sar_r64_1(1); // sar rcx, 1 (untag)
+                    // shl rax, cl
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0xD3);
+                    self.mem.emit_byte(0xE0); // mod=11, reg=4(shl), r/m=0(rax)
+                    self.mem.emit_shl_r64_1(0); // shl rax, 1 (retag)
+                    self.mem.emit_or_r64_imm8(0, 1);
+                    self.emit_jit_stack_push();
+                }
+                Opcode::Shr => {
+                    self.emit_jit_stack_pop();
+                    self.mem.emit_mov_r64_rm64(1, 0);
+                    self.emit_jit_stack_pop();
+                    self.mem.emit_sar_r64_1(0);
+                    self.mem.emit_sar_r64_1(1);
+                    // sar rax, cl
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0xD3);
+                    self.mem.emit_byte(0xF8); // mod=11, reg=7(sar), r/m=0(rax)
+                    self.mem.emit_shl_r64_1(0);
+                    self.mem.emit_or_r64_imm8(0, 1);
+                    self.emit_jit_stack_push();
+                }
+                Opcode::BitAnd => {
+                    self.emit_jit_stack_pop();
+                    self.mem.emit_mov_r64_rm64(1, 0);
+                    self.emit_jit_stack_pop();
+                    self.mem.emit_sar_r64_1(0);
+                    self.mem.emit_sar_r64_1(1);
+                    // and rax, rcx
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0x23);
+                    self.mem.emit_byte(0xC1); // mod=11, reg=0(rax), r/m=1(rcx)
+                    self.mem.emit_shl_r64_1(0);
+                    self.mem.emit_or_r64_imm8(0, 1);
+                    self.emit_jit_stack_push();
+                }
+                Opcode::BitOr => {
+                    self.emit_jit_stack_pop();
+                    self.mem.emit_mov_r64_rm64(1, 0);
+                    self.emit_jit_stack_pop();
+                    self.mem.emit_sar_r64_1(0);
+                    self.mem.emit_sar_r64_1(1);
+                    // or rax, rcx
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0x0B);
+                    self.mem.emit_byte(0xC1); // mod=11, reg=0(rax), r/m=1(rcx)
+                    self.mem.emit_shl_r64_1(0);
+                    self.mem.emit_or_r64_imm8(0, 1);
+                    self.emit_jit_stack_push();
+                }
+                Opcode::BitXor => {
+                    self.emit_jit_stack_pop();
+                    self.mem.emit_mov_r64_rm64(1, 0);
+                    self.emit_jit_stack_pop();
+                    self.mem.emit_sar_r64_1(0);
+                    self.mem.emit_sar_r64_1(1);
+                    // xor rax, rcx
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0x33);
+                    self.mem.emit_byte(0xC1); // mod=11, reg=0(rax), r/m=1(rcx)
+                    self.mem.emit_shl_r64_1(0);
+                    self.mem.emit_or_r64_imm8(0, 1);
+                    self.emit_jit_stack_push();
+                }
                 Opcode::IncLocal => {
                     let idx = instr.operands[0] as usize;
                     let is_prefix = instr.operands[1] != 0;

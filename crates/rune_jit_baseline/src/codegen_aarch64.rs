@@ -100,9 +100,28 @@ fn cmp_reg(mem: &mut ExecutableMemory, xn: u32, xm: u32) {
 }
 
 /// AND xd, xn, xm
-#[allow(dead_code)]
 fn and_reg(mem: &mut ExecutableMemory, xd: u32, xn: u32, xm: u32) {
     emit(mem, 0x8A000000 | (xm << 16) | (xn << 5) | xd);
+}
+
+/// ORR xd, xn, xm
+fn orr_reg(mem: &mut ExecutableMemory, xd: u32, xn: u32, xm: u32) {
+    emit(mem, 0xAA000000 | (xm << 16) | (xn << 5) | xd);
+}
+
+/// EOR xd, xn, xm
+fn eor_reg(mem: &mut ExecutableMemory, xd: u32, xn: u32, xm: u32) {
+    emit(mem, 0xCA000000 | (xm << 16) | (xn << 5) | xd);
+}
+
+/// LSL xd, xn, xm  (register shift)
+fn lsl_reg(mem: &mut ExecutableMemory, xd: u32, xn: u32, xm: u32) {
+    emit(mem, 0x9AC02000 | (xm << 16) | (xn << 5) | xd);
+}
+
+/// ASR xd, xn, xm  (register arithmetic shift right)
+fn asr_reg(mem: &mut ExecutableMemory, xd: u32, xn: u32, xm: u32) {
+    emit(mem, 0x9AC02800 | (xm << 16) | (xn << 5) | xd);
 }
 
 /// ORR xd, xn, #1 — set bit 0 (Smi tag)
@@ -405,6 +424,63 @@ impl Aarch64CodeGen {
                     cmp_reg(&mut self.mem, 0, 1);
                     // CSET x0, EQ = CSINC x0, XZR, XZR, NE (= !EQ)
                     emit(&mut self.mem, 0x9A9F17E0);
+                    emit(&mut self.mem, 0xD37FF800);
+                    orr_imm1(&mut self.mem, 0, 0);
+                    self.push();
+                }
+                Opcode::Shl => {
+                    self.pop();
+                    mov_reg(&mut self.mem, 1, 0);
+                    self.pop();
+                    // Untag both: ASR #1 decodes Smi → int32
+                    emit(&mut self.mem, 0x9341FC00); // ASR x0, x0, #1
+                    emit(&mut self.mem, 0x9341FC21); // ASR x1, x1, #1
+                    lsl_reg(&mut self.mem, 0, 0, 1);  // LSL x0, x0, x1
+                    // Retag: LSL #1; ORR #1
+                    emit(&mut self.mem, 0xD37FF800);
+                    orr_imm1(&mut self.mem, 0, 0);
+                    self.push();
+                }
+                Opcode::Shr => {
+                    self.pop();
+                    mov_reg(&mut self.mem, 1, 0);
+                    self.pop();
+                    emit(&mut self.mem, 0x9341FC00);
+                    emit(&mut self.mem, 0x9341FC21);
+                    asr_reg(&mut self.mem, 0, 0, 1);  // ASR x0, x0, x1
+                    emit(&mut self.mem, 0xD37FF800);
+                    orr_imm1(&mut self.mem, 0, 0);
+                    self.push();
+                }
+                Opcode::BitAnd => {
+                    self.pop();
+                    mov_reg(&mut self.mem, 1, 0);
+                    self.pop();
+                    emit(&mut self.mem, 0x9341FC00);
+                    emit(&mut self.mem, 0x9341FC21);
+                    and_reg(&mut self.mem, 0, 0, 1);
+                    emit(&mut self.mem, 0xD37FF800);
+                    orr_imm1(&mut self.mem, 0, 0);
+                    self.push();
+                }
+                Opcode::BitOr => {
+                    self.pop();
+                    mov_reg(&mut self.mem, 1, 0);
+                    self.pop();
+                    emit(&mut self.mem, 0x9341FC00);
+                    emit(&mut self.mem, 0x9341FC21);
+                    orr_reg(&mut self.mem, 0, 0, 1);
+                    emit(&mut self.mem, 0xD37FF800);
+                    orr_imm1(&mut self.mem, 0, 0);
+                    self.push();
+                }
+                Opcode::BitXor => {
+                    self.pop();
+                    mov_reg(&mut self.mem, 1, 0);
+                    self.pop();
+                    emit(&mut self.mem, 0x9341FC00);
+                    emit(&mut self.mem, 0x9341FC21);
+                    eor_reg(&mut self.mem, 0, 0, 1);
                     emit(&mut self.mem, 0xD37FF800);
                     orr_imm1(&mut self.mem, 0, 0);
                     self.push();
@@ -991,6 +1067,45 @@ mod tests {
         let r = unsafe { func(vm, std::ptr::null_mut(), locals.as_mut_ptr()) };
         let expected = (2147516416u64 << 1) | 1;
         assert_eq!(r, expected, "65537 iters: got {}, expected {}", r, expected);
+    }
+
+    #[test]
+    fn test_aarch64_codegen_bitwise_ops() {
+        use rune_bytecode::opcode::{BytecodeProgram, Instruction};
+        // Test Shl, Shr, BitAnd, BitOr, BitXor with Smi operands
+        // 10 << 1 = 20 → Smi(20) = 41
+        // 20 >> 1 = 10 → Smi(10) = 21
+        // 6 & 3 = 2 → Smi(2) = 5
+        // 6 | 3 = 7 → Smi(7) = 15
+        // 6 ^ 3 = 5 → Smi(5) = 11
+        let tests: Vec<(Opcode, i64, i64, u64)> = vec![
+            (Opcode::Shl, 10, 1, 41),
+            (Opcode::Shr, 20, 1, 21),
+            (Opcode::BitAnd, 6, 3, 5),
+            (Opcode::BitOr, 6, 3, 15),
+            (Opcode::BitXor, 6, 3, 11),
+        ];
+        type JF = unsafe fn(*mut u8, *mut u8, *mut u64) -> u64;
+        for (op, a, b, expected) in tests {
+            let a_smi = ((a as u64) << 1) | 1;
+            let b_smi = ((b as u64) << 1) | 1;
+            let mut locals = vec![a_smi, b_smi];
+            let prog = BytecodeProgram::new(
+                vec![
+                    Instruction::new(Opcode::LoadLocal, vec![0]),
+                    Instruction::new(Opcode::LoadLocal, vec![1]),
+                    Instruction::new(op, vec![]),
+                    Instruction::new(Opcode::Return, vec![]),
+                ],
+                vec![], vec![],
+            );
+            let mem = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+            mem.make_executable();
+            let vm = jit_vm_ptr();
+            let func: JF = unsafe { std::mem::transmute(mem.code_ptr()) };
+            let r = unsafe { func(vm, std::ptr::null_mut(), locals.as_mut_ptr()) };
+            assert_eq!(r, expected, "{:?} {} {}: expected {}, got {}", op, a, b, expected, r);
+        }
     }
 
     #[test]

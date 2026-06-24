@@ -365,6 +365,50 @@ impl Aarch64CodeGen {
                     orr_imm1(&mut self.mem, 0, 0);
                     self.push();
                 }
+                Opcode::Gt => {
+                    self.pop();
+                    mov_reg(&mut self.mem, 1, 0);
+                    self.pop();
+                    cmp_reg(&mut self.mem, 0, 1);
+                    // CSET x0, GT = CSINC x0, XZR, XZR, LE (= !GT)
+                    emit(&mut self.mem, 0x9A9FD7E0);
+                    emit(&mut self.mem, 0xD37FF800);
+                    orr_imm1(&mut self.mem, 0, 0);
+                    self.push();
+                }
+                Opcode::Le => {
+                    self.pop();
+                    mov_reg(&mut self.mem, 1, 0);
+                    self.pop();
+                    cmp_reg(&mut self.mem, 0, 1);
+                    // CSET x0, LE = CSINC x0, XZR, XZR, GT (= !LE)
+                    emit(&mut self.mem, 0x9A9FC7E0);
+                    emit(&mut self.mem, 0xD37FF800);
+                    orr_imm1(&mut self.mem, 0, 0);
+                    self.push();
+                }
+                Opcode::Ge => {
+                    self.pop();
+                    mov_reg(&mut self.mem, 1, 0);
+                    self.pop();
+                    cmp_reg(&mut self.mem, 0, 1);
+                    // CSET x0, GE = CSINC x0, XZR, XZR, LT (= !GE)
+                    emit(&mut self.mem, 0x9A9FB7E0);
+                    emit(&mut self.mem, 0xD37FF800);
+                    orr_imm1(&mut self.mem, 0, 0);
+                    self.push();
+                }
+                Opcode::StrictEq => {
+                    self.pop();
+                    mov_reg(&mut self.mem, 1, 0);
+                    self.pop();
+                    cmp_reg(&mut self.mem, 0, 1);
+                    // CSET x0, EQ = CSINC x0, XZR, XZR, NE (= !EQ)
+                    emit(&mut self.mem, 0x9A9F17E0);
+                    emit(&mut self.mem, 0xD37FF800);
+                    orr_imm1(&mut self.mem, 0, 0);
+                    self.push();
+                }
                 Opcode::IncLocal => {
                     let idx = instr.operands[0] as u32;
                     let is_prefix = instr.operands.get(1).copied().unwrap_or(0) != 0;
@@ -947,6 +991,46 @@ mod tests {
         let r = unsafe { func(vm, std::ptr::null_mut(), locals.as_mut_ptr()) };
         let expected = (2147516416u64 << 1) | 1;
         assert_eq!(r, expected, "65537 iters: got {}, expected {}", r, expected);
+    }
+
+    #[test]
+    fn test_aarch64_cset_all_comparisons() {
+        // Test each comparison opcode: Lt, Gt, Le, Ge, StrictEq
+        type JF = unsafe fn(*mut u8, *mut u8, *mut u64) -> u64;
+        let test = |op: Opcode, a: i64, b: i64, expected: bool| {
+            let a_smi = ((a as u64) << 1) | 1;
+            let b_smi = ((b as u64) << 1) | 1;
+            let mut locals = vec![a_smi, b_smi];
+            let prog = BytecodeProgram::new(
+                vec![
+                    Instruction::new(Opcode::LoadLocal, vec![0]),
+                    Instruction::new(Opcode::LoadLocal, vec![1]),
+                    Instruction::new(op, vec![]),
+                    Instruction::new(Opcode::Return, vec![]),
+                ],
+                vec![], vec![],
+            );
+            let mem = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+            mem.make_executable();
+            let vm = jit_vm_ptr();
+            let func: JF = unsafe { std::mem::transmute(mem.code_ptr()) };
+            let r = unsafe { func(vm, std::ptr::null_mut(), locals.as_mut_ptr()) };
+            // true=3 (Smi(1)), false=1 (Smi(0))
+            assert_eq!(r == 3, expected, "{:?} {} {}: got {}", op, a, b, r);
+        };
+        use rune_bytecode::opcode::{BytecodeProgram, Instruction};
+        test(Opcode::Lt, 0, 10, true);
+        test(Opcode::Lt, 10, 0, false);
+        test(Opcode::Gt, 10, 0, true);
+        test(Opcode::Gt, 0, 10, false);
+        test(Opcode::Le, 0, 10, true);
+        test(Opcode::Le, 10, 10, true);
+        test(Opcode::Le, 10, 0, false);
+        test(Opcode::Ge, 10, 0, true);
+        test(Opcode::Ge, 10, 10, true);
+        test(Opcode::Ge, 0, 10, false);
+        test(Opcode::StrictEq, 42, 42, true);
+        test(Opcode::StrictEq, 42, 99, false);
     }
 
     #[test]

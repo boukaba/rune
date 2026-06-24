@@ -248,6 +248,74 @@ impl CodeGen {
                     self.mem.emit_or_r64_imm8(0, 1); // or rax, 1
                     self.emit_jit_stack_push();
                 }
+                Opcode::Gt => {
+                    self.emit_jit_stack_pop();
+                    self.mem.emit_mov_r64_rm64(1, 0);
+                    self.emit_jit_stack_pop();
+                    self.mem.emit_cmp_r64_r64(0, 1);
+                    // setg: 0F 9F /0
+                    self.mem.emit_byte(0x0F);
+                    self.mem.emit_byte(0x9F);
+                    self.mem.emit_byte(0xC0);
+                    self.mem.emit_byte(0x0F);
+                    self.mem.emit_byte(0xB6);
+                    self.mem.emit_byte(0xC0);
+                    self.mem.emit_byte(0xD1);
+                    self.mem.emit_byte(0xE0);
+                    self.mem.emit_or_r64_imm8(0, 1);
+                    self.emit_jit_stack_push();
+                }
+                Opcode::Le => {
+                    self.emit_jit_stack_pop();
+                    self.mem.emit_mov_r64_rm64(1, 0);
+                    self.emit_jit_stack_pop();
+                    self.mem.emit_cmp_r64_r64(0, 1);
+                    // setle: 0F 9E /0
+                    self.mem.emit_byte(0x0F);
+                    self.mem.emit_byte(0x9E);
+                    self.mem.emit_byte(0xC0);
+                    self.mem.emit_byte(0x0F);
+                    self.mem.emit_byte(0xB6);
+                    self.mem.emit_byte(0xC0);
+                    self.mem.emit_byte(0xD1);
+                    self.mem.emit_byte(0xE0);
+                    self.mem.emit_or_r64_imm8(0, 1);
+                    self.emit_jit_stack_push();
+                }
+                Opcode::Ge => {
+                    self.emit_jit_stack_pop();
+                    self.mem.emit_mov_r64_rm64(1, 0);
+                    self.emit_jit_stack_pop();
+                    self.mem.emit_cmp_r64_r64(0, 1);
+                    // setge: 0F 9D /0
+                    self.mem.emit_byte(0x0F);
+                    self.mem.emit_byte(0x9D);
+                    self.mem.emit_byte(0xC0);
+                    self.mem.emit_byte(0x0F);
+                    self.mem.emit_byte(0xB6);
+                    self.mem.emit_byte(0xC0);
+                    self.mem.emit_byte(0xD1);
+                    self.mem.emit_byte(0xE0);
+                    self.mem.emit_or_r64_imm8(0, 1);
+                    self.emit_jit_stack_push();
+                }
+                Opcode::StrictEq => {
+                    self.emit_jit_stack_pop();
+                    self.mem.emit_mov_r64_rm64(1, 0);
+                    self.emit_jit_stack_pop();
+                    self.mem.emit_cmp_r64_r64(0, 1);
+                    // sete: 0F 94 /0
+                    self.mem.emit_byte(0x0F);
+                    self.mem.emit_byte(0x94);
+                    self.mem.emit_byte(0xC0);
+                    self.mem.emit_byte(0x0F);
+                    self.mem.emit_byte(0xB6);
+                    self.mem.emit_byte(0xC0);
+                    self.mem.emit_byte(0xD1);
+                    self.mem.emit_byte(0xE0);
+                    self.mem.emit_or_r64_imm8(0, 1);
+                    self.emit_jit_stack_push();
+                }
                 Opcode::IncLocal => {
                     let idx = instr.operands[0] as usize;
                     let is_prefix = instr.operands[1] != 0;

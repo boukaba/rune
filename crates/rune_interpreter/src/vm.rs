@@ -17,6 +17,7 @@ use rune_core::value::Value;
 use rune_jit_baseline::{CodeGen, JitEntryFn};
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 /// Create a minimal Error object with `name` and `message` properties.
 fn make_error_object(gc: &mut SemiSpace, name: &str, msg: &str) -> Value {
@@ -110,6 +111,8 @@ pub struct Vm {
     loop_traces: HashMap<usize, LoopTrace>,
     /// If Some(target_pc), we're currently recording a trace for that loop.
     recording_trace: Option<usize>,
+    /// Whether the current hot loop has already been patched.
+    loop_patched: HashSet<usize>,
     /// Pre-built constructor objects (like `Object`) that expose methods via property access.
     builtin_wrappers: HashMap<String, Value>,
     last_locals: Vec<Value>,
@@ -147,6 +150,7 @@ impl Vm {
             loop_counts: HashMap::new(),
             loop_traces: HashMap::new(),
             recording_trace: None,
+            loop_patched: HashSet::new(),
             builtin_wrappers: HashMap::new(),
             last_locals: Vec::new(),
             eval_fn: UnsafeCell::new(None),
@@ -1923,7 +1927,7 @@ impl Vm {
                 // ---- Control flow ----
                 Opcode::Jump => {
                     let target = instr.operands[0] as usize;
-                    if target < pc && self.recording_trace.is_none() {
+                    if target < pc {
                         // Back-edge: loop iteration
                         let entry = self.loop_counts.entry(target).or_insert(0);
                         *entry += 1;
@@ -1939,6 +1943,17 @@ impl Vm {
                                     shape_ids: Vec::new(),
                                 },
                             );
+                        }
+                        // After trace recorded (monomorphic), patch loop body
+                        if *entry > 60
+                            && self
+                                .loop_traces
+                                .get(&target)
+                                .is_some_and(|t| t.is_monomorphic())
+                        {
+                            unsafe {
+                                self.patch_loop_body(prog_ptr, target, pc);
+                            }
                         }
                     }
                     self.frames[fi].pc = target;
@@ -2966,6 +2981,67 @@ impl Vm {
             }
         }
         lines.join("\n")
+    }
+
+    /// Patch LoadProperty instructions in a hot monomorphic loop to
+    /// LoadPropertyIC with cached IC values, eliminating IC lookup overhead.
+    unsafe fn patch_loop_body(
+        &mut self,
+        prog_ptr: *const BytecodeProgram,
+        target_pc: usize,
+        back_edge_pc: usize,
+    ) {
+        if self.loop_patched.contains(&target_pc) {
+            return;
+        }
+        let trace = match self.loop_traces.get(&target_pc) {
+            Some(t) if t.is_monomorphic() => t,
+            _ => return,
+        };
+        let shape_id = trace.shape_ids.first().copied().unwrap_or(0);
+        if shape_id == 0 {
+            return;
+        }
+
+        let mut patched = 0u32;
+        for pc in target_pc..=back_edge_pc {
+            let instr_ptr = unsafe {
+                let instrs = (*prog_ptr).instructions.as_ptr() as *mut Instruction;
+                &mut *instrs.add(pc)
+            };
+            if instr_ptr.opcode == Opcode::LoadProperty && instr_ptr.ic_index >= 0 {
+                let ic_idx = instr_ptr.ic_index as usize;
+                if ic_idx < self.ics.len() {
+                    // Find the IC entry matching the trace's monomorphic shape_id
+                    for (key, entry) in &self.ics[ic_idx].entries {
+                        if key.shape_id == shape_id {
+                            instr_ptr.opcode = Opcode::LoadPropertyIC;
+                            instr_ptr.operands.clear();
+                            instr_ptr.operands.extend_from_slice(&[
+                                shape_id as i64,
+                                entry.offset as i64,
+                                entry.proto_depth as i64,
+                            ]);
+                            patched += 1;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if patched > 0 {
+            eprintln!(
+                "Trace: patched {} LoadProperty → LoadPropertyIC in loop pc={}..{} (shape={})",
+                patched, target_pc, back_edge_pc, shape_id
+            );
+        } else {
+            eprintln!(
+                "Trace: loop pc={}..{} already LoadPropertyIC (shape={})",
+                target_pc, back_edge_pc, shape_id
+            );
+        }
+        self.loop_patched.insert(target_pc);
     }
 }
 

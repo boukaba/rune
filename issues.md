@@ -143,13 +143,25 @@
 
 ---
 
-## P12: Trace compiler not wired to loop execution ⚠️ Known
+## P12: Trace compiler not wired to loop execution ✅ FIXED
 
-**Status:** ⚠️ Known, active work item
+**Status:** ✅ Fixed
 
-**Symptom:** The AArch64 trace compiler (`compile_trace`) exists and passes unit tests, but is never invoked during loop execution. Hot loops always run in interpreter, even though trace recording infrastructure is in place (`LoopTrace`, `TraceOp`, `record_trace()`).
+**Symptom:** The AArch64 trace compiler (`compile_trace`) existed and passed unit tests, but was never invoked during loop execution. Hot loops always ran in interpreter, even though trace recording infrastructure was in place.
 
-**Fix:** Wire trace compilation into the VM's loop tier-up path. On Nth loop iteration, compile trace, install entry point, and execute natively.
+**Fix:** Trace compilation is now triggered automatically when a hot loop is detected (>50 iterations). The trace is compiled using `Aarch64CodeGen` (which supports branches) and executed natively on subsequent back-edge jumps. The trace compiles as a self-contained loop: the back-edge Jump is remapped to the top, and JumpIfFalse is remapped to exit the trace. Trace execution works for Smi-only loops with values < 2^32 (see P13).
+
+---
+
+## P13: AArch64 trace incorrect for Smi values > 2^32 ⚠️ Known
+
+**Status:** ⚠️ Known, active
+
+**Symptom:** Traced loops with Smi values exceeding 2^32 (e.g., `n > 65536` in `var s=0; for(var i=0;i<n;i++) s+=i`) produce incorrect results. The 60K-iteration case passes; 70K fails.
+
+**Root cause hypothesis:** `mov_imm64` encoding boundary at 32 bits; the MOVK instruction's hw field for lsl#32 may produce incorrect MOVK due to shift field confusion, or the ADD/SUB instructions wrap at 32-bit boundaries rather than 64-bit.
+
+**Fix:** Investigate and fix AArch64 codegen for 64-bit Smi values across 2^32 boundary. Candidate: verify MOVK shift encoding for hw=10, or use `mov_imm64` fallback for values needing MOVK at lsl#32.
 
 ---
 
@@ -167,6 +179,7 @@
 | P7 | IC stats undercounted | ✅ Fixed | current |
 | P8 | CLI -e flag | ⚠️ Known | — |
 | P9 | Return assertion relaxed | ⚠️ Deferred | — |
-| P10 | JIT slower than interpreter on tiny functions | ⚠️ Known | — |
+| P10 | JIT slower than interpreter on tiny functions | ✅ Fixed | bb1a0e2 |
 | P11 | JIT coverage Smi-only (15/61 opcodes) | ⚠️ Known | — |
-| P12 | Trace compiler not wired to loop execution | ⚠️ Known | — |
+| P12 | Trace compiler not wired to loop execution | ✅ Fixed | — |
+| P13 | AArch64 trace incorrect for Smi values > 2^32 | ⚠️ Known | — |

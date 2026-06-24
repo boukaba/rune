@@ -51,9 +51,9 @@ fn movz(mem: &mut ExecutableMemory, xd: u32, imm16: u16) {
     emit(mem, 0xD2800000 | ((imm16 as u32) << 5) | xd);
 }
 
-/// MOVK xd, #u16, lsl #16
-fn movk(mem: &mut ExecutableMemory, xd: u32, imm16: u16) {
-    emit(mem, 0xF2800000 | ((imm16 as u32) << 5) | xd);
+/// MOVK xd, #imm16, lsl #(shift*16)
+fn movk(mem: &mut ExecutableMemory, xd: u32, imm16: u16, shift: u32) {
+    emit(mem, 0xF2800000 | (shift << 21) | ((imm16 as u32) << 5) | xd);
 }
 
 /// MOV xd, #u64 (split across MOVZ + MOVK)
@@ -64,13 +64,13 @@ fn mov_imm64(mem: &mut ExecutableMemory, xd: u32, val: u64) {
     let w3 = (val >> 48) as u16;
     movz(mem, xd, w0);
     if w1 != 0 {
-        movk(mem, xd, w1);
+        movk(mem, xd, w1, 1);
     }
     if w2 != 0 {
-        movk(mem, xd, w2);
+        movk(mem, xd, w2, 2);
     }
     if w3 != 0 {
-        movk(mem, xd, w3);
+        movk(mem, xd, w3, 3);
     }
 }
 
@@ -864,6 +864,48 @@ mod tests {
             unsafe { std::mem::transmute(mem.code_ptr()) };
         let r = unsafe { func(vm, std::ptr::null_mut(), std::ptr::null_mut()) };
         assert_eq!(r, ((7u64 << 1) | 1));
+    }
+
+    #[test]
+    fn test_aarch64_codegen_load_large_smi() {
+        use rune_bytecode::opcode::{BytecodeProgram, Instruction};
+        // LoadSmi 100000 → should produce Smi(100000) = 200001
+        let prog = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadSmi, vec![100000]),
+                Instruction::new(Opcode::Return, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        let mem = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+        mem.make_executable();
+        let vm = jit_vm_ptr();
+        let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
+            unsafe { std::mem::transmute(mem.code_ptr()) };
+        let r = unsafe { func(vm, std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert_eq!(r, ((100000u64 << 1) | 1));
+    }
+
+    #[test]
+    fn test_aarch64_codegen_load_very_large_smi() {
+        use rune_bytecode::opcode::{BytecodeProgram, Instruction};
+        // LoadSmi 70000 → Smi(70000) = 140001 (needs 18 bits)
+        let prog = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadSmi, vec![70000]),
+                Instruction::new(Opcode::Return, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        let mem = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+        mem.make_executable();
+        let vm = jit_vm_ptr();
+        let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
+            unsafe { std::mem::transmute(mem.code_ptr()) };
+        let r = unsafe { func(vm, std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert_eq!(r, ((70000u64 << 1) | 1));
     }
 
     #[test]

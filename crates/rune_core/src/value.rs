@@ -16,6 +16,7 @@ use crate::string::HeapString;
 ///
 /// Smi range: -(2^30) .. (2^30 - 1)
 #[derive(Copy, Clone)]
+#[repr(transparent)]
 pub struct Value(u64);
 
 const SMI_TAG: u64 = 0x01;

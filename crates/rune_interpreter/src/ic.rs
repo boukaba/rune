@@ -180,10 +180,12 @@ pub struct IcStats {
 }
 
 /// A recorded opcode from a hot-loop trace.
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct TraceOp {
     /// The opcode executed.
     pub opcode: u8,
+    /// The operands of the instruction.
+    pub operands: Vec<i64>,
     /// Shape ID hit during LoadProperty (0 if not a property access or miss).
     pub shape_id: u64,
     /// Number of times this opcode would dispatch in the interpreter.
@@ -199,6 +201,12 @@ pub struct LoopTrace {
     pub total_iterations: u64,
     /// Unique shape_ids seen (for monomorphism check).
     pub shape_ids: Vec<u64>,
+    /// Compiled native code for this trace (null if not yet compiled).
+    pub compiled_entry: *const u8,
+    /// The bytecode index after the loop (JumpIfFalse fallthrough target).
+    /// Set when the trace is compiled; used to resume the interpreter after
+    /// the native trace exits.
+    pub exit_pc: usize,
 }
 
 impl LoopTrace {

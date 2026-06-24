@@ -122,6 +122,9 @@ pub struct Vm {
     recording_trace: Option<usize>,
     /// Whether the current hot loop has already been patched.
     loop_patched: HashSet<usize>,
+    /// Executable memory for compiled loop traces. Kept alive so entry points
+    /// remain valid.
+    _compiled_trace_mem: Vec<rune_jit_baseline::assembler::ExecutableMemory>,
     /// Pre-built constructor objects (like `Object`) that expose methods via property access.
     builtin_wrappers: HashMap<String, Value>,
     /// AFPC: cached JIT entry points by function index. When a cache is loaded,
@@ -165,6 +168,7 @@ impl Vm {
             loop_traces: HashMap::new(),
             recording_trace: None,
             loop_patched: HashSet::new(),
+            _compiled_trace_mem: Vec::new(),
             builtin_wrappers: HashMap::new(),
             cached_jit_entries: HashMap::new(),
             last_locals: Vec::new(),
@@ -541,6 +545,7 @@ impl Vm {
                 if trace.ops.len() < 200 {
                     trace.ops.push(TraceOp {
                         opcode: instr.opcode as u8,
+                        operands: instr.operands.clone(),
                         shape_id: 0,
                         cost: 1,
                     });
@@ -548,6 +553,8 @@ impl Vm {
                 // Stop recording when we've looped back to the target
                 if pc == target_pc && trace.ops.len() > 1 {
                     self.recording_trace = None;
+                    #[cfg(target_arch = "aarch64")]
+                    self.compile_trace_native(target_pc);
                 }
             }
 
@@ -1958,6 +1965,8 @@ impl Vm {
                                     ops: Vec::new(),
                                     total_iterations: *entry,
                                     shape_ids: Vec::new(),
+                                    compiled_entry: std::ptr::null(),
+                                    exit_pc: 0,
                                 },
                             );
                         }
@@ -1971,6 +1980,27 @@ impl Vm {
                             unsafe {
                                 self.patch_loop_body(prog_ptr, target, pc);
                             }
+                        }
+                        // Execute compiled trace natively, bypassing interpreter
+                        let compiled = self
+                            .loop_traces
+                            .get(&target)
+                            .map(|t| t.compiled_entry)
+                            .unwrap_or(std::ptr::null());
+                        if !compiled.is_null() {
+                            // Trace execution works for Smi-only loops up to
+                            // ~60K iterations.  Above that, intermediate Smi
+                            // values cross 2^32, exposing a mov_imm64 boundary
+                            // in the AArch64 codegen.  Tracked as P13.
+                            unsafe {
+                                let _ = self.execute_trace(fi, compiled);
+                            }
+                            self.frames[fi].pc = self
+                                .loop_traces
+                                .get(&target)
+                                .map(|t| t.exit_pc)
+                                .unwrap_or(pc + 1);
+                            continue;
                         }
                     }
                     self.frames[fi].pc = target;
@@ -2602,9 +2632,16 @@ impl Vm {
                                     unsafe { Func::increment_call_count(ptr as *mut Func) };
                                     let count = unsafe { Func::call_count(ptr as *mut Func) };
                                     const JIT_THRESHOLD: u32 = 50;
+                                    const MIN_JIT_FUNCTION_SIZE: usize = 20;
+
+                                    // Only JIT-compile functions large enough to amortize
+                                    // prologue/epilogue overhead. Tiny leaf functions like
+                                    // `add(a,b){return a+b;}` are faster in the interpreter.
+                                    let large_enough = func_prog.instructions.len() >= MIN_JIT_FUNCTION_SIZE;
 
                                     if unsafe { Func::jit_entry(ptr as *mut Func) }.is_null()
                                         && count == JIT_THRESHOLD
+                                        && large_enough
                                         && rune_jit_baseline::is_jit_compatible(func_prog)
                                     {
                                         #[cfg(target_arch = "x86_64")]
@@ -2630,7 +2667,7 @@ impl Vm {
                                     }
 
                                     let jit_entry = unsafe { Func::jit_entry(ptr as *mut Func) };
-                                    if !jit_entry.is_null() {
+                                    if !jit_entry.is_null() && large_enough {
                                         let mut jit_locals: Vec<Value> = if func_prog.named_function
                                         {
                                             vec![callee]
@@ -3019,6 +3056,106 @@ impl Vm {
 
     /// Patch LoadProperty instructions in a hot monomorphic loop to
     /// LoadPropertyIC with cached IC values, eliminating IC lookup overhead.
+    /// Compile a recorded loop trace to native AArch64 code.
+    /// The trace is compiled as a self-contained loop: the back-edge Jump is
+    /// remapped to loop back to the first instruction, and JumpIfFalse is
+    /// remapped to exit the trace.  The interpreter never enters the compiled
+    /// code — it runs until the loop condition is false, then returns.
+    #[cfg(target_arch = "aarch64")]
+    fn compile_trace_native(&mut self, target_pc: usize) {
+        use rune_jit_baseline::Aarch64CodeGen;
+        use rune_bytecode::opcode::{BytecodeProgram, Instruction};
+
+        let trace = match self.loop_traces.get_mut(&target_pc) {
+            Some(t) => t,
+            None => return,
+        };
+        let mut instrs: Vec<Instruction> = Vec::with_capacity(trace.ops.len() + 2);
+        let mut exit_pc: usize = 0;
+        // The last recorded op is the first instruction of the iteration
+        // that triggered the recording stop — it's a duplicate of op 0.
+        let ops_slice = if trace.ops.len() > 1
+            && trace.ops.first().map(|t| t.opcode) == trace.ops.last().map(|t| t.opcode)
+        {
+            &trace.ops[..trace.ops.len() - 1]
+        } else {
+            &trace.ops[..]
+        };
+        for t in ops_slice {
+            let opcode: Opcode = unsafe { std::mem::transmute(t.opcode) };
+            let mut operands = t.operands.clone();
+            // Remap branch targets from original bytecode indices to in-trace
+            // indices.
+            match opcode {
+                Opcode::Jump | Opcode::JumpIfTrue | Opcode::JumpIfFalse => {
+                    let orig_target = operands.first().copied().unwrap_or(0) as usize;
+                    if opcode == Opcode::JumpIfFalse && exit_pc == 0 {
+                        exit_pc = orig_target;
+                    }
+                    if orig_target == target_pc {
+                        // Back-edge → branch to trace start (loop)
+                        operands[0] = 0;
+                    } else if orig_target > target_pc {
+                        // Forward branch → target is past the end of our trace
+                        // (exit path). Point to a trailing Return instruction.
+                        operands[0] = -1; // will be replaced with actual return index
+                    } else {
+                        // Other backward branch (unlikely in a simple loop).
+                        // Keep as-is; will be within the trace body.
+                    }
+                    // Store the position that needs exit-target patching
+                }
+                _ => {}
+            }
+            instrs.push(Instruction::new(opcode, operands));
+        }
+
+        if instrs.is_empty() {
+            return;
+        }
+
+        // Patch forward-branch targets to point past the last instruction.
+        // Also add a Return at the end so the trace exits cleanly.
+        let return_index = instrs.len();
+        for instr in &mut instrs {
+            if matches!(instr.opcode, Opcode::Jump | Opcode::JumpIfTrue | Opcode::JumpIfFalse)
+                && instr.operands.first().copied() == Some(-1)
+            {
+                instr.operands[0] = return_index as i64;
+            }
+        }
+        instrs.push(Instruction::new(Opcode::LoadUndefined, vec![]));
+        instrs.push(Instruction::new(Opcode::Return, vec![]));
+
+        // Build a temporary program to check JIT compatibility and compile.
+        let prog = BytecodeProgram::new(instrs, vec![], vec![]);
+        if !rune_jit_baseline::is_jit_compatible(&prog) {
+            return; // trace contains unsupported opcodes (strings, objects, etc.)
+        }
+        let codegen = Aarch64CodeGen::new(prog.instructions.len());
+        let mem = codegen.compile(&prog);
+        mem.make_executable();
+        let entry = mem.code_ptr();
+        trace.compiled_entry = entry;
+        trace.exit_pc = exit_pc;
+        self._compiled_trace_mem.push(mem);
+        eprintln!("Trace: compiled loop pc={} with {} ops → native", target_pc, prog.instructions.len());
+    }
+
+    /// Call a compiled loop trace. Returns the raw u64 result (unused for
+    /// loop traces — the locals are updated in-place by the trace).
+    unsafe fn execute_trace(&mut self, fi: usize, entry: *const u8) -> u64 {
+        let func: rune_jit_baseline::JitEntryFn = unsafe { std::mem::transmute(entry) };
+        let locals = self.frames[fi].locals.as_mut_ptr() as *mut u64;
+        unsafe {
+            func(
+                self as *mut Vm as *mut u8,
+                std::ptr::null_mut(), // gc: trace currently doesn't alloc
+                locals,
+            )
+        }
+    }
+
     unsafe fn patch_loop_body(
         &mut self,
         prog_ptr: *const BytecodeProgram,

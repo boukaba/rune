@@ -87,6 +87,12 @@ struct TryFrame {
 
 /// Stack-based bytecode interpreter with call frame support.
 pub struct Vm {
+    /// JIT-compiled trace value stack. Must remain the first field so that
+    /// emitted AArch64 trace code can address it at offset 0 from the VM
+    /// pointer (x19). Using heap memory for the JIT stack avoids macOS
+    /// Apple Silicon restrictions on writes through the real stack pointer
+    /// from JIT pages.
+    pub jit_stack: [u64; 64],
     pub stack: Vec<Value>,
     frames: Vec<Frame>,
     try_stack: Vec<TryFrame>,
@@ -136,6 +142,7 @@ impl Default for Vm {
 impl Vm {
     pub fn new() -> Self {
         Vm {
+            jit_stack: [0; 64],
             stack: Vec::new(),
             frames: Vec::new(),
             try_stack: Vec::new(),
@@ -1443,6 +1450,7 @@ impl Vm {
                                     &mut self.ics,
                                     &mut self.ic_entries,
                                     &mut self.ic_hit_counts,
+                                    &mut self.ic_stats,
                                     &instr,
                                     obj,
                                     raw_key,
@@ -1512,6 +1520,7 @@ impl Vm {
                         &mut self.ics,
                         &mut self.ic_entries,
                         &mut self.ic_hit_counts,
+                        &mut self.ic_stats,
                         &instr,
                         obj,
                         raw_key,
@@ -3338,6 +3347,7 @@ fn load_property_recursive_ic(
     ics: &mut Vec<InlineCache>,
     ic_entries: &mut Vec<IcEntry>,
     ic_hit_counts: &mut Vec<u32>,
+    ic_stats: &mut IcStats,
     instr: &Instruction,
     obj: Value,
     raw_key: Value,
@@ -3353,6 +3363,7 @@ fn load_property_recursive_ic(
                 let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
                 let (shape_id, key_hash) = ic_cache_key(shape.id, raw_key);
                 if let Some(entry) = ics[ic_idx].get(shape_id, key_hash) {
+                    ic_stats.hits += 1;
                     if entry.is_own {
                         unsafe {
                             return JSObject::get_slot(ptr as *mut JSObject, entry.offset);

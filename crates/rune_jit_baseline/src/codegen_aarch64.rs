@@ -6,13 +6,30 @@
 /// Calling convention (AAPCS64):
 ///   x0 = vm_ptr, x1 = gc_ptr, x2 = locals_ptr
 ///   return value in x0
+///
+/// The trace uses VM-heap memory for its value stack instead of the native
+/// stack pointer. On macOS Apple Silicon, JIT pages are restricted from
+/// writing through sp, so we keep the real stack pointer intact and use a
+/// dedicated pointer (x22) into `JitVmState::jit_stack` at offset 0 from the
+/// VM pointer.
 use crate::assembler::ExecutableMemory;
 use rune_bytecode::opcode::Opcode;
+
+/// Number of u64 slots reserved for the trace value stack.
+pub const JIT_STACK_SIZE: usize = 64;
+
+/// VM state visible to the trace compiler. Must be placed at offset 0 from
+/// the VM pointer passed to emitted trace code.
+#[repr(C)]
+pub struct JitVmState {
+    pub jit_stack: [u64; JIT_STACK_SIZE],
+}
 
 /// Register assignments for the trace compiler.
 const VM_REG: u32 = 19; // callee-saved, holds Vm pointer
 const GC_REG: u32 = 20; // callee-saved, holds GC pointer
 const LOC_REG: u32 = 21; // callee-saved, holds locals pointer
+const JIT_STACK_REG: u32 = 22; // callee-saved, holds JIT value-stack pointer
 
 /// Emit a full 32-bit instruction.
 fn emit(mem: &mut ExecutableMemory, instr: u32) {
@@ -83,6 +100,7 @@ fn cmp_reg(mem: &mut ExecutableMemory, xn: u32, xm: u32) {
 }
 
 /// AND xd, xn, xm
+#[allow(dead_code)]
 fn and_reg(mem: &mut ExecutableMemory, xd: u32, xn: u32, xm: u32) {
     emit(mem, 0x8A000000 | (xm << 16) | (xn << 5) | xd);
 }
@@ -104,11 +122,13 @@ fn str_off(mem: &mut ExecutableMemory, xd: u32, xn: u32, uoffset: u32) {
 }
 
 /// B #offset  (unconditional branch, imm26 offset in instructions)
+#[allow(dead_code)]
 fn b_imm(mem: &mut ExecutableMemory, offset_in_instrs: i32) {
     emit(mem, 0x14000000 | ((offset_in_instrs as u32) & 0x3FF_FFFF));
 }
 
 /// B.EQ #offset  (conditional branch on equal)
+#[allow(dead_code)]
 fn b_eq(mem: &mut ExecutableMemory, offset_in_instrs: i32) {
     emit(
         mem,
@@ -117,6 +137,7 @@ fn b_eq(mem: &mut ExecutableMemory, offset_in_instrs: i32) {
 }
 
 /// B.NE #offset  (conditional branch on not equal)
+#[allow(dead_code)]
 fn b_ne(mem: &mut ExecutableMemory, offset_in_instrs: i32) {
     let imm19 = (offset_in_instrs as u32) & 0x7FFFF;
     emit(mem, 0x54000000 | (imm19 << 5) | 1);
@@ -149,10 +170,14 @@ pub fn emit_trace_into(mem: &mut ExecutableMemory, ops: &[(Opcode, Vec<i64>, u64
     mov_reg(mem, VM_REG, 0);
     mov_reg(mem, GC_REG, 1);
     mov_reg(mem, LOC_REG, 2);
-    mov_reg(mem, 22, 31); mov_reg(mem, 31, LOC_REG); add_imm(mem, 31, 31, 512); // JIT stack allocation
+    // JIT value-stack pointer = VM pointer + jit_stack offset (offset 0).
+    add_imm(mem, JIT_STACK_REG, VM_REG, 0);
     for &(ref opcode, ref operands, _shape_id) in ops { compile_op(mem, *opcode, operands); }
-    sub_imm(mem, 31, 31, 8); ldr_off(mem, 0, 31, 0);
-    mov_reg(mem, 31, 22); pop_callee_saved(mem); ret(mem);
+    // Pop the top value into x0 and return.
+    sub_imm(mem, JIT_STACK_REG, JIT_STACK_REG, 8);
+    ldr_off(mem, 0, JIT_STACK_REG, 0);
+    pop_callee_saved(mem);
+    ret(mem);
 }
 /// Compile a recorded trace into native aarch64 code.
 pub fn compile_trace(ops: &[(Opcode, Vec<i64>, u64)]) -> ExecutableMemory {
@@ -169,94 +194,91 @@ fn compile_op(mem: &mut ExecutableMemory, opcode: Opcode, operands: &[i64]) {
             let val = operands[0];
             let smi_raw = ((val as u64) << 1) | 1;
             mov_imm64(mem, 0, smi_raw); // x0 = smi
-            str_off(mem, 0, 31, 0); // str x0, [sp, #0]
-            add_imm(mem, 31, 31, 8); // ADD sp, sp, #8
+            str_off(mem, 0, JIT_STACK_REG, 0); // str x0, [jit_stack]
+            add_imm(mem, JIT_STACK_REG, JIT_STACK_REG, 8); // advance
         }
         Opcode::LoadUndefined => {
             movz(mem, 0, 0); // x0 = 0 (undefined)
-            str_off(mem, 0, 31, 0);
-            add_imm(mem, 31, 31, 8);
+            str_off(mem, 0, JIT_STACK_REG, 0);
+            add_imm(mem, JIT_STACK_REG, JIT_STACK_REG, 8);
         }
         Opcode::LoadNull => {
-            movz(mem, 0, 0);
-            orr_imm1(mem, 0, 0); // x0 |= 2 — wait, ORR x0, x0, #1 = 1, not 2
-            // Actually: ORR x0, x0, #2 is needed for null (0x02)
             // Load null value: 2
             movz(mem, 0, 2);
-            str_off(mem, 0, 31, 0);
-            add_imm(mem, 31, 31, 8);
+            str_off(mem, 0, JIT_STACK_REG, 0);
+            add_imm(mem, JIT_STACK_REG, JIT_STACK_REG, 8);
         }
         Opcode::LoadBoolean => {
             let raw = if operands[0] != 0 { 6u64 } else { 4u64 };
             mov_imm64(mem, 0, raw); // x0 = true(6) or false(4)
-            str_off(mem, 0, 31, 0);
-            add_imm(mem, 31, 31, 8);
+            str_off(mem, 0, JIT_STACK_REG, 0);
+            add_imm(mem, JIT_STACK_REG, JIT_STACK_REG, 8);
         }
         Opcode::LoadLocal => {
             let idx = operands[0] as u32;
             ldr_off(mem, 0, LOC_REG, idx * 8); // ldr x0, [x21, #idx*8]
-            str_off(mem, 0, 31, 0);
-            add_imm(mem, 31, 31, 8);
+            str_off(mem, 0, JIT_STACK_REG, 0);
+            add_imm(mem, JIT_STACK_REG, JIT_STACK_REG, 8);
         }
         Opcode::StoreLocal => {
-            sub_imm(mem, 31, 31, 8); // pop
-            ldr_off(mem, 0, 31, 0); // ldr x0, [sp]
+            sub_imm(mem, JIT_STACK_REG, JIT_STACK_REG, 8); // pop
+            ldr_off(mem, 0, JIT_STACK_REG, 0); // ldr x0, [jit_stack]
             let idx = operands[0] as u32;
             str_off(mem, 0, LOC_REG, idx * 8); // str x0, [x21, #idx*8]
         }
         Opcode::Pop => {
-            sub_imm(mem, 31, 31, 8);
+            sub_imm(mem, JIT_STACK_REG, JIT_STACK_REG, 8);
         }
         Opcode::Add => {
             // pop b
-            sub_imm(mem, 31, 31, 8);
-            ldr_off(mem, 1, 31, 0); // x1 = b
+            sub_imm(mem, JIT_STACK_REG, JIT_STACK_REG, 8);
+            ldr_off(mem, 1, JIT_STACK_REG, 0); // x1 = b
             // pop a
-            sub_imm(mem, 31, 31, 8);
-            ldr_off(mem, 0, 31, 0); // x0 = a
+            sub_imm(mem, JIT_STACK_REG, JIT_STACK_REG, 8);
+            ldr_off(mem, 0, JIT_STACK_REG, 0); // x0 = a
             // Smi add: (a - 1) + b  (untag a, then add b)
             sub_imm(mem, 0, 0, 1); // x0 = a - 1 (clear smi tag)
             add_reg(mem, 0, 0, 1); // x0 = (a-1) + b
             // push result
-            str_off(mem, 0, 31, 0);
-            add_imm(mem, 31, 31, 8);
+            str_off(mem, 0, JIT_STACK_REG, 0);
+            add_imm(mem, JIT_STACK_REG, JIT_STACK_REG, 8);
         }
         Opcode::Sub => {
-            sub_imm(mem, 31, 31, 8);
-            ldr_off(mem, 1, 31, 0); // x1 = b
-            sub_imm(mem, 31, 31, 8);
-            ldr_off(mem, 0, 31, 0); // x0 = a
+            sub_imm(mem, JIT_STACK_REG, JIT_STACK_REG, 8);
+            ldr_off(mem, 1, JIT_STACK_REG, 0); // x1 = b
+            sub_imm(mem, JIT_STACK_REG, JIT_STACK_REG, 8);
+            ldr_off(mem, 0, JIT_STACK_REG, 0); // x0 = a
             sub_reg(mem, 0, 0, 1); // x0 = a - b
             add_imm(mem, 0, 0, 1); // x0 |= 1 (re-tag, same as ORR #1 since bit0 is 0)
-            str_off(mem, 0, 31, 0);
-            add_imm(mem, 31, 31, 8);
+            str_off(mem, 0, JIT_STACK_REG, 0);
+            add_imm(mem, JIT_STACK_REG, JIT_STACK_REG, 8);
         }
         Opcode::Mul => {
-            sub_imm(mem, 31, 31, 8);
-            ldr_off(mem, 1, 31, 0); // x1 = b
-            sub_imm(mem, 31, 31, 8);
-            ldr_off(mem, 0, 31, 0); // x0 = a
+            sub_imm(mem, JIT_STACK_REG, JIT_STACK_REG, 8);
+            ldr_off(mem, 1, JIT_STACK_REG, 0); // x1 = b
+            sub_imm(mem, JIT_STACK_REG, JIT_STACK_REG, 8);
+            ldr_off(mem, 0, JIT_STACK_REG, 0); // x0 = a
             emit(mem, 0x9341FC00 | (0 << 5) | 0); // ASR x0, x0, #1
             emit(mem, 0x9341FC21 | (1 << 5) | 1); // ASR x1, x1, #1
             emit(mem, 0x9B007C00 | (1 << 16) | (0 << 5) | 0); // MUL x0, x0, x1
             emit(mem, 0xD37EF800 | (0 << 5) | 0); // LSL x0, x0, #1
             add_imm(mem, 0, 0, 1); // x0 |= 1
-            str_off(mem, 0, 31, 0);
-            add_imm(mem, 31, 31, 8);
+            str_off(mem, 0, JIT_STACK_REG, 0);
+            add_imm(mem, JIT_STACK_REG, JIT_STACK_REG, 8);
         }
         Opcode::Lt => {
-            sub_imm(mem, 31, 31, 8);
-            ldr_off(mem, 1, 31, 0); // x1 = b
-            sub_imm(mem, 31, 31, 8);
-            ldr_off(mem, 0, 31, 0); // x0 = a
+            sub_imm(mem, JIT_STACK_REG, JIT_STACK_REG, 8);
+            ldr_off(mem, 1, JIT_STACK_REG, 0); // x1 = b
+            sub_imm(mem, JIT_STACK_REG, JIT_STACK_REG, 8);
+            ldr_off(mem, 0, JIT_STACK_REG, 0); // x0 = a
             cmp_reg(mem, 0, 1); // CMP a, b
             // CSET x0, LT → x0 = 1 if LT else 0
             // Then encode as Smi: x0 = (x0 << 1) | 1
             emit(mem, 0x9A9FB7E0); // CSET x0, LT
             emit(mem, 0xD37EF800 | (0 << 5) | 0); // LSL x0, x0, #1
             orr_imm1(mem, 0, 0); // x0 |= 1
-            str_off(mem, 0, 31, 0);
-            add_imm(mem, 31, 31, 8);
+            str_off(mem, 0, JIT_STACK_REG, 0);
+            add_imm(mem, JIT_STACK_REG, JIT_STACK_REG, 8);
         }
         Opcode::IncLocal => {
             let idx = operands[0] as u32;
@@ -288,6 +310,16 @@ fn compile_op(mem: &mut ExecutableMemory, opcode: Opcode, operands: &[i64]) {
 mod tests {
     use super::*;
 
+    /// Allocate a `JitVmState` on the heap and return a raw VM pointer.
+    /// The trace compiler expects `jit_stack` to live at offset 0 from this
+    /// pointer. Tests intentionally leak this small allocation.
+    fn jit_vm_ptr() -> *mut u8 {
+        let state = Box::new(JitVmState {
+            jit_stack: [0; JIT_STACK_SIZE],
+        });
+        Box::into_raw(state) as *mut u8
+    }
+
     #[test]
     fn test_aarch64_mov_ret() {
         // Emit: mov x0, #85 ; ret (85 = Smi(42) = 42*2+1)
@@ -312,6 +344,7 @@ mod tests {
         assert_eq!(unsafe { func(10, 32) }, 42);
     }
 
+    #[allow(dead_code)]
     fn test_trace_smi() {
         let mut mem = ExecutableMemory::allocate(4096);
         push_callee_saved(&mut mem);
@@ -345,6 +378,7 @@ mod tests {
 
     #[test]
     fn test_compile_trace_smi() {
+        let vm = jit_vm_ptr();
         let mut buf = vec![0u64; 256];
         let mut mem = ExecutableMemory::allocate(4096);
         let ops = vec![(Opcode::LoadSmi, vec![42], 0)];
@@ -352,13 +386,15 @@ mod tests {
         mem.make_executable();
         let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
             unsafe { std::mem::transmute(mem.code_ptr()) };
-        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut(), buf.as_mut_ptr()) };
-        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut(), buf.as_mut_ptr()) };
-        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut(), buf.as_mut_ptr()) };
-        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut(), buf.as_mut_ptr()) };
-        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut(), buf.as_mut_ptr()) };
-        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut(), buf.as_mut_ptr()) };
-        let result = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut(), buf.as_mut_ptr()) };
+        // Invoke several times to verify the trace is repeatable and the JIT
+        // stack is reset correctly between invocations.
+        unsafe { func(vm, std::ptr::null_mut(), buf.as_mut_ptr()) };
+        unsafe { func(vm, std::ptr::null_mut(), buf.as_mut_ptr()) };
+        unsafe { func(vm, std::ptr::null_mut(), buf.as_mut_ptr()) };
+        unsafe { func(vm, std::ptr::null_mut(), buf.as_mut_ptr()) };
+        unsafe { func(vm, std::ptr::null_mut(), buf.as_mut_ptr()) };
+        unsafe { func(vm, std::ptr::null_mut(), buf.as_mut_ptr()) };
+        let result = unsafe { func(vm, std::ptr::null_mut(), buf.as_mut_ptr()) };
         assert_eq!(result, ((42u64 << 1) | 1));
     }
 
@@ -412,6 +448,7 @@ mod tests {
 
     #[test]
     fn test_trace_add() {
+        let vm = jit_vm_ptr();
         let mut buf = vec![0u64; 256];
         let ops = vec![
             (Opcode::LoadSmi, vec![10], 0),
@@ -422,12 +459,13 @@ mod tests {
         mem.make_executable();
         let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
             unsafe { std::mem::transmute(mem.code_ptr()) };
-        let r = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut(), buf.as_mut_ptr()) };
+        let r = unsafe { func(vm, std::ptr::null_mut(), buf.as_mut_ptr()) };
         assert_eq!(r, ((32u64 << 1) | 1)); // last pushed value (32)
     }
 
     #[test]
     fn test_trace_sub() {
+        let vm = jit_vm_ptr();
         let mut buf = vec![0u64; 256];
         let ops = vec![
             (Opcode::LoadSmi, vec![50], 0),
@@ -439,7 +477,7 @@ mod tests {
         mem.make_executable();
         let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
             unsafe { std::mem::transmute(mem.code_ptr()) };
-        let r = unsafe { func(std::ptr::null_mut(), std::ptr::null_mut(), buf.as_mut_ptr()) };
+        let r = unsafe { func(vm, std::ptr::null_mut(), buf.as_mut_ptr()) };
         assert_eq!(r, ((42u64 << 1) | 1));
     }
 }

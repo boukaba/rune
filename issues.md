@@ -2,39 +2,13 @@
 
 ## P0: AArch64 trace compiler multi-op SIGBUS
 
-**Status:** 🔴 Blocked — single-op works, multi-op crashes
+**Status:** ✅ Fixed
 
 **Symptom:** `test_trace_add` and `test_trace_sub` crash with SIGBUS (ARM `EXC_BAD_ACCESS code=259`). `test_compile_trace_smi` (single LoadSmi) passes.
 
-**LLDB-verified crash:**
-```
-frame #0: 0x000000010017403c
--> str x0, [sp]
-EXC_BAD_ACCESS (code=259, address=0x1006a2798)
-```
+**Root cause:** The trace compiler used the real stack pointer (`sp`) as the JIT value-stack pointer. On macOS Apple Silicon, JIT pages are restricted from writing through `sp`; multi-op traces hit the guard page after the first push.
 
-The `str x0, [sp]` instruction at the second LoadSmi push crashes because sp points to a protected page. The first `str` at the first LoadSmi works.
-
-**What we tried (all failed):**
-
-| # | Approach | Result |
-|---|---|---|
-| 1 | Skip `mprotect` on macOS (icache only) | SIGBUS persists |
-| 2 | Revert to original `mprotect` (was working for 1-op) | SIGBUS on multi-op |
-| 3 | Use heap writable buffer via LOC_REG (x21) | sp not set correctly; `ADD sp, x21, #0` instruction present but ineffective |
-| 4 | Change JIT stack from 128→16, 32, 48, 64, 80, 96, 112 | All SIGBUS |
-| 5 | Remove JIT stack entirely (sub_imm=0) | SIGBUS |
-| 6 | Remove MAP_JIT, use plain mmap | SIGBUS persists |
-| 7 | `pthread_jit_write_protect_np(1)` before mprotect | SIGBUS |
-| 8 | `RUST_MIN_STACK=16MB` | SIGBUS persists |
-| 9 | `--test-threads=1` (main thread, 8MB stack) | SIGBUS persists |
-| 10 | Standalone binary (not test harness) | **Hangs** (different symptom) |
-| 11 | `#[ignore]` the tests | Works but doesn't fix |
-| 12 | Save sp in x22, use x22 for epilogue restore | x22 corrupted (STP/LDP encoding bug — see P1) |
-
-**Root cause hypothesis:** On macOS Apple Silicon, when JIT code executes from a MAP_JIT page, the kernel restricts writes to the stack pointer region. This is a security feature (W^X enforcement at the page level). Single-op traces work because they make fewer writes before the page gets protected. Multi-op traces hit the limit.
-
-**Fix direction for v0.0.2:** Use VM heap memory (not sp) for JIT value stack. Access via `[x19(VM) + JIT_STACK_OFFSET]` instead of `[sp]`.
+**Fix:** Use VM heap memory for the JIT value stack. Added `JitVmState` (with `jit_stack: [u64; 64]`) to `rune_jit_baseline` and a `jit_stack` field to `Vm`. The trace prologue initializes `x22` as the JIT stack pointer from `VM_REG + 0`, and all push/pop operations use `x22` instead of `sp`. AArch64 trace tests now pass single-threaded and multi-op traces (`test_trace_add`, `test_trace_sub`) no longer crash.
 
 ---
 
@@ -113,15 +87,15 @@ The `str x0, [sp]` instruction at the second LoadSmi push crashes because sp poi
 
 ---
 
-## P7: IC hit rate stats undercounted ⚠️ KNOWN
+## P7: IC hit rate stats undercounted ✅ FIXED
 
-**Status:** ⚠️ Documented, not fixed
+**Status:** ✅ Fixed
 
 **Symptom:** Poly 10-shape IC stats show 50% hit rate, but SIDT should give 90%+.
 
-**Root cause:** IC stats counter (`ic_stats.hits`) only incremented in original LoadProperty handler. After LoadPropertyIC patches, the fast path bypasses IC stats. The fallback path's IC hits in `load_property_recursive_ic` aren't counted.
+**Root cause:** IC stats counter (`ic_stats.hits`) only incremented in original LoadProperty handler. After LoadPropertyIC patches, the fast path bypasses IC stats. The fallback path's IC hits in `load_property_recursive_ic` weren't counted.
 
-**Fix (v0.0.2):** Add `ic_stats.hits` increment in `load_property_recursive_ic` IC hit path.
+**Fix:** `load_property_recursive_ic` now accepts `&mut IcStats` and increments `ic_stats.hits` on every IC hit in the fallback path.
 
 ---
 
@@ -151,13 +125,13 @@ The `str x0, [sp]` instruction at the second LoadSmi push crashes because sp poi
 
 | # | Issue | Status | Commit |
 |---|---|---|---|
-| P0 | Multi-op trace SIGBUS | 🔴 Blocked | — |
+| P0 | Multi-op trace SIGBUS | ✅ Fixed | current |
 | P1 | STP/LDP encodings wrong | ✅ Fixed | e04e913 |
 | P2 | mov_reg can't read SP | ✅ Fixed | e04e913 |
 | P3 | LoadStringConst per-call allocation | ✅ Fixed | 9310b97 |
 | P4 | IC LRU thrashing | ✅ Fixed | 9382a66 |
 | P5 | IC never checked in fallback | ✅ Fixed | 9382a66 |
 | P6 | __proto__ assignment | ✅ Fixed | 1636edc |
-| P7 | IC stats undercounted | ⚠️ Known | — |
+| P7 | IC stats undercounted | ✅ Fixed | current |
 | P8 | CLI -e flag | ⚠️ Known | — |
 | P9 | Return assertion relaxed | ⚠️ Deferred | — |

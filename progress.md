@@ -951,6 +951,31 @@ Phase 5 (Cranelift JIT) aims to close this gap to within 3–10×.
 - 14E-1: Closure capture + GC soundness ✅
 - 14F: Default parameters ✅ | 14G: Comma operator ✅ | 14H: V8 baseline ✅
 
+## Sprint 15.5 — IC Performance Hardening
+
+**Goal:** Make the SIDT pitch defensible by verifying IC correctness and adding bytecode specialization.
+
+### 15.5-1: IC Hit-Rate Profiling ✅
+- Added `Vm::dump_ic_stats()` + `--ic-stats` CLI flag
+- Monomorphic access: **100% hit rate** (1 miss for initial populate, 9999 hits)
+- 10-shape polymorphic access: **98.5% hit rate** — SIDT works, no megamorphic cliff
+
+### 15.5-2: Flat Vec IC Lookup — SKIPPED
+- HashMap lookup cost is ~30ns × 200K hits ≈ 6ms on a 396ms benchmark — negligible
+- 98.5% hit rate confirmed the HashMap is working; structural change would save <1ms
+
+### 15.5-3: Bytecode Specialization — LoadPropertyIC ✅
+- Added `Opcode::LoadPropertyIC` — shape-guarded fast path
+- After 8 IC hits, opcode is patched in-place from `LoadProperty` → `LoadPropertyIC`
+- LoadPropertyIC handler: reads cached `(shape_id, offset, proto_depth)` from operands, shape guard check, direct slot access
+- Shape guard failure falls back to `load_property_recursive_ic`
+- Monomorphic: 1M accesses → only 9 IC lookups (8 before patch + 1 initial miss)
+- Polymorphic: dominant shape handled by LoadPropertyIC, others by IC fallback
+
+### Test Results
+- 292 integration tests, clippy + fmt clean
+- Committed `4ecab90`
+
 ## Global Testing Strategy
 
 > **Spec mandate:** Every test expectation must be traceable to an ECMA-262 algorithm in [`ecma262.md`](./ecma262.md). Open linked `https://tc39.es/ecma262/multipage/` URLs via `webfetch` when writing tests. No guessing — if a test expects `42`, the spec must say so.

@@ -40,26 +40,71 @@ impl InlineCache {
         }
     }
 
-    /// Look up a cached entry by (shape_id, key_hash). Linear scan.
-    /// On x86-64, uses SSE2 SIMD to compare 2 shape_ids per instruction.
+    /// Look up a cached entry by (shape_id, key_hash).
+    /// Uses SIMD: SSE4.1 on x86-64, NEON on aarch64, scalar fallback elsewhere.
     #[inline]
+    #[allow(clippy::needless_return)]
     pub fn get(&self, shape_id: u64, key_hash: u64) -> Option<IcEntry> {
         #[cfg(target_arch = "x86_64")]
         {
             return self.get_simd(shape_id, key_hash);
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(target_arch = "aarch64")]
+        {
+            return self.get_neon(shape_id, key_hash);
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {
             self.get_scalar(shape_id, key_hash)
         }
     }
 
     /// Scalar linear scan fallback.
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     fn get_scalar(&self, shape_id: u64, key_hash: u64) -> Option<IcEntry> {
         self.entries
             .iter()
             .find(|(k, _)| k.shape_id == shape_id && k.key_hash == key_hash)
             .map(|(_, e)| *e)
+    }
+
+    /// ARM NEON SIMD shape compare: 2 shape_ids compared in 1 instruction.
+    /// Uses `vceqq_u64` + `vgetq_lane_u64`. IcKey layout is 16 bytes = uint64x2_t.
+    #[cfg(target_arch = "aarch64")]
+    fn get_neon(&self, shape_id: u64, key_hash: u64) -> Option<IcEntry> {
+        use std::arch::aarch64::*;
+        unsafe {
+            let entries = &self.entries;
+            let mut i = 0;
+            while i + 1 < entries.len() {
+                let ptr = entries.as_ptr().add(i) as *const uint64x2_t;
+                let key0: uint64x2_t = *ptr;
+                let key1: uint64x2_t = *ptr.add(1);
+                let target = vdupq_n_u64(shape_id);
+                let cmp0 = vceqq_u64(key0, target);
+                let cmp1 = vceqq_u64(key1, target);
+                if vgetq_lane_u64(cmp0, 0) == u64::MAX {
+                    let e = entries[i];
+                    if e.0.key_hash == key_hash {
+                        return Some(e.1);
+                    }
+                }
+                if vgetq_lane_u64(cmp1, 0) == u64::MAX {
+                    let e = entries[i + 1];
+                    if e.0.key_hash == key_hash {
+                        return Some(e.1);
+                    }
+                }
+                i += 2;
+            }
+            if i < entries.len() {
+                let e = entries[i];
+                if e.0.shape_id == shape_id && e.0.key_hash == key_hash {
+                    return Some(e.1);
+                }
+            }
+            None
+        }
     }
 
     /// SIMD shape compare: on x86-64 with SSE4.1, compares 2 shape_ids in 1 instruction.

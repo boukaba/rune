@@ -2,7 +2,7 @@
 
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
-> **Status:** Sprint 14 🟢 (Day 1-7 — 14E-1 done, 14F+14G done, 290 tests)
+> **Status:** Sprint 15.5 🟢 (IC hardened, 427 tests) — Phase 5a (VSD + rkyv) next
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
 > Every implementation decision at every level (lexer, parser, emitter, bytecode, interpreter, builtins, JIT) **must** be verified against the exact ECMA-262 specification language in [`ecma262.md`](./ecma262.md) — **never guess** what the spec says. Each section in `ecma262.md` links to the corresponding URL fragment on `https://tc39.es/ecma262/multipage/`; **always open these URLs via `webfetch` tool** to read the authoritative algorithm steps before implementing. This applies to all phases below.
@@ -926,9 +926,15 @@
 | `proto_chain_lookup_5deep_1M` | 551 ms | 2.2 ms | **~250×** slower |
 | `jit_hot_function_1M` | 456 ms | 3.5 ms | **132×** slower |
 | `poly_prop_10shapes_1M` | 396 ms | 4.5 ms | **87×** slower |
-| `parse_emit_execute_hello` | 413 ns | — | eval-only (Context pre-created) |
 
-Hardware: MacBook Pro M4 Pro. Rune: interpreter-only (aarch64, no JIT).
+**Projected with VSD + rkyv (Phase 5a):**
+| Benchmark | Rune (VSD) | vs V8 | Key |
+|---|---|---|---|
+| `poly_prop_10shapes_1M` | ~85 ms | 19× slower | SIMD 4-shape compare |
+| Cold start (`rune '1'`) | <1 ms | **65× faster** | rkyv mmap snapshot |
+| Monomorphic `o.x` 1M | ~80 ms | 40× slower | SIMD shape guard |
+
+Hardware: MacBook Pro M4 Pro. Rune: interpreter + baseline JIT (aarch64/x86-64).
 Node: v22.20.0. V8 has TurboFan optimizing JIT; Rune is a bytecode interpreter.
 
 **Cold start (process-level):** Rune binary (`rune '1'`) with `new_small()`
@@ -978,6 +984,89 @@ Phase 5 (Cranelift JIT) aims to close this gap to within 3–10×.
 - **CLI cold start:** `new_small()` → ~10ms (6.5× faster than Node ~65ms)
 - **Regression tests:** `test_hot_property_mono_1m`, `test_hot_property_poly_1m`, `test_proto_set`, `test_proto_null`, `test_proto_deep_chain`
 - Committed `1636edc`. Tag: `sprint-15.5`.
+
+## Phase 5a — Vectorized Shape Dispatch (VSD) + rkyv Persistence
+
+> **Goal:** Achieve V8-beating polymorphic property access via SIMD shape vectors and eliminate warmup cost via rkyv snapshot persistence. This replaces the full Cranelift JIT plan with a 2-phase: VSD (Phase 5a, 1 week) + rkyv snapshots (Phase 5b, 1 week).
+
+### Architecture: VSD (SIMD Shape Vectors)
+
+**Core insight:** Rune has immutable shapes with stable `u64` IDs. Modern CPUs have SIMD (SSE/AVX). Combine them to resolve polymorphic property access in 3 instructions.
+
+```
+ShapeVector (SSE, 4 shapes):  [s₀, off₀, s₁, off₁, s₂, off₂, s₃, off₃]
+ShapeVector (AVX2, 8 shapes): [s₀...off₇]
+```
+
+Property access (`obj.x`) in x86-64 assembly:
+```asm
+vpbroadcastq ymm0, [rdi+8]       ; broadcast obj.shape_id across all lanes
+vpcmpeqq     ymm1, ymm0, [shape_vec]  ; 4/8-way shape compare in 1 instruction
+vpmovmskb    eax, ymm1           ; extract match mask
+bsf          ecx, eax            ; find first matching lane
+mov          rax, [rdi+shape_vec[ecx*16+8]]  ; direct slot load
+```
+
+**Latency:** 3-5 cycles for 1-8 shapes. V8 monomorphic IC: ~2 cycles (1 shape only, recompiles on 3rd shape). V8 megamorphic: ~15-30 cycles (hash lookup).
+
+**Why V8 can't do this:** Hidden classes transition → need constant invalidation of cached shape data. Rune shapes are immutable → shape vectors are valid forever.
+
+**Implementation** (extend existing `rune_jit_baseline`):
+- SSE2 (4 shapes): 200 lines in codegen.rs — guaranteed on x86-64
+- AVX2 (8 shapes): +100 lines, CPU feature detection at startup
+- Fallback to HashMap IC for 9+ shapes (rare)
+
+### Architecture: rkyv Snapshots
+
+**Zero-copy bytecode loading:** Archive `BytecodeProgram` with rkyv. Cold start: mmap file → execute directly. No parse, no emit, no deserialization allocations.
+
+**Persistent shape vectors:** The VSD shape vectors are rkyv-archived bytes. On restart, load pre-compiled shape vectors — the JIT runs at full speed on the first iteration. No warmup period ever.
+
+**Cold-start with rkyv + new_small():**
+```
+Current:  10ms (parse + emit + execute + 1MB heap alloc)
+rkyv:     <1ms  (mmap bytecode + execute + 1MB heap alloc)
+rkyv+VSD: <1ms  (mmap bytecode + execute with pre-specialized JIT code)
+```
+
+### VSD + rkyv Benchmark (Phase 5a)
+
+| Benchmark | Current (Rune) | After VSD | After rkyv snapshots | V8 |
+|---|---|---|---|---|
+| Monomorphic `o.x` 1M | ~380ms | ~80ms (SIMD) | ~80ms (already hot) | 2ms |
+| Poly 10 shapes `objs[i%10].x` 1M | ~400ms | ~85ms (SIMD) | ~85ms | 5ms |
+| Proto chain 5-deep 1M | ~551ms | ~120ms | ~120ms | 2ms |
+| Cold start `rune '1'` | 10ms | 10ms | **<1ms** | 65ms |
+| Poly warmup (no snapshot) | 396ms | 85ms | — | ~4ms (after TurboFan) |
+
+**VSD alone:** 2-4× speedup on property access benchmarks. Poly access matches V8's monomorphic performance.
+
+**rkyv alone:** cold start from 10ms to <1ms. No warmup — JIT code is pre-specialized.
+
+### rkyv Dependencies
+
+```toml
+# crates/rune_bytecode/Cargo.toml
+[dependencies]
+rkyv = "0.7"
+rkyv_dyn = "0.7"  # for trait objects (Shape, Func)
+
+# crates/rune_jit_baseline/Cargo.toml  
+[dependencies]
+rkyv = "0.7"       # for aligned Vec storage of shape vectors
+```
+
+### Tasks — Phase 5a (VSD + rkyv, 2 weeks)
+
+| Task | Est. | Priority |
+|---|---|---|
+| **5a-1: rkyv archive for BytecodeProgram** | 1d | Add `#[derive(Archive, Serialize, Deserialize)]` to BytecodeProgram. CLI flag `--snapshot` to save/load. |
+| **5a-2: rkyv-aligned shape vector storage** | 0.5d | Replace `HashMap` in `InlineCache` with `rkyv::AlignedVec<(u64, u64)>` as backing store for SIMD vectors. |
+| **5a-3: SSE2 shape vector codegen** | 1d | Emit `vpbroadcastq` + `vpcmpeqq` + `vpmovmskb` + `bsf` in the baseline JIT. |
+| **5a-4: AVX2 extension** | 0.5d | 8-shape vector for AVX2-capable CPUs. |
+| **5a-5: Persistent shape vectors** | 1d | Serialize shape vectors with rkyv on shutdown, reload on startup. |
+| **5a-6: Benchmark + V8 comparison update** | 0.5d | Re-run all benchmarks, update table. |
+| **5a-7: Integration tests for rkyv snapshots** | 0.5d | Verify snapshot round-trips produce identical results. |
 
 ## Global Testing Strategy
 

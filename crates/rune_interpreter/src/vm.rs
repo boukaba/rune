@@ -2700,6 +2700,22 @@ impl RootProvider for Vm {
     }
 }
 
+impl Vm {
+    /// Return a summary of IC hit/miss statistics.
+    pub fn dump_ic_stats(&self) -> String {
+        let total = self.ic_stats.hits + self.ic_stats.misses;
+        let hit_pct = if total > 0 {
+            (self.ic_stats.hits as f64 / total as f64) * 100.0
+        } else {
+            0.0
+        };
+        format!(
+            "IC stats: {} lookups, {} hits, {} misses ({:.1}% hit rate)",
+            self.ic_stats.lookups, self.ic_stats.hits, self.ic_stats.misses, hit_pct
+        )
+    }
+}
+
 /// Allocate a GC-managed string and return it as a raw pointer (for builtins).
 pub fn heap_string(gc: &mut SemiSpace, s: &str) -> *mut u8 {
     HeapString::allocate(gc, s) as *mut u8

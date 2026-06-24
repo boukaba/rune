@@ -1468,7 +1468,21 @@ impl Vm {
                     if let Some(ptr) = obj.heap_ptr() {
                         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
                         if tag == TAG_OBJECT {
-                            if let Some(key) = value_to_prop_key(raw_key) {
+                            // __proto__ setter: set the object's prototype
+                            if is_proto_key(raw_key) {
+                                if let Some(val_ptr) = value.heap_ptr() {
+                                    unsafe {
+                                        JSObject::set_prototype(ptr as *mut JSObject, val_ptr)
+                                    };
+                                } else {
+                                    unsafe {
+                                        JSObject::set_prototype(
+                                            ptr as *mut JSObject,
+                                            std::ptr::null_mut(),
+                                        )
+                                    };
+                                }
+                            } else if let Some(key) = value_to_prop_key(raw_key) {
                                 let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
                                 if let Some(slot) = shape.lookup(&key) {
                                     unsafe {
@@ -3035,6 +3049,18 @@ fn value_to_prop_key(val: Value) -> Option<PropertyKey> {
         return Some(PropertyKey::from_string(&v.to_string()));
     }
     None
+}
+
+/// Check if a Value is the string `"__proto__"` (the special prototype setter key).
+fn is_proto_key(val: Value) -> bool {
+    if let Some(ptr) = val.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_STRING {
+            let s = unsafe { HeapString::to_string(ptr as *mut HeapString) };
+            return s == "__proto__";
+        }
+    }
+    false
 }
 
 /// Maximum depth to walk the prototype chain before giving up (cycle guard).

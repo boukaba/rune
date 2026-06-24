@@ -721,6 +721,63 @@ fn test_prototype_shadow() {
     assert_eq!(r.as_smi(), None, "shadowed value is a string, not a number");
 }
 
+// ---- __proto__ assignment ---
+
+#[test]
+fn test_proto_set() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(r#"var proto = {x: 42}; var o = {}; o.__proto__ = proto; o.x"#)
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(42), "__proto__ assignment sets prototype");
+}
+
+#[test]
+fn test_proto_null() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(r#"var proto = {x: 42}; var o = {}; o.__proto__ = proto; o.__proto__ = null; o.x"#)
+        .unwrap();
+    assert_eq!(r.as_smi(), None, "null proto clears prototype chain");
+}
+
+#[test]
+fn test_proto_deep_chain() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"function mk(l){if(l==0){return {x:42};}var o={};o.__proto__=mk(l-1);return o;} var o=mk(5); o.x"#,
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(42), "5-deep proto chain returns 42");
+}
+
+// ---- GC stress regression: hot property access ---
+
+#[test]
+fn test_hot_property_mono_1m() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(r#"var o = {x: 1}; var s = 0; for (var i = 0; i < 1000000; i = i + 1) { s = s + o.x; } s"#)
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(1000000), "o.x 1M times returns 1000000");
+}
+
+#[test]
+fn test_hot_property_poly_1m() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"var objs = []; for (var i = 0; i < 10; i = i + 1) { var o = {}; o.x = i; objs.push(o); } var s = 0; for (var i = 0; i < 1000000; i = i + 1) { s = s + objs[i % 10].x; } s"#,
+        )
+        .unwrap();
+    assert_eq!(
+        r.as_smi(),
+        Some(4500000),
+        "10-shape poly 1M returns 4500000"
+    );
+}
+
 #[test]
 fn test_new_opcode_returns_object() {
     let mut ctx = Context::new_small();

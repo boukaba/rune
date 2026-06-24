@@ -41,11 +41,68 @@ impl InlineCache {
     }
 
     /// Look up a cached entry by (shape_id, key_hash). Linear scan.
+    /// On x86-64, uses SSE2 SIMD to compare 2 shape_ids per instruction.
+    #[inline]
     pub fn get(&self, shape_id: u64, key_hash: u64) -> Option<IcEntry> {
+        #[cfg(target_arch = "x86_64")]
+        {
+            return self.get_simd(shape_id, key_hash);
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            self.get_scalar(shape_id, key_hash)
+        }
+    }
+
+    /// Scalar linear scan fallback.
+    fn get_scalar(&self, shape_id: u64, key_hash: u64) -> Option<IcEntry> {
         self.entries
             .iter()
             .find(|(k, _)| k.shape_id == shape_id && k.key_hash == key_hash)
             .map(|(_, e)| *e)
+    }
+
+    /// SIMD shape compare: on x86-64 with SSE4.1, compares 2 shape_ids in 1 instruction.
+    /// Falls back to scalar linear scan on other platforms or if SSE4.1 unavailable.
+    #[cfg(target_arch = "x86_64")]
+    fn get_simd(&self, shape_id: u64, key_hash: u64) -> Option<IcEntry> {
+        if is_x86_feature_detected!("sse4.1") {
+            use core::arch::x86_64::*;
+            unsafe {
+                let entries = &self.entries;
+                let mut i = 0;
+                while i + 1 < entries.len() {
+                    let ptr = entries.as_ptr().add(i) as *const __m128i;
+                    let key0 = _mm_loadu_si128(ptr);
+                    let key1 = _mm_loadu_si128(ptr.add(1));
+                    let target = _mm_set1_epi64x(shape_id as i64);
+                    let cmp0 = _mm_cmpeq_epi64(key0, target);
+                    let cmp1 = _mm_cmpeq_epi64(key1, target);
+                    if _mm_extract_epi64(cmp0, 0) as u64 == u64::MAX {
+                        let e = entries[i];
+                        if e.0.key_hash == key_hash {
+                            return Some(e.1);
+                        }
+                    }
+                    if _mm_extract_epi64(cmp1, 0) as u64 == u64::MAX {
+                        let e = entries[i + 1];
+                        if e.0.key_hash == key_hash {
+                            return Some(e.1);
+                        }
+                    }
+                    i += 2;
+                }
+                if i < entries.len() {
+                    let e = entries[i];
+                    if e.0.shape_id == shape_id && e.0.key_hash == key_hash {
+                        return Some(e.1);
+                    }
+                }
+                None
+            }
+        } else {
+            self.get_scalar(shape_id, key_hash)
+        }
     }
 
     /// Insert or update a cached entry. Caps at 8 entries (evicts oldest if full).

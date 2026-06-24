@@ -133,19 +133,13 @@ fn nop(mem: &mut ExecutableMemory) {
 }
 
 fn push_callee_saved(mem: &mut ExecutableMemory) {
-    emit(mem, 0xA9BF7BFD); // STP x29, x30, [sp, #-16]!
-    emit(mem, 0xA9BF13F3); // STP x19, x20, [sp, #-16]!
-    emit(mem, 0xA9BF17F5); // STP x21, x22, [sp, #-16]!
-    emit(mem, 0xA9BF1BF7); // STP x23, x24, [sp, #-16]!
-    emit(mem, 0xA9BF1FF9); // STP x25, x26, [sp, #-16]!
+    let mut stp = |rt: u32, rt2: u32| emit(mem, 0xA9BF0000 | (rt2 << 10) | (31 << 5) | rt);
+    stp(29, 30); stp(19, 20); stp(21, 22); stp(23, 24); stp(25, 26);
 }
 
 fn pop_callee_saved(mem: &mut ExecutableMemory) {
-    emit(mem, 0xA8C11FF9); // LDP x25, x26, [sp], #16
-    emit(mem, 0xA8C11BF7); // LDP x23, x24, [sp], #16
-    emit(mem, 0xA8C117F5); // LDP x21, x22, [sp], #16
-    emit(mem, 0xA8C113F3); // LDP x19, x20, [sp], #16
-    emit(mem, 0xA8C17BFD); // LDP x29, x30, [sp], #16
+    let mut ldp = |rt: u32, rt2: u32| emit(mem, 0xA8C10000 | (rt2 << 10) | (31 << 5) | rt);
+    ldp(25, 26); ldp(23, 24); ldp(21, 22); ldp(19, 20); ldp(29, 30);
 }
 
 /// Compile a trace into the given ExecutableMemory buffer.

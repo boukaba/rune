@@ -9,3 +9,19 @@ rune_bytecode = { path = "../rune_bytecode" }
 rune_parser = { path = "../rune_parser" }
 rune_interpreter = { path = "../rune_interpreter" }
 tracing = { workspace = true }
+
+[[example]]
+name = "embedding"
+path = "examples/embeddding.rs"
+
+[[example]]
+name = "closures"
+path = "examples/closures.rs"
+
+[[example]]
+name = "destructuring"
+path = "examples/destructuring.rs"
+
+[[example]]
+name = "snapshot"
+path = "examples/snapshot.rs"

@@ -13,8 +13,11 @@ use rune_core::object::JSObject;
 use rune_core::shape::{DENSE_ARRAY_SHAPE, PROTOTYPE_KEY, PropertyKey, Shape};
 use rune_core::string::HeapString;
 use rune_core::value::Value;
+#[cfg(all(feature = "jit", target_arch = "aarch64"))]
+use rune_jit_baseline::Aarch64CodeGen;
 #[cfg(all(feature = "jit", target_arch = "x86_64"))]
-use rune_jit_baseline::{CodeGen, JitEntryFn};
+use rune_jit_baseline::CodeGen;
+use rune_jit_baseline::JitEntryFn;
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -2593,8 +2596,8 @@ impl Vm {
                                     self.frames[fi].pc = pc + 1;
                                     continue;
                                 }
-                                // --- JIT tier-up (if enabled on x86-64) ---
-                                #[cfg(all(feature = "jit", target_arch = "x86_64"))]
+                                // --- JIT tier-up (if enabled) ---
+                                #[cfg(feature = "jit")]
                                 {
                                     unsafe { Func::increment_call_count(ptr as *mut Func) };
                                     let count = unsafe { Func::call_count(ptr as *mut Func) };
@@ -2604,8 +2607,21 @@ impl Vm {
                                         && count == JIT_THRESHOLD
                                         && rune_jit_baseline::is_jit_compatible(func_prog)
                                     {
-                                        let codegen = CodeGen::new(func_prog.instructions.len());
-                                        let mem = codegen.compile(func_prog);
+                                        #[cfg(target_arch = "x86_64")]
+                                        let mem = {
+                                            let codegen = CodeGen::new(func_prog.instructions.len());
+                                            codegen.compile(func_prog)
+                                        };
+                                        #[cfg(target_arch = "aarch64")]
+                                        let mem = {
+                                            let codegen = Aarch64CodeGen::new(func_prog.instructions.len());
+                                            codegen.compile(func_prog)
+                                        };
+                                        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+                                        let mem = {
+                                            let _ = func_prog;
+                                            unreachable!("JIT not supported on this architecture")
+                                        };
                                         mem.make_executable();
                                         unsafe {
                                             Func::set_jit_entry(ptr as *mut Func, mem.code_ptr());

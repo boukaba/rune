@@ -275,7 +275,23 @@ pub fn aot_compile_functions(program: &BytecodeProgram) -> Vec<CompiledFunc> {
         }
         out
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(target_arch = "aarch64")]
+    {
+        use rune_jit_baseline::{Aarch64CodeGen, is_jit_compatible};
+        let mut out = Vec::new();
+        for (idx, func_prog) in program.functions.iter().enumerate() {
+            if is_jit_compatible(func_prog) {
+                let codegen = Aarch64CodeGen::new(func_prog.instructions.len());
+                let mem = codegen.compile(func_prog);
+                let code = unsafe {
+                    std::slice::from_raw_parts(mem.code_ptr(), mem.offset).to_vec()
+                };
+                out.push(CompiledFunc { func_idx: idx, code });
+            }
+        }
+        out
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
         let _ = program;
         Vec::new()

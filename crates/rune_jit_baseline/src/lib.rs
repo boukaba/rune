@@ -7,7 +7,7 @@ pub mod templates;
 
 pub use codegen::{CodeGen, JitEntryFn};
 #[cfg(target_arch = "aarch64")]
-pub use codegen_aarch64::compile_trace;
+pub use codegen_aarch64::{compile_trace, Aarch64CodeGen};
 
 /// Check if a BytecodeProgram only uses opcodes the JIT can currently handle.
 pub fn is_jit_compatible(prog: &rune_bytecode::opcode::BytecodeProgram) -> bool {
@@ -29,9 +29,8 @@ pub fn is_jit_compatible(prog: &rune_bytecode::opcode::BytecodeProgram) -> bool 
             | Opcode::Return
             | Opcode::Jump
             | Opcode::JumpIfFalse
-            | Opcode::JumpIfTrue
-            | Opcode::DecLocal
-            | Opcode::LoadPropertyIC => {}
+            | Opcode::IncLocal
+            | Opcode::DecLocal => {}
             _ => return false,
         }
     }

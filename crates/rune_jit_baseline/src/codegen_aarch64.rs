@@ -187,6 +187,245 @@ pub fn compile_trace(ops: &[(Opcode, Vec<i64>, u64)]) -> ExecutableMemory {
     mem
 }
 
+// ===========================================================================
+// Function AOT compiler (parallel to x86_64 CodeGen)
+// ===========================================================================
+
+/// AArch64 function baseline JIT compiler.
+///
+/// Calling convention (AAPCS64):
+///   x0 = vm_ptr, x1 = gc_ptr, x2 = locals_ptr
+///   return value in x0
+///
+/// The JIT value stack lives in VM heap memory (`JitVmState::jit_stack`) so
+/// that JIT pages on macOS Apple Silicon do not need to write through `sp`.
+pub struct Aarch64CodeGen {
+    mem: ExecutableMemory,
+    bc_to_native: Vec<usize>,
+    pending_patches: Vec<(usize, usize, u32)>, // (patch_offset_in_bytes, target_bc_index, original_instr)
+}
+
+impl Aarch64CodeGen {
+    pub fn new(instruction_count: usize) -> Self {
+        let mem = ExecutableMemory::allocate(64 * 1024);
+        Self {
+            mem,
+            bc_to_native: vec![0; instruction_count],
+            pending_patches: Vec::new(),
+        }
+    }
+
+    fn push(&mut self) {
+        // x0 -> [jit_stack]; jit_stack += 8
+        str_off(&mut self.mem, 0, JIT_STACK_REG, 0);
+        add_imm(&mut self.mem, JIT_STACK_REG, JIT_STACK_REG, 8);
+    }
+
+    fn pop(&mut self) {
+        // jit_stack -= 8; x0 <- [jit_stack]
+        sub_imm(&mut self.mem, JIT_STACK_REG, JIT_STACK_REG, 8);
+        ldr_off(&mut self.mem, 0, JIT_STACK_REG, 0);
+    }
+
+    fn emit_prologue(&mut self) {
+        push_callee_saved(&mut self.mem);
+        mov_reg(&mut self.mem, VM_REG, 0);
+        mov_reg(&mut self.mem, GC_REG, 1);
+        mov_reg(&mut self.mem, LOC_REG, 2);
+        add_imm(&mut self.mem, JIT_STACK_REG, VM_REG, 0);
+    }
+
+    fn emit_epilogue(&mut self) {
+        sub_imm(&mut self.mem, JIT_STACK_REG, JIT_STACK_REG, 8);
+        ldr_off(&mut self.mem, 0, JIT_STACK_REG, 0);
+        pop_callee_saved(&mut self.mem);
+        ret(&mut self.mem);
+    }
+
+    fn emit_b_cond(&mut self, cond: u32, target_bc: usize) -> usize {
+        // B.cond: 0x54000000 | (imm19 << 5) | cond
+        let patch_offset = self.mem.current_offset();
+        let instr = 0x54000000 | cond;
+        emit(&mut self.mem, instr);
+        self.pending_patches.push((patch_offset, target_bc, instr));
+        patch_offset
+    }
+
+    fn emit_b(&mut self, target_bc: usize) -> usize {
+        // B: 0x14000000 | imm26
+        let patch_offset = self.mem.current_offset();
+        let instr = 0x14000000;
+        emit(&mut self.mem, instr);
+        self.pending_patches.push((patch_offset, target_bc, instr));
+        patch_offset
+    }
+
+    fn resolve_patches(&mut self) {
+        for &(patch_offset, bc_target, original_instr) in &self.pending_patches {
+            let native_target = self.bc_to_native[bc_target];
+            let from_addr = patch_offset as i64;
+            let to_addr = native_target as i64;
+            let instr = if (original_instr & 0xFF000000) == 0x14000000 {
+                // Unconditional B: imm26 in bits [25:0], encoded as signed
+                // offset in instructions.
+                let imm = to_addr - from_addr;
+                let imm_instr = (imm / 4) as i32;
+                (original_instr & !0x03FF_FFFF) | ((imm_instr as u32) & 0x03FF_FFFF)
+            } else {
+                // B.cond: imm19 in bits [23:5].
+                let imm = to_addr - from_addr;
+                let imm_instr = (imm / 4) as i32;
+                (original_instr & !0x00FF_FFE0) | (((imm_instr as u32) & 0x0007_FFFF) << 5)
+            };
+            self.mem.patch_u32(patch_offset, instr);
+        }
+        self.pending_patches.clear();
+    }
+
+    pub fn compile(mut self, program: &rune_bytecode::opcode::BytecodeProgram) -> ExecutableMemory {
+        self.emit_prologue();
+
+        for (bc_idx, instr) in program.instructions.iter().enumerate() {
+            self.bc_to_native[bc_idx] = self.mem.current_offset();
+            match instr.opcode {
+                Opcode::LoadSmi => {
+                    let smi_raw = ((instr.operands[0] as u64) << 1) | 1;
+                    mov_imm64(&mut self.mem, 0, smi_raw);
+                    self.push();
+                }
+                Opcode::LoadUndefined => {
+                    movz(&mut self.mem, 0, 0);
+                    self.push();
+                }
+                Opcode::LoadNull => {
+                    movz(&mut self.mem, 0, 2);
+                    self.push();
+                }
+                Opcode::LoadBoolean => {
+                    let raw = if instr.operands[0] != 0 { 6u64 } else { 4u64 };
+                    mov_imm64(&mut self.mem, 0, raw);
+                    self.push();
+                }
+                Opcode::LoadLocal => {
+                    let idx = instr.operands[0] as u32;
+                    ldr_off(&mut self.mem, 0, LOC_REG, idx * 8);
+                    self.push();
+                }
+                Opcode::StoreLocal => {
+                    let idx = instr.operands[0] as u32;
+                    self.pop();
+                    str_off(&mut self.mem, 0, LOC_REG, idx * 8);
+                    self.push();
+                }
+                Opcode::Pop => {
+                    self.pop();
+                }
+                Opcode::Dup => {
+                    // peek top without popping
+                    sub_imm(&mut self.mem, JIT_STACK_REG, JIT_STACK_REG, 8);
+                    ldr_off(&mut self.mem, 0, JIT_STACK_REG, 0);
+                    add_imm(&mut self.mem, JIT_STACK_REG, JIT_STACK_REG, 8);
+                    self.push();
+                }
+                Opcode::Add => {
+                    self.pop(); // x0 = b
+                    mov_reg(&mut self.mem, 1, 0); // x1 = b
+                    self.pop(); // x0 = a
+                    sub_imm(&mut self.mem, 0, 0, 1); // untag a
+                    add_reg(&mut self.mem, 0, 0, 1); // x0 = a + b
+                    self.push();
+                }
+                Opcode::Sub => {
+                    self.pop();
+                    mov_reg(&mut self.mem, 1, 0);
+                    self.pop();
+                    sub_reg(&mut self.mem, 0, 0, 1);
+                    add_imm(&mut self.mem, 0, 0, 1); // retag
+                    self.push();
+                }
+                Opcode::Mul => {
+                    self.pop();
+                    mov_reg(&mut self.mem, 1, 0);
+                    self.pop();
+                    emit(&mut self.mem, 0x9341FC00); // ASR x0, x0, #1
+                    emit(&mut self.mem, 0x9341FC21); // ASR x1, x1, #1
+                    emit(&mut self.mem, 0x9B017C00); // MUL x0, x0, x1
+                    emit(&mut self.mem, 0xD37FF800); // LSL x0, x0, #1
+                    add_imm(&mut self.mem, 0, 0, 1);
+                    self.push();
+                }
+                Opcode::Lt => {
+                    self.pop();
+                    mov_reg(&mut self.mem, 1, 0);
+                    self.pop();
+                    cmp_reg(&mut self.mem, 0, 1);
+                    // CSET x0, LT = CSINC x0, XZR, XZR, GE (= !LT)
+                    emit(&mut self.mem, 0x9A9FA7E0);
+                    emit(&mut self.mem, 0xD37FF800); // LSL x0, x0, #1
+                    orr_imm1(&mut self.mem, 0, 0);
+                    self.push();
+                }
+                Opcode::IncLocal => {
+                    let idx = instr.operands[0] as u32;
+                    let is_prefix = instr.operands.get(1).copied().unwrap_or(0) != 0;
+                    ldr_off(&mut self.mem, 0, LOC_REG, idx * 8);
+                    if is_prefix {
+                        add_imm(&mut self.mem, 0, 0, 2);
+                        str_off(&mut self.mem, 0, LOC_REG, idx * 8);
+                        self.push();
+                    } else {
+                        mov_reg(&mut self.mem, 2, 0); // x2 = old
+                        add_imm(&mut self.mem, 0, 0, 2);
+                        str_off(&mut self.mem, 0, LOC_REG, idx * 8);
+                        mov_reg(&mut self.mem, 0, 2);
+                        self.push();
+                    }
+                }
+                Opcode::DecLocal => {
+                    let idx = instr.operands[0] as u32;
+                    let is_prefix = instr.operands.get(1).copied().unwrap_or(0) != 0;
+                    ldr_off(&mut self.mem, 0, LOC_REG, idx * 8);
+                    if is_prefix {
+                        sub_imm(&mut self.mem, 0, 0, 2);
+                        str_off(&mut self.mem, 0, LOC_REG, idx * 8);
+                        self.push();
+                    } else {
+                        mov_reg(&mut self.mem, 2, 0);
+                        sub_imm(&mut self.mem, 0, 0, 2);
+                        str_off(&mut self.mem, 0, LOC_REG, idx * 8);
+                        mov_reg(&mut self.mem, 0, 2);
+                        self.push();
+                    }
+                }
+                Opcode::Jump => {
+                    let target = instr.operands[0] as usize;
+                    self.emit_b(target);
+                }
+                Opcode::JumpIfFalse => {
+                    let target = instr.operands[0] as usize;
+                    self.pop(); // x0 = condition
+                    movz(&mut self.mem, 1, 2); // x1 = 2 (null sentinel)
+                    cmp_reg(&mut self.mem, 0, 1);
+                    self.emit_b_cond(0x9, target); // B.LS target (falsy: undefined/Smi(0)/null)
+                    movz(&mut self.mem, 1, 4); // x1 = 4 (false sentinel)
+                    cmp_reg(&mut self.mem, 0, 1);
+                    self.emit_b_cond(0x0, target); // B.EQ target
+                }
+                Opcode::Return => {
+                    self.emit_epilogue();
+                }
+                _ => {
+                    // Unknown opcode: emit a trap so we notice quickly.
+                    emit(&mut self.mem, 0xD4200000); // BRK #0
+                }
+            }
+        }
+
+        self.resolve_patches();
+        self.mem
+    }
+}
+
 /// Compile a single trace opcode to aarch64 instructions.
 #[allow(clippy::identity_op)] // instruction encoding uses explicit bit-field slots
 fn compile_op(mem: &mut ExecutableMemory, opcode: Opcode, operands: &[i64]) {
@@ -259,10 +498,10 @@ fn compile_op(mem: &mut ExecutableMemory, opcode: Opcode, operands: &[i64]) {
             ldr_off(mem, 1, JIT_STACK_REG, 0); // x1 = b
             sub_imm(mem, JIT_STACK_REG, JIT_STACK_REG, 8);
             ldr_off(mem, 0, JIT_STACK_REG, 0); // x0 = a
-            emit(mem, 0x9341FC00 | (0 << 5) | 0); // ASR x0, x0, #1
-            emit(mem, 0x9341FC21 | (1 << 5) | 1); // ASR x1, x1, #1
-            emit(mem, 0x9B007C00 | (1 << 16) | (0 << 5) | 0); // MUL x0, x0, x1
-            emit(mem, 0xD37EF800 | (0 << 5) | 0); // LSL x0, x0, #1
+            emit(mem, 0x9341FC00); // ASR x0, x0, #1
+            emit(mem, 0x9341FC21); // ASR x1, x1, #1
+            emit(mem, 0x9B017C00); // MUL x0, x0, x1
+            emit(mem, 0xD37FF800); // LSL x0, x0, #1
             add_imm(mem, 0, 0, 1); // x0 |= 1
             str_off(mem, 0, JIT_STACK_REG, 0);
             add_imm(mem, JIT_STACK_REG, JIT_STACK_REG, 8);
@@ -273,10 +512,9 @@ fn compile_op(mem: &mut ExecutableMemory, opcode: Opcode, operands: &[i64]) {
             sub_imm(mem, JIT_STACK_REG, JIT_STACK_REG, 8);
             ldr_off(mem, 0, JIT_STACK_REG, 0); // x0 = a
             cmp_reg(mem, 0, 1); // CMP a, b
-            // CSET x0, LT → x0 = 1 if LT else 0
-            // Then encode as Smi: x0 = (x0 << 1) | 1
-            emit(mem, 0x9A9FB7E0); // CSET x0, LT
-            emit(mem, 0xD37EF800 | (0 << 5) | 0); // LSL x0, x0, #1
+            // CSET x0, LT = CSINC x0, XZR, XZR, GE (= !LT)
+            emit(mem, 0x9A9FA7E0);
+            emit(mem, 0xD37FF800); // LSL x0, x0, #1
             orr_imm1(mem, 0, 0); // x0 |= 1
             str_off(mem, 0, JIT_STACK_REG, 0);
             add_imm(mem, JIT_STACK_REG, JIT_STACK_REG, 8);
@@ -480,5 +718,192 @@ mod tests {
             unsafe { std::mem::transmute(mem.code_ptr()) };
         let r = unsafe { func(vm, std::ptr::null_mut(), buf.as_mut_ptr()) };
         assert_eq!(r, ((42u64 << 1) | 1));
+    }
+
+    #[test]
+    fn test_aarch64_cset_lt_encoding() {
+        let mut mem = ExecutableMemory::allocate(256);
+        // CMP x0, x1 (x0=a=1, x1=b=21); CSET x0, LT; RET
+        mov_imm64(&mut mem, 0, 1);  // x0 = 1 = Smi(0)
+        mov_imm64(&mut mem, 1, 21); // x1 = 21 = Smi(10)
+        cmp_reg(&mut mem, 0, 1);
+        // CSET x0, LT = CSINC x0, XZR, XZR, GE
+        emit(&mut mem, 0x9A9FA7E0);
+        ret(&mut mem);
+        mem.make_executable();
+        let func: unsafe fn() -> u64 = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let r = unsafe { func() };
+        assert_eq!(r, 1u64, "CSET LT (1 < 21) should return 1");
+    }
+
+    #[test]
+    fn test_aarch64_cset_lt_false_encoding() {
+        let mut mem = ExecutableMemory::allocate(256);
+        mov_imm64(&mut mem, 0, 21); // x0 = 21 = Smi(10)
+        mov_imm64(&mut mem, 1, 1);  // x1 = 1 = Smi(0)
+        cmp_reg(&mut mem, 0, 1);
+        emit(&mut mem, 0x9A9FA7E0); // CSET x0, LT
+        ret(&mut mem);
+        mem.make_executable();
+        let func: unsafe fn() -> u64 = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let r = unsafe { func() };
+        assert_eq!(r, 0u64, "CSET LT (21 < 1) should return 0");
+    }
+
+    #[test]
+    fn test_aarch64_codegen_load_smi_return() {
+        use rune_bytecode::opcode::{BytecodeProgram, Instruction};
+        let prog = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadSmi, vec![42]),
+                Instruction::new(Opcode::Return, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        let mem = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+        mem.make_executable();
+        let vm = jit_vm_ptr();
+        let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
+            unsafe { std::mem::transmute(mem.code_ptr()) };
+        let r = unsafe { func(vm, std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert_eq!(r, ((42u64 << 1) | 1));
+    }
+
+    #[test]
+    fn test_aarch64_codegen_add_locals() {
+        use rune_bytecode::opcode::{BytecodeProgram, Instruction};
+        let prog = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadLocal, vec![0]),
+                Instruction::new(Opcode::LoadLocal, vec![1]),
+                Instruction::new(Opcode::Add, vec![]),
+                Instruction::new(Opcode::Return, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        let mem = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+        mem.make_executable();
+        let vm = jit_vm_ptr();
+        let mut locals: Vec<u64> = vec![((10u64 << 1) | 1), ((32u64 << 1) | 1)];
+        let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
+            unsafe { std::mem::transmute(mem.code_ptr()) };
+        let r = unsafe { func(vm, std::ptr::null_mut(), locals.as_mut_ptr()) };
+        assert_eq!(r, ((42u64 << 1) | 1));
+    }
+
+    #[test]
+    fn test_aarch64_codegen_lt_smi() {
+        use rune_bytecode::opcode::{BytecodeProgram, Instruction};
+        let prog = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadSmi, vec![0]),
+                Instruction::new(Opcode::LoadSmi, vec![10]),
+                Instruction::new(Opcode::Lt, vec![]),
+                Instruction::new(Opcode::Return, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        let mem = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+        mem.make_executable();
+        let vm = jit_vm_ptr();
+        let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
+            unsafe { std::mem::transmute(mem.code_ptr()) };
+        let r = unsafe { func(vm, std::ptr::null_mut(), std::ptr::null_mut()) };
+        // Lt should return true, encoded as Smi(1)=3 in the JIT (matching x86_64).
+        assert_eq!(r, 3u64);
+    }
+
+    #[test]
+    fn test_aarch64_codegen_jump_if_false() {
+        use rune_bytecode::opcode::{BytecodeProgram, Instruction};
+        // if (true) 42 else 7
+        let prog = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadBoolean, vec![1]),
+                Instruction::new(Opcode::JumpIfFalse, vec![4]),
+                Instruction::new(Opcode::LoadSmi, vec![42]),
+                Instruction::new(Opcode::Jump, vec![5]),
+                Instruction::new(Opcode::LoadSmi, vec![7]),
+                Instruction::new(Opcode::Return, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        let mem = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+        mem.make_executable();
+        let vm = jit_vm_ptr();
+        let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
+            unsafe { std::mem::transmute(mem.code_ptr()) };
+        let r = unsafe { func(vm, std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert_eq!(r, ((42u64 << 1) | 1));
+    }
+
+    #[test]
+    fn test_aarch64_codegen_jump_if_false_falsy() {
+        use rune_bytecode::opcode::{BytecodeProgram, Instruction};
+        // if (false) 42 else 7
+        let prog = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadBoolean, vec![0]),
+                Instruction::new(Opcode::JumpIfFalse, vec![4]),
+                Instruction::new(Opcode::LoadSmi, vec![42]),
+                Instruction::new(Opcode::Jump, vec![5]),
+                Instruction::new(Opcode::LoadSmi, vec![7]),
+                Instruction::new(Opcode::Return, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        let mem = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+        mem.make_executable();
+        let vm = jit_vm_ptr();
+        let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
+            unsafe { std::mem::transmute(mem.code_ptr()) };
+        let r = unsafe { func(vm, std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert_eq!(r, ((7u64 << 1) | 1));
+    }
+
+    #[test]
+    fn test_aarch64_codegen_loop() {
+        use rune_bytecode::opcode::{BytecodeProgram, Instruction};
+        // i = 0; s = 0; while (i < 10) { s += i; i++; } return s;
+        let prog = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadSmi, vec![0]),
+                Instruction::new(Opcode::StoreLocal, vec![1]),
+                Instruction::new(Opcode::Pop, vec![]),
+                Instruction::new(Opcode::LoadSmi, vec![0]),
+                Instruction::new(Opcode::StoreLocal, vec![0]),
+                Instruction::new(Opcode::Pop, vec![]),
+                Instruction::new(Opcode::LoadLocal, vec![0]), // loop head
+                Instruction::new(Opcode::LoadSmi, vec![10]),
+                Instruction::new(Opcode::Lt, vec![]),
+                Instruction::new(Opcode::JumpIfFalse, vec![18]),
+                Instruction::new(Opcode::LoadLocal, vec![1]),
+                Instruction::new(Opcode::LoadLocal, vec![0]),
+                Instruction::new(Opcode::Add, vec![]),
+                Instruction::new(Opcode::StoreLocal, vec![1]),
+                Instruction::new(Opcode::Pop, vec![]),
+                Instruction::new(Opcode::IncLocal, vec![0, 1]),
+                Instruction::new(Opcode::Pop, vec![]),
+                Instruction::new(Opcode::Jump, vec![6]),
+                Instruction::new(Opcode::LoadLocal, vec![1]),
+                Instruction::new(Opcode::Return, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        let mem = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+        mem.make_executable();
+        let vm = jit_vm_ptr();
+        let mut locals: Vec<u64> = vec![0, 0];
+        let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
+            unsafe { std::mem::transmute(mem.code_ptr()) };
+        let r = unsafe { func(vm, std::ptr::null_mut(), locals.as_mut_ptr()) };
+        // sum 0..9 = 45
+        assert_eq!(r, ((45u64 << 1) | 1));
     }
 }

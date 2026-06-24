@@ -3,7 +3,7 @@
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
 > **Status:** v0.0.1 🏷️ (Technology Preview — tagged at `0067e41`)
-> SIDT validated, AFPC bytecode + native-code cache functional, 297 tests, cold start 5× faster than Node
+> SIDT validated, AFPC bytecode + native-code cache functional (x86_64 + AArch64), 300+ tests, cold start 5× faster than Node
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
 > Every implementation decision at every level (lexer, parser, emitter, bytecode, interpreter, builtins, JIT) **must** be verified against the exact ECMA-262 specification language in [`ecma262.md`](./ecma262.md) — **never guess** what the spec says. Each section in `ecma262.md` links to the corresponding URL fragment on `https://tc39.es/ecma262/multipage/`; **always open these URLs via `webfetch` tool** to read the authoritative algorithm steps before implementing. This applies to all phases below.
@@ -1028,7 +1028,7 @@ Phase 5 (Cranelift JIT) aims to close this gap to within 3–10×.
 **IC infrastructure:** Mono: 9 lookups/1M (LoadPropertyIC shape guard). SIDT: unlimited entries, no megamorphic cliff. SIMD: NEON+SSE4.1.
 **PPTS projected** (native trace compiler): mono from 480ms → ~30ms (16×, gap 120×→8×), poly from 590ms → ~80ms (7×, gap 116×→16×).
 
-## Sprint 16 — AFPC Bytecode Cache (rkyv) 🟡 In Progress
+## Sprint 16 — AFPC Bytecode Cache (rkyv) ✅ Done
 
 **Goal:** Replace the source-level `--snapshot` cache with a binary rkyv bytecode cache. Parse + emit once, then zero-copy load `BytecodeProgram` on subsequent runs. This is the foundation for later native-code persistence.
 
@@ -1127,7 +1127,7 @@ append delta to cache → future runs use cached delta
 |---|---|---|---|---|
 | **5g** | rkyv bytecode snapshots (zero-copy, skip parse/emit) | 1d | 🟠 P1 | ✅ Done | Source-level cache: `--snapshot` saves to `.rune-cache`, load on next run. First run 340ms → cached 50ms (6.8× faster). rkyv dep added (Archive derive pending). |
 | **5a** | Fix trace compiler Add/Sub/Mul SIGBUS | 0.5d | 🔴 P0 | ✅ Done | Moved JIT value stack from `sp` to VM heap memory (`JitVmState::jit_stack`). All AArch64 trace tests pass. |
-| **5b** | Full function AOT compiler (bytecode→native for all opcodes) | 3d | 🔴 P0 | ✅ Done | x86-64 Smi-only baseline JIT (`rune_jit_baseline::CodeGen`) compiles all JIT-compatible functions; blobs stored in `AfpcCache::compiled_funcs`. Full opcode coverage remains future work. |
+| **5b** | Full function AOT compiler (bytecode→native for all opcodes) | 3d | 🔴 P0 | ✅ Done | x86-64 Smi-only baseline JIT + AArch64 function baseline JIT (`Aarch64CodeGen`). Both compile all JIT-compatible functions; blobs persisted in `AfpcCache::compiled_funcs`. Full opcode coverage remains future work. |
 | **5c** | rkyv cache format: serialize shapes + compiled code + IC + strings | 2d | 🔴 P0 | ✅ Done | `AfpcCache` serializes bytecode, shape table, IC table, and native code blobs. Shape IDs made content-addressed/stable. |
 | **5d** | Cache loader: mmap → validate shape IDs → install entry points | 1d | 🔴 P0 | ✅ Done | `InstalledNativeCode::from_cache` mmap's function blobs into RX memory; `Context::install_native_code` maps func_idx → entry pointer; `MakeFunction` installs cached JIT entry on function creation. |
 | **5e** | Delta JIT: shape miss → record → compile delta → append cache | 2d | 🟠 P1 | ⬜ New |

@@ -20,8 +20,19 @@ impl Default for Context {
 
 impl Context {
     pub fn new() -> Self {
+        Self::new_with_semispace(16 * 1024 * 1024) // 16 MiB default
+    }
+
+    /// Like `new()` but with a small semispace (1 MiB) for tests that
+    /// run many contexts in parallel. Large live sets (>60K objects)
+    /// may OOM with this — use the 16 MiB `new()` for those.
+    pub fn new_small() -> Self {
+        Self::new_with_semispace(1024 * 1024) // 1 MiB for parallel tests
+    }
+
+    fn new_with_semispace(size: usize) -> Self {
         let mut ctx = Context {
-            gc: SemiSpace::new(),
+            gc: SemiSpace::with_size(size),
             vm: Vm::new(),
             programs: Vec::new(),
         };

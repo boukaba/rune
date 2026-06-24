@@ -72,6 +72,7 @@ pub struct SemiSpace {
     limit: *mut u8,
     scan: *mut u8,
     roots: Vec<*mut u64>,
+    semispace_size: usize,
     /// Optional root provider called before each collection to refresh
     /// the root set (handles Vec reallocation invalidating root pointers).
     pub root_provider: Option<*mut dyn RootProvider>,
@@ -81,15 +82,22 @@ unsafe impl Send for SemiSpace {}
 
 impl SemiSpace {
     pub fn new() -> Self {
-        let r0 = unsafe { alloc_zeroed(SEMISPACE_SIZE) };
-        let r1 = unsafe { alloc_zeroed(SEMISPACE_SIZE) };
+        Self::with_size(SEMISPACE_SIZE)
+    }
+
+    /// Create a SemiSpace with a custom semispace size.
+    /// Each of the two semispaces is `size` bytes (total allocation = 2 * size).
+    pub fn with_size(size: usize) -> Self {
+        let r0 = unsafe { alloc_zeroed(size) };
+        let r1 = unsafe { alloc_zeroed(size) };
         SemiSpace {
             regions: [r0, r1],
             active: 0,
             bump: r0,
-            limit: unsafe { r0.add(SEMISPACE_SIZE) },
+            limit: unsafe { r0.add(size) },
             scan: r0,
             roots: Vec::new(),
+            semispace_size: size,
             root_provider: None,
         }
     }
@@ -157,7 +165,7 @@ impl SemiSpace {
             // Nothing to preserve; reset bump pointer
             self.active = 1 - self.active;
             self.bump = self.regions[self.active];
-            self.limit = unsafe { self.bump.add(SEMISPACE_SIZE) };
+            self.limit = unsafe { self.bump.add(self.semispace_size) };
             self.scan = self.bump;
             return;
         }
@@ -166,7 +174,7 @@ impl SemiSpace {
         self.scan = to;
         self.bump = to;
         self.active = 1 - self.active;
-        self.limit = unsafe { to.add(SEMISPACE_SIZE) };
+        self.limit = unsafe { to.add(self.semispace_size) };
 
         unsafe {
             // Forward all root objects; also update root slots in-place

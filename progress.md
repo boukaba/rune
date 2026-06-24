@@ -1026,88 +1026,117 @@ Phase 5 (Cranelift JIT) aims to close this gap to within 3–10×.
 **IC infrastructure:** Mono: 9 lookups/1M (LoadPropertyIC shape guard). SIDT: unlimited entries, no megamorphic cliff. SIMD: NEON+SSE4.1.
 **PPTS projected** (native trace compiler): mono from 480ms → ~30ms (16×, gap 120×→8×), poly from 590ms → ~80ms (7×, gap 116×→16×).
 
-## Phase 5a — Vectorized Shape Dispatch (VSD) + rkyv Persistence
+## Phase 5 — AFPC: AOT-First Persistent Compilation
 
-> **Goal:** Achieve V8-beating polymorphic property access via SIMD shape vectors and eliminate warmup cost via rkyv snapshot persistence. This replaces the full Cranelift JIT plan with a 2-phase: VSD (Phase 5a, 1 week) + rkyv snapshots (Phase 5b, 1 week).
+> **Goal:** Compile EVERYTHING to native on first run, persist the result with rkyv, then on every subsequent run execute native code from the first instruction with 0ms warmup. Delta JIT only compiles new shapes never seen before. Immutable shapes make this possible — cached code is valid forever.
 
-### Architecture: VSD (SIMD Shape Vectors)
+### Why nobody else can do this
 
-**Core insight:** Rune has immutable shapes with stable `u64` IDs. Modern CPUs have SIMD (SSE/AVX). Combine them to resolve polymorphic property access in 3 instructions.
+| Engine | Why they can't |
+|---|---|
+| **V8** | Hidden classes transition. `{x:1}` then add `y:2` → class changes. Cached code for old class is STALE. Must re-validate on every load. |
+| **SpiderMonkey** | Shapes are mutable. Shape tree can be pruned. Cached offsets go stale. |
+| **JSC** | Structure transitions invalidate cached dispatch. |
+| **Hermes** | AOT bytecode only (no native). No JIT tier for deltas. |
+| **QuickJS** | No JIT at all. No shapes. |
 
+**Rune's immutable shapes are the architectural moat.** Shape 9 is born with `{x}` and dies with `{x}`. It never transitions. A compiled trace for shape 9 is valid forever.
+
+### Architecture: AFPC (AOT-First, Delta JIT, rkyv Persistence)
+
+**First run (AOT — compile everything):**
 ```
-ShapeVector (SSE, 4 shapes):  [s₀, off₀, s₁, off₁, s₂, off₂, s₃, off₃]
-ShapeVector (AVX2, 8 shapes): [s₀...off₇]
-```
-
-Property access (`obj.x`) in x86-64 assembly:
-```asm
-vpbroadcastq ymm0, [rdi+8]       ; broadcast obj.shape_id across all lanes
-vpcmpeqq     ymm1, ymm0, [shape_vec]  ; 4/8-way shape compare in 1 instruction
-vpmovmskb    eax, ymm1           ; extract match mask
-bsf          ecx, eax            ; find first matching lane
-mov          rax, [rdi+shape_vec[ecx*16+8]]  ; direct slot load
-```
-
-**Latency:** 3-5 cycles for 1-8 shapes. V8 monomorphic IC: ~2 cycles (1 shape only, recompiles on 3rd shape). V8 megamorphic: ~15-30 cycles (hash lookup).
-
-**Why V8 can't do this:** Hidden classes transition → need constant invalidation of cached shape data. Rune shapes are immutable → shape vectors are valid forever.
-
-**Implementation** (extend existing `rune_jit_baseline`):
-- SSE2 (4 shapes): 200 lines in codegen.rs — guaranteed on x86-64
-- AVX2 (8 shapes): +100 lines, CPU feature detection at startup
-- Fallback to HashMap IC for 9+ shapes (rare)
-
-### Architecture: rkyv Snapshots
-
-**Zero-copy bytecode loading:** Archive `BytecodeProgram` with rkyv. Cold start: mmap file → execute directly. No parse, no emit, no deserialization allocations.
-
-**Persistent shape vectors:** The VSD shape vectors are rkyv-archived bytes. On restart, load pre-compiled shape vectors — the JIT runs at full speed on the first iteration. No warmup period ever.
-
-**Cold-start with rkyv + new_small():**
-```
-Current:  10ms (parse + emit + execute + 1MB heap alloc)
-rkyv:     <1ms  (mmap bytecode + execute + 1MB heap alloc)
-rkyv+VSD: <1ms  (mmap bytecode + execute with pre-specialized JIT code)
+JS source → parse → emit bytecode → compile ALL to native → save to .rune-cache
 ```
 
-### VSD + rkyv Benchmark (Phase 5a)
+The `.rune-cache` is a persistent archive containing:
+```
+shape_table:      {9: {x→slot 0}, 10: {x→0, y→1}, ...}
+compiled_funcs:   {add: <native code>, mk: <native code>, ...}
+compiled_traces:  {pc=10..26: <native loop body for shape 9>}
+ic_entries:       {callsite_0: [(shape 9, slot 0), (shape 10, slot 0)], ...}
+string_constants: {"x": <ptr>, "y": <ptr>, ...}
+```
 
-| Benchmark | Current (Rune) | After VSD | After rkyv snapshots | V8 |
+**Every subsequent run:**
+```
+.rune-cache → mmap → execute native code from iteration 0
+```
+- No parse. No emit. No warmup. No interpretation.
+- Full native speed from the first instruction.
+
+**Delta JIT (only compile what's new):**
+```
+shape guard fails → fall back to interpreter for THIS ONE PATH
+record (shape 11, key "z", slot 1) → JIT compile the delta
+append delta to cache → future runs use cached delta
+```
+- Cache grows monotonically. Never invalidated.
+- Delta is tiny: one shape guard + offset lookup. Not the whole function.
+
+### Performance projection
+
+| Scenario | Current (interpreter) | AFPC first run | AFPC subsequent | V8 |
 |---|---|---|---|---|
-| Monomorphic `o.x` 1M | ~380ms | ~80ms (SIMD) | ~80ms (already hot) | 2ms |
-| Poly 10 shapes `objs[i%10].x` 1M | ~400ms | ~85ms (SIMD) | ~85ms | 5ms |
-| Proto chain 5-deep 1M | ~551ms | ~120ms | ~120ms | 2ms |
-| Cold start `rune '1'` | 10ms | 10ms | **<1ms** | 65ms |
-| Poly warmup (no snapshot) | 396ms | 85ms | — | ~4ms (after TurboFan) |
+| Cold start | 7ms | ~500ms (compile) | **~2ms** (mmap) | 33ms |
+| `o.x` 1M | 480ms | ~30ms (native) | **~30ms** (cached) | 4ms |
+| `poly` 1M | 590ms | ~80ms (native) | **~80ms** (cached) | 5ms |
+| New shape delta | — | — | **0.1ms** (delta JIT) | 10-50ms (deopt+recompile) |
 
-**VSD alone:** 2-4× speedup on property access benchmarks. Poly access matches V8's monomorphic performance.
+**Crossover:** V8 wins hot throughput (4ms vs 30ms). Rune wins total execution time for workloads under ~10K iterations (cold start + 0ms warmup dominates). For serverless (100-1K iterations per cold start), Rune wins by 5-10×.
 
-**rkyv alone:** cold start from 10ms to <1ms. No warmup — JIT code is pre-specialized.
+### What makes this State of the Art
 
-### rkyv Dependencies
+1. **Immutable shapes** → cached code never invalidates. Unique to Rune.
+2. **AOT-first** → compile once, run forever. No engine does full native AOT for JS.
+3. **Delta JIT** → compile only shape deltas, not whole functions. µs-scale, not ms-scale.
+4. **rkyv zero-copy** → mmap cache file, execute directly. No deserialization.
+5. **Multiplatform** → aarch64 NEON + x86-64 SSE4.1 native codegen.
 
-```toml
-# crates/rune_bytecode/Cargo.toml
-[dependencies]
-rkyv = "0.7"
-rkyv_dyn = "0.7"  # for trait objects (Shape, Func)
+### Tasks — Phase 5 (AFPC, 3 weeks)
 
-# crates/rune_jit_baseline/Cargo.toml  
-[dependencies]
-rkyv = "0.7"       # for aligned Vec storage of shape vectors
-```
+| # | Task | Est. | Priority | Status |
+|---|---|---|---|---|
+| **5a** | Fix trace compiler Add/Sub/Mul SIGBUS | 0.5d | 🔴 P0 | Pending |
+| **5b** | Full function AOT compiler (bytecode→native for all opcodes) | 3d | 🔴 P0 | New |
+| **5c** | rkyv cache format: serialize shapes + compiled code + IC + strings | 2d | 🔴 P0 | New |
+| **5d** | Cache loader: mmap → validate shape IDs → install entry points | 1d | 🔴 P0 | New |
+| **5e** | Delta JIT: shape miss → record → compile delta → append cache | 2d | 🟠 P1 | New |
+| **5f** | CLI `--cache` flag: auto-save on exit, auto-load on start | 1d | 🟠 P1 | New |
+| **5g** | rkyv bytecode snapshots (zero-copy load, skip parse/emit) | 1d | 🟠 P1 | New |
+| **5h** | Benchmark: first-run vs cached vs V8, 100/1K/10K iterations | 1d | 🟠 P1 | New |
+| **5i** | Integration tests: cache round-trip, delta correctness, deopt recovery | 1d | 🟠 P1 | New |
 
-### Tasks — Phase 5a (VSD + rkyv, 2 weeks)
+**Total: 12.5 days (~2.5 weeks).** Delivers a genuinely novel JS execution model — AOT-first with immutable-shape persistence. No engine in production, research, or open-source does this.
 
-| Task | Est. | Priority |
-|---|---|---|
-| **5a-1: rkyv archive for BytecodeProgram** | 1d | Add `#[derive(Archive, Serialize, Deserialize)]` to BytecodeProgram. CLI flag `--snapshot` to save/load. |
-| **5a-2: rkyv-aligned shape vector storage** | 0.5d | Replace `HashMap` in `InlineCache` with `rkyv::AlignedVec<(u64, u64)>` as backing store for SIMD vectors. |
-| **5a-3: SSE2 shape vector codegen** | 1d | Emit `vpbroadcastq` + `vpcmpeqq` + `vpmovmskb` + `bsf` in the baseline JIT. |
-| **5a-4: AVX2 extension** | 0.5d | 8-shape vector for AVX2-capable CPUs. |
-| **5a-5: Persistent shape vectors** | 1d | Serialize shape vectors with rkyv on shutdown, reload on startup. |
-| **5a-6: Benchmark + V8 comparison update** | 0.5d | Re-run all benchmarks, update table. |
-| **5a-7: Integration tests for rkyv snapshots** | 0.5d | Verify snapshot round-trips produce identical results. |
+### Sub-tasks detail
+
+**5a — Fix SIGBUS:** The `orr_imm1` bitmask encoding in `compile_op` Add/Sub/Mul is wrong. Test with `test_trace_add` to verify fix.
+
+**5b — Full function AOT:** Extend `emit_trace_into` to `emit_program_into`. For each bytecode instruction, emit native aarch64/x86-64 code. Start with the opcodes that already work (LoadSmi, Add, Sub, LoadLocal, StoreLocal, Jump, Return). Add property access (LoadPropertyIC with shape guard). Add control flow (JumpIfFalse, JumpIfTrue).
+
+**5c — rkyv cache format:** Define a `struct AfpcCache` with rkyv's `Archive` macro. Contains: compiled program entry points (vec of ptr/len), shape table, IC entries, string constant handles. On save: rkyv::to_bytes the cache → write to `.rune-cache`.
+
+**5d — Cache loader:** On startup, check for `.rune-cache`. If exists: mmap the file, validate the archive, verify shape IDs are still valid (they are — immutable), install native entry points into the VM's function table.
+
+**5e — Delta JIT:** When a shape guard misses (new shape not in cache), fall back to interpreter for that one call. Record the new shape+offset. At the end of execution, compile the delta (just the new shape guard) and append to cache.
+
+**5f — CLI:** `rune --cache program.js` compiles AOT and saves. `rune program.js` checks for cache, loads if found, otherwise falls back to interpreter.
+
+**5g — rkyv bytecode:** `BytecodeProgram` gets `#[derive(Archive)]`. On cache miss, load bytecode from rkyv instead of parsing.
+
+**5h — Benchmark:** Compare first-run (AOT compile), subsequent-run (cached native), and V8 at 100, 1K, 10K, 100K, 1M iterations. Measure cold start, memory, and total CPU time.
+
+**5i — Integration tests:** Verify: cache round-trip produces identical results, delta JIT doesn't corrupt cache, deoptimization (shape miss) falls back correctly, cache loads on next run.
+
+### Relationship to prior work
+
+| Prior design | How AFPC improves it |
+|---|---|
+| Phase 5a (VSD) | VSD was SIMD-only property access. AFPC compiles ALL opcodes to native, not just property access. |
+| PPTS (traces only) | PPTS compiled hot loop traces only. AFPC compiles entire programs. |
+| rkyv snapshots | rkyv was for bytecode serialization. AFPC serializes compiled native code + shape state. |
+| Cranelift JIT | AFPC replaces the full Cranelift plan. No IR, no optimization passes — direct bytecode→native emission. |
 
 ## Global Testing Strategy
 

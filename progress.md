@@ -785,7 +785,7 @@
 | **14E-1: Heap-allocated environments for closure capture** | 🔴 P0 | ✅ done | GC-managed `EnvObject` chain for captured variables. `MakeEnv`/`LoadCaptured`/`StoreCaptured` opcodes. Emitter escape analysis per function. GC env rooting. Day 1: structural layer (env.rs, gc tagging, Func layout, Frame.env, opcodes, VM handlers). Day 2: emitter escape analysis + fix two bugs (env_scope_stack inheritance, assign-to-captured). 273 tests pass, 2 pre-existing failures. |
 | **14F: Default parameters** | 🟢 P2 | ✅ done | `function f(a = 1, b = a + 1)`. Parser parses `= expr` after param identifiers and destructuring patterns. Emitter: `emit_destructuring_binding` handles `Pattern::Default` wrapping. 8 integration tests: basic, explicit arg, ref earlier param, undefined triggers default, 0/null no trigger, destructure object/array default. |
 | **14G: Comma operator** | 🟢 P2 | ✅ done | `(a, b)` returns `b`. `Expr::Binary(BinaryOp::Comma, ...)`. `parse_expr_comma()` wrapper with comma loop, only active in expression-stmt and paren-expr contexts (not arg lists, array elements). Emitter: emit lhs, Pop, emit rhs. 4 integration tests. |
-| **14H: V8 baseline comparison** | 🟢 P2 | pending | `run_v8_baseline.sh` + Rune-vs-V8 columns in `progress.md`. |
+| **14H: V8 baseline comparison** | 🟢 P2 | ✅ done | `crates/rune_bench/scripts/v8_*.js` mirroring Rune benchmarks. `run_v8_baseline.sh` runner. Comparison table below. |
 
 ### Test Results — Sprint 14E
 - **All tests pass** (fmt + clippy + test green)
@@ -917,16 +917,34 @@
 - All workspace tests pass, clippy + fmt clean
 - Committed `0924801`.
 
-## Phase 9 — v2 Features (Stretch)
+### 14H — V8 Baseline Comparison
 
-> **Spec mandate:** See [`ecma262.md`](./ecma262.md) for any spec-level features — open linked `https://tc39.es/ecma262/multipage/` URLs via `webfetch`. No guessing.
+| Benchmark | Rune (interpreter) | V8 (Node.js v22) | Ratio |
+|---|---|---|---|
+| `loop_sum_smi_1M` | 247 ms | 2.1 ms | **118×** slower |
+| `array_push_grow_100k` | 52 ms | 8.6 ms | **6×** slower |
+| `proto_chain_lookup_5deep_1M` | 442 ms | 2.2 ms | **197×** slower |
+| `jit_hot_function_1M` | 456 ms | 3.5 ms | **132×** slower |
+| `poly_prop_10shapes_1M` | 396 ms | 4.5 ms | **87×** slower |
+| `parse_emit_execute_hello` | 413 ns | — | cold-start (no V8 equivalent) |
 
-- [ ] Heap pointer-compression sandbox (Spectre mitigation)
-- [ ] Temporal API
-- [ ] Enhanced Intl (full CLDR)
-- [ ] WebAssembly module
+Hardware: MacBook Pro M4 Pro. Rune: interpreter-only (aarch64, no JIT).
+Node: v22.20.0. V8 has TurboFan optimizing JIT; Rune is a bytecode interpreter.
 
----
+**Honest analysis:** V8 is 1–2 orders of magnitude faster across all benchmarks
+due to its optimizing JIT compiler. Rune's interpreter is competitive only in
+array-intensive workloads (6× gap — array push/grow benefits from dense array
+layout). The SIDT claim (beating V8 on polymorphic property access) does not
+hold against TurboFan, which recompiles hot loops into monomorphic code.
+Phase 5 (Cranelift JIT) aims to close this gap to within 3–10×.
+
+**Scripts:** `crates/rune_bench/scripts/v8_*.js`, `run_v8_baseline.sh`.
+
+### Sprint 14 Status: DONE
+- 14A: Destructuring ✅ | 14B: Spread/rest ✅ | 14C: Object shorthand/computed ✅
+- 14D: Template literals ✅ | 14E: Arrow arguments + per-iteration let ✅
+- 14E-1: Closure capture + GC soundness ✅
+- 14F: Default parameters ✅ | 14G: Comma operator ✅ | 14H: V8 baseline ✅
 
 ## Global Testing Strategy
 

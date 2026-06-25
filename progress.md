@@ -1287,5 +1287,42 @@ TypeOf is now a native JIT opcode — the bail-on-entry stub is replaced with a 
 
 ### Next
 
-- Native `LoadStringConst` / `LoadString` (~2 hours)
+- ~~Native `LoadStringConst` / `LoadString` (~2 hours)~~ ✅ done
+- Native `LoadGlobal` / `StoreGlobal` / `IncGlobal` / `DecGlobal` (~3 hours)
+
+---
+
+## Phase C: Native LoadStringConst
+
+Commit: `cea3480`
+
+`LoadStringConst` is now a native JIT opcode — the JIT calls `rune_jit_string_helper` which looks up the pre-allocated string handle from `Vm::string_cache[prog_ptr][idx]`.
+
+### What was done
+
+- **Added `string_helper` to `JitHelpers`** (slot 3, offset 536). Updated `_reserved` from `[usize; 5]` to `[usize; 4]` in both `vm.rs` and `codegen_aarch64.rs`. Fixed all JitHelpers initializers.
+- **Implemented `rune_jit_string_helper`** extern "C" fn in `vm.rs`. Signature: `fn(vm_ptr, gc_ptr, prog_ptr, string_idx) -> u64`. Looks up the string in the cache; if cold, allocates via GC and caches it. Fully qualified `BytecodeProgram` reference to avoid import dependency.
+- **Added `LoadStringConst` to `is_jit_compatible`** in `lib.rs` — functions using string constants can now JIT.
+- **x86-64 emission**: `mov rdi,r15; mov rsi,r14; mov rdx,prog_ptr; mov rcx,idx; call [r15+536]; push rax`.
+- **aarch64 emission**: `mov x0,x19; mov x1,x20; mov_imm64 x2,prog_ptr; mov_imm64 x3,idx; ldr x15,[x19,#536]; blr x15; push`.
+- **Fixed GC safety for `typeof_strings`**: Added `gc.push_root()` for each element of `typeof_strings` in `Vm::register_roots()` (was missing — dangling pointer risk under GC pressure).
+- **Fixed clippy warning**: `vec![Value::undefined(); 0]` → `Vec::new()` (side effect in zero-sized initializer).
+- **Added `test_jit_load_string_const`**: Calls `label()` returning `"hello"` in a hot loop. Asserts `is_heap_object()`, `jit_entry_count > 0`, `jit_bailout_count == 0`.
+
+### Test results
+
+- Integration: **304 passed** (+1: `test_jit_load_string_const`), 2 ignored
+- JIT baseline: 51 passed (both backends)
+- All crate tests: pass
+- Clippy: clean (only pre-existing `get_scalar` warning)
+
+### Key decisions
+
+- **gc_ptr passed as second arg**: The string helper needs GC access for cold-cache allocation. The JIT prologue already saves `r14/x20 = gc_ptr`.
+- **prog_ptr embedded as immediate**: Baked into JIT code at compile time, since it's a constant for each compiled function.
+- **Cache warm by default**: The interpreter pre-warms `string_cache` during the 50 warm-up calls, so the JIT helper rarely allocates.
+- **`typeof_strings` rooted**: Following the same pattern as `array_prototype`/`string_prototype`/`object_prototype` in `register_roots()`.
+
+### Next
+
 - Native `LoadGlobal` / `StoreGlobal` / `IncGlobal` / `DecGlobal` (~3 hours)

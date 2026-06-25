@@ -282,10 +282,12 @@ pub fn aot_compile_functions(program: &BytecodeProgram) -> Vec<CompiledFunc> {
         for (idx, func_prog) in program.functions.iter().enumerate() {
             if is_jit_compatible(func_prog) {
                 let codegen = Aarch64CodeGen::new(func_prog.instructions.len());
-                let mem = codegen.compile(func_prog);
+                let compiled = codegen.compile(func_prog);
                 let code = unsafe {
-                    std::slice::from_raw_parts(mem.code_ptr(), mem.offset).to_vec()
+                    std::slice::from_raw_parts(compiled.mem.code_ptr(), compiled.mem.offset).to_vec()
                 };
+                // Keep the bailout table alive so table entries remain valid.
+                std::mem::forget(compiled.bailout_table);
                 out.push(CompiledFunc { func_idx: idx, code });
             }
         }

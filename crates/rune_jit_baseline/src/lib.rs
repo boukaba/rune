@@ -9,6 +9,44 @@ pub use codegen::{CodeGen, JitEntryFn};
 #[cfg(target_arch = "aarch64")]
 pub use codegen_aarch64::{compile_trace, Aarch64CodeGen};
 
+// ---------------------------------------------------------------------------
+// Bailout infrastructure
+// ---------------------------------------------------------------------------
+
+/// Reason a JIT-compiled function bailed to the interpreter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum BailoutReason {
+    Overflow = 0,
+    NonSmiInput = 1,
+    BailOnEntry = 2,
+    ShapeMiss = 3,
+    Unimplemented = 4,
+}
+
+/// One entry per bytecode PC where a bailout can originate.
+#[derive(Clone, Copy, Debug)]
+pub struct BailoutPoint {
+    pub bc_pc: usize,
+    pub stack_depth: u32,
+    pub reason: BailoutReason,
+}
+
+/// Heap-allocated side table, one per JIT-compiled function.
+/// Stored as `Box`; owned by `Vm` keyed by entry pointer (see §10.3).
+#[derive(Clone, Debug)]
+pub struct BailoutTable {
+    pub points: Vec<BailoutPoint>,
+}
+
+/// Return type from `CodeGen::compile` / `Aarch64CodeGen::compile`.
+pub struct CompiledFunction {
+    pub mem: ExecutableMemory,
+    pub bailout_table: BailoutTable,
+}
+
+use assembler::ExecutableMemory;
+
 /// Check if an f64 value fits in Smi range (i31).
 fn float64_is_smi_compatible(val: f64) -> bool {
     let is_int = val.fract() == 0.0 && val.is_finite();
@@ -75,7 +113,8 @@ pub fn is_jit_compatible(prog: &rune_bytecode::opcode::BytecodeProgram) -> bool 
             | Opcode::DeclareLet
             | Opcode::DeclareConst
             | Opcode::LoadLexical
-            | Opcode::StoreLexical => {}
+            | Opcode::StoreLexical
+            | Opcode::TypeOf => {}
             _ => return false,
         }
     }

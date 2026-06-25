@@ -91,10 +91,32 @@ struct TryFrame {
 /// JIT helper function pointers, stored at a fixed offset from vm_ptr
 /// (offset 512 = 64 * 8, right after jit_stack) so JIT code can load
 /// and call them without cross-crate symbol resolution.
+/// JIT bailout state, written by the bailout helper, read by vm.rs call site.
+#[derive(Clone, Debug)]
+pub struct JitBailoutState {
+    /// Non-zero iff a bailout was requested during the last JIT call.
+    pub bc_pc: usize,
+    /// Snapshot of the JIT value stack at bailout.
+    pub stack_snapshot: Vec<u64>,
+    /// Reason tag (for stats/debugging).
+    pub reason: rune_jit_baseline::BailoutReason,
+}
+
+impl Default for JitBailoutState {
+    fn default() -> Self {
+        Self {
+            bc_pc: 0,
+            stack_snapshot: Vec::new(),
+            reason: rune_jit_baseline::BailoutReason::Unimplemented,
+        }
+    }
+}
+
 #[repr(C)]
 pub struct JitHelpers {
     pub lexical_helper: usize,
-    _reserved: [usize; 7],
+    pub bailout_helper: usize,
+    _reserved: [usize; 6],
 }
 
 /// Stack-based bytecode interpreter with call frame support.
@@ -109,6 +131,14 @@ pub struct Vm {
     /// JIT helper function pointer table. Must follow jit_stack immediately
     /// for the JIT to locate it at a known offset (512) from vm_ptr.
     pub jit_helpers: JitHelpers,
+    /// JIT stack base pointer, written by the JIT prologue.
+    /// On AArch64: points to the base of jit_stack[] (== vm_ptr).
+    /// On x86-64: points to the allocated native stack area (== initial rbx).
+    pub jit_stack_base: u64,
+    /// Bailout state, set by bailout helper during JIT execution.
+    pub jit_bailout: JitBailoutState,
+    /// Owned bailout tables, keyed by JIT entry pointer (see §10.3).
+    pub bailout_tables: std::collections::HashMap<usize, Box<rune_jit_baseline::BailoutTable>>,
     pub stack: Vec<Value>,
     frames: Vec<Frame>,
     try_stack: Vec<TryFrame>,
@@ -168,8 +198,12 @@ impl Vm {
             jit_stack: [0; 64],
             jit_helpers: JitHelpers {
                 lexical_helper: 0,
-                _reserved: [0; 7],
+                bailout_helper: 0,
+                _reserved: [0; 6],
             },
+            jit_stack_base: 0,
+            jit_bailout: JitBailoutState::default(),
+            bailout_tables: std::collections::HashMap::new(),
             stack: Vec::new(),
             frames: Vec::new(),
             try_stack: Vec::new(),
@@ -2657,25 +2691,28 @@ impl Vm {
                                         && rune_jit_baseline::is_jit_compatible(func_prog)
                                     {
                                         #[cfg(target_arch = "x86_64")]
-                                        let mem = {
+                                        let compiled = {
                                             let codegen = CodeGen::new(func_prog.instructions.len());
                                             codegen.compile(func_prog)
                                         };
                                         #[cfg(target_arch = "aarch64")]
-                                        let mem = {
+                                        let compiled = {
                                             let codegen = Aarch64CodeGen::new(func_prog.instructions.len());
                                             codegen.compile(func_prog)
                                         };
                                         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-                                        let mem = {
+                                        let compiled = {
                                             let _ = func_prog;
                                             unreachable!("JIT not supported on this architecture")
                                         };
-                                        mem.make_executable();
+                                        compiled.mem.make_executable();
+                                        let entry = compiled.mem.code_ptr();
                                         unsafe {
-                                            Func::set_jit_entry(ptr as *mut Func, mem.code_ptr());
+                                            Func::set_jit_entry(ptr as *mut Func, entry);
                                         }
-                                        std::mem::forget(mem);
+                                        self.bailout_tables
+                                            .insert(entry as usize, Box::new(compiled.bailout_table));
+                                        std::mem::forget(compiled.mem);
                                     }
 
                                     let jit_entry = unsafe { Func::jit_entry(ptr as *mut Func) };
@@ -2701,6 +2738,8 @@ impl Vm {
                                             let gc_ptr = gc as *mut SemiSpace as *mut u8;
                                             self.jit_helpers.lexical_helper =
                                                 rune_jit_lexical_helper as usize;
+                                            self.jit_helpers.bailout_helper =
+                                                rune_jit_bailout_helper as usize;
                                             let result_raw = unsafe {
                                                 func(
                                                     vm_ptr,
@@ -2708,6 +2747,19 @@ impl Vm {
                                                     jit_locals.as_mut_ptr() as *mut u64,
                                                 )
                                             };
+                                            let bailout_bc_pc = self.jit_bailout.bc_pc;
+                                            if bailout_bc_pc != 0 {
+                                                // Bailout occurred — materialise interpreter state.
+                                                self.jit_bailout.bc_pc = 0;
+                                                self.last_locals = jit_locals;
+                                                let snapshot =
+                                                    std::mem::take(&mut self.jit_bailout.stack_snapshot);
+                                                for val in snapshot {
+                                                    self.push(Value::from_raw(val));
+                                                }
+                                                self.frames[fi].pc = bailout_bc_pc;
+                                                continue;
+                                            }
                                             self.last_locals = jit_locals;
                                             self.push(Value::from_raw(result_raw));
                                             self.frames[fi].pc = pc + 1;
@@ -3149,12 +3201,12 @@ impl Vm {
             return; // trace contains unsupported opcodes (strings, objects, etc.)
         }
         let codegen = Aarch64CodeGen::new(prog.instructions.len());
-        let mem = codegen.compile(&prog);
-        mem.make_executable();
-        let entry = mem.code_ptr();
+        let compiled = codegen.compile(&prog);
+        compiled.mem.make_executable();
+        let entry = compiled.mem.code_ptr();
         trace.compiled_entry = entry;
         trace.exit_pc = exit_pc;
-        self._compiled_trace_mem.push(mem);
+        self._compiled_trace_mem.push(compiled.mem);
         eprintln!("Trace: compiled loop pc={} with {} ops → native", target_pc, prog.instructions.len());
     }
 
@@ -4044,6 +4096,42 @@ pub extern "C" fn rune_jit_lexical_helper(
         }
         _ => 0,
     }
+}
+
+/// Bailout helper called from JIT code when a guard fails.
+///
+/// Snapshots the JIT value stack and records the bailout PC so the
+/// `vm.rs` call site can materialise interpreter state after the JIT
+/// function returns.
+///
+/// # Safety
+///
+/// `vm_ptr` must be a valid pointer to a `Vm`. `jit_sp` must point into
+/// the JIT value stack (between `vm.jit_stack_base` and the current top).
+pub extern "C" fn rune_jit_bailout_helper(
+    vm_ptr: *mut u8,
+    bc_pc: usize,
+    jit_sp: *mut u64,
+) -> u64 {
+    let vm = unsafe { &mut *(vm_ptr as *mut Vm) };
+    let base = vm.jit_stack_base as usize;
+    let current = jit_sp as usize;
+    let count = if current >= base {
+        (current - base) / 8
+    } else {
+        0
+    };
+    let base_ptr = base as *const u64;
+    let mut snapshot = Vec::with_capacity(count);
+    for i in 0..count {
+        snapshot.push(unsafe { *base_ptr.add(i) });
+    }
+    vm.jit_bailout = JitBailoutState {
+        bc_pc,
+        stack_snapshot: snapshot,
+        reason: rune_jit_baseline::BailoutReason::BailOnEntry,
+    };
+    0
 }
 
 #[cfg(test)]

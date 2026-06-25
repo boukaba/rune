@@ -13,6 +13,7 @@
 /// dedicated pointer (x22) into `JitVmState::jit_stack` at offset 0 from the
 /// VM pointer.
 use crate::assembler::ExecutableMemory;
+use crate::{BailoutPoint, BailoutReason, BailoutTable, CompiledFunction};
 use rune_bytecode::opcode::Opcode;
 
 /// Operation codes for the lexical helper callout (must match vm.rs).
@@ -31,7 +32,8 @@ pub const JIT_STACK_SIZE: usize = 64;
 #[repr(C)]
 pub struct JitHelpers {
     pub lexical_helper: usize,
-    _reserved: [usize; 7],
+    pub bailout_helper: usize,
+    _reserved: [usize; 6],
 }
 
 /// VM state visible to the trace compiler. Must be placed at offset 0 from
@@ -40,6 +42,7 @@ pub struct JitHelpers {
 pub struct JitVmState {
     pub jit_stack: [u64; JIT_STACK_SIZE],
     pub jit_helpers: JitHelpers,
+    pub jit_stack_base: u64,
 }
 
 /// Register assignments for the trace compiler.
@@ -244,6 +247,8 @@ pub struct Aarch64CodeGen {
     mem: ExecutableMemory,
     bc_to_native: Vec<usize>,
     pending_patches: Vec<(usize, usize, u32)>, // (patch_offset_in_bytes, target_bc_index, original_instr)
+    bailout_table: Vec<BailoutPoint>,
+    stack_depth: u32,
     /// Initial offset added to x22 (JIT stack pointer) during prologue.
     /// Used by tests that pre-populate the JIT stack.
     jit_stack_offset: u32,
@@ -256,6 +261,8 @@ impl Aarch64CodeGen {
             mem,
             bc_to_native: vec![0; instruction_count],
             pending_patches: Vec::new(),
+            bailout_table: Vec::new(),
+            stack_depth: 0,
             jit_stack_offset: 0,
         }
     }
@@ -271,12 +278,23 @@ impl Aarch64CodeGen {
         // x0 -> [jit_stack]; jit_stack += 8
         str_off(&mut self.mem, 0, JIT_STACK_REG, 0);
         add_imm(&mut self.mem, JIT_STACK_REG, JIT_STACK_REG, 8);
+        self.stack_depth += 1;
     }
 
     fn pop(&mut self) {
         // jit_stack -= 8; x0 <- [jit_stack]
         sub_imm(&mut self.mem, JIT_STACK_REG, JIT_STACK_REG, 8);
         ldr_off(&mut self.mem, 0, JIT_STACK_REG, 0);
+        self.stack_depth = self.stack_depth.saturating_sub(1);
+    }
+
+    /// Record a bailout point at the current bytecode PC.
+    fn record_bailout_point(&mut self, bc_pc: usize, reason: BailoutReason) {
+        self.bailout_table.push(BailoutPoint {
+            bc_pc,
+            stack_depth: self.stack_depth,
+            reason,
+        });
     }
 
     fn emit_prologue(&mut self) {
@@ -285,6 +303,9 @@ impl Aarch64CodeGen {
         mov_reg(&mut self.mem, GC_REG, 1);
         mov_reg(&mut self.mem, LOC_REG, 2);
         add_imm(&mut self.mem, JIT_STACK_REG, VM_REG, self.jit_stack_offset);
+        // Store initial JIT stack pointer as jit_stack_base (offset 576 from vm_ptr).
+        // jit_stack[64] (512) + jit_helpers[8] (64) = 576
+        str_off(&mut self.mem, JIT_STACK_REG, VM_REG, 576);
     }
 
     fn emit_epilogue(&mut self) {
@@ -334,7 +355,10 @@ impl Aarch64CodeGen {
         self.pending_patches.clear();
     }
 
-    pub fn compile(mut self, program: &rune_bytecode::opcode::BytecodeProgram) -> ExecutableMemory {
+    pub fn compile(
+        mut self,
+        program: &rune_bytecode::opcode::BytecodeProgram,
+    ) -> CompiledFunction {
         self.emit_prologue();
 
         for (bc_idx, instr) in program.instructions.iter().enumerate() {
@@ -946,6 +970,20 @@ impl Aarch64CodeGen {
                     // helper returns val back in x0
                     self.push();
                 }
+                Opcode::TypeOf => {
+                    // PR1: bail on entry — always deopt to interpreter.
+                    self.record_bailout_point(bc_idx, BailoutReason::BailOnEntry);
+                    // x0 = vm_ptr, x1 = bc_pc, x2 = current_jit_sp
+                    mov_reg(&mut self.mem, 2, JIT_STACK_REG);
+                    mov_imm64(&mut self.mem, 1, bc_idx as u64);
+                    mov_reg(&mut self.mem, 0, VM_REG);
+                    ldr_off(&mut self.mem, 15, VM_REG, 520); // bailout_helper
+                    emit(&mut self.mem, 0xD63F01E0);          // BLR x15
+                    // Push a safe return value (undefined) before epilogue.
+                    movz(&mut self.mem, 0, 0);
+                    self.push();
+                    self.emit_epilogue();
+                }
                 _ => {
                     // Unknown opcode: emit a trap so we notice quickly.
                     emit(&mut self.mem, 0xD4200000); // BRK #0
@@ -954,7 +992,15 @@ impl Aarch64CodeGen {
         }
 
         self.resolve_patches();
-        self.mem
+
+        let bailout_table = BailoutTable {
+            points: std::mem::take(&mut self.bailout_table),
+        };
+
+        CompiledFunction {
+            mem: self.mem,
+            bailout_table,
+        }
     }
 
     /// Call the lexical helper function (loaded from JitVmState::jit_helpers).
@@ -1136,8 +1182,10 @@ mod tests {
             jit_stack: [0; JIT_STACK_SIZE],
             jit_helpers: JitHelpers {
                 lexical_helper: 0,
-                _reserved: [0; 7],
+                bailout_helper: 0,
+                _reserved: [0; 6],
             },
+            jit_stack_base: 0,
         });
         Box::into_raw(state) as *mut u8
     }
@@ -1344,11 +1392,11 @@ mod tests {
             vec![],
             vec![],
         );
-        let mem = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
+        let compiled = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
         let vm = jit_vm_ptr();
         let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
-            unsafe { std::mem::transmute(mem.code_ptr()) };
+            unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let r = unsafe { func(vm, std::ptr::null_mut(), std::ptr::null_mut()) };
         assert_eq!(r, ((42u64 << 1) | 1));
     }
@@ -1366,12 +1414,12 @@ mod tests {
             vec![],
             vec![],
         );
-        let mem = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
+        let compiled = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
         let vm = jit_vm_ptr();
         let mut locals: Vec<u64> = vec![((10u64 << 1) | 1), ((32u64 << 1) | 1)];
         let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
-            unsafe { std::mem::transmute(mem.code_ptr()) };
+            unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let r = unsafe { func(vm, std::ptr::null_mut(), locals.as_mut_ptr()) };
         assert_eq!(r, ((42u64 << 1) | 1));
     }
@@ -1389,11 +1437,11 @@ mod tests {
             vec![],
             vec![],
         );
-        let mem = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
+        let compiled = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
         let vm = jit_vm_ptr();
         let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
-            unsafe { std::mem::transmute(mem.code_ptr()) };
+            unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let r = unsafe { func(vm, std::ptr::null_mut(), std::ptr::null_mut()) };
         // Lt should return true, encoded as Smi(1)=3 in the JIT (matching x86_64).
         assert_eq!(r, 3u64);
@@ -1415,11 +1463,11 @@ mod tests {
             vec![],
             vec![],
         );
-        let mem = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
+        let compiled = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
         let vm = jit_vm_ptr();
         let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
-            unsafe { std::mem::transmute(mem.code_ptr()) };
+            unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let r = unsafe { func(vm, std::ptr::null_mut(), std::ptr::null_mut()) };
         assert_eq!(r, ((42u64 << 1) | 1));
     }
@@ -1440,11 +1488,11 @@ mod tests {
             vec![],
             vec![],
         );
-        let mem = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
+        let compiled = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
         let vm = jit_vm_ptr();
         let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
-            unsafe { std::mem::transmute(mem.code_ptr()) };
+            unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let r = unsafe { func(vm, std::ptr::null_mut(), std::ptr::null_mut()) };
         assert_eq!(r, ((7u64 << 1) | 1));
     }
@@ -1461,11 +1509,11 @@ mod tests {
             vec![],
             vec![],
         );
-        let mem = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
+        let compiled = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
         let vm = jit_vm_ptr();
         let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
-            unsafe { std::mem::transmute(mem.code_ptr()) };
+            unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let r = unsafe { func(vm, std::ptr::null_mut(), std::ptr::null_mut()) };
         assert_eq!(r, ((100000u64 << 1) | 1));
     }
@@ -1482,11 +1530,11 @@ mod tests {
             vec![],
             vec![],
         );
-        let mem = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
+        let compiled = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
         let vm = jit_vm_ptr();
         let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
-            unsafe { std::mem::transmute(mem.code_ptr()) };
+            unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let r = unsafe { func(vm, std::ptr::null_mut(), std::ptr::null_mut()) };
         assert_eq!(r, ((70000u64 << 1) | 1));
     }
@@ -1521,12 +1569,12 @@ mod tests {
             vec![],
             vec![],
         );
-        let mem = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
+        let compiled = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
         let vm = jit_vm_ptr();
         let mut locals: Vec<u64> = vec![0, 0, 0, 0];
         let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
-            unsafe { std::mem::transmute(mem.code_ptr()) };
+            unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let r = unsafe { func(vm, std::ptr::null_mut(), locals.as_mut_ptr()) };
         let expected = (2147516416u64 << 1) | 1;
         assert_eq!(r, expected, "65537 iters: got {}, expected {}", r, expected);
@@ -1562,10 +1610,10 @@ mod tests {
                 ],
                 vec![], vec![],
             );
-            let mem = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
-            mem.make_executable();
+            let compiled = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+            compiled.mem.make_executable();
             let vm = jit_vm_ptr();
-            let func: JF = unsafe { std::mem::transmute(mem.code_ptr()) };
+            let func: JF = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
             let r = unsafe { func(vm, std::ptr::null_mut(), locals.as_mut_ptr()) };
             assert_eq!(r, expected, "{:?} {} {}: expected {}, got {}", op, a, b, expected, r);
         }
@@ -1588,10 +1636,10 @@ mod tests {
                 ],
                 vec![], vec![],
             );
-            let mem = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
-            mem.make_executable();
+            let compiled = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+            compiled.mem.make_executable();
             let vm = jit_vm_ptr();
-            let func: JF = unsafe { std::mem::transmute(mem.code_ptr()) };
+            let func: JF = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
             let r = unsafe { func(vm, std::ptr::null_mut(), locals.as_mut_ptr()) };
             // true=3 (Smi(1)), false=1 (Smi(0))
             assert_eq!(r == 3, expected, "{:?} {} {}: got {}", op, a, b, r);
@@ -1642,13 +1690,13 @@ mod tests {
             vec![],
             vec![],
         );
-        let mem = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
+        let compiled = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
         let vm = jit_vm_ptr();
         // 4-element locals: [0]=unused, [1]=unused, [2]=s, [3]=i
         let mut locals: Vec<u64> = vec![0, 0, 0, 0];
         let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
-            unsafe { std::mem::transmute(mem.code_ptr()) };
+            unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let r = unsafe { func(vm, std::ptr::null_mut(), locals.as_mut_ptr()) };
         let expected = (2449965000u64 << 1) | 1;
         assert_eq!(r, expected, "got {}, expected {}", r, expected);
@@ -1685,12 +1733,12 @@ mod tests {
             vec![],
             vec![],
         );
-        let mem = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
+        let compiled = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
         let vm = jit_vm_ptr();
         let mut locals: Vec<u64> = vec![0, 0];
         let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
-            unsafe { std::mem::transmute(mem.code_ptr()) };
+            unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let r = unsafe { func(vm, std::ptr::null_mut(), locals.as_mut_ptr()) };
         // sum 0..69999 = 2,449,965,000 → Smi = 4,899,930,001
         let expected = (2449965000u64 << 1) | 1;
@@ -1727,12 +1775,12 @@ mod tests {
             vec![],
             vec![],
         );
-        let mem = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
+        let compiled = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
         let vm = jit_vm_ptr();
         let mut locals: Vec<u64> = vec![0, 0];
         let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
-            unsafe { std::mem::transmute(mem.code_ptr()) };
+            unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let r = unsafe { func(vm, std::ptr::null_mut(), locals.as_mut_ptr()) };
         // sum 0..9 = 45
         assert_eq!(r, ((45u64 << 1) | 1));
@@ -1756,8 +1804,10 @@ mod tests {
             jit_stack: [0; JIT_STACK_SIZE],
             jit_helpers: JitHelpers {
                 lexical_helper: 0,
-                _reserved: [0; 7],
+                bailout_helper: 0,
+                _reserved: [0; 6],
             },
+            jit_stack_base: 0,
         };
         vm.jit_stack[0] = obj_addr;
         let vm_ptr = &mut vm as *mut _ as *mut u8;
@@ -1769,12 +1819,12 @@ mod tests {
             vec![],
             vec![],
         );
-        let mem = Aarch64CodeGen::new(prog.instructions.len())
+        let compiled = Aarch64CodeGen::new(prog.instructions.len())
             .with_jit_stack_offset(8)
             .compile(&prog);
-        mem.make_executable();
+        compiled.mem.make_executable();
         let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
-            unsafe { std::mem::transmute(mem.code_ptr()) };
+            unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let result = unsafe { func(vm_ptr, std::ptr::null_mut(), std::ptr::null_mut()) };
         assert_eq!(result, slot_value);
         unsafe { drop(Box::from_raw(shape_ptr)); }

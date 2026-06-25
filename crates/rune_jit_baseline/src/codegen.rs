@@ -9,6 +9,7 @@
 /// The JIT allocates a value stack on the native stack in the prologue
 /// (256 Value slots = 2 KB), and restores it in the epilogue.
 use crate::assembler::ExecutableMemory;
+use crate::{BailoutPoint, BailoutReason, BailoutTable, CompiledFunction};
 use rune_bytecode::opcode::{BytecodeProgram, Opcode};
 
 /// Size of the JIT local value stack (256 Value × 8 bytes).
@@ -32,6 +33,8 @@ pub struct CodeGen {
     mem: ExecutableMemory,
     bc_to_native: Vec<usize>,
     pending_patches: Vec<(usize, usize)>,
+    bailout_table: Vec<BailoutPoint>,
+    stack_depth: u32,
 }
 
 impl CodeGen {
@@ -41,6 +44,8 @@ impl CodeGen {
             mem,
             bc_to_native: vec![0; instruction_count],
             pending_patches: Vec::new(),
+            bailout_table: Vec::new(),
+            stack_depth: 0,
         }
     }
 
@@ -85,6 +90,7 @@ impl CodeGen {
         self.mem.emit_byte(0x03);
         // add rbx, 8
         self.mem.emit_add_r64_imm32(3, 8);
+        self.stack_depth += 1;
     }
 
     fn emit_jit_stack_pop(&mut self) {
@@ -94,6 +100,15 @@ impl CodeGen {
         self.mem.emit_rex_w();
         self.mem.emit_byte(0x8B);
         self.mem.emit_byte(0x03);
+        self.stack_depth = self.stack_depth.saturating_sub(1);
+    }
+
+    fn record_bailout_point(&mut self, bc_pc: usize, reason: BailoutReason) {
+        self.bailout_table.push(BailoutPoint {
+            bc_pc,
+            stack_depth: self.stack_depth,
+            reason,
+        });
     }
 
     // -----------------------------------------------------------------------
@@ -111,6 +126,12 @@ impl CodeGen {
         self.mem.emit_mov_r64_rm64(13, 2); // r13 = rdx (locals ptr)
         self.mem.emit_sub_r64_imm32(4, JIT_STACK_SIZE); // sub rsp, 2048
         self.mem.emit_mov_r64_rm64(3, 4); // rbx = rsp
+        // Store initial JIT stack pointer as jit_stack_base (offset 576 from vm_ptr).
+        // jit_stack[64] (512) + jit_helpers[8] (64) = 576
+        self.mem.emit_rex_w();
+        self.mem.emit_byte(0x89);            // MOV r/m64, r64
+        self.mem.emit_byte(0x9F);            // mod=10, reg=3(rbx), r/m=7(r15)
+        self.mem.emit_u32(576);              // disp32 = offset of jit_stack_base
     }
 
     fn emit_epilogue(&mut self) {
@@ -168,9 +189,10 @@ impl CodeGen {
 
     /// Compile a `BytecodeProgram` into native code.
     ///
-    /// On completion the returned `ExecutableMemory` is still in writable
-    /// state — the caller must call `make_executable()` before execution.
-    pub fn compile(mut self, program: &BytecodeProgram) -> ExecutableMemory {
+    /// On completion the returned `CompiledFunction` contains writable memory
+    /// — the caller must call `make_executable()` on `.mem` before execution.
+    /// The `.bailout_table` maps bc PCs to stack depths and reasons.
+    pub fn compile(mut self, program: &BytecodeProgram) -> CompiledFunction {
         self.emit_prologue();
 
         for (bc_idx, instr) in program.instructions.iter().enumerate() {
@@ -857,6 +879,26 @@ impl CodeGen {
                     self.mem.emit_call_r64(0);
                     self.emit_jit_stack_push(); // push result from rax
                 }
+                Opcode::TypeOf => {
+                    // PR1: bail on entry — always deopt to interpreter.
+                    self.record_bailout_point(bc_idx, BailoutReason::BailOnEntry);
+                    // rdi = r15 (vm_ptr), rsi = bc_pc, rdx = rbx (jit_sp)
+                    self.mem.emit_mov_r64_rm64(7, 15);       // rdi = r15
+                    self.mem.emit_mov_r64_imm64(6, bc_idx as u64); // rsi = bc_pc
+                    self.mem.emit_mov_r64_rm64(2, 3);        // rdx = rbx
+                    // Load bailout_helper from [r15 + 520] into rax
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0x8B);                // MOV rax, [r15 + 520]
+                    self.mem.emit_byte(0x87);                // mod=10, reg=0(rax), r/m=7(r15)
+                    self.mem.emit_u32(520);                  // disp32
+                    self.mem.emit_call_r64(0);               // call rax
+                    // Push a safe return value (undefined) before epilogue.
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0x31);
+                    self.mem.emit_byte(0xC0);                // xor eax, eax
+                    self.emit_jit_stack_push();
+                    self.emit_epilogue();
+                }
                 _ => {
                     self.mem.emit_byte(0xCC);
                 }
@@ -864,7 +906,15 @@ impl CodeGen {
         }
 
         self.resolve_patches();
-        self.mem
+
+        let bailout_table = BailoutTable {
+            points: std::mem::take(&mut self.bailout_table),
+        };
+
+        CompiledFunction {
+            mem: self.mem,
+            bailout_table,
+        }
     }
 }
 
@@ -893,10 +943,10 @@ mod tests {
             Instruction::new(Opcode::LoadSmi, vec![42]),
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
+        let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
 
-        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         // vm_ptr and gc_ptr are unused for this simple program
         let result = unsafe {
             func(
@@ -918,10 +968,10 @@ mod tests {
             Instruction::new(Opcode::Add, vec![]),
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
+        let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
 
-        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let result = unsafe {
             func(
                 std::ptr::null_mut(),
@@ -942,10 +992,10 @@ mod tests {
             Instruction::new(Opcode::Sub, vec![]),
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
+        let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
 
-        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let result = unsafe {
             func(
                 std::ptr::null_mut(),
@@ -966,10 +1016,10 @@ mod tests {
             Instruction::new(Opcode::Mul, vec![]),
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
+        let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
 
-        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let result = unsafe {
             func(
                 std::ptr::null_mut(),
@@ -988,10 +1038,10 @@ mod tests {
             Instruction::new(Opcode::LoadUndefined, vec![]),
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
+        let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
 
-        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let result = unsafe {
             func(
                 std::ptr::null_mut(),
@@ -1009,10 +1059,10 @@ mod tests {
             Instruction::new(Opcode::LoadNull, vec![]),
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
+        let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
 
-        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let result = unsafe {
             func(
                 std::ptr::null_mut(),
@@ -1030,10 +1080,10 @@ mod tests {
             Instruction::new(Opcode::LoadBoolean, vec![1]),
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
+        let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
 
-        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let result = unsafe {
             func(
                 std::ptr::null_mut(),
@@ -1051,10 +1101,10 @@ mod tests {
             Instruction::new(Opcode::LoadBoolean, vec![0]),
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
+        let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
 
-        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let result = unsafe {
             func(
                 std::ptr::null_mut(),
@@ -1079,10 +1129,10 @@ mod tests {
             Instruction::new(Opcode::Sub, vec![]), // 85
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
+        let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
 
-        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let result = unsafe {
             func(
                 std::ptr::null_mut(),
@@ -1111,9 +1161,9 @@ mod tests {
             Instruction::new(Opcode::LoadSmi, vec![99]),
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
-        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
+        let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let result = unsafe {
             func(
                 std::ptr::null_mut(),
@@ -1136,9 +1186,9 @@ mod tests {
             Instruction::new(Opcode::LoadSmi, vec![99]),
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
-        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
+        let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let result = unsafe {
             func(
                 std::ptr::null_mut(),
@@ -1161,9 +1211,9 @@ mod tests {
             Instruction::new(Opcode::LoadSmi, vec![99]),
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
-        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
+        let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let result = unsafe {
             func(
                 std::ptr::null_mut(),
@@ -1185,9 +1235,9 @@ mod tests {
             Instruction::new(Opcode::LoadSmi, vec![99]),
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
-        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
+        let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let result = unsafe {
             func(
                 std::ptr::null_mut(),
@@ -1207,10 +1257,10 @@ mod tests {
         // A program with just Return: should emit prologue, pop (which underflows
         // but the bytes are still valid), and epilogue. Verify it doesn't panic.
         let prog = make_prog(vec![Instruction::new(Opcode::Return, vec![])]);
-        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
+        let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
         // We can't easily verify the exact offset without duplicating the
         // codegen logic, but we can verify that it emitted something.
-        assert!(mem.offset > 0);
+        assert!(compiled.mem.offset > 0);
     }
 
     #[test]
@@ -1225,10 +1275,10 @@ mod tests {
             Instruction::new(Opcode::LoadSmi, vec![42]),
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
+        let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
         // Verify it emitted a reasonable number of bytes (within 55-85)
-        assert!(mem.offset >= 55, "offset was {}", mem.offset);
-        assert!(mem.offset <= 85, "offset was {}", mem.offset);
+        assert!(compiled.mem.offset >= 60, "offset was {}", compiled.mem.offset);
+        assert!(compiled.mem.offset <= 95, "offset was {}", compiled.mem.offset);
     }
 
     // -------------------------------------------------------------------
@@ -1247,9 +1297,9 @@ mod tests {
             Instruction::new(Opcode::LoadLocal, vec![0]),
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
-        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
+        let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         // Provide a local slot via a stack-allocated array
         let mut locals: [u64; 1] = [0; 1];
         let result = unsafe {
@@ -1279,9 +1329,9 @@ mod tests {
             Instruction::new(Opcode::LoadLocal, vec![0]),
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
-        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
+        let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let mut locals: [u64; 1] = [0; 1];
         let result = unsafe {
             func(
@@ -1304,9 +1354,9 @@ mod tests {
             Instruction::new(Opcode::Lt, vec![]),
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
-        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
+        let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let result = unsafe {
             func(
                 std::ptr::null_mut(),
@@ -1328,9 +1378,9 @@ mod tests {
             Instruction::new(Opcode::Lt, vec![]),
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
-        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
+        let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let result = unsafe {
             func(
                 std::ptr::null_mut(),
@@ -1352,9 +1402,9 @@ mod tests {
             Instruction::new(Opcode::Lt, vec![]),
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
-        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
+        let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let result = unsafe {
             func(
                 std::ptr::null_mut(),
@@ -1379,9 +1429,9 @@ mod tests {
             Instruction::new(Opcode::LoadLocal, vec![0]),
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
-        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
+        let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let mut locals: [u64; 1] = [0; 1];
         let result = unsafe {
             func(
@@ -1409,9 +1459,9 @@ mod tests {
             Instruction::new(Opcode::LoadLocal, vec![0]),
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
-        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
+        let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let mut locals: [u64; 1] = [0; 1];
         let result = unsafe {
             func(
@@ -1481,9 +1531,9 @@ mod tests {
             Instruction::new(Opcode::Return, vec![]),
         ];
         let prog = make_prog(instructions);
-        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
-        mem.make_executable();
-        let func: JitEntryFn = unsafe { std::mem::transmute(mem.code_ptr()) };
+        let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
+        let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let mut locals: [u64; 2] = [0; 2];
         let result = unsafe {
             func(
@@ -1507,9 +1557,9 @@ mod tests {
             Instruction::new(Opcode::StoreLocal, vec![0]),
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
-        assert!(mem.offset >= 60, "offset was {}", mem.offset);
-        assert!(mem.offset <= 100, "offset was {}", mem.offset);
+        let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
+        assert!(compiled.mem.offset >= 65, "offset was {}", compiled.mem.offset);
+        assert!(compiled.mem.offset <= 120, "offset was {}", compiled.mem.offset);
     }
 
     #[test]
@@ -1520,9 +1570,9 @@ mod tests {
             Instruction::new(Opcode::Lt, vec![]),
             Instruction::new(Opcode::Return, vec![]),
         ]);
-        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
-        assert!(mem.offset >= 85, "offset was {}", mem.offset);
-        assert!(mem.offset <= 170, "offset was {}", mem.offset);
+        let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
+        assert!(compiled.mem.offset >= 85, "offset was {}", compiled.mem.offset);
+        assert!(compiled.mem.offset <= 170, "offset was {}", compiled.mem.offset);
     }
 
     #[test]
@@ -1550,8 +1600,8 @@ mod tests {
             Instruction::new(Opcode::Return, vec![]),
         ];
         let prog = make_prog(instructions);
-        let mem = CodeGen::new(prog.instructions.len()).compile(&prog);
-        assert!(mem.offset >= 140, "offset was {}", mem.offset);
-        assert!(mem.offset <= 500, "offset was {}", mem.offset);
+        let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
+        assert!(compiled.mem.offset >= 140, "offset was {}", compiled.mem.offset);
+        assert!(compiled.mem.offset <= 500, "offset was {}", compiled.mem.offset);
     }
 }

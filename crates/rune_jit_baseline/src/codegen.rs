@@ -245,21 +245,6 @@ impl CodeGen {
         self.mem.patch_u32(jmp_ok, ok_label as u32 - (jmp_ok as u32 + four));
     }
 
-    /// Pop two Smis from the JIT stack and add them:
-    ///   (a & ~1) + b
-    fn emit_smi_add(&mut self, bc_idx: usize) {
-        self.emit_jit_stack_pop();                 // rax = b
-        self.emit_smi_check(bc_idx, &[]);          // check b
-        self.mem.emit_mov_r64_rm64(1, 0);          // rcx = b
-        self.emit_jit_stack_pop();                 // rax = a
-        self.mem.emit_mov_r64_rm64(9, 0);          // r9 = a
-        self.emit_smi_check(bc_idx, &[1]);         // check a; saved=[rcx(b)]
-        self.mem.emit_mov_r64_rm64(8, 1);          // r8 = b
-        self.mem.emit_and_r64_imm8(0, -2);         // rax = a & ~1
-        self.mem.emit_add_r64_r64(0, 1);           // rax += rcx
-        self.emit_smi_overflow_bailout_or_continue(bc_idx, true, true);
-    }
-
     /// Pop two Smis and subtract (a - b):
     ///   (a - b) | 1
     fn emit_smi_sub(&mut self, bc_idx: usize) {
@@ -591,7 +576,73 @@ impl CodeGen {
                     self.emit_jit_stack_push();
                 }
                 Opcode::Add => {
-                    self.emit_smi_add(bc_idx);
+                    // Pop b into rax, save in r9
+                    self.emit_jit_stack_pop();
+                    self.mem.emit_mov_r64_rm64(9, 0); // r9 = b
+                    // Pop a into rax, save in r8
+                    self.emit_jit_stack_pop();
+                    self.mem.emit_mov_r64_rm64(8, 0); // r8 = a
+
+                    // === Smi fast path: check both operands ===
+                    // Test b (r9) for Smi bit
+                    self.mem.emit_mov_r64_rm64(0, 9); // rax = b
+                    // TEST rax, 1
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0xF7);
+                    self.mem.emit_byte(0xC0);
+                    self.mem.emit_u32(1);
+                    let b_not_smi = self.mem.emit_je_rel32(0); // ZF=1 → bit 0=0 → not Smi
+
+                    // Test a (r8) for Smi bit
+                    self.mem.emit_mov_r64_rm64(0, 8); // rax = a
+                    // TEST rax, 1
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0xF7);
+                    self.mem.emit_byte(0xC0);
+                    self.mem.emit_u32(1);
+                    let a_not_smi = self.mem.emit_je_rel32(0); // ZF=1 → not Smi
+
+                    // Both Smi: do Smi add
+                    // rax still holds a (from the TEST above, value preserved)
+                    self.mem.emit_and_r64_imm8(0, -2); // rax = a & ~1 (untag)
+                    self.mem.emit_add_r64_r64(0, 9);   // rax += b (tagged) → Smi result
+
+                    // Check overflow
+                    self.mem.emit_mov_r64_rm64(1, 0);   // rcx = rax (result)
+                    self.mem.emit_sar_r64_1(1);          // rcx >>= 1 (untag)
+                    self.mem.emit_cmp_r64_imm32(1, CodeGen::MAX_I31);
+                    let ov_jg = self.mem.emit_jg_rel32(0);
+                    self.mem.emit_cmp_r64_imm32(1, CodeGen::MIN_I31_AS_I32);
+                    let ov_jl = self.mem.emit_jl_rel32(0);
+                    let jmp_done = self.mem.emit_jmp_rel32(0); // no overflow → skip helper
+
+                    // === Float64 path (non-Smi input or overflow) ===
+                    let float64_label = self.mem.current_offset();
+
+                    // Call float64_add_helper(rdi=r15, rsi=r14, rdx=r8, rcx=r9)
+                    self.mem.emit_mov_r64_rm64(7, 15);  // rdi = vm_ptr
+                    self.mem.emit_mov_r64_rm64(6, 14);  // rsi = gc_ptr
+                    self.mem.emit_mov_r64_rm64(2, 8);   // rdx = a_raw (r8)
+                    self.mem.emit_mov_r64_rm64(1, 9);   // rcx = b_raw (r9)
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0x8B);
+                    self.mem.emit_byte(0x87);
+                    self.mem.emit_u32(552);              // MOV rax, [r15 + 552]
+                    self.mem.emit_call_r64(0);           // call rax
+
+                    // Result in rax, fall through to done
+
+                    // === Done: push result (Smi or float64) ===
+                    let done_label = self.mem.current_offset();
+
+                    // Patch jumps
+                    let four: u32 = 4;
+                    self.mem.patch_u32(b_not_smi, float64_label as u32 - (b_not_smi as u32 + four));
+                    self.mem.patch_u32(a_not_smi, float64_label as u32 - (a_not_smi as u32 + four));
+                    self.mem.patch_u32(ov_jg, float64_label as u32 - (ov_jg as u32 + four));
+                    self.mem.patch_u32(ov_jl, float64_label as u32 - (ov_jl as u32 + four));
+                    self.mem.patch_u32(jmp_done, done_label as u32 - (jmp_done as u32 + four));
+
                     self.emit_jit_stack_push();
                 }
                 Opcode::Sub => {

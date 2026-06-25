@@ -124,7 +124,10 @@ pub struct JitHelpers {
     pub typeof_helper: usize,
     pub string_helper: usize,
     pub global_helper: usize,
-    _reserved: [usize; 3],
+    /// Helper that promotes Add operands to f64 on Smi overflow or non-Smi input.
+    /// Called from JIT code to avoid bailing to the interpreter.
+    pub float64_add_helper: usize,
+    _reserved: [usize; 2],
 }
 
 /// Stack-based bytecode interpreter with call frame support.
@@ -218,7 +221,8 @@ impl Vm {
                 typeof_helper: rune_jit_typeof_helper as *const () as usize,
                 string_helper: rune_jit_string_helper as *const () as usize,
                 global_helper: rune_jit_global_helper as *const () as usize,
-                _reserved: [0; 3],
+                float64_add_helper: rune_jit_float64_add_helper as *const () as usize,
+                _reserved: [0; 2],
             },
             jit_stack_base: 0,
             jit_bailout: JitBailoutState::default(),
@@ -2802,6 +2806,8 @@ impl Vm {
                                                 rune_jit_string_helper as *const () as usize;
                                             self.jit_helpers.global_helper =
                                                 rune_jit_global_helper as *const () as usize;
+                                            self.jit_helpers.float64_add_helper =
+                                                rune_jit_float64_add_helper as *const () as usize;
                                             // Clear pending flag before entering JIT; the bailout
                                             // helper sets it if a bailout occurs (cannot use
                                             // bc_pc != 0 as sentinel — MakeArgumentsArray at PC 0
@@ -4246,6 +4252,31 @@ pub extern "C" fn rune_jit_bailout_helper(
         reason: rune_jit_baseline::BailoutReason::BailOnEntry,
     };
     0
+}
+
+/// JIT callout for float64 addition promotion.
+///
+/// Called when Smi addition would overflow (or inputs are not both Smi).
+/// Converts both operands to f64 via `to_number`, adds them, and returns
+/// the resulting Value (Smi if the result fits in i31, otherwise HeapFloat64).
+///
+/// # Safety
+///
+/// `gc_ptr` must be a valid pointer to a `SemiSpace`. `a_raw`/`b_raw` are raw
+/// Value u64s.
+pub extern "C" fn rune_jit_float64_add_helper(
+    vm_ptr: *mut u8,
+    gc_ptr: *mut u8,
+    a_raw: u64,
+    b_raw: u64,
+) -> u64 {
+    let _ = vm_ptr;
+    let gc = unsafe { &mut *(gc_ptr as *mut SemiSpace) };
+    let a = Value::from_raw(a_raw);
+    let b = Value::from_raw(b_raw);
+    let av = to_number(a);
+    let bv = to_number(b);
+    number_result(gc, av + bv).raw()
 }
 
 /// Indices into Vm::typeof_strings for each typeof result.

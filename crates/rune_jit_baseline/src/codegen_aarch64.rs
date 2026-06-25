@@ -28,6 +28,10 @@ const LEX_LOAD_THIS: u64 = 6;
 /// Number of u64 slots reserved for the trace value stack.
 pub const JIT_STACK_SIZE: usize = 64;
 
+/// Smi i31 range constants for overflow detection.
+pub const MAX_I31: u64 = 0x3FFFFFFF;           // 2^30 − 1
+pub const MIN_I31: u64 = 0xFFFF_FFFF_C000_0000; // −2^30
+
 /// JIT helper function pointer table. Must match `Vm::jit_helpers` layout.
 #[repr(C)]
 pub struct JitHelpers {
@@ -36,7 +40,9 @@ pub struct JitHelpers {
     pub typeof_helper: usize,
     pub string_helper: usize,
     pub global_helper: usize,
-    _reserved: [usize; 3],
+    /// Helper that promotes Add operands to f64 on Smi overflow or non-Smi input.
+    pub float64_add_helper: usize,
+    _reserved: [usize; 2],
 }
 
 /// VM state visible to the trace compiler. Must be placed at offset 0 from
@@ -283,9 +289,6 @@ impl Aarch64CodeGen {
         saved_a: Option<u32>,
         saved_b: Option<u32>,
     ) {
-        const MAX_I31: u64 = 0x3FFFFFFF;           // 2^30 − 1
-        const MIN_I31: u64 = 0xFFFF_FFFF_C000_0000; // −2^30
-
         emit(&mut self.mem, 0x9341FC02);            // ASR x2, x0, #1 (untag)
         mov_imm64(&mut self.mem, 3, MAX_I31);
         cmp_reg(&mut self.mem, 2, 3);               // CMP x2, x3
@@ -498,14 +501,73 @@ impl Aarch64CodeGen {
                 Opcode::Add => {
                     self.pop(); // x0 = b
                     mov_reg(&mut self.mem, 9, 0); // x9 = b (save)
-                    self.emit_smi_check(bc_idx, &[]); // check b
-                    mov_reg(&mut self.mem, 1, 0); // x1 = b
                     self.pop(); // x0 = a
                     mov_reg(&mut self.mem, 8, 0); // x8 = a (save)
-                    self.emit_smi_check(bc_idx, &[9]); // check a; saved=[x9(b)]
-                    sub_imm(&mut self.mem, 0, 0, 1); // untag a
-                    add_reg(&mut self.mem, 0, 0, 1); // x0 = Smi(a+b)
-                    self.emit_smi_overflow_bailout_or_continue(bc_idx, Some(8), Some(9));
+
+                    // === Smi fast path: both operands Smi ===
+                    // Check b is Smi (bit 0) without destroying x9
+                    mov_reg(&mut self.mem, 1, 9);
+                    emit(&mut self.mem, 0x92400021); // AND x1, x1, #1
+                    let b_not_smi = self.mem.current_offset();
+                    emit(&mut self.mem, 0xB4000001); // CBZ X1, +0 (b not Smi → float64)
+
+                    // Check a is Smi (bit 0) without destroying x8
+                    mov_reg(&mut self.mem, 1, 8);
+                    emit(&mut self.mem, 0x92400021); // AND x1, x1, #1
+                    let a_not_smi = self.mem.current_offset();
+                    emit(&mut self.mem, 0xB4000001); // CBZ X1, +0 (a not Smi → float64)
+
+                    // Both Smi: do Smi add
+                    mov_reg(&mut self.mem, 0, 8); // x0 = a
+                    sub_imm(&mut self.mem, 0, 0, 1); // untag a: x0 = a - 1 = a_untag*2
+                    add_reg(&mut self.mem, 0, 0, 9); // add b (tagged) → Smi result
+
+                    // Check overflow
+                    emit(&mut self.mem, 0x9341FC02); // ASR x2, x0, #1 (untag result)
+                    mov_imm64(&mut self.mem, 3, MAX_I31);
+                    cmp_reg(&mut self.mem, 2, 3);
+                    let ov_jg = self.mem.current_offset();
+                    emit(&mut self.mem, 0x5400000C); // B.GT +0 (overflow → float64)
+
+                    mov_imm64(&mut self.mem, 3, MIN_I31);
+                    cmp_reg(&mut self.mem, 2, 3);
+                    let ov_jl = self.mem.current_offset();
+                    emit(&mut self.mem, 0x5400000B); // B.LT +0 (overflow → float64)
+
+                    // No overflow — Smi result in x0, skip helper
+                    let smi_done = self.mem.current_offset();
+                    emit(&mut self.mem, 0x14000000); // B +0
+
+                    // === Float64 path (non-Smi input or overflow) ===
+                    let float64_label = self.mem.current_offset();
+
+                    // Call float64_add_helper(vm_ptr=x19, gc_ptr=x20, a_raw=x8, b_raw=x9)
+                    mov_reg(&mut self.mem, 0, VM_REG);
+                    mov_reg(&mut self.mem, 1, GC_REG);
+                    mov_reg(&mut self.mem, 2, 8); // a_raw
+                    mov_reg(&mut self.mem, 3, 9); // b_raw
+                    ldr_off(&mut self.mem, 15, VM_REG, 552); // float64_add_helper
+                    emit(&mut self.mem, 0xD63F01E0); // BLR x15
+
+                    // === Done: push result (Smi or float64) ===
+                    let done_label = self.mem.current_offset();
+
+                    // Patch: b_not_smi → float64_label
+                    let d_bns = ((float64_label as i64 - b_not_smi as i64) / 4) as u32;
+                    self.mem.patch_u32(b_not_smi, 0xB4000001 | ((d_bns & 0x7FFFF) << 5));
+                    // Patch: a_not_smi → float64_label
+                    let d_ans = ((float64_label as i64 - a_not_smi as i64) / 4) as u32;
+                    self.mem.patch_u32(a_not_smi, 0xB4000001 | ((d_ans & 0x7FFFF) << 5));
+                    // Patch: ov_jg → float64_label
+                    let d_jg = ((float64_label as i64 - ov_jg as i64) / 4) as u32;
+                    self.mem.patch_u32(ov_jg, 0x5400000C | ((d_jg & 0x7FFFF) << 5));
+                    // Patch: ov_jl → float64_label
+                    let d_jl = ((float64_label as i64 - ov_jl as i64) / 4) as u32;
+                    self.mem.patch_u32(ov_jl, 0x5400000B | ((d_jl & 0x7FFFF) << 5));
+                    // Patch: smi_done → done_label
+                    let d_done = ((done_label as i64 - smi_done as i64) / 4) as u32;
+                    self.mem.patch_u32(smi_done, 0x14000000 | (d_done & 0x03FF_FFFF));
+
                     self.push();
                 }
                 Opcode::Sub => {
@@ -1264,7 +1326,8 @@ mod tests {
                 typeof_helper: 0,
                 string_helper: 0,
                 global_helper: 0,
-                _reserved: [0; 3],
+                float64_add_helper: 0,
+                _reserved: [0; 2],
             },
             jit_stack_base: 0,
         });
@@ -1750,7 +1813,8 @@ mod tests {
                 typeof_helper: 0,
                 string_helper: 0,
                 global_helper: 0,
-                _reserved: [0; 3],
+                float64_add_helper: 0,
+                _reserved: [0; 2],
             },
             jit_stack_base: 0,
         };

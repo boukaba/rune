@@ -1736,8 +1736,9 @@ fn test_jit_bailout_on_float() {
 #[test]
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn test_jit_non_smi_args_bail() {
-    // Non-arrow function with float arg. JIT enters, bails at MakeArgumentsArray
-    // (bail-on-entry at PC 0). Interpreter resumes and handles the float.
+    // Non-arrow function with float arg. JIT now promotes non-Smi Add operands
+    // to float64 via helper instead of bailing. The function still produces the
+    // correct result, and JIT is used (entry_count > 0).
     let mut ctx = Context::new_small();
     let r = ctx
         .eval(
@@ -1755,16 +1756,12 @@ fn test_jit_non_smi_args_bail() {
     let f = r.as_float64().unwrap_or(0.0);
     assert!(
         (f - 5.5).abs() < 0.001,
-        "JIT non-Smi bail: add(3.5, 2) should be ~5.5, got {}",
+        "JIT non-Smi: add(3.5, 2) should be ~5.5, got {}",
         f
     );
     assert!(
         ctx.vm().jit_entry_count > 0,
         "JIT must have entered at least once"
-    );
-    assert!(
-        ctx.vm().jit_bailout_count > 0,
-        "JIT must have bailed at least once when given non-Smi args"
     );
 }
 

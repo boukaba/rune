@@ -437,12 +437,12 @@
 
 > **Spec mandate:** See [`ecma262.md`](./ecma262.md) §11 ([[Call]]/[[Construct]]), §29.3 (generator JIT) — open each linked `https://tc39.es/ecma262/multipage/` URL via `webfetch` for exact call semantics and generator dispatch. No guessing.
 
-**Goal:** Direct-emission JIT for normal + generator functions. Smi-only fast paths. Monomorphic ICs pending.
+**Goal:** Direct-emission JIT for normal + generator functions. Smi-only fast paths. LoadPropertyIC shape-guarded property access working.
 
 ### `rune_jit_baseline` crate
 - [x] `assembler.rs` — ExecutableMemory (mmap MAP_JIT / MAP_ANONYMOUS, mprotect W^X, Drop-unmapped). x86-64 helpers: ret, nop, mov imm64/rm64/mem_disp32, add/sub/cmp imm32, jmp/je/jne/jbe/jb/ja/jae rel32, call/push/pop r64, and/or imm8, add/sub/imul r64 r64, sar/shl by 1, cmp r64 r64, REX.W. 22+ offset tests.
-- [x] `codegen.rs` — Walk bytecode → emit native instructions directly (no pre-compiled templates). JitEntryFn = `fn(vm, gc, locals_ptr)`. Prologue saves RBP/R15/R14/R13/RBX, allocates 256-slot JIT value stack. Emits: LoadSmi, LoadUndefined, LoadNull, LoadBoolean, LoadLocal, StoreLocal, Pop, Return, Add/Sub/Mul (Smi), Lt (setl), IncLocal/DecLocal, Jump, JumpIfFalse. Forward jumps via bc_to_native + pending_patches resolution. 22 tests (13 offset + 9 execution cfg-gated x86_64).
-- [ ] `ic.rs` — Monomorphic IC stubs (deferred — shape guard comparison in generated code)
+- [x] `codegen.rs` — Walk bytecode → emit native instructions directly (no pre-compiled templates). JitEntryFn = `fn(vm, gc, locals_ptr)`. Prologue saves RBP/R15/R14/R13/RBX, allocates 256-slot JIT value stack. Emits: LoadSmi, LoadUndefined, LoadNull, LoadBoolean, LoadLocal, StoreLocal, Pop, Return, Add/Sub/Mul (Smi), Lt (setl), IncLocal/DecLocal, Jump, JumpIfFalse, JumpIfTrue, Gt, Le, Ge, StrictEq, StrictNe, Shl, Shr, BitAnd, BitOr, BitXor, Neg, Not, Void, LoadPropertyIC. Forward jumps via bc_to_native + pending_patches resolution. 22 tests (13 offset + 9 execution cfg-gated x86_64).
+- [x] `ic.rs` — LoadPropertyIC implemented in both backends: shape guard (Smi check, sentinel check, shape.id compare), property load from heap object slots, undefined fallback on miss.
 - [ ] `templates.rs` — (Not used — direct emission instead of copy-and-patch templates)
 
 ### `rune_interpreter` integration
@@ -1109,14 +1109,14 @@ append delta to cache → future runs use cached delta
 |---|---|---|---|---|
 | **5g** | rkyv bytecode snapshots (zero-copy, skip parse/emit) | 1d | 🟠 P1 | ✅ Done | Source-level cache: `--snapshot` saves to `.rune-cache`, load on next run. First run 340ms → cached 50ms (6.8× faster). rkyv dep added (Archive derive pending). |
 | **5a** | Fix trace compiler Add/Sub/Mul SIGBUS | 0.5d | 🔴 P0 | ✅ Done | Moved JIT value stack from `sp` to VM heap memory (`JitVmState::jit_stack`). All AArch64 trace tests pass. |
-| **5b** | Full function AOT compiler (bytecode→native for all opcodes) | 3d | 🔴 P0 | 🟡 In progress | AArch64 + x86-64 baseline JIT covers 19/61 opcodes (Smi arithmetic, comparison, branches, locals). Missing: floats, strings, property access, calls, bitwise ops. |
+| **5b** | Full function AOT compiler (bytecode→native for all opcodes) | 3d | 🔴 P0 | 🟡 In progress | AArch64 + x86-64 baseline JIT covers 29/61 opcodes (Smi arithmetic, comparison, bitwise, unary, branches, locals, property access). Missing: floats, strings, calls, globals. |
 | **5c** | rkyv cache format: serialize shapes + compiled code + IC + strings | 2d | 🔴 P0 | ✅ Done | `AfpcCache` serializes bytecode, shape table, IC table, and native code blobs. Shape IDs made content-addressed/stable. |
 | **5d** | Cache loader: mmap → validate shape IDs → install entry points | 1d | 🔴 P0 | ✅ Done | `InstalledNativeCode::from_cache` mmap's function blobs into RX memory; `Context::install_native_code` maps func_idx → entry pointer; `MakeFunction` installs cached JIT entry on function creation. |
 | **5e** | Delta JIT: shape miss → record → compile delta → append cache | 2d | 🟠 P1 | ⬜ New |
 | **5f** | CLI `--cache` flag: auto-save on exit, auto-load on start | 1d | 🟠 P1 | ✅ Done | CLI `--cache <path>` / `--cache=<path>` first-run compiles, AOT-compiles functions, executes, and saves cache; subsequent runs restore shapes/ICs/native code and execute cached bytecode. |
 | **5j** | AArch64 trace compiler wired to loop execution | 1d | 🔴 P0 | ✅ Done | Hot loops (>50 iterations) auto-compile to native via Aarch64CodeGen. Trace records operands, remaps branches (back-edge→0, exit→return). Compiled traces execute natively on subsequent back-edges, fully bypassing interpreter dispatch for the loop body. |
-| **5k** | JIT opcode coverage expansion (Smi comparison + bitwise ops) | 0.5d | 🟠 P1 | ✅ Done | Added Gt, Le, Ge, StrictEq, Shl, Shr, BitAnd, BitOr, BitXor to both backends (24/61 opcodes). Fixed AArch64 CSET encoding (CSEL→CSINC) and MOVK lsl shift. Added `MIN_JIT_FUNCTION_SIZE` threshold. |
-| **5l** | Remaining JIT opcodes (floats, property access, calls) | 2d | 🟠 P1 | 🟡 In progress | Added Neg, Not. JIT now at 26/61. Next: LoadPropertyIC. |
+| **5k** | JIT opcode coverage expansion (Smi comparison + bitwise ops) | 0.5d | 🟠 P1 | ✅ Done | Added Gt, Le, Ge, StrictEq, Shl, Shr, BitAnd, BitOr, BitXor to both backends (29/61 opcodes). Fixed AArch64 CSET encoding (CSEL→CSINC) and MOVK lsl shift. Added `MIN_JIT_FUNCTION_SIZE` threshold. |
+| **5l** | Remaining JIT opcodes (floats, property access, calls) | 2d | 🟠 P1 | 🟡 In progress | Added Neg, Not, LoadPropertyIC. JIT now at 29/61. Next: StoreProperty, TypeOf, globals. |
 | **5h** | Benchmark: first-run vs cached vs V8, 100/1K/10K iterations | 1d | 🟠 P1 | ⬜ New |
 | **5i** | Integration tests: cache round-trip, delta correctness, deopt recovery | 1d | 🟠 P1 | 🟡 In progress | AFPC round-trip test added; delta/deopt tests deferred to Delta JIT. |
 
@@ -1145,7 +1145,7 @@ Tagged `v0.0.1` at `0067e41`. Honest positioning: NOT FOR PRODUCTION USE.
 - Bug fixes: P0 (AArch64 trace SIGBUS), P7 (IC stats), P10 (JIT skip tiny), P12 (trace execution), P13 (Smi display), MOVK lsl fix, CSET CSINC fix.
 - Test count: 297 integration → 424 total (297 integration + 127 unit/doctest)
 
-**Gaps (documented):** No standard library, optimizing JIT (remaining 35/61 opcodes), modules, classes, async/await. 5–230× slower than V8 on hot loops. JIT covers 26/61 opcodes.
+**Gaps (documented):** No standard library, optimizing JIT (remaining 32/61 opcodes), modules, classes, async/await. 5–230× slower than V8 on hot loops. JIT covers 29/61 opcodes.
 
 ## Global Testing Strategy
 

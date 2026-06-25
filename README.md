@@ -70,7 +70,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 - **Modules:** No import/export (ESM)
 - **Classes:** No class syntax, super, getters/setters
 - **Async/await:** No async, await, for...of
-- **Optimizing JIT:** Baseline only (Smi arithmetic, locals, branches) — 5–230× slower than V8 on hot loops
+- **Optimizing JIT:** Baseline only (Smi arithmetic, comparison, bitwise, unary, locals, branches, property access) — 5–230× slower than V8 on hot loops
 - **Debugger:** No CDP/DevTools
 
 ## Performance
@@ -86,7 +86,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 
 **AFPC cache:** Compile (parse+emit) 355µs → cache load 26µs (**13.5× faster**). End-to-end latency is execution-bound — cache eliminates parse/emit entirely but hot loops still run in interpreter.
 
-Hardware: MacBook Pro M4 Pro (aarch64). JIT coverage: 15 Smi-only opcodes (floats, property access, calls not yet JIT-compiled).
+Hardware: MacBook Pro M4 Pro (aarch64). JIT coverage: 29 Smi-and-property opcodes (floats, calls not yet JIT-compiled).
 
 ### SIDT Architecture
 

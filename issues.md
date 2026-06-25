@@ -133,11 +133,9 @@
 
 ---
 
-## P11: JIT opcode coverage is Smi-only (29/61 opcodes) 🟡 In progress
+## P11: JIT opcode coverage is Smi-only (31/61 opcodes) 🟡 In progress
 
-**Status:** 🟡 Active work item — LoadPropertyIC now implemented in both backends.
-
-**Symptom:** 29/61 opcodes are JIT-compiled. Still missing: LoadFloat64, LoadStringConst, StoreProperty, Call, all object/array/string ops, type conversions.
+**Symptom:** 31/61 opcodes are JIT-compiled. Still missing: LoadFloat64, LoadStringConst, StoreProperty, Call, all object/array/string ops, type conversions.
 
 **Fix:** Baseline JIT supports Smi arithmetic, comparison, bitwise, unary, branches, locals, and property access (LoadPropertyIC). Remaining 32 opcodes are float, string, object, array, call, and type-conversion ops.
 
@@ -180,6 +178,6 @@
 | P8 | CLI -e flag | ⚠️ Known | — |
 | P9 | Return assertion relaxed | ⚠️ Deferred | — |
 | P10 | JIT slower than interpreter on tiny functions | ✅ Fixed | bb1a0e2 |
-| P11 | JIT coverage (now 29/61 opcodes) | 🟡 In progress | — |
+| P11 | JIT coverage (now 31/61 opcodes) | 🟡 In progress | — |
 | P12 | Trace compiler wired to loop execution | ✅ Fixed | — |
 | P13 | Smi i31 display truncation (design constraint) | ✅ Resolved | — |

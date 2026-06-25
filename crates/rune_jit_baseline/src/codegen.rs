@@ -227,6 +227,17 @@ impl CodeGen {
                     self.mem.emit_byte(0xC0);            // xor eax, eax (undefined = 0)
                     self.emit_jit_stack_push();
                 }
+                Opcode::UnaryPlus => {
+                    // No-op for Smi: value stays on JIT stack
+                }
+                Opcode::BitNot => {
+                    self.emit_jit_stack_pop();
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0xF7);
+                    self.mem.emit_byte(0xD0);            // not rax
+                    self.mem.emit_add_r64_imm32(0, 1);   // add rax, 1
+                    self.emit_jit_stack_push();
+                }
                 Opcode::StrictNe => {
                     self.emit_jit_stack_pop();
                     self.mem.emit_mov_r64_rm64(1, 0);    // rcx = b

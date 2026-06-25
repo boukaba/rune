@@ -636,6 +636,16 @@ impl Aarch64CodeGen {
                     movz(&mut self.mem, 0, 0); // x0 = 0 (undefined)
                     self.push();
                 }
+                Opcode::UnaryPlus => {
+                    // No-op for Smi: ToNumber(smi) = smi, value stays on JIT stack
+                }
+                Opcode::BitNot => {
+                    // Smi(~n) = ~Smi(n) + 1
+                    self.pop();
+                    emit(&mut self.mem, 0xAA2003E0); // MVN x0, x0 (ORN x0, xzr, x0)
+                    add_imm(&mut self.mem, 0, 0, 1);
+                    self.push();
+                }
                 Opcode::StrictNe => {
                     self.pop();
                     mov_reg(&mut self.mem, 1, 0);
@@ -771,6 +781,17 @@ fn compile_op(mem: &mut ExecutableMemory, opcode: Opcode, operands: &[i64]) {
         }
         Opcode::Return => {
             // Value is in x0, epilogue handles the rest
+        }
+        Opcode::UnaryPlus => {
+            // No-op for Smi: value stays on JIT stack
+        }
+        Opcode::BitNot => {
+            sub_imm(mem, JIT_STACK_REG, JIT_STACK_REG, 8); // pop
+            ldr_off(mem, 0, JIT_STACK_REG, 0);
+            emit(mem, 0xAA2003E0); // MVN x0, x0 (ORN x0, xzr, x0)
+            add_imm(mem, 0, 0, 1);
+            str_off(mem, 0, JIT_STACK_REG, 0);
+            add_imm(mem, JIT_STACK_REG, JIT_STACK_REG, 8);
         }
         _ => {
             nop(mem); // unhandled opcode — trace-verified, shouldn't hit

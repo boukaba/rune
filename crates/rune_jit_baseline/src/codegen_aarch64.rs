@@ -124,6 +124,11 @@ fn asr_reg(mem: &mut ExecutableMemory, xd: u32, xn: u32, xm: u32) {
     emit(mem, 0x9AC02800 | (xm << 16) | (xn << 5) | xd);
 }
 
+/// LSR xd, xn, xm  (register logical shift right)
+fn lsr_reg(mem: &mut ExecutableMemory, xd: u32, xn: u32, xm: u32) {
+    emit(mem, 0x9AC02400 | (xm << 16) | (xn << 5) | xd);
+}
+
 /// ORR xd, xn, #1 — set bit 0 (Smi tag)
 fn orr_imm1(mem: &mut ExecutableMemory, xd: u32, xn: u32) {
     // ORR xd, xn, #1: bitmask encoding N:immr:imms = 0:000000:000000
@@ -494,6 +499,164 @@ impl Aarch64CodeGen {
                     eor_reg(&mut self.mem, 0, 0, 1);
                     emit(&mut self.mem, 0xD37FF800);
                     orr_imm1(&mut self.mem, 0, 0);
+                    self.push();
+                }
+                Opcode::ShrU => {
+                    // Smi unsigned right shift (>>>)
+                    self.pop();
+                    mov_reg(&mut self.mem, 1, 0); // x1 = b
+                    self.pop(); // x0 = a
+                    emit(&mut self.mem, 0x9341FC00); // ASR x0, x0, #1 (untag a)
+                    emit(&mut self.mem, 0x9341FC21); // ASR x1, x1, #1 (untag b)
+                    lsr_reg(&mut self.mem, 0, 0, 1); // LSR x0, x0, x1 (unsigned shift)
+                    emit(&mut self.mem, 0xD37FF800); // LSL x0, x0, #1 (retag)
+                    orr_imm1(&mut self.mem, 0, 0);
+                    self.push();
+                }
+                Opcode::Swap => {
+                    self.pop(); // x0 = top (b)
+                    mov_reg(&mut self.mem, 1, 0); // x1 = b
+                    self.pop(); // x0 = second (a)
+                    mov_reg(&mut self.mem, 2, 0); // x2 = a
+                    mov_reg(&mut self.mem, 0, 1); // x0 = b
+                    self.push();
+                    mov_reg(&mut self.mem, 0, 2); // x0 = a
+                    self.push();
+                }
+                Opcode::Eq => {
+                    // Abstract equality for Smi/sentinel values. Branchless CSET-based.
+                    self.pop(); // x0 = b
+                    mov_reg(&mut self.mem, 1, 0); // x1 = b
+                    self.pop(); // x0 = a
+                    mov_reg(&mut self.mem, 2, 31); // x2 = 0 (result accumulator)
+                    // a == b
+                    cmp_reg(&mut self.mem, 0, 1);
+                    emit(&mut self.mem, 0x9A9F07E3); // CSET x3, EQ
+                    orr_reg(&mut self.mem, 2, 2, 3);
+                    // null == undefined: (a==0 && b==2)
+                    movz(&mut self.mem, 3, 0);
+                    cmp_reg(&mut self.mem, 0, 3);
+                    emit(&mut self.mem, 0x9A9F07E4); // CSET x4, EQ
+                    movz(&mut self.mem, 3, 2);
+                    cmp_reg(&mut self.mem, 1, 3);
+                    emit(&mut self.mem, 0x9A9F07E5); // CSET x5, EQ
+                    and_reg(&mut self.mem, 3, 4, 5);
+                    orr_reg(&mut self.mem, 2, 2, 3);
+                    // null == undefined: (a==2 && b==0)
+                    movz(&mut self.mem, 3, 2);
+                    cmp_reg(&mut self.mem, 0, 3);
+                    emit(&mut self.mem, 0x9A9F07E4);
+                    movz(&mut self.mem, 3, 0);
+                    cmp_reg(&mut self.mem, 1, 3);
+                    emit(&mut self.mem, 0x9A9F07E5);
+                    and_reg(&mut self.mem, 3, 4, 5);
+                    orr_reg(&mut self.mem, 2, 2, 3);
+                    // a == false(4): b == Smi(0)=1
+                    movz(&mut self.mem, 3, 4);
+                    cmp_reg(&mut self.mem, 0, 3);
+                    emit(&mut self.mem, 0x9A9F07E4);
+                    movz(&mut self.mem, 3, 1);
+                    cmp_reg(&mut self.mem, 1, 3);
+                    emit(&mut self.mem, 0x9A9F07E5);
+                    and_reg(&mut self.mem, 3, 4, 5);
+                    orr_reg(&mut self.mem, 2, 2, 3);
+                    // a == true(6): b == Smi(1)=3
+                    movz(&mut self.mem, 3, 6);
+                    cmp_reg(&mut self.mem, 0, 3);
+                    emit(&mut self.mem, 0x9A9F07E4);
+                    movz(&mut self.mem, 3, 3);
+                    cmp_reg(&mut self.mem, 1, 3);
+                    emit(&mut self.mem, 0x9A9F07E5);
+                    and_reg(&mut self.mem, 3, 4, 5);
+                    orr_reg(&mut self.mem, 2, 2, 3);
+                    // b == false(4): a == Smi(0)=1
+                    movz(&mut self.mem, 3, 4);
+                    cmp_reg(&mut self.mem, 1, 3);
+                    emit(&mut self.mem, 0x9A9F07E4);
+                    movz(&mut self.mem, 3, 1);
+                    cmp_reg(&mut self.mem, 0, 3);
+                    emit(&mut self.mem, 0x9A9F07E5);
+                    and_reg(&mut self.mem, 3, 4, 5);
+                    orr_reg(&mut self.mem, 2, 2, 3);
+                    // b == true(6): a == Smi(1)=3
+                    movz(&mut self.mem, 3, 6);
+                    cmp_reg(&mut self.mem, 1, 3);
+                    emit(&mut self.mem, 0x9A9F07E4);
+                    movz(&mut self.mem, 3, 3);
+                    cmp_reg(&mut self.mem, 0, 3);
+                    emit(&mut self.mem, 0x9A9F07E5);
+                    and_reg(&mut self.mem, 3, 4, 5);
+                    orr_reg(&mut self.mem, 2, 2, 3);
+                    // Smi-encode result (x2 = 0 or 1)
+                    emit(&mut self.mem, 0xD37FF842); // LSL x2, x2, #1
+                    orr_imm1(&mut self.mem, 2, 2);
+                    mov_reg(&mut self.mem, 0, 2);
+                    self.push();
+                }
+                Opcode::Ne => {
+                    // Same as Eq, then invert result
+                    self.pop();
+                    mov_reg(&mut self.mem, 1, 0);
+                    self.pop();
+                    mov_reg(&mut self.mem, 2, 31);
+                    cmp_reg(&mut self.mem, 0, 1);
+                    emit(&mut self.mem, 0x9A9F07E3);
+                    orr_reg(&mut self.mem, 2, 2, 3);
+                    movz(&mut self.mem, 3, 0);
+                    cmp_reg(&mut self.mem, 0, 3);
+                    emit(&mut self.mem, 0x9A9F07E4);
+                    movz(&mut self.mem, 3, 2);
+                    cmp_reg(&mut self.mem, 1, 3);
+                    emit(&mut self.mem, 0x9A9F07E5);
+                    and_reg(&mut self.mem, 3, 4, 5);
+                    orr_reg(&mut self.mem, 2, 2, 3);
+                    movz(&mut self.mem, 3, 2);
+                    cmp_reg(&mut self.mem, 0, 3);
+                    emit(&mut self.mem, 0x9A9F07E4);
+                    movz(&mut self.mem, 3, 0);
+                    cmp_reg(&mut self.mem, 1, 3);
+                    emit(&mut self.mem, 0x9A9F07E5);
+                    and_reg(&mut self.mem, 3, 4, 5);
+                    orr_reg(&mut self.mem, 2, 2, 3);
+                    movz(&mut self.mem, 3, 4);
+                    cmp_reg(&mut self.mem, 0, 3);
+                    emit(&mut self.mem, 0x9A9F07E4);
+                    movz(&mut self.mem, 3, 1);
+                    cmp_reg(&mut self.mem, 1, 3);
+                    emit(&mut self.mem, 0x9A9F07E5);
+                    and_reg(&mut self.mem, 3, 4, 5);
+                    orr_reg(&mut self.mem, 2, 2, 3);
+                    movz(&mut self.mem, 3, 6);
+                    cmp_reg(&mut self.mem, 0, 3);
+                    emit(&mut self.mem, 0x9A9F07E4);
+                    movz(&mut self.mem, 3, 3);
+                    cmp_reg(&mut self.mem, 1, 3);
+                    emit(&mut self.mem, 0x9A9F07E5);
+                    and_reg(&mut self.mem, 3, 4, 5);
+                    orr_reg(&mut self.mem, 2, 2, 3);
+                    movz(&mut self.mem, 3, 4);
+                    cmp_reg(&mut self.mem, 1, 3);
+                    emit(&mut self.mem, 0x9A9F07E4);
+                    movz(&mut self.mem, 3, 1);
+                    cmp_reg(&mut self.mem, 0, 3);
+                    emit(&mut self.mem, 0x9A9F07E5);
+                    and_reg(&mut self.mem, 3, 4, 5);
+                    orr_reg(&mut self.mem, 2, 2, 3);
+                    movz(&mut self.mem, 3, 6);
+                    cmp_reg(&mut self.mem, 1, 3);
+                    emit(&mut self.mem, 0x9A9F07E4);
+                    movz(&mut self.mem, 3, 3);
+                    cmp_reg(&mut self.mem, 0, 3);
+                    emit(&mut self.mem, 0x9A9F07E5);
+                    and_reg(&mut self.mem, 3, 4, 5);
+                    orr_reg(&mut self.mem, 2, 2, 3);
+                    // Invert: x2 = 1 - x2
+                    movz(&mut self.mem, 3, 1);
+                    eor_reg(&mut self.mem, 2, 2, 3);
+                    // Smi-encode
+                    emit(&mut self.mem, 0xD37FF842);
+                    orr_imm1(&mut self.mem, 2, 2);
+                    mov_reg(&mut self.mem, 0, 2);
                     self.push();
                 }
                 Opcode::IncLocal => {

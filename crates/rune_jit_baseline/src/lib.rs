@@ -48,7 +48,11 @@ pub fn is_jit_compatible(prog: &rune_bytecode::opcode::BytecodeProgram) -> bool 
             | Opcode::UnaryPlus
             | Opcode::BitNot
             | Opcode::LoadPropertyIC
-            | Opcode::StorePropertyIC => {}
+            | Opcode::StorePropertyIC
+            | Opcode::ShrU
+            | Opcode::Eq
+            | Opcode::Ne
+            | Opcode::Swap => {}
             _ => return false,
         }
     }

@@ -254,6 +254,149 @@ impl CodeGen {
                     self.mem.emit_or_r64_imm8(0, 1);    // or rax, 1
                     self.emit_jit_stack_push();
                 }
+                Opcode::Swap => {
+                    self.emit_jit_stack_pop();            // rax = b
+                    self.mem.emit_mov_r64_rm64(1, 0);    // rcx = b
+                    self.emit_jit_stack_pop();            // rax = a
+                    self.mem.emit_mov_r64_rm64(2, 0);    // rdx = a
+                    self.mem.emit_mov_r64_rm64(0, 1);    // rax = b
+                    self.emit_jit_stack_push();
+                    self.mem.emit_mov_r64_rm64(0, 2);    // rax = a
+                    self.emit_jit_stack_push();
+                }
+                Opcode::Eq => {
+                    self.emit_jit_stack_pop();            // rax = b
+                    self.mem.emit_mov_r64_rm64(1, 0);    // rcx = b
+                    self.emit_jit_stack_pop();            // rax = a
+                    // a == b
+                    self.mem.emit_cmp_r64_r64(0, 1);
+                    let je_same = self.mem.emit_je_rel32(0);
+                    // null == undefined: (a==0 && b==2) || (a==2 && b==0)
+                    self.mem.emit_mov_r64_imm64(2, 0);   // rdx = 0
+                    self.mem.emit_cmp_r64_r64(0, 2);
+                    let je_a0 = self.mem.emit_je_rel32(0);
+                    self.mem.emit_mov_r64_imm64(2, 2);   // rdx = 2 (null)
+                    self.mem.emit_cmp_r64_r64(0, 2);
+                    let je_a2 = self.mem.emit_je_rel32(0);
+                    // boolean checks
+                    self.mem.emit_mov_r64_imm64(2, 4);   // false
+                    self.mem.emit_cmp_r64_r64(0, 2);
+                    let je_a_false = self.mem.emit_je_rel32(0);
+                    self.mem.emit_mov_r64_imm64(2, 6);   // true
+                    self.mem.emit_cmp_r64_r64(0, 2);
+                    let je_a_true = self.mem.emit_je_rel32(0);
+                    let jmp_done = self.mem.emit_jmp_rel32(0); // fall through false
+                    // a == null(2): check b == undefined(0)
+                    let label_a2 = self.mem.current_offset();
+                    self.mem.patch_u32(je_a2, (label_a2 - (je_a2 + 6)) as u32);
+                    self.mem.emit_mov_r64_imm64(2, 0);
+                    self.mem.emit_cmp_r64_r64(1, 2);
+                    let je_null_undef = self.mem.emit_je_rel32(0);
+                    let jmp_not_eq = self.mem.emit_jmp_rel32(0);
+                    // a == undefined(0): check b == null(2)
+                    let label_a0 = self.mem.current_offset();
+                    self.mem.patch_u32(je_a0, (label_a0 - (je_a0 + 6)) as u32);
+                    self.mem.emit_mov_r64_imm64(2, 2);
+                    self.mem.emit_cmp_r64_r64(1, 2);
+                    let je_undef_null = self.mem.emit_je_rel32(0);
+                    let jmp_not_eq2 = self.mem.emit_jmp_rel32(0);
+                    // a == false: check b == Smi(0)=1
+                    let label_a_false = self.mem.current_offset();
+                    self.mem.patch_u32(je_a_false, (label_a_false - (je_a_false + 6)) as u32);
+                    self.mem.emit_mov_r64_imm64(2, 1);
+                    self.mem.emit_cmp_r64_r64(1, 2);
+                    let je_eq = self.mem.emit_je_rel32(0);
+                    let jmp_not_eq3 = self.mem.emit_jmp_rel32(0);
+                    // a == true: check b == Smi(1)=3
+                    let label_a_true = self.mem.current_offset();
+                    self.mem.patch_u32(je_a_true, (label_a_true - (je_a_true + 6)) as u32);
+                    self.mem.emit_mov_r64_imm64(2, 3);
+                    self.mem.emit_cmp_r64_r64(1, 2);
+                    let je_eq2 = self.mem.emit_je_rel32(0);
+                    let jmp_not_eq4 = self.mem.emit_jmp_rel32(0);
+                    // equal
+                    let label_eq = self.mem.current_offset();
+                    self.mem.patch_u32(je_same, (label_eq - (je_same + 6)) as u32);
+                    self.mem.patch_u32(je_null_undef, (label_eq - (je_null_undef + 6)) as u32);
+                    self.mem.patch_u32(je_undef_null, (label_eq - (je_undef_null + 6)) as u32);
+                    self.mem.patch_u32(je_eq, (label_eq - (je_eq + 6)) as u32);
+                    self.mem.patch_u32(je_eq2, (label_eq - (je_eq2 + 6)) as u32);
+                    self.mem.emit_mov_r64_imm64(0, 3);   // Smi(1)
+                    let jmp_done2 = self.mem.emit_jmp_rel32(0);
+                    // not equal
+                    let label_not_eq = self.mem.current_offset();
+                    self.mem.patch_u32(jmp_not_eq, (label_not_eq - (jmp_not_eq + 5)) as u32);
+                    self.mem.patch_u32(jmp_not_eq2, (label_not_eq - (jmp_not_eq2 + 5)) as u32);
+                    self.mem.patch_u32(jmp_not_eq3, (label_not_eq - (jmp_not_eq3 + 5)) as u32);
+                    self.mem.patch_u32(jmp_not_eq4, (label_not_eq - (jmp_not_eq4 + 5)) as u32);
+                    self.mem.emit_mov_r64_imm64(0, 1);   // Smi(0)
+                    // done
+                    self.mem.patch_u32(jmp_done, (label_not_eq - (jmp_done + 5)) as u32);
+                    self.mem.patch_u32(jmp_done2, (self.mem.current_offset() - (jmp_done2 + 5)) as u32);
+                    self.emit_jit_stack_push();
+                }
+                Opcode::Ne => {
+                    // Same branching as Eq but XOR result
+                    self.emit_jit_stack_pop();
+                    self.mem.emit_mov_r64_rm64(1, 0);
+                    self.emit_jit_stack_pop();
+                    self.mem.emit_cmp_r64_r64(0, 1);
+                    let je_same = self.mem.emit_je_rel32(0);
+                    self.mem.emit_mov_r64_imm64(2, 0);
+                    self.mem.emit_cmp_r64_r64(0, 2);
+                    let je_a0 = self.mem.emit_je_rel32(0);
+                    self.mem.emit_mov_r64_imm64(2, 2);
+                    self.mem.emit_cmp_r64_r64(0, 2);
+                    let je_a2 = self.mem.emit_je_rel32(0);
+                    self.mem.emit_mov_r64_imm64(2, 4);
+                    self.mem.emit_cmp_r64_r64(0, 2);
+                    let je_a_false = self.mem.emit_je_rel32(0);
+                    self.mem.emit_mov_r64_imm64(2, 6);
+                    self.mem.emit_cmp_r64_r64(0, 2);
+                    let je_a_true = self.mem.emit_je_rel32(0);
+                    let jmp_done = self.mem.emit_jmp_rel32(0);
+                    let label_a2 = self.mem.current_offset();
+                    self.mem.patch_u32(je_a2, (label_a2 - (je_a2 + 6)) as u32);
+                    self.mem.emit_mov_r64_imm64(2, 0);
+                    self.mem.emit_cmp_r64_r64(1, 2);
+                    let je_null_undef = self.mem.emit_je_rel32(0);
+                    let jmp_not_eq = self.mem.emit_jmp_rel32(0);
+                    let label_a0 = self.mem.current_offset();
+                    self.mem.patch_u32(je_a0, (label_a0 - (je_a0 + 6)) as u32);
+                    self.mem.emit_mov_r64_imm64(2, 2);
+                    self.mem.emit_cmp_r64_r64(1, 2);
+                    let je_undef_null = self.mem.emit_je_rel32(0);
+                    let jmp_not_eq2 = self.mem.emit_jmp_rel32(0);
+                    let label_a_false = self.mem.current_offset();
+                    self.mem.patch_u32(je_a_false, (label_a_false - (je_a_false + 6)) as u32);
+                    self.mem.emit_mov_r64_imm64(2, 1);
+                    self.mem.emit_cmp_r64_r64(1, 2);
+                    let je_eq = self.mem.emit_je_rel32(0);
+                    let jmp_not_eq3 = self.mem.emit_jmp_rel32(0);
+                    let label_a_true = self.mem.current_offset();
+                    self.mem.patch_u32(je_a_true, (label_a_true - (je_a_true + 6)) as u32);
+                    self.mem.emit_mov_r64_imm64(2, 3);
+                    self.mem.emit_cmp_r64_r64(1, 2);
+                    let je_eq2 = self.mem.emit_je_rel32(0);
+                    let jmp_not_eq4 = self.mem.emit_jmp_rel32(0);
+                    let label_eq = self.mem.current_offset();
+                    self.mem.patch_u32(je_same, (label_eq - (je_same + 6)) as u32);
+                    self.mem.patch_u32(je_null_undef, (label_eq - (je_null_undef + 6)) as u32);
+                    self.mem.patch_u32(je_undef_null, (label_eq - (je_undef_null + 6)) as u32);
+                    self.mem.patch_u32(je_eq, (label_eq - (je_eq + 6)) as u32);
+                    self.mem.patch_u32(je_eq2, (label_eq - (je_eq2 + 6)) as u32);
+                    self.mem.emit_mov_r64_imm64(0, 1);   // Smi(0) — NE (inverted from Eq)
+                    let jmp_done2 = self.mem.emit_jmp_rel32(0);
+                    let label_not_eq = self.mem.current_offset();
+                    self.mem.patch_u32(jmp_not_eq, (label_not_eq - (jmp_not_eq + 5)) as u32);
+                    self.mem.patch_u32(jmp_not_eq2, (label_not_eq - (jmp_not_eq2 + 5)) as u32);
+                    self.mem.patch_u32(jmp_not_eq3, (label_not_eq - (jmp_not_eq3 + 5)) as u32);
+                    self.mem.patch_u32(jmp_not_eq4, (label_not_eq - (jmp_not_eq4 + 5)) as u32);
+                    self.mem.emit_mov_r64_imm64(0, 3);   // Smi(1) — NE (inverted)
+                    self.mem.patch_u32(jmp_done, (label_not_eq - (jmp_done + 5)) as u32);
+                    self.mem.patch_u32(jmp_done2, (self.mem.current_offset() - (jmp_done2 + 5)) as u32);
+                    self.emit_jit_stack_push();
+                }
                 Opcode::Add => {
                     self.emit_smi_add();
                     self.emit_jit_stack_push();
@@ -594,6 +737,20 @@ impl CodeGen {
                     self.mem.emit_rex_w();
                     self.mem.emit_byte(0x33);
                     self.mem.emit_byte(0xC1); // mod=11, reg=0(rax), r/m=1(rcx)
+                    self.mem.emit_shl_r64_1(0);
+                    self.mem.emit_or_r64_imm8(0, 1);
+                    self.emit_jit_stack_push();
+                }
+                Opcode::ShrU => {
+                    self.emit_jit_stack_pop();
+                    self.mem.emit_mov_r64_rm64(1, 0);
+                    self.emit_jit_stack_pop();
+                    self.mem.emit_sar_r64_1(0);
+                    self.mem.emit_sar_r64_1(1);
+                    // shr rax, cl (unsigned shift right)
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0xD3);
+                    self.mem.emit_byte(0xE8); // mod=11, reg=5(shr), r/m=0(rax)
                     self.mem.emit_shl_r64_1(0);
                     self.mem.emit_or_r64_imm8(0, 1);
                     self.emit_jit_stack_push();

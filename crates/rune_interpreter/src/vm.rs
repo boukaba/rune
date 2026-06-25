@@ -121,7 +121,8 @@ impl Default for JitBailoutState {
 pub struct JitHelpers {
     pub lexical_helper: usize,
     pub bailout_helper: usize,
-    _reserved: [usize; 6],
+    pub typeof_helper: usize,
+    _reserved: [usize; 5],
 }
 
 /// Stack-based bytecode interpreter with call frame support.
@@ -185,6 +186,8 @@ pub struct Vm {
     /// Number of JIT bailouts (all reasons). Helps detect wasteful JIT entries
     /// where a function always bails (e.g., always receives non-Smi args).
     pub jit_bailout_count: u64,
+    /// Pre-allocated string Values for typeof results (indexed by TYPEOF_* constants).
+    pub typeof_strings: [Value; 6],
     last_locals: Vec<Value>,
     pub eval_fn: UnsafeCell<Option<EvalFn>>,
     /// Reference to Array.prototype for setting on newly created arrays.
@@ -210,7 +213,8 @@ impl Vm {
             jit_helpers: JitHelpers {
                 lexical_helper: 0,
                 bailout_helper: 0,
-                _reserved: [0; 6],
+                typeof_helper: 0,
+                _reserved: [0; 5],
             },
             jit_stack_base: 0,
             jit_bailout: JitBailoutState::default(),
@@ -235,6 +239,7 @@ impl Vm {
             cached_jit_entries: HashMap::new(),
             jit_entry_count: 0,
             jit_bailout_count: 0,
+            typeof_strings: [Value::undefined(); 6],
             last_locals: Vec::new(),
             eval_fn: UnsafeCell::new(None),
             array_prototype: Value::undefined(),
@@ -2753,6 +2758,8 @@ impl Vm {
                                                 rune_jit_lexical_helper as *const () as usize;
                                             self.jit_helpers.bailout_helper =
                                                 rune_jit_bailout_helper as *const () as usize;
+                                            self.jit_helpers.typeof_helper =
+                                                rune_jit_typeof_helper as *const () as usize;
                                             // Clear pending flag before entering JIT; the bailout
                                             // helper sets it if a bailout occurs (cannot use
                                             // bc_pc != 0 as sentinel — MakeArgumentsArray at PC 0
@@ -4176,6 +4183,46 @@ pub extern "C" fn rune_jit_bailout_helper(
         reason: rune_jit_baseline::BailoutReason::BailOnEntry,
     };
     0
+}
+
+/// Indices into Vm::typeof_strings for each typeof result.
+const TYPEOF_NUMBER: usize = 0;
+const TYPEOF_STRING: usize = 1;
+const TYPEOF_BOOLEAN: usize = 2;
+const TYPEOF_UNDEFINED: usize = 3;
+const TYPEOF_OBJECT: usize = 4;
+const TYPEOF_FUNCTION: usize = 5;
+
+/// JIT callout for `typeof` operator.
+///
+/// Takes a raw Value, returns the pre-allocated string Value corresponding
+/// to the ECMAScript `typeof` result. Reads from `Vm::typeof_strings`.
+///
+/// # Safety
+///
+/// `vm_ptr` must be a valid pointer to a `Vm`. `value_raw` is a raw Value u64.
+pub extern "C" fn rune_jit_typeof_helper(vm_ptr: *mut u8, value_raw: u64) -> u64 {
+    let vm = unsafe { &*(vm_ptr as *mut Vm) };
+    let val = Value::from_raw(value_raw);
+    let idx = if val.is_undefined() {
+        TYPEOF_UNDEFINED
+    } else if val.is_null() {
+        TYPEOF_OBJECT
+    } else if val.is_boolean() {
+        TYPEOF_BOOLEAN
+    } else if val.is_smi() {
+        TYPEOF_NUMBER
+    } else {
+        let ptr = val.raw() as *const GcHeader;
+        let tag = unsafe { (*ptr).tag() };
+        match tag {
+            TAG_STRING => TYPEOF_STRING,
+            TAG_FUNC => TYPEOF_FUNCTION,
+            TAG_FLOAT64 => TYPEOF_NUMBER,
+            _ => TYPEOF_OBJECT,
+        }
+    };
+    vm.typeof_strings[idx].raw()
 }
 
 #[cfg(test)]

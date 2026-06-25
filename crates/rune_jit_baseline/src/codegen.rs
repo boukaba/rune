@@ -1063,24 +1063,20 @@ impl CodeGen {
                     self.emit_jit_stack_push(); // push result from rax
                 }
                 Opcode::TypeOf => {
-                    // PR1: bail on entry — always deopt to interpreter.
-                    self.record_bailout_point(bc_idx, BailoutReason::BailOnEntry);
-                    // rdi = r15 (vm_ptr), rsi = bc_pc, rdx = rbx (jit_sp)
-                    self.mem.emit_mov_r64_rm64(7, 15);       // rdi = r15
-                    self.mem.emit_mov_r64_imm64(6, bc_idx as u64); // rsi = bc_pc
-                    self.mem.emit_mov_r64_rm64(2, 3);        // rdx = rbx
-                    // Load bailout_helper from [r15 + 520] into rax
+                    // Pop value from JIT stack
+                    self.emit_jit_stack_pop();                  // rax = value
+                    // rdi = r15 (vm_ptr)
+                    self.mem.emit_mov_r64_rm64(7, 15);
+                    // rsi = rax (value_raw)
+                    self.mem.emit_mov_r64_rm64(6, 0);
+                    // Load typeof_helper from [r15 + 528] into rax
                     self.mem.emit_rex_w();
-                    self.mem.emit_byte(0x8B);                // MOV rax, [r15 + 520]
-                    self.mem.emit_byte(0x87);                // mod=10, reg=0(rax), r/m=7(r15)
-                    self.mem.emit_u32(520);                  // disp32
-                    self.mem.emit_call_r64(0);               // call rax
-                    // Push a safe return value (undefined) before epilogue.
-                    self.mem.emit_rex_w();
-                    self.mem.emit_byte(0x31);
-                    self.mem.emit_byte(0xC0);                // xor eax, eax
+                    self.mem.emit_byte(0x8B);                   // MOV rax, [r15 + 528]
+                    self.mem.emit_byte(0x87);                   // mod=10, reg=0(rax), r/m=7(r15)
+                    self.mem.emit_u32(528);                     // disp32
+                    self.mem.emit_call_r64(0);                  // call rax
+                    // push result (string Value in rax)
                     self.emit_jit_stack_push();
-                    self.emit_epilogue();
                 }
                 Opcode::MakeArgumentsArray => {
                     // Phase B: bail on entry — always deopt to interpreter.

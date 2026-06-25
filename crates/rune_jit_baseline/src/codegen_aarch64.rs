@@ -33,7 +33,8 @@ pub const JIT_STACK_SIZE: usize = 64;
 pub struct JitHelpers {
     pub lexical_helper: usize,
     pub bailout_helper: usize,
-    _reserved: [usize; 6],
+    pub typeof_helper: usize,
+    _reserved: [usize; 5],
 }
 
 /// VM state visible to the trace compiler. Must be placed at offset 0 from
@@ -1143,18 +1144,13 @@ impl Aarch64CodeGen {
                     self.push();
                 }
                 Opcode::TypeOf => {
-                    // PR1: bail on entry — always deopt to interpreter.
-                    self.record_bailout_point(bc_idx, BailoutReason::BailOnEntry);
-                    // x0 = vm_ptr, x1 = bc_pc, x2 = current_jit_sp
-                    mov_reg(&mut self.mem, 2, JIT_STACK_REG);
-                    mov_imm64(&mut self.mem, 1, bc_idx as u64);
-                    mov_reg(&mut self.mem, 0, VM_REG);
-                    ldr_off(&mut self.mem, 15, VM_REG, 520); // bailout_helper
-                    emit(&mut self.mem, 0xD63F01E0);          // BLR x15
-                    // Push a safe return value (undefined) before epilogue.
-                    movz(&mut self.mem, 0, 0);
-                    self.push();
-                    self.emit_epilogue();
+                    // Pop value from JIT stack
+                    self.pop();                                  // x0 = value
+                    mov_reg(&mut self.mem, 1, 0);                // x1 = value_raw (second arg)
+                    mov_reg(&mut self.mem, 0, VM_REG);           // x0 = vm_ptr (first arg)
+                    ldr_off(&mut self.mem, 15, VM_REG, 528);     // typeof_helper at offset 528
+                    emit(&mut self.mem, 0xD63F01E0);             // BLR x15
+                    self.push();                                 // push result (x0)
                 }
                 Opcode::MakeArgumentsArray => {
                     // Phase B: bail on entry — always deopt to interpreter.
@@ -1373,7 +1369,8 @@ mod tests {
             jit_helpers: JitHelpers {
                 lexical_helper: 0,
                 bailout_helper: test_bailout_stub as usize,
-                _reserved: [0; 6],
+                typeof_helper: 0,
+                _reserved: [0; 5],
             },
             jit_stack_base: 0,
         });
@@ -1993,7 +1990,8 @@ mod tests {
             jit_helpers: JitHelpers {
                 lexical_helper: 0,
                 bailout_helper: 0,
-                _reserved: [0; 6],
+                typeof_helper: 0,
+                _reserved: [0; 5],
             },
             jit_stack_base: 0,
         };

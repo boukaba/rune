@@ -1826,6 +1826,46 @@ fn test_jit_no_bail_on_simple_fn() {
     );
 }
 
+#[test]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn test_jit_typeof_native() {
+    // TypeOf is now native — the JIT calls typeof_helper instead of bailing.
+    // This test verifies all typeof results and that the JIT enters + no bail.
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(
+        r#"
+        function check(x) {
+            var a = 1;
+            var b = 2;
+            var c = 3;
+            return typeof x;
+        }
+        var r = "";
+        for (var i = 0; i < 100; i++) {
+            r = check(42);
+            r = check("hello");
+            r = check(undefined);
+            r = check(null);
+            r = check(true);
+            r = check(function(){});
+            r = check(3.5);
+        }
+        r
+    "#,
+    )
+    .unwrap();
+    // Result should be a heap object (typeof returns a string)
+    assert!(r.is_heap_object(), "typeof result should be a string value");
+    assert!(
+        ctx.vm().jit_entry_count > 0,
+        "JIT must have entered for check()"
+    );
+    assert_eq!(
+        ctx.vm().jit_bailout_count, 0,
+        "TypeOf should be native — no bailout"
+    );
+}
+
 mod instanceof_tests {
     use rune_embed::Context;
 

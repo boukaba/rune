@@ -46,6 +46,15 @@ impl Context {
         }
         // Build constructor wrappers (Object.create, etc.)
         ctx.vm.init_builtin_wrappers(&mut ctx.gc);
+        // Pre-allocate typeof result strings for JIT typeof helper.
+        ctx.vm.typeof_strings = [
+            ctx.allocate_string("number"),
+            ctx.allocate_string("string"),
+            ctx.allocate_string("boolean"),
+            ctx.allocate_string("undefined"),
+            ctx.allocate_string("object"),
+            ctx.allocate_string("function"),
+        ];
         ctx
     }
 

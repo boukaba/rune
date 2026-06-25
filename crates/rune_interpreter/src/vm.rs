@@ -2069,11 +2069,29 @@ impl Vm {
                                 let gc_ptr = gc as *mut SemiSpace as *mut u8;
                                 let _ = self.execute_trace(fi, compiled, gc_ptr);
                             }
-                            self.frames[fi].pc = self
-                                .loop_traces
-                                .get(&target)
-                                .map(|t| t.exit_pc)
-                                .unwrap_or(pc + 1);
+                            if self.jit_bailout.pending {
+                                // Trace bailed mid-loop (e.g. overflow guard).
+                                // Restore interpreter state from the saved snapshot
+                                // and resume at the bailout PC.
+                                let bailout_pc = self.jit_bailout.bc_pc;
+                                self.jit_bailout.pending = false;
+                                self.jit_bailout.bc_pc = 0;
+                                let snapshot = std::mem::take(
+                                    &mut self.jit_bailout.stack_snapshot,
+                                );
+                                self.frames[fi].pc = bailout_pc;
+                                self.stack.truncate(self.frames[fi].stack_base);
+                                for val in snapshot {
+                                    self.push(Value::from_raw(val));
+                                }
+                            } else {
+                                // Trace completed normally (loop condition false).
+                                self.frames[fi].pc = self
+                                    .loop_traces
+                                    .get(&target)
+                                    .map(|t| t.exit_pc)
+                                    .unwrap_or(pc + 1);
+                            }
                             continue;
                         }
                     }

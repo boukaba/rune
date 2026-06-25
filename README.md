@@ -86,7 +86,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 
 **AFPC cache:** Compile (parse+emit) 355µs → cache load 26µs (**13.5× faster**). End-to-end latency is execution-bound — cache eliminates parse/emit entirely but hot loops still run in interpreter.
 
-Hardware: MacBook Pro M4 Pro (aarch64). JIT coverage: 47 Smi-and-float opcodes (float64 → Smi when in range) (floats, calls not yet JIT-compiled).
+Hardware: MacBook Pro M4 Pro (aarch64). JIT coverage: 48 Smi-and-float opcodes (float64 → Smi when in range) (floats, calls not yet JIT-compiled). JIT bailout mechanism (PR1) shipped: BailoutPoint/BailoutTable/CompiledFunction, rune_jit_bailout_helper, jit_stack_base prologue, TypeOf bail-on-entry.
 
 ### SIDT Architecture
 

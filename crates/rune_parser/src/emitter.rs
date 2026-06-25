@@ -168,8 +168,8 @@ impl Emitter {
                 }
             }
         }
-        // For non-arrow functions: materialize `arguments` object
-        if !func.is_arrow {
+        // For non-arrow functions: materialize `arguments` object only when referenced
+        if !func.is_arrow && uses_arguments_stmt(&func.body) {
             sub.locals.push("arguments".to_string());
             sub.emit(Opcode::MakeArgumentsArray, vec![]);
             if let Some(idx) = sub.local_index("arguments") {
@@ -1736,6 +1736,108 @@ fn collect_var_names_stmt(stmt: &Stmt, names: &mut Vec<String>) {
             }
         }
         _ => {}
+    }
+}
+
+/// Check if a statement tree references the `arguments` identifier, skipping
+/// nested non-arrow function declarations (which have their own `arguments`).
+fn uses_arguments_stmt(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Expr(expr, _) => uses_arguments_expr(expr),
+        Stmt::Block(stmts, _) => stmts.iter().any(uses_arguments_stmt),
+        Stmt::If(cond, then, else_, _) => {
+            uses_arguments_expr(cond)
+                || uses_arguments_stmt(then)
+                || else_.as_deref().is_some_and(uses_arguments_stmt)
+        }
+        Stmt::While(cond, body, _) => uses_arguments_expr(cond) || uses_arguments_stmt(body),
+        Stmt::DoWhile(cond, body, _) => uses_arguments_expr(cond) || uses_arguments_stmt(body),
+        Stmt::For(init, cond, update, body, _) => {
+            let cond_uses = cond.as_ref().map(|e| uses_arguments_expr(e)).unwrap_or(false);
+            let update_uses = update.as_ref().map(|e| uses_arguments_expr(e)).unwrap_or(false);
+            (init.as_deref().is_some_and(uses_arguments_stmt))
+                || cond_uses
+                || update_uses
+                || uses_arguments_stmt(body)
+        }
+        Stmt::ForIn(lhs, rhs, body, _) => {
+            uses_arguments_expr(lhs) || uses_arguments_expr(rhs) || uses_arguments_stmt(body)
+        }
+        Stmt::Var(_, decls, _) => decls
+            .iter()
+            .any(|d| d.init.as_ref().is_some_and(|e| uses_arguments_expr(e))),
+        Stmt::Return(expr, _) => expr.as_ref().map(|e| uses_arguments_expr(e)).unwrap_or(false),
+        Stmt::Throw(expr, _) => uses_arguments_expr(expr),
+        Stmt::Break(_, _) | Stmt::Continue(_, _) => false,
+        Stmt::Try(body, catch, finally, _) => {
+            body.iter().any(uses_arguments_stmt)
+                || catch
+                    .as_ref()
+                    .is_some_and(|c| c.body.iter().any(uses_arguments_stmt))
+                || finally
+                    .as_ref()
+                    .is_some_and(|stmts| stmts.iter().any(uses_arguments_stmt))
+        }
+        Stmt::Switch(discr, cases, default, _) => {
+            uses_arguments_expr(discr)
+                || cases
+                    .iter()
+                    .any(|c| uses_arguments_expr(&c.test) || c.body.iter().any(uses_arguments_stmt))
+                || default
+                    .as_ref()
+                    .is_some_and(|stmts| stmts.iter().any(uses_arguments_stmt))
+        }
+        Stmt::Function(fn_node, _) => {
+            // Non-arrow functions have their own `arguments` — don't scan inside.
+            // Arrow functions inherit `arguments` from the enclosing scope.
+            if fn_node.is_arrow {
+                uses_arguments_stmt(&fn_node.body)
+            } else {
+                false
+            }
+        }
+        Stmt::Empty(_) => false,
+    }
+}
+
+/// Check if an expression references the `arguments` identifier.
+fn uses_arguments_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Identifier(name, _) => name.as_ref() == "arguments",
+        Expr::Number(_, _)
+        | Expr::String(_, _)
+        | Expr::Boolean(_, _)
+        | Expr::Null(_)
+        | Expr::Undefined(_)
+        | Expr::This(_) => false,
+        Expr::Array(elements, _) => elements.iter().any(|e| uses_arguments_expr(&e.expr)),
+        Expr::Object(props, _) => props.iter().any(|p| uses_arguments_expr(&p.value)),
+        Expr::Unary(_, expr, _) => uses_arguments_expr(expr),
+        Expr::Binary(_, left, right, _) => uses_arguments_expr(left) || uses_arguments_expr(right),
+        Expr::Conditional(cond, then, else_, _) => {
+            uses_arguments_expr(cond) || uses_arguments_expr(then) || uses_arguments_expr(else_)
+        }
+        Expr::Call(callee, args, _) => {
+            uses_arguments_expr(callee) || args.iter().any(|a| uses_arguments_expr(&a.expr))
+        }
+        Expr::New(callee, args, _) => {
+            uses_arguments_expr(callee) || args.iter().any(|a| uses_arguments_expr(&a.expr))
+        }
+        Expr::Member(obj, prop, _, _) => uses_arguments_expr(obj) || uses_arguments_expr(prop),
+        Expr::Assign(lhs, rhs, _) => uses_arguments_expr(lhs) || uses_arguments_expr(rhs),
+        Expr::CompoundAssign(_, lhs, rhs, _) => uses_arguments_expr(lhs) || uses_arguments_expr(rhs),
+        Expr::Function(fn_node, _) => {
+            // Non-arrow function expressions have their own `arguments`.
+            // Arrow function expressions inherit `arguments` from enclosing scope.
+            if fn_node.is_arrow {
+                uses_arguments_stmt(&fn_node.body)
+            } else {
+                false
+            }
+        }
+        Expr::Template { exprs, .. } => exprs.iter().any(uses_arguments_expr),
+        Expr::Update(_, expr, _, _) => uses_arguments_expr(expr),
+        Expr::Yield(expr, _) => expr.as_ref().is_some_and(|e| uses_arguments_expr(e)),
     }
 }
 

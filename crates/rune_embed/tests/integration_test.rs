@@ -1736,8 +1736,8 @@ fn test_jit_bailout_on_float() {
 #[test]
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn test_jit_non_smi_args_bail() {
-    // Arrow function — no MakeArgumentsArray. JIT enters, first consuming
-    // opcode (Add) triggers NonSmiInput bailout, interpreter resumes.
+    // Non-arrow function with float arg. JIT enters, bails at MakeArgumentsArray
+    // (bail-on-entry at PC 0). Interpreter resumes and handles the float.
     let mut ctx = Context::new_small();
     let r = ctx
         .eval(
@@ -1775,6 +1775,38 @@ fn test_jit_bailout_count() {
     let mut ctx = Context::new_small();
     ctx.eval(
         r#"
+        // Uses `arguments` — MakeArgumentsArray still emitted → JIT bails on entry.
+        function useArgs() { return arguments; }
+        var r;
+        for (var i = 0; i < 100; i++) {
+            r = useArgs(1, 2, 3);
+        }
+        r
+    "#,
+    )
+    .unwrap();
+    assert!(
+        ctx.vm().jit_entry_count > 0,
+        "JIT must have entered"
+    );
+    assert!(
+        ctx.vm().jit_bailout_count > 0,
+        "JIT must have bailed at least once"
+    );
+    assert!(
+        ctx.vm().jit_bailout_count <= ctx.vm().jit_entry_count,
+        "Bailouts should not exceed entries"
+    );
+}
+
+#[test]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn test_jit_no_bail_on_simple_fn() {
+    // A function that doesn't use `arguments` no longer has MakeArgumentsArray.
+    // The JIT should run end-to-end without bailing.
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
         function add(a, b) { return a + b; }
         var sum = 0;
         for (var i = 0; i < 100; i++) {
@@ -1788,13 +1820,9 @@ fn test_jit_bailout_count() {
         ctx.vm().jit_entry_count > 0,
         "JIT must have entered"
     );
-    assert!(
-        ctx.vm().jit_bailout_count > 0,
-        "JIT must have bailed (MakeArgumentsArray bail-on-entry)"
-    );
-    assert!(
-        ctx.vm().jit_bailout_count <= ctx.vm().jit_entry_count,
-        "Bailouts should not exceed entries"
+    assert_eq!(
+        ctx.vm().jit_bailout_count, 0,
+        "Simple add() should not bail (no MakeArgumentsArray)"
     );
 }
 

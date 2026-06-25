@@ -297,6 +297,63 @@ impl Aarch64CodeGen {
         });
     }
 
+    /// Check if the Smi-encoded value in x0 fits in i31 range.
+    /// On overflow: restore stack from saved registers, record bailout, call helper, epilogue.
+    /// On no overflow: fall through with x0 unchanged.
+    fn emit_smi_overflow_bailout_or_continue(
+        &mut self,
+        bc_idx: usize,
+        saved_a: Option<u32>,
+        saved_b: Option<u32>,
+    ) {
+        const MAX_I31: u64 = 0x3FFFFFFF;           // 2^30 − 1
+        const MIN_I31: u64 = 0xFFFF_FFFF_C000_0000; // −2^30
+
+        emit(&mut self.mem, 0x9341FC02);            // ASR x2, x0, #1 (untag)
+        mov_imm64(&mut self.mem, 3, MAX_I31);
+        cmp_reg(&mut self.mem, 2, 3);               // CMP x2, x3
+        let patch_jg = self.mem.current_offset();
+        emit(&mut self.mem, 0x5400000C);             // B.GT +0
+
+        mov_imm64(&mut self.mem, 3, MIN_I31);
+        cmp_reg(&mut self.mem, 2, 3);               // CMP x2, x3
+        let patch_jl = self.mem.current_offset();
+        emit(&mut self.mem, 0x5400000B);             // B.LT +0
+
+        // No overflow — skip bailout
+        let patch_done = self.mem.current_offset();
+        emit(&mut self.mem, 0x14000000);             // B +0
+
+        // Overflow: restore stack, record bailout, call helper, epilogue
+        let ov_label = self.mem.current_offset();
+        if let Some(reg) = saved_a {
+            mov_reg(&mut self.mem, 0, reg);
+            self.push();
+        }
+        if let Some(reg) = saved_b {
+            mov_reg(&mut self.mem, 0, reg);
+            self.push();
+        }
+        self.record_bailout_point(bc_idx, BailoutReason::Overflow);
+        mov_reg(&mut self.mem, 2, JIT_STACK_REG);
+        mov_imm64(&mut self.mem, 1, bc_idx as u64);
+        mov_reg(&mut self.mem, 0, VM_REG);
+        ldr_off(&mut self.mem, 15, VM_REG, 520);
+        emit(&mut self.mem, 0xD63F01E0);             // BLR x15
+        movz(&mut self.mem, 0, 0);
+        self.push();
+        self.emit_epilogue();
+
+        // Patch forward jumps
+        let done_label = self.mem.current_offset();
+        let d_jg = ((ov_label as i64 - patch_jg as i64) / 4) as u32;
+        self.mem.patch_u32(patch_jg, 0x5400000C | ((d_jg & 0x7FFFF) << 5));
+        let d_jl = ((ov_label as i64 - patch_jl as i64) / 4) as u32;
+        self.mem.patch_u32(patch_jl, 0x5400000B | ((d_jl & 0x7FFFF) << 5));
+        let d_done = ((done_label as i64 - patch_done as i64) / 4) as u32;
+        self.mem.patch_u32(patch_done, 0x14000000 | (d_done & 0x03FF_FFFF));
+    }
+
     fn emit_prologue(&mut self) {
         push_callee_saved(&mut self.mem);
         mov_reg(&mut self.mem, VM_REG, 0);
@@ -413,29 +470,38 @@ impl Aarch64CodeGen {
                 }
                 Opcode::Add => {
                     self.pop(); // x0 = b
+                    mov_reg(&mut self.mem, 9, 0); // x9 = b (save)
                     mov_reg(&mut self.mem, 1, 0); // x1 = b
                     self.pop(); // x0 = a
+                    mov_reg(&mut self.mem, 8, 0); // x8 = a (save)
                     sub_imm(&mut self.mem, 0, 0, 1); // untag a
-                    add_reg(&mut self.mem, 0, 0, 1); // x0 = a + b
+                    add_reg(&mut self.mem, 0, 0, 1); // x0 = Smi(a+b)
+                    self.emit_smi_overflow_bailout_or_continue(bc_idx, Some(8), Some(9));
                     self.push();
                 }
                 Opcode::Sub => {
-                    self.pop();
+                    self.pop(); // x0 = b
+                    mov_reg(&mut self.mem, 9, 0); // x9 = b
                     mov_reg(&mut self.mem, 1, 0);
-                    self.pop();
+                    self.pop(); // x0 = a
+                    mov_reg(&mut self.mem, 8, 0); // x8 = a
                     sub_reg(&mut self.mem, 0, 0, 1);
                     add_imm(&mut self.mem, 0, 0, 1); // retag
+                    self.emit_smi_overflow_bailout_or_continue(bc_idx, Some(8), Some(9));
                     self.push();
                 }
                 Opcode::Mul => {
-                    self.pop();
+                    self.pop(); // x0 = b
+                    mov_reg(&mut self.mem, 9, 0); // x9 = b
                     mov_reg(&mut self.mem, 1, 0);
-                    self.pop();
+                    self.pop(); // x0 = a
+                    mov_reg(&mut self.mem, 8, 0); // x8 = a
                     emit(&mut self.mem, 0x9341FC00); // ASR x0, x0, #1
                     emit(&mut self.mem, 0x9341FC21); // ASR x1, x1, #1
                     emit(&mut self.mem, 0x9B017C00); // MUL x0, x0, x1
                     emit(&mut self.mem, 0xD37FF800); // LSL x0, x0, #1
                     add_imm(&mut self.mem, 0, 0, 1);
+                    self.emit_smi_overflow_bailout_or_continue(bc_idx, Some(8), Some(9));
                     self.push();
                 }
                 Opcode::Lt => {
@@ -494,9 +560,11 @@ impl Aarch64CodeGen {
                     self.push();
                 }
                 Opcode::Shl => {
-                    self.pop();
+                    self.pop(); // x0 = b
+                    mov_reg(&mut self.mem, 9, 0); // x9 = b
                     mov_reg(&mut self.mem, 1, 0);
-                    self.pop();
+                    self.pop(); // x0 = a
+                    mov_reg(&mut self.mem, 8, 0); // x8 = a
                     // Untag both: ASR #1 decodes Smi → int32
                     emit(&mut self.mem, 0x9341FC00); // ASR x0, x0, #1
                     emit(&mut self.mem, 0x9341FC21); // ASR x1, x1, #1
@@ -504,6 +572,7 @@ impl Aarch64CodeGen {
                     // Retag: LSL #1; ORR #1
                     emit(&mut self.mem, 0xD37FF800);
                     orr_imm1(&mut self.mem, 0, 0);
+                    self.emit_smi_overflow_bailout_or_continue(bc_idx, Some(8), Some(9));
                     self.push();
                 }
                 Opcode::Shr => {
@@ -893,10 +962,11 @@ impl Aarch64CodeGen {
                 }
                 Opcode::Neg => {
                     // Smi(-n) = -(2n+1) + 2 = -2n + 1 = Smi(-n)
-                    // neg x0; add x0, #2
-                    self.pop();
+                    self.pop(); // x0 = value
+                    mov_reg(&mut self.mem, 8, 0); // x8 = value (save)
                     sub_reg(&mut self.mem, 0, 31, 0); // SUB x0, XZR, x0 (= NEG)
                     add_imm(&mut self.mem, 0, 0, 2);
+                    self.emit_smi_overflow_bailout_or_continue(bc_idx, Some(8), None);
                     self.push();
                 }
                 Opcode::Not => {
@@ -1208,6 +1278,12 @@ fn compile_op(mem: &mut ExecutableMemory, opcode: Opcode, operands: &[i64]) {
 mod tests {
     use super::*;
 
+    /// Stub bailout helper for tests that don't need real bailout processing.
+    /// Prevents SIGSEGV when the overflow guard fires.
+    extern "C" fn test_bailout_stub(_vm: *mut u8, _bc_pc: usize, _jit_sp: *mut u64) -> u64 {
+        0
+    }
+
     /// Allocate a `JitVmState` on the heap and return a raw VM pointer.
     /// The trace compiler expects `jit_stack` to live at offset 0 from this
     /// pointer. Tests intentionally leak this small allocation.
@@ -1216,7 +1292,7 @@ mod tests {
             jit_stack: [0; JIT_STACK_SIZE],
             jit_helpers: JitHelpers {
                 lexical_helper: 0,
-                bailout_helper: 0,
+                bailout_helper: test_bailout_stub as usize,
                 _reserved: [0; 6],
             },
             jit_stack_base: 0,
@@ -1574,9 +1650,9 @@ mod tests {
     }
 
     #[test]
-    fn test_aarch64_codegen_large_sum_65537_iterations() {
+    fn test_aarch64_codegen_large_sum_1000_iterations() {
         use rune_bytecode::opcode::{BytecodeProgram, Instruction};
-        // Sum 0..65536 = 2,147,516,416 → Smi = 4,295,032,833 (> 2^32).
+        // Sum 0..1000 = 499,500 — well within i31 range (max = 2^30 − 1 = 1,073,741,823).
         let prog = BytecodeProgram::new(
             vec![
                 Instruction::new(Opcode::LoadSmi, vec![0]),
@@ -1586,7 +1662,7 @@ mod tests {
                 Instruction::new(Opcode::StoreLocal, vec![3]),
                 Instruction::new(Opcode::Pop, vec![]),
                 Instruction::new(Opcode::LoadLocal, vec![3]),
-                Instruction::new(Opcode::LoadSmi, vec![65537]),
+                Instruction::new(Opcode::LoadSmi, vec![1000]),
                 Instruction::new(Opcode::Lt, vec![]),
                 Instruction::new(Opcode::JumpIfFalse, vec![18]),
                 Instruction::new(Opcode::LoadLocal, vec![2]),
@@ -1610,8 +1686,8 @@ mod tests {
         let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
             unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let r = unsafe { func(vm, std::ptr::null_mut(), locals.as_mut_ptr()) };
-        let expected = (2147516416u64 << 1) | 1;
-        assert_eq!(r, expected, "65537 iters: got {}, expected {}", r, expected);
+        let expected = (499500u64 << 1) | 1;
+        assert_eq!(r, expected, "1000 iters: got {}, expected {}", r, expected);
     }
 
     #[test]
@@ -1696,8 +1772,8 @@ mod tests {
     #[test]
     fn test_aarch64_codegen_large_sum_loop_trace_indices() {
         use rune_bytecode::opcode::{BytecodeProgram, Instruction};
-        // Same loop as trace-level, but locals at indices [2] and [3] (matching
-        // the recorded trace). Uses 4-element locals vec.
+        // Sum 0..999 = 499,500 — well within i31 range.
+        // Uses 4-element locals vec.
         let prog = BytecodeProgram::new(
             vec![
                 Instruction::new(Opcode::LoadSmi, vec![0]),
@@ -1707,7 +1783,7 @@ mod tests {
                 Instruction::new(Opcode::StoreLocal, vec![3]),
                 Instruction::new(Opcode::Pop, vec![]),
                 Instruction::new(Opcode::LoadLocal, vec![3]),
-                Instruction::new(Opcode::LoadSmi, vec![70000]),
+                Instruction::new(Opcode::LoadSmi, vec![1000]),
                 Instruction::new(Opcode::Lt, vec![]),
                 Instruction::new(Opcode::JumpIfFalse, vec![18]),
                 Instruction::new(Opcode::LoadLocal, vec![2]),
@@ -1727,20 +1803,19 @@ mod tests {
         let compiled = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
         compiled.mem.make_executable();
         let vm = jit_vm_ptr();
-        // 4-element locals: [0]=unused, [1]=unused, [2]=s, [3]=i
         let mut locals: Vec<u64> = vec![0, 0, 0, 0];
         let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
             unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let r = unsafe { func(vm, std::ptr::null_mut(), locals.as_mut_ptr()) };
-        let expected = (2449965000u64 << 1) | 1;
+        let expected = (499500u64 << 1) | 1;
         assert_eq!(r, expected, "got {}, expected {}", r, expected);
     }
 
     #[test]
     fn test_aarch64_codegen_large_sum_loop() {
         use rune_bytecode::opcode::{BytecodeProgram, Instruction};
-        // Sum 0..70000 = 2,449,965,000 → Smi = 4,899,930,001 (> 2^32).
-        // This exercises arithmetic across the 32-bit boundary.
+        // Sum 0..999 = 499,500 — well within i31 range.
+        // Uses 2-element locals vec.
         let prog = BytecodeProgram::new(
             vec![
                 Instruction::new(Opcode::LoadSmi, vec![0]),
@@ -1750,7 +1825,7 @@ mod tests {
                 Instruction::new(Opcode::StoreLocal, vec![1]),
                 Instruction::new(Opcode::Pop, vec![]),
                 Instruction::new(Opcode::LoadLocal, vec![1]),
-                Instruction::new(Opcode::LoadSmi, vec![70000]),
+                Instruction::new(Opcode::LoadSmi, vec![1000]),
                 Instruction::new(Opcode::Lt, vec![]),
                 Instruction::new(Opcode::JumpIfFalse, vec![18]),
                 Instruction::new(Opcode::LoadLocal, vec![0]),
@@ -1774,8 +1849,7 @@ mod tests {
         let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
             unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let r = unsafe { func(vm, std::ptr::null_mut(), locals.as_mut_ptr()) };
-        // sum 0..69999 = 2,449,965,000 → Smi = 4,899,930,001
-        let expected = (2449965000u64 << 1) | 1;
+        let expected = (499500u64 << 1) | 1;
         assert_eq!(r, expected, "got {}, expected {}", r, expected);
     }
 
@@ -1862,5 +1936,124 @@ mod tests {
         let result = unsafe { func(vm_ptr, std::ptr::null_mut(), std::ptr::null_mut()) };
         assert_eq!(result, slot_value);
         unsafe { drop(Box::from_raw(shape_ptr)); }
+    }
+
+    // -----------------------------------------------------------------------
+    // Overflow guard tests (aarch64)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_aarch64_add_overflow() {
+        use rune_bytecode::opcode::{BytecodeProgram, Instruction};
+        // (2^30 − 1) + 1 = 2^30 → exceeds i31 → bailout
+        let prog = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadSmi, vec![1073741823]),
+                Instruction::new(Opcode::LoadSmi, vec![1]),
+                Instruction::new(Opcode::Add, vec![]),
+                Instruction::new(Opcode::Return, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        let compiled = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
+        let vm = jit_vm_ptr();
+        let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
+            unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
+        let result = unsafe { func(vm, std::ptr::null_mut(), std::ptr::null_mut()) };
+        // Overflow → bailout → returns undefined = 0
+        assert_eq!(result, 0, "Add overflow: expected 0 (bailout), got {}", result);
+    }
+
+    #[test]
+    fn test_aarch64_sub_overflow() {
+        use rune_bytecode::opcode::{BytecodeProgram, Instruction};
+        // −2^30 − 1 = −(2^30+1) < −2^30 → underflow → bailout
+        let prog = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadSmi, vec![-1073741824]),
+                Instruction::new(Opcode::LoadSmi, vec![1]),
+                Instruction::new(Opcode::Sub, vec![]),
+                Instruction::new(Opcode::Return, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        let compiled = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
+        let vm = jit_vm_ptr();
+        let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
+            unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
+        let result = unsafe { func(vm, std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert_eq!(result, 0, "Sub underflow: expected 0 (bailout), got {}", result);
+    }
+
+    #[test]
+    fn test_aarch64_mul_overflow() {
+        use rune_bytecode::opcode::{BytecodeProgram, Instruction};
+        // 2^16 × 2^16 = 2^32 > 2^30−1 → overflow → bailout
+        let prog = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadSmi, vec![65536]),
+                Instruction::new(Opcode::LoadSmi, vec![65536]),
+                Instruction::new(Opcode::Mul, vec![]),
+                Instruction::new(Opcode::Return, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        let compiled = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
+        let vm = jit_vm_ptr();
+        let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
+            unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
+        let result = unsafe { func(vm, std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert_eq!(result, 0, "Mul overflow: expected 0 (bailout), got {}", result);
+    }
+
+    #[test]
+    fn test_aarch64_neg_overflow() {
+        use rune_bytecode::opcode::{BytecodeProgram, Instruction};
+        // −(−2^30) = 2^30 > 2^30−1 → overflow → bailout
+        let prog = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadSmi, vec![-1073741824]),
+                Instruction::new(Opcode::Neg, vec![]),
+                Instruction::new(Opcode::Return, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        let compiled = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
+        let vm = jit_vm_ptr();
+        let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
+            unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
+        let result = unsafe { func(vm, std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert_eq!(result, 0, "Neg overflow: expected 0 (bailout), got {}", result);
+    }
+
+    #[test]
+    fn test_aarch64_shl_overflow() {
+        use rune_bytecode::opcode::{BytecodeProgram, Instruction};
+        // 1 << 31 = 2^31 > 2^30−1 → overflow → bailout
+        let prog = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadSmi, vec![1]),
+                Instruction::new(Opcode::LoadSmi, vec![31]),
+                Instruction::new(Opcode::Shl, vec![]),
+                Instruction::new(Opcode::Return, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        let compiled = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
+        let vm = jit_vm_ptr();
+        let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
+            unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
+        let result = unsafe { func(vm, std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert_eq!(result, 0, "Shl overflow: expected 0 (bailout), got {}", result);
     }
 }

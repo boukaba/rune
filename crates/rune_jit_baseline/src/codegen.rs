@@ -145,42 +145,106 @@ impl CodeGen {
     }
 
     // -----------------------------------------------------------------------
-    // Smi arithmetic helpers
+    // Smi arithmetic helpers (overflow-guarded)
     // -----------------------------------------------------------------------
+
+    const MAX_I31: i32 = 0x3FFFFFFF;   // 2^30 − 1
+    const MIN_I31_AS_I32: i32 = -1_073_741_824; // −2^30, sign-extends to 0xFFFF_FFFF_C000_0000
+
+    /// Emit the overflow check / bailout sequence for a Smi-encoded value in rax.
+    /// On overflow: pushes r9 then r8 back, records bailout, calls helper, epilogue.
+    /// On no overflow: falls through, rax holds the valid Smi result.
+    fn emit_smi_overflow_bailout_or_continue(
+        &mut self,
+        bc_idx: usize,
+        r9_holds_a: bool,
+        r8_holds_b: bool,
+    ) {
+        // Save result in rcx and untag for comparison
+        self.mem.emit_mov_r64_rm64(1, 0);          // rcx = rax (result)
+        self.mem.emit_sar_r64_1(1);                // rcx >>= 1 (untag)
+        // Check > max
+        self.mem.emit_cmp_r64_imm32(1, Self::MAX_I31);
+        let jg_ov = self.mem.emit_jg_rel32(0);
+        // Check < min
+        self.mem.emit_cmp_r64_imm32(1, Self::MIN_I31_AS_I32);
+        let jl_ov = self.mem.emit_jl_rel32(0);
+        // No overflow — skip bailout
+        let jmp_ok = self.mem.emit_jmp_rel32(0);
+        // Overflow: restore stack, record bailout, call helper, epilogue
+        let ov_label = self.mem.current_offset();
+        if r9_holds_a {
+            self.mem.emit_mov_r64_rm64(0, 9);      // rax = a (saved in r9)
+            self.emit_jit_stack_push();             // restore a
+        }
+        if r8_holds_b {
+            self.mem.emit_mov_r64_rm64(0, 8);      // rax = b (saved in r8)
+            self.emit_jit_stack_push();             // restore b
+        }
+        self.record_bailout_point(bc_idx, BailoutReason::Overflow);
+        // Call bailout_helper(rdi=r15, rsi=bc_idx, rdx=rbx)
+        self.mem.emit_mov_r64_rm64(7, 15);
+        self.mem.emit_mov_r64_imm64(6, bc_idx as u64);
+        self.mem.emit_mov_r64_rm64(2, 3);
+        self.mem.emit_rex_w();
+        self.mem.emit_byte(0x8B);
+        self.mem.emit_byte(0x87);
+        self.mem.emit_u32(520);
+        self.mem.emit_call_r64(0);
+        self.mem.emit_rex_w();
+        self.mem.emit_byte(0x31);
+        self.mem.emit_byte(0xC0);                  // xor eax, eax
+        self.emit_jit_stack_push();
+        self.emit_epilogue();
+        // Patch jumps
+        let ok_label = self.mem.current_offset();
+        let six: u32 = 6;
+        self.mem.patch_u32(jg_ov, ov_label as u32 - (jg_ov as u32 + six));
+        self.mem.patch_u32(jl_ov, ov_label as u32 - (jl_ov as u32 + six));
+        let five: u32 = 5;
+        self.mem.patch_u32(jmp_ok, ok_label as u32 - (jmp_ok as u32 + five));
+    }
 
     /// Pop two Smis from the JIT stack and add them:
     ///   (a & ~1) + b
-    ///
-    /// Clears the tag bit of `a` before adding `b` so the result tag is correct.
-    fn emit_smi_add(&mut self) {
-        self.emit_jit_stack_pop(); // rax = b
-        self.mem.emit_mov_r64_rm64(1, 0); // rcx = b
-        self.emit_jit_stack_pop(); // rax = a
-        self.mem.emit_and_r64_imm8(0, -2); // rax = a & ~1
-        self.mem.emit_add_r64_r64(0, 1); // rax += rcx
+    fn emit_smi_add(&mut self, bc_idx: usize) {
+        self.emit_jit_stack_pop();                 // rax = b
+        self.mem.emit_mov_r64_rm64(1, 0);          // rcx = b
+        self.emit_jit_stack_pop();                 // rax = a
+        self.mem.emit_mov_r64_rm64(9, 0);          // r9 = a
+        self.mem.emit_mov_r64_rm64(8, 1);          // r8 = b
+        self.mem.emit_and_r64_imm8(0, -2);         // rax = a & ~1
+        self.mem.emit_add_r64_r64(0, 1);           // rax += rcx
+        self.emit_smi_overflow_bailout_or_continue(bc_idx, true, true);
     }
 
     /// Pop two Smis and subtract (a - b):
     ///   (a - b) | 1
-    fn emit_smi_sub(&mut self) {
-        self.emit_jit_stack_pop(); // rax = b
-        self.mem.emit_mov_r64_rm64(1, 0); // rcx = b
-        self.emit_jit_stack_pop(); // rax = a
-        self.mem.emit_sub_r64_r64(0, 1); // rax -= rcx
-        self.mem.emit_or_r64_imm8(0, 1); // rax |= 1
+    fn emit_smi_sub(&mut self, bc_idx: usize) {
+        self.emit_jit_stack_pop();                 // rax = b
+        self.mem.emit_mov_r64_rm64(1, 0);          // rcx = b
+        self.emit_jit_stack_pop();                 // rax = a
+        self.mem.emit_mov_r64_rm64(9, 0);          // r9 = a
+        self.mem.emit_mov_r64_rm64(8, 1);          // r8 = b
+        self.mem.emit_sub_r64_r64(0, 1);           // rax -= rcx
+        self.mem.emit_or_r64_imm8(0, 1);           // rax |= 1
+        self.emit_smi_overflow_bailout_or_continue(bc_idx, true, true);
     }
 
     /// Pop two Smis and multiply (a * b):
     ///   decode → mul → encode
-    fn emit_smi_mul(&mut self) {
-        self.emit_jit_stack_pop(); // rax = b
-        self.mem.emit_mov_r64_rm64(1, 0); // rcx = b
-        self.emit_jit_stack_pop(); // rax = a
-        self.mem.emit_sar_r64_1(0); // rax >>= 1 (a)
-        self.mem.emit_sar_r64_1(1); // rcx >>= 1 (b)
-        self.mem.emit_imul_r64_r64(0, 1); // rax *= rcx
-        self.mem.emit_shl_r64_1(0); // rax <<= 1
-        self.mem.emit_or_r64_imm8(0, 1); // rax |= 1
+    fn emit_smi_mul(&mut self, bc_idx: usize) {
+        self.emit_jit_stack_pop();                 // rax = b
+        self.mem.emit_mov_r64_rm64(1, 0);          // rcx = b
+        self.emit_jit_stack_pop();                 // rax = a
+        self.mem.emit_mov_r64_rm64(9, 0);          // r9 = a
+        self.mem.emit_mov_r64_rm64(8, 1);          // r8 = b
+        self.mem.emit_sar_r64_1(0);                // rax >>= 1 (untag a)
+        self.mem.emit_sar_r64_1(1);                // rcx >>= 1 (untag b)
+        self.mem.emit_imul_r64_r64(0, 1);          // rax *= rcx
+        self.mem.emit_shl_r64_1(0);                // rax <<= 1 (Smi)
+        self.mem.emit_or_r64_imm8(0, 1);           // rax |= 1
+        self.emit_smi_overflow_bailout_or_continue(bc_idx, true, true);
     }
 
     // -----------------------------------------------------------------------
@@ -238,10 +302,12 @@ impl CodeGen {
                 Opcode::Neg => {
                     // Smi(-n) = -(2n+1) + 2
                     self.emit_jit_stack_pop(); // rax = value
+                    self.mem.emit_mov_r64_rm64(9, 0); // r9 = value (save)
                     self.mem.emit_rex_w();
                     self.mem.emit_byte(0xF7);
                     self.mem.emit_byte(0xD8); // neg rax
                     self.mem.emit_add_r64_imm32(0, 2); // add rax, 2
+                    self.emit_smi_overflow_bailout_or_continue(bc_idx, true, false);
                     self.emit_jit_stack_push();
                 }
                 Opcode::Not => {
@@ -448,15 +514,15 @@ impl CodeGen {
                     self.emit_jit_stack_push();
                 }
                 Opcode::Add => {
-                    self.emit_smi_add();
+                    self.emit_smi_add(bc_idx);
                     self.emit_jit_stack_push();
                 }
                 Opcode::Sub => {
-                    self.emit_smi_sub();
+                    self.emit_smi_sub(bc_idx);
                     self.emit_jit_stack_push();
                 }
                 Opcode::Mul => {
-                    self.emit_smi_mul();
+                    self.emit_smi_mul(bc_idx);
                     self.emit_jit_stack_push();
                 }
                 Opcode::Jump => {
@@ -752,17 +818,20 @@ impl CodeGen {
                     self.emit_jit_stack_push();
                 }
                 Opcode::Shl => {
-                    self.emit_jit_stack_pop();
+                    self.emit_jit_stack_pop(); // rax = b
                     self.mem.emit_mov_r64_rm64(1, 0); // rcx = b
                     self.emit_jit_stack_pop(); // rax = a
-                    self.mem.emit_sar_r64_1(0); // sar rax, 1 (untag)
-                    self.mem.emit_sar_r64_1(1); // sar rcx, 1 (untag)
+                    self.mem.emit_mov_r64_rm64(9, 0); // r9 = a (save)
+                    self.mem.emit_mov_r64_rm64(8, 1); // r8 = b (save)
+                    self.mem.emit_sar_r64_1(0); // sar rax, 1 (untag a)
+                    self.mem.emit_sar_r64_1(1); // sar rcx, 1 (untag b)
                     // shl rax, cl
                     self.mem.emit_rex_w();
                     self.mem.emit_byte(0xD3);
                     self.mem.emit_byte(0xE0); // mod=11, reg=4(shl), r/m=0(rax)
                     self.mem.emit_shl_r64_1(0); // shl rax, 1 (retag)
                     self.mem.emit_or_r64_imm8(0, 1);
+                    self.emit_smi_overflow_bailout_or_continue(bc_idx, true, true);
                     self.emit_jit_stack_push();
                 }
                 Opcode::Shr => {
@@ -983,11 +1052,20 @@ mod tests {
         }
     }
 
-    /// Returns a pointer to a zeroed 1 KB buffer suitable as a JIT vm_ptr stub.
+    /// Returns a pointer to a 1 KB buffer with bailout_helper set at offset 520.
     /// The allocation is intentionally leaked — it lives for the test duration.
     #[cfg(target_arch = "x86_64")]
     fn vm_stub() -> *mut u8 {
-        Box::into_raw(Box::new([0u8; 1024])) as *mut u8
+        extern "C" fn bailout_stub(_vm: *mut u8, _bc_pc: usize, _jit_sp: *mut u64) -> u64 {
+            0
+        }
+        let buf = Box::new([0u8; 1024]);
+        let ptr = Box::into_raw(buf) as *mut u8;
+        unsafe {
+            let bailout_ptr = ptr.add(520) as *mut usize;
+            *bailout_ptr = bailout_stub as usize;
+        }
+        ptr
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -1656,6 +1734,95 @@ mod tests {
         let prog = make_prog(instructions);
         let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
         assert!(compiled.mem.offset >= 140, "offset was {}", compiled.mem.offset);
-        assert!(compiled.mem.offset <= 500, "offset was {}", compiled.mem.offset);
+        assert!(compiled.mem.offset <= 1000, "offset was {}", compiled.mem.offset);
+    }
+
+    // -----------------------------------------------------------------------
+    // Overflow guard tests (x86_64)
+    // -----------------------------------------------------------------------
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_jit_add_overflow() {
+        // (2^30 − 1) + 1 = 2^30 → exceeds i31 → bailout
+        let prog = make_prog(vec![
+            Instruction::new(Opcode::LoadSmi, vec![1073741823]),
+            Instruction::new(Opcode::LoadSmi, vec![1]),
+            Instruction::new(Opcode::Add, vec![]),
+            Instruction::new(Opcode::Return, vec![]),
+        ]);
+        let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
+        let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
+        let result = unsafe { func(vm_stub(), std::ptr::null_mut(), std::ptr::null_mut()) };
+        // Overflow → bailout returns undefined = 0
+        assert_eq!(result, 0, "Add overflow: expected 0 (bailout), got {}", result);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_jit_sub_overflow() {
+        // −2^30 − 1 = −(2^30+1) < −2^30 → underflow → bailout
+        let prog = make_prog(vec![
+            Instruction::new(Opcode::LoadSmi, vec![-1073741824]),
+            Instruction::new(Opcode::LoadSmi, vec![1]),
+            Instruction::new(Opcode::Sub, vec![]),
+            Instruction::new(Opcode::Return, vec![]),
+        ]);
+        let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
+        let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
+        let result = unsafe { func(vm_stub(), std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert_eq!(result, 0, "Sub underflow: expected 0 (bailout), got {}", result);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_jit_mul_overflow() {
+        // 2^16 × 2^16 = 2^32 > 2^30−1 → overflow → bailout
+        let prog = make_prog(vec![
+            Instruction::new(Opcode::LoadSmi, vec![65536]),
+            Instruction::new(Opcode::LoadSmi, vec![65536]),
+            Instruction::new(Opcode::Mul, vec![]),
+            Instruction::new(Opcode::Return, vec![]),
+        ]);
+        let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
+        let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
+        let result = unsafe { func(vm_stub(), std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert_eq!(result, 0, "Mul overflow: expected 0 (bailout), got {}", result);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_jit_neg_overflow() {
+        // −(−2^30) = 2^30 > 2^30−1 → overflow → bailout
+        let prog = make_prog(vec![
+            Instruction::new(Opcode::LoadSmi, vec![-1073741824]),
+            Instruction::new(Opcode::Neg, vec![]),
+            Instruction::new(Opcode::Return, vec![]),
+        ]);
+        let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
+        let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
+        let result = unsafe { func(vm_stub(), std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert_eq!(result, 0, "Neg overflow: expected 0 (bailout), got {}", result);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_jit_shl_overflow() {
+        // 1 << 31 = 2^31 > 2^30−1 → overflow → bailout
+        let prog = make_prog(vec![
+            Instruction::new(Opcode::LoadSmi, vec![1]),
+            Instruction::new(Opcode::LoadSmi, vec![31]),
+            Instruction::new(Opcode::Shl, vec![]),
+            Instruction::new(Opcode::Return, vec![]),
+        ]);
+        let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
+        compiled.mem.make_executable();
+        let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
+        let result = unsafe { func(vm_stub(), std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert_eq!(result, 0, "Shl overflow: expected 0 (bailout), got {}", result);
     }
 }

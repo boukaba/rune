@@ -418,6 +418,24 @@ impl ExecutableMemory {
         self.emit_u32(offset as u32);
         patch_offset
     }
+
+    /// JG rel32  (0F 8F cd) — jump if greater (signed >, ZF=0 and SF=OF)
+    pub fn emit_jg_rel32(&mut self, offset: i32) -> usize {
+        let patch_offset = self.offset + 2;
+        self.emit_byte(0x0F);
+        self.emit_byte(0x8F);
+        self.emit_u32(offset as u32);
+        patch_offset
+    }
+
+    /// JL rel32  (0F 8C cd) — jump if less (signed <, SF≠OF)
+    pub fn emit_jl_rel32(&mut self, offset: i32) -> usize {
+        let patch_offset = self.offset + 2;
+        self.emit_byte(0x0F);
+        self.emit_byte(0x8C);
+        self.emit_u32(offset as u32);
+        patch_offset
+    }
 }
 
 // ---------------------------------------------------------------------------

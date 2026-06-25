@@ -1302,11 +1302,21 @@ mod tests {
         extern "C" fn bailout_stub(_vm: *mut u8, _bc_pc: usize, _jit_sp: *mut u64) -> u64 {
             0
         }
+        extern "C" fn float64_add_stub(
+            _vm: *mut u8,
+            _gc: *mut u8,
+            _a: u64,
+            _b: u64,
+        ) -> u64 {
+            0
+        }
         let buf = Box::new([0u8; 1024]);
         let ptr = Box::into_raw(buf) as *mut u8;
         unsafe {
             let bailout_ptr = ptr.add(520) as *mut usize;
             *bailout_ptr = bailout_stub as *const () as usize;
+            let float64_ptr = ptr.add(552) as *mut usize;
+            *float64_ptr = float64_add_stub as *const () as usize;
         }
         ptr
     }

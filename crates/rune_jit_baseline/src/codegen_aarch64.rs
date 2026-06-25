@@ -1326,6 +1326,17 @@ mod tests {
         0
     }
 
+    /// Stub float64 add helper for tests — prevents SIGSEGV when the float64 Add
+    /// path is taken (non-Smi input or Smi overflow).
+    extern "C" fn test_float64_add_stub(
+        _vm: *mut u8,
+        _gc: *mut u8,
+        _a: u64,
+        _b: u64,
+    ) -> u64 {
+        0
+    }
+
     /// Allocate a `JitVmState` on the heap and return a raw VM pointer.
     /// The trace compiler expects `jit_stack` to live at offset 0 from this
     /// pointer. Tests intentionally leak this small allocation.
@@ -1338,7 +1349,7 @@ mod tests {
                 typeof_helper: 0,
                 string_helper: 0,
                 global_helper: 0,
-                float64_add_helper: 0,
+                float64_add_helper: test_float64_add_stub as usize,
                 _reserved: [0; 2],
             },
             jit_stack_base: 0,

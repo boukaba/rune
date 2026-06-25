@@ -534,6 +534,14 @@ impl Aarch64CodeGen {
                 Opcode::Return => {
                     self.emit_epilogue();
                 }
+                Opcode::Neg => {
+                    // Smi(-n) = -(2n+1) + 2 = -2n + 1 = Smi(-n)
+                    // neg x0; add x0, #2
+                    self.pop();
+                    sub_reg(&mut self.mem, 0, 31, 0); // SUB x0, XZR, x0 (= NEG)
+                    add_imm(&mut self.mem, 0, 0, 2);
+                    self.push();
+                }
                 _ => {
                     // Unknown opcode: emit a trap so we notice quickly.
                     emit(&mut self.mem, 0xD4200000); // BRK #0

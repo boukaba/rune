@@ -185,6 +185,15 @@ impl CodeGen {
                     self.emit_jit_stack_pop();
                     self.emit_epilogue();
                 }
+                Opcode::Neg => {
+                    // Smi(-n) = -(2n+1) + 2
+                    self.emit_jit_stack_pop(); // rax = value
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0xF7);
+                    self.mem.emit_byte(0xD8); // neg rax
+                    self.mem.emit_add_r64_imm32(0, 2); // add rax, 2
+                    self.emit_jit_stack_push();
+                }
                 Opcode::Add => {
                     self.emit_smi_add();
                     self.emit_jit_stack_push();

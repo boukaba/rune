@@ -796,10 +796,20 @@ impl Aarch64CodeGen {
                     // B done (skip miss handler)
                     let patch_done = self.mem.current_offset();
                     emit(&mut self.mem, 0x14000000);    // B +0 (patched → done)
-                    // miss: push undefined (= 0)
+                    // miss: push object back, bail to interpreter
                     let miss_offset = self.mem.current_offset();
+                    self.record_bailout_point(bc_idx, BailoutReason::ShapeMiss);
+                    mov_reg(&mut self.mem, 0, 1);       // x0 = popped value (saved in x1)
+                    self.push();                         // restore JIT stack
+                    // Call bailout_helper(x0=vm_ptr, x1=bc_pc, x2=jit_sp)
+                    mov_reg(&mut self.mem, 2, JIT_STACK_REG);
+                    mov_imm64(&mut self.mem, 1, bc_idx as u64);
+                    mov_reg(&mut self.mem, 0, VM_REG);
+                    ldr_off(&mut self.mem, 15, VM_REG, 520);
+                    emit(&mut self.mem, 0xD63F01E0);    // BLR x15
                     movz(&mut self.mem, 0, 0);
-                    self.push();
+                    self.push();                         // push undefined (safety)
+                    self.emit_epilogue();                 // return from JIT
                     // done:
                     let done_offset = self.mem.current_offset();
                     // Patch forward jumps
@@ -850,10 +860,22 @@ impl Aarch64CodeGen {
                     // B done
                     let patch_done = self.mem.current_offset();
                     emit(&mut self.mem, 0x14000000);    // B +0
-                    // miss: push value back (same as hit — shape miss is rare)
+                    // miss: push object back, then value back, bail to interpreter
                     let miss_offset = self.mem.current_offset();
-                    mov_reg(&mut self.mem, 0, 1);
-                    self.push();
+                    self.record_bailout_point(bc_idx, BailoutReason::ShapeMiss);
+                    mov_reg(&mut self.mem, 0, 2);       // x0 = object (key, saved in x2)
+                    self.push();                         // restore object on JIT stack
+                    mov_reg(&mut self.mem, 0, 1);       // x0 = value (saved in x1)
+                    self.push();                         // restore value on JIT stack
+                    // Call bailout_helper(x0=vm_ptr, x1=bc_pc, x2=jit_sp)
+                    mov_reg(&mut self.mem, 2, JIT_STACK_REG);
+                    mov_imm64(&mut self.mem, 1, bc_idx as u64);
+                    mov_reg(&mut self.mem, 0, VM_REG);
+                    ldr_off(&mut self.mem, 15, VM_REG, 520);
+                    emit(&mut self.mem, 0xD63F01E0);    // BLR x15
+                    movz(&mut self.mem, 0, 0);
+                    self.push();                         // push undefined (safety)
+                    self.emit_epilogue();                 // return from JIT
                     // done:
                     let done_offset = self.mem.current_offset();
                     // Patch forward jumps

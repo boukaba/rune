@@ -546,10 +546,27 @@ impl CodeGen {
                     self.mem.emit_mov_r64_rm64(0, 1); // rax = rcx (value)
                     self.emit_jit_stack_push();
                     let jmp_done_patch = self.mem.emit_jmp_rel32(0);
-                    // miss: push value back
+                    // miss: push object back, then value back, bail to interpreter
                     let miss_offset = self.mem.current_offset();
-                    self.mem.emit_mov_r64_rm64(0, 1); // rax = value
-                    self.emit_jit_stack_push();
+                    self.record_bailout_point(bc_idx, BailoutReason::ShapeMiss);
+                    self.mem.emit_mov_r64_rm64(0, 2);   // rax = rdx (object)
+                    self.emit_jit_stack_push();         // restore object on JIT stack
+                    self.mem.emit_mov_r64_rm64(0, 1);   // rax = rcx (value)
+                    self.emit_jit_stack_push();         // restore value on JIT stack
+                    // Call bailout_helper(rdi=r15, rsi=bc_idx, rdx=rbx)
+                    self.mem.emit_mov_r64_rm64(7, 15);       // rdi = vm_ptr
+                    self.mem.emit_mov_r64_imm64(6, bc_idx as u64); // rsi = bc_pc
+                    self.mem.emit_mov_r64_rm64(2, 3);        // rdx = jit_sp
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0x8B);                // MOV rax, [r15 + 520]
+                    self.mem.emit_byte(0x87);                // mod=10, reg=0(rax), r/m=7(r15)
+                    self.mem.emit_u32(520);                  // disp32
+                    self.mem.emit_call_r64(0);               // call rax
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0x31);
+                    self.mem.emit_byte(0xC0);                // xor eax, eax
+                    self.emit_jit_stack_push();               // push undefined (safety)
+                    self.emit_epilogue();                     // return from JIT
                     // Patch jumps
                     self.mem.patch_u32(jne_miss_patch, (miss_offset - (jne_miss_patch + 6)) as u32);
                     self.mem.patch_u32(jbe_miss_patch, (miss_offset - (jbe_miss_patch + 6)) as u32);
@@ -604,12 +621,25 @@ impl CodeGen {
                     self.emit_jit_stack_push();
                     // JMP done (skip miss handler)
                     let jmp_done_patch = self.mem.emit_jmp_rel32(0);
-                    // miss: push undefined (= 0)
+                    // miss: push object back, bail to interpreter
                     let miss_label = self.mem.current_offset();
+                    // rax still holds the originally popped value (checks don't modify it)
+                    self.record_bailout_point(bc_idx, BailoutReason::ShapeMiss);
+                    self.emit_jit_stack_push();        // restore JIT stack
+                    // Call bailout_helper(rdi=r15, rsi=bc_idx, rdx=rbx)
+                    self.mem.emit_mov_r64_rm64(7, 15);       // rdi = vm_ptr
+                    self.mem.emit_mov_r64_imm64(6, bc_idx as u64); // rsi = bc_pc
+                    self.mem.emit_mov_r64_rm64(2, 3);        // rdx = jit_sp
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0x8B);                // MOV rax, [r15 + 520]
+                    self.mem.emit_byte(0x87);                // mod=10, reg=0(rax), r/m=7(r15)
+                    self.mem.emit_u32(520);                  // disp32
+                    self.mem.emit_call_r64(0);               // call rax
                     self.mem.emit_rex_w();
                     self.mem.emit_byte(0x31);
-                    self.mem.emit_byte(0xC0); // XOR eax, eax
-                    self.emit_jit_stack_push();
+                    self.mem.emit_byte(0xC0);                // xor eax, eax
+                    self.emit_jit_stack_push();               // push undefined (safety)
+                    self.emit_epilogue();                     // return from JIT
                     // done:
                     let done_label = self.mem.current_offset();
                     // Patch forward jumps: displacement = target - (patch_addr + 4)

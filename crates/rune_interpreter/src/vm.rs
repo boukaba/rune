@@ -2065,7 +2065,8 @@ impl Vm {
                             // due to as_smi() truncation, but the underlying u64 is
                             // correct.
                             unsafe {
-                                let _ = self.execute_trace(fi, compiled);
+                                let gc_ptr = gc as *mut SemiSpace as *mut u8;
+                                let _ = self.execute_trace(fi, compiled, gc_ptr);
                             }
                             self.frames[fi].pc = self
                                 .loop_traces
@@ -3282,13 +3283,13 @@ impl Vm {
 
     /// Call a compiled loop trace. Returns the raw u64 result (unused for
     /// loop traces — the locals are updated in-place by the trace).
-    unsafe fn execute_trace(&mut self, fi: usize, entry: *const u8) -> u64 {
+    unsafe fn execute_trace(&mut self, fi: usize, entry: *const u8, gc_ptr: *mut u8) -> u64 {
         let func: rune_jit_baseline::JitEntryFn = unsafe { std::mem::transmute(entry) };
         let locals = self.frames[fi].locals.as_mut_ptr() as *mut u64;
         unsafe {
             func(
                 self as *mut Vm as *mut u8,
-                std::ptr::null_mut(), // gc: trace currently doesn't alloc
+                gc_ptr,
                 locals,
             )
         }

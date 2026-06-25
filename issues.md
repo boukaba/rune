@@ -180,6 +180,6 @@
 | P8 | CLI -e flag | ⚠️ Known | — |
 | P9 | Return assertion relaxed | ⚠️ Deferred | — |
 | P10 | JIT slower than interpreter on tiny functions | ✅ Fixed | bb1a0e2 |
-| P11 | JIT coverage (now 19/61 opcodes) | 🟡 In progress | — |
+| P11 | JIT coverage (now 24/61 opcodes) | 🟡 In progress | da3a04d |
 | P12 | Trace compiler wired to loop execution | ✅ Fixed | — |
 | P13 | Smi i31 display truncation (design constraint) | ✅ Resolved | — |

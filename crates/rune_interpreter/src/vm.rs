@@ -623,6 +623,7 @@ impl Vm {
                     trace.ops.push(TraceOp {
                         opcode: instr.opcode as u8,
                         operands: instr.operands.clone(),
+                        original_pc: pc,
                         shape_id: 0,
                         cost: 1,
                     });
@@ -2038,6 +2039,7 @@ impl Vm {
                                     compiled_entry: std::ptr::null(),
                                     exit_pc: 0,
                                     compiled_prog: std::ptr::null_mut(),
+                                    trace_to_original_pc: Vec::new(),
                                 },
                             );
                         }
@@ -2071,15 +2073,23 @@ impl Vm {
                             }
                             if self.jit_bailout.pending {
                                 // Trace bailed mid-loop (e.g. overflow guard).
-                                // Restore interpreter state from the saved snapshot
-                                // and resume at the bailout PC.
-                                let bailout_pc = self.jit_bailout.bc_pc;
+                                // The bailout PC from the compiled code is a trace
+                                // instruction index — translate to the original
+                                // program PC so the interpreter resumes correctly.
+                                let trace_idx = self.jit_bailout.bc_pc;
+                                let original_pc = self
+                                    .loop_traces
+                                    .get(&target)
+                                    .and_then(|t| {
+                                        t.trace_to_original_pc.get(trace_idx).copied()
+                                    })
+                                    .unwrap_or(trace_idx);
                                 self.jit_bailout.pending = false;
                                 self.jit_bailout.bc_pc = 0;
                                 let snapshot = std::mem::take(
                                     &mut self.jit_bailout.stack_snapshot,
                                 );
-                                self.frames[fi].pc = bailout_pc;
+                                self.frames[fi].pc = original_pc;
                                 self.stack.truncate(self.frames[fi].stack_base);
                                 for val in snapshot {
                                     self.push(Value::from_raw(val));
@@ -3225,6 +3235,9 @@ impl Vm {
         let original_prog = unsafe { &*self.frames[fi].prog };
 
         let mut instrs: Vec<Instruction> = Vec::with_capacity(trace.ops.len() + 2);
+        // Build mapping: trace instruction index → original program PC.
+        // Used to translate bailout PCs when the trace bails mid-loop.
+        let mut trace_to_original_pc: Vec<usize> = Vec::with_capacity(trace.ops.len());
         let mut exit_pc: usize = 0;
         // The last recorded op is the first instruction of the iteration
         // that triggered the recording stop — it's a duplicate of op 0.
@@ -3238,6 +3251,7 @@ impl Vm {
         for t in ops_slice {
             let opcode: Opcode = unsafe { std::mem::transmute(t.opcode) };
             let mut operands = t.operands.clone();
+            trace_to_original_pc.push(t.original_pc);
             // Remap branch targets from original bytecode indices to in-trace
             // indices.
             match opcode {
@@ -3310,6 +3324,7 @@ impl Vm {
         trace.compiled_entry = entry;
         trace.exit_pc = exit_pc;
         trace.compiled_prog = leaked_prog as *mut BytecodeProgram as *mut u8;
+        trace.trace_to_original_pc = trace_to_original_pc;
         self._compiled_trace_mem.push(compiled.mem);
     }
 

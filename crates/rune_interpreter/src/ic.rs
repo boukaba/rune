@@ -185,6 +185,8 @@ pub struct TraceOp {
     pub opcode: u8,
     /// The operands of the instruction.
     pub operands: Vec<i64>,
+    /// PC in the original program (used for bailout PC translation).
+    pub original_pc: usize,
     /// Shape ID hit during LoadProperty (0 if not a property access or miss).
     pub shape_id: u64,
     /// Number of times this opcode would dispatch in the interpreter.
@@ -209,6 +211,9 @@ pub struct LoopTrace {
     /// Leaked BytecodeProgram pointer that compiled_entry references.
     /// Kept alive for the lifetime of the trace. Dropped when the Vm is dropped.
     pub compiled_prog: *mut u8,
+    /// Maps trace instruction index → original program PC.
+    /// Used to translate bailout PCs when the trace bails.
+    pub trace_to_original_pc: Vec<usize>,
 }
 
 impl LoopTrace {

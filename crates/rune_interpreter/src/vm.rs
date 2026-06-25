@@ -3278,7 +3278,6 @@ impl Vm {
         trace.compiled_entry = entry;
         trace.exit_pc = exit_pc;
         self._compiled_trace_mem.push(compiled.mem);
-        eprintln!("Trace: compiled loop pc={} with {} ops → native", target_pc, prog.instructions.len());
     }
 
     /// Call a compiled loop trace. Returns the raw u64 result (unused for
@@ -3341,15 +3340,9 @@ impl Vm {
         }
 
         if patched > 0 {
-            eprintln!(
-                "Trace: patched {} LoadProperty → LoadPropertyIC in loop pc={}..{} (shape={})",
-                patched, target_pc, back_edge_pc, shape_id
-            );
+            // Trace: patched LoadProperty → LoadPropertyIC
         } else {
-            eprintln!(
-                "Trace: loop pc={}..{} already LoadPropertyIC (shape={})",
-                target_pc, back_edge_pc, shape_id
-            );
+            // Trace: already LoadPropertyIC
         }
         self.loop_patched.insert(target_pc);
     }

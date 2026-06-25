@@ -1418,7 +1418,7 @@ mod tests {
         let mock_shape = Box::new(shape_id);
         let shape_ptr = Box::into_raw(mock_shape) as *mut u8;
         // Mock object: [GcHeader(8) | shape*(8) | proto*(8) | unused(8) | slots(8)...]
-        let mut obj = vec![0u8; 80];
+        let mut obj = [0u8; 80];
         obj[8..16].copy_from_slice(&(shape_ptr as u64).to_le_bytes());
         obj[32..40].copy_from_slice(&slot_value.to_le_bytes());
         let obj_addr = obj.as_ptr() as u64;

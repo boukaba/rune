@@ -204,13 +204,56 @@ impl CodeGen {
         self.mem.patch_u32(jmp_ok, ok_label as u32 - (jmp_ok as u32 + four));
     }
 
+    /// Check if rax holds a Smi (bit 0 = 1). If yes, fall through.
+    /// If not, restore JIT stack from saved registers, record NonSmiInput
+    /// bailout, call bailout_helper, and return.
+    /// `saved`: register indices of previously-popped values in chronological
+    /// order (earliest first). Restored on bail after current rax.
+    fn emit_smi_check(&mut self, bc_idx: usize, saved: &[u8]) {
+        // TEST rax, 1
+        self.mem.emit_rex_w();
+        self.mem.emit_byte(0xF7);
+        self.mem.emit_byte(0xC0);
+        self.mem.emit_u32(1);
+        let je_bail = self.mem.emit_je_rel32(0); // ZF=1 → bit 0=0 → not Smi → bail
+        let jmp_ok = self.mem.emit_jmp_rel32(0);
+        let bail_label = self.mem.current_offset();
+        // Restore JIT stack: push current rax, then saved values
+        self.emit_jit_stack_push(); // push rax (current failed check)
+        for &reg in saved.iter() {
+            self.mem.emit_mov_r64_rm64(0, reg);
+            self.emit_jit_stack_push();
+        }
+        self.record_bailout_point(bc_idx, BailoutReason::NonSmiInput);
+        // Call bailout_helper(rdi=r15, rsi=bc_pc, rdx=rbx)
+        self.mem.emit_mov_r64_rm64(7, 15);
+        self.mem.emit_mov_r64_imm64(6, bc_idx as u64);
+        self.mem.emit_mov_r64_rm64(2, 3);
+        self.mem.emit_rex_w();
+        self.mem.emit_byte(0x8B);
+        self.mem.emit_byte(0x87);
+        self.mem.emit_u32(520);
+        self.mem.emit_call_r64(0);
+        self.mem.emit_rex_w();
+        self.mem.emit_byte(0x31);
+        self.mem.emit_byte(0xC0);
+        self.emit_jit_stack_push();
+        self.emit_epilogue();
+        let ok_label = self.mem.current_offset();
+        let four: u32 = 4;
+        self.mem.patch_u32(je_bail, bail_label as u32 - (je_bail as u32 + four));
+        self.mem.patch_u32(jmp_ok, ok_label as u32 - (jmp_ok as u32 + four));
+    }
+
     /// Pop two Smis from the JIT stack and add them:
     ///   (a & ~1) + b
     fn emit_smi_add(&mut self, bc_idx: usize) {
         self.emit_jit_stack_pop();                 // rax = b
+        self.emit_smi_check(bc_idx, &[]);          // check b
         self.mem.emit_mov_r64_rm64(1, 0);          // rcx = b
         self.emit_jit_stack_pop();                 // rax = a
         self.mem.emit_mov_r64_rm64(9, 0);          // r9 = a
+        self.emit_smi_check(bc_idx, &[1]);         // check a; saved=[rcx(b)]
         self.mem.emit_mov_r64_rm64(8, 1);          // r8 = b
         self.mem.emit_and_r64_imm8(0, -2);         // rax = a & ~1
         self.mem.emit_add_r64_r64(0, 1);           // rax += rcx
@@ -221,9 +264,11 @@ impl CodeGen {
     ///   (a - b) | 1
     fn emit_smi_sub(&mut self, bc_idx: usize) {
         self.emit_jit_stack_pop();                 // rax = b
+        self.emit_smi_check(bc_idx, &[]);          // check b
         self.mem.emit_mov_r64_rm64(1, 0);          // rcx = b
         self.emit_jit_stack_pop();                 // rax = a
         self.mem.emit_mov_r64_rm64(9, 0);          // r9 = a
+        self.emit_smi_check(bc_idx, &[1]);         // check a; saved=[rcx(b)]
         self.mem.emit_mov_r64_rm64(8, 1);          // r8 = b
         self.mem.emit_sub_r64_r64(0, 1);           // rax -= rcx
         self.mem.emit_or_r64_imm8(0, 1);           // rax |= 1
@@ -234,9 +279,11 @@ impl CodeGen {
     ///   decode → mul → encode
     fn emit_smi_mul(&mut self, bc_idx: usize) {
         self.emit_jit_stack_pop();                 // rax = b
+        self.emit_smi_check(bc_idx, &[]);          // check b
         self.mem.emit_mov_r64_rm64(1, 0);          // rcx = b
         self.emit_jit_stack_pop();                 // rax = a
         self.mem.emit_mov_r64_rm64(9, 0);          // r9 = a
+        self.emit_smi_check(bc_idx, &[1]);         // check a; saved=[rcx(b)]
         self.mem.emit_mov_r64_rm64(8, 1);          // r8 = b
         self.mem.emit_sar_r64_1(0);                // rax >>= 1 (untag a)
         self.mem.emit_sar_r64_1(1);                // rcx >>= 1 (untag b)
@@ -302,6 +349,7 @@ impl CodeGen {
                     // Smi(-n) = -(2n+1) + 2
                     self.emit_jit_stack_pop(); // rax = value
                     self.mem.emit_mov_r64_rm64(9, 0); // r9 = value (save)
+                    self.emit_smi_check(bc_idx, &[]); // check input Smi
                     self.mem.emit_rex_w();
                     self.mem.emit_byte(0xF7);
                     self.mem.emit_byte(0xD8); // neg rax
@@ -311,6 +359,7 @@ impl CodeGen {
                 }
                 Opcode::Not => {
                     self.emit_jit_stack_pop();
+                    self.emit_smi_check(bc_idx, &[]);    // check input Smi
                     self.mem.emit_mov_r64_rm64(1, 0);    // rcx = value
                     self.mem.emit_rex_w();
                     self.mem.emit_byte(0x83);
@@ -343,10 +392,13 @@ impl CodeGen {
                     self.emit_jit_stack_push();
                 }
                 Opcode::UnaryPlus => {
-                    // No-op for Smi: value stays on JIT stack
+                    self.emit_jit_stack_pop();
+                    self.emit_smi_check(bc_idx, &[]); // check Smi
+                    self.emit_jit_stack_push();       // push back (no transformation)
                 }
                 Opcode::BitNot => {
                     self.emit_jit_stack_pop();
+                    self.emit_smi_check(bc_idx, &[]); // check input Smi
                     self.mem.emit_rex_w();
                     self.mem.emit_byte(0xF7);
                     self.mem.emit_byte(0xD0);            // not rax
@@ -355,8 +407,10 @@ impl CodeGen {
                 }
                 Opcode::StrictNe => {
                     self.emit_jit_stack_pop();
+                    self.emit_smi_check(bc_idx, &[]);    // check b
                     self.mem.emit_mov_r64_rm64(1, 0);    // rcx = b
                     self.emit_jit_stack_pop();            // rax = a
+                    self.emit_smi_check(bc_idx, &[1]);   // check a; saved=[rcx(b)]
                     self.mem.emit_cmp_r64_r64(0, 1);     // cmp a, b
                     self.mem.emit_byte(0x0F);
                     self.mem.emit_byte(0x95);
@@ -381,8 +435,10 @@ impl CodeGen {
                 }
                 Opcode::Eq => {
                     self.emit_jit_stack_pop();            // rax = b
+                    self.emit_smi_check(bc_idx, &[]);    // check b
                     self.mem.emit_mov_r64_rm64(1, 0);    // rcx = b
                     self.emit_jit_stack_pop();            // rax = a
+                    self.emit_smi_check(bc_idx, &[1]);   // check a; saved=[rcx(b)]
                     // a == b
                     self.mem.emit_cmp_r64_r64(0, 1);
                     let je_same = self.mem.emit_je_rel32(0);
@@ -453,8 +509,10 @@ impl CodeGen {
                 Opcode::Ne => {
                     // Same branching as Eq but XOR result
                     self.emit_jit_stack_pop();
+                    self.emit_smi_check(bc_idx, &[]);
                     self.mem.emit_mov_r64_rm64(1, 0);
                     self.emit_jit_stack_pop();
+                    self.emit_smi_check(bc_idx, &[1]);
                     self.mem.emit_cmp_r64_r64(0, 1);
                     let je_same = self.mem.emit_je_rel32(0);
                     self.mem.emit_mov_r64_imm64(2, 0);
@@ -532,6 +590,7 @@ impl CodeGen {
                 Opcode::JumpIfFalse => {
                     let target = instr.operands[0] as usize;
                     self.emit_jit_stack_pop(); // rax = condition
+                    self.emit_smi_check(bc_idx, &[]); // check Smi
                     self.mem.emit_mov_r64_imm64(1, 2); // rcx = 2 (null sentinel)
                     self.mem.emit_cmp_r64_r64(0, 1); // cmp rax, 2
                     let patch1 = self.mem.emit_jbe_rel32(0); // ≤2: falsy
@@ -544,6 +603,7 @@ impl CodeGen {
                 Opcode::JumpIfTrue => {
                     let target = instr.operands[0] as usize;
                     self.emit_jit_stack_pop();          // rax = value
+                    self.emit_smi_check(bc_idx, &[]);  // check Smi
                     self.mem.emit_mov_r64_imm64(1, 2);  // rcx = 2
                     self.mem.emit_cmp_r64_r64(0, 1);    // cmp value, 2
                     let skip_falsy = self.mem.emit_ja_rel32(0);
@@ -736,10 +796,11 @@ impl CodeGen {
                 }
                 Opcode::Lt => {
                     self.emit_jit_stack_pop(); // rax = b
+                    self.emit_smi_check(bc_idx, &[]); // check b
                     self.mem.emit_mov_r64_rm64(1, 0); // rcx = b
                     self.emit_jit_stack_pop(); // rax = a
+                    self.emit_smi_check(bc_idx, &[1]); // check a; saved=[rcx(b)]
                     self.mem.emit_cmp_r64_r64(0, 1); // cmp a, b
-                    // setl al -> movzx eax, al -> shl eax, 1 -> or rax, 1
                     // setl (0F 9C /0) sets al = 1 if a < b (signed), 0 otherwise
                     self.mem.emit_byte(0x0F);
                     self.mem.emit_byte(0x9C);
@@ -754,8 +815,10 @@ impl CodeGen {
                 }
                 Opcode::Gt => {
                     self.emit_jit_stack_pop();
+                    self.emit_smi_check(bc_idx, &[]); // check b
                     self.mem.emit_mov_r64_rm64(1, 0);
                     self.emit_jit_stack_pop();
+                    self.emit_smi_check(bc_idx, &[1]); // check a; saved=[rcx(b)]
                     self.mem.emit_cmp_r64_r64(0, 1);
                     // setg: 0F 9F /0
                     self.mem.emit_byte(0x0F);
@@ -771,8 +834,10 @@ impl CodeGen {
                 }
                 Opcode::Le => {
                     self.emit_jit_stack_pop();
+                    self.emit_smi_check(bc_idx, &[]); // check b
                     self.mem.emit_mov_r64_rm64(1, 0);
                     self.emit_jit_stack_pop();
+                    self.emit_smi_check(bc_idx, &[1]); // check a; saved=[rcx(b)]
                     self.mem.emit_cmp_r64_r64(0, 1);
                     // setle: 0F 9E /0
                     self.mem.emit_byte(0x0F);
@@ -788,8 +853,10 @@ impl CodeGen {
                 }
                 Opcode::Ge => {
                     self.emit_jit_stack_pop();
+                    self.emit_smi_check(bc_idx, &[]); // check b
                     self.mem.emit_mov_r64_rm64(1, 0);
                     self.emit_jit_stack_pop();
+                    self.emit_smi_check(bc_idx, &[1]); // check a; saved=[rcx(b)]
                     self.mem.emit_cmp_r64_r64(0, 1);
                     // setge: 0F 9D /0
                     self.mem.emit_byte(0x0F);
@@ -805,8 +872,10 @@ impl CodeGen {
                 }
                 Opcode::StrictEq => {
                     self.emit_jit_stack_pop();
+                    self.emit_smi_check(bc_idx, &[]); // check b
                     self.mem.emit_mov_r64_rm64(1, 0);
                     self.emit_jit_stack_pop();
+                    self.emit_smi_check(bc_idx, &[1]); // check a; saved=[rcx(b)]
                     self.mem.emit_cmp_r64_r64(0, 1);
                     // sete: 0F 94 /0
                     self.mem.emit_byte(0x0F);
@@ -822,9 +891,11 @@ impl CodeGen {
                 }
                 Opcode::Shl => {
                     self.emit_jit_stack_pop(); // rax = b
+                    self.emit_smi_check(bc_idx, &[]); // check b
                     self.mem.emit_mov_r64_rm64(1, 0); // rcx = b
                     self.emit_jit_stack_pop(); // rax = a
                     self.mem.emit_mov_r64_rm64(9, 0); // r9 = a (save)
+                    self.emit_smi_check(bc_idx, &[1]); // check a; saved=[rcx(b)]
                     self.mem.emit_mov_r64_rm64(8, 1); // r8 = b (save)
                     self.mem.emit_sar_r64_1(0); // sar rax, 1 (untag a)
                     self.mem.emit_sar_r64_1(1); // sar rcx, 1 (untag b)
@@ -839,8 +910,10 @@ impl CodeGen {
                 }
                 Opcode::Shr => {
                     self.emit_jit_stack_pop();
+                    self.emit_smi_check(bc_idx, &[]); // check b
                     self.mem.emit_mov_r64_rm64(1, 0);
                     self.emit_jit_stack_pop();
+                    self.emit_smi_check(bc_idx, &[1]); // check a; saved=[rcx(b)]
                     self.mem.emit_sar_r64_1(0);
                     self.mem.emit_sar_r64_1(1);
                     // sar rax, cl
@@ -853,8 +926,10 @@ impl CodeGen {
                 }
                 Opcode::BitAnd => {
                     self.emit_jit_stack_pop();
+                    self.emit_smi_check(bc_idx, &[]); // check b
                     self.mem.emit_mov_r64_rm64(1, 0);
                     self.emit_jit_stack_pop();
+                    self.emit_smi_check(bc_idx, &[1]); // check a; saved=[rcx(b)]
                     self.mem.emit_sar_r64_1(0);
                     self.mem.emit_sar_r64_1(1);
                     // and rax, rcx
@@ -867,8 +942,10 @@ impl CodeGen {
                 }
                 Opcode::BitOr => {
                     self.emit_jit_stack_pop();
+                    self.emit_smi_check(bc_idx, &[]); // check b
                     self.mem.emit_mov_r64_rm64(1, 0);
                     self.emit_jit_stack_pop();
+                    self.emit_smi_check(bc_idx, &[1]); // check a; saved=[rcx(b)]
                     self.mem.emit_sar_r64_1(0);
                     self.mem.emit_sar_r64_1(1);
                     // or rax, rcx
@@ -881,8 +958,10 @@ impl CodeGen {
                 }
                 Opcode::BitXor => {
                     self.emit_jit_stack_pop();
+                    self.emit_smi_check(bc_idx, &[]); // check b
                     self.mem.emit_mov_r64_rm64(1, 0);
                     self.emit_jit_stack_pop();
+                    self.emit_smi_check(bc_idx, &[1]); // check a; saved=[rcx(b)]
                     self.mem.emit_sar_r64_1(0);
                     self.mem.emit_sar_r64_1(1);
                     // xor rax, rcx
@@ -895,8 +974,10 @@ impl CodeGen {
                 }
                 Opcode::ShrU => {
                     self.emit_jit_stack_pop();
+                    self.emit_smi_check(bc_idx, &[]); // check b
                     self.mem.emit_mov_r64_rm64(1, 0);
                     self.emit_jit_stack_pop();
+                    self.emit_smi_check(bc_idx, &[1]); // check a; saved=[rcx(b)]
                     self.mem.emit_sar_r64_1(0);
                     self.mem.emit_sar_r64_1(1);
                     // shr rax, cl (unsigned shift right)
@@ -1337,9 +1418,9 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn test_jit_conditional_undefined_falsy() {
-        // if (undefined) { return 42; } else { return 99; }
+        // if (0) { return 42; } else { return 99; }
         let prog = make_prog(vec![
-            Instruction::new(Opcode::LoadUndefined, vec![]),
+            Instruction::new(Opcode::LoadSmi, vec![0]),
             Instruction::new(Opcode::JumpIfFalse, vec![4]),
             Instruction::new(Opcode::LoadSmi, vec![42]),
             Instruction::new(Opcode::Return, vec![]),
@@ -1706,8 +1787,8 @@ mod tests {
             Instruction::new(Opcode::Return, vec![]),
         ]);
         let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
-        assert!(compiled.mem.offset >= 85, "offset was {}", compiled.mem.offset);
-        assert!(compiled.mem.offset <= 170, "offset was {}", compiled.mem.offset);
+        assert!(compiled.mem.offset >= 200, "offset was {}", compiled.mem.offset);
+        assert!(compiled.mem.offset <= 500, "offset was {}", compiled.mem.offset);
     }
 
     #[test]
@@ -1736,8 +1817,8 @@ mod tests {
         ];
         let prog = make_prog(instructions);
         let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
-        assert!(compiled.mem.offset >= 140, "offset was {}", compiled.mem.offset);
-        assert!(compiled.mem.offset <= 1000, "offset was {}", compiled.mem.offset);
+        assert!(compiled.mem.offset >= 800, "offset was {}", compiled.mem.offset);
+        assert!(compiled.mem.offset <= 1500, "offset was {}", compiled.mem.offset);
     }
 
     // -----------------------------------------------------------------------

@@ -354,6 +354,42 @@ impl Aarch64CodeGen {
         self.mem.patch_u32(patch_done, 0x14000000 | (d_done & 0x03FF_FFFF));
     }
 
+    /// Check if x0 holds a Smi (bit 0 = 1). If yes, fall through.
+    /// If not, restore the JIT stack from `saved` registers, record
+    /// NonSmiInput bailout, call bailout_helper, and return.
+    /// `saved`: register indices of previously-popped values in chronological
+    /// order (earliest first). Restored on bail after current x0.
+    fn emit_smi_check(&mut self, bc_idx: usize, saved: &[u8]) {
+        let patch_bail = self.mem.current_offset();
+        emit(&mut self.mem, 0x36000000); // TBZ X0, #0, <0> (patched; branches if not Smi)
+        let patch_ok = self.mem.current_offset();
+        emit(&mut self.mem, 0x14000000); // B ok (patched)
+        let bail_label = self.mem.current_offset();
+        // Restore JIT stack: push x0 (current), then saved values
+        self.push(); // push x0 (current failed check)
+        for &reg in saved.iter() {
+            mov_reg(&mut self.mem, 0, reg as u32);
+            self.push();
+        }
+        self.record_bailout_point(bc_idx, BailoutReason::NonSmiInput);
+        // Call bailout_helper(x0=vm_ptr, x1=bc_idx, x2=jit_sp)
+        mov_reg(&mut self.mem, 2, JIT_STACK_REG);
+        mov_imm64(&mut self.mem, 1, bc_idx as u64);
+        mov_reg(&mut self.mem, 0, VM_REG);
+        ldr_off(&mut self.mem, 15, VM_REG, 520);
+        emit(&mut self.mem, 0xD63F01E0); // BLR x15
+        movz(&mut self.mem, 0, 0);
+        self.push();
+        self.emit_epilogue();
+        let ok_label = self.mem.current_offset();
+        // Patch TBZ X0, #0: d = (bail_label - patch_bail) / 4
+        let d = ((bail_label as i64 - patch_bail as i64) / 4) as u32;
+        self.mem.patch_u32(patch_bail, 0x36000000 | ((d & 0x3FFF) << 5));
+        // Patch B (unconditional)
+        let d = ((ok_label as i64 - patch_ok as i64) / 4) as u32;
+        self.mem.patch_u32(patch_ok, 0x14000000 | (d & 0x03FF_FFFF));
+    }
+
     fn emit_prologue(&mut self) {
         push_callee_saved(&mut self.mem);
         mov_reg(&mut self.mem, VM_REG, 0);
@@ -471,9 +507,11 @@ impl Aarch64CodeGen {
                 Opcode::Add => {
                     self.pop(); // x0 = b
                     mov_reg(&mut self.mem, 9, 0); // x9 = b (save)
+                    self.emit_smi_check(bc_idx, &[]); // check b
                     mov_reg(&mut self.mem, 1, 0); // x1 = b
                     self.pop(); // x0 = a
                     mov_reg(&mut self.mem, 8, 0); // x8 = a (save)
+                    self.emit_smi_check(bc_idx, &[9]); // check a; saved=[x9(b)]
                     sub_imm(&mut self.mem, 0, 0, 1); // untag a
                     add_reg(&mut self.mem, 0, 0, 1); // x0 = Smi(a+b)
                     self.emit_smi_overflow_bailout_or_continue(bc_idx, Some(8), Some(9));
@@ -482,9 +520,11 @@ impl Aarch64CodeGen {
                 Opcode::Sub => {
                     self.pop(); // x0 = b
                     mov_reg(&mut self.mem, 9, 0); // x9 = b
+                    self.emit_smi_check(bc_idx, &[]); // check b
                     mov_reg(&mut self.mem, 1, 0);
                     self.pop(); // x0 = a
                     mov_reg(&mut self.mem, 8, 0); // x8 = a
+                    self.emit_smi_check(bc_idx, &[9]); // check a; saved=[x9(b)]
                     sub_reg(&mut self.mem, 0, 0, 1);
                     add_imm(&mut self.mem, 0, 0, 1); // retag
                     self.emit_smi_overflow_bailout_or_continue(bc_idx, Some(8), Some(9));
@@ -493,9 +533,11 @@ impl Aarch64CodeGen {
                 Opcode::Mul => {
                     self.pop(); // x0 = b
                     mov_reg(&mut self.mem, 9, 0); // x9 = b
+                    self.emit_smi_check(bc_idx, &[]); // check b
                     mov_reg(&mut self.mem, 1, 0);
                     self.pop(); // x0 = a
                     mov_reg(&mut self.mem, 8, 0); // x8 = a
+                    self.emit_smi_check(bc_idx, &[9]); // check a; saved=[x9(b)]
                     emit(&mut self.mem, 0x9341FC00); // ASR x0, x0, #1
                     emit(&mut self.mem, 0x9341FC21); // ASR x1, x1, #1
                     emit(&mut self.mem, 0x9B017C00); // MUL x0, x0, x1
@@ -506,8 +548,10 @@ impl Aarch64CodeGen {
                 }
                 Opcode::Lt => {
                     self.pop();
+                    self.emit_smi_check(bc_idx, &[]); // check b
                     mov_reg(&mut self.mem, 1, 0);
                     self.pop();
+                    self.emit_smi_check(bc_idx, &[1]); // check a; saved=[x1(b)]
                     cmp_reg(&mut self.mem, 0, 1);
                     // CSET x0, LT = CSINC x0, XZR, XZR, GE (= !LT)
                     emit(&mut self.mem, 0x9A9FA7E0);
@@ -517,8 +561,10 @@ impl Aarch64CodeGen {
                 }
                 Opcode::Gt => {
                     self.pop();
+                    self.emit_smi_check(bc_idx, &[]); // check b
                     mov_reg(&mut self.mem, 1, 0);
                     self.pop();
+                    self.emit_smi_check(bc_idx, &[1]); // check a; saved=[x1(b)]
                     cmp_reg(&mut self.mem, 0, 1);
                     // CSET x0, GT = CSINC x0, XZR, XZR, LE (= !GT)
                     emit(&mut self.mem, 0x9A9FD7E0);
@@ -528,8 +574,10 @@ impl Aarch64CodeGen {
                 }
                 Opcode::Le => {
                     self.pop();
+                    self.emit_smi_check(bc_idx, &[]); // check b
                     mov_reg(&mut self.mem, 1, 0);
                     self.pop();
+                    self.emit_smi_check(bc_idx, &[1]); // check a; saved=[x1(b)]
                     cmp_reg(&mut self.mem, 0, 1);
                     // CSET x0, LE = CSINC x0, XZR, XZR, GT (= !LE)
                     emit(&mut self.mem, 0x9A9FC7E0);
@@ -539,8 +587,10 @@ impl Aarch64CodeGen {
                 }
                 Opcode::Ge => {
                     self.pop();
+                    self.emit_smi_check(bc_idx, &[]); // check b
                     mov_reg(&mut self.mem, 1, 0);
                     self.pop();
+                    self.emit_smi_check(bc_idx, &[1]); // check a; saved=[x1(b)]
                     cmp_reg(&mut self.mem, 0, 1);
                     // CSET x0, GE = CSINC x0, XZR, XZR, LT (= !GE)
                     emit(&mut self.mem, 0x9A9FB7E0);
@@ -550,8 +600,10 @@ impl Aarch64CodeGen {
                 }
                 Opcode::StrictEq => {
                     self.pop();
+                    self.emit_smi_check(bc_idx, &[]); // check b
                     mov_reg(&mut self.mem, 1, 0);
                     self.pop();
+                    self.emit_smi_check(bc_idx, &[1]); // check a; saved=[x1(b)]
                     cmp_reg(&mut self.mem, 0, 1);
                     // CSET x0, EQ = CSINC x0, XZR, XZR, NE (= !EQ)
                     emit(&mut self.mem, 0x9A9F17E0);
@@ -562,9 +614,11 @@ impl Aarch64CodeGen {
                 Opcode::Shl => {
                     self.pop(); // x0 = b
                     mov_reg(&mut self.mem, 9, 0); // x9 = b
+                    self.emit_smi_check(bc_idx, &[]); // check b
                     mov_reg(&mut self.mem, 1, 0);
                     self.pop(); // x0 = a
                     mov_reg(&mut self.mem, 8, 0); // x8 = a
+                    self.emit_smi_check(bc_idx, &[9]); // check a; saved=[x9(b)]
                     // Untag both: ASR #1 decodes Smi → int32
                     emit(&mut self.mem, 0x9341FC00); // ASR x0, x0, #1
                     emit(&mut self.mem, 0x9341FC21); // ASR x1, x1, #1
@@ -577,8 +631,10 @@ impl Aarch64CodeGen {
                 }
                 Opcode::Shr => {
                     self.pop();
+                    self.emit_smi_check(bc_idx, &[]); // check b
                     mov_reg(&mut self.mem, 1, 0);
                     self.pop();
+                    self.emit_smi_check(bc_idx, &[1]); // check a; saved=[x1(b)]
                     emit(&mut self.mem, 0x9341FC00);
                     emit(&mut self.mem, 0x9341FC21);
                     asr_reg(&mut self.mem, 0, 0, 1);  // ASR x0, x0, x1
@@ -588,8 +644,10 @@ impl Aarch64CodeGen {
                 }
                 Opcode::BitAnd => {
                     self.pop();
+                    self.emit_smi_check(bc_idx, &[]); // check b
                     mov_reg(&mut self.mem, 1, 0);
                     self.pop();
+                    self.emit_smi_check(bc_idx, &[1]); // check a; saved=[x1(b)]
                     emit(&mut self.mem, 0x9341FC00);
                     emit(&mut self.mem, 0x9341FC21);
                     and_reg(&mut self.mem, 0, 0, 1);
@@ -599,8 +657,10 @@ impl Aarch64CodeGen {
                 }
                 Opcode::BitOr => {
                     self.pop();
+                    self.emit_smi_check(bc_idx, &[]); // check b
                     mov_reg(&mut self.mem, 1, 0);
                     self.pop();
+                    self.emit_smi_check(bc_idx, &[1]); // check a; saved=[x1(b)]
                     emit(&mut self.mem, 0x9341FC00);
                     emit(&mut self.mem, 0x9341FC21);
                     orr_reg(&mut self.mem, 0, 0, 1);
@@ -610,8 +670,10 @@ impl Aarch64CodeGen {
                 }
                 Opcode::BitXor => {
                     self.pop();
+                    self.emit_smi_check(bc_idx, &[]); // check b
                     mov_reg(&mut self.mem, 1, 0);
                     self.pop();
+                    self.emit_smi_check(bc_idx, &[1]); // check a; saved=[x1(b)]
                     emit(&mut self.mem, 0x9341FC00);
                     emit(&mut self.mem, 0x9341FC21);
                     eor_reg(&mut self.mem, 0, 0, 1);
@@ -622,8 +684,10 @@ impl Aarch64CodeGen {
                 Opcode::ShrU => {
                     // Smi unsigned right shift (>>>)
                     self.pop();
+                    self.emit_smi_check(bc_idx, &[]); // check b
                     mov_reg(&mut self.mem, 1, 0); // x1 = b
                     self.pop(); // x0 = a
+                    self.emit_smi_check(bc_idx, &[1]); // check a; saved=[x1(b)]
                     emit(&mut self.mem, 0x9341FC00); // ASR x0, x0, #1 (untag a)
                     emit(&mut self.mem, 0x9341FC21); // ASR x1, x1, #1 (untag b)
                     lsr_reg(&mut self.mem, 0, 0, 1); // LSR x0, x0, x1 (unsigned shift)
@@ -644,8 +708,10 @@ impl Aarch64CodeGen {
                 Opcode::Eq => {
                     // Abstract equality for Smi/sentinel values. Branchless CSET-based.
                     self.pop(); // x0 = b
+                    self.emit_smi_check(bc_idx, &[]); // check b
                     mov_reg(&mut self.mem, 1, 0); // x1 = b
                     self.pop(); // x0 = a
+                    self.emit_smi_check(bc_idx, &[1]); // check a; saved=[x1(b)]
                     mov_reg(&mut self.mem, 2, 31); // x2 = 0 (result accumulator)
                     // a == b
                     cmp_reg(&mut self.mem, 0, 1);
@@ -714,8 +780,10 @@ impl Aarch64CodeGen {
                 Opcode::Ne => {
                     // Same as Eq, then invert result
                     self.pop();
+                    self.emit_smi_check(bc_idx, &[]); // check b
                     mov_reg(&mut self.mem, 1, 0);
                     self.pop();
+                    self.emit_smi_check(bc_idx, &[1]); // check a; saved=[x1(b)]
                     mov_reg(&mut self.mem, 2, 31);
                     cmp_reg(&mut self.mem, 0, 1);
                     emit(&mut self.mem, 0x9A9F07E3);
@@ -816,6 +884,7 @@ impl Aarch64CodeGen {
                 Opcode::JumpIfFalse => {
                     let target = instr.operands[0] as usize;
                     self.pop(); // x0 = condition
+                    self.emit_smi_check(bc_idx, &[]); // check condition is Smi
                     movz(&mut self.mem, 1, 2); // x1 = 2 (null sentinel)
                     cmp_reg(&mut self.mem, 0, 1);
                     self.emit_b_cond(0x9, target); // B.LS target (falsy: ≤ 2)
@@ -826,6 +895,7 @@ impl Aarch64CodeGen {
                 Opcode::JumpIfTrue => {
                     let target = instr.operands[0] as usize;
                     self.pop(); // x0 = condition
+                    self.emit_smi_check(bc_idx, &[]); // check condition is Smi
                     movz(&mut self.mem, 1, 2);
                     cmp_reg(&mut self.mem, 0, 1);
                     emit(&mut self.mem, 0x54000049); // B.LS +2 (falsy: skip B)
@@ -963,6 +1033,7 @@ impl Aarch64CodeGen {
                 Opcode::Neg => {
                     // Smi(-n) = -(2n+1) + 2 = -2n + 1 = Smi(-n)
                     self.pop(); // x0 = value
+                    self.emit_smi_check(bc_idx, &[]); // check value is Smi
                     mov_reg(&mut self.mem, 8, 0); // x8 = value (save)
                     sub_reg(&mut self.mem, 0, 31, 0); // SUB x0, XZR, x0 (= NEG)
                     add_imm(&mut self.mem, 0, 0, 2);
@@ -971,6 +1042,7 @@ impl Aarch64CodeGen {
                 }
                 Opcode::Not => {
                     self.pop();
+                    self.emit_smi_check(bc_idx, &[]); // check value is Smi
                     mov_reg(&mut self.mem, 2, 0);   // x2 = original
                     movz(&mut self.mem, 1, 2);
                     cmp_reg(&mut self.mem, 2, 1);
@@ -992,18 +1064,26 @@ impl Aarch64CodeGen {
                 }
                 Opcode::UnaryPlus => {
                     // No-op for Smi: ToNumber(smi) = smi, value stays on JIT stack
+                    // But other types need interpreter, so guard the top of stack
+                    self.pop();
+                    self.emit_smi_check(bc_idx, &[]);
+                    // value remains in x0, still on stack top — push it back
+                    self.push();
                 }
                 Opcode::BitNot => {
                     // Smi(~n) = ~Smi(n) + 1
                     self.pop();
+                    self.emit_smi_check(bc_idx, &[]);
                     emit(&mut self.mem, 0xAA2003E0); // MVN x0, x0 (ORN x0, xzr, x0)
                     add_imm(&mut self.mem, 0, 0, 1);
                     self.push();
                 }
                 Opcode::StrictNe => {
                     self.pop();
+                    self.emit_smi_check(bc_idx, &[]); // check b
                     mov_reg(&mut self.mem, 1, 0);
                     self.pop();
+                    self.emit_smi_check(bc_idx, &[1]); // check a; saved=[x1(b)]
                     cmp_reg(&mut self.mem, 0, 1);
                     // CSET x0, NE = CSINC x0, XZR, XZR, EQ (= !NE)
                     emit(&mut self.mem, 0x9A9F07E0); // CSET NE = CSINC EQ
@@ -1560,10 +1640,10 @@ mod tests {
     #[test]
     fn test_aarch64_codegen_jump_if_false() {
         use rune_bytecode::opcode::{BytecodeProgram, Instruction};
-        // if (true) 42 else 7
+        // if (Smi(1)=truthy) 42 else 7
         let prog = BytecodeProgram::new(
             vec![
-                Instruction::new(Opcode::LoadBoolean, vec![1]),
+                Instruction::new(Opcode::LoadSmi, vec![1]),
                 Instruction::new(Opcode::JumpIfFalse, vec![4]),
                 Instruction::new(Opcode::LoadSmi, vec![42]),
                 Instruction::new(Opcode::Jump, vec![5]),
@@ -1585,10 +1665,10 @@ mod tests {
     #[test]
     fn test_aarch64_codegen_jump_if_false_falsy() {
         use rune_bytecode::opcode::{BytecodeProgram, Instruction};
-        // if (false) 42 else 7
+        // if (Smi(0)=falsy) 42 else 7
         let prog = BytecodeProgram::new(
             vec![
-                Instruction::new(Opcode::LoadBoolean, vec![0]),
+                Instruction::new(Opcode::LoadSmi, vec![0]),
                 Instruction::new(Opcode::JumpIfFalse, vec![4]),
                 Instruction::new(Opcode::LoadSmi, vec![42]),
                 Instruction::new(Opcode::Jump, vec![5]),

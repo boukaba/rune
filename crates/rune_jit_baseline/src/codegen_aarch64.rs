@@ -195,10 +195,6 @@ fn ret(mem: &mut ExecutableMemory) {
     emit(mem, 0xD65F03C0);
 }
 
-/// NOP
-fn nop(mem: &mut ExecutableMemory) {
-    emit(mem, 0xD503201F);
-}
 
 fn push_callee_saved(mem: &mut ExecutableMemory) {
     let mut stp = |rt: u32, rt2: u32| emit(mem, 0xA9BF0000 | (rt2 << 10) | (31 << 5) | rt);

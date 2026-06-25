@@ -2044,6 +2044,7 @@ impl Vm {
                                     exit_pc: 0,
                                     compiled_prog: std::ptr::null_mut(),
                                     trace_to_original_pc: Vec::new(),
+                                    bailout_table: None,
                                 },
                             );
                         }
@@ -3323,6 +3324,7 @@ impl Vm {
         trace.exit_pc = exit_pc;
         trace.compiled_prog = leaked_prog as *mut BytecodeProgram as *mut u8;
         trace.trace_to_original_pc = trace_to_original_pc;
+        trace.bailout_table = Some(Box::new(compiled.bailout_table));
         self._compiled_trace_mem.push(compiled.mem);
     }
 

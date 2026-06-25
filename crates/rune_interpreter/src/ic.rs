@@ -214,6 +214,10 @@ pub struct LoopTrace {
     /// Maps trace instruction index → original program PC.
     /// Used to translate bailout PCs when the trace bails.
     pub trace_to_original_pc: Vec<usize>,
+    /// Bailout table produced by trace compilation (metadata only).
+    /// Mirrors the function JIT's bailout_tables pattern; not queried at
+    /// runtime (bailout works through jit_bailout.pending).
+    pub bailout_table: Option<Box<rune_jit_baseline::BailoutTable>>,
 }
 
 impl LoopTrace {

@@ -542,6 +542,28 @@ impl Aarch64CodeGen {
                     add_imm(&mut self.mem, 0, 0, 2);
                     self.push();
                 }
+                Opcode::Not => {
+                    self.pop();
+                    mov_reg(&mut self.mem, 2, 0);   // x2 = original
+                    movz(&mut self.mem, 1, 2);
+                    cmp_reg(&mut self.mem, 2, 1);
+                    // CSET x0, LS → 1 if original ≤ 2 (falsy: undefined/Smi(0)/null)
+                    emit(&mut self.mem, 0x9A9F97E0); // CSINC x0, XZR, XZR, HI? Wait
+                    // Actually: LS condition. CSINC LS = 0x9A9F? ~LS is HI.
+                    // CSINC x0, XZR, XZR, HI (= !LS) → x0=1 if >2, else 0
+                    // We want x0=1 if ≤2. Let me recalculate.
+                    // CSET LS = CSINC x0, XZR, XZR, HI (since !LS = HI).
+                    // HI = 1000 = 0x8. Base CSINC: 0x9A9F07E0 | (0x8 << 12) = 0x9A9F87E0
+                    emit(&mut self.mem, 0x9A9F87E0);
+                    movz(&mut self.mem, 1, 4);
+                    cmp_reg(&mut self.mem, 2, 1);
+                    // CSET EQ = CSINC NE. NE = 0001 = 0x1. 0x9A9F07E0 | 0x1000 = 0x9A9F17E0
+                    emit(&mut self.mem, 0x9A9F17E0); // x1 = 1 if original == 4
+                    orr_reg(&mut self.mem, 0, 0, 1); // x0 = x0 | x1 (falsy flag)
+                    emit(&mut self.mem, 0xD37FF800); // LSL x0, x0, #1
+                    orr_imm1(&mut self.mem, 0, 0);
+                    self.push();
+                }
                 _ => {
                     // Unknown opcode: emit a trap so we notice quickly.
                     emit(&mut self.mem, 0xD4200000); // BRK #0

@@ -194,6 +194,35 @@ impl CodeGen {
                     self.mem.emit_add_r64_imm32(0, 2); // add rax, 2
                     self.emit_jit_stack_push();
                 }
+                Opcode::Not => {
+                    // Falsy: value ≤ 2 (undefined/Smi(0)/null) or == 4 (false)
+                    self.emit_jit_stack_pop();             // rax = value
+                    self.mem.emit_mov_r64_rm64(1, 0);      // rcx = value
+                    // cmp rcx, 2
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0x83);
+                    self.mem.emit_byte(0xF9);              // ModRM: r/m=rcx, reg=7(cmp)
+                    self.mem.emit_byte(2);                 // imm8
+                    self.mem.emit_byte(0x0F);
+                    self.mem.emit_byte(0x96);
+                    self.mem.emit_byte(0xC0);              // setbe al (1 if ≤ 2)
+                    // cmp rcx, 4
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0x83);
+                    self.mem.emit_byte(0xF9);
+                    self.mem.emit_byte(4);                 // imm8
+                    self.mem.emit_byte(0x0F);
+                    self.mem.emit_byte(0x94);
+                    self.mem.emit_byte(0xC1);              // sete cl (1 if == 4)
+                    self.mem.emit_byte(0x08);
+                    self.mem.emit_byte(0xC8);              // or al, cl
+                    self.mem.emit_byte(0x0F);
+                    self.mem.emit_byte(0xB6);
+                    self.mem.emit_byte(0xC0);              // movzx eax, al
+                    self.mem.emit_shl_r64_1(0);            // shl rax, 1
+                    self.mem.emit_or_r64_imm8(0, 1);      // or rax, 1
+                    self.emit_jit_stack_push();
+                }
                 Opcode::Add => {
                     self.emit_smi_add();
                     self.emit_jit_stack_push();

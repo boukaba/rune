@@ -198,11 +198,10 @@ impl CodeGen {
         self.emit_epilogue();
         // Patch jumps
         let ok_label = self.mem.current_offset();
-        let six: u32 = 6;
-        self.mem.patch_u32(jg_ov, ov_label as u32 - (jg_ov as u32 + six));
-        self.mem.patch_u32(jl_ov, ov_label as u32 - (jl_ov as u32 + six));
-        let five: u32 = 5;
-        self.mem.patch_u32(jmp_ok, ok_label as u32 - (jmp_ok as u32 + five));
+        let four: u32 = 4;
+        self.mem.patch_u32(jg_ov, ov_label as u32 - (jg_ov as u32 + four));
+        self.mem.patch_u32(jl_ov, ov_label as u32 - (jl_ov as u32 + four));
+        self.mem.patch_u32(jmp_ok, ok_label as u32 - (jmp_ok as u32 + four));
     }
 
     /// Pop two Smis from the JIT stack and add them:
@@ -633,12 +632,16 @@ impl CodeGen {
                     self.mem.emit_byte(0xC0);                // xor eax, eax
                     self.emit_jit_stack_push();               // push undefined (safety)
                     self.emit_epilogue();                     // return from JIT
-                    // Patch jumps
-                    self.mem.patch_u32(jne_miss_patch, (miss_offset - (jne_miss_patch + 6)) as u32);
-                    self.mem.patch_u32(jbe_miss_patch, (miss_offset - (jbe_miss_patch + 6)) as u32);
-                    self.mem.patch_u32(jne_shape_patch, (miss_offset - (jne_shape_patch + 6)) as u32);
+                    // Patch jumps: displacement = target - (patch_addr + 4)
+                    // Jcc rel32: 2-byte opcode + 4-byte disp (6 total), disp field at offset+2,
+                    //   end of instruction = patch_offset + 4.
+                    // JMP rel32: 1-byte opcode + 4-byte disp (5 total), disp field at offset+1,
+                    //   end of instruction = patch_offset + 4.
+                    self.mem.patch_u32(jne_miss_patch, (miss_offset - (jne_miss_patch + 4)) as u32);
+                    self.mem.patch_u32(jbe_miss_patch, (miss_offset - (jbe_miss_patch + 4)) as u32);
+                    self.mem.patch_u32(jne_shape_patch, (miss_offset - (jne_shape_patch + 4)) as u32);
                     let done = self.mem.current_offset();
-                    self.mem.patch_u32(jmp_done_patch, (done - (jmp_done_patch + 5)) as u32);
+                    self.mem.patch_u32(jmp_done_patch, (done - (jmp_done_patch + 4)) as u32);
                 }
                 Opcode::LoadPropertyIC => {
                     let shape_id = instr.operands[0] as u64;
@@ -1063,7 +1066,7 @@ mod tests {
         let ptr = Box::into_raw(buf) as *mut u8;
         unsafe {
             let bailout_ptr = ptr.add(520) as *mut usize;
-            *bailout_ptr = bailout_stub as usize;
+            *bailout_ptr = bailout_stub as *const () as usize;
         }
         ptr
     }

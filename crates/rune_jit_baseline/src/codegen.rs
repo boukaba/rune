@@ -1909,4 +1909,100 @@ mod tests {
         let result = unsafe { func(vm_stub(), std::ptr::null_mut(), std::ptr::null_mut()) };
         assert_eq!(result, 0, "Shl overflow: expected 0 (bailout), got {}", result);
     }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_non_smi_input_bailouts() {
+        let run = |instrs: Vec<Instruction>| -> u64 {
+            let prog = make_prog(instrs);
+            let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
+            compiled.mem.make_executable();
+            let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
+            unsafe { func(vm_stub(), std::ptr::null_mut(), std::ptr::null_mut()) }
+        };
+
+        // Binary ops — non-Smi b (first operand), Smi a
+        for &(op, name) in &[
+            (Opcode::Add, "Add"),
+            (Opcode::Sub, "Sub"),
+            (Opcode::Mul, "Mul"),
+            (Opcode::Shl, "Shl"),
+            (Opcode::Shr, "Shr"),
+            (Opcode::BitAnd, "BitAnd"),
+            (Opcode::BitOr, "BitOr"),
+            (Opcode::BitXor, "BitXor"),
+            (Opcode::ShrU, "ShrU"),
+            (Opcode::Lt, "Lt"),
+            (Opcode::Gt, "Gt"),
+            (Opcode::Le, "Le"),
+            (Opcode::Ge, "Ge"),
+            (Opcode::StrictEq, "StrictEq"),
+            (Opcode::StrictNe, "StrictNe"),
+            (Opcode::Eq, "Eq"),
+            (Opcode::Ne, "Ne"),
+        ] {
+            let r = run(vec![
+                Instruction::new(Opcode::LoadUndefined, vec![]),
+                Instruction::new(Opcode::LoadSmi, vec![10]),
+                Instruction::new(op, vec![]),
+                Instruction::new(Opcode::Return, vec![]),
+            ]);
+            assert_eq!(r, 0, "{}: non-Smi b should bail, got {}", name, r);
+        }
+
+        // Binary ops — non-Smi a (second operand), Smi b — skips first guard, hits second
+        for &(op, name) in &[
+            (Opcode::Add, "Add"),
+            (Opcode::Sub, "Sub"),
+            (Opcode::Mul, "Mul"),
+            (Opcode::Shl, "Shl"),
+            (Opcode::Shr, "Shr"),
+            (Opcode::BitAnd, "BitAnd"),
+            (Opcode::BitOr, "BitOr"),
+            (Opcode::BitXor, "BitXor"),
+            (Opcode::ShrU, "ShrU"),
+            (Opcode::Lt, "Lt"),
+            (Opcode::Gt, "Gt"),
+            (Opcode::Le, "Le"),
+            (Opcode::Ge, "Ge"),
+            (Opcode::StrictEq, "StrictEq"),
+            (Opcode::StrictNe, "StrictNe"),
+            (Opcode::Eq, "Eq"),
+            (Opcode::Ne, "Ne"),
+        ] {
+            let r = run(vec![
+                Instruction::new(Opcode::LoadSmi, vec![10]),
+                Instruction::new(Opcode::LoadUndefined, vec![]),
+                Instruction::new(op, vec![]),
+                Instruction::new(Opcode::Return, vec![]),
+            ]);
+            assert_eq!(r, 0, "{}: non-Smi a should bail, got {}", name, r);
+        }
+
+        // Unary ops — non-Smi operand
+        for &(op, name) in &[
+            (Opcode::Neg, "Neg"),
+            (Opcode::Not, "Not"),
+            (Opcode::BitNot, "BitNot"),
+            (Opcode::UnaryPlus, "UnaryPlus"),
+        ] {
+            let r = run(vec![
+                Instruction::new(Opcode::LoadUndefined, vec![]),
+                Instruction::new(op, vec![]),
+                Instruction::new(Opcode::Return, vec![]),
+            ]);
+            assert_eq!(r, 0, "{}: non-Smi should bail, got {}", name, r);
+        }
+
+        // Jumps — non-Smi condition; target must be ≤ instruction count
+        for &(op, name) in &[(Opcode::JumpIfFalse, "JumpIfFalse"), (Opcode::JumpIfTrue, "JumpIfTrue")] {
+            let r = run(vec![
+                Instruction::new(Opcode::LoadUndefined, vec![]),
+                Instruction::new(op, vec![3]),
+                Instruction::new(Opcode::LoadSmi, vec![42]),
+                Instruction::new(Opcode::Return, vec![]),
+            ]);
+            assert_eq!(r, 0, "{}: non-Smi should bail, got {}", name, r);
+        }
+    }
 }

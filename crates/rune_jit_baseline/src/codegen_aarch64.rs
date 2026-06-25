@@ -2136,4 +2136,102 @@ mod tests {
         let result = unsafe { func(vm, std::ptr::null_mut(), std::ptr::null_mut()) };
         assert_eq!(result, 0, "Shl overflow: expected 0 (bailout), got {}", result);
     }
+
+    #[test]
+    fn test_aarch64_non_smi_input_bailouts() {
+        use rune_bytecode::opcode::{BytecodeProgram, Instruction, Opcode};
+        let run = |instrs: Vec<Instruction>| -> u64 {
+            let prog = BytecodeProgram::new(instrs, vec![], vec![]);
+            let compiled = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
+            compiled.mem.make_executable();
+            let vm = jit_vm_ptr();
+            let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
+                unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
+            unsafe { func(vm, std::ptr::null_mut(), std::ptr::null_mut()) }
+        };
+
+        // Binary ops — non-Smi b (first operand), Smi a
+        for &(op, name) in &[
+            (Opcode::Add, "Add"),
+            (Opcode::Sub, "Sub"),
+            (Opcode::Mul, "Mul"),
+            (Opcode::Shl, "Shl"),
+            (Opcode::Shr, "Shr"),
+            (Opcode::BitAnd, "BitAnd"),
+            (Opcode::BitOr, "BitOr"),
+            (Opcode::BitXor, "BitXor"),
+            (Opcode::ShrU, "ShrU"),
+            (Opcode::Lt, "Lt"),
+            (Opcode::Gt, "Gt"),
+            (Opcode::Le, "Le"),
+            (Opcode::Ge, "Ge"),
+            (Opcode::StrictEq, "StrictEq"),
+            (Opcode::StrictNe, "StrictNe"),
+            (Opcode::Eq, "Eq"),
+            (Opcode::Ne, "Ne"),
+        ] {
+            let r = run(vec![
+                Instruction::new(Opcode::LoadUndefined, vec![]),
+                Instruction::new(Opcode::LoadSmi, vec![10]),
+                Instruction::new(op, vec![]),
+                Instruction::new(Opcode::Return, vec![]),
+            ]);
+            assert_eq!(r, 0, "{}: non-Smi b should bail, got {}", name, r);
+        }
+
+        // Binary ops — non-Smi a (second operand), Smi b
+        for &(op, name) in &[
+            (Opcode::Add, "Add"),
+            (Opcode::Sub, "Sub"),
+            (Opcode::Mul, "Mul"),
+            (Opcode::Shl, "Shl"),
+            (Opcode::Shr, "Shr"),
+            (Opcode::BitAnd, "BitAnd"),
+            (Opcode::BitOr, "BitOr"),
+            (Opcode::BitXor, "BitXor"),
+            (Opcode::ShrU, "ShrU"),
+            (Opcode::Lt, "Lt"),
+            (Opcode::Gt, "Gt"),
+            (Opcode::Le, "Le"),
+            (Opcode::Ge, "Ge"),
+            (Opcode::StrictEq, "StrictEq"),
+            (Opcode::StrictNe, "StrictNe"),
+            (Opcode::Eq, "Eq"),
+            (Opcode::Ne, "Ne"),
+        ] {
+            let r = run(vec![
+                Instruction::new(Opcode::LoadSmi, vec![10]),
+                Instruction::new(Opcode::LoadUndefined, vec![]),
+                Instruction::new(op, vec![]),
+                Instruction::new(Opcode::Return, vec![]),
+            ]);
+            assert_eq!(r, 0, "{}: non-Smi a should bail, got {}", name, r);
+        }
+
+        // Unary ops — non-Smi operand
+        for &(op, name) in &[
+            (Opcode::Neg, "Neg"),
+            (Opcode::Not, "Not"),
+            (Opcode::BitNot, "BitNot"),
+            (Opcode::UnaryPlus, "UnaryPlus"),
+        ] {
+            let r = run(vec![
+                Instruction::new(Opcode::LoadUndefined, vec![]),
+                Instruction::new(op, vec![]),
+                Instruction::new(Opcode::Return, vec![]),
+            ]);
+            assert_eq!(r, 0, "{}: non-Smi should bail, got {}", name, r);
+        }
+
+        // Jumps — non-Smi condition; target must be ≤ instruction count
+        for &(op, name) in &[(Opcode::JumpIfFalse, "JumpIfFalse"), (Opcode::JumpIfTrue, "JumpIfTrue")] {
+            let r = run(vec![
+                Instruction::new(Opcode::LoadUndefined, vec![]),
+                Instruction::new(op, vec![3]),
+                Instruction::new(Opcode::LoadSmi, vec![42]),
+                Instruction::new(Opcode::Return, vec![]),
+            ]);
+            assert_eq!(r, 0, "{}: non-Smi should bail, got {}", name, r);
+        }
+    }
 }

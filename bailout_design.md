@@ -168,27 +168,20 @@ movz x1, #<bc_pc>           ; arg1 = bc_pc (low 16 bits; use movk if >65535)
 mov  x0, x19                ; arg0 = vm_ptr
 ldr  x15, [x19, #520]       ; x15 = bailout_helper
 blr  x15
-; helper returns sentinel; check & return
-movz x1, #<sentinel_low>
-movk x1, #<sentinel_high>, lsl #16
-movk x1, #<sentinel_high2>, lsl #32
-movk x1, #<sentinel_high3>, lsl #48
-cmp  x0, x1
-b.eq 2f                     ; bail — jump to function epilogue
+; bailout helper sets vm.jit_bailout.pending = true
+b 2f                       ; always bail — jump to epilogue
 1:
 ; --- continue ---
-str  x0, [x22]
-add  x22, x22, #8
 ```
 
-The sentinel return value must be a bit pattern that is **never a valid Value**. Candidate: `0xBAD_BA1B0uT_BAD` — but Value's tag scheme allows any 64-bit pattern as a heap pointer. **Use a separate flag instead:** the bailout helper writes `vm.jit_bailout.bc_pc = bc_pc` (non-zero) and returns 0. The JIT call site checks `vm.jit_bailout.bc_pc != 0` — never inspects the return value. **This is simpler and avoids the sentinel collision problem entirely.**
+**Do not inspect the return value.** The bailout helper writes `vm.jit_bailout.pending = true` (with `bc_pc` and `stack_snapshot`). The JIT call site in `vm.rs` checks `vm.jit_bailout.pending` after the JIT function returns — never inspects the JIT return value. This avoids the sentinel collision problem entirely. The `pending` flag is cleared before every JIT call and after handling the bailout.
 
-So the post-helper code simplifies to:
+For overflow guards (PR2, §9), the pattern is the same — call the helper and bail. No return-value check in asm:
 
 ```asm
 ldr  x15, [x19, #520]
 blr  x15
-; Always return — vm.rs checks vm.jit_bailout.bc_pc
+; Always bail — vm.rs checks vm.jit_bailout.pending
 b 2f                       ; jump to epilogue
 1:
 ; ... continue opcode ...

@@ -30,6 +30,8 @@ pub fn is_jit_compatible(prog: &rune_bytecode::opcode::BytecodeProgram) -> bool 
             | Opcode::StrictEq
             | Opcode::Neg
             | Opcode::Not
+            | Opcode::Void
+            | Opcode::StrictNe
             | Opcode::Shl
             | Opcode::Shr
             | Opcode::BitAnd

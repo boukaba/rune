@@ -1141,7 +1141,7 @@ Tagged `v0.0.1` at `0067e41`. Honest positioning: NOT FOR PRODUCTION USE.
 - IC hardening: LoadPropertyIC → SIDT fused check, StorePropertyIC, get-by-value IC, proto chain IC, LoadPropertyIC shape-installing, IC miss stats, ~2.3× poly speedup (Sprint 15.5)
 - AFPC: rkyv binary bytecode cache, CLI --cache flag, shape/IC table persistence, x86-64 + AArch64 function baseline JIT with native code mmap on load, 13.5× compile speedup (Sprint 16)
 - AArch64 function AOT + trace compiler: `Aarch64CodeGen` covers 19/61 opcodes (Smi arithmetic + comparison + branches + locals). Hot loops auto-compile to native at >50 iterations and execute directly, bypassing interpreter dispatch.
-- JIT: 26/61 opcodes covered (Smi arithmetic + comparison + bitwise + Neg + Not + branches + locals).
+- JIT: 28/61 opcodes covered (Smi arithmetic + comparison + bitwise + unary + branches + locals).
 - Bug fixes: P0 (AArch64 trace SIGBUS), P7 (IC stats), P10 (JIT skip tiny), P12 (trace execution), P13 (Smi display), MOVK lsl fix, CSET CSINC fix.
 - Test count: 297 integration → 424 total (297 integration + 127 unit/doctest)
 

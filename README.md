@@ -70,23 +70,24 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 - **Modules:** No import/export (ESM)
 - **Classes:** No class syntax, super, getters/setters
 - **Async/await:** No async, await, for...of
-- **Optimizing JIT:** Baseline only (Smi arithmetic, comparison, bitwise, unary, locals, branches, property access) — 5–230× slower than V8 on hot loops
+- **Baseline JIT (x86-64):** 56/62 opcodes — Smi arithmetic, comparison, bitwise, unary, branches, locals, property access, TypeOf, LoadStringConst, LoadGlobal, StoreGlobal, IncGlobal, DecGlobal. Function tier-up at 50 calls. Input guards + overflow guards + bailout to interpreter.
+- **Trace compiler (aarch64):** Loop trace recording + native compilation for hot loops with property access. Limited by global variable rejection (pre-existing IC stack bug).
 - **Debugger:** No CDP/DevTools
 
-## Performance
+## Performance (aarch64, M4 Pro)
 
 | Benchmark | Rune | V8 (Node v22) | Ratio |
 |---|---|---|---|
 | **Cold start** (`rune '1'` / `node -e '1'`) | **4ms** | 33ms | **Rune 5× faster** |
-| `loop_sum_smi_1M` (interpreter) | 428ms | 3ms | 143× slower |
-| `jit_hot_function_1M` (JIT tier-up) | ~680ms | 3ms | 227× slower |
-| `array_push_grow_100k` | 66ms | 3ms | 22× slower |
-| `o.x` 1M monomorphic | ~499ms | 4ms | 125× slower |
-| `o.x` 10 shapes (SIDT) | ~994ms | 5ms | 199× slower |
+| `loop_sum_smi_1M` | 397ms | 2.2ms | 181× slower |
+| `jit_hot_function_1M` | 599ms | 2.4ms | 252× slower |
+| `array_push_grow_100k` | 60ms | 6.7ms | 9× slower |
+| `poly_prop_10shapes_1M` (SIDT) | 916ms | 4.1ms | 221× slower |
+| `proto_chain_lookup_5deep_1M` | — | 1.5ms | — |
+
+> **Note:** JIT function compiler is x86-64-only. On aarch64, JIT traces (hot loops) are compiled natively only when they contain no global variable references — the trace compiler's LoadPropertyIC/StorePropertyIC handlers have a pre-existing stack-balance bug that prevents global ops from being safely compiled. All benchmarks above run entirely in the interpreter on aarch64.
 
 **AFPC cache:** Compile (parse+emit) 355µs → cache load 26µs (**13.5× faster**). End-to-end latency is execution-bound — cache eliminates parse/emit entirely but hot loops still run in interpreter.
-
-Hardware: MacBook Pro M4 Pro (aarch64). JIT coverage: 48 Smi-and-float opcodes (float64 → Smi when in range) (floats, calls not yet JIT-compiled). JIT bailout mechanism (PR1) shipped: BailoutPoint/BailoutTable/CompiledFunction, rune_jit_bailout_helper, jit_stack_base prologue, TypeOf bail-on-entry.
 
 ### SIDT Architecture
 

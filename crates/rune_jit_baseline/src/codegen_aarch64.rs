@@ -35,7 +35,8 @@ pub struct JitHelpers {
     pub bailout_helper: usize,
     pub typeof_helper: usize,
     pub string_helper: usize,
-    _reserved: [usize; 4],
+    pub global_helper: usize,
+    _reserved: [usize; 3],
 }
 
 /// VM state visible to the trace compiler. Must be placed at offset 0 from
@@ -1018,7 +1019,7 @@ impl Aarch64CodeGen {
                     // miss: push object back, then value back, bail to interpreter
                     let miss_offset = self.mem.current_offset();
                     self.record_bailout_point(bc_idx, BailoutReason::ShapeMiss);
-                    mov_reg(&mut self.mem, 0, 2);       // x0 = object (key, saved in x2)
+                    mov_reg(&mut self.mem, 0, 2);       // x0 = object (saved in x2)
                     self.push();                         // restore object on JIT stack
                     mov_reg(&mut self.mem, 0, 1);       // x0 = value (saved in x1)
                     self.push();                         // restore value on JIT stack
@@ -1178,6 +1179,61 @@ impl Aarch64CodeGen {
                     movz(&mut self.mem, 0, 0);
                     self.push();
                     self.emit_epilogue();
+                }
+                Opcode::LoadGlobal => {
+                    let name_idx = instr.operands[0] as u64;
+                    let prog_ptr = program as *const rune_bytecode::opcode::BytecodeProgram as *const u8 as u64;
+                    // x0 = x19 (vm_ptr), x1 = x20 (gc_ptr)
+                    mov_reg(&mut self.mem, 0, VM_REG);
+                    mov_reg(&mut self.mem, 1, GC_REG);
+                    // x2 = prog_ptr (immediate), x3 = 0 (op: LoadGlobal)
+                    mov_imm64(&mut self.mem, 2, prog_ptr);
+                    mov_imm64(&mut self.mem, 3, 0);
+                    // x4 = name_idx, x5 = 0 (unused for load)
+                    mov_imm64(&mut self.mem, 4, name_idx);
+                    mov_imm64(&mut self.mem, 5, 0);
+                    // Load global_helper from [x19 + 544] into x15
+                    ldr_off(&mut self.mem, 15, VM_REG, 544);
+                    emit(&mut self.mem, 0xD63F01E0);             // BLR x15
+                    self.push();                                 // push result (x0)
+                }
+                Opcode::StoreGlobal => {
+                    let name_idx = instr.operands[0] as u64;
+                    let prog_ptr = program as *const rune_bytecode::opcode::BytecodeProgram as *const u8 as u64;
+                    // Pop value to store from JIT stack into x5
+                    self.pop();
+                    mov_reg(&mut self.mem, 5, 0);                // x5 = value_raw
+                    // x0 = x19 (vm_ptr), x1 = x20 (gc_ptr)
+                    mov_reg(&mut self.mem, 0, VM_REG);
+                    mov_reg(&mut self.mem, 1, GC_REG);
+                    // x2 = prog_ptr, x3 = 1 (op: StoreGlobal)
+                    mov_imm64(&mut self.mem, 2, prog_ptr);
+                    mov_imm64(&mut self.mem, 3, 1);
+                    // x4 = name_idx, x5 = value_raw (already set)
+                    mov_imm64(&mut self.mem, 4, name_idx);
+                    // Load global_helper from [x19 + 544] into x15
+                    ldr_off(&mut self.mem, 15, VM_REG, 544);
+                    emit(&mut self.mem, 0xD63F01E0);             // BLR x15
+                    self.push();                                 // push result (stored value)
+                }
+                Opcode::IncGlobal | Opcode::DecGlobal => {
+                    let name_idx = instr.operands[0] as u64;
+                    let is_prefix = instr.operands[1];
+                    let op = if matches!(instr.opcode, Opcode::IncGlobal) { 2u64 } else { 3u64 };
+                    let prog_ptr = program as *const rune_bytecode::opcode::BytecodeProgram as *const u8 as u64;
+                    // x0 = x19 (vm_ptr), x1 = x20 (gc_ptr)
+                    mov_reg(&mut self.mem, 0, VM_REG);
+                    mov_reg(&mut self.mem, 1, GC_REG);
+                    // x2 = prog_ptr, x3 = op
+                    mov_imm64(&mut self.mem, 2, prog_ptr);
+                    mov_imm64(&mut self.mem, 3, op);
+                    // x4 = name_idx, x5 = is_prefix
+                    mov_imm64(&mut self.mem, 4, name_idx);
+                    mov_imm64(&mut self.mem, 5, is_prefix as u64);
+                    // Load global_helper from [x19 + 544] into x15
+                    ldr_off(&mut self.mem, 15, VM_REG, 544);
+                    emit(&mut self.mem, 0xD63F01E0);             // BLR x15
+                    self.push();                                 // push result (new or old value)
                 }
                 _ => {
                     // Unknown opcode: emit a trap so we notice quickly.
@@ -1386,7 +1442,8 @@ mod tests {
                 bailout_helper: test_bailout_stub as usize,
                 typeof_helper: 0,
                 string_helper: 0,
-                _reserved: [0; 4],
+                global_helper: 0,
+                _reserved: [0; 3],
             },
             jit_stack_base: 0,
         });
@@ -2008,7 +2065,8 @@ mod tests {
                 bailout_helper: 0,
                 typeof_helper: 0,
                 string_helper: 0,
-                _reserved: [0; 4],
+                global_helper: 0,
+                _reserved: [0; 3],
             },
             jit_stack_base: 0,
         };

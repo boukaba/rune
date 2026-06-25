@@ -123,7 +123,8 @@ pub struct JitHelpers {
     pub bailout_helper: usize,
     pub typeof_helper: usize,
     pub string_helper: usize,
-    _reserved: [usize; 4],
+    pub global_helper: usize,
+    _reserved: [usize; 3],
 }
 
 /// Stack-based bytecode interpreter with call frame support.
@@ -212,11 +213,12 @@ impl Vm {
         Vm {
             jit_stack: [0; 64],
             jit_helpers: JitHelpers {
-                lexical_helper: 0,
-                bailout_helper: 0,
-                typeof_helper: 0,
-                string_helper: 0,
-                _reserved: [0; 4],
+                lexical_helper: rune_jit_lexical_helper as *const () as usize,
+                bailout_helper: rune_jit_bailout_helper as *const () as usize,
+                typeof_helper: rune_jit_typeof_helper as *const () as usize,
+                string_helper: rune_jit_string_helper as *const () as usize,
+                global_helper: rune_jit_global_helper as *const () as usize,
+                _reserved: [0; 3],
             },
             jit_stack_base: 0,
             jit_bailout: JitBailoutState::default(),
@@ -2768,6 +2770,8 @@ impl Vm {
                                                 rune_jit_typeof_helper as *const () as usize;
                                             self.jit_helpers.string_helper =
                                                 rune_jit_string_helper as *const () as usize;
+                                            self.jit_helpers.global_helper =
+                                                rune_jit_global_helper as *const () as usize;
                                             // Clear pending flag before entering JIT; the bailout
                                             // helper sets it if a bailout occurs (cannot use
                                             // bc_pc != 0 as sentinel — MakeArgumentsArray at PC 0
@@ -3252,11 +3256,20 @@ impl Vm {
         instrs.push(Instruction::new(Opcode::LoadUndefined, vec![]));
         instrs.push(Instruction::new(Opcode::Return, vec![]));
 
-        // Build a temporary program to check JIT compatibility and compile.
         let prog = BytecodeProgram::new(instrs, vec![], vec![]);
         if !rune_jit_baseline::is_jit_compatible(&prog) {
             return; // trace contains unsupported opcodes (strings, objects, etc.)
         }
+        // Trace compiler doesn't support global opcodes yet.
+        for instr in &prog.instructions {
+            match instr.opcode {
+                Opcode::LoadGlobal | Opcode::StoreGlobal | Opcode::IncGlobal | Opcode::DecGlobal => {
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         let codegen = Aarch64CodeGen::new(prog.instructions.len());
         let compiled = codegen.compile(&prog);
         compiled.mem.make_executable();
@@ -4266,6 +4279,61 @@ pub extern "C" fn rune_jit_string_helper(
         *val = Value::from_heap_ptr(ptr as *mut u8);
     }
     val.raw()
+}
+
+/// JIT callout for LoadGlobal, StoreGlobal, IncGlobal, DecGlobal.
+///
+/// # Safety
+///
+/// `vm_ptr` must be a valid Vm pointer. `gc_ptr` must be a valid SemiSpace.
+/// `prog_ptr` must point to a live BytecodeProgram.
+pub extern "C" fn rune_jit_global_helper(
+    vm_ptr: *mut u8,
+    gc_ptr: *mut u8,
+    prog_ptr: *const u8,
+    op: u64,
+    name_idx: u64,
+    value_raw: u64,
+) -> u64 {
+    let vm = unsafe { &mut *(vm_ptr as *mut Vm) };
+    let gc = unsafe { &mut *(gc_ptr as *mut SemiSpace) };
+    let prog = unsafe { &*(prog_ptr as *const rune_bytecode::opcode::BytecodeProgram) };
+    let name = prog.string_pool.get(name_idx as usize).map(|s| s.as_str()).unwrap_or("");
+
+    match op {
+        0 => {
+            // LoadGlobal
+            let val = vm.globals.get(name).copied()
+                .or_else(|| vm.builtin_wrappers.get(name).copied())
+                .or_else(|| vm.get_builtin(name))
+                .unwrap_or(Value::undefined());
+            val.raw()
+        }
+        1 => {
+            // StoreGlobal
+            let val = Value::from_raw(value_raw);
+            vm.globals.insert(name.to_string(), val);
+            val.raw()
+        }
+        2 | 3 => {
+            // IncGlobal (2) or DecGlobal (3)
+            let old_val = vm.globals.get(name).copied()
+                .or_else(|| vm.builtin_wrappers.get(name).copied())
+                .or_else(|| vm.get_builtin(name))
+                .unwrap_or(Value::undefined());
+            let is_prefix = value_raw != 0;
+            let n = if op == 2 {
+                to_number(old_val) + 1.0
+            } else {
+                to_number(old_val) - 1.0
+            };
+            let new_val = number_result(gc, n);
+            vm.globals.insert(name.to_string(), new_val);
+            let result = if is_prefix { new_val } else { old_val };
+            result.raw()
+        }
+        _ => Value::undefined().raw(),
+    }
 }
 
 #[cfg(test)]

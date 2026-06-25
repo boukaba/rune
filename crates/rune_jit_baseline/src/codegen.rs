@@ -1115,6 +1115,81 @@ impl CodeGen {
                     self.emit_jit_stack_push();
                     self.emit_epilogue();
                 }
+                Opcode::LoadGlobal => {
+                    let name_idx = instr.operands[0] as u64;
+                    let prog_ptr = program as *const BytecodeProgram as *const u8 as u64;
+                    // rdi = r15 (vm_ptr)
+                    self.mem.emit_mov_r64_rm64(7, 15);
+                    // rsi = r14 (gc_ptr)
+                    self.mem.emit_mov_r64_rm64(6, 14);
+                    // rdx = prog_ptr (immediate)
+                    self.mem.emit_mov_r64_imm64(2, prog_ptr);
+                    // rcx = 0 (op: LoadGlobal)
+                    self.mem.emit_mov_r64_imm64(1, 0);
+                    // r8 = name_idx
+                    self.mem.emit_mov_r64_imm64(8, name_idx);
+                    // r9 = 0 (value_raw, unused for load)
+                    self.mem.emit_mov_r64_imm64(9, 0);
+                    // Load global_helper from [r15 + 544] into rax
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0x8B);                   // MOV rax, [r15 + 544]
+                    self.mem.emit_byte(0x87);                   // mod=10, reg=0(rax), r/m=7(r15)
+                    self.mem.emit_u32(544);                     // disp32
+                    self.mem.emit_call_r64(0);                  // call rax
+                    // push result (Value in rax)
+                    self.emit_jit_stack_push();
+                }
+                Opcode::StoreGlobal => {
+                    let name_idx = instr.operands[0] as u64;
+                    let prog_ptr = program as *const BytecodeProgram as *const u8 as u64;
+                    // Pop value to store from JIT stack into r9
+                    self.emit_jit_stack_pop();                  // rax = value
+                    self.mem.emit_mov_r64_rm64(9, 0);           // r9 = value_raw
+                    // rdi = r15 (vm_ptr)
+                    self.mem.emit_mov_r64_rm64(7, 15);
+                    // rsi = r14 (gc_ptr)
+                    self.mem.emit_mov_r64_rm64(6, 14);
+                    // rdx = prog_ptr (immediate)
+                    self.mem.emit_mov_r64_imm64(2, prog_ptr);
+                    // rcx = 1 (op: StoreGlobal)
+                    self.mem.emit_mov_r64_imm64(1, 1);
+                    // r8 = name_idx
+                    self.mem.emit_mov_r64_imm64(8, name_idx);
+                    // Load global_helper from [r15 + 544] into rax
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0x8B);                   // MOV rax, [r15 + 544]
+                    self.mem.emit_byte(0x87);                   // mod=10, reg=0(rax), r/m=7(r15)
+                    self.mem.emit_u32(544);                     // disp32
+                    self.mem.emit_call_r64(0);                  // call rax
+                    // push result (stored Value in rax)
+                    self.emit_jit_stack_push();
+                }
+                Opcode::IncGlobal | Opcode::DecGlobal => {
+                    let name_idx = instr.operands[0] as u64;
+                    let is_prefix = instr.operands[1];
+                    let op = if matches!(instr.opcode, Opcode::IncGlobal) { 2u64 } else { 3u64 };
+                    let prog_ptr = program as *const BytecodeProgram as *const u8 as u64;
+                    // rdi = r15 (vm_ptr)
+                    self.mem.emit_mov_r64_rm64(7, 15);
+                    // rsi = r14 (gc_ptr)
+                    self.mem.emit_mov_r64_rm64(6, 14);
+                    // rdx = prog_ptr (immediate)
+                    self.mem.emit_mov_r64_imm64(2, prog_ptr);
+                    // rcx = op
+                    self.mem.emit_mov_r64_imm64(1, op);
+                    // r8 = name_idx
+                    self.mem.emit_mov_r64_imm64(8, name_idx);
+                    // r9 = is_prefix
+                    self.mem.emit_mov_r64_imm64(9, is_prefix as u64);
+                    // Load global_helper from [r15 + 544] into rax
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0x8B);                   // MOV rax, [r15 + 544]
+                    self.mem.emit_byte(0x87);                   // mod=10, reg=0(rax), r/m=7(r15)
+                    self.mem.emit_u32(544);                     // disp32
+                    self.mem.emit_call_r64(0);                  // call rax
+                    // push result (Value in rax)
+                    self.emit_jit_stack_push();
+                }
                 _ => {
                     self.mem.emit_byte(0xCC);
                 }

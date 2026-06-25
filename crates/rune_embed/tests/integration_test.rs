@@ -1900,6 +1900,104 @@ fn test_jit_load_string_const() {
     );
 }
 
+#[test]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn test_jit_load_global() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(
+        r#"
+        function reader() {
+            var a = 1;
+            var b = 2;
+            var c = 3;
+            return g;
+        }
+        var g = 42;
+        var r = 0;
+        for (var i = 0; i < 100; i++) {
+            r = reader();
+        }
+        r
+    "#,
+    )
+    .unwrap();
+    assert_eq!(r.as_smi(), Some(42), "should read global g");
+    assert!(
+        ctx.vm().jit_entry_count > 0,
+        "JIT must have entered for reader()"
+    );
+    assert_eq!(
+        ctx.vm().jit_bailout_count, 0,
+        "LoadGlobal should be native — no bailout"
+    );
+}
+
+#[test]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn test_jit_store_global() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(
+        r#"
+        function writer(x) {
+            var a = 1;
+            var b = 2;
+            var c = 3;
+            g = x;
+            return g;
+        }
+        var g = 0;
+        var r = 0;
+        for (var i = 0; i < 100; i++) {
+            r = writer(i);
+        }
+        r
+    "#,
+    )
+    .unwrap();
+    assert_eq!(r.as_smi(), Some(99), "g should be 99 after loop");
+    assert!(
+        ctx.vm().jit_entry_count > 0,
+        "JIT must have entered for writer()"
+    );
+    assert_eq!(
+        ctx.vm().jit_bailout_count, 0,
+        "StoreGlobal should be native — no bailout"
+    );
+}
+
+#[test]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn test_jit_inc_global() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(
+        r#"
+        function increment() {
+            var a = 1;
+            var b = 2;
+            var c = 3;
+            g = g + 1;
+            return g;
+        }
+        var g = 0;
+        var r = 0;
+        for (var i = 0; i < 100; i++) {
+            r = increment();
+        }
+        r
+    "#,
+    )
+    .unwrap();
+    assert_eq!(r.as_smi(), Some(100), "g should be 100 after 100 increments");
+    assert!(
+        ctx.vm().jit_entry_count > 0,
+        "JIT must have entered for increment()"
+    );
+    assert_eq!(
+        ctx.vm().jit_bailout_count, 0,
+        "Global load/store should be native — no bailout"
+    );
+}
+
 mod instanceof_tests {
     use rune_embed::Context;
 

@@ -1141,14 +1141,15 @@ Tagged `v0.0.1` at `0067e41`. Honest positioning: NOT FOR PRODUCTION USE.
 - IC hardening: LoadPropertyIC → SIDT fused check, StorePropertyIC, get-by-value IC, proto chain IC, LoadPropertyIC shape-installing, IC miss stats, ~2.3× poly speedup (Sprint 15.5)
 - AFPC: rkyv binary bytecode cache, CLI --cache flag, shape/IC table persistence, x86-64 + AArch64 function baseline JIT with native code mmap on load, 13.5× compile speedup (Sprint 16)
 - AArch64 function AOT + trace compiler: `Aarch64CodeGen` covers 19/61 opcodes (Smi arithmetic + comparison + branches + locals). Hot loops auto-compile to native at >50 iterations and execute directly, bypassing interpreter dispatch.
-- JIT: 49/62 opcodes covered (Smi arithmetic, comparison, bitwise, unary, branches, locals, property access, lexical scoping, TypeOf bail-on-entry, MakeArgumentsArray bail-on-entry).
+- JIT: 56/62 opcodes covered (Smi arithmetic, comparison, bitwise, unary, branches, locals, property access, lexical scoping, TypeOf, LoadStringConst, LoadGlobal, StoreGlobal, IncGlobal, DecGlobal; MakeArgumentsArray skip avoids bail).
 - Bailout mechanism (PR1): BailoutPoint/BailoutTable/CompiledFunction types, rune_jit_bailout_helper extern C, jit_stack_base prologue storage, Vm-owned bailout_tables HashMap, JitBailoutState with stack snapshot.
 - Bailout fix (PR1 fixup): §6.2 frame push (new Frame, not caller's frame), MakeArgumentsArray in is_jit_compatible (49/62), MIN_JIT_FUNCTION_SIZE lowered 20→3, jit_entry_count assertion in tests, x86-64 CompiledFunction.mem access, extern C fn→usize cast lint fix, vm_stub() for unit tests.
 - PR1 fixup 2: `all_smi` → `jit_locals_ok` (skips locals[0] for named functions, allows undefined pads); `JitBailoutState::pending` flag replaces `bc_pc != 0` sentinel which collided with MakeArgumentsArray at PC 0; JIT tests now run on both x86-64 and AArch64.
-- Bug fixes: P0 (AArch64 trace SIGBUS), P7 (IC stats), P10 (JIT skip tiny), P12 (trace execution), P13 (Smi display), MOVK lsl fix, CSET CSINC fix.
-- Test count: 299 integration → 426 total (299 integration + 127 unit/doctest)
+- Phase C: Native JIT opcodes — TypeOf, LoadStringConst, LoadGlobal, StoreGlobal, IncGlobal, DecGlobal (6 new native opcodes). `JitHelpers` populated at Vm::new() for trace-execution safety.
+- Bug fixes: P0 (AArch64 trace SIGBUS), P7 (IC stats), P10 (JIT skip tiny), P12 (trace execution), P13 (Smi display), MOVK lsl fix, CSET CSINC fix, AArch64 trace compiler LoadPropertyIC/StorePropertyIC stack balance.
+- Test count: 307 integration → 434 total (307 integration + 127 unit/doctest)
 
-**Gaps (documented):** No standard library, optimizing JIT (remaining 13/62 opcodes), modules, classes, async/await. 5–230× slower than V8 on hot loops. JIT covers 49/62 opcodes.
+**Gaps (documented):** No standard library, optimizing JIT (remaining 6/62 opcodes — floats, calls, generator ops), modules, classes, async/await. 5–230× slower than V8 on hot loops. JIT covers 56/62 opcodes.
 
 ## Global Testing Strategy
 
@@ -1217,7 +1218,7 @@ The JIT now accepts any argument types. Non-Smi inputs hit `NonSmiInput` guard a
 | PR2: Overflow guards + IC miss | ✅ shipped | Result overflow guards; Load/StorePropertyIC miss → bailout |
 | Phase B: Input guards | ✅ shipped | NonSmiInput guards on all 24 value-consuming opcodes, tested |
 | Phase D: Remove jit_locals_ok | ✅ shipped (`152bc8f`) | JIT safe for arbitrary JS — non-Smi args bail at first consuming op |
-| Phase C: Native opcodes | 🏗️ in progress | MakeArgumentsArray skip (done), TypeOf, LoadStringConst, globals |
+| Phase C: Native opcodes | ✅ shipped | MakeArgumentsArray skip, TypeOf, LoadStringConst, globals |
 
 ---
 
@@ -1323,6 +1324,47 @@ Commit: `cea3480`
 - **Cache warm by default**: The interpreter pre-warms `string_cache` during the 50 warm-up calls, so the JIT helper rarely allocates.
 - **`typeof_strings` rooted**: Following the same pattern as `array_prototype`/`string_prototype`/`object_prototype` in `register_roots()`.
 
-### Next
+---
 
-- Native `LoadGlobal` / `StoreGlobal` / `IncGlobal` / `DecGlobal` (~3 hours)
+## Phase C: Native Global Opcodes
+
+Commit: `HEAD` (not yet tagged)
+
+`LoadGlobal`, `StoreGlobal`, `IncGlobal`, and `DecGlobal` are now native JIT opcodes — the JIT calls `rune_jit_global_helper` which operates on `Vm::globals`, `Vm::builtin_wrappers`, and `Vm::get_builtin()`.
+
+### What was done
+
+- **Added `global_helper` to `JitHelpers`** (slot 4, offset 544). Updated `_reserved` from `[usize; 4]` to `[usize; 3]` in both `vm.rs` and `codegen_aarch64.rs`. Fixed all `JitHelpers` initializers.
+- **Fixed `JitHelpers` not being set for trace execution**: Previously, `Vm::new()` left all helpers as zero — they were only set in the function-JIT entry path. Now `Vm::new()` initializes all six helpers (`lexical_helper`, `bailout_helper`, `typeof_helper`, `string_helper`, `global_helper`) at construction time, so both function-JIT code and trace-execution paths have valid pointers.
+- **Implemented `rune_jit_global_helper`** extern "C" fn in `vm.rs`. Signature: `fn(vm_ptr, gc_ptr, prog_ptr, op, name_idx, value_raw) -> u64`. Handles op=0 (LoadGlobal), op=1 (StoreGlobal), op=2 (IncGlobal), op=3 (DecGlobal).
+  - **LoadGlobal**: Looks up `vm.globals[name]` → `vm.builtin_wrappers[name]` → `vm.get_builtin(name)` → `Value::undefined()`.
+  - **StoreGlobal**: Inserts the value into `vm.globals`.
+  - **IncGlobal/DecGlobal**: Reads current value, applies `to_number()`, `number_result()` for GC allocation of HeapFloat64, stores result, returns prefix or postfix value.
+- **x86-64 emission** (`codegen.rs`): `mov rdi,r15; mov rsi,r14; mov rdx,prog_ptr; mov rcx,op; mov r8,name_idx; mov r9,value_raw; call [r15+544]; push rax`.
+- **aarch64 emission** (`codegen_aarch64.rs`): Same pattern via x19/x20 and `blr x15`.
+- **Added `LoadGlobal`, `StoreGlobal`, `IncGlobal`, `DecGlobal` to `is_jit_compatible`** in `lib.rs`.
+- **Trace compiler filter**: `compile_trace_native` in `vm.rs` checks for global opcodes and returns early (trace compiler's `LoadPropertyIC`/`StorePropertyIC` handlers have a pre-existing stack-balance bug — see bugs section below).
+- **Fixed `StorePropertyIC` miss handler** in `codegen_aarch64.rs`: The miss path pushed key + object + value, but the interpreter expects only object + value (the key is consumed by the IC check, not pushed back). Fixed by removing the key push from the miss path. The corresponding `LoadPropertyIC` bug was fixed earlier by adding a key pop before the miss path.
+- **Added `test_jit_load_global`**: Hot loop reading a global variable, verifies `jit_entry_count > 0` and `jit_bailout_count == 0`.
+- **Added `test_jit_store_global`**: Hot loop writing a global variable, verifies `jit_entry_count > 0` and `jit_bailout_count == 0`.
+- **Added `test_jit_inc_global`**: Hot loop incrementing a global counter (`i++`), verifies correct final value and `jit_bailout_count == 0`.
+
+### Test results
+
+- Integration: **307 passed** (+3: test_jit_load_global, test_jit_store_global, test_jit_inc_global), 2 ignored
+- JIT baseline: 51 passed (both backends)
+- All crate tests: pass (workspace: all green)
+- Clippy: clean (only pre-existing `get_scalar` warning)
+
+### Key decisions
+
+- **Single callout for all four ops**: Rather than four separate helpers, one `global_helper` takes an `op` parameter, minimising codegen churn and keeping the ABI consistent.
+- **gc_ptr passed through**: IncGlobal/DecGlobal need GC access for `number_result()` (HeapFloat64 allocation). The existing prologue convention (x20/r14 = gc_ptr) is reused.
+- **Trace compiler excluded**: The aarch64 trace compiler has a pre-existing `LoadPropertyIC` stack-balance bug (the key operand is never popped before the miss handler). Rather than fix the trace compiler's property IC ops, globals are simply excluded from trace compilation by an explicit filter in `compile_trace_native`, while remaining in `is_jit_compatible` for function JIT.
+- **`JitHelpers` initialized in `Vm::new()`**: Previously, only the function-JIT entry path populated helpers. The trace-execution path (`compile_trace_native`) ran through `Vm::execute()` which did not go through the JIT entry code, so it used zeroed pointers. Fix: populate all helpers at construction time.
+
+### Pre-existing bugs encountered
+
+1. **`LoadPropertyIC` in aarch64 trace compiler**: The key operand (from `LoadStringConst`) was never popped from the JIT stack. On miss, the interpreter got key + object instead of just object, causing stack corruption. Discovered when enabling global opcodes in the trace compiler triggered the property-IC path. Fixed by popping the key before the miss path.
+2. **`StorePropertyIC` miss handler**: Pushed key + object + value for the interpreter, but the key is consumed by the IC check and should not be pushed back. Fixed by removing the key push.
+3. **`JitHelpers` zeroed for trace execution**: `Vm::new()` set all helpers to zero. Function JIT set them later, but the trace compiler's output executed before any function JIT entry, causing crashes. Fixed by populating at construction time.

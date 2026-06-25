@@ -93,10 +93,13 @@ pub struct BailoutTable {
 /// Written by the bailout helper, read by the vm.rs call site.
 #[repr(C)]
 pub struct JitBailoutState {
-    /// Non-zero iff a bailout was requested during the last JIT call.
-    /// The sentinel bc_pc=0 means "no bailout" (PC 0 is the function entry,
-    /// which never bails — bails happen mid-execution).
+    /// Bytecode PC where the bailout occurred (set by helper).
     pub bc_pc: usize,
+    /// Set by helper to signal a bailout. Checked by call site instead of
+    /// `bc_pc != 0` — MakeArgumentsArray is emitted as the very first
+    /// instruction of every non-arrow function (bc_pc = 0), so the former
+    /// sentinel `bc_pc = 0 ⇒ no bailout` would miss a bail at PC 0.
+    pub pending: bool,
     /// Snapshot of the JIT value stack at bailout, deepest-first.
     /// Copied from `jit_stack_base..jit_stack_sp` by the helper.
     pub stack_snapshot: Vec<u64>,
@@ -106,7 +109,7 @@ pub struct JitBailoutState {
 
 impl Default for JitBailoutState {
     fn default() -> Self {
-        Self { bc_pc: 0, stack_snapshot: Vec::new(), reason: BailoutReason::Unimplemented }
+        Self { bc_pc: 0, pending: false, stack_snapshot: Vec::new(), reason: BailoutReason::Unimplemented }
     }
 }
 ```

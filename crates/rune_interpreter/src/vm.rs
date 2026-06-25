@@ -94,8 +94,12 @@ struct TryFrame {
 /// JIT bailout state, written by the bailout helper, read by vm.rs call site.
 #[derive(Clone, Debug)]
 pub struct JitBailoutState {
-    /// Non-zero iff a bailout was requested during the last JIT call.
+    /// Bytecode PC where bailout occurred.
     pub bc_pc: usize,
+    /// Set by bailout helper to signal a bailout. Checked by call site
+    /// instead of `bc_pc != 0` because MakeArgumentsArray at PC 0 would
+    /// collide with the "no bailout" sentinel.
+    pub pending: bool,
     /// Snapshot of the JIT value stack at bailout.
     pub stack_snapshot: Vec<u64>,
     /// Reason tag (for stats/debugging).
@@ -106,8 +110,9 @@ impl Default for JitBailoutState {
     fn default() -> Self {
         Self {
             bc_pc: 0,
+            pending: false,
             stack_snapshot: Vec::new(),
-            reason: rune_jit_baseline::BailoutReason::Unimplemented,
+            reason: rune_jit_baseline::BailoutReason::BailOnEntry,
         }
     }
 }
@@ -381,6 +386,15 @@ impl Vm {
     #[allow(dead_code)]
     fn all_smi(values: &[Value]) -> bool {
         values.iter().all(|v| v.is_smi())
+    }
+
+    /// Check whether `jit_locals` is safe to pass to the JIT prologue.
+    /// For named functions, `locals[0]` is the callee Func pointer (never Smi) — skip it.
+    /// Padded slots (undefined) are also harmless since the JIT bails at MakeArgumentsArray
+    /// before any value-consuming opcode.
+    fn jit_locals_ok(locals: &[Value], named_function: bool) -> bool {
+        let start = if named_function { 1 } else { 0 };
+        locals[start..].iter().all(|v| v.is_smi() || v.is_undefined())
     }
 
     /// Set a pending exception (used by builtins that cannot return Exit).
@@ -2735,7 +2749,7 @@ impl Vm {
                                         // Safety check: JIT only handles Smi values
                                         let this_ok = !func_prog.instructions.iter().any(|i| i.opcode == Opcode::LoadThis)
                                             || self.frames[fi].this.is_smi();
-                                        if Self::all_smi(&jit_locals) && this_ok {
+                                        if Self::jit_locals_ok(&jit_locals, func_prog.named_function) && this_ok {
                                             self.jit_entry_count += 1;
                                             let func: JitEntryFn =
                                                 unsafe { std::mem::transmute(jit_entry) };
@@ -2745,6 +2759,11 @@ impl Vm {
                                                 rune_jit_lexical_helper as *const () as usize;
                                             self.jit_helpers.bailout_helper =
                                                 rune_jit_bailout_helper as *const () as usize;
+                                            // Clear pending flag before entering JIT; the bailout
+                                            // helper sets it if a bailout occurs (cannot use
+                                            // bc_pc != 0 as sentinel — MakeArgumentsArray at PC 0
+                                            // would collide).
+                                            self.jit_bailout.pending = false;
                                             let result_raw = unsafe {
                                                 func(
                                                     vm_ptr,
@@ -2752,12 +2771,13 @@ impl Vm {
                                                     jit_locals.as_mut_ptr() as *mut u64,
                                                 )
                                             };
-                                            let bailout_bc_pc = self.jit_bailout.bc_pc;
-                                            if bailout_bc_pc != 0 {
+                                            if self.jit_bailout.pending {
                                                 // Bailout occurred — materialise interpreter state.
                                                 // Push a new Frame for the callee per §6.2: the
                                                 // bc_pc is inside the callee's bytecode, not the
                                                 // caller's frame at fi.
+                                                let bailout_bc_pc = self.jit_bailout.bc_pc;
+                                                self.jit_bailout.pending = false;
                                                 self.jit_bailout.bc_pc = 0;
                                                 // Clone locals for the frame (bailout is rare).
                                                 let mut bailout_locals = jit_locals.clone();
@@ -4158,6 +4178,7 @@ pub extern "C" fn rune_jit_bailout_helper(
     }
     vm.jit_bailout = JitBailoutState {
         bc_pc,
+        pending: true,
         stack_snapshot: snapshot,
         reason: rune_jit_baseline::BailoutReason::BailOnEntry,
     };

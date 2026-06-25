@@ -1675,7 +1675,7 @@ fn test_negate_undefined() {
 }
 
 #[test]
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn test_jit_tier_up() {
     // add(a, b) is JIT-compatible; tier-up at 50 calls, then bails on first
     // opcode (MakeArgumentsArray, §6.2 bail-on-entry). Verifies the JIT
@@ -1702,7 +1702,7 @@ fn test_jit_tier_up() {
 }
 
 #[test]
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn test_jit_bailout_on_float() {
     // add() tier-up at 50, then pass a float64 — JIT bails at MakeArgumentsArray
     // (§6.2 bail-on-entry), interpreter handles float via normal flow.

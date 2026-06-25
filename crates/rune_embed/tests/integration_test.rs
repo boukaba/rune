@@ -1677,7 +1677,9 @@ fn test_negate_undefined() {
 #[test]
 #[cfg(target_arch = "x86_64")]
 fn test_jit_tier_up() {
-    // add(a, b) uses only Smi arithmetic — JIT-compatible, will tier-up at 50 calls
+    // add(a, b) is JIT-compatible; tier-up at 50 calls, then bails on first
+    // opcode (MakeArgumentsArray, §6.2 bail-on-entry). Verifies the JIT
+    // actually compiled and the bailout path works.
     let mut ctx = Context::new_small();
     let r = ctx
         .eval(
@@ -1693,12 +1695,17 @@ fn test_jit_tier_up() {
         .unwrap();
     // sum = 0+1+2+...+99 = 4950
     assert_eq!(r.as_smi(), Some(4950), "JIT tier-up: sum should be 4950");
+    assert!(
+        ctx.vm().jit_entry_count > 0,
+        "JIT must have executed at least once"
+    );
 }
 
 #[test]
 #[cfg(target_arch = "x86_64")]
 fn test_jit_bailout_on_float() {
-    // add() tier-up at 50, then pass a float64 — JIT should bail out to interpreter
+    // add() tier-up at 50, then pass a float64 — JIT bails at MakeArgumentsArray
+    // (§6.2 bail-on-entry), interpreter handles float via normal flow.
     let mut ctx = Context::new_small();
     let r = ctx
         .eval(
@@ -1719,6 +1726,10 @@ fn test_jit_bailout_on_float() {
         (f - 5.5).abs() < 0.001,
         "JIT bail-out: add(3.5, 2) should be ~5.5, got {}",
         f
+    );
+    assert!(
+        ctx.vm().jit_entry_count > 0,
+        "JIT must have executed at least once before float bail-out"
     );
 }
 

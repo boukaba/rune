@@ -174,6 +174,9 @@ pub struct Vm {
     /// native code blobs are mmap'd and their addresses stored here; MakeFunction
     /// installs them on the newly-created Func objects.
     pub cached_jit_entries: HashMap<usize, *const u8>,
+    /// Number of times the JIT entry path was taken (including bailout).
+    /// Used by tests to verify JIT actually executed.
+    pub jit_entry_count: u64,
     last_locals: Vec<Value>,
     pub eval_fn: UnsafeCell<Option<EvalFn>>,
     /// Reference to Array.prototype for setting on newly created arrays.
@@ -222,6 +225,7 @@ impl Vm {
             _compiled_trace_mem: Vec::new(),
             builtin_wrappers: HashMap::new(),
             cached_jit_entries: HashMap::new(),
+            jit_entry_count: 0,
             last_locals: Vec::new(),
             eval_fn: UnsafeCell::new(None),
             array_prototype: Value::undefined(),
@@ -2678,7 +2682,7 @@ impl Vm {
                                     unsafe { Func::increment_call_count(ptr as *mut Func) };
                                     let count = unsafe { Func::call_count(ptr as *mut Func) };
                                     const JIT_THRESHOLD: u32 = 50;
-                                    const MIN_JIT_FUNCTION_SIZE: usize = 20;
+                                    const MIN_JIT_FUNCTION_SIZE: usize = 3;
 
                                     // Only JIT-compile functions large enough to amortize
                                     // prologue/epilogue overhead. Tiny leaf functions like
@@ -2732,14 +2736,15 @@ impl Vm {
                                         let this_ok = !func_prog.instructions.iter().any(|i| i.opcode == Opcode::LoadThis)
                                             || self.frames[fi].this.is_smi();
                                         if Self::all_smi(&jit_locals) && this_ok {
+                                            self.jit_entry_count += 1;
                                             let func: JitEntryFn =
                                                 unsafe { std::mem::transmute(jit_entry) };
                                             let vm_ptr = self as *mut Vm as *mut u8;
                                             let gc_ptr = gc as *mut SemiSpace as *mut u8;
                                             self.jit_helpers.lexical_helper =
-                                                rune_jit_lexical_helper as usize;
+                                                rune_jit_lexical_helper as *const () as usize;
                                             self.jit_helpers.bailout_helper =
-                                                rune_jit_bailout_helper as usize;
+                                                rune_jit_bailout_helper as *const () as usize;
                                             let result_raw = unsafe {
                                                 func(
                                                     vm_ptr,
@@ -2750,14 +2755,39 @@ impl Vm {
                                             let bailout_bc_pc = self.jit_bailout.bc_pc;
                                             if bailout_bc_pc != 0 {
                                                 // Bailout occurred — materialise interpreter state.
+                                                // Push a new Frame for the callee per §6.2: the
+                                                // bc_pc is inside the callee's bytecode, not the
+                                                // caller's frame at fi.
                                                 self.jit_bailout.bc_pc = 0;
-                                                self.last_locals = jit_locals;
-                                                let snapshot =
-                                                    std::mem::take(&mut self.jit_bailout.stack_snapshot);
+                                                // Clone locals for the frame (bailout is rare).
+                                                let mut bailout_locals = jit_locals.clone();
+                                                while bailout_locals.len() < local_count {
+                                                    bailout_locals.push(Value::undefined());
+                                                }
+                                                let func_env =
+                                                    unsafe { Func::env_ptr(ptr as *mut Func) };
+                                                self.frames.push(Frame {
+                                                    locals: bailout_locals,
+                                                    lexical_slots: Vec::new(),
+                                                    lexical_tdz: Vec::new(),
+                                                    lexical_const: Vec::new(),
+                                                    scope_boundaries: Vec::new(),
+                                                    passed_argc: args.len(),
+                                                    pc: bailout_bc_pc,
+                                                    stack_base: self.stack.len(),
+                                                    prog: func_prog as *const BytecodeProgram,
+                                                    generator_id: None,
+                                                    this,
+                                                    is_constructor_call: false,
+                                                    constructed_object: Value::undefined(),
+                                                    env: func_env,
+                                                });
+                                                let snapshot = std::mem::take(
+                                                    &mut self.jit_bailout.stack_snapshot,
+                                                );
                                                 for val in snapshot {
                                                     self.push(Value::from_raw(val));
                                                 }
-                                                self.frames[fi].pc = bailout_bc_pc;
                                                 continue;
                                             }
                                             self.last_locals = jit_locals;

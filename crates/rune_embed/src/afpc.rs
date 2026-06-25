@@ -263,14 +263,13 @@ pub fn aot_compile_functions(program: &BytecodeProgram) -> Vec<CompiledFunc> {
         for (idx, func_prog) in program.functions.iter().enumerate() {
             if is_jit_compatible(func_prog) {
                 let codegen = CodeGen::new(func_prog.instructions.len());
-                let mem = codegen.compile(func_prog);
-                // Copy emitted bytes; the cache owns them and will mmap them
-                // into executable memory on load.
+                let compiled = codegen.compile(func_prog);
                 let code = unsafe {
-                    std::slice::from_raw_parts(mem.code_ptr(), mem.offset).to_vec()
+                    std::slice::from_raw_parts(compiled.mem.code_ptr(), compiled.mem.offset).to_vec()
                 };
+                // Keep the bailout table alive so table entries remain valid.
+                std::mem::forget(compiled.bailout_table);
                 out.push(CompiledFunc { func_idx: idx, code });
-                // `mem` is dropped here, freeing the temporary writable buffer.
             }
         }
         out

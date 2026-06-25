@@ -1166,6 +1166,23 @@ impl CodeGen {
                     self.emit_jit_stack_push();
                     self.emit_epilogue();
                 }
+                Opcode::Call => {
+                    // Phase E: bail on entry — delegate to interpreter.
+                    self.record_bailout_point(bc_idx, BailoutReason::BailOnEntry);
+                    self.mem.emit_mov_r64_rm64(7, 15);       // rdi = r15
+                    self.mem.emit_mov_r64_imm64(6, bc_idx as u64); // rsi = bc_pc
+                    self.mem.emit_mov_r64_rm64(2, 3);        // rdx = rbx
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0x8B);                // MOV rax, [r15 + 520]
+                    self.mem.emit_byte(0x87);
+                    self.mem.emit_u32(520);
+                    self.mem.emit_call_r64(0);               // call rax
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0x31);
+                    self.mem.emit_byte(0xC0);                // xor eax, eax
+                    self.emit_jit_stack_push();
+                    self.emit_epilogue();
+                }
                 Opcode::LoadGlobal => {
                     let name_idx = instr.operands[0] as u64;
                     let prog_ptr = program as *const BytecodeProgram as *const u8 as u64;

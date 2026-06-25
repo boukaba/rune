@@ -1216,6 +1216,18 @@ impl Aarch64CodeGen {
                     self.push();
                     self.emit_epilogue();
                 }
+                Opcode::Call => {
+                    // Phase E: bail on entry — delegate to interpreter.
+                    self.record_bailout_point(bc_idx, BailoutReason::BailOnEntry);
+                    mov_reg(&mut self.mem, 2, JIT_STACK_REG);
+                    mov_imm64(&mut self.mem, 1, bc_idx as u64);
+                    mov_reg(&mut self.mem, 0, VM_REG);
+                    ldr_off(&mut self.mem, 15, VM_REG, 520);
+                    emit(&mut self.mem, 0xD63F01E0);
+                    movz(&mut self.mem, 0, 0);
+                    self.push();
+                    self.emit_epilogue();
+                }
                 Opcode::LoadGlobal => {
                     let name_idx = instr.operands[0] as u64;
                     let prog_ptr = program as *const rune_bytecode::opcode::BytecodeProgram as *const u8 as u64;

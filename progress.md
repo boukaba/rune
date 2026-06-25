@@ -1249,6 +1249,43 @@ Commit: `8ec26a9`
 
 ### Next
 
-- Native `TypeOf` opcode in JIT (~1 hour)
+- ~~Native `TypeOf` opcode in JIT (~1 hour)~~ ✅ done
 - Native `LoadStringConst` / `LoadString` in JIT (~2 hours)
 - Native `LoadGlobal` / `StoreGlobal` / `IncGlobal` / `DecGlobal` in JIT (~3 hours)
+
+---
+
+## Phase C: Native TypeOf
+
+Commit: `c57b6c7`
+
+TypeOf is now a native JIT opcode — the bail-on-entry stub is replaced with a call to `rune_jit_typeof_helper` that inspects tag bits and returns the pre-allocated string Value.
+
+### What was done
+
+- **Added `typeof_strings: [Value; 6]` field to `Vm` struct**: Six pre-allocated string Values ("number", "string", "boolean", "undefined", "object", "function") stored in the Vm, initialized during `Context::new_with_semispace()`.
+- **Added `typeof_helper` slot to `JitHelpers`** (slot 2, offset 528 from vm_ptr). Updated `_reserved` from `[usize; 6]` to `[usize; 5]`. Fixed all `JitHelpers` initializers in both `vm.rs` and `codegen_aarch64.rs`.
+- **Implemented `rune_jit_typeof_helper`** extern "C" fn in `vm.rs`. Takes `(vm_ptr, value_raw)`, checks sentinels/Smi/GC tag bits, returns the matching pre-allocated string Value. Follows the same `is_undefined()` → `is_null()` → `is_boolean()` → `is_smi()` → GC tag chain as the interpreter.
+- **x86-64 TypeOf emission** (`codegen.rs`): Replaced bail-on-entry with `emit_jit_stack_pop()` + `call typeof_helper` + `emit_jit_stack_push()`. No bailout table entry needed.
+- **aarch64 TypeOf emission** (`codegen_aarch64.rs`): Same pattern — `self.pop()` + `BLR x15` (load helper from `[x19 + 528]`) + `self.push()`.
+- **Added `test_jit_typeof_native`**: Calls `check(x)` with Smi, string, undefined, null, boolean, function, and float values — all 7 typeof results. Asserts `jit_entry_count > 0` and `jit_bailout_count == 0` (native TypeOf, no bail).
+- **`JitHelpers` struct duplicated** in `codegen_aarch64.rs` (must match Vm layout). Both copies updated in sync.
+
+### Test results
+
+- Integration: **303 passed** (+1: `test_jit_typeof_native`), 2 ignored
+- JIT baseline: 51 passed (both backends)
+- All crate tests: pass
+- Clippy: clean (only pre-existing `get_scalar` dead code warning in `rune_interpreter`)
+
+### Key decisions
+
+- **Pre-allocated strings**: The typeof result strings are allocated once during Context initialization and stored on the Vm. The JIT helper returns pre-existing Values — zero allocation per `typeof` call.
+- **Slot 2 at offset 528**: `typeof_helper` added to `JitHelpers` after `bailout_helper` (offset 520 → 528). x86-64 loads from `[r15 + 528]`, aarch64 from `[x19 + 528]`.
+- **No bailout entry**: Native TypeOf doesn't need a bailout table entry since it handles all inputs inline. The helper is infallible.
+- **Sentinel check order**: Must check sentinels (0/2/4/6) before treating the value as a heap pointer. The helper checks `is_undefined()` (0), `is_null()` (2), `is_boolean()` (4/6), then `is_smi()`, and only then dereferences the heap pointer for the GC tag.
+
+### Next
+
+- Native `LoadStringConst` / `LoadString` (~2 hours)
+- Native `LoadGlobal` / `StoreGlobal` / `IncGlobal` / `DecGlobal` (~3 hours)

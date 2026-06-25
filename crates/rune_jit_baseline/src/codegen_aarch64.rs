@@ -22,6 +22,7 @@ const LEX_DECLARE_LET: u64 = 2;
 const LEX_DECLARE_CONST: u64 = 3;
 const LEX_LOAD: u64 = 4;
 const LEX_STORE: u64 = 5;
+const LEX_LOAD_THIS: u64 = 6;
 
 /// Number of u64 slots reserved for the trace value stack.
 pub const JIT_STACK_SIZE: usize = 64;
@@ -884,6 +885,16 @@ impl Aarch64CodeGen {
                     emit(&mut self.mem, 0x9A9F07E0); // CSET NE = CSINC EQ
                     emit(&mut self.mem, 0xD37FF800);
                     orr_imm1(&mut self.mem, 0, 0);
+                    self.push();
+                }
+                Opcode::LoadThis => {
+                    // Call lexical helper with LEX_LOAD_THIS
+                    movz(&mut self.mem, 2, 0); // x2 = 0 (unused arg1)
+                    movz(&mut self.mem, 1, LEX_LOAD_THIS as u16); // x1 = op
+                    ldr_off(&mut self.mem, 15, VM_REG, 512);
+                    mov_reg(&mut self.mem, 0, VM_REG);
+                    movz(&mut self.mem, 3, 0);
+                    emit(&mut self.mem, 0xD63F01E0); // BLR x15
                     self.push();
                 }
                 // Lexical-scope operations — call into VM via helper function

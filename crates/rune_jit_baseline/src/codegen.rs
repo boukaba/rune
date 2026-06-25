@@ -809,6 +809,10 @@ impl CodeGen {
                         self.emit_jit_stack_push();
                     }
                 }
+                Opcode::LoadThis => {
+                    self.emit_lexical_call(6, 0, 0); // LEX_LOAD_THIS
+                    self.emit_jit_stack_push();
+                }
                 Opcode::BlockEnter => {
                     let count = *instr.operands.first().unwrap_or(&0) as u64;
                     self.emit_lexical_call(0, count, 0); // LEX_BLOCK_ENTER

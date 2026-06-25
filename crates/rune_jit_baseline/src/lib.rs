@@ -53,6 +53,7 @@ pub fn is_jit_compatible(prog: &rune_bytecode::opcode::BytecodeProgram) -> bool 
             | Opcode::Eq
             | Opcode::Ne
             | Opcode::Swap
+            | Opcode::LoadThis
             | Opcode::BlockEnter
             | Opcode::BlockLeave
             | Opcode::DeclareLet

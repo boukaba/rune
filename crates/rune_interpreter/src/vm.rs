@@ -2691,8 +2691,10 @@ impl Vm {
                                         while jit_locals.len() < local_count {
                                             jit_locals.push(Value::undefined());
                                         }
-                                        // Safety check: only call JIT if all inputs are Smi
-                                        if Self::all_smi(&jit_locals) {
+                                        // Safety check: JIT only handles Smi values
+                                        let this_ok = !func_prog.instructions.iter().any(|i| i.opcode == Opcode::LoadThis)
+                                            || self.frames[fi].this.is_smi();
+                                        if Self::all_smi(&jit_locals) && this_ok {
                                             let func: JitEntryFn =
                                                 unsafe { std::mem::transmute(jit_entry) };
                                             let vm_ptr = self as *mut Vm as *mut u8;
@@ -3970,6 +3972,7 @@ const LEX_DECLARE_LET: u64 = 2;
 const LEX_DECLARE_CONST: u64 = 3;
 const LEX_LOAD: u64 = 4;
 const LEX_STORE: u64 = 5;
+const LEX_LOAD_THIS: u64 = 6;
 
 /// JIT callout for all lexical-scope operations.
 /// Called from JIT-compiled code via the `lexical_helper` function pointer
@@ -4035,6 +4038,9 @@ pub extern "C" fn rune_jit_lexical_helper(
                 f.lexical_slots[slot] = val;
             }
             val.raw()
+        }
+        LEX_LOAD_THIS => {
+            f.this.raw()
         }
         _ => 0,
     }

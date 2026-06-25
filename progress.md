@@ -1185,6 +1185,36 @@ Opcodes now check every JIT-stack value is a Smi (bit 0 = 1) before operating. N
 
 ### Remaining
 
-- **Phase B test coverage**: Input guard non-Smi bail paths need dedicated tests (added in `90fc0b8` follow-up).
 - **Phase C**: Native `MakeArgumentsArray`, `TypeOf`, `LoadStringConst`, globals.
-- **Phase D**: Remove `jit_locals_ok` — arbitrary JS can enter JIT, non-Smi inputs bail at first consuming opcode.
+
+---
+
+## Phase D: Remove jit_locals_ok (PR4)
+
+Commit: `152bc8f`
+
+The JIT now accepts any argument types. Non-Smi inputs hit `NonSmiInput` guard at the first consuming opcode and bail to the interpreter. `MakeArgumentsArray` still bails on entry (Phase C will make it native).
+
+### What was done
+
+- **Removed `jit_locals_ok()` function** and its check at JIT entry (`vm.rs:395-398`, `vm.rs:2752`). JIT entry is no longer predicated on Smi-only locals.
+- **Removed `this_ok` check**: `LoadThis` with non-Smi `this` pushes the value; the next value-consuming opcode triggers `NonSmiInput` bail. No need to gate JIT entry.
+- **Added `jit_bailout_count: u64`** to `Vm` struct, incremented inside `rune_jit_bailout_helper`. Debug counter for detecting wasteful JIT entries (functions that always bail).
+- **Added `test_jit_non_smi_args_bail`**: Passes non-Smi args (float) to a JIT'd function, verifies result is correct (interpreter handles bailout) and `jit_bailout_count > 0`.
+- **Added `test_jit_bailout_count`**: Verifies `jit_bailout_count ≤ jit_entry_count`.
+
+### Test results
+
+- JIT baseline: 51 passed (both backends)
+- Integration: 301 passed, 2 ignored (unchanged)
+- Clippy: clean
+
+### Where the bailout roadmap stands
+
+| Phase | Status | What it does |
+|-------|--------|-------------|
+| PR1: Bailout mechanism | ✅ shipped | BailoutPoint, pending flag, helper, frame materialization |
+| PR2: Overflow guards + IC miss | ✅ shipped | Result overflow guards; Load/StorePropertyIC miss → bailout |
+| Phase B: Input guards | ✅ shipped | NonSmiInput guards on all 24 value-consuming opcodes, tested |
+| Phase D: Remove jit_locals_ok | ✅ shipped (`152bc8f`) | JIT safe for arbitrary JS — non-Smi args bail at first consuming op |
+| Phase C: Native opcodes | ⬜ next | MakeArgumentsArray, TypeOf, LoadStringConst, globals |

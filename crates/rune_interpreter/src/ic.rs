@@ -62,8 +62,7 @@ impl InlineCache {
         }
     }
 
-    /// Scalar linear scan fallback.
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    /// Scalar linear scan fallback (used as universal fallback on x86-64 without SSE4.1).
     fn get_scalar(&self, shape_id: u64, key_hash: u64) -> Option<IcEntry> {
         self.entries
             .iter()

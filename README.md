@@ -107,7 +107,7 @@ Immutable, content-addressed shapes make cached native code valid forever — no
 ## Development
 
 ```sh
-# Run tests (424 total across workspace)
+# Run tests (434 total across workspace)
 cargo test --workspace
 
 # Format + lint

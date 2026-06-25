@@ -163,6 +163,16 @@
 
 ---
 
+## P14: InlineCache::get_scalar cfg-gate breaks non-SSE4.1 x86-64 builds ✅ Fixed
+
+**Status:** ✅ Fixed in `current`
+
+**Symptom:** `get_scalar` was gated `#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]` but `get_simd` (SSE4.1 path) falls back to `get_scalar` on x86-64 when SSE4.1 is unavailable. The method doesn't exist → link failure on any x86-64 CPU without SSE4.1.
+
+**Fix:** Removed the cfg gate; `get_scalar` is now unconditionally compiled as the universal scalar fallback.
+
+---
+
 ## Summary
 
 | # | Issue | Status | Commit |
@@ -181,3 +191,4 @@
 | P11 | JIT coverage (now 47/61 opcodes) | 🟡 In progress | — |
 | P12 | Trace compiler wired to loop execution | ✅ Fixed | — |
 | P13 | Smi i31 display truncation (design constraint) | ✅ Resolved | — |
+| P14 | InlineCache::get_scalar cfg-gate breaks non-SSE4.1 x86-64 | ✅ Fixed | current |

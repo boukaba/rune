@@ -15,14 +15,30 @@
 use crate::assembler::ExecutableMemory;
 use rune_bytecode::opcode::Opcode;
 
+/// Operation codes for the lexical helper callout (must match vm.rs).
+const LEX_BLOCK_ENTER: u64 = 0;
+const LEX_BLOCK_LEAVE: u64 = 1;
+const LEX_DECLARE_LET: u64 = 2;
+const LEX_DECLARE_CONST: u64 = 3;
+const LEX_LOAD: u64 = 4;
+const LEX_STORE: u64 = 5;
+
 /// Number of u64 slots reserved for the trace value stack.
 pub const JIT_STACK_SIZE: usize = 64;
+
+/// JIT helper function pointer table. Must match `Vm::jit_helpers` layout.
+#[repr(C)]
+pub struct JitHelpers {
+    pub lexical_helper: usize,
+    _reserved: [usize; 7],
+}
 
 /// VM state visible to the trace compiler. Must be placed at offset 0 from
 /// the VM pointer passed to emitted trace code.
 #[repr(C)]
 pub struct JitVmState {
     pub jit_stack: [u64; JIT_STACK_SIZE],
+    pub jit_helpers: JitHelpers,
 }
 
 /// Register assignments for the trace compiler.
@@ -870,6 +886,47 @@ impl Aarch64CodeGen {
                     orr_imm1(&mut self.mem, 0, 0);
                     self.push();
                 }
+                // Lexical-scope operations — call into VM via helper function
+                Opcode::BlockEnter => {
+                    let count = *instr.operands.first().unwrap_or(&0) as u64;
+                    self.emit_lexical_call(LEX_BLOCK_ENTER, count, 0);
+                }
+                Opcode::BlockLeave => {
+                    self.emit_lexical_call(LEX_BLOCK_LEAVE, 0, 0);
+                }
+                Opcode::DeclareLet => {
+                    let slot = *instr.operands.first().unwrap_or(&0) as u64;
+                    self.emit_lexical_call(LEX_DECLARE_LET, slot, 0);
+                }
+                Opcode::DeclareConst => {
+                    let slot = *instr.operands.first().unwrap_or(&0) as u64;
+                    self.emit_lexical_call(LEX_DECLARE_CONST, slot, 0);
+                }
+                Opcode::LoadLexical => {
+                    let slot = *instr.operands.first().unwrap_or(&0) as u64;
+                    // Set up args: x0=vm_ptr, x1=op(LEX_LOAD), x2=slot, x3=0
+                    mov_imm64(&mut self.mem, 2, slot);
+                    mov_imm64(&mut self.mem, 1, LEX_LOAD);
+                    ldr_off(&mut self.mem, 15, VM_REG, 512);
+                    mov_reg(&mut self.mem, 0, VM_REG);
+                    movz(&mut self.mem, 3, 0); // x3 = 0
+                    emit(&mut self.mem, 0xD63F01E0); // BLR x15
+                    self.push(); // push the loaded value (in x0)
+                }
+                Opcode::StoreLexical => {
+                    let slot = *instr.operands.first().unwrap_or(&0) as u64;
+                    self.pop(); // x0 = value to store
+                    // Pass value as arg2 (already in x0), vm_ptr in x0 is clobbered
+                    // We need to save and set up args carefully
+                    mov_reg(&mut self.mem, 3, 0); // x3 = value (arg2)
+                    mov_imm64(&mut self.mem, 2, slot); // x2 = slot (arg1)
+                    mov_imm64(&mut self.mem, 1, LEX_STORE); // x1 = op
+                    ldr_off(&mut self.mem, 15, VM_REG, 512); // x15 = helper addr
+                    mov_reg(&mut self.mem, 0, VM_REG); // x0 = vm_ptr
+                    emit(&mut self.mem, 0xD63F01E0); // BLR x15
+                    // helper returns val back in x0
+                    self.push();
+                }
                 _ => {
                     // Unknown opcode: emit a trap so we notice quickly.
                     emit(&mut self.mem, 0xD4200000); // BRK #0
@@ -879,6 +936,19 @@ impl Aarch64CodeGen {
 
         self.resolve_patches();
         self.mem
+    }
+
+    /// Call the lexical helper function (loaded from JitVmState::jit_helpers).
+    fn emit_lexical_call(&mut self, op: u64, arg1: u64, arg2: u64) {
+        // Load helper address from [x19 + 512] (offset of JitHelpers in Vm)
+        ldr_off(&mut self.mem, 15, VM_REG, 512);
+        // Set up arguments: x0=vm_ptr, x1=op, x2=arg1, x3=arg2
+        mov_reg(&mut self.mem, 0, VM_REG);
+        mov_imm64(&mut self.mem, 1, op);
+        mov_imm64(&mut self.mem, 2, arg1);
+        mov_imm64(&mut self.mem, 3, arg2);
+        // BLR x15
+        emit(&mut self.mem, 0xD63F01E0);
     }
 }
 
@@ -1045,6 +1115,10 @@ mod tests {
     fn jit_vm_ptr() -> *mut u8 {
         let state = Box::new(JitVmState {
             jit_stack: [0; JIT_STACK_SIZE],
+            jit_helpers: JitHelpers {
+                lexical_helper: 0,
+                _reserved: [0; 7],
+            },
         });
         Box::into_raw(state) as *mut u8
     }
@@ -1661,6 +1735,10 @@ mod tests {
         // Create JIT VM state with obj_addr pre-pushed
         let mut vm = JitVmState {
             jit_stack: [0; JIT_STACK_SIZE],
+            jit_helpers: JitHelpers {
+                lexical_helper: 0,
+                _reserved: [0; 7],
+            },
         };
         vm.jit_stack[0] = obj_addr;
         let vm_ptr = &mut vm as *mut _ as *mut u8;

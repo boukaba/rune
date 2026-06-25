@@ -52,7 +52,13 @@ pub fn is_jit_compatible(prog: &rune_bytecode::opcode::BytecodeProgram) -> bool 
             | Opcode::ShrU
             | Opcode::Eq
             | Opcode::Ne
-            | Opcode::Swap => {}
+            | Opcode::Swap
+            | Opcode::BlockEnter
+            | Opcode::BlockLeave
+            | Opcode::DeclareLet
+            | Opcode::DeclareConst
+            | Opcode::LoadLexical
+            | Opcode::StoreLexical => {}
             _ => return false,
         }
     }

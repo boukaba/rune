@@ -88,7 +88,17 @@ struct TryFrame {
     in_catch: bool,
 }
 
+/// JIT helper function pointers, stored at a fixed offset from vm_ptr
+/// (offset 512 = 64 * 8, right after jit_stack) so JIT code can load
+/// and call them without cross-crate symbol resolution.
+#[repr(C)]
+pub struct JitHelpers {
+    pub lexical_helper: usize,
+    _reserved: [usize; 7],
+}
+
 /// Stack-based bytecode interpreter with call frame support.
+#[repr(C)]
 pub struct Vm {
     /// JIT-compiled trace value stack. Must remain the first field so that
     /// emitted AArch64 trace code can address it at offset 0 from the VM
@@ -96,6 +106,9 @@ pub struct Vm {
     /// Apple Silicon restrictions on writes through the real stack pointer
     /// from JIT pages.
     pub jit_stack: [u64; 64],
+    /// JIT helper function pointer table. Must follow jit_stack immediately
+    /// for the JIT to locate it at a known offset (512) from vm_ptr.
+    pub jit_helpers: JitHelpers,
     pub stack: Vec<Value>,
     frames: Vec<Frame>,
     try_stack: Vec<TryFrame>,
@@ -153,6 +166,10 @@ impl Vm {
     pub fn new() -> Self {
         Vm {
             jit_stack: [0; 64],
+            jit_helpers: JitHelpers {
+                lexical_helper: 0,
+                _reserved: [0; 7],
+            },
             stack: Vec::new(),
             frames: Vec::new(),
             try_stack: Vec::new(),
@@ -2680,6 +2697,8 @@ impl Vm {
                                                 unsafe { std::mem::transmute(jit_entry) };
                                             let vm_ptr = self as *mut Vm as *mut u8;
                                             let gc_ptr = gc as *mut SemiSpace as *mut u8;
+                                            self.jit_helpers.lexical_helper =
+                                                rune_jit_lexical_helper as usize;
                                             let result_raw = unsafe {
                                                 func(
                                                     vm_ptr,
@@ -3941,6 +3960,83 @@ fn value_to_array_index(v: Value) -> Option<usize> {
         }
     } else {
         None
+    }
+}
+
+/// Lexical operation codes for the JIT callout helper.
+const LEX_BLOCK_ENTER: u64 = 0;
+const LEX_BLOCK_LEAVE: u64 = 1;
+const LEX_DECLARE_LET: u64 = 2;
+const LEX_DECLARE_CONST: u64 = 3;
+const LEX_LOAD: u64 = 4;
+const LEX_STORE: u64 = 5;
+
+/// JIT callout for all lexical-scope operations.
+/// Called from JIT-compiled code via the `lexical_helper` function pointer
+/// stored in `Vm::jit_helpers`.
+/// Returns 0 for most ops; returns the loaded Value for LEX_LOAD.
+#[unsafe(no_mangle)]
+pub extern "C" fn rune_jit_lexical_helper(
+    vm_ptr: *mut u8,
+    op: u64,
+    arg1: u64,
+    arg2: u64,
+) -> u64 {
+    let vm = unsafe { &mut *(vm_ptr as *mut Vm) };
+    let fi = vm.frames.len() - 1;
+    let f = &mut vm.frames[fi];
+    match op {
+        LEX_BLOCK_ENTER => {
+            let count = arg1 as usize;
+            for _ in 0..count {
+                f.lexical_slots.push(Value::undefined());
+            }
+            f.lexical_tdz.extend(std::iter::repeat_n(true, count));
+            f.lexical_const.extend(std::iter::repeat_n(false, count));
+            f.scope_boundaries.push(f.lexical_slots.len());
+            0
+        }
+        LEX_BLOCK_LEAVE => {
+            let boundary = f.scope_boundaries.pop().unwrap_or(0);
+            f.lexical_slots.truncate(boundary);
+            f.lexical_tdz.truncate(boundary);
+            f.lexical_const.truncate(boundary);
+            0
+        }
+        LEX_DECLARE_LET => {
+            let slot = arg1 as usize;
+            if slot < f.lexical_tdz.len() {
+                f.lexical_tdz[slot] = false;
+            }
+            0
+        }
+        LEX_DECLARE_CONST => {
+            let slot = arg1 as usize;
+            if slot < f.lexical_tdz.len() {
+                f.lexical_tdz[slot] = false;
+                f.lexical_const[slot] = true;
+            }
+            0
+        }
+        LEX_LOAD => {
+            let slot = arg1 as usize;
+            if slot < f.lexical_slots.len() {
+                if f.lexical_tdz[slot] {
+                    return Value::undefined().raw();
+                }
+                return f.lexical_slots[slot].raw();
+            }
+            Value::undefined().raw()
+        }
+        LEX_STORE => {
+            let slot = arg1 as usize;
+            let val = Value::from_raw(arg2);
+            if slot < f.lexical_slots.len() && !f.lexical_const[slot] {
+                f.lexical_slots[slot] = val;
+            }
+            val.raw()
+        }
+        _ => 0,
     }
 }
 

@@ -54,6 +54,26 @@ impl CodeGen {
         self.pending_patches.clear();
     }
 
+    /// Call the lexical helper function stored in Vm::jit_helpers (offset 512 from vm_ptr).
+    /// Sets up System V AMD64 calling convention: rdi=vm_ptr, rsi=op, rdx=arg1, rcx=arg2.
+    /// The return value is in rax. Clobbers rdi, rsi, rdx, rcx, rax.
+    fn emit_lexical_call(&mut self, op: u64, arg1: u64, arg2: u64) {
+        // rdi = r15 (vm_ptr)
+        self.mem.emit_mov_r64_rm64(7, 15);
+        // rsi = op
+        self.mem.emit_mov_r64_imm64(6, op);
+        // rdx = arg1
+        self.mem.emit_mov_r64_imm64(2, arg1);
+        // rcx = arg2
+        self.mem.emit_mov_r64_imm64(1, arg2);
+        // Load helper addr from [r15 + 512] into rax
+        self.mem.emit_rex_w();
+        self.mem.emit_byte(0x8B);            // MOV r64, r/m64
+        self.mem.emit_byte(0x87);            // mod=10, reg=0(rax), r/m=7(r15)
+        self.mem.emit_u32(512);              // disp32 = offset of jit_helpers.lexical_helper
+        self.mem.emit_call_r64(0);           // call rax
+    }
+
     // -----------------------------------------------------------------------
     // JIT value stack helpers
     // -----------------------------------------------------------------------
@@ -788,6 +808,42 @@ impl CodeGen {
                         self.mem.emit_mov_r64_rm64(0, 1);
                         self.emit_jit_stack_push();
                     }
+                }
+                Opcode::BlockEnter => {
+                    let count = *instr.operands.first().unwrap_or(&0) as u64;
+                    self.emit_lexical_call(0, count, 0); // LEX_BLOCK_ENTER
+                }
+                Opcode::BlockLeave => {
+                    self.emit_lexical_call(1, 0, 0); // LEX_BLOCK_LEAVE
+                }
+                Opcode::DeclareLet => {
+                    let slot = *instr.operands.first().unwrap_or(&0) as u64;
+                    self.emit_lexical_call(2, slot, 0); // LEX_DECLARE_LET
+                }
+                Opcode::DeclareConst => {
+                    let slot = *instr.operands.first().unwrap_or(&0) as u64;
+                    self.emit_lexical_call(3, slot, 0); // LEX_DECLARE_CONST
+                }
+                Opcode::LoadLexical => {
+                    let slot = *instr.operands.first().unwrap_or(&0) as u64;
+                    self.emit_lexical_call(4, slot, 0); // LEX_LOAD
+                    self.emit_jit_stack_push(); // push value from rax
+                }
+                Opcode::StoreLexical => {
+                    let slot = *instr.operands.first().unwrap_or(&0) as u64;
+                    self.emit_jit_stack_pop(); // rax = value
+                    self.mem.emit_mov_r64_rm64(1, 0); // rcx = value (arg2)
+                    // Set up args: rdi=vm_ptr, rsi=LEX_STORE, rdx=slot, rcx=value
+                    self.mem.emit_mov_r64_rm64(7, 15); // rdi = r15 (vm_ptr)
+                    self.mem.emit_mov_r64_imm64(6, 5); // rsi = LEX_STORE (5)
+                    self.mem.emit_mov_r64_imm64(2, slot); // rdx = slot
+                    // rcx already has value
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0x8B);
+                    self.mem.emit_byte(0x87);
+                    self.mem.emit_u32(512);
+                    self.mem.emit_call_r64(0);
+                    self.emit_jit_stack_push(); // push result from rax
                 }
                 _ => {
                     self.mem.emit_byte(0xCC);

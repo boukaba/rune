@@ -222,6 +222,9 @@ pub struct Aarch64CodeGen {
     mem: ExecutableMemory,
     bc_to_native: Vec<usize>,
     pending_patches: Vec<(usize, usize, u32)>, // (patch_offset_in_bytes, target_bc_index, original_instr)
+    /// Initial offset added to x22 (JIT stack pointer) during prologue.
+    /// Used by tests that pre-populate the JIT stack.
+    jit_stack_offset: u32,
 }
 
 impl Aarch64CodeGen {
@@ -231,7 +234,15 @@ impl Aarch64CodeGen {
             mem,
             bc_to_native: vec![0; instruction_count],
             pending_patches: Vec::new(),
+            jit_stack_offset: 0,
         }
+    }
+
+    /// Set an initial offset for the JIT stack pointer.
+    /// Allows pre-populated values on the JIT stack to be read correctly.
+    pub fn with_jit_stack_offset(mut self, offset: u32) -> Self {
+        self.jit_stack_offset = offset;
+        self
     }
 
     fn push(&mut self) {
@@ -251,7 +262,7 @@ impl Aarch64CodeGen {
         mov_reg(&mut self.mem, VM_REG, 0);
         mov_reg(&mut self.mem, GC_REG, 1);
         mov_reg(&mut self.mem, LOC_REG, 2);
-        add_imm(&mut self.mem, JIT_STACK_REG, VM_REG, 0);
+        add_imm(&mut self.mem, JIT_STACK_REG, VM_REG, self.jit_stack_offset);
     }
 
     fn emit_epilogue(&mut self) {
@@ -1375,5 +1386,43 @@ mod tests {
         let r = unsafe { func(vm, std::ptr::null_mut(), locals.as_mut_ptr()) };
         // sum 0..9 = 45
         assert_eq!(r, ((45u64 << 1) | 1));
+    }
+
+    #[test]
+    fn test_aarch64_codegen_load_property_ic() {
+        use rune_bytecode::opcode::{BytecodeProgram, Instruction};
+        let shape_id: u64 = 0xDEAD_BEEF_CAFE_1234;
+        let slot_value: u64 = (42u64 << 1) | 1; // Smi(42)
+        // Mock shape: [id: u64]
+        let mock_shape = Box::new(shape_id);
+        let shape_ptr = Box::into_raw(mock_shape) as *mut u8;
+        // Mock object: [GcHeader(8) | shape*(8) | proto*(8) | unused(8) | slots(8)...]
+        let mut obj = vec![0u8; 80];
+        obj[8..16].copy_from_slice(&(shape_ptr as u64).to_le_bytes());
+        obj[32..40].copy_from_slice(&slot_value.to_le_bytes());
+        let obj_addr = obj.as_ptr() as u64;
+        // Create JIT VM state with obj_addr pre-pushed
+        let mut vm = JitVmState {
+            jit_stack: [0; JIT_STACK_SIZE],
+        };
+        vm.jit_stack[0] = obj_addr;
+        let vm_ptr = &mut vm as *mut _ as *mut u8;
+        let prog = BytecodeProgram::new(
+            vec![
+                Instruction::new(Opcode::LoadPropertyIC, vec![shape_id as i64, 0]),
+                Instruction::new(Opcode::Return, vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+        let mem = Aarch64CodeGen::new(prog.instructions.len())
+            .with_jit_stack_offset(8)
+            .compile(&prog);
+        mem.make_executable();
+        let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
+            unsafe { std::mem::transmute(mem.code_ptr()) };
+        let result = unsafe { func(vm_ptr, std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert_eq!(result, slot_value);
+        unsafe { drop(Box::from_raw(shape_ptr)); }
     }
 }

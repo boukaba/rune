@@ -1217,4 +1217,38 @@ The JIT now accepts any argument types. Non-Smi inputs hit `NonSmiInput` guard a
 | PR2: Overflow guards + IC miss | ✅ shipped | Result overflow guards; Load/StorePropertyIC miss → bailout |
 | Phase B: Input guards | ✅ shipped | NonSmiInput guards on all 24 value-consuming opcodes, tested |
 | Phase D: Remove jit_locals_ok | ✅ shipped (`152bc8f`) | JIT safe for arbitrary JS — non-Smi args bail at first consuming op |
-| Phase C: Native opcodes | ⬜ next | MakeArgumentsArray, TypeOf, LoadStringConst, globals |
+| Phase C: Native opcodes | 🏗️ in progress | MakeArgumentsArray skip (done), TypeOf, LoadStringConst, globals |
+
+---
+
+## Phase C: Skip MakeArgumentsArray when `arguments` is unused
+
+Commit: `8ec26a9`
+
+### What was done
+
+- **Added `uses_arguments_stmt()` / `uses_arguments_expr()` pre-scan functions** (`crates/rune_parser/src/emitter.rs`). Recursively walk the AST to detect `Identifier("arguments")`. Nested non-arrow function declarations/expressions are skipped (they have their own `arguments`). Arrow function bodies are scanned (they inherit `arguments` from the enclosing scope).
+- **Modified `compile_function()`** to skip emitting `MakeArgumentsArray` (and the subsequent `StoreLocal("arguments")`) when the pre-scan finds no `arguments` reference. This saves an opcode + local slot for the interpreter too.
+- **Added `test_jit_no_bail_on_simple_fn`**: Verifies that `add(a, b) { return a + b; }` runs JIT end-to-end (`jit_bailout_count == 0`) — no `MakeArgumentsArray` to bail on.
+- **Fixed `test_jit_bailout_count`**: Changed from `add()` (no longer bails) to `function useArgs() { return arguments; }` (still has `MakeArgumentsArray`, so JIT bails on entry).
+- **Fixed all clippy `map_or` → `is_some_and` warnings** across both pre-scan functions.
+- **Added `Stmt::Switch` arm** to `uses_arguments_stmt` (was missing — caught by exhaustive pattern check after compilation).
+- **Removed duplicate `finally` handler** from the `Try` match arm (artifact from the `map_or`→`is_some_and` edit).
+
+### Test results
+
+- Integration: **302 passed** (+1: `test_jit_no_bail_on_simple_fn`), 2 ignored
+- All crate tests: pass
+- Clippy: clean (only pre-existing `get_scalar` dead code warning in `rune_interpreter`)
+
+### Key decisions
+
+- **Pre-scan approach**: Rather than adding a new bytecode opcode or JIT-compiling `MakeArgumentsArray`, we scan the AST in the emitter to determine whether `arguments` is used. This benefits both the interpreter and JIT by removing the opcode entirely when not needed.
+- **Arrow function inheritance**: Arrow function bodies must be scanned because `arguments` in an arrow refers to the enclosing non-arrow function. Nested regular function declarations/expressions are skipped.
+- **Test for no-bail**: `test_jit_no_bail_on_simple_fn` proves the optimization works — `jit_bailout_count == 0` confirms the JIT runs end-to-end without hitting `MakeArgumentsArray`.
+
+### Next
+
+- Native `TypeOf` opcode in JIT (~1 hour)
+- Native `LoadStringConst` / `LoadString` in JIT (~2 hours)
+- Native `LoadGlobal` / `StoreGlobal` / `IncGlobal` / `DecGlobal` in JIT (~3 hours)

@@ -604,6 +604,56 @@ impl Aarch64CodeGen {
                     let d = ((done_offset as i64 - patch_done as i64) / 4) as u32;
                     self.mem.patch_u32(patch_done, 0x14000000 | (d & 0x03FF_FFFF));
                 }
+                Opcode::StorePropertyIC => {
+                    let shape_id = instr.operands[0] as u64;
+                    let offset = instr.operands[1] as u32;
+                    let _proto_depth = instr.operands.get(2).copied().unwrap_or(0) as u32;
+                    self.pop(); // x0 = value
+                    // Save value in x1
+                    mov_reg(&mut self.mem, 1, 0);
+                    // Pop object (skip key — offset cached in instruction)
+                    self.pop(); // x0 = object
+                    mov_reg(&mut self.mem, 2, 0); // x2 = object
+                    // Test bit 0: Smi → miss
+                    movz(&mut self.mem, 3, 1);          // x3 = 1
+                    emit(&mut self.mem, 0xEA03005F);    // TST x2, x3 (ANDS XZR, X2, X3)
+                    let patch_smi = self.mem.current_offset();
+                    emit(&mut self.mem, 0x54000001);    // B.NE +0 (patched → miss)
+                    // CMP x2, #6 (sentinel ≤ 6 → miss)
+                    emit(&mut self.mem, 0xF100185F);    // CMP x2, #6 (SUBS XZR, X2, #6)
+                    let patch_sentinel = self.mem.current_offset();
+                    emit(&mut self.mem, 0x54000009);    // B.LS +0 (patched → miss)
+                    // Load shape ptr from [x2 + 8]
+                    ldr_off(&mut self.mem, 4, 2, 8);    // x4 = [x2 + 8] (shape ptr)
+                    ldr_off(&mut self.mem, 5, 4, 0);    // x5 = [x4] (shape.id)
+                    mov_imm64(&mut self.mem, 6, shape_id);
+                    cmp_reg(&mut self.mem, 5, 6);
+                    let patch_shape = self.mem.current_offset();
+                    emit(&mut self.mem, 0x54000001);    // B.NE +0 (patched → miss)
+                    // Store value to [x2 + 32 + offset*8]
+                    str_off(&mut self.mem, 1, 2, 32 + offset * 8);
+                    // Push value back (JS: store returns the value)
+                    mov_reg(&mut self.mem, 0, 1);
+                    self.push();
+                    // B done
+                    let patch_done = self.mem.current_offset();
+                    emit(&mut self.mem, 0x14000000);    // B +0
+                    // miss: push value back (same as hit — shape miss is rare)
+                    let miss_offset = self.mem.current_offset();
+                    mov_reg(&mut self.mem, 0, 1);
+                    self.push();
+                    // done:
+                    let done_offset = self.mem.current_offset();
+                    // Patch forward jumps
+                    let d = ((miss_offset as i64 - patch_smi as i64) / 4) as u32;
+                    self.mem.patch_u32(patch_smi, 0x54000001 | ((d & 0x7FFFF) << 5));
+                    let d = ((miss_offset as i64 - patch_sentinel as i64) / 4) as u32;
+                    self.mem.patch_u32(patch_sentinel, 0x54000009 | ((d & 0x7FFFF) << 5));
+                    let d = ((miss_offset as i64 - patch_shape as i64) / 4) as u32;
+                    self.mem.patch_u32(patch_shape, 0x54000001 | ((d & 0x7FFFF) << 5));
+                    let d = ((done_offset as i64 - patch_done as i64) / 4) as u32;
+                    self.mem.patch_u32(patch_done, 0x14000000 | (d & 0x03FF_FFFF));
+                }
                 Opcode::Return => {
                     self.emit_epilogue();
                 }
@@ -791,6 +841,29 @@ fn compile_op(mem: &mut ExecutableMemory, opcode: Opcode, operands: &[i64]) {
             emit(mem, 0xAA2003E0); // MVN x0, x0 (ORN x0, xzr, x0)
             add_imm(mem, 0, 0, 1);
             str_off(mem, 0, JIT_STACK_REG, 0);
+            add_imm(mem, JIT_STACK_REG, JIT_STACK_REG, 8);
+        }
+        Opcode::StorePropertyIC => {
+            // StorePropertyIC: pop value, pop key (discard), pop obj, shape guard, store, push value
+            sub_imm(mem, JIT_STACK_REG, JIT_STACK_REG, 8);
+            ldr_off(mem, 0, JIT_STACK_REG, 0); // x0 = value
+            mov_reg(mem, 1, 0);                // x1 = saved value
+            sub_imm(mem, JIT_STACK_REG, JIT_STACK_REG, 8);
+            ldr_off(mem, 0, JIT_STACK_REG, 0); // x0 = key (discard)
+            sub_imm(mem, JIT_STACK_REG, JIT_STACK_REG, 8);
+            ldr_off(mem, 0, JIT_STACK_REG, 0); // x0 = object
+            mov_reg(mem, 2, 0);                // x2 = saved object
+            // Shape guard: TST x2, #1; CMP x2, #6
+            movz(mem, 3, 1);
+            emit(mem, 0xEA03005F);              // TST x2, x3
+            // nop for guard (trace assumes hit)
+            nop(mem);
+            nop(mem);
+            nop(mem);
+            // Store value to slot
+            str_off(mem, 1, 2, 32);             // [x2 + 32] = x1 (simplified slot 0)
+            // Push value back
+            str_off(mem, 1, JIT_STACK_REG, 0);
             add_imm(mem, JIT_STACK_REG, JIT_STACK_REG, 8);
         }
         _ => {

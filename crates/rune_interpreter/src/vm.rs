@@ -1547,62 +1547,55 @@ impl Vm {
                     let value = self.pop();
                     let raw_key = self.pop();
                     let obj = self.pop();
+                    // IC hit counting: track successful own-property writes for patching
                     if let Some(ptr) = obj.heap_ptr() {
                         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-                        if tag == TAG_OBJECT {
-                            // __proto__ setter: set the object's prototype
-                            if is_proto_key(raw_key) {
-                                if let Some(val_ptr) = value.heap_ptr() {
-                                    unsafe {
-                                        JSObject::set_prototype(ptr as *mut JSObject, val_ptr)
-                                    };
-                                } else {
-                                    unsafe {
-                                        JSObject::set_prototype(
-                                            ptr as *mut JSObject,
-                                            std::ptr::null_mut(),
-                                        )
-                                    };
-                                }
-                            } else if let Some(key) = value_to_prop_key(raw_key) {
-                                let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
-                                if let Some(slot) = shape.lookup(&key) {
-                                    unsafe {
-                                        JSObject::set_slot(ptr as *mut JSObject, slot, value)
-                                    };
-                                } else {
-                                    let key_name = value_to_debug_string(raw_key);
-                                    unsafe {
-                                        JSObject::add_property(
-                                            ptr as *mut JSObject,
-                                            key,
-                                            key_name,
-                                            value,
-                                        )
-                                    };
-                                }
-                            }
-                        } else if tag == TAG_ARRAY {
-                            // Dense array: numeric key → element set
-                            if let Some(index) = value_to_array_index(raw_key) {
-                                let len = unsafe { RuneArray::length(ptr as *mut RuneArray) };
-                                if index < len as usize {
-                                    unsafe {
-                                        RuneArray::set_element(ptr as *mut RuneArray, index, value)
-                                    };
-                                }
-                            }
-                        } else if tag == TAG_FUNC {
-                            // Function.prototype = value
-                            if let Some(key) = value_to_prop_key(raw_key)
-                                && key == *PROTOTYPE_KEY
-                                && let Some(val_ptr) = value.heap_ptr()
-                            {
-                                unsafe {
-                                    Func::set_prototype(ptr as *mut Func, val_ptr);
+                        if tag == TAG_OBJECT
+                            && !is_proto_key(raw_key)
+                            && let Some(key) = value_to_prop_key(raw_key)
+                        {
+                            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                            if let Some(slot) = shape.lookup(&key) {
+                                let ic_idx = instr.ic_index as usize;
+                                if ic_idx < self.ic_hit_counts.len()
+                                    && self.ic_hit_counts[ic_idx] < 8
+                                {
+                                    self.ic_hit_counts[ic_idx] += 1;
+                                    if self.ic_hit_counts[ic_idx] == 8 {
+                                        let instr_mut = unsafe {
+                                            let instrs_ptr = (*prog_ptr).instructions.as_ptr()
+                                                as *mut Instruction;
+                                            &mut *instrs_ptr.add(pc)
+                                        };
+                                        instr_mut.opcode = Opcode::StorePropertyIC;
+                                        instr_mut.operands.clear();
+                                        instr_mut.operands.extend_from_slice(&[
+                                            shape.id as i64,
+                                            slot as i64,
+                                            0,
+                                        ]);
+                                    }
                                 }
                             }
                         }
+                    }
+                    do_store_property(obj, raw_key, value);
+                    self.push(value);
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::StorePropertyIC => {
+                    let value = self.pop();
+                    let raw_key = self.pop();
+                    let obj = self.pop();
+                    let cached_shape_id = instr.operands.first().copied().unwrap_or(0) as u64;
+                    let offset = instr.operands.get(1).copied().unwrap_or(0) as usize;
+                    if let Some(ptr) = obj.heap_ptr()
+                        && unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_OBJECT
+                        && unsafe { JSObject::shape_ptr(ptr as *mut JSObject) }.id == cached_shape_id
+                    {
+                        unsafe { JSObject::set_slot(ptr as *mut JSObject, offset, value) };
+                    } else {
+                        do_store_property(obj, raw_key, value);
                     }
                     self.push(value);
                     self.frames[fi].pc = pc + 1;
@@ -3654,6 +3647,43 @@ fn load_property_recursive_ic(
         }
     }
     result
+}
+
+/// Perform the full store-property logic (modelled after StoreProperty handler body).
+fn do_store_property(obj: Value, raw_key: Value, value: Value) {
+    if let Some(ptr) = obj.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_OBJECT {
+            if is_proto_key(raw_key) {
+                if let Some(val_ptr) = value.heap_ptr() {
+                    unsafe { JSObject::set_prototype(ptr as *mut JSObject, val_ptr) };
+                } else {
+                    unsafe { JSObject::set_prototype(ptr as *mut JSObject, std::ptr::null_mut()) };
+                }
+            } else if let Some(key) = value_to_prop_key(raw_key) {
+                let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                if let Some(slot) = shape.lookup(&key) {
+                    unsafe { JSObject::set_slot(ptr as *mut JSObject, slot, value) };
+                } else {
+                    let key_name = value_to_debug_string(raw_key);
+                    unsafe { JSObject::add_property(ptr as *mut JSObject, key, key_name, value) };
+                }
+            }
+        } else if tag == TAG_ARRAY {
+            if let Some(index) = value_to_array_index(raw_key) {
+                let len = unsafe { RuneArray::length(ptr as *mut RuneArray) };
+                if index < len as usize {
+                    unsafe { RuneArray::set_element(ptr as *mut RuneArray, index, value) };
+                }
+            }
+        } else if tag == TAG_FUNC
+            && let Some(key) = value_to_prop_key(raw_key)
+            && key == *PROTOTYPE_KEY
+            && let Some(val_ptr) = value.heap_ptr()
+        {
+            unsafe { Func::set_prototype(ptr as *mut Func, val_ptr); }
+        }
+    }
 }
 
 /// Convert a Value to an f64 for numeric operations.

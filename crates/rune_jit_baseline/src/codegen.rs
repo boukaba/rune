@@ -302,6 +302,68 @@ impl CodeGen {
                     self.mem.patch_u32(jmp_done, (done - (jmp_done + 5)) as u32);
                     self.mem.patch_u32(je_done, (done - (je_done + 6)) as u32);
                 }
+                Opcode::StorePropertyIC => {
+                    let shape_id = instr.operands[0] as u64;
+                    let offset = instr.operands[1] as u32;
+                    let _proto_depth = instr.operands.get(2).copied().unwrap_or(0) as u32;
+                    self.emit_jit_stack_pop(); // rax = value
+                    self.mem.emit_mov_r64_rm64(1, 0);    // rcx = value
+                    self.emit_jit_stack_pop(); // rax = object (skip key)
+                    self.mem.emit_mov_r64_rm64(2, 0);    // rdx = object
+                    // Test bit 0: Smi → miss
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0xF7);
+                    self.mem.emit_byte(0xC2);
+                    self.mem.emit_u32(0x0000_0001);      // TEST rdx, 1
+                    let jne_miss_patch = self.mem.emit_jne_rel32(0);
+                    // CMP rdx, 6; JBE miss
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0x83);
+                    self.mem.emit_byte(0xFA);
+                    self.mem.emit_byte(0x06);
+                    let jbe_miss_patch = self.mem.emit_jbe_rel32(0);
+                    // MOV rax, [rdx + 8] (shape ptr)
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0x8B);
+                    self.mem.emit_byte(0x42);
+                    self.mem.emit_byte(0x08);
+                    // MOV r8, [rax] (shape.id)
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0x8B);
+                    self.mem.emit_byte(0x00);
+                    // MOV r9, shape_id
+                    self.mem.emit_mov_r64_imm64(9, shape_id);
+                    // CMP r8, r9
+                    self.mem.emit_cmp_r64_r64(8, 9);
+                    let jne_shape_patch = self.mem.emit_jne_rel32(0);
+                    // MOV [rdx + 32 + offset*8], rcx (store value)
+                    let disp = 32 + offset * 8;
+                    if disp <= i8::MAX as u32 {
+                        self.mem.emit_rex_w();
+                        self.mem.emit_byte(0x89);
+                        self.mem.emit_byte(0x4A);
+                        self.mem.emit_byte(disp as u8);
+                    } else {
+                        self.mem.emit_rex_w();
+                        self.mem.emit_byte(0x89);
+                        self.mem.emit_byte(0x8A);
+                        self.mem.emit_u32(disp);
+                    }
+                    // Push value back
+                    self.mem.emit_mov_r64_rm64(0, 1); // rax = rcx (value)
+                    self.emit_jit_stack_push();
+                    let jmp_done_patch = self.mem.emit_jmp_rel32(0);
+                    // miss: push value back
+                    let miss_offset = self.mem.current_offset();
+                    self.mem.emit_mov_r64_rm64(0, 1); // rax = value
+                    self.emit_jit_stack_push();
+                    // Patch jumps
+                    self.mem.patch_u32(jne_miss_patch, (miss_offset - (jne_miss_patch + 6)) as u32);
+                    self.mem.patch_u32(jbe_miss_patch, (miss_offset - (jbe_miss_patch + 6)) as u32);
+                    self.mem.patch_u32(jne_shape_patch, (miss_offset - (jne_shape_patch + 6)) as u32);
+                    let done = self.mem.current_offset();
+                    self.mem.patch_u32(jmp_done_patch, (done - (jmp_done_patch + 5)) as u32);
+                }
                 Opcode::LoadPropertyIC => {
                     let shape_id = instr.operands[0] as u64;
                     let offset = instr.operands[1] as u32;

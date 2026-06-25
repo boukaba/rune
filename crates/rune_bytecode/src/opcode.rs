@@ -59,6 +59,7 @@ pub enum Opcode {
     SpreadIntoObject,
     LoadProperty,
     LoadPropertyIC, // shape-guarded fast path (after N hits)
+    StorePropertyIC, // shape-guarded store fast path (after N hits)
     StoreProperty,
     DeleteProperty,
     DefineProperty,
@@ -120,7 +121,7 @@ pub enum Opcode {
 pub struct Instruction {
     pub opcode: Opcode,
     pub operands: Vec<i64>,
-    /// Optional index into the Vm's IC table for LoadProperty/StoreProperty caching.
+    /// Optional index into the Vm's IC table for property caching.
     /// -1 means no IC attached; other values index into Vm.ics[].
     pub ic_index: i64,
 }

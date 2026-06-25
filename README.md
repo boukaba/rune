@@ -79,13 +79,15 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 | Benchmark | Rune | V8 (Node v22) | Ratio |
 |---|---|---|---|
 | **Cold start** (`rune '1'` / `node -e '1'`) | **4ms** | 33ms | **Rune 5× faster** |
-| `loop_sum_smi_1M` | 397ms | 2.2ms | 181× slower |
-| `jit_hot_function_1M` | 599ms | 2.4ms | 252× slower |
-| `array_push_grow_100k` | 60ms | 6.7ms | 9× slower |
-| `poly_prop_10shapes_1M` (SIDT) | 916ms | 4.1ms | 221× slower |
+| `loop_sum_smi_1M` | **5.3ms** | 2.2ms | **2.4× slower** |
+| `jit_hot_function_1M` | 683ms | 2.4ms | 285× slower |
+| `array_push_grow_100k` | 68ms | 6.7ms | 10× slower |
+| `poly_prop_10shapes_1M` (SIDT) | 1.05s | 4.1ms | 256× slower |
 | `proto_chain_lookup_5deep_1M` | — | 1.5ms | — |
 
-> **Note:** JIT function compiler is x86-64-only. On aarch64, JIT traces (hot loops) are compiled natively only when they contain no global variable references — the trace compiler's LoadPropertyIC/StorePropertyIC handlers have a pre-existing stack-balance bug that prevents global ops from being safely compiled. All benchmarks above run entirely in the interpreter on aarch64.
+> **Trace compiler (aarch64):** Hot loops with Smi arithmetic and global variables are compiled to native code, reaching **75× speedup** vs the interpreter (`loop_sum_smi_1M`: 397ms → 5.3ms). Traces with property access (`LoadPropertyIC`/`StorePropertyIC`) are not yet compiled — the bailout infrastructure needed for shape-guard miss handling is not set up for traces (the function JIT uses a `BailoutTable` per compiled function). This is the next investment target.
+>
+> **Function JIT (x86-64):** 56/62 opcodes covered. On aarch64, the function JIT exists via `Aarch64CodeGen` but the `jit_hot_function_1M` benchmark is dominated by Smi-overflow bailout (95% of calls bail after iteration ~46K when the sum exceeds i31 range).
 
 **AFPC cache:** Compile (parse+emit) 355µs → cache load 26µs (**13.5× faster**). End-to-end latency is execution-bound — cache eliminates parse/emit entirely but hot loops still run in interpreter.
 

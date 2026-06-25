@@ -2037,6 +2037,7 @@ impl Vm {
                                     shape_ids: Vec::new(),
                                     compiled_entry: std::ptr::null(),
                                     exit_pc: 0,
+                                    compiled_prog: std::ptr::null_mut(),
                                 },
                             );
                         }
@@ -3193,13 +3194,18 @@ impl Vm {
     /// code — it runs until the loop condition is false, then returns.
     #[cfg(target_arch = "aarch64")]
     fn compile_trace_native(&mut self, target_pc: usize) {
-        use rune_jit_baseline::Aarch64CodeGen;
         use rune_bytecode::opcode::{BytecodeProgram, Instruction};
 
         let trace = match self.loop_traces.get_mut(&target_pc) {
             Some(t) => t,
             None => return,
         };
+        // The original program whose string/float pools the recorded
+        // name/float indices reference.  Must be the one currently
+        // executing (top frame's prog).
+        let fi = self.frames.len() - 1;
+        let original_prog = unsafe { &*self.frames[fi].prog };
+
         let mut instrs: Vec<Instruction> = Vec::with_capacity(trace.ops.len() + 2);
         let mut exit_pc: usize = 0;
         // The last recorded op is the first instruction of the iteration
@@ -3257,26 +3263,35 @@ impl Vm {
         instrs.push(Instruction::new(Opcode::LoadUndefined, vec![]));
         instrs.push(Instruction::new(Opcode::Return, vec![]));
 
-        let prog = BytecodeProgram::new(instrs, vec![], vec![]);
+        // Copy the original program's string/float pools so that name/float
+        // indices recorded in the trace resolve correctly at JIT time.
+        let prog = BytecodeProgram::new(
+            instrs,
+            original_prog.string_pool.clone(),
+            vec![],
+        );
         if !rune_jit_baseline::is_jit_compatible(&prog) {
             return; // trace contains unsupported opcodes (strings, objects, etc.)
         }
-        // Trace compiler doesn't support global opcodes yet.
+        // Trace compiler doesn't support LoadPropertyIC/StorePropertyIC bailout
+        // (no BailoutTable set up for traces).  Reject traces that use them.
         for instr in &prog.instructions {
             match instr.opcode {
-                Opcode::LoadGlobal | Opcode::StoreGlobal | Opcode::IncGlobal | Opcode::DecGlobal => {
-                    return;
-                }
+                Opcode::LoadPropertyIC | Opcode::StorePropertyIC => return,
                 _ => {}
             }
         }
 
         let codegen = Aarch64CodeGen::new(prog.instructions.len());
-        let compiled = codegen.compile(&prog);
+        // Leak the program so its address stays valid for the compiled trace's
+        // embedded prog_ptr reference (used by LoadStringConst, globals, etc.).
+        let leaked_prog = Box::leak(Box::new(prog));
+        let compiled = codegen.compile(leaked_prog);
         compiled.mem.make_executable();
         let entry = compiled.mem.code_ptr();
         trace.compiled_entry = entry;
         trace.exit_pc = exit_pc;
+        trace.compiled_prog = leaked_prog as *mut BytecodeProgram as *mut u8;
         self._compiled_trace_mem.push(compiled.mem);
     }
 

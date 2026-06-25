@@ -206,6 +206,9 @@ pub struct LoopTrace {
     /// Set when the trace is compiled; used to resume the interpreter after
     /// the native trace exits.
     pub exit_pc: usize,
+    /// Leaked BytecodeProgram pointer that compiled_entry references.
+    /// Kept alive for the lifetime of the trace. Dropped when the Vm is dropped.
+    pub compiled_prog: *mut u8,
 }
 
 impl LoopTrace {

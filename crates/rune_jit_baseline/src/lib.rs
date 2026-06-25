@@ -7,7 +7,7 @@ pub mod templates;
 
 pub use codegen::{CodeGen, JitEntryFn};
 #[cfg(target_arch = "aarch64")]
-pub use codegen_aarch64::{compile_trace, Aarch64CodeGen};
+pub use codegen_aarch64::Aarch64CodeGen;
 
 // ---------------------------------------------------------------------------
 // Bailout infrastructure

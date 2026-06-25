@@ -265,12 +265,39 @@ impl CodeGen {
                     self.emit_jit_stack_pop(); // rax = condition
                     self.mem.emit_mov_r64_imm64(1, 2); // rcx = 2 (null sentinel)
                     self.mem.emit_cmp_r64_r64(0, 1); // cmp rax, 2
-                    let patch1 = self.mem.emit_jbe_rel32(0); // ≤2: falsy (undefined, Smi(0), null)
+                    let patch1 = self.mem.emit_jbe_rel32(0); // ≤2: falsy
                     self.pending_patches.push((patch1, target));
                     self.mem.emit_mov_r64_imm64(1, 4); // rcx = 4 (false sentinel)
                     self.mem.emit_cmp_r64_r64(0, 1); // cmp rax, 4
-                    let patch2 = self.mem.emit_je_rel32(0); // =4: falsy (false)
+                    let patch2 = self.mem.emit_je_rel32(0); // =4: falsy
                     self.pending_patches.push((patch2, target));
+                }
+                Opcode::JumpIfTrue => {
+                    let target = instr.operands[0] as usize;
+                    self.emit_jit_stack_pop();          // rax = value
+                    self.mem.emit_mov_r64_imm64(1, 2);  // rcx = 2
+                    self.mem.emit_cmp_r64_r64(0, 1);    // cmp value, 2
+                    // JA (jump if above, >2 unsigned): skip JMP.falsy
+                    let skip_falsy = self.mem.emit_ja_rel32(0);
+                    // ≤2: falsy → skip the JMP to target
+                    let jmp_done = self.mem.emit_jmp_rel32(0);
+                    // Patch JA: skip to after JMP.falsy (5 bytes for JMP rel32)
+                    let ja_end = skip_falsy + 6;
+                    let after_jmp_falsy = ja_end + 5;
+                    self.mem.patch_u32(skip_falsy, (after_jmp_falsy - ja_end) as u32);
+                    // Check == 4
+                    self.mem.emit_mov_r64_imm64(1, 4);  // rcx = 4
+                    self.mem.emit_cmp_r64_r64(0, 1);    // cmp value, 4
+                    // JE: equal to 4 → falsy → skip JMP
+                    let je_done = self.mem.emit_je_rel32(0);
+                    // JMP to target (truthy)
+                    let jmp_target = self.mem.emit_jmp_rel32(0);
+                    self.pending_patches.push((jmp_target, target));
+                    // Patch JMP.falsy (to skip both checks and JMP)
+                    let done = self.mem.current_offset();
+                    self.mem.patch_u32(jmp_done, (done - (jmp_done + 5)) as u32);
+                    // Patch JE.done
+                    self.mem.patch_u32(je_done, (done - (je_done + 6)) as u32);
                 }
                 Opcode::LoadLocal => {
                     let idx = instr.operands[0] as usize;

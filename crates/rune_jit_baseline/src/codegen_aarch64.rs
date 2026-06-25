@@ -526,10 +526,25 @@ impl Aarch64CodeGen {
                     self.pop(); // x0 = condition
                     movz(&mut self.mem, 1, 2); // x1 = 2 (null sentinel)
                     cmp_reg(&mut self.mem, 0, 1);
-                    self.emit_b_cond(0x9, target); // B.LS target (falsy: undefined/Smi(0)/null)
+                    self.emit_b_cond(0x9, target); // B.LS target (falsy: ≤ 2)
                     movz(&mut self.mem, 1, 4); // x1 = 4 (false sentinel)
                     cmp_reg(&mut self.mem, 0, 1);
-                    self.emit_b_cond(0x0, target); // B.EQ target
+                    self.emit_b_cond(0x0, target); // B.EQ target (falsy: == 4)
+                }
+                Opcode::JumpIfTrue => {
+                    let target = instr.operands[0] as usize;
+                    self.pop(); // x0 = condition
+                    // Falsy: ≤ 2 or == 4. We skip the B if falsy.
+                    movz(&mut self.mem, 1, 2);
+                    cmp_reg(&mut self.mem, 0, 1);
+                    // B.LS +2: skip over B.EQ check and B (2 instructions)
+                    emit(&mut self.mem, 0x54000049);
+                    movz(&mut self.mem, 1, 4);
+                    cmp_reg(&mut self.mem, 0, 1);
+                    // B.EQ +1: skip over B (1 instruction)
+                    emit(&mut self.mem, 0x54000020);
+                    // B target (only reached if truthy)
+                    self.emit_b(target);
                 }
                 Opcode::Return => {
                     self.emit_epilogue();

@@ -358,6 +358,14 @@ impl Aarch64CodeGen {
                     mov_imm64(&mut self.mem, 0, raw);
                     self.push();
                 }
+                Opcode::LoadFloat64 => {
+                    let idx = instr.operands[0] as usize;
+                    let val = program.float_pool.get(idx).copied().unwrap_or(0.0);
+                    let i = val as i64;
+                    let smi_raw = ((i as u64) << 1) | 1;
+                    mov_imm64(&mut self.mem, 0, smi_raw);
+                    self.push();
+                }
                 Opcode::LoadLocal => {
                     let idx = instr.operands[0] as u32;
                     ldr_off(&mut self.mem, 0, LOC_REG, idx * 8);

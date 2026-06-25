@@ -201,6 +201,14 @@ impl CodeGen {
                     self.mem.emit_mov_r64_imm64(0, val);
                     self.emit_jit_stack_push();
                 }
+                Opcode::LoadFloat64 => {
+                    let idx = instr.operands[0] as usize;
+                    let val = program.float_pool.get(idx).copied().unwrap_or(0.0);
+                    let i = val as i64;
+                    let smi_raw = ((i as u64) << 1) | 1;
+                    self.mem.emit_mov_r64_imm64(0, smi_raw);
+                    self.emit_jit_stack_push();
+                }
                 Opcode::Return => {
                     self.emit_jit_stack_pop();
                     self.emit_epilogue();

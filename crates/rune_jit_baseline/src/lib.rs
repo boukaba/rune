@@ -9,11 +9,27 @@ pub use codegen::{CodeGen, JitEntryFn};
 #[cfg(target_arch = "aarch64")]
 pub use codegen_aarch64::{compile_trace, Aarch64CodeGen};
 
+/// Check if an f64 value fits in Smi range (i31).
+fn float64_is_smi_compatible(val: f64) -> bool {
+    let is_int = val.fract() == 0.0 && val.is_finite();
+    is_int && {
+        let i = val as i64;
+        i >= -(1 << 30) as i64 && i < (1 << 30) as i64
+    }
+}
+
 /// Check if a BytecodeProgram only uses opcodes the JIT can currently handle.
 pub fn is_jit_compatible(prog: &rune_bytecode::opcode::BytecodeProgram) -> bool {
     use rune_bytecode::opcode::Opcode;
     for instr in &prog.instructions {
         match instr.opcode {
+            Opcode::LoadFloat64 => {
+                let idx = instr.operands[0] as usize;
+                let val = prog.float_pool.get(idx).copied().unwrap_or(f64::NAN);
+                if !float64_is_smi_compatible(val) {
+                    return false;
+                }
+            }
             Opcode::LoadSmi
             | Opcode::LoadUndefined
             | Opcode::LoadNull

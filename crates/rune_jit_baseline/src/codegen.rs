@@ -341,6 +341,26 @@ impl CodeGen {
                     self.mem.emit_mov_r64_imm64(0, smi_raw);
                     self.emit_jit_stack_push();
                 }
+                Opcode::LoadStringConst => {
+                    let string_idx = instr.operands[0] as u64;
+                    let prog_ptr = program as *const BytecodeProgram as *const u8 as u64;
+                    // rdi = r15 (vm_ptr)
+                    self.mem.emit_mov_r64_rm64(7, 15);
+                    // rsi = r14 (gc_ptr)
+                    self.mem.emit_mov_r64_rm64(6, 14);
+                    // rdx = prog_ptr (immediate)
+                    self.mem.emit_mov_r64_imm64(2, prog_ptr);
+                    // rcx = string_idx (immediate)
+                    self.mem.emit_mov_r64_imm64(1, string_idx);
+                    // Load string_helper from [r15 + 536] into rax
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0x8B);                   // MOV rax, [r15 + 536]
+                    self.mem.emit_byte(0x87);                   // mod=10, reg=0(rax), r/m=7(r15)
+                    self.mem.emit_u32(536);                     // disp32
+                    self.mem.emit_call_r64(0);                  // call rax
+                    // push result (string Value in rax)
+                    self.emit_jit_stack_push();
+                }
                 Opcode::Return => {
                     self.emit_jit_stack_pop();
                     self.emit_epilogue();

@@ -122,7 +122,8 @@ pub struct JitHelpers {
     pub lexical_helper: usize,
     pub bailout_helper: usize,
     pub typeof_helper: usize,
-    _reserved: [usize; 5],
+    pub string_helper: usize,
+    _reserved: [usize; 4],
 }
 
 /// Stack-based bytecode interpreter with call frame support.
@@ -214,7 +215,8 @@ impl Vm {
                 lexical_helper: 0,
                 bailout_helper: 0,
                 typeof_helper: 0,
-                _reserved: [0; 5],
+                string_helper: 0,
+                _reserved: [0; 4],
             },
             jit_stack_base: 0,
             jit_bailout: JitBailoutState::default(),
@@ -458,6 +460,10 @@ impl Vm {
         gc.push_root(&self.object_prototype as *const Value as *mut u64);
         gc.push_root(&self.array_prototype as *const Value as *mut u64);
         gc.push_root(&self.string_prototype as *const Value as *mut u64);
+        // Root pre-allocated typeof result strings (JIT typeof_helper reads these)
+        for v in &self.typeof_strings {
+            gc.push_root(v as *const Value as *mut u64);
+        }
         // Root cached string constant handles (LoadStringConst cache)
         for handles in self.string_cache.values() {
             for v in handles {
@@ -2760,6 +2766,8 @@ impl Vm {
                                                 rune_jit_bailout_helper as *const () as usize;
                                             self.jit_helpers.typeof_helper =
                                                 rune_jit_typeof_helper as *const () as usize;
+                                            self.jit_helpers.string_helper =
+                                                rune_jit_string_helper as *const () as usize;
                                             // Clear pending flag before entering JIT; the bailout
                                             // helper sets it if a bailout occurs (cannot use
                                             // bc_pc != 0 as sentinel — MakeArgumentsArray at PC 0
@@ -4223,6 +4231,41 @@ pub extern "C" fn rune_jit_typeof_helper(vm_ptr: *mut u8, value_raw: u64) -> u64
         }
     };
     vm.typeof_strings[idx].raw()
+}
+
+/// JIT callout for `LoadStringConst`.
+///
+/// Looks up the pre-allocated string handle from `Vm::string_cache[prog_ptr][idx]`.
+/// If the cache entry is cold (interpreter hasn't seen this string yet), allocates
+/// it via the GC and caches it.
+///
+/// # Safety
+///
+/// `vm_ptr` must be a valid pointer to a `Vm`. `gc_ptr` must be a valid pointer
+/// to a `SemiSpace`. `prog_ptr` must point to a live `BytecodeProgram`.
+pub extern "C" fn rune_jit_string_helper(
+    vm_ptr: *mut u8,
+    gc_ptr: *mut u8,
+    prog_ptr: *const u8,
+    string_idx: usize,
+) -> u64 {
+    let vm = unsafe { &mut *(vm_ptr as *mut Vm) };
+    let gc = unsafe { &mut *(gc_ptr as *mut SemiSpace) };
+    let cache_key = prog_ptr as usize;
+    let handles = vm.string_cache.entry(cache_key).or_insert_with(|| {
+        Vec::new()
+    });
+    if string_idx >= handles.len() {
+        handles.resize(string_idx + 1, Value::undefined());
+    }
+    let val = &mut handles[string_idx];
+    if val.is_undefined() {
+        let prog = unsafe { &*(prog_ptr as *const rune_bytecode::opcode::BytecodeProgram) };
+        let s = prog.string_pool.get(string_idx).map(|s| s.as_str()).unwrap_or("");
+        let ptr = rune_core::string::HeapString::allocate(gc, s);
+        *val = Value::from_heap_ptr(ptr as *mut u8);
+    }
+    val.raw()
 }
 
 #[cfg(test)]

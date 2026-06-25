@@ -34,7 +34,8 @@ pub struct JitHelpers {
     pub lexical_helper: usize,
     pub bailout_helper: usize,
     pub typeof_helper: usize,
-    _reserved: [usize; 5],
+    pub string_helper: usize,
+    _reserved: [usize; 4],
 }
 
 /// VM state visible to the trace compiler. Must be placed at offset 0 from
@@ -483,6 +484,20 @@ impl Aarch64CodeGen {
                     let smi_raw = ((i as u64) << 1) | 1;
                     mov_imm64(&mut self.mem, 0, smi_raw);
                     self.push();
+                }
+                Opcode::LoadStringConst => {
+                    let string_idx = instr.operands[0] as u64;
+                    let prog_ptr = program as *const rune_bytecode::opcode::BytecodeProgram as *const u8 as u64;
+                    // x0 = x19 (vm_ptr), x1 = x20 (gc_ptr)
+                    mov_reg(&mut self.mem, 0, VM_REG);
+                    mov_reg(&mut self.mem, 1, GC_REG);
+                    // x2 = prog_ptr (immediate), x3 = string_idx (immediate)
+                    mov_imm64(&mut self.mem, 2, prog_ptr);
+                    mov_imm64(&mut self.mem, 3, string_idx);
+                    // Load string_helper from [x19 + 536] into x15
+                    ldr_off(&mut self.mem, 15, VM_REG, 536);
+                    emit(&mut self.mem, 0xD63F01E0);             // BLR x15
+                    self.push();                                 // push result (x0)
                 }
                 Opcode::LoadLocal => {
                     let idx = instr.operands[0] as u32;
@@ -1370,7 +1385,8 @@ mod tests {
                 lexical_helper: 0,
                 bailout_helper: test_bailout_stub as usize,
                 typeof_helper: 0,
-                _reserved: [0; 5],
+                string_helper: 0,
+                _reserved: [0; 4],
             },
             jit_stack_base: 0,
         });
@@ -1991,7 +2007,8 @@ mod tests {
                 lexical_helper: 0,
                 bailout_helper: 0,
                 typeof_helper: 0,
-                _reserved: [0; 5],
+                string_helper: 0,
+                _reserved: [0; 4],
             },
             jit_stack_base: 0,
         };

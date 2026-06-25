@@ -1866,6 +1866,40 @@ fn test_jit_typeof_native() {
     );
 }
 
+#[test]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn test_jit_load_string_const() {
+    // LoadStringConst is native — the JIT calls string_helper instead of bailing.
+    // This test verifies that a function returning a bare string constant
+    // runs end-to-end in the JIT without bailing.
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(
+        r#"
+        function label() {
+            var a = 1;
+            var b = 2;
+            var c = 3;
+            return "hello";
+        }
+        var r = "";
+        for (var i = 0; i < 100; i++) {
+            r = label();
+        }
+        r
+    "#,
+    )
+    .unwrap();
+    assert!(r.is_heap_object(), "should return a string value");
+    assert!(
+        ctx.vm().jit_entry_count > 0,
+        "JIT must have entered for label()"
+    );
+    assert_eq!(
+        ctx.vm().jit_bailout_count, 0,
+        "LoadStringConst should be native — no bailout"
+    );
+}
+
 mod instanceof_tests {
     use rune_embed::Context;
 

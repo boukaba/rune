@@ -173,6 +173,27 @@
 
 ---
 
+## P15: test_hot_property_mono_1m SIGSEGV in JIT code 🔴 P0
+
+**Status:** 🔴 Unfixed — pre-existing on `main`
+
+**Symptom:** `test_hot_property_mono_1m` crashes with SIGSEGV (`EXC_BAD_ACCESS`). The test accesses `o.x` on one object 1M times in a loop. Crash is in JIT-compiled code (no debug symbols, mmap'd executable region).
+
+**Crash site:** `ldr x3, [x2]` where `x2 = 0x7800000001` — a Smi-tagged value (bit 0 = 1) being treated as a heap pointer. The Smi decodes to `0x3C0000000 = 16,106,127,360`, which is far larger than any value in the test (max sum = 1,000,000). This suggests the trace or function JIT is loading a Smi value where a heap pointer is expected — likely a register aliasing or operand-order bug in the JIT-compiled property access path.
+
+**Repro:** `cargo test -p rune_embed --test integration_test test_hot_property_mono_1m` (crashes every time on both x86-64 and aarch64).
+
+**Introduced by:** Commit `1636edc` (Fix __proto__ assignment, added this test). Unclear if the test was broken from inception or a later change regressed it.
+
+**Impact:** P0 — crashing test on `main` prevents developers from running the full test suite. Users who run `cargo test --workspace` hit this crash and see red.
+
+**Investigation needed:**
+1. Determine if crash is in the function JIT or trace compiler
+2. Determine if it's an input guard miss (Smi where object expected) or a trace operand bug
+3. Fix the guard, add a pol buffer, or disable the test with `#[ignore]` until fixed
+
+---
+
 ## Summary
 
 | # | Issue | Status | Commit |
@@ -187,8 +208,9 @@
 | P7 | IC stats undercounted | ✅ Fixed | current |
 | P8 | CLI -e flag | ⚠️ Known | — |
 | P9 | Return assertion relaxed | ⚠️ Deferred | — |
-| P10 | JIT slower than interpreter on tiny functions | ✅ Fixed | bb1a0e2 |
-| P11 | JIT coverage (now 47/61 opcodes) | 🟡 In progress | — |
+| P10 | JIT now faster than interpreter after float64 Add (see P13→float64) | ✅ Fixed | 597b12c |
+| P11 | JIT coverage (55/62 opcodes + float64 Add promotion) | 🟡 In progress | — |
 | P12 | Trace compiler wired to loop execution | ✅ Fixed | — |
-| P13 | Smi i31 display truncation (design constraint) | ✅ Resolved | — |
-| P14 | InlineCache::get_scalar cfg-gate breaks non-SSE4.1 x86-64 | ✅ Fixed | current |
+| P13 | Smi overflow → float64 Add promotion (was display truncation) | ✅ Resolved | 597b12c |
+| P14 | InlineCache::get_scalar cfg-gate | ✅ Fixed | current |
+| P15 | test_hot_property_mono_1m SIGSEGV | 🔴 P0 | — |

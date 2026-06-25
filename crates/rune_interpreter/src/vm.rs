@@ -130,6 +130,29 @@ pub struct JitHelpers {
     _reserved: [usize; 2],
 }
 
+/// A cached call-IC entry: stores the expected callee Func pointer and its
+/// JIT entry so the interpreter can skip the full Call dispatch on repeated
+/// monomorphic calls to the same function.
+#[derive(Clone, Debug)]
+pub struct CallIcEntry {
+    /// Heap pointer to the expected Func (monomorphic callee).
+    pub func_ptr: *mut u8,
+    /// Cached JIT entry for that Func (null if not yet compiled).
+    pub jit_entry: *const u8,
+    /// Number of arguments expected at this callsite.
+    pub argc: usize,
+}
+
+impl Default for CallIcEntry {
+    fn default() -> Self {
+        Self {
+            func_ptr: std::ptr::null_mut(),
+            jit_entry: std::ptr::null(),
+            argc: 0,
+        }
+    }
+}
+
 /// Stack-based bytecode interpreter with call frame support.
 #[repr(C)]
 pub struct Vm {
@@ -156,6 +179,11 @@ pub struct Vm {
     pub generators: Vec<Generator>,
     pub builtins: Vec<Builtin>,
     pub globals: HashMap<String, Value>,
+    /// Call-site ICs for monomorphic Call caching (Opcode::Call fast path).
+    pub call_ics: Vec<CallIcEntry>,
+    /// Reusable buffer for JIT locals Vec to avoid per-call heap allocation.
+    /// Cleared and refilled on each JIT entry; sized to the largest locals set.
+    pub jit_locals_buffer: Vec<Value>,
     /// Shape-Indexed Dispatch Tables for property access caching.
     pub ics: Vec<InlineCache>,
     /// Cached IC entries for bytecode-specialized callsites (LoadPropertyIC).
@@ -233,6 +261,8 @@ impl Vm {
             generators: Vec::new(),
             builtins: Vec::new(),
             globals: HashMap::new(),
+            call_ics: Vec::new(),
+            jit_locals_buffer: Vec::new(),
             ics: Vec::new(),
             ic_entries: Vec::new(),
             ic_hit_counts: Vec::new(),
@@ -2733,6 +2763,79 @@ impl Vm {
                                     self.frames[fi].pc = pc + 1;
                                     continue;
                                 }
+                                // --- Call IC fast path ---
+                                if instr.call_ic_index >= 0 {
+                                    let ic_idx = instr.call_ic_index as usize;
+                                    if ic_idx < self.call_ics.len() {
+                                        let ic = &self.call_ics[ic_idx];
+                                        if ic.func_ptr == ptr && ic.argc == argc {
+                                            let jit_entry = ic.jit_entry;
+                                            if !jit_entry.is_null() {
+                                                // IC hit: call JIT entry directly, skip all overhead.
+                                                self.jit_locals_buffer.clear();
+                                                if func_prog.named_function {
+                                                    self.jit_locals_buffer.push(callee);
+                                                }
+                                                self.jit_locals_buffer.extend(args.iter().copied());
+                                                let local_count = func_prog.local_names.len();
+                                                while self.jit_locals_buffer.len() < local_count {
+                                                    self.jit_locals_buffer.push(Value::undefined());
+                                                }
+                                                self.jit_entry_count += 1;
+                                                let func: JitEntryFn =
+                                                    unsafe { std::mem::transmute(jit_entry) };
+                                                let vm_ptr = self as *mut Vm as *mut u8;
+                                                let gc_ptr = gc as *mut SemiSpace as *mut u8;
+                                                self.jit_bailout.pending = false;
+                                                let result_raw = unsafe {
+                                                    func(
+                                                        vm_ptr,
+                                                        gc_ptr,
+                                                        self.jit_locals_buffer.as_mut_ptr() as *mut u64,
+                                                    )
+                                                };
+                                                if self.jit_bailout.pending {
+                                                    let bailout_bc_pc = self.jit_bailout.bc_pc;
+                                                    self.jit_bailout.pending = false;
+                                                    self.jit_bailout.bc_pc = 0;
+                                                    let mut bailout_locals = self.jit_locals_buffer.clone();
+                                                    while bailout_locals.len() < local_count {
+                                                        bailout_locals.push(Value::undefined());
+                                                    }
+                                                    let func_env =
+                                                        unsafe { Func::env_ptr(ptr as *mut Func) };
+                                                    self.frames.push(Frame {
+                                                        locals: bailout_locals,
+                                                        lexical_slots: Vec::new(),
+                                                        lexical_tdz: Vec::new(),
+                                                        lexical_const: Vec::new(),
+                                                        scope_boundaries: Vec::new(),
+                                                        passed_argc: argc,
+                                                        pc: bailout_bc_pc,
+                                                        stack_base: self.stack.len(),
+                                                        prog: func_prog as *const BytecodeProgram,
+                                                        generator_id: None,
+                                                        this,
+                                                        is_constructor_call: false,
+                                                        constructed_object: Value::undefined(),
+                                                        env: func_env,
+                                                    });
+                                                    let snapshot = std::mem::take(
+                                                        &mut self.jit_bailout.stack_snapshot,
+                                                    );
+                                                    for val in snapshot {
+                                                        self.push(Value::from_raw(val));
+                                                    }
+                                                    continue;
+                                                }
+                                                self.push(Value::from_raw(result_raw));
+                                                self.frames[fi].pc = pc + 1;
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                }
+
                                 // --- JIT tier-up (if enabled) ---
                                 #[cfg(feature = "jit")]
                                 {
@@ -2778,16 +2881,26 @@ impl Vm {
 
                                     let jit_entry = unsafe { Func::jit_entry(ptr as *mut Func) };
                                     if !jit_entry.is_null() && large_enough {
-                                        let mut jit_locals: Vec<Value> = if func_prog.named_function
-                                        {
-                                            vec![callee]
-                                        } else {
-                                            vec![]
-                                        };
-                                        jit_locals.extend(args.iter().copied());
+                                        // Update call IC now that JIT entry is available
+                                        if instr.call_ic_index >= 0 {
+                                            let ic_idx = instr.call_ic_index as usize;
+                                            if ic_idx >= self.call_ics.len() {
+                                                self.call_ics.resize(ic_idx + 1, CallIcEntry::default());
+                                            }
+                                            self.call_ics[ic_idx] = CallIcEntry {
+                                                func_ptr: ptr,
+                                                jit_entry,
+                                                argc,
+                                            };
+                                        }
+                                        self.jit_locals_buffer.clear();
+                                        if func_prog.named_function {
+                                            self.jit_locals_buffer.push(callee);
+                                        }
+                                        self.jit_locals_buffer.extend(args.iter().copied());
                                         let local_count = func_prog.local_names.len();
-                                        while jit_locals.len() < local_count {
-                                            jit_locals.push(Value::undefined());
+                                        while self.jit_locals_buffer.len() < local_count {
+                                            self.jit_locals_buffer.push(Value::undefined());
                                         }
                                         // Phase D: JIT accepts any argument types. Input Smi guards
                                         // on every value-consuming opcode handle non-Smi values by
@@ -2797,18 +2910,6 @@ impl Vm {
                                                 unsafe { std::mem::transmute(jit_entry) };
                                             let vm_ptr = self as *mut Vm as *mut u8;
                                             let gc_ptr = gc as *mut SemiSpace as *mut u8;
-                                            self.jit_helpers.lexical_helper =
-                                                rune_jit_lexical_helper as *const () as usize;
-                                            self.jit_helpers.bailout_helper =
-                                                rune_jit_bailout_helper as *const () as usize;
-                                            self.jit_helpers.typeof_helper =
-                                                rune_jit_typeof_helper as *const () as usize;
-                                            self.jit_helpers.string_helper =
-                                                rune_jit_string_helper as *const () as usize;
-                                            self.jit_helpers.global_helper =
-                                                rune_jit_global_helper as *const () as usize;
-                                            self.jit_helpers.float64_add_helper =
-                                                rune_jit_float64_add_helper as *const () as usize;
                                             // Clear pending flag before entering JIT; the bailout
                                             // helper sets it if a bailout occurs (cannot use
                                             // bc_pc != 0 as sentinel — MakeArgumentsArray at PC 0
@@ -2818,7 +2919,7 @@ impl Vm {
                                                 func(
                                                     vm_ptr,
                                                     gc_ptr,
-                                                    jit_locals.as_mut_ptr() as *mut u64,
+                                                    self.jit_locals_buffer.as_mut_ptr() as *mut u64,
                                                 )
                                             };
                                             if self.jit_bailout.pending {
@@ -2830,7 +2931,7 @@ impl Vm {
                                                 self.jit_bailout.pending = false;
                                                 self.jit_bailout.bc_pc = 0;
                                                 // Clone locals for the frame (bailout is rare).
-                                                let mut bailout_locals = jit_locals.clone();
+                                                let mut bailout_locals = self.jit_locals_buffer.clone();
                                                 while bailout_locals.len() < local_count {
                                                     bailout_locals.push(Value::undefined());
                                                 }
@@ -2860,7 +2961,7 @@ impl Vm {
                                                 }
                                                 continue;
                                             }
-                                            self.last_locals = jit_locals;
+                                            self.last_locals = self.jit_locals_buffer.clone();
                                             self.push(Value::from_raw(result_raw));
                                             self.frames[fi].pc = pc + 1;
                                             continue;

@@ -1733,6 +1733,71 @@ fn test_jit_bailout_on_float() {
     );
 }
 
+#[test]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn test_jit_non_smi_args_bail() {
+    // Arrow function — no MakeArgumentsArray. JIT enters, first consuming
+    // opcode (Add) triggers NonSmiInput bailout, interpreter resumes.
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+        function add(a, b) { return a + b; }
+        var sum = 0;
+        for (var i = 0; i < 100; i++) {
+            sum = add(sum, i);
+        }
+        var result = add(3.5, 2);
+        result
+    "#,
+        )
+        .unwrap();
+    let f = r.as_float64().unwrap_or(0.0);
+    assert!(
+        (f - 5.5).abs() < 0.001,
+        "JIT non-Smi bail: add(3.5, 2) should be ~5.5, got {}",
+        f
+    );
+    assert!(
+        ctx.vm().jit_entry_count > 0,
+        "JIT must have entered at least once"
+    );
+    assert!(
+        ctx.vm().jit_bailout_count > 0,
+        "JIT must have bailed at least once when given non-Smi args"
+    );
+}
+
+#[test]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn test_jit_bailout_count() {
+    // Verify the jit_bailout_count counter increments alongside jit_entry_count.
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+        function add(a, b) { return a + b; }
+        var sum = 0;
+        for (var i = 0; i < 100; i++) {
+            sum = add(sum, i);
+        }
+        sum
+    "#,
+    )
+    .unwrap();
+    assert!(
+        ctx.vm().jit_entry_count > 0,
+        "JIT must have entered"
+    );
+    assert!(
+        ctx.vm().jit_bailout_count > 0,
+        "JIT must have bailed (MakeArgumentsArray bail-on-entry)"
+    );
+    assert!(
+        ctx.vm().jit_bailout_count <= ctx.vm().jit_entry_count,
+        "Bailouts should not exceed entries"
+    );
+}
+
 mod instanceof_tests {
     use rune_embed::Context;
 

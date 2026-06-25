@@ -182,6 +182,9 @@ pub struct Vm {
     /// Number of times the JIT entry path was taken (including bailout).
     /// Used by tests to verify JIT actually executed.
     pub jit_entry_count: u64,
+    /// Number of JIT bailouts (all reasons). Helps detect wasteful JIT entries
+    /// where a function always bails (e.g., always receives non-Smi args).
+    pub jit_bailout_count: u64,
     last_locals: Vec<Value>,
     pub eval_fn: UnsafeCell<Option<EvalFn>>,
     /// Reference to Array.prototype for setting on newly created arrays.
@@ -231,6 +234,7 @@ impl Vm {
             builtin_wrappers: HashMap::new(),
             cached_jit_entries: HashMap::new(),
             jit_entry_count: 0,
+            jit_bailout_count: 0,
             last_locals: Vec::new(),
             eval_fn: UnsafeCell::new(None),
             array_prototype: Value::undefined(),
@@ -386,15 +390,6 @@ impl Vm {
     #[allow(dead_code)]
     fn all_smi(values: &[Value]) -> bool {
         values.iter().all(|v| v.is_smi())
-    }
-
-    /// Check whether `jit_locals` is safe to pass to the JIT prologue.
-    /// For named functions, `locals[0]` is the callee Func pointer (never Smi) — skip it.
-    /// Padded slots (undefined) are also harmless since the JIT bails at MakeArgumentsArray
-    /// before any value-consuming opcode.
-    fn jit_locals_ok(locals: &[Value], named_function: bool) -> bool {
-        let start = if named_function { 1 } else { 0 };
-        locals[start..].iter().all(|v| v.is_smi() || v.is_undefined())
     }
 
     /// Set a pending exception (used by builtins that cannot return Exit).
@@ -2746,10 +2741,9 @@ impl Vm {
                                         while jit_locals.len() < local_count {
                                             jit_locals.push(Value::undefined());
                                         }
-                                        // Safety check: JIT only handles Smi values
-                                        let this_ok = !func_prog.instructions.iter().any(|i| i.opcode == Opcode::LoadThis)
-                                            || self.frames[fi].this.is_smi();
-                                        if Self::jit_locals_ok(&jit_locals, func_prog.named_function) && this_ok {
+                                        // Phase D: JIT accepts any argument types. Input Smi guards
+                                        // on every value-consuming opcode handle non-Smi values by
+                                        // bailing to the interpreter.
                                             self.jit_entry_count += 1;
                                             let func: JitEntryFn =
                                                 unsafe { std::mem::transmute(jit_entry) };
@@ -2814,8 +2808,6 @@ impl Vm {
                                             self.push(Value::from_raw(result_raw));
                                             self.frames[fi].pc = pc + 1;
                                             continue;
-                                        }
-                                        // Non-Smi value present — fall through to interpreter
                                     }
                                 }
                                 // --- End JIT tier-up ---
@@ -4164,6 +4156,7 @@ pub extern "C" fn rune_jit_bailout_helper(
     jit_sp: *mut u64,
 ) -> u64 {
     let vm = unsafe { &mut *(vm_ptr as *mut Vm) };
+    vm.jit_bailout_count += 1;
     let base = vm.jit_stack_base as usize;
     let current = jit_sp as usize;
     let count = if current >= base {

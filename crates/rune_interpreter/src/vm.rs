@@ -3311,14 +3311,6 @@ impl Vm {
         if !rune_jit_baseline::is_jit_compatible(&prog) {
             return; // trace contains unsupported opcodes (strings, objects, etc.)
         }
-        // Trace compiler doesn't support LoadPropertyIC/StorePropertyIC bailout
-        // (no BailoutTable set up for traces).  Reject traces that use them.
-        for instr in &prog.instructions {
-            match instr.opcode {
-                Opcode::LoadPropertyIC | Opcode::StorePropertyIC => return,
-                _ => {}
-            }
-        }
 
         let codegen = Aarch64CodeGen::new(prog.instructions.len());
         // Leak the program so its address stays valid for the compiled trace's

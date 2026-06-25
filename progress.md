@@ -1151,6 +1151,16 @@ Tagged `v0.0.1` at `0067e41`. Honest positioning: NOT FOR PRODUCTION USE.
 
 **Gaps (documented):** No standard library, optimizing JIT (remaining 6/62 opcodes — floats, calls, generator ops), modules, classes, async/await. 5–230× slower than V8 on hot loops. JIT covers 56/62 opcodes.
 
+### Current benchmarks (aarch64, M4 Pro, after Phase C)
+
+| Benchmark | Time | Notes |
+|---|---|---|
+| `loop_sum_smi_1M` | 438 ms | JIT-compiled Smi loop |
+| `jit_hot_function_1M` | 664 ms | function tiered up to JIT after 50 |
+| `poly_prop_10shapes_1M` | 1.01 s | SIDT polymorphic property access (+debug eprintln removed) |
+| `array_push_grow_100k` | 65.7 ms | no JIT for array push |
+| `proto_chain_lookup_5deep_1M` | — | time-out in default 5s window |
+
 ## Global Testing Strategy
 
 > **Spec mandate:** Every test expectation must be traceable to an ECMA-262 algorithm in [`ecma262.md`](./ecma262.md). Open linked `https://tc39.es/ecma262/multipage/` URLs via `webfetch` when writing tests. No guessing — if a test expects `42`, the spec must say so.

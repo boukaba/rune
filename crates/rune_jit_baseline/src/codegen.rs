@@ -277,27 +277,81 @@ impl CodeGen {
                     self.emit_jit_stack_pop();          // rax = value
                     self.mem.emit_mov_r64_imm64(1, 2);  // rcx = 2
                     self.mem.emit_cmp_r64_r64(0, 1);    // cmp value, 2
-                    // JA (jump if above, >2 unsigned): skip JMP.falsy
                     let skip_falsy = self.mem.emit_ja_rel32(0);
-                    // ≤2: falsy → skip the JMP to target
                     let jmp_done = self.mem.emit_jmp_rel32(0);
-                    // Patch JA: skip to after JMP.falsy (5 bytes for JMP rel32)
                     let ja_end = skip_falsy + 6;
                     let after_jmp_falsy = ja_end + 5;
                     self.mem.patch_u32(skip_falsy, (after_jmp_falsy - ja_end) as u32);
-                    // Check == 4
-                    self.mem.emit_mov_r64_imm64(1, 4);  // rcx = 4
-                    self.mem.emit_cmp_r64_r64(0, 1);    // cmp value, 4
-                    // JE: equal to 4 → falsy → skip JMP
+                    self.mem.emit_mov_r64_imm64(1, 4);
+                    self.mem.emit_cmp_r64_r64(0, 1);
                     let je_done = self.mem.emit_je_rel32(0);
-                    // JMP to target (truthy)
                     let jmp_target = self.mem.emit_jmp_rel32(0);
                     self.pending_patches.push((jmp_target, target));
-                    // Patch JMP.falsy (to skip both checks and JMP)
                     let done = self.mem.current_offset();
                     self.mem.patch_u32(jmp_done, (done - (jmp_done + 5)) as u32);
-                    // Patch JE.done
                     self.mem.patch_u32(je_done, (done - (je_done + 6)) as u32);
+                }
+                Opcode::LoadPropertyIC => {
+                    let shape_id = instr.operands[0] as u64;
+                    let offset = instr.operands[1] as u32;
+                    let _proto_depth = instr.operands.get(2).copied().unwrap_or(0) as u32;
+                    self.emit_jit_stack_pop(); // rax = object Value
+                    // Test bit 0: if set → Smi/sentinel → miss
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0xF7);
+                    self.mem.emit_byte(0xC0);  // TEST rax, imm32
+                    self.mem.emit_u32(0x0000_0001);
+                    let jne_miss_patch = self.mem.emit_jne_rel32(0);
+                    // CMP rax, 6; JBE miss (sentinels: 0/2/4/6)
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0x83);
+                    self.mem.emit_byte(0xF8);
+                    self.mem.emit_byte(0x06);
+                    let jbe_miss_patch = self.mem.emit_jbe_rel32(0);
+                    // MOV rcx, [rax + 8]  (shape ptr)
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0x8B);
+                    self.mem.emit_byte(0x48);
+                    self.mem.emit_byte(0x08);
+                    // MOV rdx, [rcx]      (shape.id)
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0x8B);
+                    self.mem.emit_byte(0x11);
+                    // MOV r8, shape_id
+                    self.mem.emit_mov_r64_imm64(8, shape_id);
+                    // CMP rdx, r8
+                    self.mem.emit_cmp_r64_r64(2, 8);
+                    let jne_shape_miss = self.mem.emit_jne_rel32(0);
+                    // MOV rax, [rax + 32 + offset*8]
+                    let slot_disp: i32 = (32 + offset * 8) as i32;
+                    if (-128..=127).contains(&(slot_disp as i8)) {
+                        self.mem.emit_rex_w();
+                        self.mem.emit_byte(0x8B);
+                        self.mem.emit_byte(0x40); // mod=01, reg=0, r/m=0
+                        self.mem.emit_byte(slot_disp as u8);
+                    } else {
+                        self.mem.emit_rex_w();
+                        self.mem.emit_byte(0x8B);
+                        self.mem.emit_byte(0x80); // mod=10, reg=0, r/m=0
+                        self.mem.emit_u32(slot_disp as u32);
+                    }
+                    self.emit_jit_stack_push();
+                    // JMP done (skip miss handler)
+                    let jmp_done_patch = self.mem.emit_jmp_rel32(0);
+                    // miss: push undefined (= 0)
+                    let miss_label = self.mem.current_offset();
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0x31);
+                    self.mem.emit_byte(0xC0); // XOR eax, eax
+                    self.emit_jit_stack_push();
+                    // done:
+                    let done_label = self.mem.current_offset();
+                    // Patch forward jumps: displacement = target - (patch_addr + 4)
+                    let four: u32 = 4;
+                    self.mem.patch_u32(jne_miss_patch, miss_label as u32 - (jne_miss_patch as u32 + four));
+                    self.mem.patch_u32(jbe_miss_patch, miss_label as u32 - (jbe_miss_patch as u32 + four));
+                    self.mem.patch_u32(jne_shape_miss, miss_label as u32 - (jne_shape_miss as u32 + four));
+                    self.mem.patch_u32(jmp_done_patch, done_label as u32 - (jmp_done_patch as u32 + four));
                 }
                 Opcode::LoadLocal => {
                     let idx = instr.operands[0] as usize;

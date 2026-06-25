@@ -534,17 +534,64 @@ impl Aarch64CodeGen {
                 Opcode::JumpIfTrue => {
                     let target = instr.operands[0] as usize;
                     self.pop(); // x0 = condition
-                    // Falsy: ≤ 2 or == 4. We skip the B if falsy.
                     movz(&mut self.mem, 1, 2);
                     cmp_reg(&mut self.mem, 0, 1);
-                    // B.LS +2: skip over B.EQ check and B (2 instructions)
-                    emit(&mut self.mem, 0x54000049);
+                    emit(&mut self.mem, 0x54000049); // B.LS +2 (falsy: skip B)
                     movz(&mut self.mem, 1, 4);
                     cmp_reg(&mut self.mem, 0, 1);
-                    // B.EQ +1: skip over B (1 instruction)
-                    emit(&mut self.mem, 0x54000020);
-                    // B target (only reached if truthy)
+                    emit(&mut self.mem, 0x54000020); // B.EQ +1 (falsy: skip B)
                     self.emit_b(target);
+                }
+                Opcode::LoadPropertyIC => {
+                    let shape_id = instr.operands[0] as u64;
+                    let offset = instr.operands[1] as u32;
+                    let _proto_depth = instr.operands.get(2).copied().unwrap_or(0) as u32;
+                    self.pop(); // x0 = object
+                    // Save object pointer in x1 for validation + property load
+                    mov_reg(&mut self.mem, 1, 0);
+                    // Test bit 0: Smi → miss
+                    movz(&mut self.mem, 2, 1);          // x2 = 1
+                    emit(&mut self.mem, 0xEA02003F);    // TST x1, x2 (ANDS XZR, X1, X2)
+                    let patch_smi = self.mem.current_offset();
+                    emit(&mut self.mem, 0x54000001);    // B.NE +0 (patched → miss)
+                    // CMP x1, #6 (sentinel ≤ 6 → miss)
+                    emit(&mut self.mem, 0xF100183F);    // CMP x1, #6 (SUBS XZR, X1, #6)
+                    let patch_sentinel = self.mem.current_offset();
+                    emit(&mut self.mem, 0x54000009);    // B.LS +0 (patched → miss)
+                    // Load shape ptr from [x1 + 8]
+                    ldr_off(&mut self.mem, 2, 1, 8);    // x2 = [x1 + 8] (shape ptr)
+                    // Load shape.id from [x2]
+                    ldr_off(&mut self.mem, 3, 2, 0);    // x3 = [x2] (shape.id)
+                    // Compare with expected shape_id
+                    mov_imm64(&mut self.mem, 4, shape_id);
+                    cmp_reg(&mut self.mem, 3, 4);
+                    let patch_shape = self.mem.current_offset();
+                    emit(&mut self.mem, 0x54000001);    // B.NE +0 (patched → miss)
+                    // Load property from [x1 + 32 + offset*8]
+                    ldr_off(&mut self.mem, 0, 1, 32 + offset * 8);
+                    self.push();
+                    // B done (skip miss handler)
+                    let patch_done = self.mem.current_offset();
+                    emit(&mut self.mem, 0x14000000);    // B +0 (patched → done)
+                    // miss: push undefined (= 0)
+                    let miss_offset = self.mem.current_offset();
+                    movz(&mut self.mem, 0, 0);
+                    self.push();
+                    // done:
+                    let done_offset = self.mem.current_offset();
+                    // Patch forward jumps
+                    // B.NE (smi check, cond=1)
+                    let d = ((miss_offset as i64 - patch_smi as i64) / 4) as u32;
+                    self.mem.patch_u32(patch_smi, 0x54000001 | ((d & 0x7FFFF) << 5));
+                    // B.LS (sentinel check, cond=9)
+                    let d = ((miss_offset as i64 - patch_sentinel as i64) / 4) as u32;
+                    self.mem.patch_u32(patch_sentinel, 0x54000009 | ((d & 0x7FFFF) << 5));
+                    // B.NE (shape mismatch, cond=1)
+                    let d = ((miss_offset as i64 - patch_shape as i64) / 4) as u32;
+                    self.mem.patch_u32(patch_shape, 0x54000001 | ((d & 0x7FFFF) << 5));
+                    // B (unconditional to done)
+                    let d = ((done_offset as i64 - patch_done as i64) / 4) as u32;
+                    self.mem.patch_u32(patch_done, 0x14000000 | (d & 0x03FF_FFFF));
                 }
                 Opcode::Return => {
                     self.emit_epilogue();

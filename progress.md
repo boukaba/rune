@@ -1624,15 +1624,34 @@ The remaining ~80ms gap to ≤50ms on `jit_hot_function_1M` comes from the BLR r
 
 The CLI did not recognize the `-e`/`--eval` flag, leaving the inline JS code string unused as `source_args[1]`. Fixed by adding proper flag parsing and feeding the inline string to `ctx.eval()`.
 
-### Updated benchmarks (aarch64, M4 Pro, 2026-06-26 post-fix)
+### Updated benchmarks (aarch64, M4 Pro, 2026-06-27 post-fix)
 
-| Benchmark | Before | After | Notes |
+| Benchmark | Pre-fix (2026-06-26) | Post-fix (2026-06-27) | Change |
 |---|---|---|---|
-| `test_hot_property_mono_1m` | **3.88s** (all interpreter, JIT 99.9% bail) | **1.32s** (trace JIT, 0 bailouts) | 2.9× faster |
-| `test_hot_property_poly_1m` | **4.70s** (all interpreter) | **4.70s** (unchanged) | Polymorphic still bails per-shape-change |
+| `loop_sum_smi_1M` | 108.63 ms | 100.51 ms | **-9.2%** |
+| `array_push_grow_100k` | 65.90 ms | 46.58 ms | **-30.6%** |
+| `proto_chain_lookup_5deep_1M` | 726.72 ms | 105.58 ms | **-85.7% (6.9× faster)** |
+| `jit_hot_function_1M` | 129.36 ms | 120.15 ms | **-4.7%** (within noise) |
+| `poly_prop_10shapes_1M` | 1.0109 s | 722.06 ms | **-9.0%** |
+| `parse_emit_execute_hello` | 263.31 µs | 253.17 µs | **-7.6%** (within noise) |
+
+Headline results from `cargo bench -p rune_bench --features jit`. Full output at `crates/rune_bench/results/20260626_jit_on_post_p19.txt`.
 
 ### Test results
 
 - **307 integration tests passing** (0 failed, 2 ignored) — same as before, no regressions
 - Workspace: all green (fmt + clippy + test)
-- Commits: `efd2e87` (all three fixes + CLI -e flag)
+- Commits: `efd2e87` (all three fixes + CLI `-e` flag), `e2ccd61` (track progress.md on GitHub)
+
+### Revised v0.2 priorities (2026-06-27)
+
+| Item | Priority | Status | Rationale |
+|---|---|---|---|
+| Phase F inlining — eliminate BLR round-trip in hot loops | 🔴 P0 | 🟡 In progress | `jit_hot_function_1M` still 120ms (unchanged post-fix) — BLR still dominates |
+| JIT coverage of `ArrayPush` (Phase C from `bailout_design.md` §7.3) | 🔴 P0 | ⬜ Not started | `array_push_grow_100k` dropped 30% from IC fix alone — native JIT push would further improve |
+| float64 Sub/Mul/Div promotion for JIT | 🟠 P1 | ⬜ Not started | Small, unblocks non-integer workloads |
+| GenImmix GC spike | 🟠 P1 | ⬜ Not started | Cheney overhead unknown — instrument GC first; if >20% of runtime, jumps to P0 |
+| Delta JIT: shape miss → record → compile delta → append cache | 🟠 P1 | ⬜ Not started | `poly_prop_10shapes_1M` still 722ms — multi-shape dispatch needed |
+| x86-64 native JIT Call (replace bail-on-entry) | 🟡 P2 | ⬜ Not started | No x86-64 user — symmetrical engineering, doesn't move M4 numbers |
+| All 93 opcodes whitelisted in JIT | 🟡 P2 | ⬜ Not started | Complete coverage, but diminishing returns per-opcode |
+| Div/Mod/Exp native JIT opcodes | 🟡 P2 | ⬜ Not started | Rare in hot loops |

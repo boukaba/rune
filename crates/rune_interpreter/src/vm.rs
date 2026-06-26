@@ -669,7 +669,33 @@ impl Vm {
                 if pc == target_pc && trace.ops.len() > 1 {
                     self.recording_trace = None;
                     #[cfg(target_arch = "aarch64")]
-                    self.compile_trace_native(target_pc);
+                    {
+                        // Check if trace contains callee ops (Call followed by
+                        // callee-body ops ending in Return).  If so, compiling
+                        // the trace would produce JIT code where the callee's
+                        // Return opcode exits the trace early.  Remove the
+                        // trace to prevent the bug.
+                        let mut has_callee_return = false;
+                        let mut in_callee = false;
+                        for op in &trace.ops {
+                            if op.opcode == Opcode::Call as u8
+                                || op.opcode == Opcode::CallFromArray as u8
+                            {
+                                in_callee = true;
+                            } else if in_callee && op.opcode == Opcode::Return as u8 {
+                                has_callee_return = true;
+                                break;
+                            }
+                        }
+                        if has_callee_return {
+                            // Trace crosses a function-call boundary; inlining
+                            // not yet supported — prevent compilation of buggy trace.
+                            self.loop_traces.remove(&target_pc);
+                            self.loop_counts.remove(&target_pc);
+                        } else {
+                            self.compile_trace_native(target_pc);
+                        }
+                    }
                 }
             }
 

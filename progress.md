@@ -1373,8 +1373,55 @@ Commit: `HEAD` (not yet tagged)
 - **Trace compiler excluded**: The aarch64 trace compiler has a pre-existing `LoadPropertyIC` stack-balance bug (the key operand is never popped before the miss handler). Rather than fix the trace compiler's property IC ops, globals are simply excluded from trace compilation by an explicit filter in `compile_trace_native`, while remaining in `is_jit_compatible` for function JIT.
 - **`JitHelpers` initialized in `Vm::new()`**: Previously, only the function-JIT entry path populated helpers. The trace-execution path (`compile_trace_native`) ran through `Vm::execute()` which did not go through the JIT entry code, so it used zeroed pointers. Fix: populate all helpers at construction time.
 
-### Pre-existing bugs encountered
+### Bugs encountered (all fixed)
 
-1. **`LoadPropertyIC` in aarch64 trace compiler**: The key operand (from `LoadStringConst`) was never popped from the JIT stack. On miss, the interpreter got key + object instead of just object, causing stack corruption. Discovered when enabling global opcodes in the trace compiler triggered the property-IC path. Fixed by popping the key before the miss path.
+1. **`LoadPropertyIC` in aarch64 JIT codegen (P15)**: The key operand (from `LoadStringConst`) was never popped from the JIT stack. The JIT treated the key string as the object, dereferencing its length field as a shape pointer — SIGSEGV. Fixed in `d8ad991` by popping the key before the object in both `LoadPropertyIC` and `StorePropertyIC` codegen, restoring both on bailout.
 2. **`StorePropertyIC` miss handler**: Pushed key + object + value for the interpreter, but the key is consumed by the IC check and should not be pushed back. Fixed by removing the key push.
 3. **`JitHelpers` zeroed for trace execution**: `Vm::new()` set all helpers to zero. Function JIT set them later, but the trace compiler's output executed before any function JIT entry, causing crashes. Fixed by populating at construction time.
+
+---
+
+## Post-Phase C: Call IC, BailoutTable Consistency, P15 Fix
+
+### Option B: BailoutTable on LoopTrace (commit `8a5edfc`)
+
+Stored `bailout_table: Option<Box<BailoutTable>>` on each `LoopTrace` for metadata consistency with function JIT. This is a correctness/latent-bug fix — without it, trace bailouts cannot map PC → stack depth.
+
+### Option C: Interpreter-side monomorphic call IC (commit `af4b2da`)
+
+Added interpreter-side monomorphic call IC to reduce per-call overhead for hot functions that tier up to JIT:
+
+- **`call_ic_index` field on `Instruction`**: Identifies which call-IC slot a callsite uses (set at emit time, same scheme as property ICs).
+- **`CallIcEntry { func_ptr, jit_entry, argc }`**: Cached callee identity to skip the full `Call` dispatch on repeat monomorphic calls.
+- **`Vm::call_ics: Vec<CallIcEntry>`**: Call-site IC table on the VM, parallel to property `ics`.
+- **`jit_locals_buffer` reuse**: Eliminated the per-call `Vec::new()` allocation by reusing `jit_locals_buffer` across calls.
+- **Removed redundant `jit_helpers` setup**: The JIT entry helper table was being set up redundantly on every call; now initialized once in `Vm::new()`.
+
+**Benchmark impact**: `jit_hot_function_1M` improved from ~578ms → ~559ms (~3% gain). The caller loop still runs in the interpreter; this only reduces overhead per call, not the total number of interpreted instructions.
+
+### P15: `LoadPropertyIC`/`StorePropertyIC` JIT codegen key-pop bug (commit `d8ad991`)
+
+**Root cause**: The AArch64 JIT codegen for `LoadPropertyIC` and `StorePropertyIC` popped only the object (and value) from the JIT stack, but not the key string pushed by the preceding `LoadStringConst`. The bytecode layout before a property access is:
+
+```
+LoadStringConst [key_idx]   → push key
+LoadPropertyIC / StorePropertyIC  → pop key, pop obj (fast path discards key)
+```
+
+The interpreter's `LoadPropertyIC` correctly pops both values (the key is discarded in the fast shape-guard path). The JIT codegen only popped the object, leaving the key on the JIT stack. This caused every subsequent stack operation to be off by one slot. The key (a `HeapString`) was treated as the JSObject — `[HeapString + 8]` reads the string length field (`0x7800000001`, a Smi-looking value), which was then dereferenced as a shape pointer, causing the SIGSEGV.
+
+**Fix**:
+- `LoadPropertyIC`: Added `self.pop()` + save in x7 before the existing object pop; on bailout, restore both key and object to the JIT stack.
+- `StorePropertyIC`: Same fix — pop key (save in x7), then pop object/value; on bailout restore all three.
+- Updated `test_aarch64_codegen_load_property_ic` unit test to pre-push a dummy key and adjust `jit_stack_offset`.
+
+**Tests**: All 307 integration, 46 JIT baseline, 29 interpreter tests pass. Full workspace green.
+
+### Updated benchmarks (aarch64, M4 Pro)
+
+| Benchmark | Time | Notes |
+|---|---|---|
+| `loop_sum_smi_1M` | ~438 ms | JIT-compiled Smi loop (unchanged) |
+| `jit_hot_function_1M` | **~559 ms** | After call IC + float64 Add JIT; was 578ms before call IC, 181× vs V8 3.19ms |
+| `test_hot_property_mono_1m` | **passes** | Was crashing with SIGSEGV (P15); now runs clean |
+| `array_push_grow_100k` | ~65.7 ms | No JIT for array push (unchanged) |

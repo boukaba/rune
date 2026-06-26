@@ -1650,6 +1650,8 @@ impl Vm {
                                     }
                                 }
                                 // Shape guard passes — direct slot access
+                                self.ic_stats.lookups += 1;
+                                self.ic_stats.hits += 1;
                                 let val = if proto_depth == 0 {
                                     unsafe { JSObject::get_slot(ptr as *mut JSObject, offset) }
                                 } else {
@@ -1671,6 +1673,8 @@ impl Vm {
                         }
                     }
                     // Shape guard failed — fall back to generic LoadProperty
+                    self.ic_stats.lookups += 1;
+                    self.ic_stats.misses += 1;
                     let result = load_property_recursive_ic(
                         gc,
                         &mut self.ics,

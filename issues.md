@@ -191,6 +191,34 @@
 1. Determine if crash is in the function JIT or trace compiler
 2. Determine if it's an input guard miss (Smi where object expected) or a trace operand bug
 3. Fix the guard, add a pol buffer, or disable the test with `#[ignore]` until fixed
+---
+
+## P16: NEON/SSE SIMD IC stride bug (`ptr.add(1)` instead of `ptr.add(2)`) ✅ FIXED
+
+**Status:** ✅ Fixed in `current`
+
+**Symptom:** 10-shape polymorphic `poly_prop_10shapes_1M` benchmark had only ~50% IC hit rate despite unbounded IC (SIDT guarantees O(1) for any number of shapes). `--ic-stats` showed ~50% miss rate.
+
+**Root cause:** `InlineCache::get()` has SIMD hot paths for NEON AArch64 and SSE4.1 x86-64. Both used `ptr.add(1)` to skip from entry `i` to entry `i+1`. But each `IcEntry` is 32 bytes (4 × u64), so the correct stride is `ptr.add(2)` (16 bytes per u64 × 2 u64s per load). The off-by-one caused every odd-indexed entry to read 16 bytes of garbage — half of the IcKey was the previous entry's key_hash and half was the next entry's shape_id. For a 10-shape workload, this meant shapes at odd indices (1, 3, 5, 7, 9) never matched, producing the ~50% artificial miss rate.
+
+**Fix:** Changed `ptr.add(1)` to `ptr.add(2)` in both `get_neon()` (`ic.rs:75`) and `get_simd()` (`ic.rs:199`). This correctly strides by 32 bytes (full IcEntry) per iteration.
+
+**Impact:** Benchmark `poly_prop_10shapes_1M` improved from 1,014ms → 794ms (21% faster). The IC now correctly finds all 10 shapes, not just the even-indexed ones.
+
+---
+
+## P17: LoadPropertyIC stats tracking 🟡 In progress
+
+**Status:** 🟡 Partially fixed — reporting still confusing
+
+**Symptom:** `--ic-stats` showed `0 hits, 0 misses` for LoadProperty (patched ops) and misleadingly low hit rates for polymorphic workloads.
+
+**Root cause vs current state:**
+1. `LoadProperty` handler: `lookups`/`hits`/`misses` counted at line 1480+ — after patching to `LoadPropertyIC`, this path is bypassed (correct).
+2. `LoadPropertyIC` shape-guard fast path — never touched IC stats. ✅ Now fixed: `lookups += 1` and `hits += 1` added.
+3. `LoadPropertyIC` fallback path — never touched IC stats. ✅ Now fixed: `lookups += 1` and `misses += 1` before fallback.
+4. `load_property_recursive_ic` already counted IC hits ✅ (from P7).
+5. **Remaining:** Stats double-count when both shape-guard `miss` AND fallback IC `hit` fire for same access — `hits + misses > lookups`. Two-tier separation needed.
 
 ---
 
@@ -214,3 +242,5 @@
 | P13 | Smi overflow → float64 Add promotion (was display truncation) | ✅ Resolved | 597b12c |
 | P14 | InlineCache::get_scalar cfg-gate | ✅ Fixed | current |
 | P15 | test_hot_property_mono_1m SIGSEGV | 🔴 P0 | — |
+| P16 | NEON/SSE SIMD IC stride bug (`ptr.add(1)` → `ptr.add(2)`) | ✅ Fixed | current |
+| P17 | LoadPropertyIC stats tracking | 🟡 In progress | current |

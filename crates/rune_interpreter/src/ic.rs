@@ -72,6 +72,8 @@ impl InlineCache {
 
     /// ARM NEON SIMD shape compare: 2 shape_ids compared in 1 instruction.
     /// Uses `vceqq_u64` + `vgetq_lane_u64`. IcKey layout is 16 bytes = uint64x2_t.
+    /// Each entry is (IcKey, IcEntry) = 32 bytes = 2 × uint64x2_t, so consecutive
+    /// IcKeys are at stride 2 (ptr.add(2) skips the IcEntry of entry i).
     #[cfg(target_arch = "aarch64")]
     fn get_neon(&self, shape_id: u64, key_hash: u64) -> Option<IcEntry> {
         use std::arch::aarch64::*;
@@ -79,9 +81,9 @@ impl InlineCache {
             let entries = &self.entries;
             let mut i = 0;
             while i + 1 < entries.len() {
-                let ptr = entries.as_ptr().add(i) as *const uint64x2_t;
-                let key0: uint64x2_t = *ptr;
-                let key1: uint64x2_t = *ptr.add(1);
+                let base = entries.as_ptr().add(i) as *const uint64x2_t;
+                let key0: uint64x2_t = *base;        // entry i          → IcKey of entry i
+                let key1: uint64x2_t = *base.add(2);  // entry i + 32 bytes → IcKey of entry i+1
                 let target = vdupq_n_u64(shape_id);
                 let cmp0 = vceqq_u64(key0, target);
                 let cmp1 = vceqq_u64(key1, target);
@@ -111,6 +113,8 @@ impl InlineCache {
 
     /// SIMD shape compare: on x86-64 with SSE4.1, compares 2 shape_ids in 1 instruction.
     /// Falls back to scalar linear scan on other platforms or if SSE4.1 unavailable.
+    /// Each entry is (IcKey, IcEntry) = 32 bytes = 2 × __m128i, so consecutive
+    /// IcKeys are at stride 2 (ptr.add(2) skips the IcEntry of entry i).
     #[cfg(target_arch = "x86_64")]
     fn get_simd(&self, shape_id: u64, key_hash: u64) -> Option<IcEntry> {
         if is_x86_feature_detected!("sse4.1") {
@@ -119,9 +123,9 @@ impl InlineCache {
                 let entries = &self.entries;
                 let mut i = 0;
                 while i + 1 < entries.len() {
-                    let ptr = entries.as_ptr().add(i) as *const __m128i;
-                    let key0 = _mm_loadu_si128(ptr);
-                    let key1 = _mm_loadu_si128(ptr.add(1));
+                    let base = entries.as_ptr().add(i) as *const __m128i;
+                    let key0 = _mm_loadu_si128(base);        // entry i → IcKey of entry i
+                    let key1 = _mm_loadu_si128(base.add(2));  // entry i + 32 bytes → IcKey of entry i+1
                     let target = _mm_set1_epi64x(shape_id as i64);
                     let cmp0 = _mm_cmpeq_epi64(key0, target);
                     let cmp1 = _mm_cmpeq_epi64(key1, target);

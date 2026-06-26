@@ -1666,3 +1666,101 @@ Headline results from `cargo bench -p rune_bench --features jit`. Full output at
 | `loop_sum_smi_1M` | 100 ms | 2.30 ms | **43×** | 47× → 43× | Phase F (BLR elimination) |
 | `jit_hot_function_1M` | 120 ms | 3.19 ms | **37×** | 40× → 37× (noise) | Phase F (P0) |
 | `array_push_grow_100k` | 47 ms | 7.21 ms | **6.5×** | 9× → 6.5× | ArrayPush JIT (P1) |
+
+---
+
+## Arxiv Literature Review — Acceleration Hints for Rune
+
+> **2026-06-27**: Systematic search of arxiv and adjacent sources for techniques applicable to Rune's exact bottlenecks.
+
+### 🏆 #1: Copy-and-Patch Compilation (arxiv `2011.13127`, 2020)
+
+**The single most important paper for Rune's codegen.** Replaces hand-rolled AArch64/x86-64 instruction encoding with pre-compiled **parameterized stencils** — chunks of machine code with holes, emitted by LLVM at build time. At runtime, JIT compilation = memcpy stencil + patch holes. No register allocator, no instruction encoder, no Cranelift dependency.
+
+**Why it's critical for Rune:**
+- `codegen_aarch64.rs` is 2124 lines of hand-rolled encoding — source of **every JIT bug this session** (P16, P18, `#[repr(C)]` all survived because codegen is opaque). Copy-and-patch stencils are emitted by LLVM: bugs surface at build time, not runtime.
+- Compilation drops from ~50µs/trace to **<1µs**. AFPC cold-start pitch strengthens; tier-up threshold can drop from 50 to 5–10 calls.
+- **Deegen** (arxiv `2411.11469`, 2024) used copy-and-patch to build a Lua VM 179% faster than LuaJIT with sub-µs compile. Technique is production-validated.
+- **Architecture-portable**: same paper showed x86-64, AArch64, RISC-V stencils. "x86-64 native Call" P2 becomes free.
+
+**Action:** Not during v0.2 — finish Phase F + multi-shape dispatch on existing codegen. But for v0.3, copy-and-patch is the **strategic bet** that collapses JIT maintenance cost 10× and unlocks all architectures.
+
+---
+
+### 🥈 #2: Float Self-Tagging (arxiv `2411.16544`, 2024)
+
+**Genuinely unexpected.** Rune uses Smi tagging (low bit = tag). Floats must be heap-allocated as `HeapFloat64`. The paper's insight: self-tag a float using its own **exponent bits** — reserve one exponent value as "this is a tagged pointer", store the float directly in a 64-bit Value word. No heap allocation, no pointer dereference for float reads.
+
+**Why it matters:**
+- Float arithmetic becomes a register op — no GC allocation in the JIT fast path
+- Smi→float promotion becomes a register op, not a GC op
+- Eliminates the entire "float64 Sub/Mul/Div heap allocation" problem
+- No NaN-boxing dependency on 48-bit pointers (works on any address width)
+
+**Catch:** Research paper, not yet production-validated in a JS engine. First-mover risk or marketing opportunity.
+
+**Action:** Read the paper. Prototype `Value` + `as_float`/`from_float` on a branch. If it passes test suite, Rune becomes the only production float-self-tagging JS engine.
+
+---
+
+### 🥉 #3: Deegen Vector Call IC (arxiv `2411.11469`, 2024)
+
+**Directly addresses `poly_prop_10shapes_1M`.** Deegen's call IC uses a small dispatch table of (shape_id → handler) pairs, checked in parallel with SIMD — essentially your SIDT but at call sites. 10-shape polymorphic sites run at near-monomorphic speed.
+
+**Why it matters for Rune:** Your planned multi-shape trace dispatch is 1–2 weeks. Deegen's vector IC is ~1 week and composes with existing SIDT infrastructure (you already have SIMD compare primitives). **Read Deegen §4 before writing the multi-shape trace design doc.** You may decide vector IC is the better architecture.
+
+---
+
+### #4: Nofl GC (arxiv `2503.16971`, March 2025)
+
+**Replaces the GenImmix plan.** Nofl extends Immix to reclaim all free space between objects, down to the allocator's minimum object size. Matches Immix throughput while reducing fragmentation 60–80%. For JS allocation patterns (small variable-size objects: closures, arrays, objects), this is strictly better.
+
+**Action:** When starting the GC spike, use Nofl instead of GenImmix. Same engineering cost, better result.
+
+---
+
+### #5: ShareJIT System-wide Cache (arxiv `1810.09555`, 2018)
+
+**AFPC extended OS-wide.** Multiple processes share the same compiled JIT code, identified by content hash. For Rune's serverless/edge pitch: N Lambda cold starts share one compiled cache, eliminating per-instance compile entirely. AFPC infrastructure is already 80% of the way there.
+
+**Action:** v1.0+ feature, not now. Add a system-wide cache directory (`~/.rune-cache/`) keyed by content hash — multi-process cache for free.
+
+---
+
+### #6: TPDE (arxiv `2505.22610`, May 2025)
+
+**Cranelift replacement for an optimizing tier.** SSA-form back-end framework for sub-millisecond compilation. If you ever build an optimizing tier (deferred `rune_jit_cranelift` crate), TPDE is better than Cranelift for a JS engine's latency budget.
+
+**Action:** Lower priority than copy-and-patch. File for reference.
+
+---
+
+### #7: Look Before You Leap (arxiv `2606.05466`, 2026)
+
+**Empirical validation of tag design choices.** Benchmarks badged headers vs. low-bit tagging (yours) vs. NaN-boxing on AArch64 + x86-64, including Apple M-series. Key finding: no universally-optimal strategy — low-bit wins on integer-heavy, NaN-boxing on float-heavy, badged headers on object-heavy. For Rune's three target workloads (edge = mixed, serverless = object-heavy, compute = float-heavy), you may want **workload-aware tagging** — a runtime flag that switches Value representation.
+
+**Action:** Lower priority. If you benchmark against V8 and lose on float-heavy workloads, this tells you why.
+
+---
+
+### Strategic synthesis
+
+| Timeframe | Work | Source |
+|---|---|---|
+| **v0.2 (now)** | Phase F inlining + multi-shape dispatch (or vector IC) | Existing plan, Deegen-informed |
+| **v0.2 (parallel)** | Prototype Float Self-Tagging on branch | arxiv `2411.16544` |
+| **v0.3 Q1** | **Copy-and-patch JIT rewrite** (replaces hand-rolled codegen) | arxiv `2011.13127` + Deegen |
+| **v0.3 Q1** | Adopt Float Self-Tagging (if prototype passes) | arxiv `2411.16544` |
+| **v0.3 Q2** | Nofl GC (replaces GenImmix plan) | arxiv `2503.16971` |
+| **v1.0+** | ShareJIT system-wide AFPC cache | arxiv `1810.09555` |
+
+**Research issues to file:**
+
+| ID | Title | Target | Source |
+|---|---|---|---|
+| P20-research | Copy-and-patch JIT (replace hand-rolled codegen) | v0.3 | arxiv `2011.13127` |
+| P21-research | Float Self-Tagging (eliminate heap-allocated floats) | v0.3 | arxiv `2411.16544` |
+| P22-research | Nofl GC (replaces GenImmix) | v0.3 | arxiv `2503.16971` |
+| P23-research | ShareJIT system-wide cache | v1.0+ | arxiv `1810.09555` |
+| P24-research | TPDE optimizing-tier framework | v0.4+ | arxiv `2505.22610` |
+| P25-research | Workload-aware Value tagging | v0.4+ | arxiv `2606.05466` |

@@ -7,6 +7,7 @@ pub struct PropertyKey(u64);
 
 /// An immutable shape — maps property keys to slot offsets.
 /// Shapes are hash-consed globally; each unique entry list maps to exactly one `&'static Shape`.
+#[repr(C)]
 pub struct Shape {
     pub id: u64,
     pub property_count: usize,

@@ -1478,18 +1478,17 @@ impl Vm {
                             if instr.ic_index >= 0 {
                                 let ic_idx = instr.ic_index as usize;
                                 self.ic_stats.lookups += 1;
-                                if ic_idx < self.ics.len()
-                                    && let Some(ptr) = obj.heap_ptr()
-                                {
-                                    if tag == TAG_OBJECT {
-                                        let shape =
-                                            unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
-                                        let (shape_id, key_hash) = ic_cache_key(shape.id, raw_key);
-                                        if let Some(entry) =
-                                            self.ics[ic_idx].get(shape_id, key_hash)
-                                        {
-                                            self.ic_stats.hits += 1;
-                                            // Record shape_id for trace analysis
+                    if ic_idx < self.ics.len()
+                        && let Some(ptr) = obj.heap_ptr()
+                    {
+                        if tag == TAG_OBJECT {
+                            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                            let (shape_id, key_hash) = ic_cache_key(shape.id, raw_key);
+                            if let Some(entry) =
+                                self.ics[ic_idx].get(shape_id, key_hash)
+                            {
+                                self.ic_stats.hits += 1;
+                                // Record shape_id for trace analysis
                                             if let Some(target) = self.recording_trace
                                                 && let Some(trace) =
                                                     self.loop_traces.get_mut(&target)
@@ -3477,6 +3476,7 @@ impl Vm {
         // embedded prog_ptr reference (used by LoadStringConst, globals, etc.).
         let leaked_prog = Box::leak(Box::new(prog));
         let compiled = codegen.compile(leaked_prog);
+
         compiled.mem.make_executable();
         let entry = compiled.mem.code_ptr();
         trace.compiled_entry = entry;
@@ -3855,7 +3855,7 @@ fn load_property_recursive_ic(
     obj: Value,
     raw_key: Value,
 ) -> Value {
-    // Check IC first before doing full lookup
+                    // Check IC first before doing full lookup
     if instr.ic_index >= 0
         && let Some(ptr) = obj.heap_ptr()
     {
@@ -3918,7 +3918,7 @@ fn load_property_recursive_ic(
                     );
                 } else {
                     // Inherited — walk prototype chain to find offset and depth
-                    let mut depth: u8 = 0;
+                    let mut depth = 0usize;
                     let mut p = ptr;
                     loop {
                         let next = unsafe { JSObject::prototype(p as *mut JSObject) };
@@ -3926,7 +3926,7 @@ fn load_property_recursive_ic(
                             break;
                         }
                         depth += 1;
-                        if depth >= MAX_PROTOTYPE_DEPTH as u8 {
+                        if depth >= MAX_PROTOTYPE_DEPTH {
                             break;
                         }
                         let next_shape = unsafe { JSObject::shape_ptr(next as *mut JSObject) };
@@ -3937,7 +3937,7 @@ fn load_property_recursive_ic(
                                 IcEntry {
                                     offset,
                                     is_own: false,
-                                    proto_depth: depth,
+                                    proto_depth: depth as u8,
                                 },
                             );
                             break;
@@ -3962,7 +3962,7 @@ fn load_property_recursive_ic(
             } else if let Some(key) = value_to_prop_key(raw_key) {
                 // Non-numeric key — inherited from Array.prototype
                 let (shape_id, key_hash) = ic_cache_key(DENSE_ARRAY_SHAPE.id, raw_key);
-                let mut depth: u8 = 0;
+                let mut depth = 0usize;
                 let mut p = ptr;
                 loop {
                     let next = unsafe { JSObject::prototype(p as *mut JSObject) };
@@ -3970,7 +3970,7 @@ fn load_property_recursive_ic(
                         break;
                     }
                     depth += 1;
-                    if depth >= MAX_PROTOTYPE_DEPTH as u8 {
+                    if depth >= MAX_PROTOTYPE_DEPTH {
                         break;
                     }
                     let next_shape = unsafe { JSObject::shape_ptr(next as *mut JSObject) };
@@ -3981,7 +3981,7 @@ fn load_property_recursive_ic(
                             IcEntry {
                                 offset,
                                 is_own: false,
-                                proto_depth: depth,
+                                proto_depth: depth as u8,
                             },
                         );
                         break;
@@ -4387,6 +4387,7 @@ pub extern "C" fn rune_jit_bailout_helper(
 ) -> u64 {
     let vm = unsafe { &mut *(vm_ptr as *mut Vm) };
     vm.jit_bailout_count += 1;
+
     let base = vm.jit_stack_base as usize;
     let current = jit_sp as usize;
     let count = if current >= base {

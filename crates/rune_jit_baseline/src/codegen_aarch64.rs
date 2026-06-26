@@ -962,7 +962,7 @@ impl Aarch64CodeGen {
                 Opcode::LoadPropertyIC => {
                     let shape_id = instr.operands[0] as u64;
                     let offset = instr.operands[1] as u32;
-                    let _proto_depth = instr.operands.get(2).copied().unwrap_or(0) as u32;
+                    let proto_depth = instr.operands.get(2).copied().unwrap_or(0) as u32;
                     // Pop key (pushed by preceding LoadStringConst); discard in fast path
                     self.pop();                     // x0 = key
                     mov_reg(&mut self.mem, 7, 0);   // x7 = key (saved for miss path)
@@ -987,6 +987,12 @@ impl Aarch64CodeGen {
                     cmp_reg(&mut self.mem, 3, 4);
                     let patch_shape = self.mem.current_offset();
                     emit(&mut self.mem, 0x54000001);    // B.NE +0 (patched → miss)
+                    // Walk prototype chain for inherited properties
+                    if proto_depth > 0 {
+                        for _ in 0..proto_depth {
+                            ldr_off(&mut self.mem, 1, 1, 24);  // x1 = [x1 + 24] (prototype)
+                        }
+                    }
                     // Load property from [x1 + 32 + offset*8]
                     ldr_off(&mut self.mem, 0, 1, 32 + offset * 8);
                     self.push();
@@ -996,6 +1002,7 @@ impl Aarch64CodeGen {
                     // miss: push object and key back, bail to interpreter
                     let miss_offset = self.mem.current_offset();
                     self.record_bailout_point(bc_idx, BailoutReason::ShapeMiss);
+
                     mov_reg(&mut self.mem, 0, 1);       // x0 = object (saved in x1)
                     self.push();                         // push object
                     mov_reg(&mut self.mem, 0, 7);       // x0 = key (saved in x7)

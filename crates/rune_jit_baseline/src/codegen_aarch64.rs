@@ -998,6 +998,18 @@ impl Aarch64CodeGen {
                     emit(&mut self.mem, 0x54000020); // B.EQ +1 (falsy: skip B)
                     self.emit_b(target);
                 }
+                Opcode::LoadProperty => {
+                    // Bail to interpreter for computed property access.
+                    self.record_bailout_point(bc_idx, BailoutReason::ShapeMiss);
+                    mov_reg(&mut self.mem, 2, JIT_STACK_REG);
+                    mov_imm64(&mut self.mem, 1, bc_idx as u64);
+                    mov_reg(&mut self.mem, 0, VM_REG);
+                    ldr_off(&mut self.mem, 15, VM_REG, 520);
+                    emit(&mut self.mem, 0xD63F01E0); // BLR x15
+                    movz(&mut self.mem, 0, 0);
+                    self.push();
+                    self.emit_epilogue();
+                }
                 Opcode::LoadPropertyIC => {
                     let shape_id = instr.operands[0] as u64;
                     let offset = instr.operands[1] as u32;

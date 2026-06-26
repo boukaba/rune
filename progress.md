@@ -1645,13 +1645,24 @@ Headline results from `cargo bench -p rune_bench --features jit`. Full output at
 
 ### Revised v0.2 priorities (2026-06-27)
 
-| Item | Priority | Status | Rationale |
-|---|---|---|---|
-| Phase F inlining — eliminate BLR round-trip in hot loops | 🔴 P0 | 🟡 In progress | `jit_hot_function_1M` still 120ms (unchanged post-fix) — BLR still dominates |
-| JIT coverage of `ArrayPush` (Phase C from `bailout_design.md` §7.3) | 🔴 P0 | ⬜ Not started | `array_push_grow_100k` dropped 30% from IC fix alone — native JIT push would further improve |
-| float64 Sub/Mul/Div promotion for JIT | 🟠 P1 | ⬜ Not started | Small, unblocks non-integer workloads |
-| GenImmix GC spike | 🟠 P1 | ⬜ Not started | Cheney overhead unknown — instrument GC first; if >20% of runtime, jumps to P0 |
-| Delta JIT: shape miss → record → compile delta → append cache | 🟠 P1 | ⬜ Not started | `poly_prop_10shapes_1M` still 722ms — multi-shape dispatch needed |
-| x86-64 native JIT Call (replace bail-on-entry) | 🟡 P2 | ⬜ Not started | No x86-64 user — symmetrical engineering, doesn't move M4 numbers |
-| All 93 opcodes whitelisted in JIT | 🟡 P2 | ⬜ Not started | Complete coverage, but diminishing returns per-opcode |
-| Div/Mod/Exp native JIT opcodes | 🟡 P2 | ⬜ Not started | Rare in hot loops |
+| Item | Priority | Status | Expected impact | Gap to V8 |
+|---|---|---|---|---|
+| Phase F inlining — eliminate BLR round-trip in hot loops | 🔴 P0 | 🟡 In progress | `jit_hot_function` 120ms → ~30ms | 37× → ~9× |
+| Multi-shape trace dispatch — record N traces/loop head, dispatch on shape ID | 🔴 P0 | ⬜ Not started | `poly_prop` 722ms → ~100ms | 173× → ~25× |
+| float64 Sub/Mul/Div promotion for JIT | 🟠 P1 | ⬜ Not started | Unblocks numeric workloads | — |
+| GenImmix GC spike | 🟠 P1 | ⬜ Not started | ~20% on allocation-heavy benches | — |
+| `ArrayPush` JIT coverage (Phase C from `bailout_design.md` §7.3) | 🟠 P1 | ⬜ Not started | 47ms → ~25ms (smallest gap, low ROI) | 6.5× → ~3.5× |
+| Delta JIT: shape miss → record → compile delta → append cache | 🟠 P1 | ⬜ Not started | Multi-shape traces cover this for loop heads; delta for side exits | — |
+| x86-64 native JIT Call (replace bail-on-entry) | 🟡 P2 | ⬜ Not started | No x86-64 user | — |
+| All 93 opcodes whitelisted in JIT | 🟡 P2 | ⬜ Not started | Completeness, not perf | — |
+| Div/Mod/Exp native JIT opcodes | 🟡 P2 | ⬜ Not started | Rare in hot loops | — |
+
+### Headline gap-to-V8 (M4 Pro, 2026-06-27)
+
+| Benchmark | Rune (post-fix) | V8 | Gap | Δ vs pre-fix | Next lever |
+|---|---|---|---|---|---|
+| `poly_prop_10shapes_1M` | 722 ms | 4.16 ms | **173×** | 244× → 173× | Multi-shape traces (P0) |
+| `proto_chain_lookup_5deep_1M` | 106 ms | 1.55 ms | **68×** | 469× → 68× | Full-trace JIT covering all loop opcodes |
+| `loop_sum_smi_1M` | 100 ms | 2.30 ms | **43×** | 47× → 43× | Phase F (BLR elimination) |
+| `jit_hot_function_1M` | 120 ms | 3.19 ms | **37×** | 40× → 37× (noise) | Phase F (P0) |
+| `array_push_grow_100k` | 47 ms | 7.21 ms | **6.5×** | 9× → 6.5× | ArrayPush JIT (P1) |

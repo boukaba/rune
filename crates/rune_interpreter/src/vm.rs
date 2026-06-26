@@ -3299,15 +3299,25 @@ impl Vm {
     /// Note: `hits` counts IC LOOKUP hits; `misses` counts both IC lookup misses
     /// AND LoadPropertyIC shape-guard misses. For polymorphic sites the guard
     /// miss dominates, so `hits / lookups` is the accurate IC lookup hit rate.
+    /// `gap = lookups - (hits + misses)` measures counter consistency:
+    ///   - gap = 0: all accesses are cleanly counted
+    ///   - gap > 0: some accesses counted as lookups but not as hits or misses
+    ///     (likely: cache hits on the run before opcode patching)
     pub fn dump_ic_stats(&self) -> String {
         let ic_hit_rate = if self.ic_stats.lookups > 0 {
             (self.ic_stats.hits as f64 / self.ic_stats.lookups as f64) * 100.0
         } else {
             0.0
         };
+        let gap = self.ic_stats.lookups as i64 - (self.ic_stats.hits + self.ic_stats.misses) as i64;
+        debug_assert!(
+            self.ic_stats.lookups as i64 >= self.ic_stats.hits as i64 + self.ic_stats.misses as i64,
+            "IC stats violate: lookups({}) < hits({}) + misses({})",
+            self.ic_stats.lookups, self.ic_stats.hits, self.ic_stats.misses
+        );
         format!(
-            "IC stats: {} lookups, {} hits, {} misses (IC hit rate: {:.1}%)",
-            self.ic_stats.lookups, self.ic_stats.hits, self.ic_stats.misses, ic_hit_rate
+            "IC stats: {} lookups, {} hits, {} misses (IC hit rate: {:.1}%, gap: {})",
+            self.ic_stats.lookups, self.ic_stats.hits, self.ic_stats.misses, ic_hit_rate, gap
         )
     }
 

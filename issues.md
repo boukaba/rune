@@ -226,24 +226,76 @@
 
 **Post-fix benchmark diagnostics (commit 5f2c883 + current):**
 - `poly_prop_10shapes_1M`: 99.9% IC hit rate (1,998,990/2,001,990). JIT: 0 entries (top-level code). **Bottleneck: interpreter dispatch** — the 191× gap to V8 is dominated by LoadPropertyIC shape-guard fallback for 9/10 shapes.
+  - ⚠️ This 99.9% rate uses `hits / lookups`. The formula was changed from `hits / (hits + misses)` to avoid double-counting from shape-guard misses (which increment BOTH `misses` in the LoadPropertyIC fallback AND `hits` in `load_property_recursive_ic` on IC find). The gap metric (`lookups - hits - misses`) is negative for poly_prop (-899K), confirming double-counting. **The 99.9% rate may be inflated** — need to verify by running with IC disabled and confirming `lookups` rises (see §2 below).
 - `proto_chain_lookup_5deep_1M`: 0.0% IC hit rate (0/1M). JIT: 0 entries. **Root cause: trace JIT doesn't execute** — see P18.
+
+**IC stats verification needed (30-mins):**
+1. Add `debug_assert!(lookups >= hits + misses)` at the dump site
+2. Print all three raw numbers (`lookups`, `hits`, `misses`) — not just the rate
+3. Run `poly_prop_10shapes_1M` once with IC disabled (e.g., make LoadPropertyIC always fall through) and confirm `lookups` rises substantially. If it doesn't, the `lookups` counter isn't measuring what we think.
 
 ---
 
-## P18: Trace JIT LoadPropertyIC operand mismatch (ic_index vs shape_id) 🔴 P0
+## P18: Trace JIT LoadPropertyIC — three sub-bugs + codegen shape-guard failure 🔴 P0
 
-**Status:** 🔴 Unfixed — prevents trace JIT execution for any loop with property access
+**Status:** 🔴 Same-day investigation results below
 
-**Symptom:** All trace-compiled loops with LoadPropertyIC show 0 shapes recorded, and `--jit-stats` shows 0 entries/0 bailouts. The trace is compiled but never executes (the shape guard always fails silently via bailout). Both `proto_chain_lookup_5deep_1M` (727ms) and `poly_prop_10shapes_1M` (794ms) would benefit from trace JIT execution.
+**Summary:** Three diagnosed sub-bugs from earlier analysis were re-investigated:
+- **Sub-bug #1 (shape recording):** ✅ ALREADY FIXED. The LoadPropertyIC handler at `vm.rs:1644–1653` records `trace.shape_ids` correctly. Verified via debug output: `compile_trace_native` shows `shape_ids=[3014187217855022801]` for a monomorphic load.
+- **Sub-bug #2 (operand format):** ❌ NOT A BUG. Trace records `instr.operands.clone()` at line 662, which for LoadPropertyIC are the patched operands `[cached_shape_id, offset, proto_depth]` (set during patch at line 1521–1525). The compiled BytecodeProgram preserves these correctly.
+- **Sub-bug #3 (patch_loop_body gate):** ✅ IRRELEVANT. `patch_loop_body` runs after trace compilation (at back-edge > 60). It patches `LoadProperty` → `LoadPropertyIC` in the original program for the trace's monomorphic shape. Since patching already happened at iteration 8, it finds nothing to do — but the operational path doesn't depend on it.
 
-**Root cause:** Two separate issues conspire:
-1. **Shape recording only happens in LoadProperty handler** (line 1493-1502), not in LoadPropertyIC handler (line 1642-1650 only records if `self.recording_trace` is set, which happens at back-edge 50 — but by then LoadPropertyIC is already patched, and the LoadProperty handler's shape recording code is dead).
-2. **Trace records bytecode operand [ic_index], not [shape_id, offset, proto_depth].** When `compile_trace_native` builds a new BytecodeProgram from recorded trace ops, the LoadPropertyIC instruction has operands `[ic_index]` (the bytecode format). The AArch64 codegen (`codegen_aarch64.rs:962-965`) reads `operands[0]` as `shape_id` and `operands[1]` as `offset` (the patched format). With `[ic_index]`, `shape_id = ic_index` (wrong) and `offset` is OOB.
-3. **`patch_loop_body` (line 3480) never runs** because it requires `trace.shape_ids.len() >= 1` (line 3493-3495) and `trace.is_monomorphic()` (line 3490). With 0 shapes, it's never called, so the opcode operands are never converted from `[ic_index]` to `[shape_id, offset, proto_depth]`.
+**Empirical findings (from instrumented runs on aarch64):**
 
-**Consequence:** The trace compiles but the shape guard always fails (wrong shape_id). The bailout restores interpreter state, which handles the remaining loop iterations. The slow recursive walk path is taken for every property access in the loop.
+*Monomorphic own-property load (`var o = {x:1}; s=s+o.x`; 100K iterations):*
+- `test_hot_property_mono_1m`: 3.64s (debug build)
+- IC stats: 100000 lookups, 99999 hits, 1 miss (IC hit rate: 100.0%, gap: 0) ✅
+- JIT stats: 99949 entries, 99948 bailouts (99.999% bailout rate) ❌
+- **Conclusion:** Trace compiles and executes (jit_entry_count ≈ iteration_count), but JIT-compiled `LoadPropertyIC` **always bails** — shape guard fails every time.
+- The interpreter resumes after each bailout → handler's IC fast path succeeds → loop finishes. This means the JIT provides **zero speedup** despite "executing."
 
-**Fix:** Either (a) record shapes in the LoadPropertyIC handler too, or (b) resolve the shape_id/offset from the IC table at trace compile time (in `compile_trace_native`), or (c) record the full instruction with patched operands when the patch happens.
+*Polymorphic 10-shape load (`objs[i%10].x`; 100K iterations):*
+- IC stats: 100000 lookups, 99999 hits, 1 miss (IC hit rate: 100.0%, gap: 0) ✅
+- JIT stats: 99949 entries, 99948 bailouts (99.999% bailout rate) ❌
+- Same pattern — JIT always bails.
+
+*Inherited property (`o.x` on 5-deep prototype chain; 100K iterations):*
+- IC stats: 100000 lookups, **0 hits, 100000 misses** (IC hit rate: 0.0%, gap: 0) ❌
+- JIT stats: **0 entries, 0 bailouts** — trace never fires
+- **Conclusion:** The interpreter's own `LoadPropertyIC` shape guard fails for inherited properties. The trace JIT is never invoked (no recording → no compilation). This is a PRE-JIT bug that prevents even the interpreter's IC fast path from working.
+
+**Current understanding of the JIT shape-guard failure:**
+The JIT codegen for `LoadPropertyIC` (`codegen_aarch64.rs:962–1027`) generates:
+1. Pop key (x0), save to x7
+2. Pop object (x0), save to x1
+3. `TST x1, #1; B.NE miss` (Smi check)
+4. `CMP x1, #6; B.LS miss` (sentinel check)
+5. `LDR x2, [x1, #8]` (shape ptr at offset 8)
+6. `LDR x3, [x2]` (shape.id at offset 0)
+7. Compare x3 with immediate `shape_id` from trace operands
+8. `B.NE miss` → bailout if mismatch
+
+The shape_id in the compiled trace matches the patched instruction's cached_shape_id (3014187217855022801 for the monomorphic test). The memory layout is verified correct (JSObject header 8 bytes, shape ptr at offset 8, Shape.id at offset 0). Yet the comparison always fails.
+
+Possible causes to investigate:
+- Shape interning produces different IDs for structurally identical shapes across time
+- JIT stack corruption before LoadPropertyIC (e.g., LoadGlobal or LoadStringConst uses wrong register)
+- `emit_smi_check` or `emit_smi_check` path changes register state before shape comparison
+- `pop()` implementation has off-by-one in JIT stack pointer
+
+**Also confirmed: proto_depth codegen bug** — the JIT codegen reads `proto_depth` from `operands[2]` but ignores it (assigns to `_proto_depth`). Even if the shape guard were fixed, inherited property loads (like the 5-deep prototype chain) would read from the wrong slot. Need to add prototype-chain walking before slot access when `proto_depth > 0`.
+
+**IC stats counter verification (30-min check):**
+- ✅ `debug_assert!(lookups >= hits + misses)` added at dump site — no failures
+- ✅ Raw numbers printed: `lookups`, `hits`, `misses`, `gap` shown alongside hit rate
+- ⚠️ IC-disabled test not yet run — need to create a synthetic benchmark that disables LoadPropertyIC
+- Gap metric = 0 for all tested workloads (mono, poly, proto_chain) — counters are internally consistent
+
+**Updated impact estimates:**
+- Fixing the JIT shape-guard bug alone: ~0× acceleration until proto_depth is also fixed
+- Fixing proto_depth codegen + shape guard: **2–3× on own-property monomorphic** (trace executes without bailing). **~0× on proto_chain** (interpreter's IC fast path doesn't fire, so no trace is recorded)
+- The 0% IC hit rate for proto_chain needs its own investigation — it's blocking both interpreter and JIT paths
+- Fixing the proto_chain IC bug + trace JIT: could unlock 2–3× for that benchmark, but the JIT codegen proto_depth bug would produce garbage results unless fixed
 
 ---
 
@@ -269,4 +321,5 @@
 | P15 | test_hot_property_mono_1m SIGSEGV | 🔴 P0 | — |
 | P16 | NEON/SSE SIMD IC stride bug (`ptr.add(1)` → `ptr.add(2)`) | ✅ Fixed | current |
 | P17 | LoadPropertyIC stats tracking | ✅ Fixed | current |
-| P18 | Trace JIT LoadPropertyIC operand bug (ic_index → shape_id mismatch) | 🔴 P0 | — |
+| P18 | Trace JIT LoadPropertyIC — JIT shape guard always fails (99.999% bailout) + proto_depth codegen bug | 🔴 P0 | — |
+| P19 | Proto_chain 0% IC hit rate — interpreter LoadPropertyIC shape guard never fires for inherited props | 🔴 P0 | — |

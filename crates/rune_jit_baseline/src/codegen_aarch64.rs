@@ -42,7 +42,9 @@ pub struct JitHelpers {
     pub global_helper: usize,
     /// Helper that promotes Add operands to f64 on Smi overflow or non-Smi input.
     pub float64_add_helper: usize,
-    _reserved: [usize; 2],
+    /// Call helper for JIT-to-JIT function calls (Phase E).
+    pub call_helper: usize,
+    _reserved: [usize; 1],
 }
 
 /// VM state visible to the trace compiler. Must be placed at offset 0 from
@@ -1227,16 +1229,42 @@ impl Aarch64CodeGen {
                     self.emit_epilogue();
                 }
                 Opcode::Call => {
-                    // Phase E: bail on entry — delegate to interpreter.
+                    let argc = instr.operands[0] as u32;
+                    // Clear bailout flag at jit_stack[63] (offset 63*8=504)
+                    movz(&mut self.mem, 0, 0);
+                    str_off(&mut self.mem, 0, VM_REG, 504);
+                    // Call helper: x0=vm_ptr, x1=gc_ptr, x2=argc, x3=bc_idx, x4=jit_sp
+                    mov_reg(&mut self.mem, 0, VM_REG);
+                    mov_reg(&mut self.mem, 1, GC_REG);
+                    mov_imm64(&mut self.mem, 2, argc as u64);
+                    mov_imm64(&mut self.mem, 3, bc_idx as u64);
+                    mov_reg(&mut self.mem, 4, JIT_STACK_REG);
+                    ldr_off(&mut self.mem, 15, VM_REG, 560); // call_helper
+                    emit(&mut self.mem, 0xD63F01E0); // BLR x15
+                    // Check bailout flag at [VM_REG + 504]
+                    ldr_off(&mut self.mem, 1, VM_REG, 504);  // x1 = flag
+                    movz(&mut self.mem, 2, 1);                 // x2 = 1
+                    cmp_reg(&mut self.mem, 1, 2);             // flag == 1?
+                    let bail_path = self.mem.current_offset();
+                    emit(&mut self.mem, 0x54000001);          // B.NE +0 (skip bailout if flag != 1)
+                    // Bailout path: call bailout_helper and return from JIT
                     self.record_bailout_point(bc_idx, BailoutReason::BailOnEntry);
                     mov_reg(&mut self.mem, 2, JIT_STACK_REG);
                     mov_imm64(&mut self.mem, 1, bc_idx as u64);
                     mov_reg(&mut self.mem, 0, VM_REG);
-                    ldr_off(&mut self.mem, 15, VM_REG, 520);
-                    emit(&mut self.mem, 0xD63F01E0);
+                    ldr_off(&mut self.mem, 15, VM_REG, 520); // bailout_helper
+                    emit(&mut self.mem, 0xD63F01E0);          // BLR x15
                     movz(&mut self.mem, 0, 0);
                     self.push();
                     self.emit_epilogue();
+                    // Normal path: pop argc+2 (args+callee+this) and push result
+                    let done_path = self.mem.current_offset();
+                    let pop_bytes = (argc + 2) * 8;
+                    sub_imm(&mut self.mem, JIT_STACK_REG, JIT_STACK_REG, pop_bytes);
+                    self.push();
+                    // Patch B.NE to skip bailout
+                    let d = ((done_path as i64 - bail_path as i64) / 4) as u32;
+                    self.mem.patch_u32(bail_path, 0x54000001 | ((d & 0x7FFFF) << 5));
                 }
                 Opcode::LoadGlobal => {
                     let name_idx = instr.operands[0] as u64;
@@ -1360,7 +1388,8 @@ mod tests {
                 string_helper: 0,
                 global_helper: 0,
                 float64_add_helper: test_float64_add_stub as usize,
-                _reserved: [0; 2],
+                call_helper: 0,
+                _reserved: [0; 1],
             },
             jit_stack_base: 0,
         });
@@ -1847,7 +1876,8 @@ mod tests {
                 string_helper: 0,
                 global_helper: 0,
                 float64_add_helper: 0,
-                _reserved: [0; 2],
+                call_helper: 0,
+                _reserved: [0; 1],
             },
             jit_stack_base: 0,
         };

@@ -127,7 +127,9 @@ pub struct JitHelpers {
     /// Helper that promotes Add operands to f64 on Smi overflow or non-Smi input.
     /// Called from JIT code to avoid bailing to the interpreter.
     pub float64_add_helper: usize,
-    _reserved: [usize; 2],
+    /// Call helper for JIT-to-JIT function calls (Phase E).
+    pub call_helper: usize,
+    _reserved: [usize; 1],
 }
 
 /// A cached call-IC entry: stores the expected callee Func pointer and its
@@ -250,7 +252,8 @@ impl Vm {
                 string_helper: rune_jit_string_helper as *const () as usize,
                 global_helper: rune_jit_global_helper as *const () as usize,
                 float64_add_helper: rune_jit_float64_add_helper as *const () as usize,
-                _reserved: [0; 2],
+                call_helper: rune_jit_call_helper as *const () as usize,
+                _reserved: [0; 1],
             },
             jit_stack_base: 0,
             jit_bailout: JitBailoutState::default(),
@@ -3432,6 +3435,7 @@ impl Vm {
     /// Call a compiled loop trace. Returns the raw u64 result (unused for
     /// loop traces — the locals are updated in-place by the trace).
     unsafe fn execute_trace(&mut self, fi: usize, entry: *const u8, gc_ptr: *mut u8) -> u64 {
+        self.jit_entry_count += 1;
         let func: rune_jit_baseline::JitEntryFn = unsafe { std::mem::transmute(entry) };
         let locals = self.frames[fi].locals.as_mut_ptr() as *mut u64;
         unsafe {
@@ -4372,6 +4376,140 @@ pub extern "C" fn rune_jit_float64_add_helper(
     let av = to_number(a);
     let bv = to_number(b);
     number_result(gc, av + bv).raw()
+}
+
+/// JIT callout for JIT-to-JIT function calls (Phase E T1).
+///
+/// Called from JIT-compiled `Call` opcode. Reads the call operands from the
+/// JIT stack, sets up the callee's locals buffer, and BLRs to the callee's
+/// JIT entry point. Returns the callee's return value.
+///
+/// For non-JIT callees or other incompatibilities, sets `jit_stack[63]` to 1
+/// as a bailout flag — the JIT codegen checks this after BLR and exits.
+///
+/// # Arguments
+/// - `vm_ptr`: pointer to the Vm (x0)
+/// - `gc_ptr`: pointer to the GC SemiSpace (x1)
+/// - `argc`: number of arguments (x2)
+/// - `bc_idx`: bytecode PC of the Call opcode (x3)
+/// - `args_ptr`: pointer to `arg_{argc-1}` on the JIT stack (x4)
+///
+/// # Safety
+/// All pointers must be valid and the JIT stack must be in the pre-Call state.
+pub extern "C" fn rune_jit_call_helper(
+    vm_ptr: *mut u8,
+    gc_ptr: *mut u8,
+    argc: u64,
+    bc_idx: u64,
+    args_ptr: *mut u64,
+) -> u64 {
+    let vm = unsafe { &mut *(vm_ptr as *mut Vm) };
+    let gc = unsafe { &mut *(gc_ptr as *mut SemiSpace) };
+    let _ = gc;
+
+    let argc_usize = argc as usize;
+
+    // JIT stack layout (bottom to top):
+    //   ..., this, callee, arg0, arg1, ..., arg_{argc-1}
+    //   args_ptr points to the slot after arg_{argc-1} (= current JIT SP)
+    //
+    // Offsets from args_ptr:
+    //   args_ptr[-1] = arg_{argc-1}
+    //   args_ptr[-argc] = arg0
+    //   args_ptr[-(argc+1)] = callee
+    //   args_ptr[-(argc+2)] = this
+
+    let callee_raw = unsafe { *args_ptr.sub(argc_usize + 1) };
+    let callee = Value::from_raw(callee_raw);
+
+    if let Some(ptr) = callee.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_FUNC {
+            let func_ptr = ptr as *mut Func;
+            let jit_entry = unsafe { Func::jit_entry(func_ptr) };
+            if !jit_entry.is_null() {
+                let creator_prog = unsafe {
+                    &*(Func::prog_ptr(func_ptr) as *const BytecodeProgram)
+                };
+                let func_idx = unsafe { Func::func_index(func_ptr) } as usize;
+
+                if func_idx < creator_prog.functions.len() {
+                    let func_prog = &creator_prog.functions[func_idx];
+
+                    // Read this and args from JIT stack
+                    let _this_raw = unsafe { *args_ptr.sub(argc_usize + 2) };
+
+                    let mut args: Vec<Value> = Vec::with_capacity(argc_usize);
+                    for i in 0..argc_usize {
+                        let raw = unsafe { *args_ptr.sub(argc_usize - i) };
+                        args.push(Value::from_raw(raw));
+                    }
+
+                    // Set up locals buffer for callee
+                    vm.jit_locals_buffer.clear();
+                    if func_prog.named_function {
+                        vm.jit_locals_buffer.push(callee);
+                    }
+                    vm.jit_locals_buffer.extend(args.iter().copied());
+                    let local_count = func_prog.local_names.len();
+                    while vm.jit_locals_buffer.len() < local_count {
+                        vm.jit_locals_buffer.push(Value::undefined());
+                    }
+
+                    // Call JIT entry
+                    vm.jit_entry_count += 1;
+                    let func: JitEntryFn =
+                        unsafe { std::mem::transmute(jit_entry) };
+                    vm.jit_bailout.pending = false;
+                    let result_raw = unsafe {
+                        func(
+                            vm_ptr,
+                            gc_ptr,
+                            vm.jit_locals_buffer.as_mut_ptr() as *mut u64,
+                        )
+                    };
+
+                    // If callee bailed out, set the bailout flag for the caller
+                    if vm.jit_bailout.pending {
+                        unsafe {
+                            let flag_ptr = vm_ptr.add(504) as *mut u64;
+                            *flag_ptr = 1;
+                        }
+                        return result_raw;
+                    }
+
+                    return result_raw;
+                }
+            }
+        }
+    }
+
+    // Callee not JIT-compiled or not a function: set bailout flag.
+    // The JIT codegen checks this flag after BLR and exits via bailout_helper.
+    unsafe {
+        let flag_ptr = vm_ptr.add(504) as *mut u64;
+        *flag_ptr = 1;
+    }
+    // Record bailout state for the interpreter
+    let base = vm.jit_stack_base as usize;
+    let current = args_ptr as usize;
+    let count = if current >= base {
+        (current - base) / 8
+    } else {
+        0
+    };
+    let base_ptr = base as *const u64;
+    let mut snapshot = Vec::with_capacity(count);
+    for i in 0..count {
+        snapshot.push(unsafe { *base_ptr.add(i) });
+    }
+    vm.jit_bailout = JitBailoutState {
+        bc_pc: bc_idx as usize,
+        pending: true,
+        stack_snapshot: snapshot,
+        reason: rune_jit_baseline::BailoutReason::BailOnEntry,
+    };
+    0
 }
 
 /// Indices into Vm::typeof_strings for each typeof result.

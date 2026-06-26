@@ -961,7 +961,10 @@ impl Aarch64CodeGen {
                     let shape_id = instr.operands[0] as u64;
                     let offset = instr.operands[1] as u32;
                     let _proto_depth = instr.operands.get(2).copied().unwrap_or(0) as u32;
-                    self.pop(); // x0 = object
+                    // Pop key (pushed by preceding LoadStringConst); discard in fast path
+                    self.pop();                     // x0 = key
+                    mov_reg(&mut self.mem, 7, 0);   // x7 = key (saved for miss path)
+                    self.pop();                     // x0 = object
                     // Save object pointer in x1 for validation + property load
                     mov_reg(&mut self.mem, 1, 0);
                     // Test bit 0: Smi → miss
@@ -988,11 +991,13 @@ impl Aarch64CodeGen {
                     // B done (skip miss handler)
                     let patch_done = self.mem.current_offset();
                     emit(&mut self.mem, 0x14000000);    // B +0 (patched → done)
-                    // miss: push object back, bail to interpreter
+                    // miss: push object and key back, bail to interpreter
                     let miss_offset = self.mem.current_offset();
                     self.record_bailout_point(bc_idx, BailoutReason::ShapeMiss);
-                    mov_reg(&mut self.mem, 0, 1);       // x0 = popped value (saved in x1)
-                    self.push();                         // restore JIT stack
+                    mov_reg(&mut self.mem, 0, 1);       // x0 = object (saved in x1)
+                    self.push();                         // push object
+                    mov_reg(&mut self.mem, 0, 7);       // x0 = key (saved in x7)
+                    self.push();                         // push key on top
                     // Call bailout_helper(x0=vm_ptr, x1=bc_pc, x2=jit_sp)
                     mov_reg(&mut self.mem, 2, JIT_STACK_REG);
                     mov_imm64(&mut self.mem, 1, bc_idx as u64);
@@ -1025,7 +1030,10 @@ impl Aarch64CodeGen {
                     self.pop(); // x0 = value
                     // Save value in x1
                     mov_reg(&mut self.mem, 1, 0);
-                    // Pop object (skip key — offset cached in instruction)
+                    // Pop key (pushed by preceding LoadStringConst); discard in fast path
+                    self.pop();                     // x0 = key
+                    mov_reg(&mut self.mem, 7, 0);   // x7 = key (saved for miss path)
+                    // Pop object
                     self.pop(); // x0 = object
                     mov_reg(&mut self.mem, 2, 0); // x2 = object
                     // Test bit 0: Smi → miss
@@ -1052,11 +1060,13 @@ impl Aarch64CodeGen {
                     // B done
                     let patch_done = self.mem.current_offset();
                     emit(&mut self.mem, 0x14000000);    // B +0
-                    // miss: push object back, then value back, bail to interpreter
+                    // miss: push object, key, value back, bail to interpreter
                     let miss_offset = self.mem.current_offset();
                     self.record_bailout_point(bc_idx, BailoutReason::ShapeMiss);
                     mov_reg(&mut self.mem, 0, 2);       // x0 = object (saved in x2)
                     self.push();                         // restore object on JIT stack
+                    mov_reg(&mut self.mem, 0, 7);       // x0 = key (saved in x7)
+                    self.push();                         // restore key on JIT stack
                     mov_reg(&mut self.mem, 0, 1);       // x0 = value (saved in x1)
                     self.push();                         // restore value on JIT stack
                     // Call bailout_helper(x0=vm_ptr, x1=bc_pc, x2=jit_sp)
@@ -1841,7 +1851,9 @@ mod tests {
             },
             jit_stack_base: 0,
         };
-        vm.jit_stack[0] = obj_addr;
+        // Stack: [top=key, object] — LoadPropertyIC pops key then object
+        vm.jit_stack[0] = obj_addr;    // second pop: object
+        vm.jit_stack[1] = 0x42;        // first pop: key (discarded in fast path)
         let vm_ptr = &mut vm as *mut _ as *mut u8;
         let prog = BytecodeProgram::new(
             vec![
@@ -1852,7 +1864,7 @@ mod tests {
             vec![],
         );
         let compiled = Aarch64CodeGen::new(prog.instructions.len())
-            .with_jit_stack_offset(8)
+            .with_jit_stack_offset(16)
             .compile(&prog);
         compiled.mem.make_executable();
         let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =

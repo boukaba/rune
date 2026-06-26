@@ -1,0 +1,21 @@
+=== 2026-06-27 JIT final: Mod whitelist + LoadProperty(46) fast path ===
+
+Benchmarks run with --sample-size 20.
+
+loop_sum_smi_1M         time:   [117.19 ms 119.00 ms 121.23 ms]
+array_push_grow_100k    time:   [44.680 ms 45.431 ms 46.347 ms]
+proto_chain_lookup_5deep_1M
+                        time:   [105.43 ms 106.07 ms 106.69 ms]
+jit_hot_function_1M     time:   [104.90 ms 105.90 ms 107.32 ms]
+poly_prop_10shapes_1M   time:   [482.62 ms 489.41 ms 499.26 ms]
+parse_emit_execute_hello
+                        time:   [199.03 µs 240.06 µs 270.08 µs]
+
+=== Comparison to session start ===
+
+Benchmark              Session start    Now        Improvement
+poly_prop_10shapes_1M  1010 ms          489 ms     −52%
+proto_chain_5deep_1M   727 ms           106 ms     −85%
+array_push_grow_100k   66 ms            45 ms      −32%
+jit_hot_function_1M    129 ms           106 ms     −18%
+loop_sum_smi_1M        109 ms           119 ms     +9% (small regression, P20)

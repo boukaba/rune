@@ -99,7 +99,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 | `jit_hot_function_1M` | **130 ms** | 3.19 ms | 41× slower | After Phase E (native JIT Call); was 578 ms (181×) |
 | `loop_sum_smi_1M` | **115 ms** | 2.30 ms | 50× slower | Trace-compiled Smi loop |
 | `array_push_grow_100k` | **70 ms** | 7.21 ms | 10× slower | No JIT for array push |
-| `poly_prop_10shapes_1M` | **1.01 s** | 4.16 ms | 244× slower | SIDT dispatch overhead |
+| `poly_prop_10shapes_1M` | **794 ms** | 4.16 ms | 191× slower | SIDT dispatch overhead (SIMD IC stride fix, was 1.01 s) |
 | `proto_chain_lookup_5deep_1M` | **737 ms** | 1.55 ms | 476× slower | Prototype walk (not optimized) |
 
 ### AFPC Cache

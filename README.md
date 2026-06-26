@@ -1,23 +1,23 @@
-# Rune v0.0.1 — Technology Preview
+# Rune
 
-> ⚠️ **NOT FOR PRODUCTION USE.** Rune can run algorithmic JavaScript today. It cannot run npm packages, Node.js apps, or code that depends on the standard library (Map, Set, Promise, JSON, RegExp, modules, classes, async/await).
+[![License: MIT/Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.83%2B-orange)](https://www.rust-lang.org)
+[![CI](https://github.com/boukaba/rune/actions/workflows/ci.yml/badge.svg)](https://github.com/boukaba/rune/actions)
 
-A Rust-native JavaScript engine with **Shape-Indexed Dispatch Tables (SIDT)** and immutable shapes. Cold start 4ms — **5× faster than Node.js**. Designed for serverless/edge embedding where predictable latency and small memory footprint matter more than peak throughput.
+**A Rust-native JavaScript engine with AOT-first persistent compilation.**  
 
-Rune is the only JS engine with an **AOT-First Persistent Compilation (AFPC)** architecture: compile to native once, cache with rkyv, skip warmup on every restart. Immutable, content-addressed shapes make cached code valid forever — something no other engine can do.
+Cold starts in **4ms** — 5× faster than Node.js. Designed for serverless and edge environments where predictable latency, minimal memory, and instant warm boots matter more than peak throughput.
 
-## Architecture
+## Why Rune?
 
-| Crate | Purpose |
-|---|---|
-| `rune_core` | Tagged Smi/heap values, semi-space GC, immutable shapes, objects, strings |
-| `rune_bytecode` | Bytecode opcodes, instructions, program representation, CFG/liveness |
-| `rune_parser` | JavaScript lexer, recursive-descent parser, bytecode emitter |
-| `rune_interpreter` | Stack-based VM with SIDT inline caches, call frames, generators, builtins |
-| `rune_jit_baseline` | Baseline JIT (x86-64 + AArch64 function AOT) + ARM NEON / SSE4.1 SIMD IC |
-| `rune_embed` | Embedding API (`Context::eval`), AFPC cache save/load |
-| `rune_cli` | CLI binary with `--cache`, `--snapshot`, `--ic-stats`, `--trace-stats` |
-| `rune_bench` | Criterion benchmarks with V8 comparison scripts |
+| Characteristic | Rune | V8 (Node) |
+|---|---|---|
+| **Cold start** (empty script) | **4 ms** | 33 ms |
+| **Compilation model** | AOT + persistent native cache | JIT-only, re-compiles on every restart |
+| **Shape system** | Immutable, content-addressed | Mutable hidden classes (transitions) |
+| **Cache validity** | Forever (content-addressed) | None (no cross-run caching) |
+| **Property IC** | SIMD (NEON/SSE), no megamorphic cliff | Linear probe, megamorphic cliff |
+| **GC** | Semi-space (Cheney) | Generational + concurrent |
 
 ## Quick Start
 
@@ -27,10 +27,10 @@ Rune is the only JS engine with an **AOT-First Persistent Compilation (AFPC)** a
 # Evaluate JavaScript
 rune 'var o = {x: 1}; print(o.x + 2);'
 
-# Cold start: 4ms (vs Node 33ms — 5× faster)
+# Cold start: 4ms (vs Node 33ms)
 time rune '1'
 
-# AFPC cache: first run compiles & saves, subsequent runs load native code
+# AFPC cache: first run compiles, subsequent runs load native code
 rune --cache=/tmp/foo.cache 'function f(n){var s=0;for(var i=0;i<n;i++)s+=i;return s;} f(100);'
 ```
 
@@ -39,26 +39,37 @@ rune --cache=/tmp/foo.cache 'function f(n){var s=0;for(var i=0;i<n;i++)s+=i;retu
 ```rust
 use rune_embed::Context;
 
-let mut ctx = Context::new_small(); // 1MB heap, ~4ms cold start
+let mut ctx = Context::new_small(); // 1 MB heap, ~4ms cold start
 let val = ctx.eval("var x = 1; function inc() { return x = x + 1; } inc() + inc()").unwrap();
 assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 ```
+
+## Architecture
+
+| Crate | Purpose |
+|---|---|
+| `rune_core` | Tagged Smi/heap values, semi-space GC, immutable shapes, objects, strings |
+| `rune_bytecode` | Bytecode opcodes, instructions, program representation, CFG/liveness analysis |
+| `rune_parser` | JavaScript lexer, recursive-descent parser, bytecode emitter |
+| `rune_interpreter` | Stack-based VM with SIDT inline caches, call frames, generators, builtins |
+| `rune_jit_baseline` | Baseline JIT (AArch64 + x86-64) — 56/62 opcodes, function tier-up at 50 calls |
+| `rune_embed` | Embedding API (`Context::eval`), AFPC cache save/load |
+| `rune_cli` | CLI binary with `--cache`, `--snapshot`, `--ic-stats`, `--trace-stats` |
+| `rune_bench` | Criterion benchmarks with V8 comparison scripts |
 
 ## What Works
 
 - **Language core:** arithmetic, comparisons, logical operators (loose + strict)
 - **Scoping:** var, let, const with block scope and TDZ
-- **Functions:** declarations, expressions, arrows, closures, rest/default params
+- **Functions:** declarations, expressions, arrows, closures, rest/default params, destructuring
 - **Objects:** literals, shorthand, methods, computed keys, spread, destructuring
 - **Arrays:** dense arrays, spread, destructuring, rest, push/pop/length
 - **Control flow:** if/else, while, do/while, for, for-in, switch, try/catch/finally
-- **Destructuring:** object, array, nested, defaults, rest patterns
 - **Generators:** function*, yield, next() (basic)
 - **Template literals:** substitutions, nested, escapes
-- **Error objects:** TypeError, ReferenceError with .name/.message
-- **Prototype chains:** \_\_proto\_\_, Object.create, instanceof
+- **Error objects:** TypeError, ReferenceError with `.name`/`.message`
+- **Prototype chains:** `__proto__`, Object.create, instanceof
 - **GC:** Cheney semi-space, sound at 500K+ allocations
-- **Closures:** heap-allocated environment chain, full capture + mutation
 - **SIDT:** O(1) property access via SIMD inline caches (NEON + SSE4.1), no megamorphic cliff
 - **AFPC cache:** rkyv bytecode persistence (13.5× compile speedup), AArch64 + x86-64 native code caching
 
@@ -70,67 +81,99 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 - **Modules:** No import/export (ESM)
 - **Classes:** No class syntax, super, getters/setters
 - **Async/await:** No async, await, for...of
-- **Baseline JIT (aarch64 + x86-64):** 55/62 opcodes — Smi arithmetic, comparison, bitwise, unary, branches, locals, property access, TypeOf, LoadStringConst, LoadGlobal, StoreGlobal, IncGlobal, DecGlobal. Function tier-up at 50 calls. Input guards + overflow guards + float64 promotion (Add) + bailout to interpreter.
-- **Trace compiler (aarch64):** Loop trace recording + native compilation for hot loops with Smi arithmetic. Property IC opcodes accepted but not yet compiled (bailout table integration pending).
+- **JIT:** 56/62 opcodes — missing: float64 Sub/Mul/Div/Mod promotion, property IC in loop traces
 - **Debugger:** No CDP/DevTools
 
-## Performance (aarch64, M4 Pro)
+## Performance (AArch64, M4 Pro)
 
-| Benchmark | Rune | V8 (Node v22) | Ratio |
+### Cold Start
+
+| Benchmark | Rune | Node 22 | Ratio |
 |---|---|---|---|
-| **Cold start** (`rune '1'` / `node -e '1'`) | **4ms** | 33ms | **Rune 5× faster** |
-| `loop_sum_smi_1M` | **115ms** | 2.30ms | 50× slower |
-| `jit_hot_function_1M` | **578ms** | 3.19ms | 181× slower |
-| `array_push_grow_100k` | **70ms** | 7.21ms | 9.7× slower |
-| `poly_prop_10shapes_1M` (SIDT) | **1.01s** | 4.16ms | 244× slower |
-| `proto_chain_lookup_5deep_1M` | **737ms** | 1.55ms | 476× slower |
+| `rune '1'` / `node -e '1'` | **4 ms** | 33 ms | **5× faster** |
 
-> **Trace compiler (aarch64):** Hot loops with Smi arithmetic (`loop_sum_smi_1M`) compile to native code — 502ms → 115ms (4.4× improvement over the interpreter-heavy baseline). The float64 Add promotion eliminates the Smi-overflow bailout hill, keeping the trace active for the entire 1M-iteration loop. Traces with property access (`LoadPropertyIC`/`StorePropertyIC`) are not yet compiled — the bailout infrastructure needed for shape-guard miss handling is not set up for traces (the function JIT uses a `BailoutTable` per compiled function).
->
-> **Function JIT (aarch64 + x86-64):** 55/62 opcodes covered. `jit_hot_function_1M` improved from 683ms → 578ms (15% faster) with float64 Add promotion, which eliminated the 95% bailout rate on Smi overflow. The remaining gap is dominated by `Call` overhead — every `add(s, i)` enters the JIT, runs 4 opcodes, and returns to the interpreter. Native `Call` compilation (Phase E) would be the next step.
->
-> **Prototype chain** (`proto_chain_lookup_5deep_1M` at 476× slower) is the worst ratio because every property access traverses 5 prototype links via the inline cache — each cache miss falls back to the interpreter's prototype walk with no JIT acceleration. This is not a priority; it's an inherent cost of Skipping prototype inlining.
+### Hot Loops
 
-**AFPC cache:** Compile (parse+emit) 355µs → cache load 26µs (**13.5× faster**). End-to-end latency is execution-bound. Hot loops with Smi arithmetic are now compiled to native by the trace compiler on aarch64.
+| Benchmark | Rune | Node 22 | Ratio | Notes |
+|---|---|---|---|---|
+| `jit_hot_function_1M` | **130 ms** | 3.19 ms | 41× slower | After Phase E (native JIT Call); was 578 ms (181×) |
+| `loop_sum_smi_1M` | **115 ms** | 2.30 ms | 50× slower | Trace-compiled Smi loop |
+| `array_push_grow_100k` | **70 ms** | 7.21 ms | 10× slower | No JIT for array push |
+| `poly_prop_10shapes_1M` | **1.01 s** | 4.16 ms | 244× slower | SIDT dispatch overhead |
+| `proto_chain_lookup_5deep_1M` | **737 ms** | 1.55 ms | 476× slower | Prototype walk (not optimized) |
 
-### SIDT Architecture
+### AFPC Cache
 
-Rune's Shape-Indexed Dispatch Tables guarantee O(1) property access regardless of shape count — no megamorphic cliff.
+| Operation | Time | vs Baseline |
+|---|---|---|
+| Compile (parse + emit) | 355 µs | 1× |
+| Cache load | 26 µs | **13.5× faster** |
 
-| Callsite | IC Stats |
+### Phase E: Native JIT Call
+
+Native JIT-to-JIT function calls eliminated the interpreter round-trip:
+
+```
+jit_hot_function_1M timeline:
+  Baseline (interpreter)  ── 578 ms
+  + Call IC                ── 559 ms  (3% improvement)
+  + float64 Add promotion  ── 559 ms  (95% bailout rate fixed)
+  + Phase E T1 (JIT Call)  ── 124 ms  (4.5× improvement)
+  + Phase E T3 (Frame)     ── 130 ms  (lexical-scope correctness, ~5% overhead)
+```
+
+The remaining gap to V8 is dominated by **lack of inlining** — each `add(a, b)` call is a full `blr` round-trip. Inlining (Phase F) is the next step.
+
+## Key Innovations
+
+### Shape-Indexed Dispatch Tables (SIDT)
+
+Immutable, content-addressed shapes guarantee O(1) property access at any polymorphism depth. The SIMD inline cache (NEON on AArch64, SSE4.1 on x86-64) compares 2 shapes per cycle with no fallback to a linear walk — there is **no megamorphic cliff**.
+
+| Callsite | Behavior |
 |---|---|
-| Monomorphic `o.x` | IC lookup bypassed after LoadPropertyIC patching |
-| 10-shape polymorphic | Unlimited entries, NEON SIMD (2 shape_ids/cycle) |
-| Loop body patching | All LoadProperty → LoadPropertyIC after 8 hits |
+| Monomorphic `o.x` | Direct `LoadPropertyIC` after 8 hits |
+| 10-shape polymorphic | All shapes in IC, no eviction |
+| Loop body | `LoadProperty` → `LoadPropertyIC` patching |
 
-### AFPC: AOT-First Persistent Compilation
+### AOT-First Persistent Compilation (AFPC)
 
-Immutable, content-addressed shapes make cached native code valid forever — no engine in production or research does this. On first run, Rune compiles to native and persists bytecode + shapes + ICs + native code to disk. On subsequent runs, it mmap's the cache and begins native execution from the first instruction. Delta JIT handles new shapes never seen before.
+Rune is the only JavaScript engine that caches compiled code across restarts with **permanent validity**. Because shapes are immutable and content-addressed, cached native code never needs invalidation:
 
-**Status:** Bytecode + shape + IC persistence shipped (Sprint 16). AArch64 + x86-64 function baseline JIT compiles Smi-only opcode subset. Trace compiler and full opcode coverage are in progress.
+1. **First run:** Parse → emit → JIT-compile → persist (bytecode + shapes + ICs + native code)
+2. **Subsequent runs:** mmap cache → begin native execution immediately
+3. **Delta JIT:** New shapes that were never cached before are compiled on-the-fly
+
+This makes Rune uniquely suited for serverless: functions can be compiled once during cold start and cached globally, delivering near-zero warm latency.
+
+## Roadmap
+
+| Milestone | Focus |
+|---|---|
+| **v0.0.1** ✅ | Language core + baseline JIT + SIDT IC + AFPC bytecode cache |
+| **v0.0.2** ✅ | Expanded JIT opcode coverage (floats, property access, calls), trace compiler |
+| **v0.1.0** 🔜 | Native JIT Call (Phase E ✅), float64 Sub/Mul/Div promotion, property IC traces |
+| **v0.2.0** | Full AFPC: all-opcode JIT, delta JIT, GenImmix GC |
+| **v1.0.0** | Test262 >95%, production hardening, fuzzing |
 
 ## Development
 
 ```sh
-# Run tests (434 total across workspace)
+# Run tests
 cargo test --workspace
+
+# With JIT enabled
+cargo test --features jit
 
 # Format + lint
 cargo fmt --all && cargo clippy -- -D warnings
 
-# Enable pre-commit checks
+# Criterion benchmarks
+cargo bench --features jit
+
+# Enable pre-commit hooks
 git config core.hooksPath .githooks
 ```
-
-## Roadmap
-
-| Release | Focus |
-|---|---|---|
-| **v0.0.1** ✅ | Language core + baseline JIT + SIDT IC + AFPC bytecode cache |
-| **v0.0.2** ✅ | Expanding JIT opcode coverage (floats, property access, calls), wire trace compiler |
-| **v0.1.0** 🔜 | Native `Call` (Phase E), float64 Sub/Mul promotion, property IC trace support |
-| **v0.2.0** | Full AFPC: all-opcode JIT, delta JIT for shape deltas, GenImmix GC |
-| **v1.0.0** | Fuzzed, production-ready, Test262 >95% |
 
 ## License
 

@@ -4,6 +4,7 @@ fn main() {
     let args = std::env::args().skip(1);
     let mut ic_stats = false;
     let mut trace_stats = false;
+    let mut jit_stats = false;
     let mut snapshot_path: Option<String> = None;
     let mut cache_path: Option<String> = None;
 
@@ -13,6 +14,8 @@ fn main() {
             ic_stats = true;
         } else if arg == "--trace-stats" {
             trace_stats = true;
+        } else if arg == "--jit-stats" {
+            jit_stats = true;
         } else if arg == "--snapshot" {
             // Next arg is the snapshot path, or use ".rune-cache"
             // Actually — save snapshot AFTER eval to the given path
@@ -40,6 +43,9 @@ fn main() {
         }
         if trace_stats {
             eprintln!("{}", ctx.vm().dump_trace_stats());
+        }
+        if jit_stats {
+            eprintln!("{}", ctx.vm().dump_jit_stats());
         }
         return;
     }
@@ -126,6 +132,9 @@ fn main() {
             }
             if trace_stats {
                 eprintln!("{}", ctx.vm().dump_trace_stats());
+            }
+            if jit_stats {
+                eprintln!("{}", ctx.vm().dump_jit_stats());
             }
         }
     }

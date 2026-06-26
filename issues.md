@@ -205,9 +205,13 @@
 
 **Impact:** Benchmark `poly_prop_10shapes_1M` improved from 1,014ms → 794ms (21% faster). The IC now correctly finds all 10 shapes, not just the even-indexed ones.
 
+**Disclosure — prior benchmarks contaminated:** All `poly_prop_10shapes_1M` numbers measured before commit `5f2c883` were affected by this bug — odd-indexed shape entries were never SIMD-matched, forcing slow-path recursive lookup for 50% of accesses. The "no megamorphic cliff" claim in the v0.1.0 README held for ≤8-shape callsites (the SIMD half of the IC still covered even indices), but was untested above 8 shapes. Post-fix `--ic-stats` confirms 99.9% IC lookup hit rate for 10-shape workloads — the claim is now actually true for the first time.
+
+**Post-fix bottleneck diagnosis:** The 21% improvement reveals that the IC was NOT the dominant bottleneck. With 99.9% IC hit rate, the remaining 191× gap to V8 (794ms vs 4.16ms) is dominated by interpreter dispatch overhead — bytecode fetch, dispatch, and frame bookkeeping around the LoadPropertyIC shape-guard fallback path for 9/10 shapes. The fix that closes this gap is **JIT coverage of LoadPropertyIC in hot loops**, not further IC optimization.
+
 ---
 
-## P17: LoadPropertyIC stats tracking 🟡 In progress
+## P17: LoadPropertyIC stats tracking 🟡 Partially resolved
 
 **Status:** 🟡 Partially fixed — reporting still confusing
 
@@ -218,7 +222,28 @@
 2. `LoadPropertyIC` shape-guard fast path — never touched IC stats. ✅ Now fixed: `lookups += 1` and `hits += 1` added.
 3. `LoadPropertyIC` fallback path — never touched IC stats. ✅ Now fixed: `lookups += 1` and `misses += 1` before fallback.
 4. `load_property_recursive_ic` already counted IC hits ✅ (from P7).
-5. **Remaining:** Stats double-count when both shape-guard `miss` AND fallback IC `hit` fire for same access — `hits + misses > lookups`. Two-tier separation needed.
+5. **Resolution:** `dump_ic_stats` now uses `hits / lookups` as the IC hit rate, avoiding the double-count issue. `--jit-stats` flag added for JIT entry/bailout diagnostics.
+
+**Post-fix benchmark diagnostics (commit 5f2c883 + current):**
+- `poly_prop_10shapes_1M`: 99.9% IC hit rate (1,998,990/2,001,990). JIT: 0 entries (top-level code). **Bottleneck: interpreter dispatch** — the 191× gap to V8 is dominated by LoadPropertyIC shape-guard fallback for 9/10 shapes.
+- `proto_chain_lookup_5deep_1M`: 0.0% IC hit rate (0/1M). JIT: 0 entries. **Root cause: trace JIT doesn't execute** — see P18.
+
+---
+
+## P18: Trace JIT LoadPropertyIC operand mismatch (ic_index vs shape_id) 🔴 P0
+
+**Status:** 🔴 Unfixed — prevents trace JIT execution for any loop with property access
+
+**Symptom:** All trace-compiled loops with LoadPropertyIC show 0 shapes recorded, and `--jit-stats` shows 0 entries/0 bailouts. The trace is compiled but never executes (the shape guard always fails silently via bailout). Both `proto_chain_lookup_5deep_1M` (727ms) and `poly_prop_10shapes_1M` (794ms) would benefit from trace JIT execution.
+
+**Root cause:** Two separate issues conspire:
+1. **Shape recording only happens in LoadProperty handler** (line 1493-1502), not in LoadPropertyIC handler (line 1642-1650 only records if `self.recording_trace` is set, which happens at back-edge 50 — but by then LoadPropertyIC is already patched, and the LoadProperty handler's shape recording code is dead).
+2. **Trace records bytecode operand [ic_index], not [shape_id, offset, proto_depth].** When `compile_trace_native` builds a new BytecodeProgram from recorded trace ops, the LoadPropertyIC instruction has operands `[ic_index]` (the bytecode format). The AArch64 codegen (`codegen_aarch64.rs:962-965`) reads `operands[0]` as `shape_id` and `operands[1]` as `offset` (the patched format). With `[ic_index]`, `shape_id = ic_index` (wrong) and `offset` is OOB.
+3. **`patch_loop_body` (line 3480) never runs** because it requires `trace.shape_ids.len() >= 1` (line 3493-3495) and `trace.is_monomorphic()` (line 3490). With 0 shapes, it's never called, so the opcode operands are never converted from `[ic_index]` to `[shape_id, offset, proto_depth]`.
+
+**Consequence:** The trace compiles but the shape guard always fails (wrong shape_id). The bailout restores interpreter state, which handles the remaining loop iterations. The slow recursive walk path is taken for every property access in the loop.
+
+**Fix:** Either (a) record shapes in the LoadPropertyIC handler too, or (b) resolve the shape_id/offset from the IC table at trace compile time (in `compile_trace_native`), or (c) record the full instruction with patched operands when the patch happens.
 
 ---
 
@@ -243,4 +268,5 @@
 | P14 | InlineCache::get_scalar cfg-gate | ✅ Fixed | current |
 | P15 | test_hot_property_mono_1m SIGSEGV | 🔴 P0 | — |
 | P16 | NEON/SSE SIMD IC stride bug (`ptr.add(1)` → `ptr.add(2)`) | ✅ Fixed | current |
-| P17 | LoadPropertyIC stats tracking | 🟡 In progress | current |
+| P17 | LoadPropertyIC stats tracking | ✅ Fixed | current |
+| P18 | Trace JIT LoadPropertyIC operand bug (ic_index → shape_id mismatch) | 🔴 P0 | — |

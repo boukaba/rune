@@ -239,3 +239,40 @@ impl LoopTrace {
         self.ops.len() as u32 * 2
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test for P16: SIMD IC stride bug.
+    /// Both NEON (aarch64) and SSE4.1 (x86_64) hot paths used `ptr.add(1)`
+    /// instead of `ptr.add(2)` to advance between IcEntry's (32 bytes each).
+    /// This caused every odd-indexed entry to read 16 bytes of garbage,
+    /// making shape_id comparisons fail for odd indices.
+    #[test]
+    fn test_ic_simd_odd_entries() {
+        let mut ic = InlineCache::new();
+        // Insert 10 entries — tests the SIMD 2-at-a-time stride path
+        for i in 0..10u64 {
+            let entry = IcEntry { offset: i as usize, is_own: true, proto_depth: 0 };
+            ic.insert(i + 100, i * 31, entry);
+        }
+        // Every entry must be findable — including odd indices
+        for i in 0..10u64 {
+            let e = ic
+                .get(i + 100, i * 31)
+                .unwrap_or_else(|| panic!("entry {} missing", i));
+            assert_eq!(e.offset, i as usize, "entry {} offset mismatch", i);
+        }
+    }
+
+    /// IC correctly returns None for non-existent entries
+    #[test]
+    fn test_ic_miss() {
+        let mut ic = InlineCache::new();
+        ic.insert(42, 99, IcEntry { offset: 0, is_own: true, proto_depth: 0 });
+        assert!(ic.get(42, 100).is_none(), "wrong key_hash should miss");
+        assert!(ic.get(43, 99).is_none(), "wrong shape_id should miss");
+        assert!(ic.get(0, 0).is_none(), "empty entry should miss");
+    }
+}

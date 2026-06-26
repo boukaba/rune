@@ -3296,16 +3296,31 @@ impl RootProvider for Vm {
 
 impl Vm {
     /// Return a summary of IC hit/miss statistics.
+    /// Note: `hits` counts IC LOOKUP hits; `misses` counts both IC lookup misses
+    /// AND LoadPropertyIC shape-guard misses. For polymorphic sites the guard
+    /// miss dominates, so `hits / lookups` is the accurate IC lookup hit rate.
     pub fn dump_ic_stats(&self) -> String {
-        let total = self.ic_stats.hits + self.ic_stats.misses;
-        let hit_pct = if total > 0 {
-            (self.ic_stats.hits as f64 / total as f64) * 100.0
+        let ic_hit_rate = if self.ic_stats.lookups > 0 {
+            (self.ic_stats.hits as f64 / self.ic_stats.lookups as f64) * 100.0
         } else {
             0.0
         };
         format!(
-            "IC stats: {} lookups, {} hits, {} misses ({:.1}% hit rate)",
-            self.ic_stats.lookups, self.ic_stats.hits, self.ic_stats.misses, hit_pct
+            "IC stats: {} lookups, {} hits, {} misses (IC hit rate: {:.1}%)",
+            self.ic_stats.lookups, self.ic_stats.hits, self.ic_stats.misses, ic_hit_rate
+        )
+    }
+
+    /// Return JIT entry/bailout counters (for --jit-stats).
+    pub fn dump_jit_stats(&self) -> String {
+        format!(
+            "JIT stats: {} entries, {} bailouts ({} bailed)",
+            self.jit_entry_count, self.jit_bailout_count,
+            if self.jit_entry_count > 0 {
+                (self.jit_bailout_count as f64 / self.jit_entry_count as f64) * 100.0
+            } else {
+                0.0
+            }
         )
     }
 

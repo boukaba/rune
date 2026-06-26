@@ -999,7 +999,45 @@ impl Aarch64CodeGen {
                     self.emit_b(target);
                 }
                 Opcode::LoadProperty => {
-                    // Bail to interpreter for computed property access.
+                    // Computed property access: `obj[key]`.
+                    // Fast path: dense array + Smi key → direct element load.
+                    // Miss: restore JIT stack, bail to interpreter.
+                    self.pop();                     // x0 = key
+                    mov_reg(&mut self.mem, 7, 0);   // x7 = key
+                    self.pop();                     // x0 = obj
+                    mov_reg(&mut self.mem, 1, 0);   // x1 = obj
+                    // === Fast path: dense array + Smi key ===
+                    movz(&mut self.mem, 2, 1);      // x2 = 1
+                    emit(&mut self.mem, 0xEA02003F); // TST x1, x2
+                    let patch_smi = self.mem.current_offset();
+                    emit(&mut self.mem, 0x54000001); // B.NE miss (obj is Smi)
+                    emit(&mut self.mem, 0xF100183F); // CMP x1, #6
+                    let patch_sentinel = self.mem.current_offset();
+                    emit(&mut self.mem, 0x54000009); // B.LS miss (obj ≤ 6)
+                    ldr_off(&mut self.mem, 3, 1, 0); // x3 = [x1] = header
+                    mov_imm64(&mut self.mem, 4, 7);  // x4 = 7
+                    emit(&mut self.mem, 0x8A040063); // AND x3, x3, x4 = tag
+                    emit(&mut self.mem, 0xF100107F); // CMP x3, #4
+                    let patch_tag = self.mem.current_offset();
+                    emit(&mut self.mem, 0x54000001); // B.NE miss (not array)
+                    emit(&mut self.mem, 0xEA0200FF); // TST x7, x2
+                    let patch_key_not_smi = self.mem.current_offset();
+                    emit(&mut self.mem, 0x54000000); // B.EQ miss (key not Smi)
+                    emit(&mut self.mem, 0xD341FCE6); // LSR x6, x7, #1 = index
+                    ldr_off(&mut self.mem, 4, 1, 16);// x4 = [x1+16] = len|cap
+                    emit(&mut self.mem, 0x6B06009F); // CMP w4, w6
+                    let patch_oob = self.mem.current_offset();
+                    emit(&mut self.mem, 0x54000009); // B.LS miss (index ≥ len)
+                    add_imm(&mut self.mem, 5, 1, 32);// x5 = x1 + 32 (elements)
+                    emit(&mut self.mem, 0xD86678A0); // LDR x0, [x5, x6, LSL #3]
+                    let b_done = self.mem.current_offset();
+                    emit(&mut self.mem, 0x14000000); // B done (skip miss path)
+                    // === Miss: restore stack, bail to interpreter ===
+                    let miss_offset = self.mem.current_offset();
+                    mov_reg(&mut self.mem, 0, 1);
+                    self.push();
+                    mov_reg(&mut self.mem, 0, 7);
+                    self.push();
                     self.record_bailout_point(bc_idx, BailoutReason::ShapeMiss);
                     mov_reg(&mut self.mem, 2, JIT_STACK_REG);
                     mov_imm64(&mut self.mem, 1, bc_idx as u64);
@@ -1009,6 +1047,22 @@ impl Aarch64CodeGen {
                     movz(&mut self.mem, 0, 0);
                     self.push();
                     self.emit_epilogue();
+                    // done: push result (from fast path or bailout) and continue
+                    let done_offset = self.mem.current_offset();
+                    let d = ((done_offset as i64 - b_done as i64) / 4) as u32;
+                    self.mem.patch_u32(b_done, 0x14000000 | (d & 0x03FF_FFFF));
+                    // Patch miss branches
+                    let d = ((miss_offset as i64 - patch_smi as i64) / 4) as u32;
+                    self.mem.patch_u32(patch_smi, 0x54000001 | ((d & 0x7FFFF) << 5));
+                    let d = ((miss_offset as i64 - patch_sentinel as i64) / 4) as u32;
+                    self.mem.patch_u32(patch_sentinel, 0x54000009 | ((d & 0x7FFFF) << 5));
+                    let d = ((miss_offset as i64 - patch_tag as i64) / 4) as u32;
+                    self.mem.patch_u32(patch_tag, 0x54000001 | ((d & 0x7FFFF) << 5));
+                    let d = ((miss_offset as i64 - patch_key_not_smi as i64) / 4) as u32;
+                    self.mem.patch_u32(patch_key_not_smi, 0x54000000 | ((d & 0x7FFFF) << 5));
+                    let d = ((miss_offset as i64 - patch_oob as i64) / 4) as u32;
+                    self.mem.patch_u32(patch_oob, 0x54000009 | ((d & 0x7FFFF) << 5));
+                    self.push();
                 }
                 Opcode::LoadPropertyIC => {
                     let shape_id = instr.operands[0] as u64;

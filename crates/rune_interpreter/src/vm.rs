@@ -4396,7 +4396,7 @@ pub extern "C" fn rune_jit_float64_add_helper(
 ///
 /// # Safety
 /// All pointers must be valid and the JIT stack must be in the pre-Call state.
-pub extern "C" fn rune_jit_call_helper(
+pub unsafe extern "C" fn rune_jit_call_helper(
     vm_ptr: *mut u8,
     gc_ptr: *mut u8,
     argc: u64,

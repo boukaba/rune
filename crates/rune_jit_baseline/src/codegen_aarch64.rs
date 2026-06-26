@@ -983,6 +983,7 @@ impl Aarch64CodeGen {
                     // Load shape.id from [x2]
                     ldr_off(&mut self.mem, 3, 2, 0);    // x3 = [x2] (shape.id)
                     // Compare with expected shape_id
+                    debug_assert!(shape_id != 0, "LoadPropertyIC: burned-in shape ID must be non-zero (bc_idx={})", bc_idx);
                     mov_imm64(&mut self.mem, 4, shape_id);
                     cmp_reg(&mut self.mem, 3, 4);
                     let patch_shape = self.mem.current_offset();
@@ -1057,6 +1058,7 @@ impl Aarch64CodeGen {
                     // Load shape ptr from [x2 + 8]
                     ldr_off(&mut self.mem, 4, 2, 8);    // x4 = [x2 + 8] (shape ptr)
                     ldr_off(&mut self.mem, 5, 4, 0);    // x5 = [x4] (shape.id)
+                    debug_assert!(shape_id != 0, "StorePropertyIC: burned-in shape ID must be non-zero (bc_idx={})", bc_idx);
                     mov_imm64(&mut self.mem, 6, shape_id);
                     cmp_reg(&mut self.mem, 5, 6);
                     let patch_shape = self.mem.current_offset();
@@ -2126,5 +2128,43 @@ mod tests {
             ]);
             assert_eq!(r, 0, "{}: non-Smi should bail, got {}", name, r);
         }
+    }
+
+    #[test]
+    fn test_jit_vm_state_layout() {
+        // JitVmState::jit_stack is [u64; 64] → 512 bytes.
+        // JitHelpers starts immediately after jit_stack.
+        use core::mem::offset_of;
+        assert_eq!(
+            offset_of!(JitVmState, jit_helpers),
+            512,
+            "jit_helpers must be at offset 512 (after 64-slot jit_stack)"
+        );
+        assert_eq!(
+            offset_of!(JitVmState, jit_stack_base),
+            512 + 64,
+            "jit_stack_base must be at offset 576 (after jit_stack + JitHelpers)"
+        );
+    }
+
+    #[test]
+    fn test_jit_helpers_offsets() {
+        use core::mem::offset_of;
+        // Every hardcoded offset in codegen_aarch64.rs must match JitHelpers layout.
+        // Fields are [usize; 8] → 8 bytes each, #[repr(C)].
+        assert_eq!(offset_of!(JitHelpers, lexical_helper), 0,
+            "lexical_helper at offset 512 from VM base");
+        assert_eq!(offset_of!(JitHelpers, bailout_helper), 8,
+            "bailout_helper at offset 520 from VM base");
+        assert_eq!(offset_of!(JitHelpers, typeof_helper), 16,
+            "typeof_helper at offset 528 from VM base");
+        assert_eq!(offset_of!(JitHelpers, string_helper), 24,
+            "string_helper at offset 536 from VM base");
+        assert_eq!(offset_of!(JitHelpers, global_helper), 32,
+            "global_helper at offset 544 from VM base");
+        assert_eq!(offset_of!(JitHelpers, float64_add_helper), 40,
+            "float64_add_helper at offset 552 from VM base");
+        assert_eq!(offset_of!(JitHelpers, call_helper), 48,
+            "call_helper at offset 560 from VM base");
     }
 }

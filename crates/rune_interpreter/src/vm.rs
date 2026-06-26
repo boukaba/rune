@@ -4499,21 +4499,18 @@ pub unsafe extern "C" fn rune_jit_call_helper(
                 if func_idx < creator_prog.functions.len() {
                     let func_prog = &creator_prog.functions[func_idx];
 
-                    // Read this and args from JIT stack
+                    // Read this and args from JIT stack directly into
+                    // jit_locals_buffer — avoids a per-call Vec allocation.
                     let this_raw = unsafe { *args_ptr.sub(argc_usize + 2) };
 
-                    let mut args: Vec<Value> = Vec::with_capacity(argc_usize);
-                    for i in 0..argc_usize {
-                        let raw = unsafe { *args_ptr.sub(argc_usize - i) };
-                        args.push(Value::from_raw(raw));
-                    }
-
-                    // Set up locals buffer for callee
                     vm.jit_locals_buffer.clear();
                     if func_prog.named_function {
                         vm.jit_locals_buffer.push(callee);
                     }
-                    vm.jit_locals_buffer.extend(args.iter().copied());
+                    for i in 0..argc_usize {
+                        let raw = unsafe { *args_ptr.sub(argc_usize - i) };
+                        vm.jit_locals_buffer.push(Value::from_raw(raw));
+                    }
                     let local_count = func_prog.local_names.len();
                     while vm.jit_locals_buffer.len() < local_count {
                         vm.jit_locals_buffer.push(Value::undefined());

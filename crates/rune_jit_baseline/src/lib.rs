@@ -121,7 +121,8 @@ pub fn is_jit_compatible(prog: &rune_bytecode::opcode::BytecodeProgram) -> bool 
             | Opcode::StoreGlobal
             | Opcode::IncGlobal
             | Opcode::DecGlobal
-            | Opcode::Call => {}
+            | Opcode::Call
+            | Opcode::Mod => {}
             _ => return false,
         }
     }

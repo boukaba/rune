@@ -601,6 +601,45 @@ impl Aarch64CodeGen {
                     self.emit_smi_overflow_bailout_or_continue(bc_idx, Some(8), Some(9));
                     self.push();
                 }
+                Opcode::Mod => {
+                    self.pop();
+                    mov_reg(&mut self.mem, 9, 0);
+                    self.emit_smi_check(bc_idx, &[]);
+                    mov_reg(&mut self.mem, 1, 0);
+                    self.pop();
+                    mov_reg(&mut self.mem, 8, 0);
+                    self.emit_smi_check(bc_idx, &[9]);
+                    emit(&mut self.mem, 0x9341FC21); // ASR x1, x1, #1
+                    let div_by_zero = self.mem.current_offset();
+                    emit(&mut self.mem, 0xB4000001); // CBZ x1, +0
+                    emit(&mut self.mem, 0x9341FC00); // ASR x0, x0, #1
+                    emit(&mut self.mem, 0x9AC10C02); // SDIV x2, x0, x1
+                    emit(&mut self.mem, 0x9B018040); // MSUB x0, x2, x1, x0
+                    emit(&mut self.mem, 0xD37FF800); // LSL x0, x0, #1
+                    add_imm(&mut self.mem, 0, 0, 1);
+                    let mod_ok = self.mem.current_offset();
+                    emit(&mut self.mem, 0x14000000); // B push
+                    let div_by_zero_label = self.mem.current_offset();
+                    mov_reg(&mut self.mem, 0, 8);
+                    self.push();
+                    mov_reg(&mut self.mem, 0, 9);
+                    self.push();
+                    self.record_bailout_point(bc_idx, BailoutReason::NonSmiInput);
+                    mov_reg(&mut self.mem, 2, JIT_STACK_REG);
+                    mov_imm64(&mut self.mem, 1, bc_idx as u64);
+                    mov_reg(&mut self.mem, 0, VM_REG);
+                    ldr_off(&mut self.mem, 15, VM_REG, 520);
+                    emit(&mut self.mem, 0xD63F01E0); // BLR x15
+                    movz(&mut self.mem, 0, 0);
+                    self.push();
+                    self.emit_epilogue();
+                    let push_label = self.mem.current_offset();
+                    let d = ((div_by_zero_label as i64 - div_by_zero as i64) / 4) as u32;
+                    self.mem.patch_u32(div_by_zero, 0xB4000001 | ((d & 0x7FFFF) << 5));
+                    let d = ((push_label as i64 - mod_ok as i64) / 4) as u32;
+                    self.mem.patch_u32(mod_ok, 0x14000000 | (d & 0x03FF_FFFF));
+                    self.push();
+                }
                 Opcode::Lt => {
                     self.pop();
                     self.emit_smi_check(bc_idx, &[]); // check b

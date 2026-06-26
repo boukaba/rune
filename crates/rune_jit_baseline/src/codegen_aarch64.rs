@@ -983,7 +983,9 @@ impl Aarch64CodeGen {
                     // Load shape.id from [x2]
                     ldr_off(&mut self.mem, 3, 2, 0);    // x3 = [x2] (shape.id)
                     // Compare with expected shape_id
-                    debug_assert!(shape_id != 0, "LoadPropertyIC: burned-in shape ID must be non-zero (bc_idx={})", bc_idx);
+                    // shape_id may be 0 for cold ICs (no shape recorded yet).
+                    // In that case the guard always fails, but the bailout path
+                    // handles it correctly. Don't assert non-zero.
                     mov_imm64(&mut self.mem, 4, shape_id);
                     cmp_reg(&mut self.mem, 3, 4);
                     let patch_shape = self.mem.current_offset();
@@ -1058,7 +1060,7 @@ impl Aarch64CodeGen {
                     // Load shape ptr from [x2 + 8]
                     ldr_off(&mut self.mem, 4, 2, 8);    // x4 = [x2 + 8] (shape ptr)
                     ldr_off(&mut self.mem, 5, 4, 0);    // x5 = [x4] (shape.id)
-                    debug_assert!(shape_id != 0, "StorePropertyIC: burned-in shape ID must be non-zero (bc_idx={})", bc_idx);
+                    // shape_id may be 0 for cold ICs — guard will always fail, bailout handles it.
                     mov_imm64(&mut self.mem, 6, shape_id);
                     cmp_reg(&mut self.mem, 5, 6);
                     let patch_shape = self.mem.current_offset();

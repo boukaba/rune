@@ -160,6 +160,12 @@ fn lsr_reg(mem: &mut ExecutableMemory, xd: u32, xn: u32, xm: u32) {
     emit(mem, 0x9AC02400 | (xm << 16) | (xn << 5) | xd);
 }
 
+/// LSR xd, xn, #shift  (immediate logical shift right)
+fn lsr_imm(mem: &mut ExecutableMemory, xd: u32, xn: u32, shift: u32) {
+    // LSR = UBFM xd, xn, #shift, #63
+    emit(mem, 0xD3400000 | (shift << 16) | (63 << 10) | (xn << 5) | xd);
+}
+
 /// ORR xd, xn, #1 — set bit 0 (Smi tag)
 fn orr_imm1(mem: &mut ExecutableMemory, xd: u32, xn: u32) {
     // ORR xd, xn, #1: bitmask encoding N:immr:imms = 0:000000:000000
@@ -169,6 +175,12 @@ fn orr_imm1(mem: &mut ExecutableMemory, xd: u32, xn: u32) {
 /// LDR xd, [xn, #uoffset]  — unsigned offset, scaled by 8
 fn ldr_off(mem: &mut ExecutableMemory, xd: u32, xn: u32, uoffset: u32) {
     emit(mem, 0xF9400000 | ((uoffset >> 3) << 10) | (xn << 5) | xd);
+}
+
+/// LDR wd, [xn, #uoffset]  — unsigned offset, scaled by 4 (32-bit load)
+/// Encoding: 10_0_01_011100_imm12_Rn_Rt = 0x9700_0000 | ((uoffset>>2)<<10) | (xn<<5) | wd
+fn ldr_w_off(mem: &mut ExecutableMemory, wd: u32, xn: u32, uoffset: u32) {
+    emit(mem, 0x97000000 | ((uoffset >> 2) << 10) | (xn << 5) | wd);
 }
 
 /// STR xd, [xn, #uoffset]  — unsigned offset, scaled by 8
@@ -601,6 +613,48 @@ impl Aarch64CodeGen {
                     self.emit_smi_overflow_bailout_or_continue(bc_idx, Some(8), Some(9));
                     self.push();
                 }
+                Opcode::Mod => {
+                    self.pop();
+                    mov_reg(&mut self.mem, 9, 0); // x9 = b
+                    self.emit_smi_check(bc_idx, &[]);
+                    mov_reg(&mut self.mem, 1, 0); // x1 = b
+                    self.pop();
+                    mov_reg(&mut self.mem, 8, 0); // x8 = a
+                    self.emit_smi_check(bc_idx, &[9]);
+                    // x0 = a (Smi), x1 = b (Smi)
+                    emit(&mut self.mem, 0x9341FC21); // ASR x1, x1, #1 (untag b)
+                    let div_by_zero = self.mem.current_offset();
+                    emit(&mut self.mem, 0xB4000001); // CBZ x1, +0 (bail if b == 0)
+                    emit(&mut self.mem, 0x9341FC00); // ASR x0, x0, #1 (untag a)
+                    emit(&mut self.mem, 0x9AC10C02); // SDIV x2, x0, x1 (x2 = a/b)
+                    emit(&mut self.mem, 0x9B018040); // MSUB x0, x2, x1, x0 (x0 = a % b)
+                    emit(&mut self.mem, 0xD37FF800); // LSL x0, x0, #1 (retag)
+                    add_imm(&mut self.mem, 0, 0, 1); // ORR #1
+                    let mod_ok = self.mem.current_offset();
+                    emit(&mut self.mem, 0x14000000); // B push
+                    // Division by zero: bail to interpreter
+                    let div_by_zero_label = self.mem.current_offset();
+                    mov_reg(&mut self.mem, 0, 8);
+                    self.push();
+                    mov_reg(&mut self.mem, 0, 9);
+                    self.push();
+                    self.record_bailout_point(bc_idx, BailoutReason::NonSmiInput);
+                    mov_reg(&mut self.mem, 2, JIT_STACK_REG);
+                    mov_imm64(&mut self.mem, 1, bc_idx as u64);
+                    mov_reg(&mut self.mem, 0, VM_REG);
+                    ldr_off(&mut self.mem, 15, VM_REG, 520);
+                    emit(&mut self.mem, 0xD63F01E0); // BLR x15
+                    movz(&mut self.mem, 0, 0);
+                    self.push();
+                    self.emit_epilogue();
+                    let push_label = self.mem.current_offset();
+                    // Patch branches
+                    let d = ((div_by_zero_label as i64 - div_by_zero as i64) / 4) as u32;
+                    self.mem.patch_u32(div_by_zero, 0xB4000001 | ((d & 0x7FFFF) << 5));
+                    let d = ((push_label as i64 - mod_ok as i64) / 4) as u32;
+                    self.mem.patch_u32(mod_ok, 0x14000000 | (d & 0x03FF_FFFF));
+                    self.push();
+                }
                 Opcode::Lt => {
                     self.pop();
                     self.emit_smi_check(bc_idx, &[]); // check b
@@ -958,6 +1012,90 @@ impl Aarch64CodeGen {
                     cmp_reg(&mut self.mem, 0, 1);
                     emit(&mut self.mem, 0x54000020); // B.EQ +1 (falsy: skip B)
                     self.emit_b(target);
+                }
+                Opcode::LoadProperty => {
+                    // Computed property access: `obj[key]`.
+                    // Fast path: dense array + Smi key (array index).
+                    // Miss: bail to interpreter for general property lookup.
+                    self.pop();
+                    mov_reg(&mut self.mem, 7, 0);   // x7 = key
+                    self.pop();
+                    mov_reg(&mut self.mem, 1, 0);   // x1 = obj
+                    // Check obj not Smi (bit 0 must be 0)
+                    movz(&mut self.mem, 2, 1);
+                    emit(&mut self.mem, 0x8A02003F);    // TST x1, x2 = ANDS XZR, X1, X2
+                    let patch_smi = self.mem.current_offset();
+                    emit(&mut self.mem, 0x54000001);    // B.NE miss
+                    // Check obj not sentinel (must be > 6)
+                    emit(&mut self.mem, 0xF100183F);    // CMP x1, #6
+                    let patch_sentinel = self.mem.current_offset();
+                    emit(&mut self.mem, 0x54000009);    // B.LS miss
+                    // Load GcHeader tag
+                    ldr_off(&mut self.mem, 3, 1, 0);   // x3 = [x1] = header word
+                    mov_imm64(&mut self.mem, 4, 7);    // x4 = 7 (tag mask)
+                    and_reg(&mut self.mem, 4, 3, 4);   // x4 = x3 & 7 = tag
+                    // Check tag == TAG_ARRAY (4)
+                    emit(&mut self.mem, 0xF100109F);    // CMP x4, #4
+                    let patch_tag = self.mem.current_offset();
+                    emit(&mut self.mem, 0x54000001);    // B.NE miss
+                    // Check key is Smi: bit 0 must be 1
+                    emit(&mut self.mem, 0x8A0200FF);    // TST x7, x2 = ANDS XZR, X7, X2
+                    let patch_key_not_smi = self.mem.current_offset();
+                    emit(&mut self.mem, 0x54000000);    // B.EQ miss
+                    // Key is Smi: extract index = key >> 1
+                    lsr_imm(&mut self.mem, 6, 7, 1);    // x6 = x7 >> 1 = index
+                    // Load array length: [obj + 16] (64-bit load, lower 32 = length)
+                    ldr_off(&mut self.mem, 4, 1, 16);   // x4 = [x1 + 16] = (cap<<32)|len
+                    // 32-bit compare: CMP w4, w6  →  SUBS WZR, W4, W6
+                    emit(&mut self.mem, 0x6B06009F);    // CMP w4, w6
+                    let patch_oob = self.mem.current_offset();
+                    emit(&mut self.mem, 0x54000009);    // B.LS miss (w6 >= w4 = OOB)
+                    // In bounds: compute element address
+                    add_imm(&mut self.mem, 5, 1, 32);   // x5 = obj + OBJECT_HEADER_END
+                    // LDR x0, [x5, x6, LSL #3]
+                    emit(&mut self.mem, 0xD86678A0);
+                    let b_after_load = self.mem.current_offset();
+                    emit(&mut self.mem, 0x14000000);    // B push_result
+                    // Miss label
+                    let miss_offset = self.mem.current_offset();
+                    self.record_bailout_point(bc_idx, BailoutReason::ShapeMiss);
+                    // Restore obj and key on JIT stack (obj first, key on top)
+                    mov_reg(&mut self.mem, 0, 1);
+                    self.push();
+                    mov_reg(&mut self.mem, 0, 7);
+                    self.push();
+                    mov_reg(&mut self.mem, 2, JIT_STACK_REG);
+                    mov_imm64(&mut self.mem, 1, bc_idx as u64);
+                    mov_reg(&mut self.mem, 0, VM_REG);
+                    ldr_off(&mut self.mem, 15, VM_REG, 520);
+                    emit(&mut self.mem, 0xD63F01E0);    // BLR x15
+                    movz(&mut self.mem, 0, 0);
+                    self.push();
+                    self.emit_epilogue();
+                    // push_result: both paths converge
+                    let push_result = self.mem.current_offset();
+                    let d = ((push_result as i64 - b_after_load as i64) / 4) as u32;
+                    self.mem.patch_u32(b_after_load, 0x14000000 | (d & 0x03FF_FFFF));
+                    self.push();
+                    let b_done = self.mem.current_offset();
+                    emit(&mut self.mem, 0x14000000);    // B done
+                    // done label
+                    let done_offset = self.mem.current_offset();
+                    // Patch miss branches
+                    let d = ((miss_offset as i64 - patch_smi as i64) / 4) as u32;
+                    self.mem.patch_u32(patch_smi, 0x54000001 | ((d & 0x7FFFF) << 5));
+                    let d = ((miss_offset as i64 - patch_sentinel as i64) / 4) as u32;
+                    self.mem.patch_u32(patch_sentinel, 0x54000009 | ((d & 0x7FFFF) << 5));
+                    let d = ((miss_offset as i64 - patch_tag as i64) / 4) as u32;
+                    self.mem.patch_u32(patch_tag, 0x54000001 | ((d & 0x7FFFF) << 5));
+                    let d = ((miss_offset as i64 - patch_key_not_smi as i64) / 4) as u32;
+                    self.mem.patch_u32(patch_key_not_smi, 0x54000000 | ((d & 0x7FFFF) << 5));
+                    // Patch OOB branch: B.LS miss
+                    let d = ((miss_offset as i64 - patch_oob as i64) / 4) as u32;
+                    self.mem.patch_u32(patch_oob, 0x54000009 | ((d & 0x7FFFF) << 5));
+                    // Patch fast-path B to done
+                    let d = ((done_offset as i64 - b_done as i64) / 4) as u32;
+                    self.mem.patch_u32(b_done, 0x14000000 | (d & 0x03FF_FFFF));
                 }
                 Opcode::LoadPropertyIC => {
                     let shape_id = instr.operands[0] as u64;

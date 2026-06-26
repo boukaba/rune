@@ -6,13 +6,13 @@
 
 **A Rust-native JavaScript engine with AOT-first persistent compilation.**  
 
-Cold starts in **4ms** — 5× faster than Node.js. Designed for serverless and edge environments where predictable latency, minimal memory, and instant warm boots matter more than peak throughput.
+Cold starts in **~4–7ms** — 5–8× faster than Node.js. Designed for serverless and edge environments where predictable latency, minimal memory, and instant warm boots matter more than peak throughput.
 
 ## Why Rune?
 
 | Characteristic | Rune | V8 (Node) |
 |---|---|---|
-| **Cold start** (empty script) | **4 ms** | 33 ms |
+| **Cold start** (empty script) | **~4–7 ms** | ~26–33 ms |
 | **Compilation model** | AOT + persistent native cache | JIT-only, re-compiles on every restart |
 | **Shape system** | Immutable, content-addressed | Mutable hidden classes (transitions) |
 | **Cache validity** | Forever (content-addressed) | None (no cross-run caching) |
@@ -52,7 +52,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 | `rune_bytecode` | Bytecode opcodes, instructions, program representation, CFG/liveness analysis |
 | `rune_parser` | JavaScript lexer, recursive-descent parser, bytecode emitter |
 | `rune_interpreter` | Stack-based VM with SIDT inline caches, call frames, generators, builtins |
-| `rune_jit_baseline` | Baseline JIT (AArch64 + x86-64) — 56/62 opcodes, function tier-up at 50 calls |
+| `rune_jit_baseline` | Baseline JIT (AArch64 + x86-64) — 55 opcodes whitelisted, function tier-up at 50 calls |
 | `rune_embed` | Embedding API (`Context::eval`), AFPC cache save/load |
 | `rune_cli` | CLI binary with `--cache`, `--snapshot`, `--ic-stats`, `--trace-stats` |
 | `rune_bench` | Criterion benchmarks with V8 comparison scripts |
@@ -81,7 +81,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 - **Modules:** No import/export (ESM)
 - **Classes:** No class syntax, super, getters/setters
 - **Async/await:** No async, await, for...of
-- **JIT:** 56/62 opcodes — missing: float64 Sub/Mul/Div/Mod promotion, property IC in loop traces
+- **JIT:** 55 opcodes whitelisted (out of 93 total opcode variants) — missing: float64 Sub/Mul/Div/Mod promotion (only Add has float64), Div/Mod/Exp not in JIT at all (falls to interpreter via bailout)
 - **Debugger:** No CDP/DevTools
 
 ## Performance (AArch64, M4 Pro)
@@ -90,7 +90,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 
 | Benchmark | Rune | Node 22 | Ratio |
 |---|---|---|---|
-| `rune '1'` / `node -e '1'` | **4 ms** | 33 ms | **5× faster** |
+| `rune '1'` / `node -e '1'` | **~4–7 ms** | ~26–33 ms | **~5–8× faster** |
 
 ### Hot Loops
 
@@ -152,8 +152,8 @@ This makes Rune uniquely suited for serverless: functions can be compiled once d
 |---|---|
 | **v0.0.1** ✅ | Language core + baseline JIT + SIDT IC + AFPC bytecode cache |
 | **v0.0.2** ✅ | Expanded JIT opcode coverage (floats, property access, calls), trace compiler |
-| **v0.1.0** 🔜 | Native JIT Call (Phase E ✅), float64 Sub/Mul/Div promotion, property IC traces |
-| **v0.2.0** | Full AFPC: all-opcode JIT, delta JIT, GenImmix GC |
+| **v0.1.0** ✅ | Native JIT Call (Phase E, AArch64), property IC traces, trace-compiled loops |
+| **v0.2.0** 🔜 | Phase F inlining, x86-64 native Call, float64 Sub/Mul/Div promotion, delta JIT, GenImmix GC |
 | **v1.0.0** | Test262 >95%, production hardening, fuzzing |
 
 ## Development

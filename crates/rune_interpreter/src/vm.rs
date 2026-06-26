@@ -4378,11 +4378,18 @@ pub extern "C" fn rune_jit_float64_add_helper(
     number_result(gc, av + bv).raw()
 }
 
-/// JIT callout for JIT-to-JIT function calls (Phase E T1).
+/// JIT callout for JIT-to-JIT function calls (Phase E T1 + T3).
 ///
 /// Called from JIT-compiled `Call` opcode. Reads the call operands from the
-/// JIT stack, sets up the callee's locals buffer, and BLRs to the callee's
-/// JIT entry point. Returns the callee's return value.
+/// JIT stack, sets up the callee's locals buffer, pushes a Frame for the
+/// callee (T3), and BLRs to the callee's JIT entry point. Returns the
+/// callee's return value.
+///
+/// The pushed Frame enables correct lexical-scope access and `this` binding
+/// inside the JIT-compiled callee. On success the Frame is popped; on bailout
+/// it is also popped (the existing bailout-flag mechanism in the caller's
+/// codegen then propagates the failure to the interpreter, which re-executes
+/// the Call from scratch).
 ///
 /// For non-JIT callees or other incompatibilities, sets `jit_stack[63]` to 1
 /// as a bailout flag — the JIT codegen checks this after BLR and exits.
@@ -4437,7 +4444,7 @@ pub unsafe extern "C" fn rune_jit_call_helper(
                     let func_prog = &creator_prog.functions[func_idx];
 
                     // Read this and args from JIT stack
-                    let _this_raw = unsafe { *args_ptr.sub(argc_usize + 2) };
+                    let this_raw = unsafe { *args_ptr.sub(argc_usize + 2) };
 
                     let mut args: Vec<Value> = Vec::with_capacity(argc_usize);
                     for i in 0..argc_usize {
@@ -4456,20 +4463,75 @@ pub unsafe extern "C" fn rune_jit_call_helper(
                         vm.jit_locals_buffer.push(Value::undefined());
                     }
 
+                    // Determine whether the callee needs a Frame for
+                    // lexical-scope access (BlockEnter/Leave, DeclareLet/Const,
+                    // LoadLexical/StoreLexical, LoadThis).  Most JIT-compiled
+                    // leaf functions (e.g. `add(a,b){return a+b;}`) do not;
+                    // skip the Frame setup to avoid per-call overhead.
+                    let needs_frame = func_prog.instructions.iter().any(|instr| {
+                        matches!(
+                            instr.opcode,
+                            Opcode::BlockEnter
+                                | Opcode::BlockLeave
+                                | Opcode::DeclareLet
+                                | Opcode::DeclareConst
+                                | Opcode::LoadLexical
+                                | Opcode::StoreLexical
+                                | Opcode::LoadThis
+                        )
+                    });
+
+                    let locals_ptr: *mut u64;
+                    if needs_frame {
+                        // Push a Frame for the callee so that lexical-scope
+                        // helpers find the correct frame.  Swap the locals
+                        // out of jit_locals_buffer to avoid a per-call
+                        // allocation (jit_locals_buffer will be cleared and
+                        // refilled on next use anyway).
+                        let func_env =
+                            unsafe { Func::env_ptr(func_ptr) };
+                        let callee_locals =
+                            std::mem::take(&mut vm.jit_locals_buffer);
+                        let fi = vm.frames.len();
+                        vm.frames.push(Frame {
+                            locals: callee_locals,
+                            lexical_slots: Vec::new(),
+                            lexical_tdz: Vec::new(),
+                            lexical_const: Vec::new(),
+                            scope_boundaries: Vec::new(),
+                            passed_argc: argc_usize,
+                            pc: 0,
+                            stack_base: vm.stack.len(),
+                            prog: func_prog as *const BytecodeProgram,
+                            generator_id: None,
+                            this: Value::from_raw(this_raw),
+                            is_constructor_call: false,
+                            constructed_object: Value::undefined(),
+                            env: func_env,
+                        });
+                        locals_ptr =
+                            vm.frames[fi].locals.as_mut_ptr() as *mut u64;
+                    } else {
+                        locals_ptr =
+                            vm.jit_locals_buffer.as_mut_ptr() as *mut u64;
+                    }
+
                     // Call JIT entry
                     vm.jit_entry_count += 1;
                     let func: JitEntryFn =
                         unsafe { std::mem::transmute(jit_entry) };
                     vm.jit_bailout.pending = false;
                     let result_raw = unsafe {
-                        func(
-                            vm_ptr,
-                            gc_ptr,
-                            vm.jit_locals_buffer.as_mut_ptr() as *mut u64,
-                        )
+                        func(vm_ptr, gc_ptr, locals_ptr)
                     };
 
-                    // If callee bailed out, set the bailout flag for the caller
+                    // Pop callee Frame if one was pushed.
+                    if needs_frame {
+                        vm.frames.pop();
+                    }
+
+                    // If callee bailed out, set the bailout flag for the
+                    // caller.
                     if vm.jit_bailout.pending {
                         unsafe {
                             let flag_ptr = vm_ptr.add(504) as *mut u64;

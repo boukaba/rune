@@ -1950,17 +1950,22 @@ Copy-and-patch is the foundation that de-risks everything else. With stencil-bas
 
 **Goal:** Replace hand-rolled `codegen_aarch64.rs` and `codegen.rs` with stencil-based compilation. Keep existing interpreter, IC, trace-recording, and inlining infrastructure. Only replace the code emission layer.
 
-#### A1: Stencil Library Build System (Week 1)
+#### A1: Stencil Library Build System (Week 1, done)
 
-- Create `rune_jit_stencils/` crate with a `build.rs` that:
-  - Writes small C functions (one per opcode + common prologue/epilogue) with `__attribute__((section("stencils")))`
-  - The "holes" are global variables tagged `__attribute__((used, section("holes")))` — at runtime, the patcher scans for known hole symbols and fills them with the correct values (registers, immediates, offsets)
-  - Compiles with Clang to a staticlib or object file linked into `rune_jit_baseline`
-  - Alternative for Rust-only: inline asm `global_asm!()` stencils with named labels for hole locations, extracted via `build.rs` symbol table parsing
-  
-- **Deliverable:** `stencil_lib.o` linked into test binary; runtime can memcpy a LoadSmi stencil, patch the immediate, and execute it
+Real C stencils compiled by Clang at build time. Each stencil is a normal C function that calls a runtime helper (e.g. `rune_push(0xDEAD)`). Clang generates MOVZ + B; the helper is compiled separately and its prologue/epilogue stripped.
 
-**Key constraint from copy-and-patch §3:** Each stencil must be position-independent so it can be memcpy'd to any JIT code buffer. Use PC-relative addressing for all cross-references. Holes are absolute values (immediates, offsets) patched at runtime.
+- [x] **A1a: Path A validation** — prototype test proves Clang compiles `rune_push(0xDEAD)` to `MOVZ W0, #0xDEAD; B _rune_push`. Value hole (MOVZ imm16 at bits 20:5) and link hole (ARM64_RELOC_BRANCH26 at offset 4) identified and patched.
+- [x] **A1b: Naked-asm stencils** — `push_reg`, `pop_reg`, `ret` as `__attribute__((naked))` functions with inline asm. No link holes, used for simple JIT stack operations.
+- [x] **A1c: build.rs upgrade (real C stencils + helpers)** — `build.rs` compiles:
+  - `rune_push.c` — runtime helper with inline asm body (`STR x0,[x22]; ADD x22,x22,#8`), prologue/epilogue stripped
+  - `load_smi_16.c`, `load_smi_32.c` — real C stencils calling `rune_push(0xDEAD)` / `rune_push(0xDEADBEEF)` → MOVZ[MOVK] + B
+  - Verifies instruction patterns via bitmasks (build fails loudly if Clang output changes)
+  - Extracts value holes (MOVZ/MOVK imm16) and link holes (Mach-O ARM64_RELOC_BRANCH26)
+  - Generates Rust constants: `StencilDef`, `HelperDef`, `HoleDef`, `LinkHoleDef`
+- `StencilPatcher` supports `emit_helper()` (records offset for link resolution) and `emit_stencil()` (patches value + link holes). `patch_link()` handles B/BL 26-bit signed offset field.
+- **Deliverable:** `rune_push` helper + 2 real C stencils + 3 naked stencils compile at build time, verified by 19 stencil tests. 67/67 tests pass.
+
+**Key constraint from copy-and-patch §3:** Each stencil must be position-independent so it can be memcpy'd to any JIT code buffer. B/BL offsets are resolved at JIT emit time relative to the helper's position.
 
 #### A2: Runtime Patcher (Week 1-2)
 

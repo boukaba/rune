@@ -2143,6 +2143,7 @@ impl Vm {
                                     trace_to_original_pc: Vec::new(),
                                     bailout_table: None,
                                     miss_count: 0,
+                                    inline_profiles: Vec::new(),
                                 },
                             );
                         }
@@ -2865,6 +2866,31 @@ impl Vm {
                                     self.frames[fi].pc = pc + 1;
                                     continue;
                                 }
+                                // Phase F-1: Collect inline profile during trace recording.
+                                // After the callee Func and bytecode are resolved, record
+                                // the callee's JIT status, needs_frame, and size for F-2.
+                                if let Some(target_pc) = self.recording_trace
+                                    && let Some(trace) = self.loop_traces.get_mut(&target_pc)
+                                {
+                                        let jit_entry =
+                                            unsafe { Func::jit_entry(ptr as *mut Func) };
+                                        trace.inline_profiles.push(
+                                            rune_jit_baseline::InlineProfile {
+                                                call_pc: pc,
+                                                hit_count: 1,
+                                                jit_count: if jit_entry.is_null() { 0 } else { 1 },
+                                                callee_func: Some(ptr as *const u8),
+                                                callee_jit_entry: if jit_entry.is_null() {
+                                                    None
+                                                } else {
+                                                    Some(jit_entry)
+                                                },
+                                                callee_needs_frame: func_prog.needs_frame(),
+                                                callee_bytecode_size: func_prog.instructions.len()
+                                                    as u32,
+                                            },
+                                        );
+                                    }
                                 // --- Call IC fast path ---
                                 if instr.call_ic_index >= 0 {
                                     let ic_idx = instr.call_ic_index as usize;
@@ -3574,7 +3600,8 @@ impl Vm {
         }
 
         let codegen = Aarch64CodeGen::new(prog.instructions.len())
-            .with_trace_ic_tables(trace_ic_tables);
+            .with_trace_ic_tables(trace_ic_tables)
+            .with_inline_profiles(trace.inline_profiles.clone());
         // Leak the program so its address stays valid for the compiled trace's
         // embedded prog_ptr reference (used by LoadStringConst, globals, etc.).
         let leaked_prog = Box::leak(Box::new(prog));

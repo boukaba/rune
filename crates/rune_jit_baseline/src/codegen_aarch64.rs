@@ -13,7 +13,7 @@
 /// dedicated pointer (x22) into `JitVmState::jit_stack` at offset 0 from the
 /// VM pointer.
 use crate::assembler::ExecutableMemory;
-use crate::ic::TraceIcTable;
+use crate::ic::{InlineProfile, TraceIcTable};
 use crate::{BailoutPoint, BailoutReason, BailoutTable, CompiledFunction};
 use rune_bytecode::opcode::Opcode;
 
@@ -268,6 +268,10 @@ pub struct Aarch64CodeGen {
     /// Resolved at the end of `compile()` by writing table data and
     /// patching the ADR instructions.
     ic_table_patches: Vec<IcTablePatch>,
+    /// Inlining profiles collected during trace recording.
+    /// Populated by F-1; consumed by F-2 inlining engine.
+    #[allow(dead_code)]
+    inline_profiles: Vec<InlineProfile>,
 }
 
 impl Aarch64CodeGen {
@@ -282,6 +286,7 @@ impl Aarch64CodeGen {
             jit_stack_offset: 0,
             ic_tables: Vec::new(),
             ic_table_patches: Vec::new(),
+            inline_profiles: Vec::new(),
         }
     }
 
@@ -294,6 +299,11 @@ impl Aarch64CodeGen {
 
     pub fn with_trace_ic_tables(mut self, tables: Vec<TraceIcTable>) -> Self {
         self.ic_tables = tables;
+        self
+    }
+
+    pub fn with_inline_profiles(mut self, profiles: Vec<InlineProfile>) -> Self {
+        self.inline_profiles = profiles;
         self
     }
 

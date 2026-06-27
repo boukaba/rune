@@ -1578,7 +1578,8 @@ The remaining ~80ms gap to ≤50ms on `jit_hot_function_1M` comes from the BLR r
 
 | Item | Priority | Status |
 |---|---|---|
-| Phase F inlining — eliminate BLR round-trip in hot loops | 🔴 P0 | 🟡 In progress |
+| Phase F inlining — eliminate BLR round-trip in hot loops | 🔴 P0 | ✅ Done (5% gain; design doc est. 25-70ms was off) |
+| **P25 whitelist/codegen drift** — vm.rs whitelist must match emit_inline_call arms exactly (5 phantom opcodes found in F-2) | 🔴 P0 | 🔧 Filed — single-source-of-truth refactor: move whitelist to codegen crate |
 | x86-64 native JIT `Call` (replace bail-on-entry) | 🔴 P0 | ⬜ Not started |
 | float64 Sub/Mul/Div promotion in JIT (Add done, rest missing) | 🟠 P1 | ⬜ Not started |
 | Div/Mod/Exp native JIT opcodes | 🟠 P1 | ⬜ Not started |
@@ -1647,7 +1648,7 @@ Headline results from `cargo bench -p rune_bench --features jit`. Full output at
 
 | Item | Priority | Status | Expected impact | Gap to V8 |
 |---|---|---|---|---|
-| Phase F inlining — eliminate BLR round-trip in hot loops | 🔴 P0 | ✅ F-2 complete | `jit_hot_function` 129ms → ~30ms | 40× → ~10× |
+| Phase F inlining — eliminate BLR round-trip in hot loops | 🔴 P0 | ✅ Done (5% gain) | jit_hot_function 129ms → 124ms | 40× → ~39× |
 | ~~Multi-shape trace dispatch~~ → **N=16 IC table** (shipped `9b1a385`) | ✅ Done | ✅ Fixed | `poly_prop` 269ms → **169ms** (-37%) | 65× → **41×** |
 | float64 Sub/Mul/Div promotion for JIT | 🟠 P1 | ⬜ Not started | Unblocks numeric workloads | — |
 | GenImmix GC spike | 🟠 P1 | ⬜ Not started | ~20% on allocation-heavy benches | — |
@@ -1753,14 +1754,72 @@ F-2 implements end-to-end inlining for eligible JIT-compiled callees. Four layer
 
 Whitelist at `vm.rs:3637` included 5 phantom opcodes (Neg, Not, Void, UnaryPlus, BitNot) not handled by `emit_inline_call`. Removed to match exactly. Added `test_jit_inline_skip_unarith` (Sub/Mul callees not inlined). **314 tests pass.** Clippy-clean.
 
-### Phase F-3 — Bailout + Stack Unwinding (In Progress)
+### Phase F-3 — Bailout + Stack Unwinding (Complete, `5790343`)
 
-Goal: When an inlined callee triggers a bailout (e.g., Smi overflow in `Add`), unwind the JIT stack to restore the caller's state and resume in the interpreter. Design doc §4.4.1.
+Goal: When an inlined callee triggers a bailout (e.g., Smi overflow in `Sub`), unwind the JIT stack to restore the caller's state and resume in the interpreter. Design doc §4.4.1.
 
-**Plan:**
-- F-3a: Add `stack_delta`, `call_site_pc`, `callee_arg_count` fields to inline plan entries; populate during codegen. No behavior change.
-- F-3b: Implement unwind procedure in bailout path: pop stack_delta values, push back args+callee+this, set interpreter PC to call_site_pc, do NOT push a Frame.
-- F-3c: `test_jit_inline_bail` — Smi overflow in inlined Add → bail → correct interpreter state.
+| Sub-phase | Description | Status |
+|---|---|---|
+| F-3a | `pre_call_depth` saved at `emit_inline_call` entry; `emit_inline_bailout()` helper restores x22 to pre-call level before `bailout_helper` | ✅ |
+| F-3b | `Sub` opcode added to `emit_inline_call` + eligibility whitelist. Custom overflow check → bails (no float64 promotion for Sub, unlike Add). | ✅ |
+| F-3c | Fixed pre-existing bug in interpreter's Sub handler: used `i32::checked_sub` (range ±2³¹) but `Value::smi()` only accepts i31 (±2³⁰). Promotes to float64 now when result exceeds Smi range. | ✅ |
+| F-3d | `test_jit_inline_bail` — inlined Sub overflow triggers bailout, 54 bailouts verified, correct result 1100000000. | ✅ |
+
+**P26 (Mul/Mod same-class bug, `7f3d5bb`):** Same Smi-range fix applied to Mul and Mod handlers. `checked_mul`/`checked_mod` allows i32 range but `Value::smi()` only accepts i31. Fixed with `(-(1 << 30)..(1 << 30)).contains(&r)` guard + promote to float64 via `number_result()`.
+
+**P26 is the single most important finding of Phase F.** The Sub/Mul/Mod handlers silently corrupted data in release builds for any result in [2³⁰, 2³¹). This bug existed since the Smi implementation was written and was invisible because no test exercised the boundary. The F-3 bailout test exposed it.
+
+### Phase F-4 — Benchmark & AFPC Round-Trip (Complete, `f8ebfa3`)
+
+**Honest results vs design doc estimates:**
+
+| Metric | Design Doc (§6 estimate) | Actual | Why the gap |
+|---|---|---|---|
+| Inline improvement | 25-70ms, gap 10-22× | **123.6ms** (vs 129.9ms baseline), **~5% gain** | Dispatch overhead was overestimated (6ns/call, not 90ns); Add execution + float64 promotion dominated (123ns/call, not 39ns) |
+| jit_hot_function_1M (no-inline) | ~129ms baseline | **129.9ms** | Matched |
+| jit_hot_function_1M (inline) | ~30-70ms | **123.6ms** | Inliner works correctly but the callee (`add`) is a 1-opcode function — dispatch is a fraction of total work |
+
+**What shipped:**
+
+| Deliverable | Status |
+|---|---|
+| `test_jit_inline_hot_function` — correctness with `enable_inlining=true` (result = 499,999,500,000.0 float) | ✅ |
+| `bench_jit_hot_function_inline` — criterion benchmark variant with `enable_inlining=true` | ✅ |
+| `test_afpc_cache_roundtrip_with_inlining` — AFPC save/load with inlining enabled, cached execution correct | ✅ |
+| Both `--inline` and `--no-inline` produce identical results across 316 tests | ✅ |
+
+**316 integration tests pass** (was 315). Clippy-clean.
+
+### P25 — Whitelist/Codegen Drift Risk (Filed)
+
+The eligibility whitelist at `vm.rs:3645` and `emit_inline_call`'s match arms at `codegen_aarch64.rs:535-597` must stay in sync manually. The F-2 whitelist bug (5 phantom opcodes: Neg, Not, Void, UnaryPlus, BitNot) proved this is a real risk.
+
+**Fix (deferred):** Move the whitelist to the codegen crate as a `pub fn is_inlineable_opcode()` — single source of truth referenced by both `vm.rs` and `emit_inline_call`.
+
+### Gap-to-V8 (post-Phase F, 2026-06-27)
+
+| Benchmark | Rune | V8 | Gap |
+|---|---|---|---|
+| `jit_hot_function_1M` | **124 ms** | 3.19 ms | **39×** |
+| `loop_sum_smi_1M` | 124 ms | 2.30 ms | 54× |
+| `proto_chain_lookup_5deep_1M` | 132 ms | 1.55 ms | 85× |
+| `poly_prop_10shapes_1M` | 169 ms | 4.16 ms | 41× |
+| `array_push_grow_100k` | 59 ms | 7.21 ms | 8× |
+
+### What Phase F actually delivered
+
+- ✅ A correct inliner (316 tests, AFPC verified, bailout+stack-unwind working)
+- ✅ A measurable improvement (5% on jit_hot_function_1M)
+- ✅ A pre-existing bug fix (P26: Sub/Mul/Mod Smi range — would have caused production data corruption)
+- ❌ The headline benchmark target (25-70ms, gap 10-22×) — actual is 123.6ms, gap ~39×
+
+**The P26 fix alone justifies the Phase F work.** A silent data corruption bug in release builds, present in Sub/Mul/Mod, would have been catastrophic for any production user. Finding it via the bailout test validates the entire stress-testing approach.
+
+### v0.2 recommendation
+
+Phase F is done at 5% (not the estimated 60%). The remaining largests gaps (`proto_chain` at 85×, `loop_sum` at 54×) have no clear v0.2 levers. Recommend **declaring v0.2 complete** and starting v0.3 with copy-and-patch JIT rewrite (arxiv `2011.13127`). That's where the next 2-3× gains live.
+
+**Keep `--no-inline` as default.** The 5% gain doesn't justify enabling inlining by default given the whitelist drift risk (P25, unfixed) and bailout complexity.
 
 ---
 
@@ -1858,4 +1917,5 @@ Goal: When an inlined callee triggers a bailout (e.g., Smi overflow in `Add`), u
 | P22-research | Nofl GC (replaces GenImmix) | v0.3 | arxiv `2503.16971` |
 | P23-research | ShareJIT system-wide cache | v1.0+ | arxiv `1810.09555` |
 | P24-research | TPDE optimizing-tier framework | v0.4+ | arxiv `2505.22610` |
-| P25-research | Workload-aware Value tagging | v0.4+ | arxiv `2606.05466` |
+| P25-research | Whitelist/codegen drift — share single source of truth in codegen crate | v0.3 | Phase F post-mortem |
+| P26-research | Sub/Mul/Mod Smi-range fix — promote to float64 when result exceeds Smi max | ✅ Fixed F-3 | Exposed by bailout test |

@@ -3643,6 +3643,9 @@ impl Vm {
                         };
                         // F-2 Layer 2b eligibility: only inline callees whose opcodes
                         // are all supported by emit_inline_call.
+                        // P25: This whitelist duplicates emit_inline_call's match arms at
+                        // codegen_aarch64.rs:535-597. Must stay in sync manually. Fix:
+                        // move to a single pub fn is_inlineable_opcode() in the codegen crate.
                         let eligible = if profile.callee_func_idx >= 0
                             && (profile.callee_func_idx as usize) < callee_prog.functions.len()
                         {

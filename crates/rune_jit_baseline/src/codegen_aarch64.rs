@@ -534,6 +534,8 @@ impl Aarch64CodeGen {
         // Emit the callee's body instructions.  LoadLocal/StoreLocal access
         // via the redirected LOC_REG; arithmetic bailout points use the
         // caller's bc_idx so the bailout table maps to the right trace PC.
+        // P25: The opcodes handled here must match the eligibility whitelist
+        // at vm.rs:3652. Fix: move to pub fn is_inlineable_opcode() here.
         for instr in &callee_prog.instructions {
             match instr.opcode {
                 Opcode::Return => {

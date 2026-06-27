@@ -224,6 +224,10 @@ pub struct LoopTrace {
     /// Mirrors the function JIT's bailout_tables pattern; not queried at
     /// runtime (bailout works through jit_bailout.pending).
     pub bailout_table: Option<Box<rune_jit_baseline::BailoutTable>>,
+    /// Number of shape-miss bailouts since last re-record.
+    /// Reset to 0 after each re-record. Triggers re-recording at
+    /// RE_RECORD_THRESHOLD (100).
+    pub miss_count: u64,
 }
 
 impl LoopTrace {

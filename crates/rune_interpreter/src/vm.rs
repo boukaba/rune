@@ -2108,6 +2108,7 @@ impl Vm {
                                     compiled_prog: std::ptr::null_mut(),
                                     trace_to_original_pc: Vec::new(),
                                     bailout_table: None,
+                                    miss_count: 0,
                                 },
                             );
                         }
@@ -2154,6 +2155,42 @@ impl Vm {
                                     .unwrap_or(trace_idx);
                                 self.jit_bailout.pending = false;
                                 self.jit_bailout.bc_pc = 0;
+                                // Re-record: if bailout was ShapeMiss, increment
+                                // per-trace miss counter and re-record at threshold.
+                                let rerecord_needed = {
+                                    let trace = self.loop_traces.get_mut(&target);
+                                    match trace {
+                                        Some(t) => {
+                                            let is_shape_miss = t
+                                                .bailout_table
+                                                .as_ref()
+                                                .and_then(|bt| {
+                                                    bt.points.iter().find(|bp| {
+                                                        bp.bc_pc == trace_idx
+                                                    })
+                                                })
+                                                .map_or(false, |bp| {
+                                                    bp.reason
+                                                        == rune_jit_baseline::BailoutReason::ShapeMiss
+                                                });
+                                            if is_shape_miss {
+                                                t.miss_count += 1;
+                                                if t.miss_count >= 100 {
+                                                    t.miss_count = 0;
+                                                    true
+                                                } else {
+                                                    false
+                                                }
+                                            } else {
+                                                false
+                                            }
+                                        }
+                                        None => false,
+                                    }
+                                };
+                                if rerecord_needed {
+                                    self.compile_trace_native(target);
+                                }
                                 let snapshot = std::mem::take(
                                     &mut self.jit_bailout.stack_snapshot,
                                 );

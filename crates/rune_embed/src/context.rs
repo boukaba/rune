@@ -13,6 +13,9 @@ pub struct Context {
     /// Opaque keep-alive objects (e.g. mmap'd native code) that must outlive
     /// any references held by the VM.
     _keep_alive: Vec<Box<dyn std::any::Any>>,
+    /// Enable JIT-to-JIT inlining for hot callees (Phase F).
+    /// Default: false during F-0/F-1; flipped to true when F-2 lands.
+    pub enable_inlining: bool,
 }
 
 impl Default for Context {
@@ -39,6 +42,7 @@ impl Context {
             vm: Vm::new(),
             programs: Vec::new(),
             _keep_alive: Vec::new(),
+            enable_inlining: false,
         };
         // Register default builtins
         for b in rune_interpreter::builtins::default_builtins() {

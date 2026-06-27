@@ -1824,6 +1824,87 @@ fn test_jit_no_bail_on_simple_fn() {
 }
 
 #[test]
+fn test_jit_needs_frame_verification() {
+    let ctx = Context::new_small();
+
+    // add(a,b) — pure arithmetic, no lexical scope.
+    // This is the target benchmark for Phase F inlining.
+    let prog = ctx.compile("function add(a,b) { return a + b; }").unwrap();
+    assert!(
+        !prog.functions[0].needs_frame(),
+        "add(a,b) should not need a frame (target benchmark for Phase F)"
+    );
+
+    // Function with let — needs frame for DeclareLet.
+    let prog = ctx.compile("function f() { let x = 1; }").unwrap();
+    assert!(
+        prog.functions[0].needs_frame(),
+        "function with let should need a frame"
+    );
+
+    // Function with const — needs frame for DeclareConst.
+    let prog = ctx.compile("function f() { const x = 42; return x; }").unwrap();
+    assert!(
+        prog.functions[0].needs_frame(),
+        "function with const should need a frame"
+    );
+
+    // Arrow function — lexical this, no frame needed.
+    let prog = ctx.compile("let f = () => 42;").unwrap();
+    assert!(
+        !prog.functions[0].needs_frame(),
+        "arrow function should not need a frame"
+    );
+
+    // Function using this — needs frame for LoadThis.
+    let prog = ctx.compile("function f() { return this; }").unwrap();
+    assert!(
+        prog.functions[0].needs_frame(),
+        "function using this should need a frame"
+    );
+}
+
+#[test]
+fn test_jit_inline_feature_flag() {
+    // The feature flag should not change behavior when inlining is
+    // infrastructure-only (F-0). Both flags produce identical results.
+    let mut ctx_inline = Context::new_small();
+    ctx_inline.enable_inlining = true;
+    let r1 = ctx_inline
+        .eval(
+            r#"
+            function add(a, b) { return a + b; }
+            var sum = 0;
+            for (var i = 0; i < 100; i++) {
+                sum = add(sum, i);
+            }
+            sum
+        "#,
+        )
+        .unwrap();
+
+    let mut ctx_no_inline = Context::new_small();
+    ctx_no_inline.enable_inlining = false;
+    let r2 = ctx_no_inline
+        .eval(
+            r#"
+            function add(a, b) { return a + b; }
+            var sum = 0;
+            for (var i = 0; i < 100; i++) {
+                sum = add(sum, i);
+            }
+            sum
+        "#,
+        )
+        .unwrap();
+
+    assert_eq!(
+        r1, r2,
+        "--inline and --no-inline should produce identical results"
+    );
+}
+
+#[test]
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn test_jit_typeof_native() {
     // TypeOf is now native — the JIT calls typeof_helper instead of bailing.

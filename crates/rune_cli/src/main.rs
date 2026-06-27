@@ -8,6 +8,7 @@ fn main() {
     let mut snapshot_path: Option<String> = None;
     let mut cache_path: Option<String> = None;
     let mut inline_source: Option<String> = None;
+    let mut enable_inlining = false;
 
     let mut source_args: Vec<String> = Vec::new();
     let mut i = 0;
@@ -32,6 +33,10 @@ fn main() {
             cache_path = Some(".rune-cache".to_string());
         } else if let Some(rest) = arg.strip_prefix("--cache=") {
             cache_path = Some(rest.to_string());
+        } else if arg == "--inline" {
+            enable_inlining = true;
+        } else if arg == "--no-inline" {
+            enable_inlining = false;
         } else {
             source_args.push(arg.clone());
         }
@@ -39,6 +44,7 @@ fn main() {
     }
 
     let mut ctx = rune_embed::Context::new();
+    ctx.enable_inlining = enable_inlining;
 
     if let Some(source) = inline_source {
         let result = ctx.eval(&source);

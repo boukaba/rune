@@ -139,7 +139,7 @@ A call site is eligible for inlining when ALL of the following hold:
 
 2. **Callee is JIT-compiled.** `callee.jit_entry` is non-null.
 
-3. **Callee does not need a frame.** `needs_frame` check passes — the callee's body has no `BlockEnter`, `DeclareLet`, `DeclareConst`, `LoadLexical`, `StoreLexical`, `MakeEnv`, or `LoadCaptured` opcodes. These require frame-level state that inlining cannot provide without frame manipulation.
+3. **Callee does not need a frame.** `needs_frame` check passes — the callee's body has no `BlockEnter`, `BlockLeave`, `DeclareLet`, `DeclareConst`, `LoadLexical`, `StoreLexical`, or `LoadThis` opcodes. These require frame-level state that inlining cannot provide without frame manipulation. (Matches the existing `Vm::needs_frame` check at `vm.rs:4627-4638`.)
 
 4. **Callee body is small.** Bytecode instruction count ≤ 50 (configurable). This prevents code bloat from inlining large functions.
 

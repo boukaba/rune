@@ -214,6 +214,24 @@ impl BytecodeProgram {
         crate::analysis::liveness(&cfg, &self.instructions, self.local_names.len())
     }
 
+    /// Returns true if this function needs a Frame for lexical-scope access
+    /// (BlockEnter/Leave, DeclareLet/Const, LoadLexical/StoreLexical, LoadThis).
+    /// Most JIT-compiled leaf functions (e.g. add(a,b){return a+b;}) do not.
+    pub fn needs_frame(&self) -> bool {
+        self.instructions.iter().any(|instr| {
+            matches!(
+                instr.opcode,
+                Opcode::BlockEnter
+                    | Opcode::BlockLeave
+                    | Opcode::DeclareLet
+                    | Opcode::DeclareConst
+                    | Opcode::LoadLexical
+                    | Opcode::StoreLexical
+                    | Opcode::LoadThis
+            )
+        })
+    }
+
     /// Assign IC indices to all LoadProperty/StoreProperty/Call instructions.
     /// Recursively processes nested function programs.
     pub fn assign_ic_indices(&mut self) {

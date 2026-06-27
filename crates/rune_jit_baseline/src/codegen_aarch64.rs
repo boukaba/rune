@@ -206,8 +206,8 @@ fn ret(mem: &mut ExecutableMemory) {
 
 /// ADR Xd, #offset  (PC-relative, offset in bytes, ±1MB)
 fn adr(mem: &mut ExecutableMemory, xd: u32, byte_offset: i64) {
-    let imm = byte_offset as i64;
-    let immlo = ((imm >> 0) & 0x3) as u32;
+    let imm = byte_offset;
+    let immlo = (imm & 0x3) as u32;
     let immhi = ((imm >> 2) & 0x7FFFF) as u32;
     emit(mem, 0x10000000 | (immlo << 29) | (immhi << 5) | xd);
 }
@@ -1568,7 +1568,7 @@ impl Aarch64CodeGen {
             }
             // Patch the ADR instruction at p.adr_offset
             let byte_offset = (table_offset as i64) - (p.adr_offset as i64);
-            let immlo = ((byte_offset >> 0) & 0x3) as u32;
+            let immlo = (byte_offset & 0x3) as u32;
             let immhi = ((byte_offset >> 2) & 0x7FFFF) as u32;
             let instr = 0x10000000 | (immlo << 29) | (immhi << 5) | 4; // xd = x4
             self.mem.patch_u32(p.adr_offset, instr);

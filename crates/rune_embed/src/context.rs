@@ -16,6 +16,8 @@ pub struct Context {
     /// Enable JIT-to-JIT inlining for hot callees (Phase F).
     /// Default: false during F-0/F-1; flipped to true when F-2 lands.
     pub enable_inlining: bool,
+    /// Use stencil-based code emission for JIT compilation (v0.3 copy-and-patch).
+    pub stencil_jit: bool,
 }
 
 impl Default for Context {
@@ -43,6 +45,7 @@ impl Context {
             programs: Vec::new(),
             _keep_alive: Vec::new(),
             enable_inlining: false,
+            stencil_jit: false,
         };
         // Register default builtins
         for b in rune_interpreter::builtins::default_builtins() {
@@ -82,6 +85,7 @@ impl Context {
     pub fn eval(&mut self, source: &str) -> Result<Value, String> {
         // Sync configuration flags to Vm before execution.
         self.vm.enable_inlining = self.enable_inlining;
+        self.vm.stencil_jit = self.stencil_jit;
         let bytecode = self.compile(source)?;
 
         // Execute — keep bytecode alive for dangling prog_ptr refs from Func

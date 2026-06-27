@@ -9,6 +9,7 @@ fn main() {
     let mut cache_path: Option<String> = None;
     let mut inline_source: Option<String> = None;
     let mut enable_inlining = false;
+    let mut stencil_jit = false;
 
     let mut source_args: Vec<String> = Vec::new();
     let mut i = 0;
@@ -37,6 +38,10 @@ fn main() {
             enable_inlining = true;
         } else if arg == "--no-inline" {
             enable_inlining = false;
+        } else if arg == "--stencil-jit" {
+            stencil_jit = true;
+        } else if arg == "--no-stencil-jit" {
+            stencil_jit = false;
         } else {
             source_args.push(arg.clone());
         }
@@ -45,6 +50,7 @@ fn main() {
 
     let mut ctx = rune_embed::Context::new();
     ctx.enable_inlining = enable_inlining;
+    ctx.stencil_jit = stencil_jit;
 
     if let Some(source) = inline_source {
         let result = ctx.eval(&source);

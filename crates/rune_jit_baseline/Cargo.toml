@@ -6,5 +6,6 @@ edition.workspace = true
 [dependencies]
 rune_core = { path = "../rune_core" }
 rune_bytecode = { path = "../rune_bytecode" }
+rune_jit_stencils = { path = "../rune_jit_stencils" }
 libc = { workspace = true }
 tracing = { workspace = true }

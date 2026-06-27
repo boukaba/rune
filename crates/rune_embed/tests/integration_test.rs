@@ -4187,4 +4187,49 @@ mod instanceof_tests {
             "jit_locals_buffer corrupted by GC mid-call"
         );
     }
+
+    #[test]
+    fn test_stencil_jit_load_smi_matches_old_codegen() {
+        // Each waypoint is a hot function that triggers JIT (100 calls > threshold of 50).
+        // Verify stencil and old codegen produce identical results.
+        let cases: &[&str] = &[
+            r#"
+                function f() { return 42; }
+                var r = 0;
+                for (var i = 0; i < 100; i = i + 1) { r = f(); }
+                r
+            "#,
+            r#"
+                function add(a, b) { return a + b; }
+                var r = 0;
+                for (var i = 0; i < 100; i = i + 1) { r = add(r, 42); }
+                r
+            "#,
+            r#"
+                function f() { return -1; }
+                var r = 0;
+                for (var i = 0; i < 100; i = i + 1) { r = f(); }
+                r
+            "#,
+            r#"
+                function f() { return 1073741823; }
+                var r = 0;
+                for (var i = 0; i < 100; i = i + 1) { r = f(); }
+                r
+            "#,
+        ];
+
+        for source in cases {
+            let mut ctx_old = Context::new_small();
+            ctx_old.stencil_jit = false;
+            let r_old = ctx_old.eval(source).unwrap();
+
+            let mut ctx_new = Context::new_small();
+            ctx_new.stencil_jit = true;
+            let r_new = ctx_new.eval(source).unwrap();
+
+            assert_eq!(r_old, r_new,
+                "stencil vs old codegen: old={:?} new={:?}", r_old, r_new);
+        }
+    }
 }

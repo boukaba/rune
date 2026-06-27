@@ -225,6 +225,8 @@ pub struct Vm {
     /// When false, InlinePlan is built but emit_inline_call is never reached
     /// because the plan is built as empty.
     pub enable_inlining: bool,
+    /// Use stencil-based code emission for JIT compilation (v0.3 copy-and-patch).
+    pub stencil_jit: bool,
     /// Pre-allocated string Values for typeof results (indexed by TYPEOF_* constants).
     pub typeof_strings: [Value; 6],
     last_locals: Vec<Value>,
@@ -285,6 +287,7 @@ impl Vm {
             jit_entry_count: 0,
             jit_bailout_count: 0,
             enable_inlining: false,
+            stencil_jit: false,
             typeof_strings: [Value::undefined(); 6],
             last_locals: Vec::new(),
             eval_fn: UnsafeCell::new(None),
@@ -3011,7 +3014,8 @@ impl Vm {
                                         #[cfg(target_arch = "aarch64")]
                                         let compiled = {
                                             let codegen =
-                                                Aarch64CodeGen::new(func_prog.instructions.len());
+                                                Aarch64CodeGen::new(func_prog.instructions.len())
+                                                    .with_stencil_jit(self.stencil_jit);
                                             codegen.compile(func_prog)
                                         };
                                         #[cfg(not(any(
@@ -3709,7 +3713,8 @@ impl Vm {
 
         let codegen = Aarch64CodeGen::new(prog.instructions.len())
             .with_trace_ic_tables(trace_ic_tables)
-            .with_inline_plan(inline_plan);
+            .with_inline_plan(inline_plan)
+            .with_stencil_jit(self.stencil_jit);
         // Leak the program so its address stays valid for the compiled trace's
         // embedded prog_ptr reference (used by LoadStringConst, globals, etc.).
         let leaked_prog = Box::leak(Box::new(prog));

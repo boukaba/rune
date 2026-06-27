@@ -16,6 +16,7 @@ use crate::assembler::ExecutableMemory;
 use crate::ic::{InlineEntry, InlinePlan, InlineProfile, TraceIcTable};
 use crate::{BailoutPoint, BailoutReason, BailoutTable, CompiledFunction};
 use rune_bytecode::opcode::Opcode;
+use rune_jit_stencils::{LOAD_SMI_16_BYTES, LOAD_SMI_32_BYTES, RUNE_PUSH_HELPER};
 
 /// Operation codes for the lexical helper callout (must match vm.rs).
 const LEX_BLOCK_ENTER: u64 = 0;
@@ -283,6 +284,8 @@ pub struct Aarch64CodeGen {
     inline_profiles: Vec<InlineProfile>,
     /// Inlining plan: describes which call sites to inline (F-2 Layer 2a+).
     inline_plan: InlinePlan,
+    /// If true, use stencil-based code emission for supported opcodes.
+    stencil_jit: bool,
 }
 
 impl Aarch64CodeGen {
@@ -299,6 +302,7 @@ impl Aarch64CodeGen {
             ic_table_patches: Vec::new(),
             inline_profiles: Vec::new(),
             inline_plan: InlinePlan::default(),
+            stencil_jit: false,
         }
     }
 
@@ -321,6 +325,11 @@ impl Aarch64CodeGen {
 
     pub fn with_inline_plan(mut self, plan: InlinePlan) -> Self {
         self.inline_plan = plan;
+        self
+    }
+
+    pub fn with_stencil_jit(mut self, enabled: bool) -> Self {
+        self.stencil_jit = enabled;
         self
     }
 
@@ -755,13 +764,42 @@ impl Aarch64CodeGen {
     pub fn compile(mut self, program: &rune_bytecode::opcode::BytecodeProgram) -> CompiledFunction {
         self.emit_prologue();
 
+        if self.stencil_jit {
+            // No setup needed — each stencil inlines the push body directly.
+        }
+
         for (bc_idx, instr) in program.instructions.iter().enumerate() {
             self.bc_to_native[bc_idx] = self.mem.current_offset();
             match instr.opcode {
                 Opcode::LoadSmi => {
                     let smi_raw = ((instr.operands[0] as u64) << 1) | 1;
-                    mov_imm64(&mut self.mem, 0, smi_raw);
-                    self.push();
+                    if self.stencil_jit {
+                        // Inlined stencil: emit MOVZ from the stencil bytes, fix the value hole,
+                        // then emit STR+ADD inline (no branch, no RET — the push runs immediately).
+                        let use_32 = (smi_raw >> 16) != 0;
+                        let stencil_start = self.mem.current_offset();
+                        // Emit MOVZ from stencil bytes, then patch to 64-bit (sf=1).
+                        if use_32 {
+                            for &b in &LOAD_SMI_32_BYTES[..8] { self.mem.emit_byte(b); }
+                        } else {
+                            for &b in &LOAD_SMI_16_BYTES[..4] { self.mem.emit_byte(b); }
+                        }
+                        // Patch value hole(s): 64-bit MOVZ/MOVK (sf=1, bit31=1)
+                        let lo16 = smi_raw as u32 & 0xFFFF;
+                        // 0xD2800000 = MOVZ X0, #0, LSL #0 (64-bit, sf=1)
+                        self.mem.patch_u32(stencil_start, 0xD2800000u32 | (lo16 << 5));
+                        if use_32 {
+                            let hi16 = (smi_raw as u32 >> 16) & 0xFFFF;
+                            // 0xF2A00000 = MOVK X0, #?, LSL #16 (64-bit, sf=1)
+                            self.mem.patch_u32(stencil_start + 4, 0xF2A00000u32 | (hi16 << 5));
+                        }
+                        // Emit STR+ADD inline (the push operation)
+                        for &b in RUNE_PUSH_HELPER.bytes { self.mem.emit_byte(b); }
+                        self.stack_depth += 1;
+                    } else {
+                        mov_imm64(&mut self.mem, 0, smi_raw);
+                        self.push();
+                    }
                 }
                 Opcode::LoadUndefined => {
                     movz(&mut self.mem, 0, 0);

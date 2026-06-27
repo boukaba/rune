@@ -77,6 +77,27 @@ fn bench_jit_hot_function(c: &mut Criterion) {
     });
 }
 
+/// JIT with inlining: same benchmark as above but with enable_inlining=true.
+fn bench_jit_hot_function_inline(c: &mut Criterion) {
+    let src =
+        "function add(a,b){ return a+b; } var s=0; for(var i=0;i<1000000;i=i+1){ s=add(s,i); } s";
+    c.bench_function("jit_hot_function_inline_1M", |b| {
+        b.iter_batched(
+            || {
+                let mut ctx = Context::new();
+                ctx.enable_inlining = true;
+                ctx
+            },
+            |mut ctx| {
+                let val = ctx.eval(src).unwrap();
+                assert_eq!(to_i64(val), 499_999_500_000);
+                val
+            },
+            BatchSize::SmallInput,
+        )
+    });
+}
+
 /// Polymorphic property access with 10 shapes at one callsite — SIDT stays O(1).
 fn bench_polymorphic_property_access(c: &mut Criterion) {
     // 10 shapes cycled via 1000 element array, 1M total accesses (single loop)
@@ -130,7 +151,7 @@ criterion_group! {
     name = benches;
     config = Criterion::default();
     targets = bench_loop_sum_smi, bench_array_push_grow, bench_proto_chain_lookup,
-        bench_jit_hot_function, bench_polymorphic_property_access,
+        bench_jit_hot_function, bench_jit_hot_function_inline, bench_polymorphic_property_access,
         bench_parse_emit_execute,
 }
 criterion_main!(benches);

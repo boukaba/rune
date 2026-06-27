@@ -2056,6 +2056,28 @@ fn test_jit_inline_bail() {
 
 #[test]
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn test_jit_inline_hot_function() {
+    // F-4: verify jit_hot_function_1M with --inline produces the same result
+    // as --no-inline.  add() called 1M times should tier up and inline.
+    let mut ctx = Context::new_small();
+    ctx.enable_inlining = true;
+    let r = ctx
+        .eval(
+            "function add(a,b){ return a+b; } var s=0; for(var i=0;i<1000000;i=i+1){ s=add(s,i); } s",
+        )
+        .unwrap();
+    let smi = r.as_smi();
+    assert_eq!(smi, None, "result 499999500000 exceeds Smi max, must be float");
+    let val = r.as_float64().unwrap();
+    assert_eq!(val, 499_999_500_000.0, "inlined hot function must produce correct sum");
+    assert!(
+        ctx.vm().jit_entry_count > 0,
+        "JIT must have entered for add()"
+    );
+}
+
+#[test]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn test_jit_typeof_native() {
     // TypeOf is now native — the JIT calls typeof_helper instead of bailing.
     // This test verifies all typeof results and that the JIT enters + no bail.

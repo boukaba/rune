@@ -210,6 +210,57 @@ mod tests {
         let _ = std::fs::remove_file(&tmp);
     }
 
+    #[test]
+    fn test_afpc_cache_roundtrip_with_inlining() {
+        // F-4d: AFPC round-trip with enable_inlining=true.
+        let source = "function add(a,b){ return a+b; } var s=0; for(var i=0;i<100000;i=i+1){ s=add(s,i); } s";
+        let tmp = std::env::temp_dir().join("rune_embed_afpc_inline_test.cache");
+        let _ = std::fs::remove_file(&tmp);
+
+        // First run: compile with inlining enabled, execute, save cache.
+        {
+            let mut ctx = Context::new_small();
+            ctx.enable_inlining = true;
+            let bytecode = ctx.compile(source).expect("compile failed");
+            let compiled_funcs = crate::afpc::aot_compile_functions(&bytecode);
+            let result = ctx
+                .eval_bytecode_owned(bytecode.clone())
+                .expect("execute failed");
+            let expected = 4_999_950_000f64;
+            let val = result.as_float64().unwrap_or_else(|| {
+                panic!("inlined hot function produces correct sum, got smi={:?}", result.as_smi())
+            });
+            assert_eq!(val, expected, "inlined hot function produces correct sum");
+            let ics = ctx.ics();
+            let mut cache = crate::afpc::AfpcCache::from_runtime(bytecode, ics);
+            cache.compiled_funcs = compiled_funcs;
+            crate::afpc::save_afpc_cache(&tmp, &cache).expect("save failed");
+        }
+
+        // Second run: load cache, install native code, execute from bytecode.
+        {
+            let cache = crate::afpc::load_afpc_cache(&tmp).expect("load failed");
+            let mut ctx = Context::new_small();
+            ctx.enable_inlining = true;
+            cache.restore_shapes();
+            if !cache.compiled_funcs.is_empty() {
+                let native = crate::afpc::InstalledNativeCode::from_cache(&cache);
+                ctx.install_native_code(native);
+            }
+            ctx.set_ics(cache.ic_table);
+            let result = ctx
+                .eval_bytecode_owned(cache.bytecode)
+                .expect("execute failed");
+            let expected = 4_999_950_000f64;
+            let val = result.as_float64().unwrap_or_else(|| {
+                panic!("cached result must be float64, got smi={:?}", result.as_smi())
+            });
+            assert_eq!(val, expected, "cached inlined result must match");
+        }
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
     /// Benchmark: parse+emit vs cache load for a realistic 128-line program.
     /// Run with: cargo test -p rune_embed bench_real_cache --release -- --nocapture
     #[test]

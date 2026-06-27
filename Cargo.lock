@@ -1061,6 +1061,7 @@ name = "rune_bench"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "rune_core",
  "rune_embed",
 ]
 

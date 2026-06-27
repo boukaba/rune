@@ -1,12 +1,25 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use rune_core::value::Value;
 use rune_embed::Context;
+
+/// Helper: extract the numeric value from a Value regardless of encoding.
+fn to_i64(val: Value) -> i64 {
+    val.as_smi()
+        .map(|v| v as i64)
+        .or_else(|| val.as_float64().map(|v| v as i64))
+        .unwrap_or_else(|| panic!("benchmark produced non-numeric result: {val:?}"))
+}
 
 fn bench_loop_sum_smi(c: &mut Criterion) {
     let src = "var s=0; for (var i=0; i<1000000; i=i+1) { s=s+i; } s";
     c.bench_function("loop_sum_smi_1M", |b| {
         b.iter_batched(
             Context::new,
-            |mut ctx| ctx.eval(src).unwrap(),
+            |mut ctx| {
+                let val = ctx.eval(src).unwrap();
+                assert_eq!(to_i64(val), 499_999_500_000);
+                val
+            },
             BatchSize::SmallInput,
         )
     });
@@ -17,7 +30,11 @@ fn bench_array_push_grow(c: &mut Criterion) {
     c.bench_function("array_push_grow_100k", |b| {
         b.iter_batched(
             Context::new,
-            |mut ctx| ctx.eval(src).unwrap(),
+            |mut ctx| {
+                let val = ctx.eval(src).unwrap();
+                assert_eq!(to_i64(val), 100_000);
+                val
+            },
             BatchSize::SmallInput,
         )
     });
@@ -33,7 +50,11 @@ fn bench_proto_chain_lookup(c: &mut Criterion) {
     c.bench_function("proto_chain_lookup_5deep_1M", |b| {
         b.iter_batched(
             Context::new,
-            |mut ctx| ctx.eval(src).unwrap(),
+            |mut ctx| {
+                let val = ctx.eval(src).unwrap();
+                assert_eq!(to_i64(val), 42_000_000);
+                val
+            },
             BatchSize::SmallInput,
         )
     });
@@ -46,7 +67,11 @@ fn bench_jit_hot_function(c: &mut Criterion) {
     c.bench_function("jit_hot_function_1M", |b| {
         b.iter_batched(
             Context::new,
-            |mut ctx| ctx.eval(src).unwrap(),
+            |mut ctx| {
+                let val = ctx.eval(src).unwrap();
+                assert_eq!(to_i64(val), 499_999_500_000);
+                val
+            },
             BatchSize::SmallInput,
         )
     });
@@ -54,7 +79,7 @@ fn bench_jit_hot_function(c: &mut Criterion) {
 
 /// Polymorphic property access with 10 shapes at one callsite — SIDT stays O(1).
 fn bench_polymorphic_property_access(c: &mut Criterion) {
-    // 10 shapes cycled via 1000 element array, 1M total accesses
+    // 10 shapes cycled via 1000 element array, 1M total accesses (single loop)
     let src = r#"
         var objs = [];
         var i = 0;
@@ -65,28 +90,27 @@ fn bench_polymorphic_property_access(c: &mut Criterion) {
             objs.push(o);
             i = i + 1;
         }
-        // Duplicate to 1000 objects (cycles 10 shapes)
         var j = 10;
         while (j < 1000) {
             objs.push(objs[j - 10]);
             j = j + 1;
         }
         var s = 0;
-        var k = 0;
-        while (k < 1000) {
-            var t = 0;
-            while (t < 1000) {
-                s = s + objs[t].x;
-                t = t + 1;
-            }
-            k = k + 1;
+        var i = 0;
+        while (i < 1000000) {
+            s = s + objs[i % 1000].x;
+            i = i + 1;
         }
         s
     "#;
     c.bench_function("poly_prop_10shapes_1M", |b| {
         b.iter_batched(
             Context::new,
-            |mut ctx| ctx.eval(src).unwrap(),
+            |mut ctx| {
+                let val = ctx.eval(src).unwrap();
+                assert_eq!(to_i64(val), 4_500_000);
+                val
+            },
             BatchSize::SmallInput,
         )
     });

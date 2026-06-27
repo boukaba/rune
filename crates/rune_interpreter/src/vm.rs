@@ -2879,7 +2879,8 @@ impl Vm {
                                                 call_pc: pc,
                                                 hit_count: 1,
                                                 jit_count: if jit_entry.is_null() { 0 } else { 1 },
-                                                callee_func: Some(ptr as *const u8),
+                                                callee_func_idx: func_idx as i64,
+                                                callee_prog_ptr: creator_prog as *const BytecodeProgram as *const u8,
                                                 callee_jit_entry: if jit_entry.is_null() {
                                                     None
                                                 } else {
@@ -3469,6 +3470,18 @@ impl Vm {
                     ncost,
                     speedup.max(1)
                 ));
+                if !trace.inline_profiles.is_empty() {
+                    for p in &trace.inline_profiles {
+                        lines.push(format!(
+                            "    inline profile: call_pc={}, func_idx={}, jit={}, frame={}, size={}",
+                            p.call_pc,
+                            p.callee_func_idx,
+                            if p.callee_jit_entry.is_some() { "yes" } else { "no" },
+                            if p.callee_needs_frame { "yes" } else { "no" },
+                            p.callee_bytecode_size,
+                        ));
+                    }
+                }
             }
         }
         lines.join("\n")

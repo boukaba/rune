@@ -52,6 +52,12 @@ Eliminate the `blr` round-trip overhead for JIT-to-JIT calls in hot loops. When 
 ```rust
 /// Profile data for one call site within a loop trace or function JIT.
 /// Collected during trace recording / function JIT compilation.
+///
+/// # GC safety
+/// `callee_prog_ptr` points to a `BytecodeProgram` that is `Pin<Box>`'d
+/// (not GC-managed). Nested `functions: Vec<BytecodeProgram>` inside it
+/// use Rust-heap-allocated buffers, never mutated after construction.
+/// Both the program pointer and the func index are stable across GC.
 #[derive(Clone, Debug)]
 pub struct InlineProfile {
     /// Bytecode PC of the Call instruction.
@@ -60,8 +66,12 @@ pub struct InlineProfile {
     pub hit_count: u64,
     /// Number of times the callee was JIT-compiled at this site.
     pub jit_count: u64,
-    /// The callee's Func* if monomorphic at this site.
-    pub callee_func: Option<*const u8>,
+    /// Index into `callee_prog.functions[]` for the callee's bytecode.
+    /// -1 means no user function (e.g. builtin or non-Func callee).
+    pub callee_func_idx: i64,
+    /// Pointer to the containing `BytecodeProgram` (pinned, not GC-managed).
+    /// Used together with `callee_func_idx` to locate the callee's bytecode.
+    pub callee_prog_ptr: *const u8,
     /// Callee's JIT entry point, if monomorphic and JIT-compiled.
     pub callee_jit_entry: Option<*const u8>,
     /// Whether the callee needs a Frame (lexical-scope opcodes).
@@ -77,6 +87,7 @@ pub struct InlineProfile {
 /// State for one inlined callee during codegen.
 pub struct InlinedCallee {
     /// The callee's original bytecode program (for reading opcodes).
+    /// Resolved from InlineProfile via `callee_func_idx` + `callee_prog_ptr`.
     pub prog: &'static BytecodeProgram,
     /// Offset applied to all callee bytecode PCs to make them unique
     /// in the combined bailout table (e.g., `callee_pc + CALLER_MAX_PC`).
@@ -254,7 +265,7 @@ Inlined code is cached as part of the trace. When the trace is saved to `rune-af
 3. During trace compilation (`compile_trace_native`):
    - Pass `inline_profiles` to `Aarch64CodeGen::compile`.
 
-**Deliverable:** Profile data is collected but unused. No behavior change. Verify with `--trace-stats` output.
+**Deliverable:** Profile data is collected but unused. No behavior change. Verified with `--trace-stats` output on the `jit_hot_function_1M` benchmark: `call_pc=17, func_idx=0, jit=yes, frame=no, size=4`.
 
 ### Phase F-2: Inlining Engine (6 days)
 
@@ -270,6 +281,13 @@ Inlined code is cached as part of the trace. When the trace is saved to `rune-af
 4. Handle multi-level inlining: guard `inline_depth ≤ 2`.
 
 **Deliverable:** `jit_hot_function_1M` runs with inlined `add(a,b)`. Benchmark shows improvement. 0 bailouts.
+
+**Tests written in F-2 (deferred from F-0):**
+- `test_jit_inline_skip_noneligible` — verify that callees with `needs_frame == true` or bodies ≥ 50 instructions are NOT inlined (fall through to `call_helper`). Verifies JIT stats show no inlining for non-eligible callees.
+- `test_jit_inline_no_bail` — hot function with inlined callee, 1M iterations, 0 bailouts, result matches interpreter. Inlining doesn't exist until F-2, so this test could only be written now.
+- Both tests pass with `--inline` and `--no-inline` (the non-eligible test trivially passes under `--no-inline`; the no-bail test must produce identical results under both flags).
+
+**GC safety note:** `InlineProfile.callee_func_idx` + `callee_prog_ptr` are GC-safe (see struct doc). F-2's inliner reads these to locate the callee bytecode via `(&*(prog_ptr as *const BytecodeProgram)).functions[func_idx]`. No raw GC-heap pointers involved.
 
 ### Phase F-3: Bailout Semantics + Stack Unwinding (3 days)
 

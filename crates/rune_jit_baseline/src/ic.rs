@@ -30,6 +30,12 @@ impl Default for TraceIcTable {
 /// Profile data for one call site within a loop trace or function JIT.
 /// Collected during trace recording / function JIT compilation.
 /// Stored but unused during F-1; consumed by the inlining engine in F-2.
+///
+/// # GC safety
+/// `callee_prog_ptr` points to a `BytecodeProgram` that is `Pin<Box>`'d
+/// (not GC-managed). Nested `functions: Vec<BytecodeProgram>` inside it
+/// use Rust-heap-allocated buffers, never mutated after construction.
+/// Both the program pointer and the func index are stable across GC.
 #[derive(Clone, Debug)]
 pub struct InlineProfile {
     /// Bytecode PC of the Call instruction.
@@ -38,10 +44,12 @@ pub struct InlineProfile {
     pub hit_count: u64,
     /// Number of times the callee was JIT-compiled at this site.
     pub jit_count: u64,
-    /// The callee's Func* if monomorphic at this site.
-    /// WARNING: raw pointer to GC heap — may become stale after GC.
-    /// F-2 must convert to a safe representation (func_index + prog_ptr).
-    pub callee_func: Option<*const u8>,
+    /// Index into `callee_prog.functions[]` for the callee's bytecode.
+    /// -1 means no user function (e.g. builtin or non-Func callee).
+    pub callee_func_idx: i64,
+    /// Pointer to the containing `BytecodeProgram` (pinned, not GC-managed).
+    /// Used together with `callee_func_idx` to locate the callee's bytecode.
+    pub callee_prog_ptr: *const u8,
     /// Callee's JIT entry point, if monomorphic and JIT-compiled.
     pub callee_jit_entry: Option<*const u8>,
     /// Whether the callee needs a Frame (lexical-scope opcodes).

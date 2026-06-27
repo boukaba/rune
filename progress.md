@@ -1919,3 +1919,291 @@ Phase F is done at 5% (not the estimated 60%). The remaining largests gaps (`pro
 | P24-research | TPDE optimizing-tier framework | v0.4+ | arxiv `2505.22610` |
 | P25-research | Whitelist/codegen drift — share single source of truth in codegen crate | v0.3 | Phase F post-mortem |
 | P26-research | Sub/Mul/Mod Smi-range fix — promote to float64 when result exceeds Smi max | ✅ Fixed F-3 | Exposed by bailout test |
+
+---
+
+## v0.3.0 — Copy-and-Patch JIT, Float Self-Tagging, Nofl GC
+
+> **Era:** The v0.3 rewrite replaces hand-rolled AArch64/x86-64 instruction encoding with LLVM-compiled copy-and-patch stencils (arxiv `2011.13127`), eliminating the dominant source of JIT bugs. Float Self-Tagging (arxiv `2411.16544`) eliminates heap-allocated floats. Nofl GC (arxiv `2503.16971`) replaces the Cheney semispace with lower-fragmentation precise Immix.
+>
+> **Papers downloaded to** `docs/papers/`:
+> | Paper | File | arxiv |
+> |---|---|---|
+> | Copy-and-Patch Compilation | `2011.13127_copy_and_patch.pdf` | `2011.13127` |
+> | Float Self-Tagging | `2411.16544_float_self_tagging.pdf` | `2411.16544` |
+> | Deegen: JIT-Capable VM Generator | `2411.11469_deegen.pdf` | `2411.11469` |
+> | Nofl: A Precise Immix | `2503.16971_nofl.pdf` | `2503.16971` |
+> | ShareJIT System-wide Cache | `1810.09555_sharejit.pdf` | `1810.09555` |
+> | Look Before You Leap (Value tagging) | `2606.05466_look_before_leap.pdf` | `2606.05466` |
+
+### Strategy
+
+Copy-and-patch is the foundation that de-risks everything else. With stencil-based JIT compilation:
+
+- **JIT compile time drops from ~50µs to <1µs** — tier-up threshold can fall from 50 to 5-10 calls
+- **Opcode coverage becomes trivial** — adding a new opcode = adding a stencil, not writing an encoder
+- **x86-64 native Call becomes free** — same stencil template, different ISA
+- **JIT bugs become build-time bugs** — stencils are verified by LLVM, not hand-encoded
+- **Deegen validates the approach** — LuaJIT Remake's baseline JIT is only 33% slower than LuaJIT's optimizing JIT
+
+### Phase A: Copy-and-Patch JIT Rewrite (Weeks 1-4)
+
+**Goal:** Replace hand-rolled `codegen_aarch64.rs` and `codegen.rs` with stencil-based compilation. Keep existing interpreter, IC, trace-recording, and inlining infrastructure. Only replace the code emission layer.
+
+#### A1: Stencil Library Build System (Week 1)
+
+- Create `rune_jit_stencils/` crate with a `build.rs` that:
+  - Writes small C functions (one per opcode + common prologue/epilogue) with `__attribute__((section("stencils")))`
+  - The "holes" are global variables tagged `__attribute__((used, section("holes")))` — at runtime, the patcher scans for known hole symbols and fills them with the correct values (registers, immediates, offsets)
+  - Compiles with Clang to a staticlib or object file linked into `rune_jit_baseline`
+  - Alternative for Rust-only: inline asm `global_asm!()` stencils with named labels for hole locations, extracted via `build.rs` symbol table parsing
+  
+- **Deliverable:** `stencil_lib.o` linked into test binary; runtime can memcpy a LoadSmi stencil, patch the immediate, and execute it
+
+**Key constraint from copy-and-patch §3:** Each stencil must be position-independent so it can be memcpy'd to any JIT code buffer. Use PC-relative addressing for all cross-references. Holes are absolute values (immediates, offsets) patched at runtime.
+
+#### A2: Runtime Patcher (Week 1-2)
+
+- `StencilPatcher` struct that:
+  - Holds reference to the mmap'd stencil library in RX memory
+  - `emit_stencil(&mut self, stencil_id, holes: &[(offset, value)])` → memcpy stencil to JIT buffer, patch holes
+  - Hole patching: `unsafe { ptr::write_unaligned(jit_ptr + hole_offset, value) }` for each hole
+  - Maintains a relocation-like table of (stencil_id, holes_per_stencil) from `build.rs`
+  
+- **Deliverable:** `emit_load_smi(42)` calls `emit_stencil(STENCIL_LOAD_SMI, &[(0, 42)])` instead of encoding `mov_imm64` by hand
+
+#### A3: Bytecode-to-Stencil Mapping (Week 2)
+
+- Replace `compile_op()` match arms with a table:
+  ```rust
+  fn emit_opcode(&mut self, op: Opcode) {
+      let (stencil_id, hole_fn) = OPCODE_STENCILS[op as usize];
+      let holes = hole_fn(&self.asm, &self.bc_to_native, op);
+      self.patcher.emit_stencil(stencil_id, &holes);
+  }
+  ```
+  
+- Hole functions compute the per-instance values: register indices, Smi immediates, branch offsets
+- Branch offsets still need the `pending_patches` → `resolve_patches()` mechanism (forward branches)
+- **Deliverable:** All opcodes from existing codegen emit via stencils. Old hand-rolled `emit_mov_imm64` etc. removed.
+
+**Key difference from existing codegen:** The instruction encoding is in the stencil, not in Rust code. The Rust code only computes the hole values — much less code, much less bug surface.
+
+#### A4: Prologue/Epilogue Stencils (Week 2-3)
+
+- Common prologue: save callee-saved registers, allocate JIT stack frame
+- Common epilogue: restore, return
+- Per-callee: patch JIT stack size into the prologue
+- Match existing calling convention (x22 = JIT stack base, x21 = LOC_REG, x23 = saved LOC_REG for inlining)
+- **Deliverable:** JIT-compiled functions start/end via stencils
+
+#### A5: Trace Compiler Migration (Week 3)
+
+- Trace compilation currently duplicates opcode emission logic (`compile_trace` calls `compile_op`)
+- With stencils, trace compilation becomes: for each opcode in the trace, emit the same stencil + patch JIT-stack-relative holes with trace-appropriate values
+- The trace-embedded IC table (N=16) still needs special handling — emit IC comparison + dispatch as a composed sequence of stencils
+- **Deliverable:** Trace-compiled loops emit via stencils. All existing trace tests pass.
+
+#### A6: Inliner Migration (Week 3-4)
+
+- `emit_inline_call` currently emits callee opcodes inline by iterating callee instructions
+- With stencils, this is the same as the trace compiler: emit callee stencils directly into the caller's JIT buffer
+- `Return` stencil becomes `Jump` to the next post-call instruction (already the pattern)
+- `emit_inline_bailout` continues to work unchanged (it operates at the JIT-stack level, not instruction encoding)
+- **Deliverable:** Phase F inliner works on stencil-based codegen. All inline tests pass.
+
+#### A7: x86-64 Stencils (Week 4)
+
+- The same stencil library approach but for x86-64 ISA
+- `build.rs` compiles the same C stencils twice: once for AArch64, once for x86-64
+- Runtime selects the correct set based on `#[cfg(target_arch)]`
+- x86-64 native JIT Call becomes free (stencil already handles the calling convention)
+- **Deliverable:** x86-64 JIT works with stencils. All existing x86-64 tests pass.
+
+#### Acceptance — Phase A
+
+| Metric | Current | Target | Lever |
+|---|---|---|---|
+| JIT compile time | ~50µs | <1µs | Stencil memcpy |
+| Tier-up threshold | 50 | 10 | Faster compile → earlier tier-up |
+| JIT bug reports (per feature) | ~3-5 encoding bugs | 0 (build-time) | LLVM-verified stencils |
+| Opcode coverage effort | ~2 days/opcode | ~2 hours/opcode | Add stencil → done |
+| x86-64 native Call | ⬜ Not started | ✅ Free | Same stencil, different ISA |
+
+### Phase B: Float Self-Tagging (Weeks 5-6)
+
+**Goal:** Replace `HeapFloat64` with self-tagged float values (arxiv `2411.16544`). Float arithmetic becomes register ops — no GC allocation in the JIT fast path.
+
+#### B1: Value Representation Design (Week 5)
+
+Based on arxiv `2411.16544` §3 — self-tagging uses an invertible bitwise transformation:
+
+- Reserve one exponent value (e.g., `0x7FF` = all-ones exponent = NaN) to indicate "this is a tagged value, not a float"
+- Map the most common floats (small integers in float form, simple fractions) to tagged values that carry type info in their exponent bits
+- The mapping is invertible: `self_tag(float) = float XOR tag_mask` where the result has a known pattern at the type-tag bit position
+- On AArch64, use the 13 exponent bits (bits 52-62) — reserve one exponent pattern as the "tagged" marker
+
+**Key decision from §6.1 of the paper:** Self-tagging cannot cover all IEEE754 doubles — only a subset. The paper shows that in practice, >99.9% of floats in Scheme workloads fall in the encodable range. Rune should adopt the same approach: self-tag the common range, heap-allocate the rest (rare).
+
+- **Deliverable:** Design doc with exact bit layout for Rune's Value type. Confirm it composes with Smi tagging (bit 0 = Smi, bit 0 = 0 & exponent tag = self-tagged float, else heap pointer).
+
+#### B2: Value Type Migration (Week 5)
+
+- Update `rune_core::value::Value`:
+  - `Value::from_float64(f: f64) -> Value` — tries self-tagging, falls back to HeapFloat64
+  - `Value::as_float64(&self) -> Option<f64>` — detects self-tagged float, extracts, or checks HeapFloat64
+  - Keep `is_heap_object()`, `is_smi()`, `is_float64()` — add `is_self_tagged_float()`
+  
+- Update all VM handlers that create or consume float64 values:
+  - `number_result()` — use `Value::from_float64`
+  - `to_number()` — handle self-tagged floats
+  - Arithmetic opcodes (Add, Sub, Mul, Div, Mod, Exp, Neg) — float results from self-tagged, not just HeapFloat64
+  
+- **Deliverable:** All existing tests pass with self-tagged float support. No heap allocation for floats in the common range.
+
+#### B3: JIT Stencil Updates (Week 5-6)
+
+- Float arithmetic stencils updated to handle self-tagged floats:
+  - Smi + Smi → Smi (unchanged)
+  - Self-tagged float + Self-tagged float → untag both → f64 add → retag as self-tagged (no GC call)
+  - Smi + Self-tagged float → convert Smi to f64 → f64 add → retag
+  - Non-encodable float → fall back to HeapFloat64 helper (rare)
+  
+- The `float64_add_helper` is no longer called for self-taggable floats — only for the rare non-encodable case
+- `emit_smi_overflow_bailout_or_continue` pattern changes: overflow now promotes to self-tagged float, not HeapFloat64
+
+**Key performance impact from §7.1:** Float arithmetic in the JIT goes from:
+```
+→ call float64_add_helper (save/restore callee-saved, GC-root, heap alloc)
+```
+to:
+```
+→ untag → fadd → retag (3-4 ALU instructions, 0 memory ops)
+```
+
+- **Deliverable:** `jit_hot_function_1M` float promotion path uses register ops, not heap allocation
+
+#### B4: Benchmark Validation (Week 6)
+
+| Benchmark | Before (HeapFloat64) | After (Self-tagged) | Expected Δ |
+|---|---|---|---|
+| `jit_hot_function_1M` | 124 ms | ~90-100 ms | -20-30% (eliminate float alloc in overflow path) |
+| `loop_sum_smi_1M` | 124 ms | unchanged | Smi-only unaffected |
+| `poly_prop_10shapes_1M` | 169 ms | unchanged | Not float-heavy |
+| Float-heavy microbenchmark | HeapFloat64 | Self-tagged | 2-5× (register ops vs heap alloc) |
+
+#### Acceptance — Phase B
+
+- All 316+ tests pass (float semantics unchanged for JS-level observable behavior)
+- Zero HeapFloat64 allocations for floats in the self-taggable range
+- Measurable improvement on float-heavy workloads
+
+### Phase C: Nofl GC (Weeks 7-8)
+
+**Goal:** Replace Cheney semispace copying GC with Nofl precise Immix (arxiv `2503.16971`). Lower memory overhead, lower fragmentation, better worst-case performance.
+
+#### C1: Nofl Layout Implementation (Week 7)
+
+Based on arxiv `2503.16971` §3 — Nofl extends Immix by allowing reclamation at object granularity rather than line granularity:
+
+- **Block + line structure** (from Immix): 128B lines, 8KB blocks. Blocks are the allocation unit, lines are the collection unit.
+- **Nofl precision:** Unlike Immix which reclaims at line granularity (a live object keeps its entire line alive), Nofl tracks individual object boundaries within lines. Free space between objects can be reclaimed.
+- **Mark bit per object** (not per line): Each object has a mark bit. At collection time, sweep all objects, free those not marked.
+- **Bump-pointer allocation within blocks**: Same as Cheney in the common case — fast bump allocation within a block. When a block fills, allocate from the next available block.
+
+**Implementation steps:**
+1. Replace `SemiSpace` with `NoflSpace` containing a free-list of blocks
+2. Implement `alloc(size)`: find a block with enough free space, bump-allocate
+3. Implement mark-sweep collection: mark from roots, sweep all blocks reclaiming unmarked objects
+4. Write barrier: none needed (mark-sweep doesn't require a barrier for correctness)
+
+- **Deliverable:** GC smoke test: allocate 100K objects, collect, verify no memory leak
+
+#### C2: GC Root Registration (Week 7)
+
+- Reuse existing `RootProvider` trait and `register_roots()` infrastructure
+- The mark phase calls `register_roots()` to get live root references, then traces: stack slots, frame locals, env objects, globals, prototype chain
+- Forwarding pointer mechanism from Cheney is replaced by: live objects are marked during trace, compacted during sweep
+
+- **Deliverable:** All GC stress tests pass (100K closure, 100K non-closure, 500K headroom)
+
+#### C3: Benchmark Validation (Week 8)
+
+| Benchmark | Before (Cheney 16MB) | After (Nofl) | Expected Δ |
+|---|---|---|---|
+| `array_push_grow_100k` | 59 ms | ~50 ms | -15% (less GC pressure) |
+| GC stress (500K objects) | Passing | Passing | No regression |
+| Memory overhead (max live) | ~16MB semispace | ~8-12MB | Lower worst-case |
+| `poly_prop_10shapes_1M` | 169 ms | ~169 ms | No change (few allocations) |
+
+#### Acceptance — Phase C
+
+- All 316+ tests pass
+- GC stress tests pass at 500K+ allocations
+- Memory overhead lower than Cheney for allocation-heavy workloads
+- No regressions on non-GC-heavy benchmarks
+
+### Phase D: Remaining Gaps (Weeks 8-9)
+
+With the foundation work done, the remaining gaps become straightforward:
+
+#### D1: P25 Whitelist Drift Fix
+
+- Move eligibility check from `vm.rs:3645` to `rune_jit_baseline::is_inlineable_opcode()`
+- Called by both `vm.rs` (interpreter tier-up) and `codegen_aarch64.rs` (inline plan construction)
+- Single source of truth — never out of sync
+
+#### D2: ArrayPush JIT Coverage
+
+- With copy-and-patch, adding `ArrayPush` is: write a stencil for the push logic (shape guard, length increment, element store)
+- Estimated 2 hours, not 2 days
+- `array_push_grow_100k`: expected 59ms → ~35ms (eliminate interpreter round-trip per push)
+
+#### D3: Full Opcode Coverage
+
+- All remaining 36 opcodes not yet in the JIT become stencils:
+  - Float64 Sub/Mul/Div/Mod promotion (Add is done)
+  - Div, Mod, Exp
+  - Bitwise operations (ShrU bit count masking)
+  - StorePropertyIC (only LoadPropertyIC is native)
+  - DeleteProperty, In, Instanceof
+  - Generator ops (Yield, Resume)
+- Estimated 1-2 weeks, not 2-3 months
+
+### Projected Gap-to-V8 (post v0.3)
+
+| Benchmark | v0.2 (current) | v0.3 projected | V8 | Projected gap |
+|---|---|---|---|---|
+| `jit_hot_function_1M` | 124 ms | ~65 ms | 3.19 ms | **20×** (was 39×) |
+| `loop_sum_smi_1M` | 124 ms | ~60 ms | 2.30 ms | **26×** (was 54×) |
+| `proto_chain_lookup_5deep_1M` | 132 ms | ~80 ms | 1.55 ms | **52×** (was 85×) |
+| `poly_prop_10shapes_1M` | 169 ms | ~100 ms | 4.16 ms | **24×** (was 41×) |
+| `array_push_grow_100k` | 59 ms | ~35 ms | 7.21 ms | **5×** (was 8×) |
+
+**Rationale for projections:**
+- **jit_hot_function**: -20% from copy-and-patch (sub-µs compile, lower tier-up), -30% from float self-tagging (register ops for overflow promotion) → 124 × 0.8 × 0.7 ≈ 65ms
+- **loop_sum**: -50% from copy-and-patch (trace JIT compile essentially free, lower tier-up) → 124 × 0.5 ≈ 60ms
+- **proto_chain**: -40% from copy-and-patch (trace JIT for all loop opcodes, sub-µs compile) → 132 × 0.6 ≈ 80ms
+- **poly_prop**: -40% from copy-and-patch, remaining bottleneck is interpreter dispatch on IC miss → 169 × 0.6 ≈ 100ms
+- **array_push**: -40% from ArrayPush JIT stencil → 59 × 0.6 ≈ 35ms
+
+### v0.3 Schedule Summary
+
+| Phase | Weeks | Depends on | Key Risk |
+|---|---|---|---|
+| A: Copy-and-Patch JIT | 1-4 | None | Stencil build system complexity |
+| B: Float Self-Tagging | 5-6 | A (JIT stencils need updates) | Bit layout correctness |
+| C: Nofl GC | 7-8 | None (orthogonal) | GC correctness at 500K+ objects |
+| D: Remaining gaps | 8-9 | A + B + C | None |
+
+**Total: ~9 weeks.** Each phase is independently shippable with its own test gate.
+
+### Open Questions
+
+1. **Stencil language:** C (via `build.rs` + Clang) vs Rust inline asm (`global_asm!()`). C is more portable and Deegen-validated. Rust inline asm is simpler to integrate but harder to extract hole positions. **Recommend C** — the `build.rs` can compile with Clang and parse the object file's symbol table for holes.
+
+2. **Stencil granularity:** One stencil per opcode (fine-grained, ~50 stencils) vs composite stencils for common sequences (coarse-grained, fewer patches). Copy-and-patch §4 recommends fine-grained — simpler to implement, and memcpy overhead is negligible (<100ns for a 20-byte stencil). **Recommend fine-grained.**
+
+3. **Float self-tagging vs NaN-boxing:** The paper shows self-tagging outperforms NaN-boxing on 3/4 microarchitectures. However, NaN-boxing has production validation (LuaJIT, SpiderMonkey). Self-tagging is simpler to implement (no address-space assumptions). **Recommend self-tagging** — it's the novel contribution Rune can make, and the paper's evaluation is convincing.
+
+4. **Nofl vs GenImmix:** Nofl is strictly better for JS allocation patterns (small variable-size objects). GenImmix requires MMTk integration (external dependency). Nofl can be a standalone crate. **Recommend Nofl** — simpler, no external dependency, better for Rune's workload.

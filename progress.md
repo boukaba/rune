@@ -1950,32 +1950,45 @@ Copy-and-patch is the foundation that de-risks everything else. With stencil-bas
 
 **Goal:** Replace hand-rolled `codegen_aarch64.rs` and `codegen.rs` with stencil-based compilation. Keep existing interpreter, IC, trace-recording, and inlining infrastructure. Only replace the code emission layer.
 
-#### A1: Stencil Library Build System (Week 1, done)
+#### A1: Stencil Library Build System + Integration (Weeks 1-2, done)
 
-Real C stencils compiled by Clang at build time. Each stencil is a normal C function that calls a runtime helper (e.g. `rune_push(0xDEAD)`). Clang generates MOVZ + B; the helper is compiled separately and its prologue/epilogue stripped.
+Real C stencils compiled by Clang at build time. Each stencil is a normal C function that calls a runtime helper (e.g. `rune_push(0xDEAD)`). Clang generates MOVZ + B; the helper is compiled separately and its prologue/epilogue stripped. At runtime, the helper body is inlined directly after the stencil (no branch — the STR+ADD executes sequentially).
 
 - [x] **A1a: Path A validation** — prototype test proves Clang compiles `rune_push(0xDEAD)` to `MOVZ W0, #0xDEAD; B _rune_push`. Value hole (MOVZ imm16 at bits 20:5) and link hole (ARM64_RELOC_BRANCH26 at offset 4) identified and patched.
 - [x] **A1b: Naked-asm stencils** — `push_reg`, `pop_reg`, `ret` as `__attribute__((naked))` functions with inline asm. No link holes, used for simple JIT stack operations.
-- [x] **A1c: build.rs upgrade (real C stencils + helpers)** — `build.rs` compiles:
+- [x] **A1c: build.rs + integration** — `build.rs` compiles:
   - `rune_push.c` — runtime helper with inline asm body (`STR x0,[x22]; ADD x22,x22,#8`), prologue/epilogue stripped
   - `load_smi_16.c`, `load_smi_32.c` — real C stencils calling `rune_push(0xDEAD)` / `rune_push(0xDEADBEEF)` → MOVZ[MOVK] + B
   - Verifies instruction patterns via bitmasks (build fails loudly if Clang output changes)
   - Extracts value holes (MOVZ/MOVK imm16) and link holes (Mach-O ARM64_RELOC_BRANCH26)
   - Generates Rust constants: `StencilDef`, `HelperDef`, `HoleDef`, `LinkHoleDef`
-- `StencilPatcher` supports `emit_helper()` (records offset for link resolution) and `emit_stencil()` (patches value + link holes). `patch_link()` handles B/BL 26-bit signed offset field.
-- **Deliverable:** `rune_push` helper + 2 real C stencils + 3 naked stencils compile at build time, verified by 19 stencil tests. 67/67 tests pass.
+- JIT integration (`codegen_aarch64.rs:780-809`): LoadSmi ported behind `--stencil-jit` flag
+  - Inline approach (not shared helper): emit MOVZ/MOVK from stencil bytes, patch value holes (64-bit MOVZ/MOVK, sf=1), emit STR+ADD inline
+  - `patch_u32()` handles value hole patching (direct write, no StencilPatcher struct)
+  - Old codegen kept as fallback until all 57 opcodes ported
+- CLI: `--stencil-jit`/`--no-stencil-jit` flags (default false)
+- Behavioral test: 4 cases (42, add-chain, -1, max Smi) tested with both flags, assert equal
+- **Deliverable:** `rune_push` helper + 2 real C stencils + 3 naked stencils compile at build time. `codegen_aarch64.rs` emits LoadSmi via stencil behind feature flag. 67 stencil + 48 baseline + 317 integration tests pass. Hand-rolled encoder removed from `build.rs`.
 
-**Key constraint from copy-and-patch §3:** Each stencil must be position-independent so it can be memcpy'd to any JIT code buffer. B/BL offsets are resolved at JIT emit time relative to the helper's position.
+**Key constraint from copy-and-patch §3:** Each stencil must be position-independent so it can be memcpy'd to any JIT code buffer. With the inline approach, stencils have no link holes at runtime — the helper body is appended directly, no branch needed.
 
-#### A2: Runtime Patcher (Week 1-2)
+**Design decision — inline vs shared:** For LoadSmi, the "helper" is 8 bytes (STR+ADD). A shared helper would add BL+RET = 8 bytes overhead to save 8 bytes — a wash with worse icache. Inlining is correct for this opcode. Per-opcode decision documented in stencil C files.
 
-- `StencilPatcher` struct that:
-  - Holds reference to the mmap'd stencil library in RX memory
-  - `emit_stencil(&mut self, stencil_id, holes: &[(offset, value)])` → memcpy stencil to JIT buffer, patch holes
-  - Hole patching: `unsafe { ptr::write_unaligned(jit_ptr + hole_offset, value) }` for each hole
-  - Maintains a relocation-like table of (stencil_id, holes_per_stencil) from `build.rs`
-  
-- **Deliverable:** `emit_load_smi(42)` calls `emit_stencil(STENCIL_LOAD_SMI, &[(0, 42)])` instead of encoding `mov_imm64` by hand
+#### A2: Bytecode-to-Stencil Mapping (Week 2-3, in progress)
+
+- Per-opcode pattern (established by LoadSmi):
+  ```
+  fn emit_opcode(&mut self, op: Opcode) {
+      if self.stencil_jit && self.opcode_has_stencil(op) {
+          emit stencil bytes → patch value holes → emit helper inline
+      } else {
+          old codegen
+      }
+  }
+  ```
+- Value hole patching: `patch_u32()` writes the encoding directly (encodes MOVZ/MOVK with 64-bit sf=1)
+- Link holes not needed for inline approach — helper body appended directly
+- Branch offsets still need `pending_patches` → `resolve_patches()` for forward branches
 
 #### A3: Bytecode-to-Stencil Mapping (Week 2)
 

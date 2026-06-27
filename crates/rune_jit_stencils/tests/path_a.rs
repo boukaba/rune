@@ -376,6 +376,80 @@ fn test_path_a_load_const_encoding() {
 }
 
 #[test]
+fn test_path_a_load_local_encoding() {
+    let stencil_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("stencils");
+    let c_file = stencil_dir.join("load_local.c");
+    assert!(c_file.exists(), "load_local.c not found");
+
+    let tmp = std::env::temp_dir().join("rune_path_a_load_local");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::create_dir_all(&tmp);
+
+    let obj_path = tmp.join("load_local.o");
+    let output = Command::new("clang")
+        .args(["-O2", "-c", "-ffreestanding", "-target", "arm64-apple-macos", "-o"])
+        .arg(&obj_path).arg(&c_file)
+        .output().expect("clang failed");
+    assert!(output.status.success());
+    let obj = std::fs::read(&obj_path).unwrap();
+    let section = extract_text_section(&obj).expect("no __TEXT,__text");
+    assert!(section.len() >= 8, "load_local too small: {}", section.len());
+
+    let mov_instr = u32::from_le_bytes(section[0..4].try_into().unwrap());
+    assert_eq!(mov_instr & 0xFFE0001Fu32, 0x52800000u32,
+        "load_local[0]: expected MOVZ W0, got {:#010x}", mov_instr);
+    assert_eq!((mov_instr >> 5) & 0xFFFF, 0xDEAD,
+        "load_local: expected placeholder 0xDEAD");
+
+    let branch_instr = u32::from_le_bytes(section[4..8].try_into().unwrap());
+    assert!((branch_instr >> 31) == 0, "load_local[4]: expected B, got {:#010x}", branch_instr);
+
+    let (reloc_addr, _) = find_branch_reloc(&obj).expect("load_local: no branch reloc");
+    assert_eq!(reloc_addr, 4, "load_local: expected reloc at offset 4");
+
+    eprintln!("load_local: MOVZ W0, #0xDEAD ; B _rune_load_local ✓");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_path_a_store_local_encoding() {
+    let stencil_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("stencils");
+    let c_file = stencil_dir.join("store_local.c");
+    assert!(c_file.exists(), "store_local.c not found");
+
+    let tmp = std::env::temp_dir().join("rune_path_a_store_local");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::create_dir_all(&tmp);
+
+    let obj_path = tmp.join("store_local.o");
+    let output = Command::new("clang")
+        .args(["-O2", "-c", "-ffreestanding", "-target", "arm64-apple-macos", "-o"])
+        .arg(&obj_path).arg(&c_file)
+        .output().expect("clang failed");
+    assert!(output.status.success());
+    let obj = std::fs::read(&obj_path).unwrap();
+    let section = extract_text_section(&obj).expect("no __TEXT,__text");
+    assert!(section.len() >= 8, "store_local too small: {}", section.len());
+
+    let mov_instr = u32::from_le_bytes(section[0..4].try_into().unwrap());
+    assert_eq!(mov_instr & 0xFFE0001Fu32, 0x52800000u32,
+        "store_local[0]: expected MOVZ W0, got {:#010x}", mov_instr);
+    assert_eq!((mov_instr >> 5) & 0xFFFF, 0xDEAD,
+        "store_local: expected placeholder 0xDEAD");
+
+    let branch_instr = u32::from_le_bytes(section[4..8].try_into().unwrap());
+    assert!((branch_instr >> 31) == 0, "store_local[4]: expected B, got {:#010x}", branch_instr);
+
+    let (reloc_addr, _) = find_branch_reloc(&obj).expect("store_local: no branch reloc");
+    assert_eq!(reloc_addr, 4, "store_local: expected reloc at offset 4");
+
+    eprintln!("store_local: MOVZ W0, #0xDEAD ; B _rune_store_local ✓");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
 fn test_path_a_helper_determinism() {
      // Verify the helper compiles deterministically.
      let tmp = std::env::temp_dir().join("rune_path_a_proto3");

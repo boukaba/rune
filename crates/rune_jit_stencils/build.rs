@@ -35,6 +35,10 @@ fn main() {
     // ── Runtime helpers (compiled first, emitted as byte refs) ──────
     let rune_push = compile_helper(&stencil_dir, "rune_push");
     emitter.add_helper(&rune_push);
+    let rune_load_local = compile_helper(&stencil_dir, "rune_load_local");
+    emitter.add_helper(&rune_load_local);
+    let rune_store_local = compile_helper(&stencil_dir, "rune_store_local");
+    emitter.add_helper(&rune_store_local);
 
     // ── Naked-asm stencils (no link holes) ──────────────────────────
     emit_naked_stencil(&mut emitter, &stencil_dir, "push_reg", &[
@@ -66,6 +70,24 @@ fn main() {
     );
 
     // ── Real C stencils (value holes + link holes) ─────────────────
+    // load_local: void stencil(void) { rune_load_local(0xDEAD); }
+    // Clang generates: MOV W0, #0xDEAD ; B _rune_load_local
+    emit_real_c_stencil(&mut emitter, &stencil_dir, "load_local",
+        &[ValueCheck { offset: 0, mask: 0xFFE0001Fu32, expected: 0x52800000u32,
+                        desc: "MOVZ W0, #?" }],
+        &[HoleSpec { byte_offset: 0, bit_offset: 5, bit_width: 16 }],
+        &[LinkHoleSpec { byte_offset: 4, helper_name: "rune_load_local" }],
+    );
+
+    // store_local: void stencil(void) { rune_store_local(0xDEAD); }
+    // Clang generates: MOV W0, #0xDEAD ; B _rune_store_local
+    emit_real_c_stencil(&mut emitter, &stencil_dir, "store_local",
+        &[ValueCheck { offset: 0, mask: 0xFFE0001Fu32, expected: 0x52800000u32,
+                        desc: "MOVZ W0, #?" }],
+        &[HoleSpec { byte_offset: 0, bit_offset: 5, bit_width: 16 }],
+        &[LinkHoleSpec { byte_offset: 4, helper_name: "rune_store_local" }],
+    );
+
     // load_smi_16: void stencil(void) { rune_push(0xDEAD); }
     // Clang generates: MOV W0, #0xDEAD ; B _rune_push
     emit_real_c_stencil(&mut emitter, &stencil_dir, "load_smi_16",
@@ -344,37 +366,42 @@ fn compile_c(stencil_dir: &Path, src_stem: &str) -> Vec<u8> {
 }
 
 /// Compile a runtime helper function, strip its prologue/epilogue, and return the body bytes.
+///
+/// All helpers follow the same prologue/epilogue pattern (saving/restoring
+/// callee-saved x22 and x21), so this function is generic. The body is the
+/// span between prologue (STP) and epilogue (LDP + RET).
 fn compile_helper(stencil_dir: &Path, name: &str) -> Helper {
     let obj = compile_c(stencil_dir, name);
     let section = extract_text_section(&obj).unwrap_or_else(|| panic!("helper {name}: no text section"));
 
-    // rune_push(int64_t val):
-    //   stp x22, x21, [sp, #-16]!   ; prologue (4 bytes)
-    //   str x0, [x22]                ; body (4 bytes)
-    //   add x22, x22, #8             ; body (4 bytes)
-    //   ldp x22, x21, [sp], #16     ; epilogue (4 bytes)
-    //   ret                           ; epilogue (4 bytes)
-    // Total: 20 bytes. Body at offset 4..12.
-    let expected_prologue: u32 = 0xA9BF57F6; // stp x22, x21, [sp, #-16]!
+    // Expected prologue: stp x22, x21, [sp, #-16]!
+    // Expected epilogue: ldp x22, x21, [sp], #16 + ret
+    let expected_prologue: u32 = 0xA9BF57F6;
     let expected_epilogue: u32 = 0xA8C157F6; // ldp x22, x21, [sp], #16
+    let expected_ret: u32 = 0xD65F03C0;
+
+    assert!(section.len() >= 16, "helper {name}: section too small: {} bytes", section.len());
 
     let prologue = u32::from_le_bytes(section[0..4].try_into().unwrap());
-    assert_eq!(prologue, expected_prologue, "helper {name}: expected prologue {:#010x}, got {:#010x}", expected_prologue, prologue);
+    assert_eq!(prologue, expected_prologue,
+        "helper {name}: expected prologue {:#010x}, got {:#010x}", expected_prologue, prologue);
 
-    let body_str = u32::from_le_bytes(section[4..8].try_into().unwrap());
-    assert_eq!(body_str, 0xF90002C0u32, "helper {name}[4]: expected STR x0,[x22], got {:#010x}", body_str);
+    let ret_offset = section.len() - 4;
+    let ret_actual = u32::from_le_bytes(section[ret_offset..ret_offset + 4].try_into().unwrap());
+    assert_eq!(ret_actual, expected_ret,
+        "helper {name}: expected RET at end ({:#010x}), got {:#010x}", expected_ret, ret_actual);
 
-    let body_add = u32::from_le_bytes(section[8..12].try_into().unwrap());
-    assert_eq!(body_add, 0x910022D6u32, "helper {name}[8]: expected ADD x22,x22,#8, got {:#010x}", body_add);
+    let epilogue_offset = ret_offset - 4;
+    let epilogue = u32::from_le_bytes(section[epilogue_offset..epilogue_offset + 4].try_into().unwrap());
+    assert_eq!(epilogue, expected_epilogue,
+        "helper {name}: expected epilogue {:#010x} at offset {}, got {:#010x}",
+        expected_epilogue, epilogue_offset, epilogue);
 
-    let epilogue = u32::from_le_bytes(section[12..16].try_into().unwrap());
-    assert_eq!(epilogue, expected_epilogue, "helper {name}: expected epilogue {:#010x}, got {:#010x}", expected_epilogue, epilogue);
+    let body = section[4..epilogue_offset].to_vec();
+    assert!(!body.is_empty(), "helper {name}: empty body");
+    assert_eq!(body.len() % 4, 0, "helper {name}: body length {} not multiple of 4", body.len());
 
-    // Verify RET at end
-    let ret = u32::from_le_bytes(section[16..20].try_into().unwrap());
-    assert_eq!(ret, 0xD65F03C0u32, "helper {name}[16]: expected RET, got {:#010x}", ret);
-
-    Helper { name: name.to_string(), bytes: section[4..12].to_vec() }
+    Helper { name: name.to_string(), bytes: body }
 }
 
 /// Compile a naked-asm stencil, verify instructions, strip RET.

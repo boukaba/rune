@@ -4242,6 +4242,25 @@ mod instanceof_tests {
                 for (var i = 0; i < 100; i = i + 1) { r = f(); }
                 r
             "#,
+            // LoadLocal + StoreLocal via stencil
+            r#"
+                function f(a) { return a; }
+                var r = 0;
+                for (var i = 0; i < 100; i = i + 1) { r = f(42); }
+                r
+            "#,
+            r#"
+                function f() { var x = 99; return x; }
+                var r = 0;
+                for (var i = 0; i < 100; i = i + 1) { r = f(); }
+                r
+            "#,
+            r#"
+                function f(a) { a = a + 1; return a; }
+                var r = 0;
+                for (var i = 0; i < 100; i = i + 1) { r = f(41); }
+                r
+            "#,
         ];
 
         for source in cases {

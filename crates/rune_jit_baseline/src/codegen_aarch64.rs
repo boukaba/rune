@@ -16,7 +16,7 @@ use crate::assembler::ExecutableMemory;
 use crate::ic::{InlineEntry, InlinePlan, InlineProfile, TraceIcTable};
 use crate::{BailoutPoint, BailoutReason, BailoutTable, CompiledFunction};
 use rune_bytecode::opcode::Opcode;
-use rune_jit_stencils::{LOAD_CONST_BYTES, LOAD_SMI_16_BYTES, LOAD_SMI_32_BYTES, RUNE_PUSH_HELPER};
+use rune_jit_stencils::{LOAD_CONST_BYTES, LOAD_LOCAL_BYTES, LOAD_SMI_16_BYTES, LOAD_SMI_32_BYTES, RUNE_LOAD_LOCAL_HELPER, RUNE_PUSH_HELPER, RUNE_STORE_LOCAL_HELPER, STORE_LOCAL_BYTES};
 
 /// Operation codes for the lexical helper callout (must match vm.rs).
 const LEX_BLOCK_ENTER: u64 = 0;
@@ -342,6 +342,25 @@ impl Aarch64CodeGen {
         self.stack_depth += 1;
     }
 
+    /// Emit LoadLocal stencil: MOVZ + LDR+STR+ADD (load from locals, push).
+    fn emit_load_local_stencil(&mut self, offset: u32) {
+        let start = self.mem.current_offset();
+        for &b in &LOAD_LOCAL_BYTES[..4] { self.mem.emit_byte(b); }
+        self.mem.patch_u32(start, 0xD2800000u32 | (offset << 5));
+        for &b in RUNE_LOAD_LOCAL_HELPER.bytes { self.mem.emit_byte(b); }
+        self.stack_depth += 1;
+    }
+
+    /// Emit StoreLocal stencil: MOVZ offset + helper body (pop+store+push-back).
+    /// The helper does sub+ldr+str+str+add — pop, store to local, push back.
+    /// stack_depth unchanged (pop then push nets zero).
+    fn emit_store_local_stencil(&mut self, offset: u32) {
+        let start = self.mem.current_offset();
+        for &b in &STORE_LOCAL_BYTES[..4] { self.mem.emit_byte(b); }
+        self.mem.patch_u32(start, 0xD2800000u32 | (offset << 5));
+        for &b in RUNE_STORE_LOCAL_HELPER.bytes { self.mem.emit_byte(b); }
+    }
+
     fn push(&mut self) {
         // x0 -> [jit_stack]; jit_stack += 8
         str_off(&mut self.mem, 0, JIT_STACK_REG, 0);
@@ -572,14 +591,22 @@ impl Aarch64CodeGen {
                 }
                 Opcode::LoadLocal => {
                     let idx = instr.operands[0] as u32;
-                    ldr_off(&mut self.mem, 0, 21, idx * 8);
-                    self.push();
+                    if self.stencil_jit {
+                        self.emit_load_local_stencil(idx * 8);
+                    } else {
+                        ldr_off(&mut self.mem, 0, 21, idx * 8);
+                        self.push();
+                    }
                 }
                 Opcode::StoreLocal => {
                     let idx = instr.operands[0] as u32;
-                    self.pop();
-                    str_off(&mut self.mem, 0, 21, idx * 8);
-                    self.push();
+                    if self.stencil_jit {
+                        self.emit_store_local_stencil(idx * 8);
+                    } else {
+                        self.pop();
+                        str_off(&mut self.mem, 0, 21, idx * 8);
+                        self.push();
+                    }
                 }
                 Opcode::LoadSmi => {
                     let smi_raw = ((instr.operands[0] as u64) << 1) | 1;
@@ -864,14 +891,22 @@ impl Aarch64CodeGen {
                 }
                 Opcode::LoadLocal => {
                     let idx = instr.operands[0] as u32;
-                    ldr_off(&mut self.mem, 0, LOC_REG, idx * 8);
-                    self.push();
+                    if self.stencil_jit {
+                        self.emit_load_local_stencil(idx * 8);
+                    } else {
+                        ldr_off(&mut self.mem, 0, LOC_REG, idx * 8);
+                        self.push();
+                    }
                 }
                 Opcode::StoreLocal => {
                     let idx = instr.operands[0] as u32;
-                    self.pop();
-                    str_off(&mut self.mem, 0, LOC_REG, idx * 8);
-                    self.push();
+                    if self.stencil_jit {
+                        self.emit_store_local_stencil(idx * 8);
+                    } else {
+                        self.pop();
+                        str_off(&mut self.mem, 0, LOC_REG, idx * 8);
+                        self.push();
+                    }
                 }
                 Opcode::Pop => {
                     self.pop();

@@ -14,3 +14,9 @@
 
 // Push val onto the JIT stack at x22, then advance x22.
 void rune_push(int64_t val);
+
+// Load from [x21 + offset] and push onto JIT stack.
+void rune_load_local(int64_t offset);
+
+// Pop from JIT stack and store to [x21 + offset].
+void rune_store_local(int64_t offset);

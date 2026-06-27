@@ -13,8 +13,12 @@ pub const TAG_FORWARDED: u64 = 7;
 /// Tag bits mask for GC header tag.
 const GC_TAG_MASK: u64 = 0b111;
 
-/// Tag bits mask for full-word tagging (used in Value checks).
-const TAG_MASK: u64 = 0x03;
+/// Float Self-Tagging constants (mirrors value.rs).
+const FST_QNAN_TOP: u64 = 0x7FF8;
+const FST_TAG_SHIFT: u64 = 45;
+const FST_TAG_MASK: u64 = 0x7;
+const FST_HEAP_PTR_TAG: u64 = 1;
+const FST_PAYLOAD_MASK: u64 = (1 << 45) - 1;
 
 /// Per-object GC header. Every GC-allocated object starts with this.
 #[repr(C)]
@@ -290,10 +294,15 @@ impl SemiSpace {
     unsafe fn forward_value(&mut self, slot: *mut u64) {
         unsafe {
             let raw = *slot;
-            if raw & TAG_MASK == 0 && raw > 6 {
-                let obj = raw as *mut GcHeader;
+            // Check for Float Self-Tagging encoded heap pointer
+            if (raw >> 48) == FST_QNAN_TOP
+                && ((raw >> FST_TAG_SHIFT) & FST_TAG_MASK) == FST_HEAP_PTR_TAG
+            {
+                let obj = ((raw & FST_PAYLOAD_MASK) << 3) as *mut GcHeader;
                 let new_addr = self.forward_object(obj);
-                *slot = new_addr as u64;
+                *slot = 0x7FF8_0000_0000_0000u64
+                    | (FST_HEAP_PTR_TAG << FST_TAG_SHIFT)
+                    | ((new_addr as u64) >> 3);
             }
         }
     }

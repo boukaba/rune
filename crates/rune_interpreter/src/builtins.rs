@@ -1,7 +1,6 @@
 use crate::vm::Vm;
 use rune_core::array::RuneArray;
-use rune_core::float::HeapFloat64;
-use rune_core::gc::{GcHeader, SemiSpace, TAG_ARRAY, TAG_FLOAT64, TAG_STRING};
+use rune_core::gc::{GcHeader, SemiSpace, TAG_ARRAY, TAG_STRING};
 use rune_core::object::JSObject;
 use rune_core::shape::{PropertyKey, Shape};
 use rune_core::string::HeapString;
@@ -26,12 +25,12 @@ pub fn value_to_js_string(v: Value) -> String {
         b.to_string()
     } else if let Some(n) = v.as_smi() {
         n.to_string()
+    } else if let Some(f) = v.as_float64() {
+        f.to_string()
     } else if let Some(ptr) = v.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_STRING {
             unsafe { HeapString::to_string(ptr as *mut HeapString) }
-        } else if tag == TAG_FLOAT64 {
-            unsafe { HeapFloat64::value(ptr as *mut HeapFloat64).to_string() }
         } else {
             "[object Object]".to_string()
         }
@@ -255,7 +254,7 @@ pub fn string_slice(gc: &mut SemiSpace, this: Value, args: &[Value], _vm: &mut V
 }
 
 /// Math.floor(x) — rounds down.
-fn math_op_unary(gc: &mut SemiSpace, args: &[Value], op: fn(f64) -> f64) -> Value {
+fn math_op_unary(args: &[Value], op: fn(f64) -> f64) -> Value {
     let x = args.first().copied().unwrap_or(Value::smi(0));
     let n = x
         .as_smi()
@@ -269,11 +268,10 @@ fn math_op_unary(gc: &mut SemiSpace, args: &[Value], op: fn(f64) -> f64) -> Valu
             return Value::smi(i);
         }
     }
-    let ptr = HeapFloat64::allocate(gc, result);
-    Value::from_float64_ptr(ptr as *mut u8)
+    Value::from_float64(result)
 }
 
-fn math_op_binary(gc: &mut SemiSpace, args: &[Value], op: fn(f64, f64) -> f64) -> Value {
+fn math_op_binary(args: &[Value], op: fn(f64, f64) -> f64) -> Value {
     let a = args.first().copied().unwrap_or(Value::smi(0));
     let b = args.get(1).copied().unwrap_or(Value::smi(0));
     let na = a
@@ -293,23 +291,22 @@ fn math_op_binary(gc: &mut SemiSpace, args: &[Value], op: fn(f64, f64) -> f64) -
             return Value::smi(i);
         }
     }
-    let ptr = HeapFloat64::allocate(gc, result);
-    Value::from_float64_ptr(ptr as *mut u8)
+    Value::from_float64(result)
 }
 
-pub fn math_floor(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
-    math_op_unary(gc, args, f64::floor)
+pub fn math_floor(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    math_op_unary(args, f64::floor)
 }
 
-pub fn math_ceil(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
-    math_op_unary(gc, args, f64::ceil)
+pub fn math_ceil(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    math_op_unary(args, f64::ceil)
 }
 
-pub fn math_abs(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
-    math_op_unary(gc, args, f64::abs)
+pub fn math_abs(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    math_op_unary(args, f64::abs)
 }
 
-pub fn math_min(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+pub fn math_min(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     let mut min = f64::INFINITY;
     for arg in args {
         let n = arg
@@ -327,11 +324,10 @@ pub fn math_min(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) 
             return Value::smi(i);
         }
     }
-    let ptr = HeapFloat64::allocate(gc, min);
-    Value::from_float64_ptr(ptr as *mut u8)
+    Value::from_float64(min)
 }
 
-pub fn math_max(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+pub fn math_max(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     let mut max = f64::NEG_INFINITY;
     for arg in args {
         let n = arg
@@ -349,16 +345,15 @@ pub fn math_max(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) 
             return Value::smi(i);
         }
     }
-    let ptr = HeapFloat64::allocate(gc, max);
-    Value::from_float64_ptr(ptr as *mut u8)
+    Value::from_float64(max)
 }
 
-pub fn math_pow(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
-    math_op_binary(gc, args, |a, b| a.powf(b))
+pub fn math_pow(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    math_op_binary(args, |a, b| a.powf(b))
 }
 
-pub fn math_sqrt(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
-    math_op_unary(gc, args, f64::sqrt)
+pub fn math_sqrt(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    math_op_unary(args, f64::sqrt)
 }
 
 /// Return a list of builtins to register in every new Vm.

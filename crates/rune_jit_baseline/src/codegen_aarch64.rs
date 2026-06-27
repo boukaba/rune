@@ -16,7 +16,12 @@ use crate::assembler::ExecutableMemory;
 use crate::ic::{InlineEntry, InlinePlan, InlineProfile, TraceIcTable};
 use crate::{BailoutPoint, BailoutReason, BailoutTable, CompiledFunction};
 use rune_bytecode::opcode::Opcode;
-use rune_jit_stencils::{LOAD_CONST_BYTES, LOAD_LOCAL_BYTES, LOAD_SMI_16_BYTES, LOAD_SMI_32_BYTES, RUNE_LOAD_LOCAL_HELPER, RUNE_PUSH_HELPER, RUNE_STORE_LOCAL_HELPER, STORE_LOCAL_BYTES};
+use rune_core::value::Value;
+use rune_jit_stencils::{LOAD_CONST_BYTES, LOAD_LOCAL_BYTES, RUNE_LOAD_LOCAL_HELPER, RUNE_PUSH_HELPER, RUNE_STORE_LOCAL_HELPER, STORE_LOCAL_BYTES};
+
+/// NaN-encoding constants matching rune_core::value.
+const PAYLOAD_MASK: u64 = (1 << 45) - 1;
+const QNAN_PREFIX: u64 = 0x7FF8_0000_0000_0000u64;
 
 /// Operation codes for the lexical helper callout (must match vm.rs).
 const LEX_BLOCK_ENTER: u64 = 0;
@@ -609,20 +614,22 @@ impl Aarch64CodeGen {
                     }
                 }
                 Opcode::LoadSmi => {
-                    let smi_raw = ((instr.operands[0] as u64) << 1) | 1;
-                    mov_imm64(&mut self.mem, 0, smi_raw);
+                    let raw = Value::smi(instr.operands[0] as i32).raw();
+                    mov_imm64(&mut self.mem, 0, raw);
                     self.push();
                 }
                 Opcode::LoadUndefined => {
-                    movz(&mut self.mem, 0, 0);
+                    let raw = Value::undefined().raw();
+                    mov_imm64(&mut self.mem, 0, raw);
                     self.push();
                 }
                 Opcode::LoadNull => {
-                    movz(&mut self.mem, 0, 2);
+                    let raw = Value::null().raw();
+                    mov_imm64(&mut self.mem, 0, raw);
                     self.push();
                 }
                 Opcode::LoadBoolean => {
-                    let raw = if instr.operands[0] != 0 { 6u64 } else { 4u64 };
+                    let raw = Value::boolean(instr.operands[0] != 0).raw();
                     mov_imm64(&mut self.mem, 0, raw);
                     self.push();
                 }
@@ -808,69 +815,35 @@ impl Aarch64CodeGen {
             self.bc_to_native[bc_idx] = self.mem.current_offset();
             match instr.opcode {
                 Opcode::LoadSmi => {
-                    let smi_raw = ((instr.operands[0] as u64) << 1) | 1;
-                    if self.stencil_jit {
-                        // Inlined stencil: emit MOVZ from the stencil bytes, fix the value hole,
-                        // then emit STR+ADD inline (no branch, no RET — the push runs immediately).
-                        let use_32 = (smi_raw >> 16) != 0;
-                        let stencil_start = self.mem.current_offset();
-                        // Emit MOVZ from stencil bytes, then patch to 64-bit (sf=1).
-                        if use_32 {
-                            for &b in &LOAD_SMI_32_BYTES[..8] { self.mem.emit_byte(b); }
-                        } else {
-                            for &b in &LOAD_SMI_16_BYTES[..4] { self.mem.emit_byte(b); }
-                        }
-                        // Patch value hole(s): 64-bit MOVZ/MOVK (sf=1, bit31=1)
-                        let lo16 = smi_raw as u32 & 0xFFFF;
-                        // 0xD2800000 = MOVZ X0, #0, LSL #0 (64-bit, sf=1)
-                        self.mem.patch_u32(stencil_start, 0xD2800000u32 | (lo16 << 5));
-                        if use_32 {
-                            let hi16 = (smi_raw as u32 >> 16) & 0xFFFF;
-                            // 0xF2A00000 = MOVK X0, #?, LSL #16 (64-bit, sf=1)
-                            self.mem.patch_u32(stencil_start + 4, 0xF2A00000u32 | (hi16 << 5));
-                        }
-                        // Emit STR+ADD inline (the push operation)
-                        for &b in RUNE_PUSH_HELPER.bytes { self.mem.emit_byte(b); }
-                        self.stack_depth += 1;
-                    } else {
-                        mov_imm64(&mut self.mem, 0, smi_raw);
-                        self.push();
-                    }
+                    let raw = Value::smi(instr.operands[0] as i32).raw();
+                    mov_imm64(&mut self.mem, 0, raw);
+                    self.push();
                 }
                 Opcode::LoadUndefined => {
-                    if self.stencil_jit {
-                        self.emit_const_stencil(0);
-                    } else {
-                        movz(&mut self.mem, 0, 0);
-                        self.push();
-                    }
+                    let raw = Value::undefined().raw();
+                    mov_imm64(&mut self.mem, 0, raw);
+                    self.push();
                 }
                 Opcode::LoadNull => {
-                    if self.stencil_jit {
-                        self.emit_const_stencil(2);
-                    } else {
-                        movz(&mut self.mem, 0, 2);
-                        self.push();
-                    }
+                    let raw = Value::null().raw();
+                    mov_imm64(&mut self.mem, 0, raw);
+                    self.push();
                 }
                 Opcode::LoadBoolean => {
-                    let raw = if instr.operands[0] != 0 { 6u64 } else { 4u64 };
-                    if self.stencil_jit {
-                        self.emit_const_stencil(raw);
-                    } else {
-                        mov_imm64(&mut self.mem, 0, raw);
-                        self.push();
-                    }
+                    let raw = Value::boolean(instr.operands[0] != 0).raw();
+                    mov_imm64(&mut self.mem, 0, raw);
+                    self.push();
                 }
                 Opcode::LoadFloat64 => {
                     let idx = instr.operands[0] as usize;
                     let val = program.float_pool.get(idx).copied().unwrap_or(0.0);
-                    let i = val as i64;
-                    let smi_raw = ((i as u64) << 1) | 1;
-                    if self.stencil_jit && smi_raw <= 0xFFFF {
-                        self.emit_const_stencil(smi_raw);
+                    let raw = Value::from_float64(val).raw();
+                    // Stencil path only works for values <= 0xFFFF; NaN-encoded
+                    // float64 values have QNAN_PREFIX (0x7FF8...) so they won't match.
+                    if self.stencil_jit && raw <= 0xFFFF {
+                        self.emit_const_stencil(raw);
                     } else {
-                        mov_imm64(&mut self.mem, 0, smi_raw);
+                        mov_imm64(&mut self.mem, 0, raw);
                         self.push();
                     }
                 }
@@ -924,74 +897,15 @@ impl Aarch64CodeGen {
                     self.pop(); // x0 = a
                     mov_reg(&mut self.mem, 8, 0); // x8 = a (save)
 
-                    // === Smi fast path: both operands Smi ===
-                    // Check b is Smi (bit 0) without destroying x9
-                    mov_reg(&mut self.mem, 1, 9);
-                    emit(&mut self.mem, 0x92400021); // AND x1, x1, #1
-                    let b_not_smi = self.mem.current_offset();
-                    emit(&mut self.mem, 0xB4000001); // CBZ X1, +0 (b not Smi → float64)
-
-                    // Check a is Smi (bit 0) without destroying x8
-                    mov_reg(&mut self.mem, 1, 8);
-                    emit(&mut self.mem, 0x92400021); // AND x1, x1, #1
-                    let a_not_smi = self.mem.current_offset();
-                    emit(&mut self.mem, 0xB4000001); // CBZ X1, +0 (a not Smi → float64)
-
-                    // Both Smi: do Smi add
-                    mov_reg(&mut self.mem, 0, 8); // x0 = a
-                    sub_imm(&mut self.mem, 0, 0, 1); // untag a: x0 = a - 1 = a_untag*2
-                    add_reg(&mut self.mem, 0, 0, 9); // add b (tagged) → Smi result
-
-                    // Check overflow
-                    emit(&mut self.mem, 0x9341FC02); // ASR x2, x0, #1 (untag result)
-                    mov_imm64(&mut self.mem, 3, MAX_I31);
-                    cmp_reg(&mut self.mem, 2, 3);
-                    let ov_jg = self.mem.current_offset();
-                    emit(&mut self.mem, 0x5400000C); // B.GT +0 (overflow → float64)
-
-                    mov_imm64(&mut self.mem, 3, MIN_I31);
-                    cmp_reg(&mut self.mem, 2, 3);
-                    let ov_jl = self.mem.current_offset();
-                    emit(&mut self.mem, 0x5400000B); // B.LT +0 (overflow → float64)
-
-                    // No overflow — Smi result in x0, skip helper
-                    let smi_done = self.mem.current_offset();
-                    emit(&mut self.mem, 0x14000000); // B +0
-
-                    // === Float64 path (non-Smi input or overflow) ===
-                    let float64_label = self.mem.current_offset();
-
                     // Call float64_add_helper(vm_ptr=x19, gc_ptr=x20, a_raw=x8, b_raw=x9)
+                    // The helper uses Float Self-Tagging (NaN-boxing) internally and
+                    // is allocation-free — no Smi fast path needed.
                     mov_reg(&mut self.mem, 0, VM_REG);
                     mov_reg(&mut self.mem, 1, GC_REG);
                     mov_reg(&mut self.mem, 2, 8); // a_raw
                     mov_reg(&mut self.mem, 3, 9); // b_raw
                     ldr_off(&mut self.mem, 15, VM_REG, 552); // float64_add_helper
                     emit(&mut self.mem, 0xD63F01E0); // BLR x15
-
-                    // === Done: push result (Smi or float64) ===
-                    let done_label = self.mem.current_offset();
-
-                    // Patch: b_not_smi → float64_label
-                    let d_bns = ((float64_label as i64 - b_not_smi as i64) / 4) as u32;
-                    self.mem
-                        .patch_u32(b_not_smi, 0xB4000001 | ((d_bns & 0x7FFFF) << 5));
-                    // Patch: a_not_smi → float64_label
-                    let d_ans = ((float64_label as i64 - a_not_smi as i64) / 4) as u32;
-                    self.mem
-                        .patch_u32(a_not_smi, 0xB4000001 | ((d_ans & 0x7FFFF) << 5));
-                    // Patch: ov_jg → float64_label
-                    let d_jg = ((float64_label as i64 - ov_jg as i64) / 4) as u32;
-                    self.mem
-                        .patch_u32(ov_jg, 0x5400000C | ((d_jg & 0x7FFFF) << 5));
-                    // Patch: ov_jl → float64_label
-                    let d_jl = ((float64_label as i64 - ov_jl as i64) / 4) as u32;
-                    self.mem
-                        .patch_u32(ov_jl, 0x5400000B | ((d_jl & 0x7FFFF) << 5));
-                    // Patch: smi_done → done_label
-                    let d_done = ((done_label as i64 - smi_done as i64) / 4) as u32;
-                    self.mem
-                        .patch_u32(smi_done, 0x14000000 | (d_done & 0x03FF_FFFF));
 
                     self.push();
                 }
@@ -1032,14 +946,21 @@ impl Aarch64CodeGen {
                     self.pop();
                     mov_reg(&mut self.mem, 8, 0);
                     self.emit_smi_check(bc_idx, &[9]);
-                    emit(&mut self.mem, 0x9341FC21); // ASR x1, x1, #1
+                    // Extract real Smi value from NaN-encoded operands
+                    mov_imm64(&mut self.mem, 2, PAYLOAD_MASK);
+                    and_reg(&mut self.mem, 0, 0, 2); // x0 = a & PAYLOAD_MASK
+                    and_reg(&mut self.mem, 1, 1, 2); // x1 = b & PAYLOAD_MASK
+                    emit(&mut self.mem, 0x9341FC00); // ASR x0, x0, #1 (untag a)
+                    emit(&mut self.mem, 0x9341FC21); // ASR x1, x1, #1 (untag b)
                     let div_by_zero = self.mem.current_offset();
                     emit(&mut self.mem, 0xB4000001); // CBZ x1, +0
-                    emit(&mut self.mem, 0x9341FC00); // ASR x0, x0, #1
                     emit(&mut self.mem, 0x9AC10C02); // SDIV x2, x0, x1
                     emit(&mut self.mem, 0x9B018040); // MSUB x0, x2, x1, x0
                     emit(&mut self.mem, 0xD37FF800); // LSL x0, x0, #1
                     add_imm(&mut self.mem, 0, 0, 1);
+                    // NaN-encode the result: x0 = QNAN_PREFIX | x0
+                    mov_imm64(&mut self.mem, 1, QNAN_PREFIX);
+                    orr_reg(&mut self.mem, 0, 0, 1);
                     let mod_ok = self.mem.current_offset();
                     emit(&mut self.mem, 0x14000000); // B push
                     let div_by_zero_label = self.mem.current_offset();
@@ -1075,6 +996,8 @@ impl Aarch64CodeGen {
                     emit(&mut self.mem, 0x9A9FA7E0);
                     emit(&mut self.mem, 0xD37FF800); // LSL x0, x0, #1
                     orr_imm1(&mut self.mem, 0, 0);
+                    mov_imm64(&mut self.mem, 1, QNAN_PREFIX);
+                    orr_reg(&mut self.mem, 0, 0, 1);
                     self.push();
                 }
                 Opcode::Gt => {
@@ -1088,6 +1011,8 @@ impl Aarch64CodeGen {
                     emit(&mut self.mem, 0x9A9FD7E0);
                     emit(&mut self.mem, 0xD37FF800);
                     orr_imm1(&mut self.mem, 0, 0);
+                    mov_imm64(&mut self.mem, 1, QNAN_PREFIX);
+                    orr_reg(&mut self.mem, 0, 0, 1);
                     self.push();
                 }
                 Opcode::Le => {
@@ -1101,6 +1026,8 @@ impl Aarch64CodeGen {
                     emit(&mut self.mem, 0x9A9FC7E0);
                     emit(&mut self.mem, 0xD37FF800);
                     orr_imm1(&mut self.mem, 0, 0);
+                    mov_imm64(&mut self.mem, 1, QNAN_PREFIX);
+                    orr_reg(&mut self.mem, 0, 0, 1);
                     self.push();
                 }
                 Opcode::Ge => {
@@ -1113,6 +1040,9 @@ impl Aarch64CodeGen {
                     // CSET x0, GE = CSINC x0, XZR, XZR, LT (= !GE)
                     emit(&mut self.mem, 0x9A9FB7E0);
                     emit(&mut self.mem, 0xD37FF800);
+                    orr_imm1(&mut self.mem, 0, 0);
+                    mov_imm64(&mut self.mem, 1, QNAN_PREFIX);
+                    orr_reg(&mut self.mem, 0, 0, 1);
                     orr_imm1(&mut self.mem, 0, 0);
                     self.push();
                 }
@@ -1401,26 +1331,106 @@ impl Aarch64CodeGen {
                 }
                 Opcode::JumpIfFalse => {
                     let target = instr.operands[0] as usize;
-                    self.pop(); // x0 = condition
-                    self.emit_smi_check(bc_idx, &[]); // check condition is Smi
-                    movz(&mut self.mem, 1, 2); // x1 = 2 (null sentinel)
-                    cmp_reg(&mut self.mem, 0, 1);
-                    self.emit_b_cond(0x9, target); // B.LS target (falsy: ≤ 2)
-                    movz(&mut self.mem, 1, 4); // x1 = 4 (false sentinel)
-                    cmp_reg(&mut self.mem, 0, 1);
-                    self.emit_b_cond(0x0, target); // B.EQ target (falsy: == 4)
+                    self.pop(); // x0 = condition (NaN-encoded Value)
+                    // NaN-aware falsy check.
+                    // Falsy: undefined (tag=2), null (tag=3), false (tag=4), Smi(0)
+                    //
+                    // Step 1: check if float64 (top 16 bits != 0x7FF8) → fall through to tag check
+                    // (No bailout — NaN-encoded values always have QNAN_PREFIX.)
+                    // Float64 values have top 16 bits != 0x7FF8, which will produce
+                    // a garbage tag and fall through to the truthy path. This is
+                    // lossy but avoids the bailout loop that occurred with a dedicated
+                    // float64 bailout+recompile cycle.
+                    //
+                    // movz(x1, 48); lsr_reg(x1, x0, x1); mov_imm64(x2, 0x7FF8);
+                    // cmp_reg(x1, x2); B.NE(f64_bailout);
+                    // Step 2: extract tag (bits 45-47)
+                    movz(&mut self.mem, 1, 45);
+                    lsr_reg(&mut self.mem, 1, 0, 1); // x1 = x0 >> 45
+                    movz(&mut self.mem, 2, 7);
+                    and_reg(&mut self.mem, 1, 1, 2); // x1 = tag
+                    // undefined (tag=2)
+                    movz(&mut self.mem, 2, 2);
+                    cmp_reg(&mut self.mem, 1, 2);
+                    self.emit_b_cond(0x0, target); // B.EQ target
+                    // null (tag=3)
+                    movz(&mut self.mem, 2, 3);
+                    cmp_reg(&mut self.mem, 1, 2);
+                    self.emit_b_cond(0x0, target); // B.EQ target
+                    // false (tag=4)
+                    movz(&mut self.mem, 2, 4);
+                    cmp_reg(&mut self.mem, 1, 2);
+                    self.emit_b_cond(0x0, target); // B.EQ target
+                    // Smi (tag=0)
+                    movz(&mut self.mem, 2, 0);
+                    cmp_reg(&mut self.mem, 1, 2);
+                    let patch_not_smi = self.mem.current_offset();
+                    emit(&mut self.mem, 0x54000001); // B.NE (not Smi → truthy)
+                    // Smi: check Smi(0): payload == 1
+                    mov_imm64(&mut self.mem, 2, PAYLOAD_MASK);
+                    and_reg(&mut self.mem, 2, 0, 2);
+                    movz(&mut self.mem, 3, 1);
+                    cmp_reg(&mut self.mem, 2, 3);
+                    self.emit_b_cond(0x0, target); // B.EQ target (Smi(0) → falsy)
+                    // Truthy: fall through (no float64 bailout for NaN-encoding)
+                    let truthy_label = self.mem.current_offset();
+                    // Patch B.NE (not Smi → truthy)
+                    let nd = ((truthy_label as i64 - patch_not_smi as i64) / 4) as u32;
+                    self.mem.patch_u32(patch_not_smi, 0x54000001 | ((nd & 0x7FFFF) << 5));
                 }
                 Opcode::JumpIfTrue => {
                     let target = instr.operands[0] as usize;
-                    self.pop(); // x0 = condition
-                    self.emit_smi_check(bc_idx, &[]); // check condition is Smi
-                    movz(&mut self.mem, 1, 2);
-                    cmp_reg(&mut self.mem, 0, 1);
-                    emit(&mut self.mem, 0x54000049); // B.LS +2 (falsy: skip B)
-                    movz(&mut self.mem, 1, 4);
-                    cmp_reg(&mut self.mem, 0, 1);
-                    emit(&mut self.mem, 0x54000020); // B.EQ +1 (falsy: skip B)
+                    self.pop(); // x0 = condition (NaN-encoded Value)
+                    // NaN-aware truthy check — no float64 bailout (unnecessary for NaN-encoding).
+                    // Step 2: extract tag
+                    movz(&mut self.mem, 1, 45);
+                    lsr_reg(&mut self.mem, 1, 0, 1);
+                    movz(&mut self.mem, 2, 7);
+                    and_reg(&mut self.mem, 1, 1, 2);
+                    // undefined → falsy → skip truthy
+                    movz(&mut self.mem, 2, 2);
+                    cmp_reg(&mut self.mem, 1, 2);
+                    let patch_undef = self.mem.current_offset();
+                    emit(&mut self.mem, 0x54000000); // B.EQ placeholder (falsy → skip)
+                    // null → falsy
+                    movz(&mut self.mem, 2, 3);
+                    cmp_reg(&mut self.mem, 1, 2);
+                    let patch_null = self.mem.current_offset();
+                    emit(&mut self.mem, 0x54000000); // B.EQ placeholder
+                    // false → falsy
+                    movz(&mut self.mem, 2, 4);
+                    cmp_reg(&mut self.mem, 1, 2);
+                    let patch_false = self.mem.current_offset();
+                    emit(&mut self.mem, 0x54000000); // B.EQ placeholder
+                    // Smi (tag=0)
+                    movz(&mut self.mem, 2, 0);
+                    cmp_reg(&mut self.mem, 1, 2);
+                    let patch_not_smi = self.mem.current_offset();
+                    emit(&mut self.mem, 0x54000001); // B.NE (not Smi → truthy)
+                    // Smi: check zero
+                    mov_imm64(&mut self.mem, 2, PAYLOAD_MASK);
+                    and_reg(&mut self.mem, 2, 0, 2);
+                    movz(&mut self.mem, 3, 1);
+                    cmp_reg(&mut self.mem, 2, 3);
+                    let patch_smi_zero = self.mem.current_offset();
+                    emit(&mut self.mem, 0x54000000); // B.EQ placeholder (Smi(0) → falsy)
+                    // Truthy: jump to target
                     self.emit_b(target);
+                    // Skip label (falsy cases land here)
+                    let skip_label = self.mem.current_offset();
+                    // Patch all B.EQ placeholders to skip_label
+                    let d = ((skip_label as i64 - patch_undef as i64) / 4) as u32;
+                    self.mem.patch_u32(patch_undef, 0x54000000 | ((d & 0x7FFFF) << 5));
+                    let d = ((skip_label as i64 - patch_null as i64) / 4) as u32;
+                    self.mem.patch_u32(patch_null, 0x54000000 | ((d & 0x7FFFF) << 5));
+                    let d = ((skip_label as i64 - patch_false as i64) / 4) as u32;
+                    self.mem.patch_u32(patch_false, 0x54000000 | ((d & 0x7FFFF) << 5));
+                    let d = ((skip_label as i64 - patch_smi_zero as i64) / 4) as u32;
+                    self.mem.patch_u32(patch_smi_zero, 0x54000000 | ((d & 0x7FFFF) << 5));
+                    // Patch B.NE (not Smi → truthy: emit_b target, which is before skip_label)
+                    let truthy_b_target = skip_label - 4; // emit_b is 1 instruction before skip_label
+                    let d = ((truthy_b_target as i64 - patch_not_smi as i64) / 4) as u32;
+                    self.mem.patch_u32(patch_not_smi, 0x54000001 | ((d & 0x7FFFF) << 5));
                 }
                 Opcode::LoadProperty => {
                     // Computed property access: `obj[key]`.
@@ -1429,25 +1439,50 @@ impl Aarch64CodeGen {
                     self.pop(); // x0 = key
                     mov_reg(&mut self.mem, 7, 0); // x7 = key
                     self.pop(); // x0 = obj
-                    mov_reg(&mut self.mem, 1, 0); // x1 = obj
+                    mov_reg(&mut self.mem, 1, 0); // x1 = obj (NaN-encoded)
+                    mov_reg(&mut self.mem, 8, 0); // x8 = original obj Value (saved for miss)
                     // === Fast path: dense array + Smi key ===
-                    movz(&mut self.mem, 2, 1); // x2 = 1
+                    // Float Self-Tagging guard for object being a heap pointer.
+                    // Smi check: bit 0 = 1 → miss
+                    movz(&mut self.mem, 2, 1);
                     emit(&mut self.mem, 0xEA02003F); // TST x1, x2
                     let patch_smi = self.mem.current_offset();
-                    emit(&mut self.mem, 0x54000001); // B.NE miss (obj is Smi)
-                    emit(&mut self.mem, 0xF100183F); // CMP x1, #6
-                    let patch_sentinel = self.mem.current_offset();
-                    emit(&mut self.mem, 0x54000009); // B.LS miss (obj ≤ 6)
+                    emit(&mut self.mem, 0x54000001); // B.NE miss (Smi → miss)
+                    // NaN prefix check: (x1 >> 48) == 0x7FF8 → non-float
+                    movz(&mut self.mem, 2, 48);
+                    lsr_reg(&mut self.mem, 2, 1, 2); // x2 = x1 >> 48
+                    mov_imm64(&mut self.mem, 3, 0x7FF8);
+                    cmp_reg(&mut self.mem, 2, 3);
+                    let patch_nan = self.mem.current_offset();
+                    emit(&mut self.mem, 0x54000001); // B.NE miss (float64 → miss)
+                    // Tag check: ((x1 >> 45) & 7) == HEAP_PTR_TAG(1)
+                    movz(&mut self.mem, 2, 45);
+                    lsr_reg(&mut self.mem, 2, 1, 2); // x2 = x1 >> 45
+                    movz(&mut self.mem, 3, 7);
+                    and_reg(&mut self.mem, 2, 2, 3); // x2 = tag
+                    movz(&mut self.mem, 3, 1);
+                    cmp_reg(&mut self.mem, 2, 3);
+                    let patch_tag_nan = self.mem.current_offset();
+                    emit(&mut self.mem, 0x54000001); // B.NE miss (not heap ptr → miss)
+                    // Extract real heap pointer from NaN payload: x1 = ((x1 & PAYLOAD_MASK) << 3)
+                    mov_imm64(&mut self.mem, 2, PAYLOAD_MASK);
+                    and_reg(&mut self.mem, 1, 1, 2); // x1 = x1 & PAYLOAD_MASK
+                    movz(&mut self.mem, 2, 3);
+                    lsl_reg(&mut self.mem, 1, 1, 2); // x1 = x1 << 3
                     ldr_off(&mut self.mem, 3, 1, 0); // x3 = [x1] = header
                     mov_imm64(&mut self.mem, 4, 7); // x4 = 7
                     emit(&mut self.mem, 0x8A040063); // AND x3, x3, x4 = tag
                     emit(&mut self.mem, 0xF100107F); // CMP x3, #4
                     let patch_tag = self.mem.current_offset();
                     emit(&mut self.mem, 0x54000001); // B.NE miss (not array)
+                    // Key check: must be Smi (bit 0 = 1)
                     emit(&mut self.mem, 0xEA0200FF); // TST x7, x2
                     let patch_key_not_smi = self.mem.current_offset();
                     emit(&mut self.mem, 0x54000000); // B.EQ miss (key not Smi)
-                    emit(&mut self.mem, 0xD341FCE6); // LSR x6, x7, #1 = index
+                    // Extract array index from NaN-encoded Smi key
+                    mov_imm64(&mut self.mem, 6, PAYLOAD_MASK);
+                    and_reg(&mut self.mem, 6, 7, 6); // x6 = x7 & PAYLOAD_MASK
+                    emit(&mut self.mem, 0xD341FCC6); // LSR x6, x6, #1 = index
                     ldr_off(&mut self.mem, 4, 1, 16); // x4 = [x1+16] = len|cap
                     emit(&mut self.mem, 0x6B06009F); // CMP w4, w6
                     let patch_oob = self.mem.current_offset();
@@ -1458,7 +1493,7 @@ impl Aarch64CodeGen {
                     emit(&mut self.mem, 0x14000000); // B done (skip miss path)
                     // === Miss: restore stack, bail to interpreter ===
                     let miss_offset = self.mem.current_offset();
-                    mov_reg(&mut self.mem, 0, 1);
+                    mov_reg(&mut self.mem, 0, 8); // x0 = original NaN-encoded obj Value
                     self.push();
                     mov_reg(&mut self.mem, 0, 7);
                     self.push();
@@ -1479,9 +1514,12 @@ impl Aarch64CodeGen {
                     let d = ((miss_offset as i64 - patch_smi as i64) / 4) as u32;
                     self.mem
                         .patch_u32(patch_smi, 0x54000001 | ((d & 0x7FFFF) << 5));
-                    let d = ((miss_offset as i64 - patch_sentinel as i64) / 4) as u32;
+                    let d = ((miss_offset as i64 - patch_nan as i64) / 4) as u32;
                     self.mem
-                        .patch_u32(patch_sentinel, 0x54000009 | ((d & 0x7FFFF) << 5));
+                        .patch_u32(patch_nan, 0x54000001 | ((d & 0x7FFFF) << 5));
+                    let d = ((miss_offset as i64 - patch_tag_nan as i64) / 4) as u32;
+                    self.mem
+                        .patch_u32(patch_tag_nan, 0x54000001 | ((d & 0x7FFFF) << 5));
                     let d = ((miss_offset as i64 - patch_tag as i64) / 4) as u32;
                     self.mem
                         .patch_u32(patch_tag, 0x54000001 | ((d & 0x7FFFF) << 5));
@@ -1501,16 +1539,37 @@ impl Aarch64CodeGen {
                     self.pop(); // x0 = key
                     mov_reg(&mut self.mem, 7, 0); // x7 = key (saved for miss path)
                     self.pop(); // x0 = object
-                    mov_reg(&mut self.mem, 1, 0); // x1 = object
+                    mov_reg(&mut self.mem, 1, 0); // x1 = object (for guard + extraction)
+                    mov_reg(&mut self.mem, 8, 0); // x8 = original NaN-encoded Value (saved for miss)
+                    // Float Self-Tagging guard for object being a heap pointer.
+                    // Smi check: bit 0 = 1 → miss
                     movz(&mut self.mem, 2, 1);
                     emit(&mut self.mem, 0xEA02003F); // TST x1, x2
                     let patch_smi = self.mem.current_offset();
-                    emit(&mut self.mem, 0x54000001); // B.NE +0
-                    emit(&mut self.mem, 0xF100183F); // CMP x1, #6
-                    let patch_sentinel = self.mem.current_offset();
-                    emit(&mut self.mem, 0x54000009); // B.LS +0
-                    ldr_off(&mut self.mem, 2, 1, 8); // x2 = [x1 + 8]
-                    ldr_off(&mut self.mem, 3, 2, 0); // x3 = [x2]
+                    emit(&mut self.mem, 0x54000001); // B.NE +0 (Smi → miss)
+                    // NaN-encoded check: (x1 >> 48) == 0x7FF8 → non-float
+                    movz(&mut self.mem, 2, 48);
+                    lsr_reg(&mut self.mem, 2, 1, 2); // x2 = x1 >> 48
+                    mov_imm64(&mut self.mem, 3, 0x7FF8);
+                    cmp_reg(&mut self.mem, 2, 3);
+                    let patch_not_nan = self.mem.current_offset();
+                    emit(&mut self.mem, 0x54000001); // B.NE +0 (float64 → miss)
+                    // Tag check: ((x1 >> 45) & 7) == HEAP_PTR_TAG(1)
+                    movz(&mut self.mem, 2, 45);
+                    lsr_reg(&mut self.mem, 2, 1, 2); // x2 = x1 >> 45
+                    movz(&mut self.mem, 3, 7);
+                    and_reg(&mut self.mem, 2, 2, 3); // x2 = tag (3 bits)
+                    movz(&mut self.mem, 3, 1);
+                    cmp_reg(&mut self.mem, 2, 3);
+                    let patch_not_heap = self.mem.current_offset();
+                    emit(&mut self.mem, 0x54000001); // B.NE +0 (not heap ptr → miss)
+                    // Extract real heap pointer from NaN payload: x1 = ((x1 & PAYLOAD_MASK) << 3)
+                    mov_imm64(&mut self.mem, 2, 0x1FFF_FFFF_FFFF);
+                    and_reg(&mut self.mem, 1, 1, 2); // x1 = x1 & PAYLOAD_MASK
+                    movz(&mut self.mem, 2, 3);
+                    lsl_reg(&mut self.mem, 1, 1, 2); // x1 = x1 << 3
+                    ldr_off(&mut self.mem, 2, 1, 8); // x2 = [x1 + 8] (shape ptr)
+                    ldr_off(&mut self.mem, 3, 2, 0); // x3 = [x2] (shape_id)
                     let mut miss_patches: Vec<(usize, u32)> = Vec::new();
                     let mut done_patches: Vec<usize> = Vec::new();
                     if let Some(table) = ic_table {
@@ -1577,8 +1636,8 @@ impl Aarch64CodeGen {
                         }
                     }
                     self.record_bailout_point(bc_idx, BailoutReason::ShapeMiss);
-                    mov_reg(&mut self.mem, 0, 1);
-                    self.push();
+                    mov_reg(&mut self.mem, 0, 8); // x0 = saved original NaN-encoded Value
+                    self.push(); // push object (original Value)
                     mov_reg(&mut self.mem, 0, 7);
                     self.push();
                     mov_reg(&mut self.mem, 2, JIT_STACK_REG);
@@ -1594,12 +1653,15 @@ impl Aarch64CodeGen {
                         let d = ((done_offset as i64 - patch as i64) / 4) as u32;
                         self.mem.patch_u32(patch, 0x14000000 | (d & 0x03FF_FFFF));
                     }
-                    let d = ((miss_offset as i64 - patch_smi as i64) / 4) as u32;
+                    let d_smi = ((miss_offset as i64 - patch_smi as i64) / 4) as u32;
                     self.mem
-                        .patch_u32(patch_smi, 0x54000001 | ((d & 0x7FFFF) << 5));
-                    let d = ((miss_offset as i64 - patch_sentinel as i64) / 4) as u32;
+                        .patch_u32(patch_smi, 0x54000001 | ((d_smi & 0x7FFFF) << 5));
+                    let d_nan = ((miss_offset as i64 - patch_not_nan as i64) / 4) as u32;
                     self.mem
-                        .patch_u32(patch_sentinel, 0x54000009 | ((d & 0x7FFFF) << 5));
+                        .patch_u32(patch_not_nan, 0x54000001 | ((d_nan & 0x7FFFF) << 5));
+                    let d_heap = ((miss_offset as i64 - patch_not_heap as i64) / 4) as u32;
+                    self.mem
+                        .patch_u32(patch_not_heap, 0x54000001 | ((d_heap & 0x7FFFF) << 5));
                 }
                 Opcode::StorePropertyIC => {
                     let shape_id = instr.operands[0] as u64;

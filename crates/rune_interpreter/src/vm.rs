@@ -4,7 +4,7 @@ use crate::ic::{IcEntry, IcStats, InlineCache, LoopTrace, TraceOp};
 use rune_bytecode::opcode::{BytecodeProgram, Instruction, Opcode};
 use rune_core::array::RuneArray;
 use rune_core::env::EnvObject;
-use rune_core::float::HeapFloat64;
+
 use rune_core::function::Func;
 use rune_core::gc::{
     GcHeader, RootProvider, SemiSpace, TAG_ARRAY, TAG_FLOAT64, TAG_FUNC, TAG_OBJECT, TAG_STRING,
@@ -359,14 +359,8 @@ impl Vm {
         }
 
         // Math namespace with all methods + constants
-        let pi_val = {
-            let ptr = HeapFloat64::allocate(gc, std::f64::consts::PI);
-            Value::from_float64_ptr(ptr as *mut u8)
-        };
-        let e_val = {
-            let ptr = HeapFloat64::allocate(gc, std::f64::consts::E);
-            Value::from_float64_ptr(ptr as *mut u8)
-        };
+        let pi_val = Value::from_float64(std::f64::consts::PI);
+        let e_val = Value::from_float64(std::f64::consts::E);
         let math_entries: Vec<(&str, Value)> = [
             ("floor", find_handle(&self.builtins, "Math_floor")),
             ("ceil", find_handle(&self.builtins, "Math_ceil")),
@@ -392,15 +386,9 @@ impl Vm {
         self.object_prototype = Value::from_heap_ptr(obj_proto_ptr as *mut u8);
 
         // Global constants: NaN, Infinity, undefined
-        let nan_val = {
-            let ptr = HeapFloat64::allocate(gc, f64::NAN);
-            Value::from_float64_ptr(ptr as *mut u8)
-        };
+        let nan_val = Value::from_float64(f64::NAN);
         self.globals.insert("NaN".to_string(), nan_val);
-        let inf_val = {
-            let ptr = HeapFloat64::allocate(gc, f64::INFINITY);
-            Value::from_float64_ptr(ptr as *mut u8)
-        };
+        let inf_val = Value::from_float64(f64::INFINITY);
         self.globals.insert("Infinity".to_string(), inf_val);
         self.globals
             .insert("undefined".to_string(), Value::undefined());
@@ -810,8 +798,7 @@ impl Vm {
                             continue;
                         }
                     }
-                    let ptr = HeapFloat64::allocate(gc, val);
-                    self.push(Value::from_float64_ptr(ptr as *mut u8));
+                    self.push(Value::from_float64(val));
                     self.frames[fi].pc = pc + 1;
                 }
 
@@ -881,22 +868,18 @@ impl Vm {
                     let result = if let Some(v) = a.as_smi() {
                         if v == 0 {
                             // Preserve -0.0 per spec (§13.5.5)
-                            let ptr = HeapFloat64::allocate(gc, -0.0f64);
-                            Value::from_float64_ptr(ptr as *mut u8)
+                            Value::from_float64(-0.0f64)
                         } else if v == -(1 << 30) {
                             // Overflow: -(-2^30) = 2^30 doesn't fit in Smi
-                            let ptr = HeapFloat64::allocate(gc, -(v as f64));
-                            Value::from_float64_ptr(ptr as *mut u8)
+                            Value::from_float64(-(v as f64))
                         } else {
                             Value::smi(-v)
                         }
                     } else if let Some(v) = a.as_float64() {
-                        let ptr = HeapFloat64::allocate(gc, -v);
-                        Value::from_float64_ptr(ptr as *mut u8)
+                        Value::from_float64(-v)
                     } else {
                         let n = to_number(a);
-                        let ptr = HeapFloat64::allocate(gc, -n);
-                        Value::from_float64_ptr(ptr as *mut u8)
+                        Value::from_float64(-n)
                     };
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
@@ -2128,15 +2111,17 @@ impl Vm {
                         "boolean"
                     } else if val.is_smi() {
                         "number"
-                    } else {
-                        let ptr = val.raw() as *mut GcHeader;
-                        let tag = unsafe { (*ptr).tag() };
+                    } else if let Some(ptr) = val.heap_ptr() {
+                        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
                         match tag {
                             TAG_STRING => "string",
                             TAG_FUNC => "function",
                             TAG_FLOAT64 => "number",
                             _ => "object",
                         }
+                    } else {
+                        // float64 or unknown sentinel
+                        "number"
                     };
                     let str = HeapString::allocate(gc, s);
                     self.push(Value::from_heap_ptr(str as *mut u8));
@@ -4318,6 +4303,8 @@ fn to_number(v: Value) -> f64 {
                 };
             }
             f64::NAN
+        } else if tag == TAG_FLOAT64 {
+            unsafe { *(ptr.add(std::mem::size_of::<GcHeader>()) as *const f64) }
         } else {
             f64::NAN
         }
@@ -4345,25 +4332,22 @@ fn to_int32(v: Value) -> i32 {
 }
 
 /// Wrap an f64 result back into a Value, trying to use Smi for small integers.
-fn number_result(gc: &mut SemiSpace, val: f64) -> Value {
+/// Uses NaN-boxing (not heap allocation) for float64 values.
+fn number_result(_gc: &mut SemiSpace, val: f64) -> Value {
     if val.is_nan() || val.is_infinite() {
-        let ptr = HeapFloat64::allocate(gc, val);
-        return Value::from_float64_ptr(ptr as *mut u8);
+        return Value::from_float64(val);
     }
     if val.fract() == 0.0 {
-        // Preserve -0.0 as HeapFloat64; Smi would lose the sign bit
+        // Preserve -0.0 as NaN-boxed f64; Smi would lose the sign bit
         if val == 0.0 && val.is_sign_negative() {
-            let ptr = HeapFloat64::allocate(gc, val);
-            return Value::from_float64_ptr(ptr as *mut u8);
+            return Value::from_float64(val);
         }
         let i = val as i64;
         if i >= -(1 << 30) as i64 && i < (1 << 30) as i64 {
             return Value::smi(val as i32);
         }
     }
-    // TODO Phase 5: Replace HeapFloat64 with NaN-boxing for zero-allocation arithmetic
-    let ptr = HeapFloat64::allocate(gc, val);
-    Value::from_float64_ptr(ptr as *mut u8)
+    Value::from_float64(val)
 }
 
 /// Compute the IC cache key combining shape.id with the property key,
@@ -4873,15 +4857,16 @@ pub extern "C" fn rune_jit_typeof_helper(vm_ptr: *mut u8, value_raw: u64) -> u64
         TYPEOF_BOOLEAN
     } else if val.is_smi() {
         TYPEOF_NUMBER
-    } else {
-        let ptr = val.raw() as *const GcHeader;
-        let tag = unsafe { (*ptr).tag() };
+    } else if let Some(ptr) = val.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         match tag {
             TAG_STRING => TYPEOF_STRING,
             TAG_FUNC => TYPEOF_FUNCTION,
             TAG_FLOAT64 => TYPEOF_NUMBER,
             _ => TYPEOF_OBJECT,
         }
+    } else {
+        TYPEOF_NUMBER
     };
     vm.typeof_strings[idx].raw()
 }

@@ -3,30 +3,57 @@ use std::fmt;
 use crate::gc::{GcHeader, TAG_STRING};
 use crate::string::HeapString;
 
-/// 64-bit tagged value (V8-style).
+/// 64-bit Float Self-Tagging value (arxiv 2411.16544).
 ///
-/// Tag scheme (lowest bit):
-///   - bit 0 = 1: Smi (value = n << 1 | 1; decode = (raw >> 1) as i32)
-///   - bit 0 = 0: heap pointer or sentinel
-///     - raw == 0x00: `undefined`
-///     - raw == 0x02: `null`
-///     - raw == 0x04: `false`
-///     - raw == 0x06: `true`
-///     - else: heap pointer (8-byte aligned, lowest 3 bits = 0)
+/// Float64 values are stored directly as raw IEEE 754 doubles.
+/// Non-float values (Smi, heap pointers, sentinels) are encoded
+/// as quiet NaN payloads using the 0x7FF8 prefix.
 ///
-/// Smi range: -(2^30) .. (2^30 - 1)
+/// Encoding:
+///   Float64:  raw = f64::to_bits(val)  (any non-NaN or NaN not matching our prefix)
+///   Non-float: raw = QNAN_PREFIX | (tag << 45) | payload
+///
+///   QNAN_PREFIX = 0x7FF8_0000_0000_0000 (quiet NaN, exponent=0x7FF, bit51=1)
+///
+///   Tags (3 bits at positions 45-47):
+///     0 = Smi:         payload = ((i31 as u64) << 1 | 1) & PAYLOAD_MASK  (bit0=1)
+///     1 = Heap pointer: payload = (ptr as u64) >> 3
+///     2 = Undefined
+///     3 = Null
+///     4 = False
+///     5 = True
+///
+/// Check is_float64: (raw >> 48) != 0x7FF8
 #[derive(Copy, Clone)]
 #[repr(transparent)]
 pub struct Value(u64);
 
-const SMI_TAG: u64 = 0x01;
-const TAG_MASK: u64 = 0x01;
-const UNDEFINED_RAW: u64 = 0x00;
-const NULL_RAW: u64 = 0x02;
-const FALSE_RAW: u64 = 0x04;
-const TRUE_RAW: u64 = 0x06;
+// NaN prefix for non-float values
+const QNAN_PREFIX: u64 = 0x7FF8_0000_0000_0000u64;
+const QNAN_TOP: u64 = 0x7FF8; // top 16 bits of QNAN_PREFIX
+
+// Tag constants (3 bits at positions 45-47)
+const TAG_SHIFT: u64 = 45;
+const TAG_MASK: u64 = 0x7;
+const SMI_TAG: u64 = 0;
+const HEAP_PTR_TAG: u64 = 1;
+const UNDEFINED_TAG: u64 = 2;
+const NULL_TAG: u64 = 3;
+const FALSE_TAG: u64 = 4;
+const TRUE_TAG: u64 = 5;
+
+// Payload mask: bits 0-44 (45 bits)
+const PAYLOAD_MASK: u64 = (1 << 45) - 1;
 
 impl Value {
+    pub fn is_non_float(&self) -> bool {
+        (self.0 >> 48) == QNAN_TOP
+    }
+
+    fn tag(&self) -> u64 {
+        (self.0 >> TAG_SHIFT) & TAG_MASK
+    }
+
     /// Create a Smi value (small integer).
     /// Debug-asserts value is within i31 range.
     pub fn smi(value: i32) -> Self {
@@ -34,46 +61,43 @@ impl Value {
             (-(1 << 30)..(1 << 30)).contains(&value),
             "Smi value out of range: {value}"
         );
-        let raw = ((value as i64) << 1) | SMI_TAG as i64;
-        Value(raw as u64)
+        let smi_raw = ((value as i64) << 1) | 1i64;
+        Value(QNAN_PREFIX | (smi_raw as u64 & PAYLOAD_MASK))
     }
 
     pub fn is_smi(&self) -> bool {
-        self.0 & TAG_MASK == SMI_TAG
+        self.is_non_float() && self.tag() == SMI_TAG && (self.0 & 1) == 1
     }
 
     pub fn as_smi(&self) -> Option<i32> {
         if self.is_smi() {
-            let raw = self.0 as i64;
-            Some((raw >> 1) as i32)
+            let payload = self.0 & PAYLOAD_MASK;
+            Some((payload >> 1) as i32)
         } else {
             None
         }
     }
 
-    /// Check if this is a heap pointer (bit 0 = 0, non-zero, not a sentinel).
+    /// Check if this is a heap pointer.
     pub fn is_heap_object(&self) -> bool {
-        self.0 & TAG_MASK == 0 && !self.is_sentinel()
-    }
-
-    fn is_sentinel(&self) -> bool {
-        self.0 <= 6 && self.0 & 1 == 0
+        self.is_non_float() && self.tag() == HEAP_PTR_TAG
     }
 
     /// Get the raw heap address, if this is a heap object.
     pub fn heap_ptr(&self) -> Option<*mut u8> {
         if self.is_heap_object() {
-            Some(self.0 as *mut u8)
+            let ptr = ((self.0 & PAYLOAD_MASK) << 3) as *mut u8;
+            Some(ptr)
         } else {
             None
         }
     }
 
     /// Create a Value from a heap object pointer.
-    /// `ptr` must be at least 2-byte aligned (bit 0 = 0).
+    /// `ptr` must be at least 8-byte aligned (low 3 bits = 0).
     pub fn from_heap_ptr(ptr: *mut u8) -> Self {
-        debug_assert!(ptr as usize & 1 == 0, "misaligned heap pointer");
-        Value(ptr as u64)
+        debug_assert!(ptr as usize & 7 == 0, "misaligned heap pointer");
+        Value(QNAN_PREFIX | (HEAP_PTR_TAG << TAG_SHIFT) | ((ptr as u64) >> 3))
     }
 
     /// Reconstruct a Value from its raw u64 representation (e.g. from JIT output).
@@ -82,37 +106,47 @@ impl Value {
     }
 
     pub const fn undefined() -> Self {
-        Value(UNDEFINED_RAW)
+        Value(QNAN_PREFIX | (UNDEFINED_TAG << TAG_SHIFT))
     }
 
     pub const fn null() -> Self {
-        Value(NULL_RAW)
+        Value(QNAN_PREFIX | (NULL_TAG << TAG_SHIFT))
     }
 
     pub const fn boolean(b: bool) -> Self {
-        Value(if b { TRUE_RAW } else { FALSE_RAW })
+        Value(QNAN_PREFIX | ((if b { TRUE_TAG } else { FALSE_TAG }) << TAG_SHIFT))
     }
 
     pub fn is_boolean(&self) -> bool {
-        self.0 == TRUE_RAW || self.0 == FALSE_RAW
+        if self.is_non_float() {
+            let t = self.tag();
+            t == TRUE_TAG || t == FALSE_TAG
+        } else {
+            false
+        }
     }
 
     pub fn to_boolean(&self) -> Option<bool> {
-        if self.0 == TRUE_RAW {
-            Some(true)
-        } else if self.0 == FALSE_RAW {
-            Some(false)
+        if self.is_non_float() {
+            let t = self.tag();
+            if t == TRUE_TAG {
+                Some(true)
+            } else if t == FALSE_TAG {
+                Some(false)
+            } else {
+                None
+            }
         } else {
             None
         }
     }
 
     pub fn is_undefined(&self) -> bool {
-        self.0 == UNDEFINED_RAW
+        self.is_non_float() && self.tag() == UNDEFINED_TAG
     }
 
     pub fn is_null(&self) -> bool {
-        self.0 == NULL_RAW
+        self.is_non_float() && self.tag() == NULL_TAG
     }
 
     /// ECMAScript ToBoolean (§7.1.2).
@@ -141,33 +175,37 @@ impl Value {
         true
     }
 
-    /// Check if this is a heap-allocated float64 value.
+    /// Check if this is a float64 value (raw double not in our NaN encoding space).
     pub fn is_float64(&self) -> bool {
-        if let Some(ptr) = self.heap_ptr() {
-            unsafe { (*(ptr as *const u64)) & 0b111 == 3 }
-        } else {
-            false
-        }
+        !self.is_non_float()
     }
 
-    /// Extract f64 value if this is a heap-allocated float64.
+    /// Extract f64 value if this is a float64 (raw double).
     pub fn as_float64(&self) -> Option<f64> {
-        if let Some(ptr) = self.heap_ptr() {
-            unsafe {
-                let header_word = *(ptr as *const u64);
-                if header_word & 0b111 == 3 {
-                    let val_ptr = ptr.add(8) as *const f64;
-                    return Some(*val_ptr);
-                }
-            }
+        if self.is_float64() {
+            Some(f64::from_bits(self.0))
+        } else {
+            None
         }
-        None
     }
 
-    /// Create a Value from a heap-allocated float64 pointer.
+    /// Create a float64 Value from an f64.
+    pub fn from_float64(val: f64) -> Self {
+        let raw = val.to_bits();
+        // Collision check: if the raw bits match our non-float QNaN prefix,
+        // flip bits 0 and 48 to map to a different QNaN pattern.
+        // This changes the NaN payload but preserves NaN semantics (NaN ≠ NaN).
+        if (raw >> 48) == QNAN_TOP {
+            Value(raw ^ 0x0001_0000_0000_0001)
+        } else {
+            Value(raw)
+        }
+    }
+
+    /// Create a Value from a heap-allocated float64 pointer (legacy, for GC compat).
     pub fn from_float64_ptr(ptr: *mut u8) -> Self {
-        debug_assert!(ptr as usize & 1 == 0, "misaligned float64 pointer");
-        Value(ptr as u64)
+        debug_assert!(ptr as usize & 7 == 0, "misaligned float64 pointer");
+        Value(QNAN_PREFIX | (HEAP_PTR_TAG << TAG_SHIFT) | ((ptr as u64) >> 3))
     }
 
     pub fn raw(&self) -> u64 {
@@ -294,5 +332,53 @@ mod tests {
         assert!(!v.is_undefined());
         assert!(!v.is_null());
         assert!(!v.is_boolean());
+    }
+
+    #[test]
+    fn test_float64_roundtrip() {
+        let cases = [0.0, -0.0, 1.0, -1.0, std::f64::consts::PI, f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        for &v in &cases {
+            let val = Value::from_float64(v);
+            assert!(val.is_float64(), "should be float64: {v}");
+            let recovered = val.as_float64().unwrap();
+            if v.is_nan() {
+                assert!(recovered.is_nan(), "NaN preserved: {recovered}");
+            } else {
+                assert_eq!(recovered, v, "roundtrip failed: {v}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_float64_not_non_float() {
+        let val = Value::from_float64(std::f64::consts::PI);
+        assert!(!val.is_non_float());
+        assert!(!val.is_smi());
+        assert!(!val.is_undefined());
+        assert!(!val.is_null());
+        assert!(!val.is_boolean());
+        assert!(!val.is_heap_object());
+    }
+
+    #[test]
+    fn test_non_float_not_float64() {
+        assert!(!Value::smi(42).is_float64());
+        assert!(!Value::undefined().is_float64());
+        assert!(!Value::null().is_float64());
+        assert!(!Value::boolean(true).is_float64());
+        let mut x = 0u64;
+        let ptr = &mut x as *mut u64 as *mut u8;
+        assert!(!Value::from_heap_ptr(ptr).is_float64());
+    }
+
+    #[test]
+    fn test_collision_avoidance() {
+        // The QNAN_PREFIX itself as f64::from_bits
+        let collision_val = f64::from_bits(QNAN_PREFIX);
+        let val = Value::from_float64(collision_val);
+        // Must still be detected as float64 (flipped a bit to avoid collision)
+        assert!(val.is_float64(), "collision avoidance should keep it as float64");
+        let recovered = val.as_float64().unwrap();
+        assert!(recovered.is_nan());
     }
 }

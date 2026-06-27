@@ -3496,14 +3496,14 @@ impl Vm {
                 let ic_idx = t.ic_index as usize;
                 if ic_idx < self.ics.len() {
                     let ic = &self.ics[ic_idx];
-                    let mut entries: [rune_jit_baseline::ic::TraceIcEntry; 8] =
+                    let mut entries: [rune_jit_baseline::ic::TraceIcEntry; 16] =
                         [rune_jit_baseline::ic::TraceIcEntry {
                             shape_id: 0,
                             slot_offset: 0,
-                        }; 8];
+                        }; 16];
                     let mut count = 0;
                     for (k, v) in &ic.entries {
-                        if count >= 8 {
+                        if count >= 16 {
                             break;
                         }
                         entries[count] = rune_jit_baseline::ic::TraceIcEntry {

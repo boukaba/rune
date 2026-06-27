@@ -1549,7 +1549,7 @@ impl Aarch64CodeGen {
         let patches = std::mem::take(&mut self.ic_table_patches);
         for p in &patches {
             let table_offset = self.mem.current_offset();
-            for i in 0..8 {
+            for i in 0..16 {
                 if i < p.table.count {
                     self.mem.emit_u64(p.table.entries[i].shape_id);
                     self.mem.emit_u64(p.table.entries[i].slot_offset);

@@ -1647,7 +1647,7 @@ Headline results from `cargo bench -p rune_bench --features jit`. Full output at
 
 | Item | Priority | Status | Expected impact | Gap to V8 |
 |---|---|---|---|---|
-| Phase F inlining — eliminate BLR round-trip in hot loops | 🔴 P0 | 🟡 In progress | `jit_hot_function` 129ms → ~30ms | 40× → ~10× |
+| Phase F inlining — eliminate BLR round-trip in hot loops | 🔴 P0 | ✅ F-2 complete | `jit_hot_function` 129ms → ~30ms | 40× → ~10× |
 | ~~Multi-shape trace dispatch~~ → **N=16 IC table** (shipped `9b1a385`) | ✅ Done | ✅ Fixed | `poly_prop` 269ms → **169ms** (-37%) | 65× → **41×** |
 | float64 Sub/Mul/Div promotion for JIT | 🟠 P1 | ⬜ Not started | Unblocks numeric workloads | — |
 | GenImmix GC spike | 🟠 P1 | ⬜ Not started | ~20% on allocation-heavy benches | — |
@@ -1732,7 +1732,22 @@ The trace records once at iteration 50, captures all 10 shapes, compiles, and ru
 | `jit_hot_function_1M` | 129 ms | 3.19 ms | 40× |
 | `poly_prop_10shapes_1M` | 169 ms | 4.16 ms | **41×** (was 65×) |
 
-All 309 integration tests pass. Workspace: clippy-clean (0 warnings).
+All 313 integration tests pass. Workspace: clippy-clean (0 warnings).
+
+### Phase F-2 Inlining — Complete (2026-06-27)
+
+F-2 implements end-to-end inlining for eligible JIT-compiled callees. Four layered sub-phases:
+
+| Layer | Description | Status | Key change |
+|---|---|---|---|
+| 2a | InlinePlan construction + codegen plumbing | ✅ `230f608` | `InlinePlan`/`InlineEntry` structs, `emit_inline_call` skeleton |
+| 2b | Callee body emission + Return→Jump conversion | ✅ `0b52ed6` | `emit_inline_call` emits callee instructions inline, redirected LOC_REG |
+| 2c | IC/bailout table merge (deferred — callee uses call_bc_idx) | ✅ handled by design | Bailout at call-site PC; no IC for whitelisted opcodes |
+| 2d | Deferred tests | ✅ `19d777c` | `test_jit_inline_skip_noneligible`, `test_jit_inline_no_bail` |
+
+**Design:** §4.2 zero-copy approach — save LOC_REG (x21→x23), redirect to args area on JIT stack, callee body accesses locals naturally via LoadLocal/StoreLocal. Gated behind `--inline` flag (default `--no-inline`).
+
+**313 integration tests pass. Clippy-clean. Baseline benchmark: 105ms (without inlining).**
 
 ---
 

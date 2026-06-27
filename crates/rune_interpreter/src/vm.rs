@@ -967,7 +967,11 @@ impl Vm {
                     let a = self.pop();
                     let result = if let (Some(av), Some(bv)) = (a.as_smi(), b.as_smi()) {
                         if let Some(r) = av.checked_mul(bv) {
-                            Value::smi(r)
+                            if (-(1 << 30)..(1 << 30)).contains(&r) {
+                                Value::smi(r)
+                            } else {
+                                number_result(gc, av as f64 * bv as f64)
+                            }
                         } else {
                             number_result(gc, av as f64 * bv as f64)
                         }
@@ -995,7 +999,12 @@ impl Vm {
                         if bv == 0 {
                             number_result(gc, f64::NAN)
                         } else {
-                            Value::smi(av % bv)
+                            let r = av % bv;
+                            if (-(1 << 30)..(1 << 30)).contains(&r) {
+                                Value::smi(r)
+                            } else {
+                                number_result(gc, r as f64)
+                            }
                         }
                     } else {
                         let av = to_number(a);

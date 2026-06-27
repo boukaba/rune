@@ -45,7 +45,8 @@ mod tests {
         let mut buf = LOAD_SMI_16_BYTES.to_vec();
         patcher::patch_stencil(&mut buf, LOAD_SMI_16_HOLES, &[expected_smi]);
 
-        let expected_movz: u32 = 0xD2800000 | (0x55_u32 << 5);
+        // Real C stencil compiles to MOVZ W0 (32-bit, sf=0): 0x52800000 | (imm << 5)
+        let expected_movz: u32 = 0x52800000 | (0x55_u32 << 5);
         let actual_movz = u32::from_le_bytes(buf[0..4].try_into().unwrap());
         assert_eq!(actual_movz, expected_movz,
             "load_smi_16 patched with 42: expected {:#010x}, got {:#010x}",
@@ -61,10 +62,36 @@ mod tests {
         let upper16 = (smi_val >> 16) & 0xFFFF;
         patcher::patch_stencil(&mut buf, LOAD_SMI_32_HOLES, &[lower16, upper16]);
 
-        let expected_movz_low: u32 = 0xD2800000 | ((smi_val as u32 & 0xFFFF) << 5);
+        // Real C stencil: MOVZ W0 (32-bit, sf=0): 0x52800000 | (imm << 5)
+        let expected_movz_low: u32 = 0x52800000 | ((smi_val as u32 & 0xFFFF) << 5);
         let actual_instr0 = u32::from_le_bytes(buf[0..4].try_into().unwrap());
         assert_eq!(actual_instr0, expected_movz_low,
             "load_smi_32 first MOVZ: expected {:#010x}, got {:#010x}",
             expected_movz_low, actual_instr0);
+
+        // MOVK W0 (32-bit, sf=0, hw=1): 0x72A00000 | (imm << 5)
+        let expected_movk_high: u32 = 0x72A00000 | ((smi_val as u32 >> 16) << 5);
+        let actual_instr1 = u32::from_le_bytes(buf[4..8].try_into().unwrap());
+        assert_eq!(actual_instr1, expected_movk_high,
+            "load_smi_32 MOVK upper: expected {:#010x}, got {:#010x}",
+            expected_movk_high, actual_instr1);
+    }
+
+    #[test]
+    fn test_link_holes_defined() {
+        for s in ALL_STENCILS {
+            for lh in s.link_holes {
+                assert!(
+                    lh.byte_offset < s.bytes.len(),
+                    "stencil {} link hole offset {} out of bounds (len {})",
+                    s.name, lh.byte_offset, s.bytes.len()
+                );
+                // Verify the referenced helper exists
+                let helper_found = ALL_HELPERS.iter().any(|h| h.name == lh.helper_name);
+                assert!(helper_found,
+                    "stencil {} link hole references unknown helper '{}'",
+                    s.name, lh.helper_name);
+            }
+        }
     }
 }

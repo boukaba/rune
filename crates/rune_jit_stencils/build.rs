@@ -1,14 +1,19 @@
-/// build.rs — Copy-and-patch stencil compiler.
-///
-/// Compiles C stencil functions with Clang at build time, extracts their
-/// machine-code bytes, and generates Rust constants for runtime use.
-///
-/// Each stencil is a naked C function in stencils/*.c. The function body
-/// uses inline assembly to produce a fixed instruction sequence with
-/// placeholder immediates for patchable holes.
-///
-/// At JIT compile time, the stencil bytes are memcpy'd into the code
-/// buffer and the holes are patched with runtime values.
+//! build.rs — Copy-and-patch stencil compiler.
+//!
+//! Compiles C stencil functions with Clang at build time, extracts their
+//! machine-code bytes, and generates Rust constants for runtime use.
+//!
+//! Two kinds of stencils:
+//!
+//! 1. **Naked-asm stencils** — `__attribute__((naked))` functions with inline
+//!    assembly. These have NO link-time holes (no helper calls) and are used
+//!    for simple operations like push/pop/ret.
+//!
+//! 2. **Real C stencils** — regular C functions that call runtime helpers
+//!    (e.g., `rune_push(0xDEAD)`). Clang generates MOV + BL/B with link-time
+//!    relocations. These have value holes (immediates) AND link holes (B/BL
+//!    offsets that need resolution relative to the emitted helper).
+
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -18,7 +23,6 @@ fn main() {
     let out_dir = env::var("OUT_DIR").unwrap();
     let stencil_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("stencils");
 
-    // Rerun if any C stencil file changes
     for entry in fs::read_dir(&stencil_dir).unwrap() {
         let entry = entry.unwrap();
         if entry.path().extension().is_some_and(|e| e == "c" || e == "h") {
@@ -26,26 +30,209 @@ fn main() {
         }
     }
 
-    let stencils = compile_stencils(&stencil_dir);
-    let code = render_stencils(&stencils);
+    let mut emitter = Emitter::new();
+
+    // ── Runtime helpers (compiled first, emitted as byte refs) ──────
+    let rune_push = compile_helper(&stencil_dir, "rune_push");
+    emitter.add_helper(&rune_push);
+
+    // ── Naked-asm stencils (no link holes) ──────────────────────────
+    emit_naked_stencil(&mut emitter, &stencil_dir, "push_reg", &[
+        (0, 0xF90002C0u32, "STR x0, [x22]"),
+        (4, 0x910022D6u32, "ADD x22, x22, #8"),
+        (8, 0xD65F03C0u32, "RET"),
+    ], &[], 8);
+
+    emit_naked_stencil(&mut emitter, &stencil_dir, "pop_reg", &[
+        (0, 0xD10022D6u32, "SUB x22, x22, #8"),
+        (4, 0xF94002C0u32, "LDR x0, [x22]"),
+        (8, 0xD65F03C0u32, "RET"),
+    ], &[], 8);
+
+    emit_naked_stencil(&mut emitter, &stencil_dir, "ret", &[
+        (0, 0xD65F03C0u32, "RET"),
+    ], &[], 4);
+
+    // ── Real C stencils (value holes + link holes) ─────────────────
+    // load_smi_16: void stencil(void) { rune_push(0xDEAD); }
+    // Clang generates: MOV W0, #0xDEAD ; B _rune_push
+    emit_real_c_stencil(&mut emitter, &stencil_dir, "load_smi_16",
+        &[ValueCheck { offset: 0, mask: 0xFFE0001Fu32, expected: 0x52800000u32,
+                        desc: "MOVZ W0, #?" }],
+        &[HoleSpec { byte_offset: 0, bit_offset: 5, bit_width: 16 }],
+        &[LinkHoleSpec { byte_offset: 4, helper_name: "rune_push" }],
+    );
+
+    // load_smi_32: same C stencil, different placeholder (needs MOVZ+MOVK)
+    // Compiler generates MOVZ W0, #? + MOVK W0, #?, lsl #16 + B _rune_push
+    emit_real_c_stencil(&mut emitter, &stencil_dir, "load_smi_32",
+        &[
+            ValueCheck { offset: 0, mask: 0xFFE0001Fu32, expected: 0x52800000u32,
+                        desc: "MOVZ W0, #?" },
+            ValueCheck { offset: 4, mask: 0xFFE0001Fu32, expected: 0x72A00000u32,
+                        desc: "MOVK W0, #?, lsl #16" },
+        ],
+        &[
+            HoleSpec { byte_offset: 0, bit_offset: 5, bit_width: 16 }, // lower 16
+            HoleSpec { byte_offset: 4, bit_offset: 5, bit_width: 16 }, // upper 16
+        ],
+        &[LinkHoleSpec { byte_offset: 8, helper_name: "rune_push" }],
+    );
+
+    let code = emitter.render();
     fs::write(Path::new(&out_dir).join("stencils.rs"), code).unwrap();
 }
 
-/// A compiled stencil.
+// ── Data types ───────────────────────────────────────────────────────────
+
 struct Stencil {
-    /// Function name (from C source, without leading underscore).
     name: String,
-    /// Machine-code bytes (body only — no epilogue).
     bytes: Vec<u8>,
-    /// Patchable holes in the byte sequence.
     holes: Vec<Hole>,
+    link_holes: Vec<LinkHole>,
 }
 
-/// A hole — a bit field within a 32-bit instruction word.
+struct Helper {
+    name: String,
+    bytes: Vec<u8>,
+}
+
 struct Hole {
     byte_offset: usize,
     bit_offset: u8,
     bit_width: u8,
+}
+
+struct LinkHole {
+    byte_offset: usize,
+    helper_name: String,
+}
+
+struct ValueCheck {
+    offset: usize,
+    mask: u32,
+    expected: u32,
+    desc: &'static str,
+}
+
+struct HoleSpec {
+    byte_offset: usize,
+    bit_offset: u8,
+    bit_width: u8,
+}
+
+struct LinkHoleSpec {
+    byte_offset: usize,
+    helper_name: &'static str,
+}
+
+// ── Emitter: collects helpers and stencils, generates Rust code ──────────
+
+struct Emitter {
+    helpers: Vec<Helper>,
+    stencils: Vec<Stencil>,
+}
+
+impl Emitter {
+    fn new() -> Self { Self { helpers: Vec::new(), stencils: Vec::new() } }
+
+    fn add_helper(&mut self, h: &Helper) { self.helpers.push(Helper { name: h.name.clone(), bytes: h.bytes.clone() }); }
+
+    fn add_stencil(&mut self, s: Stencil) { self.stencils.push(s); }
+
+    fn render(&self) -> String {
+        let mut out = String::new();
+        out.push_str("// Auto-generated by build.rs — do not edit.\n");
+        out.push_str("#[derive(Clone, Copy)]\n");
+        out.push_str("#[allow(dead_code)]\n");
+        out.push_str("pub struct StencilDef {\n");
+        out.push_str("    pub name: &'static str,\n");
+        out.push_str("    pub bytes: &'static [u8],\n");
+        out.push_str("    pub holes: &'static [HoleDef],\n");
+        out.push_str("    pub link_holes: &'static [LinkHoleDef],\n");
+        out.push_str("}\n\n");
+        out.push_str("#[derive(Clone, Copy)]\n");
+        out.push_str("#[allow(dead_code)]\n");
+        out.push_str("pub struct HelperDef {\n");
+        out.push_str("    pub name: &'static str,\n");
+        out.push_str("    pub bytes: &'static [u8],\n");
+        out.push_str("}\n\n");
+        out.push_str("#[derive(Clone, Copy)]\n");
+        out.push_str("pub struct HoleDef {\n");
+        out.push_str("    pub byte_offset: usize,\n");
+        out.push_str("    pub bit_offset: u8,\n");
+        out.push_str("    pub bit_width: u8,\n");
+        out.push_str("}\n\n");
+        out.push_str("#[derive(Clone, Copy)]\n");
+        out.push_str("pub struct LinkHoleDef {\n");
+        out.push_str("    pub byte_offset: usize,\n");
+        out.push_str("    pub helper_name: &'static str,\n");
+        out.push_str("}\n\n");
+
+        // Helper constants
+        for h in &self.helpers {
+            out.push_str(&format!(
+                "pub static {}_HELPER: HelperDef = HelperDef {{ name: \"{}\", bytes: &[{}] }};\n",
+                h.name.to_uppercase(), h.name,
+                h.bytes.iter().map(|b| format!("{b:#04x}")).collect::<Vec<_>>().join(", ")
+            ));
+        }
+        out.push('\n');
+
+        // Stencil constants
+        for s in &self.stencils {
+            out.push_str(&format!(
+                "pub const {}_BYTES: &[u8] = &[{}];\n",
+                s.name.to_uppercase(),
+                s.bytes.iter().map(|b| format!("{b:#04x}")).collect::<Vec<_>>().join(", ")
+            ));
+            if s.holes.is_empty() {
+                out.push_str(&format!("pub const {}_HOLES: &[HoleDef] = &[];\n", s.name.to_uppercase()));
+            } else {
+                out.push_str(&format!(
+                    "pub const {}_HOLES: &[HoleDef] = &[{}];\n",
+                    s.name.to_uppercase(),
+                    s.holes.iter().map(|h| {
+                        format!("HoleDef {{ byte_offset: {}, bit_offset: {}, bit_width: {} }}",
+                            h.byte_offset, h.bit_offset, h.bit_width)
+                    }).collect::<Vec<_>>().join(", ")
+                ));
+            }
+            if s.link_holes.is_empty() {
+                out.push_str(&format!("pub const {}_LINK_HOLES: &[LinkHoleDef] = &[];\n", s.name.to_uppercase()));
+            } else {
+                out.push_str(&format!(
+                    "pub const {}_LINK_HOLES: &[LinkHoleDef] = &[{}];\n",
+                    s.name.to_uppercase(),
+                    s.link_holes.iter().map(|lh| {
+                        format!("LinkHoleDef {{ byte_offset: {}, helper_name: \"{}\" }}",
+                            lh.byte_offset, lh.helper_name)
+                    }).collect::<Vec<_>>().join(", ")
+                ));
+            }
+        }
+
+        // All-stencils list
+        out.push_str("\npub static ALL_STENCILS: &[StencilDef] = &[\n");
+        for s in &self.stencils {
+            out.push_str(&format!(
+                "    StencilDef {{ name: \"{}\", bytes: {}_BYTES, holes: {}_HOLES, link_holes: {}_LINK_HOLES }},\n",
+                s.name, s.name.to_uppercase(), s.name.to_uppercase(), s.name.to_uppercase()
+            ));
+        }
+        out.push_str("];\n");
+
+        // All-helpers list
+        out.push_str("\npub static ALL_HELPERS: &[HelperDef] = &[\n");
+        for h in &self.helpers {
+            out.push_str(&format!(
+                "    {}_HELPER,\n", h.name.to_uppercase()
+            ));
+        }
+        out.push_str("];\n");
+
+        out
+    }
 }
 
 // ── Mach-O parser (minimal, macOS only) ─────────────────────────────────
@@ -53,15 +240,11 @@ struct Hole {
 const MH_MAGIC_64: u32 = 0xFEEDFACF;
 const LC_SEGMENT_64: u32 = 0x19;
 
-/// Extract the __TEXT,__text section bytes from a Mach-O object file.
 fn extract_text_section(o_bytes: &[u8]) -> Option<&[u8]> {
     if o_bytes.len() < 32 { return None; }
-    let magic = u32::from_le_bytes(o_bytes[0..4].try_into().unwrap());
-    if magic != MH_MAGIC_64 { return None; }
-
+    if u32::from_le_bytes(o_bytes[0..4].try_into().unwrap()) != MH_MAGIC_64 { return None; }
     let ncmds = u32::from_le_bytes(o_bytes[16..20].try_into().unwrap());
     let mut offset: usize = 32;
-
     for _ in 0..ncmds {
         if offset + 8 > o_bytes.len() { return None; }
         let cmd = u32::from_le_bytes(o_bytes[offset..offset+4].try_into().unwrap());
@@ -72,10 +255,8 @@ fn extract_text_section(o_bytes: &[u8]) -> Option<&[u8]> {
             for i in 0..nsects {
                 let sec_off = sections_start + i * 80;
                 if sec_off + 80 > o_bytes.len() { return None; }
-                let sectname = &o_bytes[sec_off..sec_off+16];
-                let segname = &o_bytes[sec_off+16..sec_off+32];
-                if sectname == b"__text\0\0\0\0\0\0\0\0\0\0" &&
-                   segname == b"__TEXT\0\0\0\0\0\0\0\0\0\0" {
+                if &o_bytes[sec_off..sec_off+16] == b"__text\0\0\0\0\0\0\0\0\0\0" &&
+                   &o_bytes[sec_off+16..sec_off+32] == b"__TEXT\0\0\0\0\0\0\0\0\0\0" {
                     let foff = u32::from_le_bytes(o_bytes[sec_off+48..sec_off+52].try_into().unwrap()) as usize;
                     let sz = u64::from_le_bytes(o_bytes[sec_off+40..sec_off+48].try_into().unwrap()) as usize;
                     if foff + sz <= o_bytes.len() {
@@ -90,234 +271,162 @@ fn extract_text_section(o_bytes: &[u8]) -> Option<&[u8]> {
     None
 }
 
-// ── Instruction analysis ────────────────────────────────────────────────
-
-/// Decode an AArch64 instruction at the given offset.
-#[inline]
-fn decode_instr(bytes: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(bytes[offset..offset+4].try_into().unwrap())
+/// Parse Mach-O relocations for a section, returning the offset + symbol index
+/// for each ARM64_RELOC_BRANCH26 entry.
+fn find_branch_relocs(o_bytes: &[u8]) -> Vec<(usize, u32)> {
+    let mut result = Vec::new();
+    if o_bytes.len() < 32 { return result; }
+    if u32::from_le_bytes(o_bytes[0..4].try_into().unwrap()) != MH_MAGIC_64 { return result; }
+    let ncmds = u32::from_le_bytes(o_bytes[16..20].try_into().unwrap());
+    let mut offset: usize = 32;
+    for _ in 0..ncmds {
+        if offset + 8 > o_bytes.len() { return result; }
+        let cmd = u32::from_le_bytes(o_bytes[offset..offset+4].try_into().unwrap());
+        let cmdsize = u32::from_le_bytes(o_bytes[offset+4..offset+8].try_into().unwrap()) as usize;
+        if cmd == LC_SEGMENT_64 {
+            let nsects = u32::from_le_bytes(o_bytes[offset+64..offset+68].try_into().unwrap()) as usize;
+            let sections_start = offset + 72;
+            for i in 0..nsects {
+                let sec_off = sections_start + i * 80;
+                if sec_off + 80 > o_bytes.len() { return result; }
+                // Check segname/sectname, or just process the first section
+                let sectname = &o_bytes[sec_off..sec_off+16];
+                if sectname != b"__text\0\0\0\0\0\0\0\0\0\0" { continue; }
+                let reloff = u32::from_le_bytes(o_bytes[sec_off+56..sec_off+60].try_into().unwrap()) as usize;
+                let nreloc = u32::from_le_bytes(o_bytes[sec_off+60..sec_off+64].try_into().unwrap()) as usize;
+                for j in 0..nreloc {
+                    let r_off = reloff + j * 8;
+                    if r_off + 8 > o_bytes.len() { return result; }
+                    let r_addr = i32::from_le_bytes(o_bytes[r_off..r_off+4].try_into().unwrap());
+                    let r_info = u32::from_le_bytes(o_bytes[r_off+4..r_off+8].try_into().unwrap());
+                    let r_type = (r_info >> 28) & 0xF; // bits 31:28
+                    let r_extern = (r_info >> 27) & 1; // bit 27
+                    let r_symbolnum = r_info & 0xFFFFFF; // bits 23:0
+                    // ARM64_RELOC_BRANCH26 = 2
+                    if r_type == 2 && r_extern == 1 {
+                        result.push((r_addr as usize, r_symbolnum));
+                    }
+                }
+            }
+        }
+        offset += cmdsize;
+        if offset >= o_bytes.len() { break; }
+    }
+    result
 }
 
-/// Expected instruction patterns (encoded as (mask, value) pairs).
-/// Used to verify that Clang produced the expected code.
-const RET: u32 = 0xD65F03C0;
-const STR_X0_X22: u32 = 0xF90002C0;
-const ADD_X22_X22_8: u32 = 0x910022D6;
-const SUB_X22_X22_8: u32 = 0xD10022D6;
-const LDR_X0_X22: u32 = 0xF94002C0;
+// ── Compilation ──────────────────────────────────────────────────────────
 
-/// Known stencil specifications: how to verify and extract holes from
-/// each compiled function.
-enum StencilSpec {
-    /// STENCIL: MOVZ #? (imm16), STR x0,[x22], ADD x22,+8, RET
-    LoadSmi16,
-    /// STENCIL: MOVZ #?, MOVK #? (upper 16), STR, ADD, RET
-    LoadSmi32,
-    /// STENCIL: STR x0,[x22], ADD x22,+8, RET
-    PushReg,
-    /// STENCIL: SUB x22,-8, LDR x0,[x22], RET
-    PopReg,
-    /// STENCIL: RET
-    Ret,
-}
-
-/// Compile a single C stencil file and extract its function body.
-fn compile_one(stencil_dir: &Path, c_file: &Path, spec: StencilSpec) -> Stencil {
-    // Derive stencil name from file stem
-    let name = c_file.file_stem().unwrap().to_str().unwrap().to_string();
-
-    // Compile with Clang
-    let obj_path = stencil_dir.join(format!("{}.o", name));
+fn compile_c(stencil_dir: &Path, src_stem: &str) -> Vec<u8> {
+    let c_file = stencil_dir.join(format!("{src_stem}.c"));
+    let obj_path = stencil_dir.join(format!("{src_stem}.o"));
     let output = Command::new("clang")
-        .args([
-            "-O2", "-c", "-ffreestanding",
-            "-target", "arm64-apple-macos",
-            "-o",
-        ])
+        .args(["-O2", "-c", "-ffreestanding", "-target", "arm64-apple-macos", "-o"])
         .arg(&obj_path)
-        .arg(c_file)
+        .arg(&c_file)
         .output()
         .expect("failed to execute clang");
-
-    if !output.status.success() {
-        panic!(
-            "clang failed compiling {}:\nstdout: {}\nstderr: {}",
-            c_file.display(),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    let obj_bytes = fs::read(&obj_path).unwrap();
-    let section = extract_text_section(&obj_bytes)
-        .unwrap_or_else(|| panic!("no __TEXT,__text section in {}", c_file.display()));
-
-    // Parse according to spec
-    let (bytes, holes) = parse_stencil(section, &name, spec);
-
-    Stencil { name, bytes, holes }
+    assert!(output.status.success(),
+        "clang failed compiling {}:\n{}", c_file.display(), String::from_utf8_lossy(&output.stderr));
+    fs::read(&obj_path).unwrap()
 }
 
-/// Parse a compiled stencil body, verify the instructions, and extract holes.
-fn parse_stencil(section: &[u8], _name: &str, spec: StencilSpec) -> (Vec<u8>, Vec<Hole>) {
-    match spec {
-        StencilSpec::LoadSmi16 => {
-            // Expected: MOVZ x0, #? (4), STR x0,[x22] (4), ADD x22,x22,#8 (4), RET (4)
-            assert!(section.len() >= 16, "load_smi_16 section too small: {} bytes", section.len());
-            let movz = decode_instr(section, 0);
-            let str_ = decode_instr(section, 4);
-            let add_ = decode_instr(section, 8);
-            let ret = decode_instr(section, 12);
-            assert_eq!(str_, STR_X0_X22, "load_smi_16[1]: expected STR {:#010x}, got {:#010x}", STR_X0_X22, str_);
-            assert_eq!(add_, ADD_X22_X22_8, "load_smi_16[2]: expected ADD {:#010x}, got {:#010x}", ADD_X22_X22_8, add_);
-            assert_eq!(ret, RET, "load_smi_16[3]: expected RET {:#010x}, got {:#010x}", RET, ret);
-            // Verify MOVZ pattern (opcode + Rd=0, imm16 varies)
-            let movz_base = movz & 0xFF80001Fu32;
-            assert_eq!(movz_base, 0xD2800000u32,
-                "load_smi_16[0]: expected MOVZ pattern {:#010x}, got {:#010x} (full: {:#010x})",
-                0xD2800000u32, movz_base, movz);
-            // Stencil body = MOVZ + STR + ADD (12 bytes). RET is epilogue, stripped.
-            let body = section[..12].to_vec();
-            let holes = vec![
-                Hole { byte_offset: 0, bit_offset: 5, bit_width: 16 }, // imm16 in MOVZ
-            ];
-            (body, holes)
-        }
-        StencilSpec::LoadSmi32 => {
-            // Expected: MOVZ x0, #? (4), MOVK x0, #?, lsl #16 (4), STR (4), ADD (4), RET (4)
-            assert!(section.len() >= 20, "load_smi_32 section too small: {} bytes", section.len());
-            let movz = decode_instr(section, 0);
-            let movk = decode_instr(section, 4);
-            let str_ = decode_instr(section, 8);
-            let add_ = decode_instr(section, 12);
-            let ret = decode_instr(section, 16);
-            assert_eq!(str_, STR_X0_X22, "load_smi_32[2]: expected STR {:#010x}, got {:#010x}", STR_X0_X22, str_);
-            assert_eq!(add_, ADD_X22_X22_8, "load_smi_32[3]: expected ADD {:#010x}, got {:#010x}", ADD_X22_X22_8, add_);
-            assert_eq!(ret, RET, "load_smi_32[4]: expected RET {:#010x}, got {:#010x}", RET, ret);
-            // MOVZ base
-            let movz_base = movz & 0xFF80001Fu32;
-            assert_eq!(movz_base, 0xD2800000u32,
-                "load_smi_32[0]: expected MOVZ {:#010x}, got {:#010x}",
-                0xD2800000u32, movz_base);
-            // MOVK base (same encoding but 0xF2800000 base)
-            let movk_base = movk & 0xFF80001Fu32;
-            assert_eq!(movk_base, 0xF2800000u32,
-                "load_smi_32[1]: expected MOVK {:#010x}, got {:#010x}",
-                0xF2800000u32, movk_base);
-            // Verify hw=1 (shift 16) for MOVK
-            let movk_hw = (movk >> 21) & 3;
-            assert_eq!(movk_hw, 1, "load_smi_32 MOVK expected hw=1, got {movk_hw}");
-            // Stencil body = MOVZ + MOVK + STR + ADD (16 bytes)
-            let body = section[..16].to_vec();
-            let holes = vec![
-                Hole { byte_offset: 0, bit_offset: 5, bit_width: 16 }, // lower 16 bits
-                Hole { byte_offset: 4, bit_offset: 5, bit_width: 16 }, // upper 16 bits
-            ];
-            (body, holes)
-        }
-        StencilSpec::PushReg => {
-            assert!(section.len() >= 12, "push_reg section too small: {} bytes", section.len());
-            let str_ = decode_instr(section, 0);
-            let add_ = decode_instr(section, 4);
-            let ret = decode_instr(section, 8);
-            assert_eq!(str_, STR_X0_X22, "push_reg[0]: expected STR {:#010x}, got {:#010x}", STR_X0_X22, str_);
-            assert_eq!(add_, ADD_X22_X22_8, "push_reg[1]: expected ADD {:#010x}, got {:#010x}", ADD_X22_X22_8, add_);
-            assert_eq!(ret, RET, "push_reg[2]: expected RET {:#010x}, got {:#010x}", RET, ret);
-            let body = section[..8].to_vec();
-            (body, vec![])
-        }
-        StencilSpec::PopReg => {
-            assert!(section.len() >= 12, "pop_reg section too small: {} bytes", section.len());
-            let sub_ = decode_instr(section, 0);
-            let ldr_ = decode_instr(section, 4);
-            let ret = decode_instr(section, 8);
-            assert_eq!(sub_, SUB_X22_X22_8, "pop_reg[0]: expected SUB {:#010x}, got {:#010x}", SUB_X22_X22_8, sub_);
-            assert_eq!(ldr_, LDR_X0_X22, "pop_reg[1]: expected LDR {:#010x}, got {:#010x}", LDR_X0_X22, ldr_);
-            assert_eq!(ret, RET, "pop_reg[2]: expected RET {:#010x}, got {:#010x}", RET, ret);
-            let body = section[..8].to_vec();
-            (body, vec![])
-        }
-        StencilSpec::Ret => {
-            assert!(section.len() >= 4, "ret section too small: {} bytes", section.len());
-            let ret = decode_instr(section, 0);
-            assert_eq!(ret, RET, "ret[0]: expected RET {:#010x}, got {:#010x}", RET, ret);
-            let body = section[..4].to_vec();
-            (body, vec![])
-        }
-    }
+/// Compile a runtime helper function, strip its prologue/epilogue, and return the body bytes.
+fn compile_helper(stencil_dir: &Path, name: &str) -> Helper {
+    let obj = compile_c(stencil_dir, name);
+    let section = extract_text_section(&obj).unwrap_or_else(|| panic!("helper {name}: no text section"));
+
+    // rune_push(int64_t val):
+    //   stp x22, x21, [sp, #-16]!   ; prologue (4 bytes)
+    //   str x0, [x22]                ; body (4 bytes)
+    //   add x22, x22, #8             ; body (4 bytes)
+    //   ldp x22, x21, [sp], #16     ; epilogue (4 bytes)
+    //   ret                           ; epilogue (4 bytes)
+    // Total: 20 bytes. Body at offset 4..12.
+    let expected_prologue: u32 = 0xA9BF57F6; // stp x22, x21, [sp, #-16]!
+    let expected_epilogue: u32 = 0xA8C157F6; // ldp x22, x21, [sp], #16
+
+    let prologue = u32::from_le_bytes(section[0..4].try_into().unwrap());
+    assert_eq!(prologue, expected_prologue, "helper {name}: expected prologue {:#010x}, got {:#010x}", expected_prologue, prologue);
+
+    let body_str = u32::from_le_bytes(section[4..8].try_into().unwrap());
+    assert_eq!(body_str, 0xF90002C0u32, "helper {name}[4]: expected STR x0,[x22], got {:#010x}", body_str);
+
+    let body_add = u32::from_le_bytes(section[8..12].try_into().unwrap());
+    assert_eq!(body_add, 0x910022D6u32, "helper {name}[8]: expected ADD x22,x22,#8, got {:#010x}", body_add);
+
+    let epilogue = u32::from_le_bytes(section[12..16].try_into().unwrap());
+    assert_eq!(epilogue, expected_epilogue, "helper {name}: expected epilogue {:#010x}, got {:#010x}", expected_epilogue, epilogue);
+
+    // Verify RET at end
+    let ret = u32::from_le_bytes(section[16..20].try_into().unwrap());
+    assert_eq!(ret, 0xD65F03C0u32, "helper {name}[16]: expected RET, got {:#010x}", ret);
+
+    Helper { name: name.to_string(), bytes: section[4..12].to_vec() }
 }
 
-/// Compile all stencils.
-fn compile_stencils(stencil_dir: &Path) -> Vec<Stencil> {
-    let mut stencils = Vec::new();
+/// Compile a naked-asm stencil, verify instructions, strip RET.
+fn emit_naked_stencil(emitter: &mut Emitter, stencil_dir: &Path, name: &str,
+                       checks: &[(usize, u32, &str)], holes: &[HoleSpec], body_len: usize) {
+    let obj = compile_c(stencil_dir, name);
+    let section = extract_text_section(&obj).unwrap_or_else(|| panic!("{name}: no text section"));
 
-    let specs: Vec<(&str, StencilSpec)> = vec![
-        ("load_smi_16", StencilSpec::LoadSmi16),
-        ("load_smi_32", StencilSpec::LoadSmi32),
-        ("push_reg",    StencilSpec::PushReg),
-        ("pop_reg",     StencilSpec::PopReg),
-        ("ret",         StencilSpec::Ret),
-    ];
-
-    for (file_stem, spec) in specs {
-        let c_file = stencil_dir.join(format!("{file_stem}.c"));
-        let stencil = compile_one(stencil_dir, &c_file, spec);
-        stencils.push(stencil);
+    for (offset, expected, desc) in checks {
+        let instr = u32::from_le_bytes(section[*offset..offset+4].try_into().unwrap());
+        assert_eq!(instr, *expected, "{name}[{}]: expected {} ({:#010x}), got {:#010x}", offset, desc, expected, instr);
     }
 
-    stencils
+    let body = section[..body_len].to_vec();
+    emitter.add_stencil(Stencil {
+        name: name.to_string(),
+        bytes: body,
+        holes: holes.iter().map(|h| Hole { byte_offset: h.byte_offset, bit_offset: h.bit_offset, bit_width: h.bit_width }).collect(),
+        link_holes: vec![],
+    });
 }
 
-// ── Code generation ─────────────────────────────────────────────────────
+/// Compile a real C stencil (calls a helper), verify instructions, extract
+/// value holes and link holes.
+fn emit_real_c_stencil(emitter: &mut Emitter, stencil_dir: &Path, name: &str,
+                        value_checks: &[ValueCheck],
+                        holes: &[HoleSpec], link_holes: &[LinkHoleSpec]) {
+    let obj = compile_c(stencil_dir, name);
+    let section = extract_text_section(&obj).unwrap_or_else(|| panic!("{name}: no text section"));
 
-fn render_stencils(stencils: &[Stencil]) -> String {
-    let mut out = String::new();
-    out.push_str("// Auto-generated by build.rs — do not edit.\n");
-    out.push_str("#[allow(dead_code)]\n");
-    out.push_str("pub struct StencilDef {\n");
-    out.push_str("    pub name: &'static str,\n");
-    out.push_str("    pub bytes: &'static [u8],\n");
-    out.push_str("    pub holes: &'static [HoleDef],\n");
-    out.push_str("}\n\n");
-    out.push_str("#[allow(dead_code)]\n");
-    out.push_str("#[derive(Clone, Copy)]\n");
-    out.push_str("pub struct HoleDef {\n");
-    out.push_str("    pub byte_offset: usize,\n");
-    out.push_str("    pub bit_offset: u8,\n");
-    out.push_str("    pub bit_width: u8,\n");
-    out.push_str("}\n\n");
-
-    for s in stencils {
-        out.push_str(&format!(
-            "pub const {}_BYTES: &[u8] = &[{}];\n",
-            s.name.to_uppercase(),
-            s.bytes.iter().map(|b| format!("{b:#04x}")).collect::<Vec<_>>().join(", ")
-        ));
-        if s.holes.is_empty() {
-            out.push_str(&format!(
-                "pub const {}_HOLES: &[HoleDef] = &[];\n",
-                s.name.to_uppercase()
-            ));
-        } else {
-            out.push_str(&format!(
-                "pub const {}_HOLES: &[HoleDef] = &[{}];\n",
-                s.name.to_uppercase(),
-                s.holes.iter().map(|h| {
-                    format!("HoleDef {{ byte_offset: {}, bit_offset: {}, bit_width: {} }}",
-                        h.byte_offset, h.bit_offset, h.bit_width)
-                }).collect::<Vec<_>>().join(", ")
-            ));
-        }
+    // Verify expected instruction pattern
+    for vc in value_checks {
+        let instr = u32::from_le_bytes(section[vc.offset..vc.offset+4].try_into().unwrap());
+        let masked = instr & vc.mask;
+        assert_eq!(masked, vc.expected,
+            "{name}[{}]: expected {} ({:#010x}), got masked={:#010x} full={:#010x}",
+            vc.offset, vc.desc, vc.expected, masked, instr);
     }
 
-    out.push_str("\npub static ALL_STENCILS: &[StencilDef] = &[\n");
-    for s in stencils {
-        out.push_str(&format!(
-            "    StencilDef {{ name: \"{}\", bytes: {}_BYTES, holes: {}_HOLES }},\n",
-            s.name, s.name.to_uppercase(), s.name.to_uppercase()
-        ));
-    }
-    out.push_str("];\n");
+    // Parse branch relocations for link holes
+    let branch_relocs = find_branch_relocs(&obj);
 
-    out
+    // Verify we found the expected link holes
+    assert_eq!(branch_relocs.len(), link_holes.len(),
+        "{name}: found {} branch relocs, expected {} link holes",
+        branch_relocs.len(), link_holes.len());
+
+    // The stencil body is from offset 0 to just before the epilogue.
+    // For a tail-call stencil: MOV[Z] + B = 8 bytes (no RET).
+    // We find the body length from the last expected instruction
+    // (the branch is the tail-call, no epilogue after it).
+    let last_value_offset = value_checks.iter().map(|vc| vc.offset + 4).max().unwrap_or(0);
+    // The branch instruction is a link hole — include it in the body.
+    let branch_ends_at = link_holes.iter().map(|lh| lh.byte_offset + 4).max().unwrap_or(0);
+    let body_end = std::cmp::max(last_value_offset, branch_ends_at);
+    let body = section[..body_end].to_vec();
+
+    emitter.add_stencil(Stencil {
+        name: name.to_string(),
+        bytes: body,
+        holes: holes.iter().map(|h| Hole { byte_offset: h.byte_offset, bit_offset: h.bit_offset, bit_width: h.bit_width }).collect(),
+        link_holes: link_holes.iter().map(|lh| LinkHole {
+            byte_offset: lh.byte_offset,
+            helper_name: lh.helper_name.to_string(),
+        }).collect(),
+    });
 }

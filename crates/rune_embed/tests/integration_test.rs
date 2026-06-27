@@ -1903,6 +1903,77 @@ fn test_jit_inline_feature_flag() {
 
 #[test]
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn test_jit_inline_skip_noneligible() {
+    // Functions that need a frame (e.g., using 'let') should not be inlined.
+    // With --inline enabled, the InlinePlan eligibility check should skip
+    // such functions.  The result must be identical to --no-inline.
+    let mut ctx_inline = Context::new_small();
+    ctx_inline.enable_inlining = true;
+    let r1 = ctx_inline
+        .eval(
+            r#"
+            function f(x) { let y = x + 1; return y; }
+            var s = 0;
+            for (var i = 0; i < 100; i++) { s = f(s); }
+            s
+        "#,
+        )
+        .unwrap();
+
+    let mut ctx_no_inline = Context::new_small();
+    ctx_no_inline.enable_inlining = false;
+    let r2 = ctx_no_inline
+        .eval(
+            r#"
+            function f(x) { let y = x + 1; return y; }
+            var s = 0;
+            for (var i = 0; i < 100; i++) { s = f(s); }
+            s
+        "#,
+        )
+        .unwrap();
+
+    assert_eq!(
+        r1, r2,
+        "inlining skip for frame-needing function should produce same result"
+    );
+}
+
+#[test]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn test_jit_inline_no_bail() {
+    // Simple frame-less function (add(a,b)) should inline cleanly with
+    // zero bailouts when --inline is enabled.
+    let mut ctx = Context::new_small();
+    ctx.enable_inlining = true;
+    let r = ctx
+        .eval(
+            r#"
+            function add(a, b) { return a + b; }
+            var s = 0;
+            for (var i = 0; i < 100; i++) { s = add(s, i); }
+            s
+        "#,
+        )
+        .unwrap();
+    assert_eq!(
+        r.as_smi(),
+        Some(4950),
+        "inlined add() should produce correct result"
+    );
+    assert!(
+        ctx.vm().jit_entry_count > 0,
+        "JIT must have entered the loop trace"
+    );
+    assert_eq!(
+        ctx.vm().jit_bailout_count,
+        0,
+        "inlined add() should not cause bailouts"
+    );
+}
+
+#[test]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn test_jit_typeof_native() {
     // TypeOf is now native — the JIT calls typeof_helper instead of bailing.
     // This test verifies all typeof results and that the JIT enters + no bail.

@@ -3878,4 +3878,42 @@ mod instanceof_tests {
             .unwrap();
         assert_eq!(r.as_smi(), Some(42), "GC stress: 100K allocs (non-closure)");
     }
+
+    #[test]
+    fn test_gc_preserves_global_heap_object() {
+        let mut ctx = Context::new();
+        ctx.eval("var obj = {x: 1, y: 2, z: 3};").unwrap();
+        let r = ctx
+            .eval(
+                r#"
+            var arr = [];
+            for (var i = 0; i < 100000; i = i + 1) {
+                arr.push({n: i, m: i + 1});
+            }
+            obj.x + obj.y + obj.z
+            "#,
+            )
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(6), "global heap object corrupted by GC");
+    }
+
+    #[test]
+    fn test_gc_during_jit_call_preserves_locals() {
+        let mut ctx = Context::new();
+        let r = ctx
+            .eval(
+                r#"
+            function make(n) {
+                var arr = [];
+                for (var i = 0; i < n; i = i + 1) { arr.push({x: i}); }
+                return arr.length;
+            }
+            var total = 0;
+            for (var i = 0; i < 1000; i = i + 1) { total = total + make(200); }
+            total
+            "#,
+            )
+            .unwrap();
+        assert_eq!(r.as_smi(), Some(200_000), "jit_locals_buffer corrupted by GC mid-call");
+    }
 }

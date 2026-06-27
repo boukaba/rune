@@ -1667,6 +1667,29 @@ Headline results from `cargo bench -p rune_bench --features jit`. Full output at
 | `jit_hot_function_1M` | 120 ms | 3.19 ms | **37×** | 40× → 37× (noise) | Phase F (P0) |
 | `array_push_grow_100k` | 47 ms | 7.21 ms | **6.5×** | 9× → 6.5× | ArrayPush JIT (P1) |
 
+### P22 GC Root Tracing Gap — First Trustworthy Baseline (2026-06-27, `fd938da`)
+
+**The numbers above are from before P22 was fixed.** After fixing P22 (4 missing GC roots), all five Criterion benchmarks were re-run. The Criterion "regression" labels (3–7%) compare against the pre-P22 baseline — actual change is within noise or attributable to the root-registration overhead on GC-heavy workloads.
+
+| Benchmark | Post-P22 (median) | JIT entries | Bailouts | Rate | Notes |
+|---|---|---|---|---|---|
+| `loop_sum_smi_1M` | 124 ms | 1 | 0 | 0% | JIT records one trace for the Smi-only loop |
+| `array_push_grow_100k` | 60 ms | N/A | — | — | 100K elements × 16 MiB semispace (passes) |
+| `proto_chain_lookup_5deep_1M` | 134 ms | 1 | 0 | 0% | Monomorphic trace, 1 shape, 0 bailouts |
+| `jit_hot_function_1M` | 133 ms | 999,952 | 0 | 0% | JIT fires on every call to `add()` |
+| `poly_prop_10shapes_1M` | 269 ms | 199,991 | 199,990 | 99.9995% | N=8 IC table cannot hold 10 shapes |
+| `parse_emit_execute_hello` | 279 µs | — | — | — | No change detected |
+
+**IC stats (poly_prop):** 200,104 lookups, 200,083 hits, 200,042 misses — interpreter IC hit rate ≈100%. The JIT trace bails because its separate N=8 vector IC table doesn't cover 10 shapes.
+
+**Key finding:** JIT works correctly for monomorphic traces but is defeated by the 8-entry IC cap on 10-shape access. This is the primary `poly_prop` bottleneck.
+
+**Regression tests added:**
+- `test_gc_preserves_global_heap_object` — 100K allocations with global heap object (verifies globals rooted)
+- `test_gc_during_jit_call_preserves_locals` — JIT-hot function calls callee that allocates 200K (verifies jit_locals_buffer rooted)
+
+All 309 integration tests pass (0 failed, 2 ignored). Workspace: all green (fmt + clippy + test).
+
 ---
 
 ## Arxiv Literature Review — Acceleration Hints for Rune

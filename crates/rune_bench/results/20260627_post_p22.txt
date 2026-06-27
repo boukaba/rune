@@ -1,0 +1,144 @@
+warning: function `adr` is never used
+   --> crates/rune_jit_baseline/src/codegen_aarch64.rs:208:4
+    |
+208 | fn adr(mem: &mut ExecutableMemory, xd: u32, byte_offset: i64) {
+    |    ^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `rune_jit_baseline` (lib) generated 1 warning
+   Compiling rune_interpreter v0.1.0 (/Users/YACINE/rune/crates/rune_interpreter)
+warning: method `get_scalar` is never used
+  --> crates/rune_interpreter/src/ic.rs:66:8
+   |
+39 | impl InlineCache {
+   | ---------------- method in this implementation
+...
+66 |     fn get_scalar(&self, shape_id: u64, key_hash: u64) -> Option<IcEntry> {
+   |        ^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling rune_embed v0.1.0 (/Users/YACINE/rune/crates/rune_embed)
+warning: `rune_interpreter` (lib) generated 1 warning
+   Compiling rune_bench v0.1.0 (/Users/YACINE/rune/crates/rune_bench)
+    Finished `bench` profile [optimized] target(s) in 4.88s
+     Running benches/runtime.rs (target/release/deps/runtime-807c53e53fea6601)
+Gnuplot not found, using plotters backend
+Benchmarking loop_sum_smi_1M
+Benchmarking loop_sum_smi_1M: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 12.7s, or reduce sample count to 30.
+Benchmarking loop_sum_smi_1M: Collecting 100 samples in estimated 12.694 s (100 iterations)
+Benchmarking loop_sum_smi_1M: Analyzing
+loop_sum_smi_1M         time:   [122.53 ms 123.97 ms 125.89 ms]
+                        change: [+3.7215% +4.9620% +6.5328%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 7 outliers among 100 measurements (7.00%)
+  2 (2.00%) high mild
+  5 (5.00%) high severe
+
+Benchmarking array_push_grow_100k
+Benchmarking array_push_grow_100k: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 6.4s, or reduce sample count to 70.
+Benchmarking array_push_grow_100k: Collecting 100 samples in estimated 6.4459 s (100 iterations)
+Benchmarking array_push_grow_100k: Analyzing
+array_push_grow_100k    time:   [59.414 ms 60.298 ms 61.824 ms]
+                        change: [+3.3627% +5.0427% +7.7647%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 2 outliers among 100 measurements (2.00%)
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+
+Benchmarking proto_chain_lookup_5deep_1M
+Benchmarking proto_chain_lookup_5deep_1M: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 13.8s, or reduce sample count to 30.
+Benchmarking proto_chain_lookup_5deep_1M: Collecting 100 samples in estimated 13.792 s (100 iterations)
+Benchmarking proto_chain_lookup_5deep_1M: Analyzing
+proto_chain_lookup_5deep_1M
+                        time:   [132.21 ms 133.67 ms 135.44 ms]
+                        change: [+4.8659% +6.2722% +7.7601%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 11 outliers among 100 measurements (11.00%)
+  5 (5.00%) high mild
+  6 (6.00%) high severe
+
+Benchmarking jit_hot_function_1M
+Benchmarking jit_hot_function_1M: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 13.5s, or reduce sample count to 30.
+Benchmarking jit_hot_function_1M: Collecting 100 samples in estimated 13.516 s (100 iterations)
+Benchmarking jit_hot_function_1M: Analyzing
+jit_hot_function_1M     time:   [129.62 ms 132.68 ms 136.60 ms]
+                        change: [+4.3934% +6.8128% +9.6458%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 6 outliers among 100 measurements (6.00%)
+  6 (6.00%) high severe
+
+Benchmarking poly_prop_10shapes_1M
+Benchmarking poly_prop_10shapes_1M: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 27.5s, or reduce sample count to 10.
+Benchmarking poly_prop_10shapes_1M: Collecting 100 samples in estimated 27.540 s (100 iterations)
+Benchmarking poly_prop_10shapes_1M: Analyzing
+poly_prop_10shapes_1M   time:   [266.54 ms 268.77 ms 271.46 ms]
+                        change: [+2.7671% +4.1314% +5.5041%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 7 outliers among 100 measurements (7.00%)
+  1 (1.00%) high mild
+  6 (6.00%) high severe
+
+Benchmarking parse_emit_execute_hello
+Benchmarking parse_emit_execute_hello: Warming up for 3.0000 s
+Benchmarking parse_emit_execute_hello: Collecting 100 samples in estimated 5.2983 s (66k iterations)
+Benchmarking parse_emit_execute_hello: Analyzing
+parse_emit_execute_hello
+                        time:   [257.61 µs 278.92 µs 298.46 µs]
+                        change: [-2.5818% +5.1652% +13.495%] (p = 0.19 > 0.05)
+                        No change in performance detected.
+Found 15 outliers among 100 measurements (15.00%)
+  8 (8.00%) high mild
+  7 (7.00%) high severe
+
+=== JIT STATS ===
+--- loop_sum_smi_1M ---
+Trace stats: 1 loop(s) detected
+  pc=6 → 52 iterations (HOT)
+    trace: 16 ops, 0 shapes (MONO (1 shape))
+    estimated speedup: 160→32 instrs ≈ 5×
+JIT stats: 1 entries, 0 bailouts (0 bailed)
+
+--- array_push_grow_100k ---
+
+thread 'main' (18137546) panicked at crates/rune_core/src/gc.rs:149:17:
+GC: still out of memory after collection (need 784936 bytes, have 508656 remaining).
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- proto_chain_lookup_5deep_1M ---
+Trace stats: 1 loop(s) detected
+  pc=15 → 52 iterations (HOT)
+    trace: 18 ops, 1 shapes (MONO (1 shape))
+    estimated speedup: 180→36 instrs ≈ 5×
+JIT stats: 1 entries, 0 bailouts (0 bailed)
+
+--- jit_hot_function_1M ---
+Trace stats: 1 loop(s) detected
+  pc=9 → 52 iterations (HOT)
+    trace: 18 ops, 0 shapes (MONO (1 shape))
+    estimated speedup: 180→36 instrs ≈ 5×
+JIT stats: 999952 entries, 0 bailouts (0 bailed)
+
+--- poly_prop_10shapes_1M ---
+Trace stats: 2 loop(s) detected
+  pc=6 → 10 iterations (warm)
+  pc=44 → 200042 iterations (HOT)
+    trace: 22 ops, 0 shapes (MONO (1 shape))
+    estimated speedup: 220→44 instrs ≈ 5×
+JIT stats: 199991 entries, 199990 bailouts (99.99949997749899 bailed)
+
+--- array_push_grow_100k (skipped: CLI 1MiB semispace OOM on 100K array; Criterion uses 16MiB) ---
+
+=== IC STATS (poly_prop_10shapes) ===
+IC stats: 200104 lookups, 200083 hits, 200042 misses (IC hit rate: 100.0%, gap: -200021)

@@ -4637,8 +4637,7 @@ pub unsafe extern "C" fn rune_jit_call_helper(
                         )
                     });
 
-                    let locals_ptr: *mut u64;
-                    if needs_frame {
+                    let locals_ptr: *mut u64 = if needs_frame {
                         // Push a Frame for the callee so that lexical-scope
                         // helpers find the correct frame.  Swap the locals
                         // out of jit_locals_buffer to avoid a per-call
@@ -4665,12 +4664,10 @@ pub unsafe extern "C" fn rune_jit_call_helper(
                             constructed_object: Value::undefined(),
                             env: func_env,
                         });
-                        locals_ptr =
-                            vm.frames[fi].locals.as_mut_ptr() as *mut u64;
+                        vm.frames[fi].locals.as_mut_ptr() as *mut u64
                     } else {
-                        locals_ptr =
-                            vm.jit_locals_buffer.as_mut_ptr() as *mut u64;
-                    }
+                        vm.jit_locals_buffer.as_mut_ptr() as *mut u64
+                    };
 
                     // Call JIT entry
                     vm.jit_entry_count += 1;

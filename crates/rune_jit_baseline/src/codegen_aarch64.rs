@@ -204,14 +204,6 @@ fn ret(mem: &mut ExecutableMemory) {
     emit(mem, 0xD65F03C0);
 }
 
-/// ADR Xd, #offset  (PC-relative, offset in bytes, ±1MB)
-fn adr(mem: &mut ExecutableMemory, xd: u32, byte_offset: i64) {
-    let imm = byte_offset;
-    let immlo = (imm & 0x3) as u32;
-    let immhi = ((imm >> 2) & 0x7FFFF) as u32;
-    emit(mem, 0x10000000 | (immlo << 29) | (immhi << 5) | xd);
-}
-
 // LDP helper removed — use two ldr_off calls instead of the
 // pair load to avoid encoding bugs. The compiler will fuse them
 // in hardware (Apple M-series load fusion).

@@ -663,6 +663,7 @@ impl Vm {
                         original_pc: pc,
                         shape_id: 0,
                         cost: 1,
+                        ic_index: instr.ic_index,
                     });
                 }
                 // Stop recording when we've looped back to the target
@@ -3413,10 +3414,42 @@ impl Vm {
         } else {
             &trace.ops[..]
         };
+        // Snapshot interpreter ICs for trace-compiled property accesses.
+        let mut trace_ic_tables: Vec<rune_jit_baseline::ic::TraceIcTable> =
+            Vec::with_capacity(ops_slice.len());
         for t in ops_slice {
             let opcode: Opcode = unsafe { std::mem::transmute(t.opcode) };
             let mut operands = t.operands.clone();
             trace_to_original_pc.push(t.original_pc);
+            // Snapshot InlineCache for property IC instructions
+            let needs_ic = matches!(opcode, Opcode::LoadPropertyIC | Opcode::StorePropertyIC);
+            if needs_ic && t.ic_index >= 0 {
+                let ic_idx = t.ic_index as usize;
+                if ic_idx < self.ics.len() {
+                    let ic = &self.ics[ic_idx];
+                    let mut entries: [rune_jit_baseline::ic::TraceIcEntry; 8] =
+                        [rune_jit_baseline::ic::TraceIcEntry {
+                            shape_id: 0,
+                            slot_offset: 0,
+                        }; 8];
+                    let mut count = 0;
+                    for (k, v) in &ic.entries {
+                        if count >= 8 {
+                            break;
+                        }
+                        entries[count] = rune_jit_baseline::ic::TraceIcEntry {
+                            shape_id: k.shape_id,
+                            slot_offset: 32 + (v.offset as u64) * 8,
+                        };
+                        count += 1;
+                    }
+                    trace_ic_tables.push(rune_jit_baseline::ic::TraceIcTable { entries, count });
+                } else {
+                    trace_ic_tables.push(rune_jit_baseline::ic::TraceIcTable::default());
+                }
+            } else {
+                trace_ic_tables.push(rune_jit_baseline::ic::TraceIcTable::default());
+            }
             // Remap branch targets from original bytecode indices to in-trace
             // indices.
             match opcode {
@@ -3471,7 +3504,8 @@ impl Vm {
             return; // trace contains unsupported opcodes (strings, objects, etc.)
         }
 
-        let codegen = Aarch64CodeGen::new(prog.instructions.len());
+        let codegen = Aarch64CodeGen::new(prog.instructions.len())
+            .with_trace_ic_tables(trace_ic_tables);
         // Leak the program so its address stays valid for the compiled trace's
         // embedded prog_ptr reference (used by LoadStringConst, globals, etc.).
         let leaked_prog = Box::leak(Box::new(prog));

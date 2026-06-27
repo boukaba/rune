@@ -195,6 +195,8 @@ pub struct TraceOp {
     pub shape_id: u64,
     /// Number of times this opcode would dispatch in the interpreter.
     pub cost: u32,
+    /// IC index for LoadPropertyIC/StorePropertyIC (−1 = none).
+    pub ic_index: i64,
 }
 
 /// A recorded trace of one hot-loop iteration.

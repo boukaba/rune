@@ -13,6 +13,7 @@
 /// dedicated pointer (x22) into `JitVmState::jit_stack` at offset 0 from the
 /// VM pointer.
 use crate::assembler::ExecutableMemory;
+use crate::ic::TraceIcTable;
 use crate::{BailoutPoint, BailoutReason, BailoutTable, CompiledFunction};
 use rune_bytecode::opcode::Opcode;
 
@@ -203,6 +204,28 @@ fn ret(mem: &mut ExecutableMemory) {
     emit(mem, 0xD65F03C0);
 }
 
+/// ADR Xd, #offset  (PC-relative, offset in bytes, ±1MB)
+fn adr(mem: &mut ExecutableMemory, xd: u32, byte_offset: i64) {
+    let imm = byte_offset as i64;
+    let immlo = ((imm >> 0) & 0x3) as u32;
+    let immhi = ((imm >> 2) & 0x7FFFF) as u32;
+    emit(mem, 0x10000000 | (immlo << 29) | (immhi << 5) | xd);
+}
+
+// LDP helper removed — use two ldr_off calls instead of the
+// pair load to avoid encoding bugs. The compiler will fuse them
+// in hardware (Apple M-series load fusion).
+
+/// LDR Xt, [Xn, Xm, LSL #0]  (register offset)
+fn ldr_reg(mem: &mut ExecutableMemory, xt: u32, xn: u32, xm: u32) {
+    emit(mem, 0xF8600800 | (xm << 16) | (3 << 13) | (xn << 5) | xt);
+}
+
+/// STR Xt, [Xn, Xm, LSL #0]  (register offset)
+fn str_reg(mem: &mut ExecutableMemory, xt: u32, xn: u32, xm: u32) {
+    emit(mem, 0xF8200800 | (xm << 16) | (3 << 13) | (xn << 5) | xt);
+}
+
 
 fn push_callee_saved(mem: &mut ExecutableMemory) {
     let mut stp = |rt: u32, rt2: u32| emit(mem, 0xA9BF0000 | (rt2 << 10) | (31 << 5) | rt);
@@ -228,6 +251,14 @@ fn pop_callee_saved(mem: &mut ExecutableMemory) {
 ///
 /// The JIT value stack lives in VM heap memory (`JitVmState::jit_stack`) so
 /// that JIT pages on macOS Apple Silicon do not need to write through `sp`.
+/// A pending ADR-to-IC-table patch. The ADR at `adr_offset` needs to be
+/// fixed up to point to the 128-byte (8-entry) table data written at a
+/// later offset in the emitted code.
+struct IcTablePatch {
+    adr_offset: usize,
+    table: TraceIcTable,
+}
+
 pub struct Aarch64CodeGen {
     mem: ExecutableMemory,
     bc_to_native: Vec<usize>,
@@ -237,6 +268,14 @@ pub struct Aarch64CodeGen {
     /// Initial offset added to x22 (JIT stack pointer) during prologue.
     /// Used by tests that pre-populate the JIT stack.
     jit_stack_offset: u32,
+    /// Polymorphic IC tables for trace-compiled property accesses.
+    /// Indexed by trace instruction position; empty tables (count=0) mean
+    /// single-guard code is used.
+    ic_tables: Vec<TraceIcTable>,
+    /// Pending ADR-to-table patches collected during compilation.
+    /// Resolved at the end of `compile()` by writing table data and
+    /// patching the ADR instructions.
+    ic_table_patches: Vec<IcTablePatch>,
 }
 
 impl Aarch64CodeGen {
@@ -249,6 +288,8 @@ impl Aarch64CodeGen {
             bailout_table: Vec::new(),
             stack_depth: 0,
             jit_stack_offset: 0,
+            ic_tables: Vec::new(),
+            ic_table_patches: Vec::new(),
         }
     }
 
@@ -256,6 +297,11 @@ impl Aarch64CodeGen {
     /// Allows pre-populated values on the JIT stack to be read correctly.
     pub fn with_jit_stack_offset(mut self, offset: u32) -> Self {
         self.jit_stack_offset = offset;
+        self
+    }
+
+    pub fn with_trace_ic_tables(mut self, tables: Vec<TraceIcTable>) -> Self {
+        self.ic_tables = tables;
         self
     }
 
@@ -1029,7 +1075,7 @@ impl Aarch64CodeGen {
                     let patch_oob = self.mem.current_offset();
                     emit(&mut self.mem, 0x54000009); // B.LS miss (index ≥ len)
                     add_imm(&mut self.mem, 5, 1, 32);// x5 = x1 + 32 (elements)
-                    emit(&mut self.mem, 0xD86678A0); // LDR x0, [x5, x6, LSL #3]
+                    emit(&mut self.mem, 0xF86678A0); // LDR x0, [x5, x6, LSL #3]
                     let b_done = self.mem.current_offset();
                     emit(&mut self.mem, 0x14000000); // B done (skip miss path)
                     // === Miss: restore stack, bail to interpreter ===
@@ -1068,145 +1114,206 @@ impl Aarch64CodeGen {
                     let shape_id = instr.operands[0] as u64;
                     let offset = instr.operands[1] as u32;
                     let proto_depth = instr.operands.get(2).copied().unwrap_or(0) as u32;
-                    // Pop key (pushed by preceding LoadStringConst); discard in fast path
+                    let ic_table = self.ic_tables.get(bc_idx).filter(|t| t.count > 1).cloned();
                     self.pop();                     // x0 = key
                     mov_reg(&mut self.mem, 7, 0);   // x7 = key (saved for miss path)
                     self.pop();                     // x0 = object
-                    // Save object pointer in x1 for validation + property load
-                    mov_reg(&mut self.mem, 1, 0);
-                    // Test bit 0: Smi → miss
-                    movz(&mut self.mem, 2, 1);          // x2 = 1
-                    emit(&mut self.mem, 0xEA02003F);    // TST x1, x2 (ANDS XZR, X1, X2)
+                    mov_reg(&mut self.mem, 1, 0);   // x1 = object
+                    movz(&mut self.mem, 2, 1);
+                    emit(&mut self.mem, 0xEA02003F);    // TST x1, x2
                     let patch_smi = self.mem.current_offset();
-                    emit(&mut self.mem, 0x54000001);    // B.NE +0 (patched → miss)
-                    // CMP x1, #6 (sentinel ≤ 6 → miss)
-                    emit(&mut self.mem, 0xF100183F);    // CMP x1, #6 (SUBS XZR, X1, #6)
+                    emit(&mut self.mem, 0x54000001);    // B.NE +0
+                    emit(&mut self.mem, 0xF100183F);    // CMP x1, #6
                     let patch_sentinel = self.mem.current_offset();
-                    emit(&mut self.mem, 0x54000009);    // B.LS +0 (patched → miss)
-                    // Load shape ptr from [x1 + 8]
-                    ldr_off(&mut self.mem, 2, 1, 8);    // x2 = [x1 + 8] (shape ptr)
-                    // Load shape.id from [x2]
-                    ldr_off(&mut self.mem, 3, 2, 0);    // x3 = [x2] (shape.id)
-                    // Compare with expected shape_id
-                    // shape_id may be 0 for cold ICs (no shape recorded yet).
-                    // In that case the guard always fails, but the bailout path
-                    // handles it correctly. Don't assert non-zero.
-                    mov_imm64(&mut self.mem, 4, shape_id);
-                    cmp_reg(&mut self.mem, 3, 4);
-                    let patch_shape = self.mem.current_offset();
-                    emit(&mut self.mem, 0x54000001);    // B.NE +0 (patched → miss)
-                    // Walk prototype chain for inherited properties
-                    if proto_depth > 0 {
-                        for _ in 0..proto_depth {
-                            ldr_off(&mut self.mem, 1, 1, 24);  // x1 = [x1 + 24] (prototype)
+                    emit(&mut self.mem, 0x54000009);    // B.LS +0
+                    ldr_off(&mut self.mem, 2, 1, 8);    // x2 = [x1 + 8]
+                    ldr_off(&mut self.mem, 3, 2, 0);    // x3 = [x2]
+                    let mut miss_patches: Vec<(usize, u32)> = Vec::new();
+                    let mut done_patches: Vec<usize> = Vec::new();
+                    if let Some(table) = ic_table {
+                        // === Polymorphic: N-entry scalar scan ===
+                        let n = table.count;
+                        let adr_off = self.mem.current_offset();
+                        emit(&mut self.mem, 0x10000000 | 4); // ADR x4, 0 (placeholder)
+                        let mut eq_offsets: Vec<usize> = Vec::with_capacity(n);
+                        for i in 0..n {
+                            let base = (i as u32) * 16;
+                            ldr_off(&mut self.mem, 5, 4, base);       // x5 = shape_id[i]
+                            ldr_off(&mut self.mem, 6, 4, base + 8);   // x6 = slot_offset[i]
+                            cmp_reg(&mut self.mem, 5, 3);
+                            eq_offsets.push(self.mem.current_offset());
+                            emit(&mut self.mem, 0x54000000); // B.EQ +0 (→ found)
+                        }
+                        let b_miss = self.mem.current_offset();
+                        emit(&mut self.mem, 0x14000000);    // B +0 (→ miss)
+                        let found_off = self.mem.current_offset();
+                        // Patch B.EQ entries → found_off (known now)
+                        for &eq in &eq_offsets {
+                            let d = ((found_off as i64 - eq as i64) / 4) as u32;
+                            self.mem.patch_u32(eq, 0x54000000 | ((d & 0x7FFFF) << 5));
+                        }
+                        miss_patches.push((b_miss, 0x14000000)); // B → miss (deferred)
+                        if proto_depth > 0 {
+                            for _ in 0..proto_depth {
+                                ldr_off(&mut self.mem, 1, 1, 24);
+                            }
+                        }
+                        ldr_reg(&mut self.mem, 0, 1, 6);    // x0 = [x1 + x6]
+                        self.push();
+                        done_patches.push(self.mem.current_offset());
+                        emit(&mut self.mem, 0x14000000);    // B → done
+                        self.ic_table_patches.push(IcTablePatch {
+                            adr_offset: adr_off,
+                            table,
+                        });
+                    } else {
+                        // === Monomorphic: single shape_id guard ===
+                        mov_imm64(&mut self.mem, 4, shape_id);
+                        cmp_reg(&mut self.mem, 3, 4);
+                        miss_patches.push((self.mem.current_offset(), 0x54000001)); // B.NE → miss
+                        emit(&mut self.mem, 0x54000001);
+                        if proto_depth > 0 {
+                            for _ in 0..proto_depth {
+                                ldr_off(&mut self.mem, 1, 1, 24);
+                            }
+                        }
+                        ldr_off(&mut self.mem, 0, 1, 32 + offset * 8);
+                        self.push();
+                        done_patches.push(self.mem.current_offset());
+                        emit(&mut self.mem, 0x14000000);    // B → done
+                    }
+                    // === Miss handler ===
+                    let miss_offset = self.mem.current_offset();
+                    for &(patch, orig) in &miss_patches {
+                        let d = ((miss_offset as i64 - patch as i64) / 4) as u32;
+                        if (orig & 0xFF000000) == 0x14000000 {
+                            self.mem.patch_u32(patch, 0x14000000 | (d & 0x03FF_FFFF));
+                        } else {
+                            self.mem.patch_u32(patch, (orig & !0x00FF_FFE0) | ((d & 0x7FFFF) << 5));
                         }
                     }
-                    // Load property from [x1 + 32 + offset*8]
-                    ldr_off(&mut self.mem, 0, 1, 32 + offset * 8);
-                    self.push();
-                    // B done (skip miss handler)
-                    let patch_done = self.mem.current_offset();
-                    emit(&mut self.mem, 0x14000000);    // B +0 (patched → done)
-                    // miss: push object and key back, bail to interpreter
-                    let miss_offset = self.mem.current_offset();
                     self.record_bailout_point(bc_idx, BailoutReason::ShapeMiss);
-
-                    mov_reg(&mut self.mem, 0, 1);       // x0 = object (saved in x1)
-                    self.push();                         // push object
-                    mov_reg(&mut self.mem, 0, 7);       // x0 = key (saved in x7)
-                    self.push();                         // push key on top
-                    // Call bailout_helper(x0=vm_ptr, x1=bc_pc, x2=jit_sp)
+                    mov_reg(&mut self.mem, 0, 1);
+                    self.push();
+                    mov_reg(&mut self.mem, 0, 7);
+                    self.push();
                     mov_reg(&mut self.mem, 2, JIT_STACK_REG);
                     mov_imm64(&mut self.mem, 1, bc_idx as u64);
                     mov_reg(&mut self.mem, 0, VM_REG);
                     ldr_off(&mut self.mem, 15, VM_REG, 520);
-                    emit(&mut self.mem, 0xD63F01E0);    // BLR x15
+                    emit(&mut self.mem, 0xD63F01E0);
                     movz(&mut self.mem, 0, 0);
-                    self.push();                         // push undefined (safety)
-                    self.emit_epilogue();                 // return from JIT
-                    // done:
+                    self.push();
+                    self.emit_epilogue();
                     let done_offset = self.mem.current_offset();
-                    // Patch forward jumps
-                    // B.NE (smi check, cond=1)
+                    for &patch in &done_patches {
+                        let d = ((done_offset as i64 - patch as i64) / 4) as u32;
+                        self.mem.patch_u32(patch, 0x14000000 | (d & 0x03FF_FFFF));
+                    }
                     let d = ((miss_offset as i64 - patch_smi as i64) / 4) as u32;
                     self.mem.patch_u32(patch_smi, 0x54000001 | ((d & 0x7FFFF) << 5));
-                    // B.LS (sentinel check, cond=9)
                     let d = ((miss_offset as i64 - patch_sentinel as i64) / 4) as u32;
                     self.mem.patch_u32(patch_sentinel, 0x54000009 | ((d & 0x7FFFF) << 5));
-                    // B.NE (shape mismatch, cond=1)
-                    let d = ((miss_offset as i64 - patch_shape as i64) / 4) as u32;
-                    self.mem.patch_u32(patch_shape, 0x54000001 | ((d & 0x7FFFF) << 5));
-                    // B (unconditional to done)
-                    let d = ((done_offset as i64 - patch_done as i64) / 4) as u32;
-                    self.mem.patch_u32(patch_done, 0x14000000 | (d & 0x03FF_FFFF));
                 }
                 Opcode::StorePropertyIC => {
                     let shape_id = instr.operands[0] as u64;
                     let offset = instr.operands[1] as u32;
                     let _proto_depth = instr.operands.get(2).copied().unwrap_or(0) as u32;
-                    self.pop(); // x0 = value
-                    // Save value in x1
-                    mov_reg(&mut self.mem, 1, 0);
-                    // Pop key (pushed by preceding LoadStringConst); discard in fast path
-                    self.pop();                     // x0 = key
-                    mov_reg(&mut self.mem, 7, 0);   // x7 = key (saved for miss path)
-                    // Pop object
-                    self.pop(); // x0 = object
-                    mov_reg(&mut self.mem, 2, 0); // x2 = object
-                    // Test bit 0: Smi → miss
-                    movz(&mut self.mem, 3, 1);          // x3 = 1
-                    emit(&mut self.mem, 0xEA03005F);    // TST x2, x3 (ANDS XZR, X2, X3)
+                    let ic_table = self.ic_tables.get(bc_idx).filter(|t| t.count > 1).cloned();
+                    self.pop();                             // x0 = value
+                    mov_reg(&mut self.mem, 1, 0);           // x1 = value
+                    self.pop();                             // x0 = key
+                    mov_reg(&mut self.mem, 7, 0);           // x7 = key (saved for miss path)
+                    self.pop();                             // x0 = object
+                    mov_reg(&mut self.mem, 2, 0);           // x2 = object
+                    movz(&mut self.mem, 3, 1);
+                    emit(&mut self.mem, 0xEA03005F);        // TST x2, x3
                     let patch_smi = self.mem.current_offset();
-                    emit(&mut self.mem, 0x54000001);    // B.NE +0 (patched → miss)
-                    // CMP x2, #6 (sentinel ≤ 6 → miss)
-                    emit(&mut self.mem, 0xF100185F);    // CMP x2, #6 (SUBS XZR, X2, #6)
+                    emit(&mut self.mem, 0x54000001);        // B.NE +0
+                    emit(&mut self.mem, 0xF100185F);        // CMP x2, #6
                     let patch_sentinel = self.mem.current_offset();
-                    emit(&mut self.mem, 0x54000009);    // B.LS +0 (patched → miss)
-                    // Load shape ptr from [x2 + 8]
-                    ldr_off(&mut self.mem, 4, 2, 8);    // x4 = [x2 + 8] (shape ptr)
-                    ldr_off(&mut self.mem, 5, 4, 0);    // x5 = [x4] (shape.id)
-                    // shape_id may be 0 for cold ICs — guard will always fail, bailout handles it.
-                    mov_imm64(&mut self.mem, 6, shape_id);
-                    cmp_reg(&mut self.mem, 5, 6);
-                    let patch_shape = self.mem.current_offset();
-                    emit(&mut self.mem, 0x54000001);    // B.NE +0 (patched → miss)
-                    // Store value to [x2 + 32 + offset*8]
-                    str_off(&mut self.mem, 1, 2, 32 + offset * 8);
-                    // Push value back (JS: store returns the value)
+                    emit(&mut self.mem, 0x54000009);        // B.LS +0
+                    ldr_off(&mut self.mem, 4, 2, 8);        // x4 = [x2 + 8] (shape ptr)
+                    ldr_off(&mut self.mem, 3, 4, 0);        // x3 = [x4] (shape.id)
+                    let mut miss_patches: Vec<(usize, u32)> = Vec::new();
+                    let mut done_patches: Vec<usize> = Vec::new();
+                    if let Some(table) = ic_table {
+                        // === Polymorphic: N-entry scalar scan ===
+                        let n = table.count;
+                        let adr_off = self.mem.current_offset();
+                        emit(&mut self.mem, 0x10000000 | 4); // ADR x4, 0
+                        let mut eq_offsets: Vec<usize> = Vec::with_capacity(n);
+                        for i in 0..n {
+                            let base = (i as u32) * 16;
+                            ldr_off(&mut self.mem, 5, 4, base);       // x5 = shape_id[i]
+                            ldr_off(&mut self.mem, 6, 4, base + 8);   // x6 = slot_offset[i]
+                            cmp_reg(&mut self.mem, 5, 3);
+                            eq_offsets.push(self.mem.current_offset());
+                            emit(&mut self.mem, 0x54000000); // B.EQ → found
+                        }
+                        let b_miss = self.mem.current_offset();
+                        emit(&mut self.mem, 0x14000000);    // B → miss
+                        let found_off = self.mem.current_offset();
+                        for &eq in &eq_offsets {
+                            let d = ((found_off as i64 - eq as i64) / 4) as u32;
+                            self.mem.patch_u32(eq, 0x54000000 | ((d & 0x7FFFF) << 5));
+                        }
+                        miss_patches.push((b_miss, 0x14000000));
+                        str_reg(&mut self.mem, 1, 2, 6);    // [x2 + x6] = value
+                        mov_reg(&mut self.mem, 0, 1);
+                        self.push();
+                        done_patches.push(self.mem.current_offset());
+                        emit(&mut self.mem, 0x14000000);    // B → done
+                        self.ic_table_patches.push(IcTablePatch {
+                            adr_offset: adr_off,
+                            table,
+                        });
+                    } else {
+                        // === Monomorphic: single shape_id guard ===
+                        mov_imm64(&mut self.mem, 6, shape_id);
+                        cmp_reg(&mut self.mem, 3, 6);
+                        miss_patches.push((self.mem.current_offset(), 0x54000001));
+                        emit(&mut self.mem, 0x54000001);    // B.NE → miss
+                        str_off(&mut self.mem, 1, 2, 32 + offset * 8);
+                        mov_reg(&mut self.mem, 0, 1);
+                        self.push();
+                        done_patches.push(self.mem.current_offset());
+                        emit(&mut self.mem, 0x14000000);    // B → done
+                    }
+                    // === Miss handler ===
+                    let miss_offset = self.mem.current_offset();
+                    for &(patch, orig) in &miss_patches {
+                        let d = ((miss_offset as i64 - patch as i64) / 4) as u32;
+                        if (orig & 0xFF000000) == 0x14000000 {
+                            self.mem.patch_u32(patch, 0x14000000 | (d & 0x03FF_FFFF));
+                        } else {
+                            self.mem.patch_u32(patch, (orig & !0x00FF_FFE0) | ((d & 0x7FFFF) << 5));
+                        }
+                    }
+                    self.record_bailout_point(bc_idx, BailoutReason::ShapeMiss);
+                    mov_reg(&mut self.mem, 0, 2);
+                    self.push();
+                    mov_reg(&mut self.mem, 0, 7);
+                    self.push();
                     mov_reg(&mut self.mem, 0, 1);
                     self.push();
-                    // B done
-                    let patch_done = self.mem.current_offset();
-                    emit(&mut self.mem, 0x14000000);    // B +0
-                    // miss: push object, key, value back, bail to interpreter
-                    let miss_offset = self.mem.current_offset();
-                    self.record_bailout_point(bc_idx, BailoutReason::ShapeMiss);
-                    mov_reg(&mut self.mem, 0, 2);       // x0 = object (saved in x2)
-                    self.push();                         // restore object on JIT stack
-                    mov_reg(&mut self.mem, 0, 7);       // x0 = key (saved in x7)
-                    self.push();                         // restore key on JIT stack
-                    mov_reg(&mut self.mem, 0, 1);       // x0 = value (saved in x1)
-                    self.push();                         // restore value on JIT stack
-                    // Call bailout_helper(x0=vm_ptr, x1=bc_pc, x2=jit_sp)
                     mov_reg(&mut self.mem, 2, JIT_STACK_REG);
                     mov_imm64(&mut self.mem, 1, bc_idx as u64);
                     mov_reg(&mut self.mem, 0, VM_REG);
                     ldr_off(&mut self.mem, 15, VM_REG, 520);
-                    emit(&mut self.mem, 0xD63F01E0);    // BLR x15
+                    emit(&mut self.mem, 0xD63F01E0);
                     movz(&mut self.mem, 0, 0);
-                    self.push();                         // push undefined (safety)
-                    self.emit_epilogue();                 // return from JIT
-                    // done:
+                    self.push();
+                    self.emit_epilogue();
                     let done_offset = self.mem.current_offset();
-                    // Patch forward jumps
+                    for &patch in &done_patches {
+                        let d = ((done_offset as i64 - patch as i64) / 4) as u32;
+                        self.mem.patch_u32(patch, 0x14000000 | (d & 0x03FF_FFFF));
+                    }
                     let d = ((miss_offset as i64 - patch_smi as i64) / 4) as u32;
                     self.mem.patch_u32(patch_smi, 0x54000001 | ((d & 0x7FFFF) << 5));
                     let d = ((miss_offset as i64 - patch_sentinel as i64) / 4) as u32;
                     self.mem.patch_u32(patch_sentinel, 0x54000009 | ((d & 0x7FFFF) << 5));
-                    let d = ((miss_offset as i64 - patch_shape as i64) / 4) as u32;
-                    self.mem.patch_u32(patch_shape, 0x54000001 | ((d & 0x7FFFF) << 5));
-                    let d = ((done_offset as i64 - patch_done as i64) / 4) as u32;
-                    self.mem.patch_u32(patch_done, 0x14000000 | (d & 0x03FF_FFFF));
                 }
                 Opcode::Return => {
                     self.emit_epilogue();
@@ -1445,6 +1552,27 @@ impl Aarch64CodeGen {
         }
 
         self.resolve_patches();
+
+        // Post-process IC table patches: write table data and fix up ADRs.
+        let patches = std::mem::take(&mut self.ic_table_patches);
+        for p in &patches {
+            let table_offset = self.mem.current_offset();
+            for i in 0..8 {
+                if i < p.table.count {
+                    self.mem.emit_u64(p.table.entries[i].shape_id);
+                    self.mem.emit_u64(p.table.entries[i].slot_offset);
+                } else {
+                    self.mem.emit_u64(0); // shape_id = 0 (never matches)
+                    self.mem.emit_u64(0); // slot_offset = 0 (unused)
+                }
+            }
+            // Patch the ADR instruction at p.adr_offset
+            let byte_offset = (table_offset as i64) - (p.adr_offset as i64);
+            let immlo = ((byte_offset >> 0) & 0x3) as u32;
+            let immhi = ((byte_offset >> 2) & 0x7FFFF) as u32;
+            let instr = 0x10000000 | (immlo << 29) | (immhi << 5) | 4; // xd = x4
+            self.mem.patch_u32(p.adr_offset, instr);
+        }
 
         let bailout_table = BailoutTable {
             points: std::mem::take(&mut self.bailout_table),

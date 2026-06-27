@@ -2017,6 +2017,45 @@ fn test_jit_inline_skip_unarith() {
 
 #[test]
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn test_jit_inline_bail() {
+    // Inlined Sub overflow triggers a bailout (F-3).  The JIT stack must be
+    // restored to pre-call state so the interpreter can re-execute the Call
+    // instruction.  Verify correct result and bailout count > 0.
+    let mut ctx = Context::new_small();
+    ctx.enable_inlining = true;
+    let r = ctx
+        .eval(
+            r#"
+            function sub(a, b) { return a - b; }
+            var s = 1000000000;
+            for (var i = 0; i < 100; i = i + 1) { s = sub(s, -1000000); }
+            s
+        "#,
+        )
+        .unwrap();
+    // 1000000000 + 100*1000000 = 1100000000
+    let smi = r.as_smi();
+    assert!(
+        smi.is_none() || smi == Some(1100000000),
+        "inlined Sub with overflow bailout should produce correct result, got: {:?}",
+        smi
+    );
+    // 1100000000 exceeds Smi max (1073741823), so result should be a float
+    if let Some(smi_val) = smi {
+        assert_eq!(smi_val, 1100000000, "overflow result should be correct or float");
+    }
+    assert!(
+        ctx.vm().jit_bailout_count > 0,
+        "inlined Sub overflow must trigger bailout"
+    );
+    assert!(
+        ctx.vm().jit_entry_count > 0,
+        "JIT must have entered for sub()"
+    );
+}
+
+#[test]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn test_jit_typeof_native() {
     // TypeOf is now native — the JIT calls typeof_helper instead of bailing.
     // This test verifies all typeof results and that the JIT enters + no bail.

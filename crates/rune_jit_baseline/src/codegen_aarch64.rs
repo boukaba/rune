@@ -504,6 +504,10 @@ impl Aarch64CodeGen {
     /// Stack effects (push/pop/stack_depth) are tracked identically to the normal call_helper
     /// path so that bailout information remains consistent.
     fn emit_inline_call(&mut self, call_bc_idx: usize, entry: &InlineEntry) {
+        // Record the pre-call stack depth so we can restore the JIT stack
+        // to pre-call state on bailout (F-3).
+        let pre_call_depth = self.stack_depth;
+
         // Save caller's LOC_REG (x21) into x23.  Callee-saved x23 won't be
         // clobbered by any emitted instructions inside the inlined body.
         mov_reg(&mut self.mem, 23, 21);
@@ -656,6 +660,52 @@ impl Aarch64CodeGen {
 
                     self.push();
                 }
+                Opcode::Sub => {
+                    self.pop();
+                    mov_reg(&mut self.mem, 9, 0);
+                    self.pop();
+                    mov_reg(&mut self.mem, 8, 0);
+                    // Smi fast path: both operands Smi
+                    mov_reg(&mut self.mem, 1, 9);
+                    emit(&mut self.mem, 0x92400021);
+                    let b_not_smi = self.mem.current_offset();
+                    emit(&mut self.mem, 0xB4000001);
+                    mov_reg(&mut self.mem, 1, 8);
+                    emit(&mut self.mem, 0x92400021);
+                    let a_not_smi = self.mem.current_offset();
+                    emit(&mut self.mem, 0xB4000001);
+                    sub_reg(&mut self.mem, 0, 8, 9);
+                    add_imm(&mut self.mem, 0, 0, 1);
+                    // Overflow check
+                    emit(&mut self.mem, 0x9341FC02);
+                    mov_imm64(&mut self.mem, 3, MAX_I31);
+                    cmp_reg(&mut self.mem, 2, 3);
+                    let ov_jg = self.mem.current_offset();
+                    emit(&mut self.mem, 0x5400000C);
+                    mov_imm64(&mut self.mem, 3, MIN_I31);
+                    cmp_reg(&mut self.mem, 2, 3);
+                    let ov_jl = self.mem.current_offset();
+                    emit(&mut self.mem, 0x5400000B);
+                    let smi_done = self.mem.current_offset();
+                    emit(&mut self.mem, 0x14000000);
+                    // Bailout: non-Smi input or overflow
+                    let bail_label = self.mem.current_offset();
+                    {
+                        let d_bns = ((bail_label as i64 - b_not_smi as i64) / 4) as u32;
+                        self.mem.patch_u32(b_not_smi, 0xB4000001 | ((d_bns & 0x7FFFF) << 5));
+                        let d_ans = ((bail_label as i64 - a_not_smi as i64) / 4) as u32;
+                        self.mem.patch_u32(a_not_smi, 0xB4000001 | ((d_ans & 0x7FFFF) << 5));
+                        let d_jg = ((bail_label as i64 - ov_jg as i64) / 4) as u32;
+                        self.mem.patch_u32(ov_jg, 0x5400000C | ((d_jg & 0x7FFFF) << 5));
+                        let d_jl = ((bail_label as i64 - ov_jl as i64) / 4) as u32;
+                        self.mem.patch_u32(ov_jl, 0x5400000B | ((d_jl & 0x7FFFF) << 5));
+                    }
+                    self.emit_inline_bailout(call_bc_idx, BailoutReason::Overflow, pre_call_depth);
+                    let done_label = self.mem.current_offset();
+                    let d_done = ((done_label as i64 - smi_done as i64) / 4) as u32;
+                    self.mem.patch_u32(smi_done, 0x14000000 | (d_done & 0x03FF_FFFF));
+                    self.push();
+                }
                 _ => {
                     // Unsupported opcode in inline context — bail at the call site.
                     // This shouldn't happen for eligible callees (checked at plan-build time).
@@ -672,6 +722,32 @@ impl Aarch64CodeGen {
                 }
             }
         }
+    }
+
+    /// Emit a bailout sequence for an inlined callee that restores the JIT stack
+    /// to the pre-call level before calling `bailout_helper`.  This ensures the
+    /// captured stack snapshot has only the pre-call state (args + this + callee),
+    /// so the interpreter can re-execute the Call instruction correctly (F-3).
+    fn emit_inline_bailout(&mut self, call_bc_idx: usize, reason: BailoutReason, pre_depth: u32) {
+        let delta = self.stack_depth.saturating_sub(pre_depth);
+        self.record_bailout_point(call_bc_idx, reason);
+        if delta > 0 {
+            let bytes = delta * 8;
+            if bytes <= 0xFFF {
+                sub_imm(&mut self.mem, 22, 22, bytes);
+            } else {
+                mov_imm64(&mut self.mem, 0, bytes as u64);
+                sub_reg(&mut self.mem, 22, 22, 0);
+            }
+        }
+        mov_reg(&mut self.mem, 2, JIT_STACK_REG);
+        mov_imm64(&mut self.mem, 1, call_bc_idx as u64);
+        mov_reg(&mut self.mem, 0, VM_REG);
+        ldr_off(&mut self.mem, 15, VM_REG, 520);
+        emit(&mut self.mem, 0xD63F01E0);
+        movz(&mut self.mem, 0, 0);
+        self.push();
+        self.emit_epilogue();
     }
 
     pub fn compile(mut self, program: &rune_bytecode::opcode::BytecodeProgram) -> CompiledFunction {

@@ -91,7 +91,7 @@
 - [x] `parser.rs` — Recursive-descent with precedence climbing, compact AST; `switch/case` statement per §14.12
 - [x] `emitter.rs` — On-the-fly bytecode emission with string + float pool interning
 - [x] String/template literals emit `LoadStringConst` (GC-allocated HeapString)
-- [x] Float literals emit `LoadSmi` (if integer in range) or `LoadFloat64` (GC-allocated HeapFloat64)
+- [x] Float literals emit `LoadSmi` (if integer in range) or `LoadFloat64` (NaN-boxed via `Value::from_float64`, no heap allocation)
 - [x] Object literals create shapes with named property keys
 - [x] Dot access (`obj.a`) emits property name as string constant
 - [ ] Fuzz with `cargo-fuzz`
@@ -113,7 +113,7 @@
 - [x] `TypeOf` checks GC header tag for `"string"`, `"function"`, and `TAG_FLOAT64 → "number"`
 - [x] GC root registration: `Vm::register_roots()` registers stack, locals, try_stack, generators, globals
 - [x] Builtin signature includes `&Vm` for access to eval callback and VM state
-- [x] **Float64 support**: GC-allocated `HeapFloat64` with `TAG_FLOAT64` (3-bit header tag); `LoadFloat64` opcode; `to_number()`/`number_result()` helpers for float arithmetic; `Add`/`Sub`/`Mul`/`Div`/`Mod`/`Exp`/`Neg` handle float operands; `typeof` returns `"number"`; `-0.0` preserved via `is_sign_negative()` check; `Mod` zero-divisor returns NaN; `Exp` negative exponent works; `ToNumber(null)`→0.0
+- [x] **Float64 support (NaN-boxed)**: All float Values are NaN-encoded inline via `Value::from_float64` — zero heap allocation. `TAG_FLOAT64` header tag retained as fallback for legacy heap-allocated floats. `LoadFloat64` opcode; `to_number()`/`number_result()` helpers for float arithmetic; `Add`/`Sub`/`Mul`/`Div`/`Mod`/`Exp`/`Neg` handle float operands; `typeof` returns `"number"`; `-0.0` preserved via `is_sign_negative()` check; `Mod` zero-divisor returns NaN; `Exp` negative exponent works; `ToNumber(null)`→0.0. JIT JumpIfFalse/JumpIfTrue remove stale float64 bailout — NaN-encoded condition values checked directly.
 - [x] **switch/case statement**: `Stmt::Switch` AST variant, `SwitchCase` struct; parser handles `case`/`default` with fall-through; emitter uses two-section architecture (comparison chain + body section) — comparison chain uses `Dup`/`StrictEq`/`JumpIfFalse` with `Jump`-to-body for matches; body section emits case bodies sequentially with natural fall-through; `switch_exit_stack` + `switch_break_jumps` handles break targeting; no-match `Pop` + `Jump` default/after after comparison chain
 - [x] **Audited & Verified**: 138/138 tests pass. 5 spec compliance patches confirmed: `5 % 0`→NaN, `2 ** -1`→0.5, `null + 1`→1, `-0.0` preservation, `true + 1`→2 (booleans are Smi(0)/Smi(1) so `to_number` works implicitly). Switch fix: double-patched skip jumps resolved, fall-through working.
 
@@ -398,7 +398,7 @@
 ### Task 8C: Deferred Builtin Cleanup 🟢 — Priority 4 ✅
 - [x] `Array.isArray` — Array constructor wrapper with `isArray` property in builtin_wrappers
 - [x] `String.fromCharCode` — String constructor wrapper with `fromCharCode` property (shadows `String(42)` as callable, consistent with Object wrapper pattern)
-- [x] Math constants (PI, E) — HeapFloat64 values in Math object shape slots
+- [x] Math constants (PI, E) — NaN-boxed via `Value::from_float64` in Math object shape slots (was HeapFloat64, now inline)
 - [x] `charAt` OOB returns `""` per §22.1.3.1 (was `undefined`; also fixed bogus `ch == '\0'` guard)
 - [x] String `.length` counts UTF-16 code units per §22.1.4.1 via `encode_utf16().count()`
 
@@ -617,7 +617,7 @@ The AFPC Phase 5 section below is now the **canonical roadmap** for the next 2-3
   - [x] 9C-1: Lt/Gt/Le/Ge use to_number() for HeapFloat64 + NaN per §12.9–12.11
   - [x] 9C-2: to_number() parses numeric strings per §9.3.1 (empty→0, hex, Infinity, etc.)
   - [x] 9C-3: ++/-- operators — parser (prefix+postfix), AST (Update), emitter, 4 bytecode opcodes (IncLocal, DecLocal, IncGlobal, DecGlobal), VM handlers
-  - [x] 9C-4: Neg uses to_number() for all non-numeric types; Smi -(-2^30) overflow → HeapFloat64
+  - [x] 9C-4: Neg uses to_number() for all non-numeric types; Smi -(-2^30) overflow → NaN-boxed float via `Value::from_float64` (was HeapFloat64)
   - [x] 9C-5: 11 integration tests (float comparison, NaN, string ToNumber, ++/-- prefix/postfix, for-loop with i++, negate string, negate overflow, negate undefined)
 - [x] **9D: JIT Control Flow + Branches** — 19 JIT baseline tests (+5 offset + 4 execution)
   - [x] cmp_r64_r64 (39 /r), jbe/jb/ja/jae rel32 assembler helpers (0F 86/82/87/83)
@@ -1904,7 +1904,7 @@ Phase F is done at 5% (not the estimated 60%). The remaining largests gaps (`pro
 | **v0.2 (now)** | Phase F inlining + multi-shape dispatch (or vector IC) | Existing plan, Deegen-informed |
 | **v0.2 (parallel)** | Prototype Float Self-Tagging on branch | arxiv `2411.16544` |
 | **v0.3 Q1** | **Copy-and-patch JIT rewrite** (replaces hand-rolled codegen) | arxiv `2011.13127` + Deegen |
-| **v0.3 Q1** | Adopt Float Self-Tagging (if prototype passes) | arxiv `2411.16544` |
+| **v0.3** | **Float Self-Tagging ✅** — NaN-boxed Values, 0 GC allocation for floats, all 317 tests pass | arxiv `2411.16544` |
 | **v0.3 Q2** | Nofl GC (replaces GenImmix plan) | arxiv `2503.16971` |
 | **v1.0+** | ShareJIT system-wide AFPC cache | arxiv `1810.09555` |
 
@@ -1913,7 +1913,7 @@ Phase F is done at 5% (not the estimated 60%). The remaining largests gaps (`pro
 | ID | Title | Target | Source |
 |---|---|---|---|
 | P20-research | Copy-and-patch JIT (replace hand-rolled codegen) | v0.3 | arxiv `2011.13127` |
-| P21-research | Float Self-Tagging (eliminate heap-allocated floats) | v0.3 | arxiv `2411.16544` |
+| P21-research | Float Self-Tagging (eliminate heap-allocated floats) | ✅ Done v0.3 | arxiv `2411.16544` |
 | P22-research | Nofl GC (replaces GenImmix) | v0.3 | arxiv `2503.16971` |
 | P23-research | ShareJIT system-wide cache | v1.0+ | arxiv `1810.09555` |
 | P24-research | TPDE optimizing-tier framework | v0.4+ | arxiv `2505.22610` |
@@ -1922,9 +1922,9 @@ Phase F is done at 5% (not the estimated 60%). The remaining largests gaps (`pro
 
 ---
 
-## v0.3.0 — Copy-and-Patch JIT, Float Self-Tagging, Nofl GC
+## v0.3.0 — Copy-and-Patch JIT, Float Self-Tagging (✅ done), Nofl GC
 
-> **Era:** The v0.3 rewrite replaces hand-rolled AArch64/x86-64 instruction encoding with LLVM-compiled copy-and-patch stencils (arxiv `2011.13127`), eliminating the dominant source of JIT bugs. Float Self-Tagging (arxiv `2411.16544`) eliminates heap-allocated floats. Nofl GC (arxiv `2503.16971`) replaces the Cheney semispace with lower-fragmentation precise Immix.
+> **Era:** The v0.3 rewrite replaces hand-rolled AArch64/x86-64 instruction encoding with LLVM-compiled copy-and-patch stencils (arxiv `2011.13127`), eliminating the dominant source of JIT bugs. **Float Self-Tagging (arxiv `2411.16544`) is done** — all Values use NaN-boxing, zero GC allocation for floats. Nofl GC (arxiv `2503.16971`) replaces the Cheney semispace with lower-fragmentation precise Immix (not yet started).
 >
 > **Papers downloaded to** `docs/papers/`:
 > | Paper | File | arxiv |

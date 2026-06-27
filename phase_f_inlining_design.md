@@ -238,12 +238,12 @@ Inlined code is cached as part of the trace. When the trace is saved to `rune-af
 
 ### Phase F-0: Feature Flag + Eligibility Verification (1 day)
 
-1. Add `--inline`/`--no-inline` CLI flag to `rune_cli` and `rune_embed`. Default: `--inline`.
+1. Add `--inline`/`--no-inline` CLI flag to `rune_cli` and `rune_embed`. **Default: `--no-inline`** (flipped to `--inline` when F-2 lands and inlining actually works — prevents confusion during F-0/F-1 where inlining is infrastructure-only).
 2. Add `enable_inlining: bool` to `CodeGen` and `LoopTrace`. When `false`, call sites skip inlining and use the `call_helper` path.
 3. Write `test_jit_needs_frame_verification` — parameterized test over various function shapes (arrow, closure, generator, function with `let`, function with `arguments`). Print `needs_frame` for each. Assert the target `add(a,b)` shape reports `false`.
-4. Write `test_jit_inline_skip_noneligible` — verify that callees with `needs_frame == true` or bodies ≥ 50 instructions are NOT inlined (fall through to `call_helper`).
+4. Write `test_jit_inline_feature_flag` — same program runs identically under both `--inline` and `--no-inline` (verifies no behavior change when flag is inert).
 
-**Deliverable:** Verified eligibility matrix (no surprise exclusions for the target benchmark). Feature-flag infrastructure allows A/B testing and rollback without reverting.
+**Deliverable:** Feature flag exists and is wired through. Eligibility check exists as a pure function (no JIT integration yet). `needs_frame` matrix empirically verified. No behavior change. `test_jit_inline_skip_noneligible` (JIT-stats verification) and `test_jit_inline_no_bail` (inline + 0 bailouts) are deferred to F-2 when inlining actually runs.
 
 ### Phase F-1: Profile Collection (2 days)
 
@@ -380,14 +380,14 @@ The 50-instruction-per-callee cap plus max depth 2 limits worst-case trace growt
 
 Before any inlining code runs, the following tests must pass (Phase F-0):
 
-| Test | What it verifies |
-|---|---|
-| `test_jit_needs_frame_verification` | Parameterized — asserts `needs_frame` for various function shapes (arrow, closure, generator, `let`, `arguments`). Confirms `add(a,b)` target is inlineable. |
-| `test_jit_inline_skip_noneligible` | Callee with `needs_frame == true` or body ≥ 50 instrs falls through to `call_helper`. Verify JIT stats show no inlining. |
-| `test_jit_inline_feature_flag` | Toggle `--inline`/`--no-inline`. Verify the same program produces identical results. |
-| `test_jit_inline_no_bail` | Hot function with inlined callee. 1M iterations. 0 bailouts. Result matches interpreter. |
+| Test | What it verifies | Written in |
+|---|---|---|---|
+| `test_jit_needs_frame_verification` | Parameterized — asserts `needs_frame` for various function shapes (arrow, closure, generator, `let`, `arguments`). Confirms `add(a,b)` target is inlineable. | F-0 |
+| `test_jit_inline_feature_flag` | Toggle `--inline`/`--no-inline`. Verify the same program produces identical results. | F-0 |
+| `test_jit_inline_skip_noneligible` | Callee with `needs_frame == true` or body ≥ 50 instrs falls through to `call_helper`. F-0 version tests the pure eligibility function. F-2 version verifies JIT stats show no inlining. | F-0 (pure fn) + F-2 (integration) |
+| `test_jit_inline_no_bail` | Hot function with inlined callee. 1M iterations. 0 bailouts. Result matches interpreter. Inlining doesn't exist until F-2, so this is written there. | F-2 |
 
-These tests are written and passing **before** F-1 starts. This is the non-negotiable foundation — the pattern that would have caught the vector IC's N=8 assumption before a week of implementation.
+The F-0 tests are written and passing **before** F-1 starts. This is the non-negotiable foundation — the pattern that would have caught the vector IC's N=8 assumption before a week of implementation.
 
 ---
 
@@ -401,7 +401,7 @@ These tests are written and passing **before** F-1 starts. This is the non-negot
 | Frame-less callee only | `needs_frame == false` as prerequisite | Inlining with frame manipulation adds significant complexity. Deferred. |
 | Profile collection | During trace recording only | No separate profiling pass needed. The trace recording already observes callee behavior at the call site. |
 | AFPC interaction | Inlining baked into cached trace | Simplest approach. Re-recording handles profile drift naturally. |
-| Feature flag | `--inline`/`--no-inline` (default: `--inline`) | Enables A/B testing and rollback without reverting. Critical for Phase F — if the inliner produces regressions, disabling it via flag takes seconds. |
+| Feature flag | `--inline`/`--no-inline` (default: `--no-inline` for F-0/F-1, flipped to `--inline` when F-2 lands) | Default is `--no-inline` during infrastructure phases to prevent "is inlining on?" confusion. Flipped in F-2 commit. Enables A/B testing and rollback without reverting. |
 | x86-64 backend priority | **Deferred to v0.3** | x86-64 has no users, no benchmarks, no JIT-to-JIT calls today. v0.2 focuses on aarch64 (M4 Pro). The copy-and-patch rewrite in v0.3 makes backend portability free. |
 | Stack unwinding complexity | Explicit `stack_delta` + `call_site_pc` + `callee_arg_count` recorded per `InlinedCallee` | Forces codegen to track this explicitly rather than reconstructing it at bailout time. The 3 fields are the minimum needed for correct unwinding (§4.4.1). |
 

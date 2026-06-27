@@ -2201,7 +2201,7 @@ impl Vm {
                                                 .and_then(|bt| {
                                                     bt.points.iter().find(|bp| bp.bc_pc == trace_idx)
                                                 })
-                                                .map_or(false, |b| {
+                                                .is_some_and(|b| {
                                                     b.reason
                                                         == rune_jit_baseline::BailoutReason::ShapeMiss
                                                 });

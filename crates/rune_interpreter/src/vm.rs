@@ -509,6 +509,22 @@ impl Vm {
                 gc.push_root(v as *const Value as *mut u64);
             }
         }
+        // Root global variables (StoreGlobal pushes heap Values here)
+        for val in self.globals.values() {
+            gc.push_root(val as *const Value as *mut u64);
+        }
+        // Root builtin constructor/prototype wrappers (Object, Array, String, Math)
+        for val in self.builtin_wrappers.values() {
+            gc.push_root(val as *const Value as *mut u64);
+        }
+        // Root JIT call helper's locals buffer (holds callee + args during JIT calls)
+        for val in &self.jit_locals_buffer {
+            gc.push_root(val as *const Value as *mut u64);
+        }
+        // Root pending exception (holds thrown Value between throw and catch)
+        if let Some(ref val) = self.pending_exception {
+            gc.push_root(val as *const Value as *mut u64);
+        }
     }
 
     /// Execute a bytecode program and return its result.

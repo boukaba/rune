@@ -299,6 +299,88 @@ Possible causes to investigate:
 
 ---
 
+## P20: Cross-loop trace recording contamination — nested while loops produce wrong results ✅ FIXED
+
+**Status:** ✅ Fixed in `93aec5c`
+
+**Symptom:** Nested `while` loops produce wrong results. `k = k + 1` in the outer loop stops incrementing at 52 (with inner=1) or 99 (with inner=10), regardless of the loop bound. The poly_prop benchmark (nested-loop form) returned 234,000 instead of 4,500,000.
+
+**Root cause:** The trace recording mechanism uses a single shared `recording_trace: Option<usize>` field. When the outer loop hits iteration 50, recording starts with `target_pc = outer_condition`. Every instruction from the outer body — including the inner loop's condition, body, and Jump back-edge — gets pushed onto the outer loop's trace. During `compile_trace_native`, the inner Jump's target is not remapped correctly:
+- `orig_target (inner_pc) > target_pc (outer_pc)` → `operands[0] = -1` → exit trace prematurely
+- The trace exits before reaching `k = k + 1`, so the outer loop stops incrementing
+
+The same root cause also produced the P21 symptom (benchmark returning 234000 instead of 4500000) — different manifestation of the same trace-contamination bug.
+
+**Fix:** Cross-loop guard in the recording block. When recording a trace and encountering a `Jump`/`JumpIfTrue`/`JumpIfFalse` whose target is a known loop head (present in `loop_counts`) and is NOT the current trace's `target_pc`, stop recording immediately and discard the partial trace. The affected loop continues in the pure interpreter — correct, just slower.
+
+**Impact:** Nested loops now produce correct results. All 307 integration tests pass. The poly_prop benchmark runs in the interpreter (no JIT trace for nested loops), producing the correct 4,500,000.
+
+---
+
+## P21: Criterion poly_prop benchmark source used broken nested-loop form ✅ FIXED
+
+**Status:** ✅ Fixed in `c3d4bc3`
+
+**Symptom:** The `poly_prop_10shapes_1M` Criterion benchmark used a nested `while`-loop form (`while(k<1000){while(t<1000){...}}`) that triggered the P20 cross-loop trace contamination bug. All previous measurements (804 ms, 731 ms, 489 ms, 232 ms, 14.5 ms) timed a broken computation returning 234,000 instead of 4,500,000.
+
+**Root cause:** The benchmark source at `crates/rune_bench/benches/runtime.rs:58-92` used nested loops. The trace contamination bug (P20) caused wrong results for any nested-loop workload. The 14.5 ms "97.4% improvement" was a false positive — it measured a broken trace that happened to finish faster because it produced wrong answers.
+
+**Fix:** Replace the nested-loop form with the single-loop form (`while(i<1000000){s=s+objs[i%1000].x;i=i+1;}`). Same 10 shapes, same 1M total property accesses, correct computation. Add `assert_eq!(to_i64(val), expected)` to every Criterion benchmark to prevent silent-correctness regressions forever.
+
+**Real poly_prop_10shapes_1M:** 258 ms (first honest measurement). The 14.5 ms → 258 ms "regression" is actually the correction — the engine was never running the right computation.
+
+---
+
+## P22: GC root tracing missing globals from register_roots ✅ FIXED
+
+**Status:** ✅ Fixed in `TODO`
+
+**Symptom:** The Cheney-style copying GC does not trace `self.globals` as a root. After GC compaction, any `Value` in the globals HashMap that points to a heap object (HeapFloat64, HeapString, JSObject, RuneArray) becomes a dangling pointer — the GC forwarded the object but didn't update the slot in globals.
+
+Also missing: `self.builtin_wrappers` HashMap (contains heap-allocated function objects for `Object`, `Array`, `String`, `Math`).
+
+**Root cause:** `Vm::register_roots()` at `vm.rs:464-511` registers these roots:
+- ✅ `self.stack` (operand stack)
+- ✅ Frame locals, lexical slots, env pointers
+- ✅ Try-stack saved exceptions
+- ✅ `self.last_locals`
+- ✅ Generator locals/lexical slots
+- ✅ Prototype fields
+- ✅ `typeof_strings` and `string_cache`
+- ❌ `self.globals` — **MISSING**
+- ❌ `self.builtin_wrappers` — **MISSING**
+
+**Impact:** Any program that runs long enough to trigger GC will experience silent data corruption. With the default 16 MiB semispace, GC triggers after ~131,072 objects (at ~128 bytes/object). Programs allocating more objects than this threshold (e.g., array push with 100K+ elements, string concat in loops, object property creation) will see undefined behavior — wrong values, NaN, crashes, or infinite loops.
+
+**Why it didn't cause the P20/P21 bugs:** Those bugs manifested before GC had a chance to fire (the counter stopped incrementing after 52-99 iterations, with only Smi operations — no heap allocations).
+
+**Repro test:** A benchmark that allocates 200K objects while also reading/writing global variables:
+```js
+var s = 0;
+var a = [];
+while (s < 200000) {
+    a.push({x: s});  // alloc + global mutation
+    s = s + 1;
+}
+s
+```
+
+**Fix:** Add `self.globals` and `self.builtin_wrappers` to `register_roots()`:
+```rust
+for val in self.globals.values_mut() {
+    gc.push_root(val as *mut Value as *mut u8);
+}
+for val in self.builtin_wrappers.values_mut() {
+    gc.push_root(val as *mut Value as *mut u8);
+}
+```
+
+**Priority:** 🔴 P0 — correctness bug. Higher priority than any performance work. An engine with broken GC cannot be trusted for any real workload.
+
+**Note:** The `update_heap_reference` method at `vm.rs:3282-3322` already scans `self.globals.values_mut()` (line 3315) — but this is only called from `builtins.rs` for array grow reallocation, not from the GC collector. The GC collector uses `register_roots` → `push_root` for all root tracing. Adding globals to `register_roots` is the correct fix.
+
+---
+
 ## Summary
 
 | # | Issue | Status | Commit |
@@ -313,13 +395,16 @@ Possible causes to investigate:
 | P7 | IC stats undercounted | ✅ Fixed | current |
 | P8 | CLI -e flag | ⚠️ Known | — |
 | P9 | Return assertion relaxed | ⚠️ Deferred | — |
-| P10 | JIT now faster than interpreter after float64 Add (see P13→float64) | ✅ Fixed | 597b12c |
-| P11 | JIT coverage (55/62 opcodes + float64 Add promotion) | 🟡 In progress | — |
+| P10 | JIT now faster than interpreter after float64 Add | ✅ Fixed | 597b12c |
+| P11 | JIT coverage (55/62 opcodes + float64 Add) | 🟡 In progress | — |
 | P12 | Trace compiler wired to loop execution | ✅ Fixed | — |
-| P13 | Smi overflow → float64 Add promotion (was display truncation) | ✅ Resolved | 597b12c |
+| P13 | Smi overflow → float64 Add promotion | ✅ Resolved | 597b12c |
 | P14 | InlineCache::get_scalar cfg-gate | ✅ Fixed | current |
 | P15 | test_hot_property_mono_1m SIGSEGV | 🔴 P0 | — |
-| P16 | NEON/SSE SIMD IC stride bug (`ptr.add(1)` → `ptr.add(2)`) | ✅ Fixed | current |
+| P16 | NEON/SSE SIMD IC stride bug | ✅ Fixed | current |
 | P17 | LoadPropertyIC stats tracking | ✅ Fixed | current |
-| P18 | Trace JIT LoadPropertyIC — JIT shape guard always fails (99.999% bailout) + proto_depth codegen bug | 🔴 P0 | — |
-| P19 | Proto_chain 0% IC hit rate — interpreter LoadPropertyIC shape guard never fires for inherited props | 🔴 P0 | — |
+| P18 | Trace JIT LoadPropertyIC shape guard fails | 🔴 P0 | — |
+| P19 | Proto_chain 0% IC hit rate | 🔴 P0 | — |
+| P20 | Cross-loop trace recording contamination | ✅ Fixed | 93aec5c |
+| P21 | Criterion benchmark source (wrong nested-loop form) | ✅ Fixed | c3d4bc3 |
+| P22 | GC root tracing missing globals (and 3 other fields) | ✅ Fixed | TODO |

@@ -656,6 +656,24 @@ impl Vm {
             if let Some(target_pc) = self.recording_trace
                 && let Some(trace) = self.loop_traces.get_mut(&target_pc)
             {
+                // Cross-loop guard: if this instruction is a Jump whose target
+                // is a different loop (present in loop_counts), the trace would
+                // cross loop boundaries.  The subsequent compile_trace_native
+                // cannot remap the inner-loop Jump target correctly — it would
+                // either exit the trace prematurely or jump to a wrong index.
+                // Stop recording and discard the partial trace.
+                if matches!(instr.opcode, Opcode::Jump | Opcode::JumpIfTrue | Opcode::JumpIfFalse)
+                {
+                    let jump_target = instr.operands.first().copied().unwrap_or(0) as usize;
+                    if jump_target != target_pc
+                        && self.loop_counts.contains_key(&jump_target)
+                    {
+                        self.recording_trace = None;
+                        self.loop_traces.remove(&target_pc);
+                        self.frames[fi].pc = pc;
+                        continue;
+                    }
+                }
                 if trace.ops.len() < 200 {
                     trace.ops.push(TraceOp {
                         opcode: instr.opcode as u8,

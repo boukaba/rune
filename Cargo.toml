@@ -16,6 +16,7 @@ members = [
     "crates/spike_mmtk",
     "crates/spike_jit",
     "crates/rune_bench",
+    "crates/rune_jit_stencils",
 ]
 # rune_jit_cranelift excluded until Phase 5 (requires Rust ≥1.94)
 

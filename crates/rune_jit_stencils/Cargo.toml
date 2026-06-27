@@ -1,0 +1,10 @@
+[package]
+name = "rune_jit_stencils"
+version.workspace = true
+edition.workspace = true
+build = "build.rs"
+
+[dependencies]
+libc.workspace = true
+
+[build-dependencies]

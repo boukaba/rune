@@ -1165,6 +1165,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rune_jit_stencils"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "rune_module"
 version = "0.1.0"
 dependencies = [

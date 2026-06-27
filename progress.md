@@ -1643,29 +1643,29 @@ Headline results from `cargo bench -p rune_bench --features jit`. Full output at
 - Workspace: all green (fmt + clippy + test)
 - Commits: `efd2e87` (all three fixes + CLI `-e` flag), `e2ccd61` (track progress.md on GitHub)
 
-### Revised v0.2 priorities (2026-06-27)
+### Revised v0.2 priorities (2026-06-27, N=16)
 
 | Item | Priority | Status | Expected impact | Gap to V8 |
 |---|---|---|---|---|
-| Phase F inlining — eliminate BLR round-trip in hot loops | 🔴 P0 | 🟡 In progress | `jit_hot_function` 120ms → ~30ms | 37× → ~9× |
-| Multi-shape trace dispatch — record N traces/loop head, dispatch on shape ID | 🔴 P0 | ⬜ Not started | `poly_prop` 722ms → ~100ms | 173× → ~25× |
+| Phase F inlining — eliminate BLR round-trip in hot loops | 🔴 P0 | 🟡 In progress | `jit_hot_function` 129ms → ~30ms | 40× → ~10× |
+| ~~Multi-shape trace dispatch~~ → **N=16 IC table** (shipped `9b1a385`) | ✅ Done | ✅ Fixed | `poly_prop` 269ms → **169ms** (-37%) | 65× → **41×** |
 | float64 Sub/Mul/Div promotion for JIT | 🟠 P1 | ⬜ Not started | Unblocks numeric workloads | — |
 | GenImmix GC spike | 🟠 P1 | ⬜ Not started | ~20% on allocation-heavy benches | — |
-| `ArrayPush` JIT coverage (Phase C from `bailout_design.md` §7.3) | 🟠 P1 | ⬜ Not started | 47ms → ~25ms (smallest gap, low ROI) | 6.5× → ~3.5× |
+| `ArrayPush` JIT coverage (Phase C from `bailout_design.md` §7.3) | 🟠 P1 | ⬜ Not started | 59ms → ~30ms | 8× → ~4× |
 | Delta JIT: shape miss → record → compile delta → append cache | 🟠 P1 | ⬜ Not started | Multi-shape traces cover this for loop heads; delta for side exits | — |
 | x86-64 native JIT Call (replace bail-on-entry) | 🟡 P2 | ⬜ Not started | No x86-64 user | — |
 | All 93 opcodes whitelisted in JIT | 🟡 P2 | ⬜ Not started | Completeness, not perf | — |
 | Div/Mod/Exp native JIT opcodes | 🟡 P2 | ⬜ Not started | Rare in hot loops | — |
 
-### Headline gap-to-V8 (M4 Pro, 2026-06-27)
+### Headline gap-to-V8 (M4 Pro, 2026-06-27, post-P22 + N=16)
 
-| Benchmark | Rune (post-fix) | V8 | Gap | Δ vs pre-fix | Next lever |
-|---|---|---|---|---|---|
-| `poly_prop_10shapes_1M` | 722 ms | 4.16 ms | **173×** | 244× → 173× | Multi-shape traces (P0) |
-| `proto_chain_lookup_5deep_1M` | 106 ms | 1.55 ms | **68×** | 469× → 68× | Full-trace JIT covering all loop opcodes |
-| `loop_sum_smi_1M` | 100 ms | 2.30 ms | **43×** | 47× → 43× | Phase F (BLR elimination) |
-| `jit_hot_function_1M` | 120 ms | 3.19 ms | **37×** | 40× → 37× (noise) | Phase F (P0) |
-| `array_push_grow_100k` | 47 ms | 7.21 ms | **6.5×** | 9× → 6.5× | ArrayPush JIT (P1) |
+| Benchmark | Rune | V8 | Gap | Next lever |
+|---|---|---|---|---|
+| `poly_prop_10shapes_1M` | **169 ms** | 4.16 ms | **41×** | N=16 shipped — gap closed from 65×; next: Phase F or float promotion |
+| `proto_chain_lookup_5deep_1M` | **132 ms** | 1.55 ms | **85×** | Full-trace JIT covering all loop opcodes |
+| `loop_sum_smi_1M` | **124 ms** | 2.30 ms | **54×** | Phase F (BLR elimination) |
+| `jit_hot_function_1M` | **129 ms** | 3.19 ms | **40×** | Phase F (P0) |
+| `array_push_grow_100k` | **59 ms** | 7.21 ms | **8×** | ArrayPush JIT (P1) |
 
 ### P22 GC Root Tracing Gap — First Trustworthy Baseline (2026-06-27, `fd938da`)
 
@@ -1689,6 +1689,50 @@ Headline results from `cargo bench -p rune_bench --features jit`. Full output at
 - `test_gc_during_jit_call_preserves_locals` — JIT-hot function calls callee that allocates 200K (verifies jit_locals_buffer rooted)
 
 All 309 integration tests pass (0 failed, 2 ignored). Workspace: all green (fmt + clippy + test).
+
+### N=16 IC Table — poly_prop JIT trace now runs without bailouts (2026-06-27, `9b1a385`)
+
+**The verified poly_prop bottleneck was the 8-entry cap on the trace-embedded IC table.** With N=8, the `compile_trace_native` snapshot captured only 8 of 10 shapes → trace shape guard missed on every 9th/10th access → 99.9995% bailout rate → all 1M accesses ran interpreted despite the JIT entry overhead.
+
+**Fix:** Bumped `TraceIcTable.entries` from `[TraceIcEntry; 8]` to `[TraceIcEntry; 16]` in 3 files:
+- `crates/rune_jit_baseline/src/ic.rs:17` — struct definition
+- `crates/rune_interpreter/src/vm.rs:3499` — snapshot array + cap check
+- `crates/rune_jit_baseline/src/codegen_aarch64.rs:1552` — table emission loop
+
+The scalar scan loop already iterated `0..n` — no codegen changes needed.
+
+**Result:**
+
+| Metric | N=8 (post-P22) | N=16 | Δ |
+|---|---|---|---|
+| poly_prop_10shapes_1M | 269 ms | **169 ms** | **-37%** |
+| JIT entries | 199,991 | **1** | 199,990× fewer |
+| JIT bailouts | 199,990 (99.9995%) | **0** | trace now runs natively |
+| All other benchmarks | unchanged | unchanged | 0% |
+
+**JIT stats (CLI, 16 MiB semispace):**
+```
+Trace stats: 2 loop(s) detected
+  pc=6 → 10 iterations (warm)
+  pc=44 → 52 iterations (HOT)    # 50 iter threshold + 2 during compile
+    trace: 22 ops, 0 shapes (MONO (1 shape))
+    estimated speedup: 220→44 instrs ≈ 5×
+JIT stats: 1 entries, 0 bailouts (0 bailed)
+```
+
+The trace records once at iteration 50, captures all 10 shapes, compiles, and runs natively for the remaining 999,950 iterations. No re-records, no bailouts.
+
+**Updated gap-to-V8 table (post-P22 + N=16):**
+
+| Benchmark | Rune | V8 | Gap |
+|---|---|---|---|
+| `loop_sum_smi_1M` | 124 ms | 2.30 ms | 54× |
+| `array_push_grow_100k` | 59 ms | 7.21 ms | 8× |
+| `proto_chain_lookup_5deep_1M` | 132 ms | 1.55 ms | 85× |
+| `jit_hot_function_1M` | 129 ms | 3.19 ms | 40× |
+| `poly_prop_10shapes_1M` | 169 ms | 4.16 ms | **41×** (was 65×) |
+
+All 309 integration tests pass. Workspace: clippy-clean (0 warnings).
 
 ---
 

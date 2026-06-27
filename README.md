@@ -52,7 +52,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 | `rune_bytecode` | Bytecode opcodes, instructions, program representation, CFG/liveness analysis |
 | `rune_parser` | JavaScript lexer, recursive-descent parser, bytecode emitter |
 | `rune_interpreter` | Stack-based VM with SIDT inline caches, call frames, generators, builtins |
-| `rune_jit_baseline` | Baseline JIT (AArch64 + x86-64) — 55 opcodes whitelisted, function tier-up at 50 calls |
+| `rune_jit_baseline` | Baseline JIT (AArch64 + x86-64) — 57 opcodes whitelisted, function tier-up at 50 calls, N=16 vector IC table |
 | `rune_embed` | Embedding API (`Context::eval`), AFPC cache save/load |
 | `rune_cli` | CLI binary with `--cache`, `--snapshot`, `--ic-stats`, `--trace-stats` |
 | `rune_bench` | Criterion benchmarks with V8 comparison scripts |
@@ -81,7 +81,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 - **Modules:** No import/export (ESM)
 - **Classes:** No class syntax, super, getters/setters
 - **Async/await:** No async, await, for...of
-- **JIT:** 55 opcodes whitelisted (out of 93 total opcode variants) — missing: float64 Sub/Mul/Div/Mod promotion (only Add has float64), Div/Mod/Exp not in JIT at all (falls to interpreter via bailout)
+- **JIT:** 57 opcodes whitelisted (out of 93 total opcode variants) — missing: float64 Sub/Mul/Div/Mod promotion (only Add has float64), Div/Mod/Exp not in JIT at all (falls to interpreter via bailout)
 - **Debugger:** No CDP/DevTools
 
 ## Performance (AArch64, M4 Pro)
@@ -92,15 +92,26 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 |---|---|---|---|
 | `rune '1'` / `node -e '1'` | **~4–7 ms** | ~26–33 ms | **~5–8× faster** |
 
-### Hot Loops
+### Hot Loops (2026-06-27, post-P22 GC fix + N=16 IC table)
 
-| Benchmark | Rune | Node 22 | Ratio | Notes |
-|---|---|---|---|---|
-| `jit_hot_function_1M` | **130 ms** | 3.19 ms | 41× slower | After Phase E (native JIT Call); was 578 ms (181×) |
-| `loop_sum_smi_1M` | **115 ms** | 2.30 ms | 50× slower | Trace-compiled Smi loop |
-| `array_push_grow_100k` | **70 ms** | 7.21 ms | 10× slower | No JIT for array push |
-| `poly_prop_10shapes_1M` | **794 ms** | 4.16 ms | 191× slower | SIDT dispatch overhead (SIMD IC stride fix, was 1.01 s) |
-| `proto_chain_lookup_5deep_1M` | **737 ms** | 1.55 ms | 476× slower | Prototype walk (not optimized) |
+All benchmarks verified via `assert_eq!` for correctness. JIT stats collected per benchmark (see `crates/rune_bench/results/`).
+
+| Benchmark | Rune | Node 22 | Ratio | JIT entries | Bailouts | Notes |
+|---|---|---|---|---|---|---|
+| `loop_sum_smi_1M` | **124 ms** | 2.30 ms | 54× | 1 | 0 | Trace-compiled Smi-only loop |
+| `array_push_grow_100k` | **59 ms** | 7.21 ms | 8× | — | — | No JIT for array push (16 MiB semispace) |
+| `jit_hot_function_1M` | **129 ms** | 3.19 ms | 40× | 999,952 | 0 | Native JIT-to-JIT call (Phase E), 0 bailouts |
+| `poly_prop_10shapes_1M` | **169 ms** | 4.16 ms | 41× | 1 | 0 | N=16 IC table covers all 10 shapes; was 269 ms with N=8 cap |
+| `proto_chain_lookup_5deep_1M` | **132 ms** | 1.55 ms | 85× | 1 | 0 | Monomorphic trace, 1 shape, 0 bailouts |
+
+### JIT Stats Summary
+
+| Benchmark | Trace type | IC coverage |
+|---|---|---|
+| `loop_sum_smi_1M` | 1 trace, 16 ops, 0 shape IDs | N/A (Smi-only) |
+| `jit_hot_function_1M` | 999,952 JIT entries, 0 bailouts | N/A (function call) |
+| `poly_prop_10shapes_1M` | 1 trace, 22 ops, 10 shape IDs, 0 bailouts | 200K IC lookups, 100% hit rate |
+| `proto_chain_lookup_5deep_1M` | 1 trace, 18 ops, 1 shape ID, 0 bailouts | 53 IC lookups, 96% hit rate |
 
 ### AFPC Cache
 
@@ -109,10 +120,9 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 | Compile (parse + emit) | 355 µs | 1× |
 | Cache load | 26 µs | **13.5× faster** |
 
-### Phase E: Native JIT Call
+### Phase E: Native JIT Call & N=16 IC Table
 
-Native JIT-to-JIT function calls eliminated the interpreter round-trip:
-
+**Phase E** removed the interpreter round-trip for JIT-to-JIT function calls:
 ```
 jit_hot_function_1M timeline:
   Baseline (interpreter)  ── 578 ms
@@ -122,7 +132,15 @@ jit_hot_function_1M timeline:
   + Phase E T3 (Frame)     ── 130 ms  (lexical-scope correctness, ~5% overhead)
 ```
 
-The remaining gap to V8 is dominated by **lack of inlining** — each `add(a, b)` call is a full `blr` round-trip. Inlining (Phase F) is the next step.
+**N=16 IC table** resolved the poly_prop bottleneck — the trace-embedded IC table was capped at 8 entries, covering only 8 of 10 shapes at a polymorphic callsite. Bumping to 16 allowed the trace to run without bailouts:
+```
+poly_prop_10shapes_1M timeline:
+  Pre-P22 (GC bug)        ── 258 ms  (first honest measurement)
+  Post-P22 (GC roots)     ── 269 ms  (still N=8, 99.9995% bailout)
+  + N=16 IC table         ── 169 ms  (-37%, 0 bailouts, trace runs natively)
+```
+
+The remaining gap to V8 is dominated by **lack of inlining** — each `add(a, b)` call is a full `blr` round-trip. Phase F inlining is the next P0 item.
 
 ## Key Innovations
 
@@ -153,7 +171,7 @@ This makes Rune uniquely suited for serverless: functions can be compiled once d
 | **v0.0.1** ✅ | Language core + baseline JIT + SIDT IC + AFPC bytecode cache |
 | **v0.0.2** ✅ | Expanded JIT opcode coverage (floats, property access, calls), trace compiler |
 | **v0.1.0** ✅ | Native JIT Call (Phase E, AArch64), property IC traces, trace-compiled loops |
-| **v0.2.0** 🔜 | Phase F inlining, x86-64 native Call, float64 Sub/Mul/Div promotion, delta JIT, GenImmix GC |
+| **v0.2.0** 🔜 | Phase F inlining (P0), N=16 IC table ✅, x86-64 native Call, float64 Sub/Mul/Div promotion, delta JIT, GenImmix GC |
 | **v1.0.0** | Test262 >95%, production hardening, fuzzing |
 
 ## Development

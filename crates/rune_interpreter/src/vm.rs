@@ -221,6 +221,10 @@ pub struct Vm {
     /// Number of JIT bailouts (all reasons). Helps detect wasteful JIT entries
     /// where a function always bails (e.g., always receives non-Smi args).
     pub jit_bailout_count: u64,
+    /// Whether inlining is enabled for JIT trace compilation (--inline flag).
+    /// When false, InlinePlan is built but emit_inline_call is never reached
+    /// because the plan is built as empty.
+    pub enable_inlining: bool,
     /// Pre-allocated string Values for typeof results (indexed by TYPEOF_* constants).
     pub typeof_strings: [Value; 6],
     last_locals: Vec<Value>,
@@ -280,6 +284,7 @@ impl Vm {
             cached_jit_entries: HashMap::new(),
             jit_entry_count: 0,
             jit_bailout_count: 0,
+            enable_inlining: false,
             typeof_strings: [Value::undefined(); 6],
             last_locals: Vec::new(),
             eval_fn: UnsafeCell::new(None),
@@ -3602,8 +3607,9 @@ impl Vm {
 
         // Build InlinePlan from collected inline profiles (F-2 Layer 2a).
         // Must happen before `instrs` is moved into `prog` below.
+        // Gated by --inline feature flag: plan is empty under --no-inline.
         let mut inline_plan = rune_jit_baseline::InlinePlan::default();
-        if !trace.inline_profiles.is_empty() {
+        if self.enable_inlining && !trace.inline_profiles.is_empty() {
             for profile in &trace.inline_profiles {
                 let found_idx = ops_slice
                     .iter()

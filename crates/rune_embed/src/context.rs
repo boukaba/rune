@@ -80,6 +80,8 @@ impl Context {
     /// Parse, compile, and execute JavaScript source code.
     /// Returns the top-of-stack Value after execution.
     pub fn eval(&mut self, source: &str) -> Result<Value, String> {
+        // Sync configuration flags to Vm before execution.
+        self.vm.enable_inlining = self.enable_inlining;
         let bytecode = self.compile(source)?;
 
         // Execute — keep bytecode alive for dangling prog_ptr refs from Func

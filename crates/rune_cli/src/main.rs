@@ -38,7 +38,7 @@ fn main() {
         i += 1;
     }
 
-    let mut ctx = rune_embed::Context::new_small();
+    let mut ctx = rune_embed::Context::new();
 
     if let Some(source) = inline_source {
         let result = ctx.eval(&source);

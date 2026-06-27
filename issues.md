@@ -381,6 +381,51 @@ for val in self.builtin_wrappers.values_mut() {
 
 ---
 
+## P23: IC stats counter inconsistency — hits + misses > lookups (negative gap) 🟡 P2
+
+**Status:** 🟡 Unfixed
+
+**Symptom:** `dump_ic_stats()` shows `gap: -200021` (negative), meaning `hits + misses > lookups`. This violates the `debug_assert` at `vm.rs:3383` but the assert is compiled out in release builds.
+
+**Root cause:** The `LoadProperty` handler and `load_property_recursive_ic` both independently increment IC stats. On an IC miss:
+
+1. `LoadProperty` handler (vm.rs:1515-1647): `lookups += 1`, shape guard fails → `misses += 1`, then calls `load_property_recursive_ic`
+2. `load_property_recursive_ic` (vm.rs:3960-3992): does its **own** IC lookup (hitting the full InlineCache HashMap), and on hit: `hits += 1`
+
+Result per access: `1 lookup + 1 miss + 1 hit` → gap = `1 - 2 = -1`. With 200K polymorphic accesses, this accumulates to -200K.
+
+**Fix:** Either:
+- Remove the `ic_stats.hits += 1` from `load_property_recursive_ic` (line 3972) — it's a fallback, not an IC fast-path hit
+- Or add a separate counter for "fallback IC hits" so they don't double-count with the main path
+
+**Impact:** IC stats are unreliable for polymorphic sites. The hit rate display (hits/lookups) under-reports because the denominator (lookups) is correct but the numerator (hits) is inflated by fallback double-counting.
+
+---
+
+## P24: CLI uses 1 MiB semispace — OOM on allocation-heavy workloads 🔴 P0
+
+**Status:** 🟡 Fix ready
+
+**Symptom:** `array_push_grow_100k` test panics in CLI mode:
+```
+GC: still out of memory after collection (need 784936 bytes, have 508656 remaining).
+```
+
+**Root cause:** The CLI creates `rune_embed::Context::new_small()` at `main.rs:41`, which uses a 1 MiB semispace. Allocating 100K array elements (1.6 MiB live data) exceeds the semispace capacity. The Criterion benchmark harness uses `Context::new()` (16 MiB) and passes fine.
+
+**Fix:** Change `main.rs:41` from `Context::new_small()` to `Context::new()`:
+
+```rust
+// Before:
+let mut ctx = rune_embed::Context::new_small();
+// After:
+let mut ctx = rune_embed::Context::new();
+```
+
+**Impact:** The CLI crashes on any workload allocating >~60K objects. Affects interactive use, ad-hoc testing, and the JIT stats collection in this session.
+
+---
+
 ## Summary
 
 | # | Issue | Status | Commit |
@@ -408,3 +453,5 @@ for val in self.builtin_wrappers.values_mut() {
 | P20 | Cross-loop trace recording contamination | ✅ Fixed | 93aec5c |
 | P21 | Criterion benchmark source (wrong nested-loop form) | ✅ Fixed | c3d4bc3 |
 | P22 | GC root tracing missing globals (and 3 other fields) | ✅ Fixed | fd938da |
+| P23 | IC stats counter inconsistency (negative gap) | 🟡 P2 | — |
+| P24 | CLI semispace too small (1 MiB → 16 MiB) | 🔴 P0 | fix ready |

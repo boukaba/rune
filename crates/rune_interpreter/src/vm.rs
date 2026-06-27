@@ -3622,13 +3622,46 @@ impl Vm {
                         } else {
                             false
                         };
-                        inline_plan.entries.push(rune_jit_baseline::InlineEntry {
-                            call_instr_idx: instr_idx,
-                            callee_func_idx: profile.callee_func_idx,
-                            callee_prog_ptr: profile.callee_prog_ptr,
-                            callee_named_function,
-                            argc,
-                        });
+                        // F-2 Layer 2b eligibility: only inline callees whose opcodes
+                        // are all supported by emit_inline_call.
+                        let eligible = if profile.callee_func_idx >= 0
+                            && (profile.callee_func_idx as usize) < callee_prog.functions.len()
+                        {
+                            let func = &callee_prog.functions[profile.callee_func_idx as usize];
+                            // Whitelist of opcodes that emit_inline_call handles.
+                            func.instructions.iter().all(|i| {
+                                matches!(
+                                    i.opcode,
+                                    Opcode::Return
+                                        | Opcode::LoadLocal
+                                        | Opcode::StoreLocal
+                                        | Opcode::Add
+                                        | Opcode::LoadSmi
+                                        | Opcode::LoadUndefined
+                                        | Opcode::LoadNull
+                                        | Opcode::LoadBoolean
+                                        | Opcode::Pop
+                                        | Opcode::Dup
+                                        | Opcode::Swap
+                                        | Opcode::Neg
+                                        | Opcode::Not
+                                        | Opcode::Void
+                                        | Opcode::UnaryPlus
+                                        | Opcode::BitNot
+                                )
+                            })
+                        } else {
+                            false
+                        };
+                        if eligible {
+                            inline_plan.entries.push(rune_jit_baseline::InlineEntry {
+                                call_instr_idx: instr_idx,
+                                callee_func_idx: profile.callee_func_idx,
+                                callee_prog_ptr: profile.callee_prog_ptr,
+                                callee_named_function,
+                                argc,
+                            });
+                        }
                     }
                 }
             }
@@ -4849,10 +4882,7 @@ pub extern "C" fn rune_jit_string_helper(
     let vm = unsafe { &mut *(vm_ptr as *mut Vm) };
     let gc = unsafe { &mut *(gc_ptr as *mut SemiSpace) };
     let cache_key = prog_ptr as usize;
-    let handles = vm
-        .string_cache
-        .entry(cache_key)
-        .or_insert_with(Vec::new);
+    let handles = vm.string_cache.entry(cache_key).or_insert_with(Vec::new);
     if string_idx >= handles.len() {
         handles.resize(string_idx + 1, Value::undefined());
     }

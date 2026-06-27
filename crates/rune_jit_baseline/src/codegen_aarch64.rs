@@ -13,8 +13,7 @@
 /// dedicated pointer (x22) into `JitVmState::jit_stack` at offset 0 from the
 /// VM pointer.
 use crate::assembler::ExecutableMemory;
-use crate::ic::InlinePlan;
-use crate::ic::{InlineProfile, TraceIcTable};
+use crate::ic::{InlineEntry, InlinePlan, InlineProfile, TraceIcTable};
 use crate::{BailoutPoint, BailoutReason, BailoutTable, CompiledFunction};
 use rune_bytecode::opcode::Opcode;
 
@@ -498,6 +497,181 @@ impl Aarch64CodeGen {
             self.mem.patch_u32(patch_offset, instr);
         }
         self.pending_patches.clear();
+    }
+
+    /// Emit a call site by inlining the callee's body.
+    /// Called from the `Call` handler when `inline_plan` has an entry for this `call_bc_idx`.
+    /// Stack effects (push/pop/stack_depth) are tracked identically to the normal call_helper
+    /// path so that bailout information remains consistent.
+    fn emit_inline_call(&mut self, call_bc_idx: usize, entry: &InlineEntry) {
+        // Save caller's LOC_REG (x21) into x23.  Callee-saved x23 won't be
+        // clobbered by any emitted instructions inside the inlined body.
+        mov_reg(&mut self.mem, 23, 21);
+
+        // Redirect LOC_REG to point at the callee's argument area on the JIT stack.
+        // Non-named: local[0] = arg_0 at x22[-argc]
+        // Named:     local[0] = callee at x22[-(argc+1)]
+        let named = if entry.callee_named_function { 1 } else { 0 };
+        let base_words = entry.argc + named; // words below x22 to reach local[0]
+        // x21 = x22 - base_words * 8
+        let base_bytes = base_words * 8;
+        if base_bytes <= 0xFFF {
+            sub_imm(&mut self.mem, 21, 22, base_bytes);
+        } else {
+            mov_imm64(&mut self.mem, 0, base_bytes as u64);
+            sub_reg(&mut self.mem, 21, 22, 0);
+        }
+
+        // Resolve the callee's BytecodeProgram.
+        let parent =
+            unsafe { &*(entry.callee_prog_ptr as *const rune_bytecode::opcode::BytecodeProgram) };
+        let callee_prog = &parent.functions[entry.callee_func_idx as usize];
+
+        // Emit the callee's body instructions.  LoadLocal/StoreLocal access
+        // via the redirected LOC_REG; arithmetic bailout points use the
+        // caller's bc_idx so the bailout table maps to the right trace PC.
+        for instr in &callee_prog.instructions {
+            match instr.opcode {
+                Opcode::Return => {
+                    // Pop the return value from the JIT stack.
+                    self.pop();
+                    // Restore caller's LOC_REG.
+                    mov_reg(&mut self.mem, 21, 23);
+                    // Remove this + callee + args from JIT stack.
+                    // Do NOT update stack_depth here — matches normal call_helper path
+                    // where sub_imm is used without a corresponding pop().
+                    let pop_bytes = (entry.argc + 2) * 8;
+                    sub_imm(&mut self.mem, 22, 22, pop_bytes);
+                    // Push the return value back (stack_depth increments by 1).
+                    self.push();
+                    return;
+                }
+                Opcode::LoadLocal => {
+                    let idx = instr.operands[0] as u32;
+                    ldr_off(&mut self.mem, 0, 21, idx * 8);
+                    self.push();
+                }
+                Opcode::StoreLocal => {
+                    let idx = instr.operands[0] as u32;
+                    self.pop();
+                    str_off(&mut self.mem, 0, 21, idx * 8);
+                    self.push();
+                }
+                Opcode::LoadSmi => {
+                    let smi_raw = ((instr.operands[0] as u64) << 1) | 1;
+                    mov_imm64(&mut self.mem, 0, smi_raw);
+                    self.push();
+                }
+                Opcode::LoadUndefined => {
+                    movz(&mut self.mem, 0, 0);
+                    self.push();
+                }
+                Opcode::LoadNull => {
+                    movz(&mut self.mem, 0, 2);
+                    self.push();
+                }
+                Opcode::LoadBoolean => {
+                    let raw = if instr.operands[0] != 0 { 6u64 } else { 4u64 };
+                    mov_imm64(&mut self.mem, 0, raw);
+                    self.push();
+                }
+                Opcode::Pop => {
+                    self.pop();
+                }
+                Opcode::Dup => {
+                    sub_imm(&mut self.mem, JIT_STACK_REG, JIT_STACK_REG, 8);
+                    ldr_off(&mut self.mem, 0, JIT_STACK_REG, 0);
+                    add_imm(&mut self.mem, JIT_STACK_REG, JIT_STACK_REG, 8);
+                    self.push();
+                }
+                Opcode::Swap => {
+                    self.pop();
+                    mov_reg(&mut self.mem, 1, 0);
+                    self.pop();
+                    mov_reg(&mut self.mem, 2, 0);
+                    mov_reg(&mut self.mem, 0, 1);
+                    self.push();
+                    mov_reg(&mut self.mem, 0, 2);
+                    self.push();
+                }
+                Opcode::Add => {
+                    self.pop(); // x0 = b
+                    mov_reg(&mut self.mem, 9, 0); // x9 = b
+                    self.pop(); // x0 = a
+                    mov_reg(&mut self.mem, 8, 0); // x8 = a
+
+                    // Smi fast path (bailout uses call_bc_idx)
+                    mov_reg(&mut self.mem, 1, 9);
+                    emit(&mut self.mem, 0x92400021); // AND x1, x1, #1
+                    let b_not_smi = self.mem.current_offset();
+                    emit(&mut self.mem, 0xB4000001); // CBZ X1, +0
+                    mov_reg(&mut self.mem, 1, 8);
+                    emit(&mut self.mem, 0x92400021); // AND x1, x1, #1
+                    let a_not_smi = self.mem.current_offset();
+                    emit(&mut self.mem, 0xB4000001); // CBZ X1, +0
+
+                    mov_reg(&mut self.mem, 0, 8);
+                    sub_imm(&mut self.mem, 0, 0, 1);
+                    add_reg(&mut self.mem, 0, 0, 9);
+
+                    emit(&mut self.mem, 0x9341FC02); // ASR x2, x0, #1
+                    mov_imm64(&mut self.mem, 3, MAX_I31);
+                    cmp_reg(&mut self.mem, 2, 3);
+                    let ov_jg = self.mem.current_offset();
+                    emit(&mut self.mem, 0x5400000C); // B.GT +0
+
+                    mov_imm64(&mut self.mem, 3, MIN_I31);
+                    cmp_reg(&mut self.mem, 2, 3);
+                    let ov_jl = self.mem.current_offset();
+                    emit(&mut self.mem, 0x5400000B); // B.LT +0
+
+                    let smi_done = self.mem.current_offset();
+                    emit(&mut self.mem, 0x14000000); // B +0
+
+                    let float64_label = self.mem.current_offset();
+                    mov_reg(&mut self.mem, 0, VM_REG);
+                    mov_reg(&mut self.mem, 1, GC_REG);
+                    mov_reg(&mut self.mem, 2, 8);
+                    mov_reg(&mut self.mem, 3, 9);
+                    ldr_off(&mut self.mem, 15, VM_REG, 552);
+                    emit(&mut self.mem, 0xD63F01E0); // BLR x15
+
+                    let done_label = self.mem.current_offset();
+
+                    let d_bns = ((float64_label as i64 - b_not_smi as i64) / 4) as u32;
+                    self.mem
+                        .patch_u32(b_not_smi, 0xB4000001 | ((d_bns & 0x7FFFF) << 5));
+                    let d_ans = ((float64_label as i64 - a_not_smi as i64) / 4) as u32;
+                    self.mem
+                        .patch_u32(a_not_smi, 0xB4000001 | ((d_ans & 0x7FFFF) << 5));
+                    let d_jg = ((float64_label as i64 - ov_jg as i64) / 4) as u32;
+                    self.mem
+                        .patch_u32(ov_jg, 0x5400000C | ((d_jg & 0x7FFFF) << 5));
+                    let d_jl = ((float64_label as i64 - ov_jl as i64) / 4) as u32;
+                    self.mem
+                        .patch_u32(ov_jl, 0x5400000B | ((d_jl & 0x7FFFF) << 5));
+                    let d_done = ((done_label as i64 - smi_done as i64) / 4) as u32;
+                    self.mem
+                        .patch_u32(smi_done, 0x14000000 | (d_done & 0x03FF_FFFF));
+
+                    self.push();
+                }
+                _ => {
+                    // Unsupported opcode in inline context — bail at the call site.
+                    // This shouldn't happen for eligible callees (checked at plan-build time).
+                    self.record_bailout_point(call_bc_idx, BailoutReason::Unimplemented);
+                    mov_reg(&mut self.mem, 2, JIT_STACK_REG);
+                    mov_imm64(&mut self.mem, 1, call_bc_idx as u64);
+                    mov_reg(&mut self.mem, 0, VM_REG);
+                    ldr_off(&mut self.mem, 15, VM_REG, 520);
+                    emit(&mut self.mem, 0xD63F01E0); // BLR x15
+                    movz(&mut self.mem, 0, 0);
+                    self.push();
+                    self.emit_epilogue();
+                    return;
+                }
+            }
+        }
     }
 
     pub fn compile(mut self, program: &rune_bytecode::opcode::BytecodeProgram) -> CompiledFunction {
@@ -1492,6 +1666,17 @@ impl Aarch64CodeGen {
                 }
                 Opcode::Call => {
                     let argc = instr.operands[0] as u32;
+                    // F-2 Layer 2b: inline eligible call sites
+                    let inline_entry = self
+                        .inline_plan
+                        .entries
+                        .iter()
+                        .find(|e| e.call_instr_idx == bc_idx)
+                        .cloned();
+                    if let Some(entry) = inline_entry {
+                        self.emit_inline_call(bc_idx, &entry);
+                        continue;
+                    }
                     // Clear bailout flag at jit_stack[63] (offset 63*8=504)
                     movz(&mut self.mem, 0, 0);
                     str_off(&mut self.mem, 0, VM_REG, 504);

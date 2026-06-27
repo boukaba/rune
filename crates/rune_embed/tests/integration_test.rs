@@ -1974,6 +1974,49 @@ fn test_jit_inline_no_bail() {
 
 #[test]
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn test_jit_inline_skip_unarith() {
+    // Functions with Sub/Mul (not in the emit_inline_call whitelist)
+    // must NOT be inlined.  Result should match --no-inline.
+    let mut ctx_inline = Context::new_small();
+    ctx_inline.enable_inlining = true;
+    let r1 = ctx_inline
+        .eval(
+            r#"
+            function sub(a, b) { return a - b; }
+            function mul(a, b) { return a * b; }
+            var x = 100;
+            for (var i = 0; i < 100; i = i + 1) { x = sub(x, 1); }
+            var y = 1;
+            for (var i = 1; i <= 10; i = i + 1) { y = mul(y, i); }
+            x + y
+        "#,
+        )
+        .unwrap();
+
+    let mut ctx_no_inline = Context::new_small();
+    ctx_no_inline.enable_inlining = false;
+    let r2 = ctx_no_inline
+        .eval(
+            r#"
+            function sub(a, b) { return a - b; }
+            function mul(a, b) { return a * b; }
+            var x = 100;
+            for (var i = 0; i < 100; i = i + 1) { x = sub(x, 1); }
+            var y = 1;
+            for (var i = 1; i <= 10; i = i + 1) { y = mul(y, i); }
+            x + y
+        "#,
+        )
+        .unwrap();
+
+    assert_eq!(
+        r1, r2,
+        "sub/mul not in the whitelist should produce same result as no-inline"
+    );
+}
+
+#[test]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn test_jit_typeof_native() {
     // TypeOf is now native — the JIT calls typeof_helper instead of bailing.
     // This test verifies all typeof results and that the JIT enters + no bail.

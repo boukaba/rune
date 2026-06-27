@@ -3634,7 +3634,7 @@ impl Vm {
                             && (profile.callee_func_idx as usize) < callee_prog.functions.len()
                         {
                             let func = &callee_prog.functions[profile.callee_func_idx as usize];
-                            // Whitelist of opcodes that emit_inline_call handles.
+                            // Must match the opcodes handled in emit_inline_call.
                             func.instructions.iter().all(|i| {
                                 matches!(
                                     i.opcode,
@@ -3649,11 +3649,6 @@ impl Vm {
                                         | Opcode::Pop
                                         | Opcode::Dup
                                         | Opcode::Swap
-                                        | Opcode::Neg
-                                        | Opcode::Not
-                                        | Opcode::Void
-                                        | Opcode::UnaryPlus
-                                        | Opcode::BitNot
                                 )
                             })
                         } else {

@@ -333,7 +333,7 @@ The same root cause also produced the P21 symptom (benchmark returning 234000 in
 
 ## P22: GC root tracing missing globals from register_roots ✅ FIXED
 
-**Status:** ✅ Fixed in `TODO`
+**Status:** ✅ Fixed in `fd938da`
 
 **Symptom:** The Cheney-style copying GC does not trace `self.globals` as a root. After GC compaction, any `Value` in the globals HashMap that points to a heap object (HeapFloat64, HeapString, JSObject, RuneArray) becomes a dangling pointer — the GC forwarded the object but didn't update the slot in globals.
 
@@ -407,4 +407,4 @@ for val in self.builtin_wrappers.values_mut() {
 | P19 | Proto_chain 0% IC hit rate | 🔴 P0 | — |
 | P20 | Cross-loop trace recording contamination | ✅ Fixed | 93aec5c |
 | P21 | Criterion benchmark source (wrong nested-loop form) | ✅ Fixed | c3d4bc3 |
-| P22 | GC root tracing missing globals (and 3 other fields) | ✅ Fixed | TODO |
+| P22 | GC root tracing missing globals (and 3 other fields) | ✅ Fixed | fd938da |

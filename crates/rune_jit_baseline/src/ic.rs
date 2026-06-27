@@ -21,7 +21,10 @@ pub struct TraceIcTable {
 impl Default for TraceIcTable {
     fn default() -> Self {
         Self {
-            entries: [TraceIcEntry { shape_id: 0, slot_offset: 0 }; 16],
+            entries: [TraceIcEntry {
+                shape_id: 0,
+                slot_offset: 0,
+            }; 16],
             count: 0,
         }
     }
@@ -56,4 +59,26 @@ pub struct InlineProfile {
     pub callee_needs_frame: bool,
     /// Size of callee body in bytecode instructions.
     pub callee_bytecode_size: u32,
+}
+
+/// Describes one call site to be inlined during trace compilation.
+/// Built from `InlineProfile` data in `Vm::compile_trace_native`.
+#[derive(Clone, Debug)]
+pub struct InlineEntry {
+    /// Trace instruction index of the Call opcode.
+    pub call_instr_idx: usize,
+    /// Index into the containing BytecodeProgram's `functions[]` for the callee.
+    pub callee_func_idx: i64,
+    /// Pointer to the containing `BytecodeProgram` (pinned, not GC-managed).
+    pub callee_prog_ptr: *const u8,
+    /// Whether the callee has `named_function` (affects local→JIT-stack offset remapping).
+    pub callee_named_function: bool,
+    /// Argument count passed to this call site.
+    pub argc: u32,
+}
+
+/// Collection of inline entries for a single trace compilation.
+#[derive(Clone, Debug, Default)]
+pub struct InlinePlan {
+    pub entries: Vec<InlineEntry>,
 }

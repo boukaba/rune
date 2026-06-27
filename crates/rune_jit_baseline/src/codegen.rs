@@ -73,10 +73,10 @@ impl CodeGen {
         self.mem.emit_mov_r64_imm64(1, arg2);
         // Load helper addr from [r15 + 512] into rax
         self.mem.emit_rex_w();
-        self.mem.emit_byte(0x8B);            // MOV r64, r/m64
-        self.mem.emit_byte(0x87);            // mod=10, reg=0(rax), r/m=7(r15)
-        self.mem.emit_u32(512);              // disp32 = offset of jit_helpers.lexical_helper
-        self.mem.emit_call_r64(0);           // call rax
+        self.mem.emit_byte(0x8B); // MOV r64, r/m64
+        self.mem.emit_byte(0x87); // mod=10, reg=0(rax), r/m=7(r15)
+        self.mem.emit_u32(512); // disp32 = offset of jit_helpers.lexical_helper
+        self.mem.emit_call_r64(0); // call rax
     }
 
     // -----------------------------------------------------------------------
@@ -129,9 +129,9 @@ impl CodeGen {
         // Store initial JIT stack pointer as jit_stack_base (offset 576 from vm_ptr).
         // jit_stack[64] (512) + jit_helpers[8] (64) = 576
         self.mem.emit_rex_w();
-        self.mem.emit_byte(0x89);            // MOV r/m64, r64
-        self.mem.emit_byte(0x9F);            // mod=10, reg=3(rbx), r/m=7(r15)
-        self.mem.emit_u32(576);              // disp32 = offset of jit_stack_base
+        self.mem.emit_byte(0x89); // MOV r/m64, r64
+        self.mem.emit_byte(0x9F); // mod=10, reg=3(rbx), r/m=7(r15)
+        self.mem.emit_u32(576); // disp32 = offset of jit_stack_base
     }
 
     fn emit_epilogue(&mut self) {
@@ -148,7 +148,7 @@ impl CodeGen {
     // Smi arithmetic helpers (overflow-guarded)
     // -----------------------------------------------------------------------
 
-    const MAX_I31: i32 = 0x3FFFFFFF;   // 2^30 − 1
+    const MAX_I31: i32 = 0x3FFFFFFF; // 2^30 − 1
     const MIN_I31_AS_I32: i32 = -1_073_741_824; // −2^30, sign-extends to 0xFFFF_FFFF_C000_0000
 
     /// Emit the overflow check / bailout sequence for a Smi-encoded value in rax.
@@ -161,8 +161,8 @@ impl CodeGen {
         r8_holds_b: bool,
     ) {
         // Save result in rcx and untag for comparison
-        self.mem.emit_mov_r64_rm64(1, 0);          // rcx = rax (result)
-        self.mem.emit_sar_r64_1(1);                // rcx >>= 1 (untag)
+        self.mem.emit_mov_r64_rm64(1, 0); // rcx = rax (result)
+        self.mem.emit_sar_r64_1(1); // rcx >>= 1 (untag)
         // Check > max
         self.mem.emit_cmp_r64_imm32(1, Self::MAX_I31);
         let jg_ov = self.mem.emit_jg_rel32(0);
@@ -174,12 +174,12 @@ impl CodeGen {
         // Overflow: restore stack, record bailout, call helper, epilogue
         let ov_label = self.mem.current_offset();
         if r9_holds_a {
-            self.mem.emit_mov_r64_rm64(0, 9);      // rax = a (saved in r9)
-            self.emit_jit_stack_push();             // restore a
+            self.mem.emit_mov_r64_rm64(0, 9); // rax = a (saved in r9)
+            self.emit_jit_stack_push(); // restore a
         }
         if r8_holds_b {
-            self.mem.emit_mov_r64_rm64(0, 8);      // rax = b (saved in r8)
-            self.emit_jit_stack_push();             // restore b
+            self.mem.emit_mov_r64_rm64(0, 8); // rax = b (saved in r8)
+            self.emit_jit_stack_push(); // restore b
         }
         self.record_bailout_point(bc_idx, BailoutReason::Overflow);
         // Call bailout_helper(rdi=r15, rsi=bc_idx, rdx=rbx)
@@ -193,15 +193,18 @@ impl CodeGen {
         self.mem.emit_call_r64(0);
         self.mem.emit_rex_w();
         self.mem.emit_byte(0x31);
-        self.mem.emit_byte(0xC0);                  // xor eax, eax
+        self.mem.emit_byte(0xC0); // xor eax, eax
         self.emit_jit_stack_push();
         self.emit_epilogue();
         // Patch jumps
         let ok_label = self.mem.current_offset();
         let four: u32 = 4;
-        self.mem.patch_u32(jg_ov, ov_label as u32 - (jg_ov as u32 + four));
-        self.mem.patch_u32(jl_ov, ov_label as u32 - (jl_ov as u32 + four));
-        self.mem.patch_u32(jmp_ok, ok_label as u32 - (jmp_ok as u32 + four));
+        self.mem
+            .patch_u32(jg_ov, ov_label as u32 - (jg_ov as u32 + four));
+        self.mem
+            .patch_u32(jl_ov, ov_label as u32 - (jl_ov as u32 + four));
+        self.mem
+            .patch_u32(jmp_ok, ok_label as u32 - (jmp_ok as u32 + four));
     }
 
     /// Check if rax holds a Smi (bit 0 = 1). If yes, fall through.
@@ -241,40 +244,42 @@ impl CodeGen {
         self.emit_epilogue();
         let ok_label = self.mem.current_offset();
         let four: u32 = 4;
-        self.mem.patch_u32(je_bail, bail_label as u32 - (je_bail as u32 + four));
-        self.mem.patch_u32(jmp_ok, ok_label as u32 - (jmp_ok as u32 + four));
+        self.mem
+            .patch_u32(je_bail, bail_label as u32 - (je_bail as u32 + four));
+        self.mem
+            .patch_u32(jmp_ok, ok_label as u32 - (jmp_ok as u32 + four));
     }
 
     /// Pop two Smis and subtract (a - b):
     ///   (a - b) | 1
     fn emit_smi_sub(&mut self, bc_idx: usize) {
-        self.emit_jit_stack_pop();                 // rax = b
-        self.emit_smi_check(bc_idx, &[]);          // check b
-        self.mem.emit_mov_r64_rm64(1, 0);          // rcx = b
-        self.emit_jit_stack_pop();                 // rax = a
-        self.mem.emit_mov_r64_rm64(9, 0);          // r9 = a
-        self.emit_smi_check(bc_idx, &[1]);         // check a; saved=[rcx(b)]
-        self.mem.emit_mov_r64_rm64(8, 1);          // r8 = b
-        self.mem.emit_sub_r64_r64(0, 1);           // rax -= rcx
-        self.mem.emit_or_r64_imm8(0, 1);           // rax |= 1
+        self.emit_jit_stack_pop(); // rax = b
+        self.emit_smi_check(bc_idx, &[]); // check b
+        self.mem.emit_mov_r64_rm64(1, 0); // rcx = b
+        self.emit_jit_stack_pop(); // rax = a
+        self.mem.emit_mov_r64_rm64(9, 0); // r9 = a
+        self.emit_smi_check(bc_idx, &[1]); // check a; saved=[rcx(b)]
+        self.mem.emit_mov_r64_rm64(8, 1); // r8 = b
+        self.mem.emit_sub_r64_r64(0, 1); // rax -= rcx
+        self.mem.emit_or_r64_imm8(0, 1); // rax |= 1
         self.emit_smi_overflow_bailout_or_continue(bc_idx, true, true);
     }
 
     /// Pop two Smis and multiply (a * b):
     ///   decode → mul → encode
     fn emit_smi_mul(&mut self, bc_idx: usize) {
-        self.emit_jit_stack_pop();                 // rax = b
-        self.emit_smi_check(bc_idx, &[]);          // check b
-        self.mem.emit_mov_r64_rm64(1, 0);          // rcx = b
-        self.emit_jit_stack_pop();                 // rax = a
-        self.mem.emit_mov_r64_rm64(9, 0);          // r9 = a
-        self.emit_smi_check(bc_idx, &[1]);         // check a; saved=[rcx(b)]
-        self.mem.emit_mov_r64_rm64(8, 1);          // r8 = b
-        self.mem.emit_sar_r64_1(0);                // rax >>= 1 (untag a)
-        self.mem.emit_sar_r64_1(1);                // rcx >>= 1 (untag b)
-        self.mem.emit_imul_r64_r64(0, 1);          // rax *= rcx
-        self.mem.emit_shl_r64_1(0);                // rax <<= 1 (Smi)
-        self.mem.emit_or_r64_imm8(0, 1);           // rax |= 1
+        self.emit_jit_stack_pop(); // rax = b
+        self.emit_smi_check(bc_idx, &[]); // check b
+        self.mem.emit_mov_r64_rm64(1, 0); // rcx = b
+        self.emit_jit_stack_pop(); // rax = a
+        self.mem.emit_mov_r64_rm64(9, 0); // r9 = a
+        self.emit_smi_check(bc_idx, &[1]); // check a; saved=[rcx(b)]
+        self.mem.emit_mov_r64_rm64(8, 1); // r8 = b
+        self.mem.emit_sar_r64_1(0); // rax >>= 1 (untag a)
+        self.mem.emit_sar_r64_1(1); // rcx >>= 1 (untag b)
+        self.mem.emit_imul_r64_r64(0, 1); // rax *= rcx
+        self.mem.emit_shl_r64_1(0); // rax <<= 1 (Smi)
+        self.mem.emit_or_r64_imm8(0, 1); // rax |= 1
         self.emit_smi_overflow_bailout_or_continue(bc_idx, true, true);
     }
 
@@ -339,10 +344,10 @@ impl CodeGen {
                     self.mem.emit_mov_r64_imm64(1, string_idx);
                     // Load string_helper from [r15 + 536] into rax
                     self.mem.emit_rex_w();
-                    self.mem.emit_byte(0x8B);                   // MOV rax, [r15 + 536]
-                    self.mem.emit_byte(0x87);                   // mod=10, reg=0(rax), r/m=7(r15)
-                    self.mem.emit_u32(536);                     // disp32
-                    self.mem.emit_call_r64(0);                  // call rax
+                    self.mem.emit_byte(0x8B); // MOV rax, [r15 + 536]
+                    self.mem.emit_byte(0x87); // mod=10, reg=0(rax), r/m=7(r15)
+                    self.mem.emit_u32(536); // disp32
+                    self.mem.emit_call_r64(0); // call rax
                     // push result (string Value in rax)
                     self.emit_jit_stack_push();
                 }
@@ -364,27 +369,27 @@ impl CodeGen {
                 }
                 Opcode::Not => {
                     self.emit_jit_stack_pop();
-                    self.emit_smi_check(bc_idx, &[]);    // check input Smi
-                    self.mem.emit_mov_r64_rm64(1, 0);    // rcx = value
+                    self.emit_smi_check(bc_idx, &[]); // check input Smi
+                    self.mem.emit_mov_r64_rm64(1, 0); // rcx = value
                     self.mem.emit_rex_w();
                     self.mem.emit_byte(0x83);
-                    self.mem.emit_byte(0xF9);            // cmp rcx, imm8
-                    self.mem.emit_byte(2);               // imm8 = 2
+                    self.mem.emit_byte(0xF9); // cmp rcx, imm8
+                    self.mem.emit_byte(2); // imm8 = 2
                     self.mem.emit_byte(0x0F);
                     self.mem.emit_byte(0x96);
-                    self.mem.emit_byte(0xC0);            // setbe al
+                    self.mem.emit_byte(0xC0); // setbe al
                     self.mem.emit_rex_w();
                     self.mem.emit_byte(0x83);
-                    self.mem.emit_byte(0xF9);            // cmp rcx, imm8
-                    self.mem.emit_byte(4);               // imm8 = 4
+                    self.mem.emit_byte(0xF9); // cmp rcx, imm8
+                    self.mem.emit_byte(4); // imm8 = 4
                     self.mem.emit_byte(0x0F);
                     self.mem.emit_byte(0x94);
-                    self.mem.emit_byte(0xC1);            // sete cl
+                    self.mem.emit_byte(0xC1); // sete cl
                     self.mem.emit_byte(0x08);
-                    self.mem.emit_byte(0xC8);            // or al, cl
+                    self.mem.emit_byte(0xC8); // or al, cl
                     self.mem.emit_byte(0x0F);
                     self.mem.emit_byte(0xB6);
-                    self.mem.emit_byte(0xC0);            // movzx eax, al
+                    self.mem.emit_byte(0xC0); // movzx eax, al
                     self.mem.emit_shl_r64_1(0);
                     self.mem.emit_or_r64_imm8(0, 1);
                     self.emit_jit_stack_push();
@@ -393,72 +398,72 @@ impl CodeGen {
                     self.emit_jit_stack_pop();
                     self.mem.emit_rex_w();
                     self.mem.emit_byte(0x31);
-                    self.mem.emit_byte(0xC0);            // xor eax, eax (undefined = 0)
+                    self.mem.emit_byte(0xC0); // xor eax, eax (undefined = 0)
                     self.emit_jit_stack_push();
                 }
                 Opcode::UnaryPlus => {
                     self.emit_jit_stack_pop();
                     self.emit_smi_check(bc_idx, &[]); // check Smi
-                    self.emit_jit_stack_push();       // push back (no transformation)
+                    self.emit_jit_stack_push(); // push back (no transformation)
                 }
                 Opcode::BitNot => {
                     self.emit_jit_stack_pop();
                     self.emit_smi_check(bc_idx, &[]); // check input Smi
                     self.mem.emit_rex_w();
                     self.mem.emit_byte(0xF7);
-                    self.mem.emit_byte(0xD0);            // not rax
-                    self.mem.emit_add_r64_imm32(0, 1);   // add rax, 1
+                    self.mem.emit_byte(0xD0); // not rax
+                    self.mem.emit_add_r64_imm32(0, 1); // add rax, 1
                     self.emit_jit_stack_push();
                 }
                 Opcode::StrictNe => {
                     self.emit_jit_stack_pop();
-                    self.emit_smi_check(bc_idx, &[]);    // check b
-                    self.mem.emit_mov_r64_rm64(1, 0);    // rcx = b
-                    self.emit_jit_stack_pop();            // rax = a
-                    self.emit_smi_check(bc_idx, &[1]);   // check a; saved=[rcx(b)]
-                    self.mem.emit_cmp_r64_r64(0, 1);     // cmp a, b
+                    self.emit_smi_check(bc_idx, &[]); // check b
+                    self.mem.emit_mov_r64_rm64(1, 0); // rcx = b
+                    self.emit_jit_stack_pop(); // rax = a
+                    self.emit_smi_check(bc_idx, &[1]); // check a; saved=[rcx(b)]
+                    self.mem.emit_cmp_r64_r64(0, 1); // cmp a, b
                     self.mem.emit_byte(0x0F);
                     self.mem.emit_byte(0x95);
-                    self.mem.emit_byte(0xC0);            // setne al
+                    self.mem.emit_byte(0xC0); // setne al
                     self.mem.emit_byte(0x0F);
                     self.mem.emit_byte(0xB6);
-                    self.mem.emit_byte(0xC0);            // movzx eax, al
+                    self.mem.emit_byte(0xC0); // movzx eax, al
                     self.mem.emit_byte(0xD1);
-                    self.mem.emit_byte(0xE0);            // shl eax, 1
-                    self.mem.emit_or_r64_imm8(0, 1);    // or rax, 1
+                    self.mem.emit_byte(0xE0); // shl eax, 1
+                    self.mem.emit_or_r64_imm8(0, 1); // or rax, 1
                     self.emit_jit_stack_push();
                 }
                 Opcode::Swap => {
-                    self.emit_jit_stack_pop();            // rax = b
-                    self.mem.emit_mov_r64_rm64(1, 0);    // rcx = b
-                    self.emit_jit_stack_pop();            // rax = a
-                    self.mem.emit_mov_r64_rm64(2, 0);    // rdx = a
-                    self.mem.emit_mov_r64_rm64(0, 1);    // rax = b
+                    self.emit_jit_stack_pop(); // rax = b
+                    self.mem.emit_mov_r64_rm64(1, 0); // rcx = b
+                    self.emit_jit_stack_pop(); // rax = a
+                    self.mem.emit_mov_r64_rm64(2, 0); // rdx = a
+                    self.mem.emit_mov_r64_rm64(0, 1); // rax = b
                     self.emit_jit_stack_push();
-                    self.mem.emit_mov_r64_rm64(0, 2);    // rax = a
+                    self.mem.emit_mov_r64_rm64(0, 2); // rax = a
                     self.emit_jit_stack_push();
                 }
                 Opcode::Eq => {
-                    self.emit_jit_stack_pop();            // rax = b
-                    self.emit_smi_check(bc_idx, &[]);    // check b
-                    self.mem.emit_mov_r64_rm64(1, 0);    // rcx = b
-                    self.emit_jit_stack_pop();            // rax = a
-                    self.emit_smi_check(bc_idx, &[1]);   // check a; saved=[rcx(b)]
+                    self.emit_jit_stack_pop(); // rax = b
+                    self.emit_smi_check(bc_idx, &[]); // check b
+                    self.mem.emit_mov_r64_rm64(1, 0); // rcx = b
+                    self.emit_jit_stack_pop(); // rax = a
+                    self.emit_smi_check(bc_idx, &[1]); // check a; saved=[rcx(b)]
                     // a == b
                     self.mem.emit_cmp_r64_r64(0, 1);
                     let je_same = self.mem.emit_je_rel32(0);
                     // null == undefined: (a==0 && b==2) || (a==2 && b==0)
-                    self.mem.emit_mov_r64_imm64(2, 0);   // rdx = 0
+                    self.mem.emit_mov_r64_imm64(2, 0); // rdx = 0
                     self.mem.emit_cmp_r64_r64(0, 2);
                     let je_a0 = self.mem.emit_je_rel32(0);
-                    self.mem.emit_mov_r64_imm64(2, 2);   // rdx = 2 (null)
+                    self.mem.emit_mov_r64_imm64(2, 2); // rdx = 2 (null)
                     self.mem.emit_cmp_r64_r64(0, 2);
                     let je_a2 = self.mem.emit_je_rel32(0);
                     // boolean checks
-                    self.mem.emit_mov_r64_imm64(2, 4);   // false
+                    self.mem.emit_mov_r64_imm64(2, 4); // false
                     self.mem.emit_cmp_r64_r64(0, 2);
                     let je_a_false = self.mem.emit_je_rel32(0);
-                    self.mem.emit_mov_r64_imm64(2, 6);   // true
+                    self.mem.emit_mov_r64_imm64(2, 6); // true
                     self.mem.emit_cmp_r64_r64(0, 2);
                     let je_a_true = self.mem.emit_je_rel32(0);
                     let jmp_done = self.mem.emit_jmp_rel32(0); // fall through false
@@ -478,37 +483,50 @@ impl CodeGen {
                     let jmp_not_eq2 = self.mem.emit_jmp_rel32(0);
                     // a == false: check b == Smi(0)=1
                     let label_a_false = self.mem.current_offset();
-                    self.mem.patch_u32(je_a_false, (label_a_false - (je_a_false + 6)) as u32);
+                    self.mem
+                        .patch_u32(je_a_false, (label_a_false - (je_a_false + 6)) as u32);
                     self.mem.emit_mov_r64_imm64(2, 1);
                     self.mem.emit_cmp_r64_r64(1, 2);
                     let je_eq = self.mem.emit_je_rel32(0);
                     let jmp_not_eq3 = self.mem.emit_jmp_rel32(0);
                     // a == true: check b == Smi(1)=3
                     let label_a_true = self.mem.current_offset();
-                    self.mem.patch_u32(je_a_true, (label_a_true - (je_a_true + 6)) as u32);
+                    self.mem
+                        .patch_u32(je_a_true, (label_a_true - (je_a_true + 6)) as u32);
                     self.mem.emit_mov_r64_imm64(2, 3);
                     self.mem.emit_cmp_r64_r64(1, 2);
                     let je_eq2 = self.mem.emit_je_rel32(0);
                     let jmp_not_eq4 = self.mem.emit_jmp_rel32(0);
                     // equal
                     let label_eq = self.mem.current_offset();
-                    self.mem.patch_u32(je_same, (label_eq - (je_same + 6)) as u32);
-                    self.mem.patch_u32(je_null_undef, (label_eq - (je_null_undef + 6)) as u32);
-                    self.mem.patch_u32(je_undef_null, (label_eq - (je_undef_null + 6)) as u32);
+                    self.mem
+                        .patch_u32(je_same, (label_eq - (je_same + 6)) as u32);
+                    self.mem
+                        .patch_u32(je_null_undef, (label_eq - (je_null_undef + 6)) as u32);
+                    self.mem
+                        .patch_u32(je_undef_null, (label_eq - (je_undef_null + 6)) as u32);
                     self.mem.patch_u32(je_eq, (label_eq - (je_eq + 6)) as u32);
                     self.mem.patch_u32(je_eq2, (label_eq - (je_eq2 + 6)) as u32);
-                    self.mem.emit_mov_r64_imm64(0, 3);   // Smi(1)
+                    self.mem.emit_mov_r64_imm64(0, 3); // Smi(1)
                     let jmp_done2 = self.mem.emit_jmp_rel32(0);
                     // not equal
                     let label_not_eq = self.mem.current_offset();
-                    self.mem.patch_u32(jmp_not_eq, (label_not_eq - (jmp_not_eq + 5)) as u32);
-                    self.mem.patch_u32(jmp_not_eq2, (label_not_eq - (jmp_not_eq2 + 5)) as u32);
-                    self.mem.patch_u32(jmp_not_eq3, (label_not_eq - (jmp_not_eq3 + 5)) as u32);
-                    self.mem.patch_u32(jmp_not_eq4, (label_not_eq - (jmp_not_eq4 + 5)) as u32);
-                    self.mem.emit_mov_r64_imm64(0, 1);   // Smi(0)
+                    self.mem
+                        .patch_u32(jmp_not_eq, (label_not_eq - (jmp_not_eq + 5)) as u32);
+                    self.mem
+                        .patch_u32(jmp_not_eq2, (label_not_eq - (jmp_not_eq2 + 5)) as u32);
+                    self.mem
+                        .patch_u32(jmp_not_eq3, (label_not_eq - (jmp_not_eq3 + 5)) as u32);
+                    self.mem
+                        .patch_u32(jmp_not_eq4, (label_not_eq - (jmp_not_eq4 + 5)) as u32);
+                    self.mem.emit_mov_r64_imm64(0, 1); // Smi(0)
                     // done
-                    self.mem.patch_u32(jmp_done, (label_not_eq - (jmp_done + 5)) as u32);
-                    self.mem.patch_u32(jmp_done2, (self.mem.current_offset() - (jmp_done2 + 5)) as u32);
+                    self.mem
+                        .patch_u32(jmp_done, (label_not_eq - (jmp_done + 5)) as u32);
+                    self.mem.patch_u32(
+                        jmp_done2,
+                        (self.mem.current_offset() - (jmp_done2 + 5)) as u32,
+                    );
                     self.emit_jit_stack_push();
                 }
                 Opcode::Ne => {
@@ -546,33 +564,46 @@ impl CodeGen {
                     let je_undef_null = self.mem.emit_je_rel32(0);
                     let jmp_not_eq2 = self.mem.emit_jmp_rel32(0);
                     let label_a_false = self.mem.current_offset();
-                    self.mem.patch_u32(je_a_false, (label_a_false - (je_a_false + 6)) as u32);
+                    self.mem
+                        .patch_u32(je_a_false, (label_a_false - (je_a_false + 6)) as u32);
                     self.mem.emit_mov_r64_imm64(2, 1);
                     self.mem.emit_cmp_r64_r64(1, 2);
                     let je_eq = self.mem.emit_je_rel32(0);
                     let jmp_not_eq3 = self.mem.emit_jmp_rel32(0);
                     let label_a_true = self.mem.current_offset();
-                    self.mem.patch_u32(je_a_true, (label_a_true - (je_a_true + 6)) as u32);
+                    self.mem
+                        .patch_u32(je_a_true, (label_a_true - (je_a_true + 6)) as u32);
                     self.mem.emit_mov_r64_imm64(2, 3);
                     self.mem.emit_cmp_r64_r64(1, 2);
                     let je_eq2 = self.mem.emit_je_rel32(0);
                     let jmp_not_eq4 = self.mem.emit_jmp_rel32(0);
                     let label_eq = self.mem.current_offset();
-                    self.mem.patch_u32(je_same, (label_eq - (je_same + 6)) as u32);
-                    self.mem.patch_u32(je_null_undef, (label_eq - (je_null_undef + 6)) as u32);
-                    self.mem.patch_u32(je_undef_null, (label_eq - (je_undef_null + 6)) as u32);
+                    self.mem
+                        .patch_u32(je_same, (label_eq - (je_same + 6)) as u32);
+                    self.mem
+                        .patch_u32(je_null_undef, (label_eq - (je_null_undef + 6)) as u32);
+                    self.mem
+                        .patch_u32(je_undef_null, (label_eq - (je_undef_null + 6)) as u32);
                     self.mem.patch_u32(je_eq, (label_eq - (je_eq + 6)) as u32);
                     self.mem.patch_u32(je_eq2, (label_eq - (je_eq2 + 6)) as u32);
-                    self.mem.emit_mov_r64_imm64(0, 1);   // Smi(0) — NE (inverted from Eq)
+                    self.mem.emit_mov_r64_imm64(0, 1); // Smi(0) — NE (inverted from Eq)
                     let jmp_done2 = self.mem.emit_jmp_rel32(0);
                     let label_not_eq = self.mem.current_offset();
-                    self.mem.patch_u32(jmp_not_eq, (label_not_eq - (jmp_not_eq + 5)) as u32);
-                    self.mem.patch_u32(jmp_not_eq2, (label_not_eq - (jmp_not_eq2 + 5)) as u32);
-                    self.mem.patch_u32(jmp_not_eq3, (label_not_eq - (jmp_not_eq3 + 5)) as u32);
-                    self.mem.patch_u32(jmp_not_eq4, (label_not_eq - (jmp_not_eq4 + 5)) as u32);
-                    self.mem.emit_mov_r64_imm64(0, 3);   // Smi(1) — NE (inverted)
-                    self.mem.patch_u32(jmp_done, (label_not_eq - (jmp_done + 5)) as u32);
-                    self.mem.patch_u32(jmp_done2, (self.mem.current_offset() - (jmp_done2 + 5)) as u32);
+                    self.mem
+                        .patch_u32(jmp_not_eq, (label_not_eq - (jmp_not_eq + 5)) as u32);
+                    self.mem
+                        .patch_u32(jmp_not_eq2, (label_not_eq - (jmp_not_eq2 + 5)) as u32);
+                    self.mem
+                        .patch_u32(jmp_not_eq3, (label_not_eq - (jmp_not_eq3 + 5)) as u32);
+                    self.mem
+                        .patch_u32(jmp_not_eq4, (label_not_eq - (jmp_not_eq4 + 5)) as u32);
+                    self.mem.emit_mov_r64_imm64(0, 3); // Smi(1) — NE (inverted)
+                    self.mem
+                        .patch_u32(jmp_done, (label_not_eq - (jmp_done + 5)) as u32);
+                    self.mem.patch_u32(
+                        jmp_done2,
+                        (self.mem.current_offset() - (jmp_done2 + 5)) as u32,
+                    );
                     self.emit_jit_stack_push();
                 }
                 Opcode::Add => {
@@ -605,11 +636,11 @@ impl CodeGen {
                     // Both Smi: do Smi add
                     // rax still holds a (from the TEST above, value preserved)
                     self.mem.emit_and_r64_imm8(0, -2); // rax = a & ~1 (untag)
-                    self.mem.emit_add_r64_r64(0, 9);   // rax += b (tagged) → Smi result
+                    self.mem.emit_add_r64_r64(0, 9); // rax += b (tagged) → Smi result
 
                     // Check overflow
-                    self.mem.emit_mov_r64_rm64(1, 0);   // rcx = rax (result)
-                    self.mem.emit_sar_r64_1(1);          // rcx >>= 1 (untag)
+                    self.mem.emit_mov_r64_rm64(1, 0); // rcx = rax (result)
+                    self.mem.emit_sar_r64_1(1); // rcx >>= 1 (untag)
                     self.mem.emit_cmp_r64_imm32(1, CodeGen::MAX_I31);
                     let ov_jg = self.mem.emit_jg_rel32(0);
                     self.mem.emit_cmp_r64_imm32(1, CodeGen::MIN_I31_AS_I32);
@@ -620,15 +651,15 @@ impl CodeGen {
                     let float64_label = self.mem.current_offset();
 
                     // Call float64_add_helper(rdi=r15, rsi=r14, rdx=r8, rcx=r9)
-                    self.mem.emit_mov_r64_rm64(7, 15);  // rdi = vm_ptr
-                    self.mem.emit_mov_r64_rm64(6, 14);  // rsi = gc_ptr
-                    self.mem.emit_mov_r64_rm64(2, 8);   // rdx = a_raw (r8)
-                    self.mem.emit_mov_r64_rm64(1, 9);   // rcx = b_raw (r9)
+                    self.mem.emit_mov_r64_rm64(7, 15); // rdi = vm_ptr
+                    self.mem.emit_mov_r64_rm64(6, 14); // rsi = gc_ptr
+                    self.mem.emit_mov_r64_rm64(2, 8); // rdx = a_raw (r8)
+                    self.mem.emit_mov_r64_rm64(1, 9); // rcx = b_raw (r9)
                     self.mem.emit_rex_w();
                     self.mem.emit_byte(0x8B);
                     self.mem.emit_byte(0x87);
-                    self.mem.emit_u32(552);              // MOV rax, [r15 + 552]
-                    self.mem.emit_call_r64(0);           // call rax
+                    self.mem.emit_u32(552); // MOV rax, [r15 + 552]
+                    self.mem.emit_call_r64(0); // call rax
 
                     // Result in rax, fall through to done
 
@@ -637,11 +668,16 @@ impl CodeGen {
 
                     // Patch jumps
                     let four: u32 = 4;
-                    self.mem.patch_u32(b_not_smi, float64_label as u32 - (b_not_smi as u32 + four));
-                    self.mem.patch_u32(a_not_smi, float64_label as u32 - (a_not_smi as u32 + four));
-                    self.mem.patch_u32(ov_jg, float64_label as u32 - (ov_jg as u32 + four));
-                    self.mem.patch_u32(ov_jl, float64_label as u32 - (ov_jl as u32 + four));
-                    self.mem.patch_u32(jmp_done, done_label as u32 - (jmp_done as u32 + four));
+                    self.mem
+                        .patch_u32(b_not_smi, float64_label as u32 - (b_not_smi as u32 + four));
+                    self.mem
+                        .patch_u32(a_not_smi, float64_label as u32 - (a_not_smi as u32 + four));
+                    self.mem
+                        .patch_u32(ov_jg, float64_label as u32 - (ov_jg as u32 + four));
+                    self.mem
+                        .patch_u32(ov_jl, float64_label as u32 - (ov_jl as u32 + four));
+                    self.mem
+                        .patch_u32(jmp_done, done_label as u32 - (jmp_done as u32 + four));
 
                     self.emit_jit_stack_push();
                 }
@@ -673,15 +709,16 @@ impl CodeGen {
                 }
                 Opcode::JumpIfTrue => {
                     let target = instr.operands[0] as usize;
-                    self.emit_jit_stack_pop();          // rax = value
-                    self.emit_smi_check(bc_idx, &[]);  // check Smi
-                    self.mem.emit_mov_r64_imm64(1, 2);  // rcx = 2
-                    self.mem.emit_cmp_r64_r64(0, 1);    // cmp value, 2
+                    self.emit_jit_stack_pop(); // rax = value
+                    self.emit_smi_check(bc_idx, &[]); // check Smi
+                    self.mem.emit_mov_r64_imm64(1, 2); // rcx = 2
+                    self.mem.emit_cmp_r64_r64(0, 1); // cmp value, 2
                     let skip_falsy = self.mem.emit_ja_rel32(0);
                     let jmp_done = self.mem.emit_jmp_rel32(0);
                     let ja_end = skip_falsy + 6;
                     let after_jmp_falsy = ja_end + 5;
-                    self.mem.patch_u32(skip_falsy, (after_jmp_falsy - ja_end) as u32);
+                    self.mem
+                        .patch_u32(skip_falsy, (after_jmp_falsy - ja_end) as u32);
                     self.mem.emit_mov_r64_imm64(1, 4);
                     self.mem.emit_cmp_r64_r64(0, 1);
                     let je_done = self.mem.emit_je_rel32(0);
@@ -696,14 +733,14 @@ impl CodeGen {
                     let offset = instr.operands[1] as u32;
                     let _proto_depth = instr.operands.get(2).copied().unwrap_or(0) as u32;
                     self.emit_jit_stack_pop(); // rax = value
-                    self.mem.emit_mov_r64_rm64(1, 0);    // rcx = value
+                    self.mem.emit_mov_r64_rm64(1, 0); // rcx = value
                     self.emit_jit_stack_pop(); // rax = object (skip key)
-                    self.mem.emit_mov_r64_rm64(2, 0);    // rdx = object
+                    self.mem.emit_mov_r64_rm64(2, 0); // rdx = object
                     // Test bit 0: Smi → miss
                     self.mem.emit_rex_w();
                     self.mem.emit_byte(0xF7);
                     self.mem.emit_byte(0xC2);
-                    self.mem.emit_u32(0x0000_0001);      // TEST rdx, 1
+                    self.mem.emit_u32(0x0000_0001); // TEST rdx, 1
                     let jne_miss_patch = self.mem.emit_jne_rel32(0);
                     // CMP rdx, 6; JBE miss
                     self.mem.emit_rex_w();
@@ -745,34 +782,40 @@ impl CodeGen {
                     // miss: push object back, then value back, bail to interpreter
                     let miss_offset = self.mem.current_offset();
                     self.record_bailout_point(bc_idx, BailoutReason::ShapeMiss);
-                    self.mem.emit_mov_r64_rm64(0, 2);   // rax = rdx (object)
-                    self.emit_jit_stack_push();         // restore object on JIT stack
-                    self.mem.emit_mov_r64_rm64(0, 1);   // rax = rcx (value)
-                    self.emit_jit_stack_push();         // restore value on JIT stack
+                    self.mem.emit_mov_r64_rm64(0, 2); // rax = rdx (object)
+                    self.emit_jit_stack_push(); // restore object on JIT stack
+                    self.mem.emit_mov_r64_rm64(0, 1); // rax = rcx (value)
+                    self.emit_jit_stack_push(); // restore value on JIT stack
                     // Call bailout_helper(rdi=r15, rsi=bc_idx, rdx=rbx)
-                    self.mem.emit_mov_r64_rm64(7, 15);       // rdi = vm_ptr
+                    self.mem.emit_mov_r64_rm64(7, 15); // rdi = vm_ptr
                     self.mem.emit_mov_r64_imm64(6, bc_idx as u64); // rsi = bc_pc
-                    self.mem.emit_mov_r64_rm64(2, 3);        // rdx = jit_sp
+                    self.mem.emit_mov_r64_rm64(2, 3); // rdx = jit_sp
                     self.mem.emit_rex_w();
-                    self.mem.emit_byte(0x8B);                // MOV rax, [r15 + 520]
-                    self.mem.emit_byte(0x87);                // mod=10, reg=0(rax), r/m=7(r15)
-                    self.mem.emit_u32(520);                  // disp32
-                    self.mem.emit_call_r64(0);               // call rax
+                    self.mem.emit_byte(0x8B); // MOV rax, [r15 + 520]
+                    self.mem.emit_byte(0x87); // mod=10, reg=0(rax), r/m=7(r15)
+                    self.mem.emit_u32(520); // disp32
+                    self.mem.emit_call_r64(0); // call rax
                     self.mem.emit_rex_w();
                     self.mem.emit_byte(0x31);
-                    self.mem.emit_byte(0xC0);                // xor eax, eax
-                    self.emit_jit_stack_push();               // push undefined (safety)
-                    self.emit_epilogue();                     // return from JIT
+                    self.mem.emit_byte(0xC0); // xor eax, eax
+                    self.emit_jit_stack_push(); // push undefined (safety)
+                    self.emit_epilogue(); // return from JIT
                     // Patch jumps: displacement = target - (patch_addr + 4)
                     // Jcc rel32: 2-byte opcode + 4-byte disp (6 total), disp field at offset+2,
                     //   end of instruction = patch_offset + 4.
                     // JMP rel32: 1-byte opcode + 4-byte disp (5 total), disp field at offset+1,
                     //   end of instruction = patch_offset + 4.
-                    self.mem.patch_u32(jne_miss_patch, (miss_offset - (jne_miss_patch + 4)) as u32);
-                    self.mem.patch_u32(jbe_miss_patch, (miss_offset - (jbe_miss_patch + 4)) as u32);
-                    self.mem.patch_u32(jne_shape_patch, (miss_offset - (jne_shape_patch + 4)) as u32);
+                    self.mem
+                        .patch_u32(jne_miss_patch, (miss_offset - (jne_miss_patch + 4)) as u32);
+                    self.mem
+                        .patch_u32(jbe_miss_patch, (miss_offset - (jbe_miss_patch + 4)) as u32);
+                    self.mem.patch_u32(
+                        jne_shape_patch,
+                        (miss_offset - (jne_shape_patch + 4)) as u32,
+                    );
                     let done = self.mem.current_offset();
-                    self.mem.patch_u32(jmp_done_patch, (done - (jmp_done_patch + 4)) as u32);
+                    self.mem
+                        .patch_u32(jmp_done_patch, (done - (jmp_done_patch + 4)) as u32);
                 }
                 Opcode::LoadPropertyIC => {
                     let shape_id = instr.operands[0] as u64;
@@ -782,7 +825,7 @@ impl CodeGen {
                     // Test bit 0: if set → Smi/sentinel → miss
                     self.mem.emit_rex_w();
                     self.mem.emit_byte(0xF7);
-                    self.mem.emit_byte(0xC0);  // TEST rax, imm32
+                    self.mem.emit_byte(0xC0); // TEST rax, imm32
                     self.mem.emit_u32(0x0000_0001);
                     let jne_miss_patch = self.mem.emit_jne_rel32(0);
                     // CMP rax, 6; JBE miss (sentinels: 0/2/4/6)
@@ -825,29 +868,41 @@ impl CodeGen {
                     let miss_label = self.mem.current_offset();
                     // rax still holds the originally popped value (checks don't modify it)
                     self.record_bailout_point(bc_idx, BailoutReason::ShapeMiss);
-                    self.emit_jit_stack_push();        // restore JIT stack
+                    self.emit_jit_stack_push(); // restore JIT stack
                     // Call bailout_helper(rdi=r15, rsi=bc_idx, rdx=rbx)
-                    self.mem.emit_mov_r64_rm64(7, 15);       // rdi = vm_ptr
+                    self.mem.emit_mov_r64_rm64(7, 15); // rdi = vm_ptr
                     self.mem.emit_mov_r64_imm64(6, bc_idx as u64); // rsi = bc_pc
-                    self.mem.emit_mov_r64_rm64(2, 3);        // rdx = jit_sp
+                    self.mem.emit_mov_r64_rm64(2, 3); // rdx = jit_sp
                     self.mem.emit_rex_w();
-                    self.mem.emit_byte(0x8B);                // MOV rax, [r15 + 520]
-                    self.mem.emit_byte(0x87);                // mod=10, reg=0(rax), r/m=7(r15)
-                    self.mem.emit_u32(520);                  // disp32
-                    self.mem.emit_call_r64(0);               // call rax
+                    self.mem.emit_byte(0x8B); // MOV rax, [r15 + 520]
+                    self.mem.emit_byte(0x87); // mod=10, reg=0(rax), r/m=7(r15)
+                    self.mem.emit_u32(520); // disp32
+                    self.mem.emit_call_r64(0); // call rax
                     self.mem.emit_rex_w();
                     self.mem.emit_byte(0x31);
-                    self.mem.emit_byte(0xC0);                // xor eax, eax
-                    self.emit_jit_stack_push();               // push undefined (safety)
-                    self.emit_epilogue();                     // return from JIT
+                    self.mem.emit_byte(0xC0); // xor eax, eax
+                    self.emit_jit_stack_push(); // push undefined (safety)
+                    self.emit_epilogue(); // return from JIT
                     // done:
                     let done_label = self.mem.current_offset();
                     // Patch forward jumps: displacement = target - (patch_addr + 4)
                     let four: u32 = 4;
-                    self.mem.patch_u32(jne_miss_patch, miss_label as u32 - (jne_miss_patch as u32 + four));
-                    self.mem.patch_u32(jbe_miss_patch, miss_label as u32 - (jbe_miss_patch as u32 + four));
-                    self.mem.patch_u32(jne_shape_miss, miss_label as u32 - (jne_shape_miss as u32 + four));
-                    self.mem.patch_u32(jmp_done_patch, done_label as u32 - (jmp_done_patch as u32 + four));
+                    self.mem.patch_u32(
+                        jne_miss_patch,
+                        miss_label as u32 - (jne_miss_patch as u32 + four),
+                    );
+                    self.mem.patch_u32(
+                        jbe_miss_patch,
+                        miss_label as u32 - (jbe_miss_patch as u32 + four),
+                    );
+                    self.mem.patch_u32(
+                        jne_shape_miss,
+                        miss_label as u32 - (jne_shape_miss as u32 + four),
+                    );
+                    self.mem.patch_u32(
+                        jmp_done_patch,
+                        done_label as u32 - (jmp_done_patch as u32 + four),
+                    );
                 }
                 Opcode::LoadLocal => {
                     let idx = instr.operands[0] as usize;
@@ -1135,51 +1190,51 @@ impl CodeGen {
                 }
                 Opcode::TypeOf => {
                     // Pop value from JIT stack
-                    self.emit_jit_stack_pop();                  // rax = value
+                    self.emit_jit_stack_pop(); // rax = value
                     // rdi = r15 (vm_ptr)
                     self.mem.emit_mov_r64_rm64(7, 15);
                     // rsi = rax (value_raw)
                     self.mem.emit_mov_r64_rm64(6, 0);
                     // Load typeof_helper from [r15 + 528] into rax
                     self.mem.emit_rex_w();
-                    self.mem.emit_byte(0x8B);                   // MOV rax, [r15 + 528]
-                    self.mem.emit_byte(0x87);                   // mod=10, reg=0(rax), r/m=7(r15)
-                    self.mem.emit_u32(528);                     // disp32
-                    self.mem.emit_call_r64(0);                  // call rax
+                    self.mem.emit_byte(0x8B); // MOV rax, [r15 + 528]
+                    self.mem.emit_byte(0x87); // mod=10, reg=0(rax), r/m=7(r15)
+                    self.mem.emit_u32(528); // disp32
+                    self.mem.emit_call_r64(0); // call rax
                     // push result (string Value in rax)
                     self.emit_jit_stack_push();
                 }
                 Opcode::MakeArgumentsArray => {
                     // Phase B: bail on entry — always deopt to interpreter.
                     self.record_bailout_point(bc_idx, BailoutReason::BailOnEntry);
-                    self.mem.emit_mov_r64_rm64(7, 15);       // rdi = r15
+                    self.mem.emit_mov_r64_rm64(7, 15); // rdi = r15
                     self.mem.emit_mov_r64_imm64(6, bc_idx as u64); // rsi = bc_pc
-                    self.mem.emit_mov_r64_rm64(2, 3);        // rdx = rbx
+                    self.mem.emit_mov_r64_rm64(2, 3); // rdx = rbx
                     self.mem.emit_rex_w();
-                    self.mem.emit_byte(0x8B);                // MOV rax, [r15 + 520]
-                    self.mem.emit_byte(0x87);                // mod=10, reg=0(rax), r/m=7(r15)
-                    self.mem.emit_u32(520);                  // disp32
-                    self.mem.emit_call_r64(0);               // call rax
+                    self.mem.emit_byte(0x8B); // MOV rax, [r15 + 520]
+                    self.mem.emit_byte(0x87); // mod=10, reg=0(rax), r/m=7(r15)
+                    self.mem.emit_u32(520); // disp32
+                    self.mem.emit_call_r64(0); // call rax
                     self.mem.emit_rex_w();
                     self.mem.emit_byte(0x31);
-                    self.mem.emit_byte(0xC0);                // xor eax, eax
+                    self.mem.emit_byte(0xC0); // xor eax, eax
                     self.emit_jit_stack_push();
                     self.emit_epilogue();
                 }
                 Opcode::Call => {
                     // Phase E: bail on entry — delegate to interpreter.
                     self.record_bailout_point(bc_idx, BailoutReason::BailOnEntry);
-                    self.mem.emit_mov_r64_rm64(7, 15);       // rdi = r15
+                    self.mem.emit_mov_r64_rm64(7, 15); // rdi = r15
                     self.mem.emit_mov_r64_imm64(6, bc_idx as u64); // rsi = bc_pc
-                    self.mem.emit_mov_r64_rm64(2, 3);        // rdx = rbx
+                    self.mem.emit_mov_r64_rm64(2, 3); // rdx = rbx
                     self.mem.emit_rex_w();
-                    self.mem.emit_byte(0x8B);                // MOV rax, [r15 + 520]
+                    self.mem.emit_byte(0x8B); // MOV rax, [r15 + 520]
                     self.mem.emit_byte(0x87);
                     self.mem.emit_u32(520);
-                    self.mem.emit_call_r64(0);               // call rax
+                    self.mem.emit_call_r64(0); // call rax
                     self.mem.emit_rex_w();
                     self.mem.emit_byte(0x31);
-                    self.mem.emit_byte(0xC0);                // xor eax, eax
+                    self.mem.emit_byte(0xC0); // xor eax, eax
                     self.emit_jit_stack_push();
                     self.emit_epilogue();
                 }
@@ -1200,10 +1255,10 @@ impl CodeGen {
                     self.mem.emit_mov_r64_imm64(9, 0);
                     // Load global_helper from [r15 + 544] into rax
                     self.mem.emit_rex_w();
-                    self.mem.emit_byte(0x8B);                   // MOV rax, [r15 + 544]
-                    self.mem.emit_byte(0x87);                   // mod=10, reg=0(rax), r/m=7(r15)
-                    self.mem.emit_u32(544);                     // disp32
-                    self.mem.emit_call_r64(0);                  // call rax
+                    self.mem.emit_byte(0x8B); // MOV rax, [r15 + 544]
+                    self.mem.emit_byte(0x87); // mod=10, reg=0(rax), r/m=7(r15)
+                    self.mem.emit_u32(544); // disp32
+                    self.mem.emit_call_r64(0); // call rax
                     // push result (Value in rax)
                     self.emit_jit_stack_push();
                 }
@@ -1211,8 +1266,8 @@ impl CodeGen {
                     let name_idx = instr.operands[0] as u64;
                     let prog_ptr = program as *const BytecodeProgram as *const u8 as u64;
                     // Pop value to store from JIT stack into r9
-                    self.emit_jit_stack_pop();                  // rax = value
-                    self.mem.emit_mov_r64_rm64(9, 0);           // r9 = value_raw
+                    self.emit_jit_stack_pop(); // rax = value
+                    self.mem.emit_mov_r64_rm64(9, 0); // r9 = value_raw
                     // rdi = r15 (vm_ptr)
                     self.mem.emit_mov_r64_rm64(7, 15);
                     // rsi = r14 (gc_ptr)
@@ -1225,17 +1280,21 @@ impl CodeGen {
                     self.mem.emit_mov_r64_imm64(8, name_idx);
                     // Load global_helper from [r15 + 544] into rax
                     self.mem.emit_rex_w();
-                    self.mem.emit_byte(0x8B);                   // MOV rax, [r15 + 544]
-                    self.mem.emit_byte(0x87);                   // mod=10, reg=0(rax), r/m=7(r15)
-                    self.mem.emit_u32(544);                     // disp32
-                    self.mem.emit_call_r64(0);                  // call rax
+                    self.mem.emit_byte(0x8B); // MOV rax, [r15 + 544]
+                    self.mem.emit_byte(0x87); // mod=10, reg=0(rax), r/m=7(r15)
+                    self.mem.emit_u32(544); // disp32
+                    self.mem.emit_call_r64(0); // call rax
                     // push result (stored Value in rax)
                     self.emit_jit_stack_push();
                 }
                 Opcode::IncGlobal | Opcode::DecGlobal => {
                     let name_idx = instr.operands[0] as u64;
                     let is_prefix = instr.operands[1];
-                    let op = if matches!(instr.opcode, Opcode::IncGlobal) { 2u64 } else { 3u64 };
+                    let op = if matches!(instr.opcode, Opcode::IncGlobal) {
+                        2u64
+                    } else {
+                        3u64
+                    };
                     let prog_ptr = program as *const BytecodeProgram as *const u8 as u64;
                     // rdi = r15 (vm_ptr)
                     self.mem.emit_mov_r64_rm64(7, 15);
@@ -1251,10 +1310,10 @@ impl CodeGen {
                     self.mem.emit_mov_r64_imm64(9, is_prefix as u64);
                     // Load global_helper from [r15 + 544] into rax
                     self.mem.emit_rex_w();
-                    self.mem.emit_byte(0x8B);                   // MOV rax, [r15 + 544]
-                    self.mem.emit_byte(0x87);                   // mod=10, reg=0(rax), r/m=7(r15)
-                    self.mem.emit_u32(544);                     // disp32
-                    self.mem.emit_call_r64(0);                  // call rax
+                    self.mem.emit_byte(0x8B); // MOV rax, [r15 + 544]
+                    self.mem.emit_byte(0x87); // mod=10, reg=0(rax), r/m=7(r15)
+                    self.mem.emit_u32(544); // disp32
+                    self.mem.emit_call_r64(0); // call rax
                     // push result (Value in rax)
                     self.emit_jit_stack_push();
                 }
@@ -1302,12 +1361,7 @@ mod tests {
         extern "C" fn bailout_stub(_vm: *mut u8, _bc_pc: usize, _jit_sp: *mut u64) -> u64 {
             0
         }
-        extern "C" fn float64_add_stub(
-            _vm: *mut u8,
-            _gc: *mut u8,
-            _a: u64,
-            _b: u64,
-        ) -> u64 {
+        extern "C" fn float64_add_stub(_vm: *mut u8, _gc: *mut u8, _a: u64, _b: u64) -> u64 {
             0
         }
         let buf = Box::new([0u8; 1024]);
@@ -1333,13 +1387,7 @@ mod tests {
 
         let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         // vm_ptr and gc_ptr are unused for this simple program
-        let result = unsafe {
-            func(
-                vm_stub(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
+        let result = unsafe { func(vm_stub(), std::ptr::null_mut(), std::ptr::null_mut()) };
         // Smi(42) = (42 << 1) | 1 = 85
         assert_eq!(result, 85u64);
     }
@@ -1357,13 +1405,7 @@ mod tests {
         compiled.mem.make_executable();
 
         let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
-        let result = unsafe {
-            func(
-                vm_stub(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
+        let result = unsafe { func(vm_stub(), std::ptr::null_mut(), std::ptr::null_mut()) };
         // Smi(10) + Smi(20) = Smi(30) = (30 << 1) | 1 = 61
         assert_eq!(result, 61u64);
     }
@@ -1381,13 +1423,7 @@ mod tests {
         compiled.mem.make_executable();
 
         let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
-        let result = unsafe {
-            func(
-                vm_stub(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
+        let result = unsafe { func(vm_stub(), std::ptr::null_mut(), std::ptr::null_mut()) };
         // Smi(30) - Smi(10) = Smi(20) = (20 << 1) | 1 = 41
         assert_eq!(result, 41u64);
     }
@@ -1405,13 +1441,7 @@ mod tests {
         compiled.mem.make_executable();
 
         let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
-        let result = unsafe {
-            func(
-                vm_stub(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
+        let result = unsafe { func(vm_stub(), std::ptr::null_mut(), std::ptr::null_mut()) };
         // Smi(6) * Smi(7) = Smi(42) = (42 << 1) | 1 = 85
         assert_eq!(result, 85u64);
     }
@@ -1427,13 +1457,7 @@ mod tests {
         compiled.mem.make_executable();
 
         let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
-        let result = unsafe {
-            func(
-                vm_stub(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
+        let result = unsafe { func(vm_stub(), std::ptr::null_mut(), std::ptr::null_mut()) };
         assert_eq!(result, 0u64); // undefined = Value(0)
     }
 
@@ -1448,13 +1472,7 @@ mod tests {
         compiled.mem.make_executable();
 
         let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
-        let result = unsafe {
-            func(
-                vm_stub(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
+        let result = unsafe { func(vm_stub(), std::ptr::null_mut(), std::ptr::null_mut()) };
         assert_eq!(result, 2u64); // null = Value(2)
     }
 
@@ -1469,13 +1487,7 @@ mod tests {
         compiled.mem.make_executable();
 
         let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
-        let result = unsafe {
-            func(
-                vm_stub(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
+        let result = unsafe { func(vm_stub(), std::ptr::null_mut(), std::ptr::null_mut()) };
         assert_eq!(result, 6u64); // Value::boolean(true) = 0x06
     }
 
@@ -1490,13 +1502,7 @@ mod tests {
         compiled.mem.make_executable();
 
         let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
-        let result = unsafe {
-            func(
-                vm_stub(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
+        let result = unsafe { func(vm_stub(), std::ptr::null_mut(), std::ptr::null_mut()) };
         assert_eq!(result, 4u64); // Value::boolean(false) = 0x04
     }
 
@@ -1518,13 +1524,7 @@ mod tests {
         compiled.mem.make_executable();
 
         let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
-        let result = unsafe {
-            func(
-                vm_stub(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
+        let result = unsafe { func(vm_stub(), std::ptr::null_mut(), std::ptr::null_mut()) };
         // Smi(85) = (85 << 1) | 1 = 171
         assert_eq!(result, 171u64);
     }
@@ -1549,13 +1549,7 @@ mod tests {
         let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
         compiled.mem.make_executable();
         let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
-        let result = unsafe {
-            func(
-                vm_stub(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
+        let result = unsafe { func(vm_stub(), std::ptr::null_mut(), std::ptr::null_mut()) };
         assert_eq!(result, 85u64); // Smi(42) = 85
     }
 
@@ -1574,13 +1568,7 @@ mod tests {
         let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
         compiled.mem.make_executable();
         let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
-        let result = unsafe {
-            func(
-                vm_stub(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
+        let result = unsafe { func(vm_stub(), std::ptr::null_mut(), std::ptr::null_mut()) };
         assert_eq!(result, 199u64); // Smi(99) = 199
     }
 
@@ -1599,13 +1587,7 @@ mod tests {
         let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
         compiled.mem.make_executable();
         let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
-        let result = unsafe {
-            func(
-                vm_stub(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
+        let result = unsafe { func(vm_stub(), std::ptr::null_mut(), std::ptr::null_mut()) };
         assert_eq!(result, 199u64); // Smi(99) = 199
     }
 
@@ -1623,13 +1605,7 @@ mod tests {
         let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
         compiled.mem.make_executable();
         let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
-        let result = unsafe {
-            func(
-                vm_stub(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
+        let result = unsafe { func(vm_stub(), std::ptr::null_mut(), std::ptr::null_mut()) };
         assert_eq!(result, 199u64); // Smi(99) = 199
     }
 
@@ -1662,8 +1638,16 @@ mod tests {
         ]);
         let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
         // Verify it emitted a reasonable number of bytes (within 55-85)
-        assert!(compiled.mem.offset >= 60, "offset was {}", compiled.mem.offset);
-        assert!(compiled.mem.offset <= 95, "offset was {}", compiled.mem.offset);
+        assert!(
+            compiled.mem.offset >= 60,
+            "offset was {}",
+            compiled.mem.offset
+        );
+        assert!(
+            compiled.mem.offset <= 95,
+            "offset was {}",
+            compiled.mem.offset
+        );
     }
 
     // -------------------------------------------------------------------
@@ -1687,13 +1671,7 @@ mod tests {
         let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         // Provide a local slot via a stack-allocated array
         let mut locals: [u64; 1] = [0; 1];
-        let result = unsafe {
-            func(
-                vm_stub(),
-                std::ptr::null_mut(),
-                locals.as_mut_ptr(),
-            )
-        };
+        let result = unsafe { func(vm_stub(), std::ptr::null_mut(), locals.as_mut_ptr()) };
         // Smi(42) = 85
         assert_eq!(result, 85u64);
     }
@@ -1718,13 +1696,7 @@ mod tests {
         compiled.mem.make_executable();
         let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let mut locals: [u64; 1] = [0; 1];
-        let result = unsafe {
-            func(
-                vm_stub(),
-                std::ptr::null_mut(),
-                locals.as_mut_ptr(),
-            )
-        };
+        let result = unsafe { func(vm_stub(), std::ptr::null_mut(), locals.as_mut_ptr()) };
         // Smi(30) = 61
         assert_eq!(result, 61u64);
     }
@@ -1742,13 +1714,7 @@ mod tests {
         let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
         compiled.mem.make_executable();
         let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
-        let result = unsafe {
-            func(
-                vm_stub(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
+        let result = unsafe { func(vm_stub(), std::ptr::null_mut(), std::ptr::null_mut()) };
         // Smi(1) = 3
         assert_eq!(result, 3u64);
     }
@@ -1766,13 +1732,7 @@ mod tests {
         let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
         compiled.mem.make_executable();
         let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
-        let result = unsafe {
-            func(
-                vm_stub(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
+        let result = unsafe { func(vm_stub(), std::ptr::null_mut(), std::ptr::null_mut()) };
         // Smi(0) = 1
         assert_eq!(result, 1u64);
     }
@@ -1790,13 +1750,7 @@ mod tests {
         let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
         compiled.mem.make_executable();
         let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
-        let result = unsafe {
-            func(
-                vm_stub(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
+        let result = unsafe { func(vm_stub(), std::ptr::null_mut(), std::ptr::null_mut()) };
         // Smi(1) = 3
         assert_eq!(result, 3u64);
     }
@@ -1818,13 +1772,7 @@ mod tests {
         compiled.mem.make_executable();
         let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let mut locals: [u64; 1] = [0; 1];
-        let result = unsafe {
-            func(
-                vm_stub(),
-                std::ptr::null_mut(),
-                locals.as_mut_ptr(),
-            )
-        };
+        let result = unsafe { func(vm_stub(), std::ptr::null_mut(), locals.as_mut_ptr()) };
         // Smi(6) = 13
         assert_eq!(result, 13u64);
         // Verify local was incremented
@@ -1848,13 +1796,7 @@ mod tests {
         compiled.mem.make_executable();
         let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let mut locals: [u64; 1] = [0; 1];
-        let result = unsafe {
-            func(
-                vm_stub(),
-                std::ptr::null_mut(),
-                locals.as_mut_ptr(),
-            )
-        };
+        let result = unsafe { func(vm_stub(), std::ptr::null_mut(), locals.as_mut_ptr()) };
         // Smi(4) = 9
         assert_eq!(result, 9u64);
         assert_eq!(locals[0], 9); // Smi(4)
@@ -1920,13 +1862,7 @@ mod tests {
         compiled.mem.make_executable();
         let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let mut locals: [u64; 2] = [0; 2];
-        let result = unsafe {
-            func(
-                vm_stub(),
-                std::ptr::null_mut(),
-                locals.as_mut_ptr(),
-            )
-        };
+        let result = unsafe { func(vm_stub(), std::ptr::null_mut(), locals.as_mut_ptr()) };
         // Smi(10) = 21
         assert_eq!(result, 21u64);
     }
@@ -1943,8 +1879,16 @@ mod tests {
             Instruction::new(Opcode::Return, vec![]),
         ]);
         let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
-        assert!(compiled.mem.offset >= 65, "offset was {}", compiled.mem.offset);
-        assert!(compiled.mem.offset <= 120, "offset was {}", compiled.mem.offset);
+        assert!(
+            compiled.mem.offset >= 65,
+            "offset was {}",
+            compiled.mem.offset
+        );
+        assert!(
+            compiled.mem.offset <= 120,
+            "offset was {}",
+            compiled.mem.offset
+        );
     }
 
     #[test]
@@ -1956,8 +1900,16 @@ mod tests {
             Instruction::new(Opcode::Return, vec![]),
         ]);
         let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
-        assert!(compiled.mem.offset >= 200, "offset was {}", compiled.mem.offset);
-        assert!(compiled.mem.offset <= 500, "offset was {}", compiled.mem.offset);
+        assert!(
+            compiled.mem.offset >= 200,
+            "offset was {}",
+            compiled.mem.offset
+        );
+        assert!(
+            compiled.mem.offset <= 500,
+            "offset was {}",
+            compiled.mem.offset
+        );
     }
 
     #[test]
@@ -1986,8 +1938,16 @@ mod tests {
         ];
         let prog = make_prog(instructions);
         let compiled = CodeGen::new(prog.instructions.len()).compile(&prog);
-        assert!(compiled.mem.offset >= 800, "offset was {}", compiled.mem.offset);
-        assert!(compiled.mem.offset <= 1500, "offset was {}", compiled.mem.offset);
+        assert!(
+            compiled.mem.offset >= 800,
+            "offset was {}",
+            compiled.mem.offset
+        );
+        assert!(
+            compiled.mem.offset <= 1500,
+            "offset was {}",
+            compiled.mem.offset
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2009,7 +1969,11 @@ mod tests {
         let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let result = unsafe { func(vm_stub(), std::ptr::null_mut(), std::ptr::null_mut()) };
         // Overflow → bailout returns undefined = 0
-        assert_eq!(result, 0, "Add overflow: expected 0 (bailout), got {}", result);
+        assert_eq!(
+            result, 0,
+            "Add overflow: expected 0 (bailout), got {}",
+            result
+        );
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -2026,7 +1990,11 @@ mod tests {
         compiled.mem.make_executable();
         let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let result = unsafe { func(vm_stub(), std::ptr::null_mut(), std::ptr::null_mut()) };
-        assert_eq!(result, 0, "Sub underflow: expected 0 (bailout), got {}", result);
+        assert_eq!(
+            result, 0,
+            "Sub underflow: expected 0 (bailout), got {}",
+            result
+        );
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -2043,7 +2011,11 @@ mod tests {
         compiled.mem.make_executable();
         let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let result = unsafe { func(vm_stub(), std::ptr::null_mut(), std::ptr::null_mut()) };
-        assert_eq!(result, 0, "Mul overflow: expected 0 (bailout), got {}", result);
+        assert_eq!(
+            result, 0,
+            "Mul overflow: expected 0 (bailout), got {}",
+            result
+        );
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -2059,7 +2031,11 @@ mod tests {
         compiled.mem.make_executable();
         let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let result = unsafe { func(vm_stub(), std::ptr::null_mut(), std::ptr::null_mut()) };
-        assert_eq!(result, 0, "Neg overflow: expected 0 (bailout), got {}", result);
+        assert_eq!(
+            result, 0,
+            "Neg overflow: expected 0 (bailout), got {}",
+            result
+        );
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -2076,7 +2052,11 @@ mod tests {
         compiled.mem.make_executable();
         let func: JitEntryFn = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let result = unsafe { func(vm_stub(), std::ptr::null_mut(), std::ptr::null_mut()) };
-        assert_eq!(result, 0, "Shl overflow: expected 0 (bailout), got {}", result);
+        assert_eq!(
+            result, 0,
+            "Shl overflow: expected 0 (bailout), got {}",
+            result
+        );
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -2164,7 +2144,10 @@ mod tests {
         }
 
         // Jumps — non-Smi condition; target must be ≤ instruction count
-        for &(op, name) in &[(Opcode::JumpIfFalse, "JumpIfFalse"), (Opcode::JumpIfTrue, "JumpIfTrue")] {
+        for &(op, name) in &[
+            (Opcode::JumpIfFalse, "JumpIfFalse"),
+            (Opcode::JumpIfTrue, "JumpIfTrue"),
+        ] {
             let r = run(vec![
                 Instruction::new(Opcode::LoadUndefined, vec![]),
                 Instruction::new(op, vec![3]),

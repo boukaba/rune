@@ -1,6 +1,5 @@
 /// Entry in an inline cache for a specific (shape, key) pair.
-#[derive(Copy, Clone, Debug, Default)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Copy, Clone, Debug, Default, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct IcEntry {
     /// Slot offset in the object (or prototype at proto_depth).
     pub offset: usize,
@@ -11,8 +10,7 @@ pub struct IcEntry {
 }
 
 /// Cache key stored alongside IcEntry for linear-scan matching.
-#[derive(Copy, Clone, Debug, Default)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Copy, Clone, Debug, Default, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct IcKey {
     pub shape_id: u64,
     pub key_hash: u64,
@@ -24,8 +22,7 @@ pub struct IcKey {
 /// and key_hash. With ≤8 entries (99% of real-world callsites), linear
 /// scan is faster than HashMap hashing. The flat layout is SIMD-ready:
 /// shape_ids can be loaded into a vector register and compared in parallel.
-#[derive(Clone, Debug)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Clone, Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct InlineCache {
     pub entries: Vec<(IcKey, IcEntry)>,
 }
@@ -83,8 +80,8 @@ impl InlineCache {
             let mut i = 0;
             while i + 1 < entries.len() {
                 let base = entries.as_ptr().add(i) as *const uint64x2_t;
-                let key0: uint64x2_t = *base;        // entry i          → IcKey of entry i
-                let key1: uint64x2_t = *base.add(2);  // entry i + 32 bytes → IcKey of entry i+1
+                let key0: uint64x2_t = *base; // entry i          → IcKey of entry i
+                let key1: uint64x2_t = *base.add(2); // entry i + 32 bytes → IcKey of entry i+1
                 let target = vdupq_n_u64(shape_id);
                 let cmp0 = vceqq_u64(key0, target);
                 let cmp1 = vceqq_u64(key1, target);
@@ -125,8 +122,8 @@ impl InlineCache {
                 let mut i = 0;
                 while i + 1 < entries.len() {
                     let base = entries.as_ptr().add(i) as *const __m128i;
-                    let key0 = _mm_loadu_si128(base);        // entry i → IcKey of entry i
-                    let key1 = _mm_loadu_si128(base.add(2));  // entry i + 32 bytes → IcKey of entry i+1
+                    let key0 = _mm_loadu_si128(base); // entry i → IcKey of entry i
+                    let key1 = _mm_loadu_si128(base.add(2)); // entry i + 32 bytes → IcKey of entry i+1
                     let target = _mm_set1_epi64x(shape_id as i64);
                     let cmp0 = _mm_cmpeq_epi64(key0, target);
                     let cmp1 = _mm_cmpeq_epi64(key1, target);
@@ -261,7 +258,11 @@ mod tests {
         let mut ic = InlineCache::new();
         // Insert 10 entries — tests the SIMD 2-at-a-time stride path
         for i in 0..10u64 {
-            let entry = IcEntry { offset: i as usize, is_own: true, proto_depth: 0 };
+            let entry = IcEntry {
+                offset: i as usize,
+                is_own: true,
+                proto_depth: 0,
+            };
             ic.insert(i + 100, i * 31, entry);
         }
         // Every entry must be findable — including odd indices
@@ -277,7 +278,15 @@ mod tests {
     #[test]
     fn test_ic_miss() {
         let mut ic = InlineCache::new();
-        ic.insert(42, 99, IcEntry { offset: 0, is_own: true, proto_depth: 0 });
+        ic.insert(
+            42,
+            99,
+            IcEntry {
+                offset: 0,
+                is_own: true,
+                proto_depth: 0,
+            },
+        );
         assert!(ic.get(42, 100).is_none(), "wrong key_hash should miss");
         assert!(ic.get(43, 99).is_none(), "wrong shape_id should miss");
         assert!(ic.get(0, 0).is_none(), "empty entry should miss");

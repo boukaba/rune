@@ -2,8 +2,7 @@ use crate::opcode::{Instruction, Opcode};
 
 /// A basic block in the CFG — a straight-line sequence of instructions
 /// with a single entry point and a single exit point.
-#[derive(Clone, Debug)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Clone, Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct BasicBlock {
     pub id: usize,
     /// Index of first instruction in this block (inclusive).
@@ -29,8 +28,7 @@ impl BasicBlock {
 }
 
 /// A control-flow graph over a flat instruction list.
-#[derive(Clone, Debug)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Clone, Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct ControlFlowGraph {
     pub blocks: Vec<BasicBlock>,
     /// Index of the entry block (always 0).

@@ -4,8 +4,7 @@ use std::collections::HashSet;
 
 /// Per-block liveness information: which local variables are live
 /// at the entry and exit of each basic block.
-#[derive(Clone, Debug)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Clone, Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct LivenessInfo {
     pub live_in: Vec<HashSet<usize>>,
     pub live_out: Vec<HashSet<usize>>,

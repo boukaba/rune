@@ -13,6 +13,7 @@
 /// dedicated pointer (x22) into `JitVmState::jit_stack` at offset 0 from the
 /// VM pointer.
 use crate::assembler::ExecutableMemory;
+use crate::ic::InlinePlan;
 use crate::ic::{InlineProfile, TraceIcTable};
 use crate::{BailoutPoint, BailoutReason, BailoutTable, CompiledFunction};
 use rune_bytecode::opcode::Opcode;
@@ -30,7 +31,7 @@ const LEX_LOAD_THIS: u64 = 6;
 pub const JIT_STACK_SIZE: usize = 64;
 
 /// Smi i31 range constants for overflow detection.
-pub const MAX_I31: u64 = 0x3FFFFFFF;           // 2^30 − 1
+pub const MAX_I31: u64 = 0x3FFFFFFF; // 2^30 − 1
 pub const MIN_I31: u64 = 0xFFFF_FFFF_C000_0000; // −2^30
 
 /// JIT helper function pointer table. Must match `Vm::jit_helpers` layout.
@@ -73,9 +74,13 @@ fn emit(mem: &mut ExecutableMemory, instr: u32) {
 
 /// MOV xd, xm  (ORR xd, xzr, xm)
 fn mov_reg(mem: &mut ExecutableMemory, xd: u32, xm: u32) {
-    if xd == 31 { emit(mem, 0x91000000 | (xm << 5) | 31); }
-    else if xm == 31 { emit(mem, 0x91000000 | (31 << 5) | xd); }
-    else { emit(mem, 0xAA0003E0 | (xm << 16) | xd); }
+    if xd == 31 {
+        emit(mem, 0x91000000 | (xm << 5) | 31);
+    } else if xm == 31 {
+        emit(mem, 0x91000000 | (31 << 5) | xd);
+    } else {
+        emit(mem, 0xAA0003E0 | (xm << 16) | xd);
+    }
 }
 
 /// MOVZ xd, #u16, lsl #0
@@ -218,18 +223,23 @@ fn str_reg(mem: &mut ExecutableMemory, xt: u32, xn: u32, xm: u32) {
     emit(mem, 0xF8200800 | (xm << 16) | (3 << 13) | (xn << 5) | xt);
 }
 
-
 fn push_callee_saved(mem: &mut ExecutableMemory) {
     let mut stp = |rt: u32, rt2: u32| emit(mem, 0xA9BF0000 | (rt2 << 10) | (31 << 5) | rt);
-    stp(29, 30); stp(19, 20); stp(21, 22); stp(23, 24); stp(25, 26);
+    stp(29, 30);
+    stp(19, 20);
+    stp(21, 22);
+    stp(23, 24);
+    stp(25, 26);
 }
 
 fn pop_callee_saved(mem: &mut ExecutableMemory) {
     let mut ldp = |rt: u32, rt2: u32| emit(mem, 0xA8C10000 | (rt2 << 10) | (31 << 5) | rt);
-    ldp(25, 26); ldp(23, 24); ldp(21, 22); ldp(19, 20); ldp(29, 30);
+    ldp(25, 26);
+    ldp(23, 24);
+    ldp(21, 22);
+    ldp(19, 20);
+    ldp(29, 30);
 }
-
-
 
 // ===========================================================================
 // Function AOT compiler (parallel to x86_64 CodeGen)
@@ -269,9 +279,11 @@ pub struct Aarch64CodeGen {
     /// patching the ADR instructions.
     ic_table_patches: Vec<IcTablePatch>,
     /// Inlining profiles collected during trace recording.
-    /// Populated by F-1; consumed by F-2 inlining engine.
+    /// Populated by F-1; superseded by `inline_plan` in F-2.
     #[allow(dead_code)]
     inline_profiles: Vec<InlineProfile>,
+    /// Inlining plan: describes which call sites to inline (F-2 Layer 2a+).
+    inline_plan: InlinePlan,
 }
 
 impl Aarch64CodeGen {
@@ -287,6 +299,7 @@ impl Aarch64CodeGen {
             ic_tables: Vec::new(),
             ic_table_patches: Vec::new(),
             inline_profiles: Vec::new(),
+            inline_plan: InlinePlan::default(),
         }
     }
 
@@ -304,6 +317,11 @@ impl Aarch64CodeGen {
 
     pub fn with_inline_profiles(mut self, profiles: Vec<InlineProfile>) -> Self {
         self.inline_profiles = profiles;
+        self
+    }
+
+    pub fn with_inline_plan(mut self, plan: InlinePlan) -> Self {
+        self.inline_plan = plan;
         self
     }
 
@@ -339,20 +357,20 @@ impl Aarch64CodeGen {
         saved_a: Option<u32>,
         saved_b: Option<u32>,
     ) {
-        emit(&mut self.mem, 0x9341FC02);            // ASR x2, x0, #1 (untag)
+        emit(&mut self.mem, 0x9341FC02); // ASR x2, x0, #1 (untag)
         mov_imm64(&mut self.mem, 3, MAX_I31);
-        cmp_reg(&mut self.mem, 2, 3);               // CMP x2, x3
+        cmp_reg(&mut self.mem, 2, 3); // CMP x2, x3
         let patch_jg = self.mem.current_offset();
-        emit(&mut self.mem, 0x5400000C);             // B.GT +0
+        emit(&mut self.mem, 0x5400000C); // B.GT +0
 
         mov_imm64(&mut self.mem, 3, MIN_I31);
-        cmp_reg(&mut self.mem, 2, 3);               // CMP x2, x3
+        cmp_reg(&mut self.mem, 2, 3); // CMP x2, x3
         let patch_jl = self.mem.current_offset();
-        emit(&mut self.mem, 0x5400000B);             // B.LT +0
+        emit(&mut self.mem, 0x5400000B); // B.LT +0
 
         // No overflow — skip bailout
         let patch_done = self.mem.current_offset();
-        emit(&mut self.mem, 0x14000000);             // B +0
+        emit(&mut self.mem, 0x14000000); // B +0
 
         // Overflow: restore stack, record bailout, call helper, epilogue
         let ov_label = self.mem.current_offset();
@@ -369,7 +387,7 @@ impl Aarch64CodeGen {
         mov_imm64(&mut self.mem, 1, bc_idx as u64);
         mov_reg(&mut self.mem, 0, VM_REG);
         ldr_off(&mut self.mem, 15, VM_REG, 520);
-        emit(&mut self.mem, 0xD63F01E0);             // BLR x15
+        emit(&mut self.mem, 0xD63F01E0); // BLR x15
         movz(&mut self.mem, 0, 0);
         self.push();
         self.emit_epilogue();
@@ -377,11 +395,14 @@ impl Aarch64CodeGen {
         // Patch forward jumps
         let done_label = self.mem.current_offset();
         let d_jg = ((ov_label as i64 - patch_jg as i64) / 4) as u32;
-        self.mem.patch_u32(patch_jg, 0x5400000C | ((d_jg & 0x7FFFF) << 5));
+        self.mem
+            .patch_u32(patch_jg, 0x5400000C | ((d_jg & 0x7FFFF) << 5));
         let d_jl = ((ov_label as i64 - patch_jl as i64) / 4) as u32;
-        self.mem.patch_u32(patch_jl, 0x5400000B | ((d_jl & 0x7FFFF) << 5));
+        self.mem
+            .patch_u32(patch_jl, 0x5400000B | ((d_jl & 0x7FFFF) << 5));
         let d_done = ((done_label as i64 - patch_done as i64) / 4) as u32;
-        self.mem.patch_u32(patch_done, 0x14000000 | (d_done & 0x03FF_FFFF));
+        self.mem
+            .patch_u32(patch_done, 0x14000000 | (d_done & 0x03FF_FFFF));
     }
 
     /// Check if x0 holds a Smi (bit 0 = 1). If yes, fall through.
@@ -414,7 +435,8 @@ impl Aarch64CodeGen {
         let ok_label = self.mem.current_offset();
         // Patch TBZ X0, #0: d = (bail_label - patch_bail) / 4
         let d = ((bail_label as i64 - patch_bail as i64) / 4) as u32;
-        self.mem.patch_u32(patch_bail, 0x36000000 | ((d & 0x3FFF) << 5));
+        self.mem
+            .patch_u32(patch_bail, 0x36000000 | ((d & 0x3FFF) << 5));
         // Patch B (unconditional)
         let d = ((ok_label as i64 - patch_ok as i64) / 4) as u32;
         self.mem.patch_u32(patch_ok, 0x14000000 | (d & 0x03FF_FFFF));
@@ -478,10 +500,7 @@ impl Aarch64CodeGen {
         self.pending_patches.clear();
     }
 
-    pub fn compile(
-        mut self,
-        program: &rune_bytecode::opcode::BytecodeProgram,
-    ) -> CompiledFunction {
+    pub fn compile(mut self, program: &rune_bytecode::opcode::BytecodeProgram) -> CompiledFunction {
         self.emit_prologue();
 
         for (bc_idx, instr) in program.instructions.iter().enumerate() {
@@ -515,7 +534,8 @@ impl Aarch64CodeGen {
                 }
                 Opcode::LoadStringConst => {
                     let string_idx = instr.operands[0] as u64;
-                    let prog_ptr = program as *const rune_bytecode::opcode::BytecodeProgram as *const u8 as u64;
+                    let prog_ptr = program as *const rune_bytecode::opcode::BytecodeProgram
+                        as *const u8 as u64;
                     // x0 = x19 (vm_ptr), x1 = x20 (gc_ptr)
                     mov_reg(&mut self.mem, 0, VM_REG);
                     mov_reg(&mut self.mem, 1, GC_REG);
@@ -524,8 +544,8 @@ impl Aarch64CodeGen {
                     mov_imm64(&mut self.mem, 3, string_idx);
                     // Load string_helper from [x19 + 536] into x15
                     ldr_off(&mut self.mem, 15, VM_REG, 536);
-                    emit(&mut self.mem, 0xD63F01E0);             // BLR x15
-                    self.push();                                 // push result (x0)
+                    emit(&mut self.mem, 0xD63F01E0); // BLR x15
+                    self.push(); // push result (x0)
                 }
                 Opcode::LoadLocal => {
                     let idx = instr.operands[0] as u32;
@@ -604,19 +624,24 @@ impl Aarch64CodeGen {
 
                     // Patch: b_not_smi → float64_label
                     let d_bns = ((float64_label as i64 - b_not_smi as i64) / 4) as u32;
-                    self.mem.patch_u32(b_not_smi, 0xB4000001 | ((d_bns & 0x7FFFF) << 5));
+                    self.mem
+                        .patch_u32(b_not_smi, 0xB4000001 | ((d_bns & 0x7FFFF) << 5));
                     // Patch: a_not_smi → float64_label
                     let d_ans = ((float64_label as i64 - a_not_smi as i64) / 4) as u32;
-                    self.mem.patch_u32(a_not_smi, 0xB4000001 | ((d_ans & 0x7FFFF) << 5));
+                    self.mem
+                        .patch_u32(a_not_smi, 0xB4000001 | ((d_ans & 0x7FFFF) << 5));
                     // Patch: ov_jg → float64_label
                     let d_jg = ((float64_label as i64 - ov_jg as i64) / 4) as u32;
-                    self.mem.patch_u32(ov_jg, 0x5400000C | ((d_jg & 0x7FFFF) << 5));
+                    self.mem
+                        .patch_u32(ov_jg, 0x5400000C | ((d_jg & 0x7FFFF) << 5));
                     // Patch: ov_jl → float64_label
                     let d_jl = ((float64_label as i64 - ov_jl as i64) / 4) as u32;
-                    self.mem.patch_u32(ov_jl, 0x5400000B | ((d_jl & 0x7FFFF) << 5));
+                    self.mem
+                        .patch_u32(ov_jl, 0x5400000B | ((d_jl & 0x7FFFF) << 5));
                     // Patch: smi_done → done_label
                     let d_done = ((done_label as i64 - smi_done as i64) / 4) as u32;
-                    self.mem.patch_u32(smi_done, 0x14000000 | (d_done & 0x03FF_FFFF));
+                    self.mem
+                        .patch_u32(smi_done, 0x14000000 | (d_done & 0x03FF_FFFF));
 
                     self.push();
                 }
@@ -683,7 +708,8 @@ impl Aarch64CodeGen {
                     self.emit_epilogue();
                     let push_label = self.mem.current_offset();
                     let d = ((div_by_zero_label as i64 - div_by_zero as i64) / 4) as u32;
-                    self.mem.patch_u32(div_by_zero, 0xB4000001 | ((d & 0x7FFFF) << 5));
+                    self.mem
+                        .patch_u32(div_by_zero, 0xB4000001 | ((d & 0x7FFFF) << 5));
                     let d = ((push_label as i64 - mod_ok as i64) / 4) as u32;
                     self.mem.patch_u32(mod_ok, 0x14000000 | (d & 0x03FF_FFFF));
                     self.push();
@@ -764,7 +790,7 @@ impl Aarch64CodeGen {
                     // Untag both: ASR #1 decodes Smi → int32
                     emit(&mut self.mem, 0x9341FC00); // ASR x0, x0, #1
                     emit(&mut self.mem, 0x9341FC21); // ASR x1, x1, #1
-                    lsl_reg(&mut self.mem, 0, 0, 1);  // LSL x0, x0, x1
+                    lsl_reg(&mut self.mem, 0, 0, 1); // LSL x0, x0, x1
                     // Retag: LSL #1; ORR #1
                     emit(&mut self.mem, 0xD37FF800);
                     orr_imm1(&mut self.mem, 0, 0);
@@ -779,7 +805,7 @@ impl Aarch64CodeGen {
                     self.emit_smi_check(bc_idx, &[1]); // check a; saved=[x1(b)]
                     emit(&mut self.mem, 0x9341FC00);
                     emit(&mut self.mem, 0x9341FC21);
-                    asr_reg(&mut self.mem, 0, 0, 1);  // ASR x0, x0, x1
+                    asr_reg(&mut self.mem, 0, 0, 1); // ASR x0, x0, x1
                     emit(&mut self.mem, 0xD37FF800);
                     orr_imm1(&mut self.mem, 0, 0);
                     self.push();
@@ -1050,12 +1076,12 @@ impl Aarch64CodeGen {
                     // Computed property access: `obj[key]`.
                     // Fast path: dense array + Smi key → direct element load.
                     // Miss: restore JIT stack, bail to interpreter.
-                    self.pop();                     // x0 = key
-                    mov_reg(&mut self.mem, 7, 0);   // x7 = key
-                    self.pop();                     // x0 = obj
-                    mov_reg(&mut self.mem, 1, 0);   // x1 = obj
+                    self.pop(); // x0 = key
+                    mov_reg(&mut self.mem, 7, 0); // x7 = key
+                    self.pop(); // x0 = obj
+                    mov_reg(&mut self.mem, 1, 0); // x1 = obj
                     // === Fast path: dense array + Smi key ===
-                    movz(&mut self.mem, 2, 1);      // x2 = 1
+                    movz(&mut self.mem, 2, 1); // x2 = 1
                     emit(&mut self.mem, 0xEA02003F); // TST x1, x2
                     let patch_smi = self.mem.current_offset();
                     emit(&mut self.mem, 0x54000001); // B.NE miss (obj is Smi)
@@ -1063,7 +1089,7 @@ impl Aarch64CodeGen {
                     let patch_sentinel = self.mem.current_offset();
                     emit(&mut self.mem, 0x54000009); // B.LS miss (obj ≤ 6)
                     ldr_off(&mut self.mem, 3, 1, 0); // x3 = [x1] = header
-                    mov_imm64(&mut self.mem, 4, 7);  // x4 = 7
+                    mov_imm64(&mut self.mem, 4, 7); // x4 = 7
                     emit(&mut self.mem, 0x8A040063); // AND x3, x3, x4 = tag
                     emit(&mut self.mem, 0xF100107F); // CMP x3, #4
                     let patch_tag = self.mem.current_offset();
@@ -1072,11 +1098,11 @@ impl Aarch64CodeGen {
                     let patch_key_not_smi = self.mem.current_offset();
                     emit(&mut self.mem, 0x54000000); // B.EQ miss (key not Smi)
                     emit(&mut self.mem, 0xD341FCE6); // LSR x6, x7, #1 = index
-                    ldr_off(&mut self.mem, 4, 1, 16);// x4 = [x1+16] = len|cap
+                    ldr_off(&mut self.mem, 4, 1, 16); // x4 = [x1+16] = len|cap
                     emit(&mut self.mem, 0x6B06009F); // CMP w4, w6
                     let patch_oob = self.mem.current_offset();
                     emit(&mut self.mem, 0x54000009); // B.LS miss (index ≥ len)
-                    add_imm(&mut self.mem, 5, 1, 32);// x5 = x1 + 32 (elements)
+                    add_imm(&mut self.mem, 5, 1, 32); // x5 = x1 + 32 (elements)
                     emit(&mut self.mem, 0xF86678A0); // LDR x0, [x5, x6, LSL #3]
                     let b_done = self.mem.current_offset();
                     emit(&mut self.mem, 0x14000000); // B done (skip miss path)
@@ -1101,15 +1127,20 @@ impl Aarch64CodeGen {
                     self.mem.patch_u32(b_done, 0x14000000 | (d & 0x03FF_FFFF));
                     // Patch miss branches
                     let d = ((miss_offset as i64 - patch_smi as i64) / 4) as u32;
-                    self.mem.patch_u32(patch_smi, 0x54000001 | ((d & 0x7FFFF) << 5));
+                    self.mem
+                        .patch_u32(patch_smi, 0x54000001 | ((d & 0x7FFFF) << 5));
                     let d = ((miss_offset as i64 - patch_sentinel as i64) / 4) as u32;
-                    self.mem.patch_u32(patch_sentinel, 0x54000009 | ((d & 0x7FFFF) << 5));
+                    self.mem
+                        .patch_u32(patch_sentinel, 0x54000009 | ((d & 0x7FFFF) << 5));
                     let d = ((miss_offset as i64 - patch_tag as i64) / 4) as u32;
-                    self.mem.patch_u32(patch_tag, 0x54000001 | ((d & 0x7FFFF) << 5));
+                    self.mem
+                        .patch_u32(patch_tag, 0x54000001 | ((d & 0x7FFFF) << 5));
                     let d = ((miss_offset as i64 - patch_key_not_smi as i64) / 4) as u32;
-                    self.mem.patch_u32(patch_key_not_smi, 0x54000000 | ((d & 0x7FFFF) << 5));
+                    self.mem
+                        .patch_u32(patch_key_not_smi, 0x54000000 | ((d & 0x7FFFF) << 5));
                     let d = ((miss_offset as i64 - patch_oob as i64) / 4) as u32;
-                    self.mem.patch_u32(patch_oob, 0x54000009 | ((d & 0x7FFFF) << 5));
+                    self.mem
+                        .patch_u32(patch_oob, 0x54000009 | ((d & 0x7FFFF) << 5));
                     self.push();
                 }
                 Opcode::LoadPropertyIC => {
@@ -1117,19 +1148,19 @@ impl Aarch64CodeGen {
                     let offset = instr.operands[1] as u32;
                     let proto_depth = instr.operands.get(2).copied().unwrap_or(0) as u32;
                     let ic_table = self.ic_tables.get(bc_idx).filter(|t| t.count > 1).cloned();
-                    self.pop();                     // x0 = key
-                    mov_reg(&mut self.mem, 7, 0);   // x7 = key (saved for miss path)
-                    self.pop();                     // x0 = object
-                    mov_reg(&mut self.mem, 1, 0);   // x1 = object
+                    self.pop(); // x0 = key
+                    mov_reg(&mut self.mem, 7, 0); // x7 = key (saved for miss path)
+                    self.pop(); // x0 = object
+                    mov_reg(&mut self.mem, 1, 0); // x1 = object
                     movz(&mut self.mem, 2, 1);
-                    emit(&mut self.mem, 0xEA02003F);    // TST x1, x2
+                    emit(&mut self.mem, 0xEA02003F); // TST x1, x2
                     let patch_smi = self.mem.current_offset();
-                    emit(&mut self.mem, 0x54000001);    // B.NE +0
-                    emit(&mut self.mem, 0xF100183F);    // CMP x1, #6
+                    emit(&mut self.mem, 0x54000001); // B.NE +0
+                    emit(&mut self.mem, 0xF100183F); // CMP x1, #6
                     let patch_sentinel = self.mem.current_offset();
-                    emit(&mut self.mem, 0x54000009);    // B.LS +0
-                    ldr_off(&mut self.mem, 2, 1, 8);    // x2 = [x1 + 8]
-                    ldr_off(&mut self.mem, 3, 2, 0);    // x3 = [x2]
+                    emit(&mut self.mem, 0x54000009); // B.LS +0
+                    ldr_off(&mut self.mem, 2, 1, 8); // x2 = [x1 + 8]
+                    ldr_off(&mut self.mem, 3, 2, 0); // x3 = [x2]
                     let mut miss_patches: Vec<(usize, u32)> = Vec::new();
                     let mut done_patches: Vec<usize> = Vec::new();
                     if let Some(table) = ic_table {
@@ -1140,14 +1171,14 @@ impl Aarch64CodeGen {
                         let mut eq_offsets: Vec<usize> = Vec::with_capacity(n);
                         for i in 0..n {
                             let base = (i as u32) * 16;
-                            ldr_off(&mut self.mem, 5, 4, base);       // x5 = shape_id[i]
-                            ldr_off(&mut self.mem, 6, 4, base + 8);   // x6 = slot_offset[i]
+                            ldr_off(&mut self.mem, 5, 4, base); // x5 = shape_id[i]
+                            ldr_off(&mut self.mem, 6, 4, base + 8); // x6 = slot_offset[i]
                             cmp_reg(&mut self.mem, 5, 3);
                             eq_offsets.push(self.mem.current_offset());
                             emit(&mut self.mem, 0x54000000); // B.EQ +0 (→ found)
                         }
                         let b_miss = self.mem.current_offset();
-                        emit(&mut self.mem, 0x14000000);    // B +0 (→ miss)
+                        emit(&mut self.mem, 0x14000000); // B +0 (→ miss)
                         let found_off = self.mem.current_offset();
                         // Patch B.EQ entries → found_off (known now)
                         for &eq in &eq_offsets {
@@ -1160,10 +1191,10 @@ impl Aarch64CodeGen {
                                 ldr_off(&mut self.mem, 1, 1, 24);
                             }
                         }
-                        ldr_reg(&mut self.mem, 0, 1, 6);    // x0 = [x1 + x6]
+                        ldr_reg(&mut self.mem, 0, 1, 6); // x0 = [x1 + x6]
                         self.push();
                         done_patches.push(self.mem.current_offset());
-                        emit(&mut self.mem, 0x14000000);    // B → done
+                        emit(&mut self.mem, 0x14000000); // B → done
                         self.ic_table_patches.push(IcTablePatch {
                             adr_offset: adr_off,
                             table,
@@ -1182,7 +1213,7 @@ impl Aarch64CodeGen {
                         ldr_off(&mut self.mem, 0, 1, 32 + offset * 8);
                         self.push();
                         done_patches.push(self.mem.current_offset());
-                        emit(&mut self.mem, 0x14000000);    // B → done
+                        emit(&mut self.mem, 0x14000000); // B → done
                     }
                     // === Miss handler ===
                     let miss_offset = self.mem.current_offset();
@@ -1191,7 +1222,8 @@ impl Aarch64CodeGen {
                         if (orig & 0xFF000000) == 0x14000000 {
                             self.mem.patch_u32(patch, 0x14000000 | (d & 0x03FF_FFFF));
                         } else {
-                            self.mem.patch_u32(patch, (orig & !0x00FF_FFE0) | ((d & 0x7FFFF) << 5));
+                            self.mem
+                                .patch_u32(patch, (orig & !0x00FF_FFE0) | ((d & 0x7FFFF) << 5));
                         }
                     }
                     self.record_bailout_point(bc_idx, BailoutReason::ShapeMiss);
@@ -1213,30 +1245,32 @@ impl Aarch64CodeGen {
                         self.mem.patch_u32(patch, 0x14000000 | (d & 0x03FF_FFFF));
                     }
                     let d = ((miss_offset as i64 - patch_smi as i64) / 4) as u32;
-                    self.mem.patch_u32(patch_smi, 0x54000001 | ((d & 0x7FFFF) << 5));
+                    self.mem
+                        .patch_u32(patch_smi, 0x54000001 | ((d & 0x7FFFF) << 5));
                     let d = ((miss_offset as i64 - patch_sentinel as i64) / 4) as u32;
-                    self.mem.patch_u32(patch_sentinel, 0x54000009 | ((d & 0x7FFFF) << 5));
+                    self.mem
+                        .patch_u32(patch_sentinel, 0x54000009 | ((d & 0x7FFFF) << 5));
                 }
                 Opcode::StorePropertyIC => {
                     let shape_id = instr.operands[0] as u64;
                     let offset = instr.operands[1] as u32;
                     let _proto_depth = instr.operands.get(2).copied().unwrap_or(0) as u32;
                     let ic_table = self.ic_tables.get(bc_idx).filter(|t| t.count > 1).cloned();
-                    self.pop();                             // x0 = value
-                    mov_reg(&mut self.mem, 1, 0);           // x1 = value
-                    self.pop();                             // x0 = key
-                    mov_reg(&mut self.mem, 7, 0);           // x7 = key (saved for miss path)
-                    self.pop();                             // x0 = object
-                    mov_reg(&mut self.mem, 2, 0);           // x2 = object
+                    self.pop(); // x0 = value
+                    mov_reg(&mut self.mem, 1, 0); // x1 = value
+                    self.pop(); // x0 = key
+                    mov_reg(&mut self.mem, 7, 0); // x7 = key (saved for miss path)
+                    self.pop(); // x0 = object
+                    mov_reg(&mut self.mem, 2, 0); // x2 = object
                     movz(&mut self.mem, 3, 1);
-                    emit(&mut self.mem, 0xEA03005F);        // TST x2, x3
+                    emit(&mut self.mem, 0xEA03005F); // TST x2, x3
                     let patch_smi = self.mem.current_offset();
-                    emit(&mut self.mem, 0x54000001);        // B.NE +0
-                    emit(&mut self.mem, 0xF100185F);        // CMP x2, #6
+                    emit(&mut self.mem, 0x54000001); // B.NE +0
+                    emit(&mut self.mem, 0xF100185F); // CMP x2, #6
                     let patch_sentinel = self.mem.current_offset();
-                    emit(&mut self.mem, 0x54000009);        // B.LS +0
-                    ldr_off(&mut self.mem, 4, 2, 8);        // x4 = [x2 + 8] (shape ptr)
-                    ldr_off(&mut self.mem, 3, 4, 0);        // x3 = [x4] (shape.id)
+                    emit(&mut self.mem, 0x54000009); // B.LS +0
+                    ldr_off(&mut self.mem, 4, 2, 8); // x4 = [x2 + 8] (shape ptr)
+                    ldr_off(&mut self.mem, 3, 4, 0); // x3 = [x4] (shape.id)
                     let mut miss_patches: Vec<(usize, u32)> = Vec::new();
                     let mut done_patches: Vec<usize> = Vec::new();
                     if let Some(table) = ic_table {
@@ -1247,25 +1281,25 @@ impl Aarch64CodeGen {
                         let mut eq_offsets: Vec<usize> = Vec::with_capacity(n);
                         for i in 0..n {
                             let base = (i as u32) * 16;
-                            ldr_off(&mut self.mem, 5, 4, base);       // x5 = shape_id[i]
-                            ldr_off(&mut self.mem, 6, 4, base + 8);   // x6 = slot_offset[i]
+                            ldr_off(&mut self.mem, 5, 4, base); // x5 = shape_id[i]
+                            ldr_off(&mut self.mem, 6, 4, base + 8); // x6 = slot_offset[i]
                             cmp_reg(&mut self.mem, 5, 3);
                             eq_offsets.push(self.mem.current_offset());
                             emit(&mut self.mem, 0x54000000); // B.EQ → found
                         }
                         let b_miss = self.mem.current_offset();
-                        emit(&mut self.mem, 0x14000000);    // B → miss
+                        emit(&mut self.mem, 0x14000000); // B → miss
                         let found_off = self.mem.current_offset();
                         for &eq in &eq_offsets {
                             let d = ((found_off as i64 - eq as i64) / 4) as u32;
                             self.mem.patch_u32(eq, 0x54000000 | ((d & 0x7FFFF) << 5));
                         }
                         miss_patches.push((b_miss, 0x14000000));
-                        str_reg(&mut self.mem, 1, 2, 6);    // [x2 + x6] = value
+                        str_reg(&mut self.mem, 1, 2, 6); // [x2 + x6] = value
                         mov_reg(&mut self.mem, 0, 1);
                         self.push();
                         done_patches.push(self.mem.current_offset());
-                        emit(&mut self.mem, 0x14000000);    // B → done
+                        emit(&mut self.mem, 0x14000000); // B → done
                         self.ic_table_patches.push(IcTablePatch {
                             adr_offset: adr_off,
                             table,
@@ -1275,12 +1309,12 @@ impl Aarch64CodeGen {
                         mov_imm64(&mut self.mem, 6, shape_id);
                         cmp_reg(&mut self.mem, 3, 6);
                         miss_patches.push((self.mem.current_offset(), 0x54000001));
-                        emit(&mut self.mem, 0x54000001);    // B.NE → miss
+                        emit(&mut self.mem, 0x54000001); // B.NE → miss
                         str_off(&mut self.mem, 1, 2, 32 + offset * 8);
                         mov_reg(&mut self.mem, 0, 1);
                         self.push();
                         done_patches.push(self.mem.current_offset());
-                        emit(&mut self.mem, 0x14000000);    // B → done
+                        emit(&mut self.mem, 0x14000000); // B → done
                     }
                     // === Miss handler ===
                     let miss_offset = self.mem.current_offset();
@@ -1289,7 +1323,8 @@ impl Aarch64CodeGen {
                         if (orig & 0xFF000000) == 0x14000000 {
                             self.mem.patch_u32(patch, 0x14000000 | (d & 0x03FF_FFFF));
                         } else {
-                            self.mem.patch_u32(patch, (orig & !0x00FF_FFE0) | ((d & 0x7FFFF) << 5));
+                            self.mem
+                                .patch_u32(patch, (orig & !0x00FF_FFE0) | ((d & 0x7FFFF) << 5));
                         }
                     }
                     self.record_bailout_point(bc_idx, BailoutReason::ShapeMiss);
@@ -1313,9 +1348,11 @@ impl Aarch64CodeGen {
                         self.mem.patch_u32(patch, 0x14000000 | (d & 0x03FF_FFFF));
                     }
                     let d = ((miss_offset as i64 - patch_smi as i64) / 4) as u32;
-                    self.mem.patch_u32(patch_smi, 0x54000001 | ((d & 0x7FFFF) << 5));
+                    self.mem
+                        .patch_u32(patch_smi, 0x54000001 | ((d & 0x7FFFF) << 5));
                     let d = ((miss_offset as i64 - patch_sentinel as i64) / 4) as u32;
-                    self.mem.patch_u32(patch_sentinel, 0x54000009 | ((d & 0x7FFFF) << 5));
+                    self.mem
+                        .patch_u32(patch_sentinel, 0x54000009 | ((d & 0x7FFFF) << 5));
                 }
                 Opcode::Return => {
                     self.emit_epilogue();
@@ -1333,7 +1370,7 @@ impl Aarch64CodeGen {
                 Opcode::Not => {
                     self.pop();
                     self.emit_smi_check(bc_idx, &[]); // check value is Smi
-                    mov_reg(&mut self.mem, 2, 0);   // x2 = original
+                    mov_reg(&mut self.mem, 2, 0); // x2 = original
                     movz(&mut self.mem, 1, 2);
                     cmp_reg(&mut self.mem, 2, 1);
                     // CSET x0, LS = CSINC x0, XZR, XZR, HI (= !LS)
@@ -1434,12 +1471,12 @@ impl Aarch64CodeGen {
                 }
                 Opcode::TypeOf => {
                     // Pop value from JIT stack
-                    self.pop();                                  // x0 = value
-                    mov_reg(&mut self.mem, 1, 0);                // x1 = value_raw (second arg)
-                    mov_reg(&mut self.mem, 0, VM_REG);           // x0 = vm_ptr (first arg)
-                    ldr_off(&mut self.mem, 15, VM_REG, 528);     // typeof_helper at offset 528
-                    emit(&mut self.mem, 0xD63F01E0);             // BLR x15
-                    self.push();                                 // push result (x0)
+                    self.pop(); // x0 = value
+                    mov_reg(&mut self.mem, 1, 0); // x1 = value_raw (second arg)
+                    mov_reg(&mut self.mem, 0, VM_REG); // x0 = vm_ptr (first arg)
+                    ldr_off(&mut self.mem, 15, VM_REG, 528); // typeof_helper at offset 528
+                    emit(&mut self.mem, 0xD63F01E0); // BLR x15
+                    self.push(); // push result (x0)
                 }
                 Opcode::MakeArgumentsArray => {
                     // Phase B: bail on entry — always deopt to interpreter.
@@ -1467,18 +1504,18 @@ impl Aarch64CodeGen {
                     ldr_off(&mut self.mem, 15, VM_REG, 560); // call_helper
                     emit(&mut self.mem, 0xD63F01E0); // BLR x15
                     // Check bailout flag at [VM_REG + 504]
-                    ldr_off(&mut self.mem, 1, VM_REG, 504);  // x1 = flag
-                    movz(&mut self.mem, 2, 1);                 // x2 = 1
-                    cmp_reg(&mut self.mem, 1, 2);             // flag == 1?
+                    ldr_off(&mut self.mem, 1, VM_REG, 504); // x1 = flag
+                    movz(&mut self.mem, 2, 1); // x2 = 1
+                    cmp_reg(&mut self.mem, 1, 2); // flag == 1?
                     let bail_path = self.mem.current_offset();
-                    emit(&mut self.mem, 0x54000001);          // B.NE +0 (skip bailout if flag != 1)
+                    emit(&mut self.mem, 0x54000001); // B.NE +0 (skip bailout if flag != 1)
                     // Bailout path: call bailout_helper and return from JIT
                     self.record_bailout_point(bc_idx, BailoutReason::BailOnEntry);
                     mov_reg(&mut self.mem, 2, JIT_STACK_REG);
                     mov_imm64(&mut self.mem, 1, bc_idx as u64);
                     mov_reg(&mut self.mem, 0, VM_REG);
                     ldr_off(&mut self.mem, 15, VM_REG, 520); // bailout_helper
-                    emit(&mut self.mem, 0xD63F01E0);          // BLR x15
+                    emit(&mut self.mem, 0xD63F01E0); // BLR x15
                     movz(&mut self.mem, 0, 0);
                     self.push();
                     self.emit_epilogue();
@@ -1489,11 +1526,13 @@ impl Aarch64CodeGen {
                     self.push();
                     // Patch B.NE to skip bailout
                     let d = ((done_path as i64 - bail_path as i64) / 4) as u32;
-                    self.mem.patch_u32(bail_path, 0x54000001 | ((d & 0x7FFFF) << 5));
+                    self.mem
+                        .patch_u32(bail_path, 0x54000001 | ((d & 0x7FFFF) << 5));
                 }
                 Opcode::LoadGlobal => {
                     let name_idx = instr.operands[0] as u64;
-                    let prog_ptr = program as *const rune_bytecode::opcode::BytecodeProgram as *const u8 as u64;
+                    let prog_ptr = program as *const rune_bytecode::opcode::BytecodeProgram
+                        as *const u8 as u64;
                     // x0 = x19 (vm_ptr), x1 = x20 (gc_ptr)
                     mov_reg(&mut self.mem, 0, VM_REG);
                     mov_reg(&mut self.mem, 1, GC_REG);
@@ -1505,15 +1544,16 @@ impl Aarch64CodeGen {
                     mov_imm64(&mut self.mem, 5, 0);
                     // Load global_helper from [x19 + 544] into x15
                     ldr_off(&mut self.mem, 15, VM_REG, 544);
-                    emit(&mut self.mem, 0xD63F01E0);             // BLR x15
-                    self.push();                                 // push result (x0)
+                    emit(&mut self.mem, 0xD63F01E0); // BLR x15
+                    self.push(); // push result (x0)
                 }
                 Opcode::StoreGlobal => {
                     let name_idx = instr.operands[0] as u64;
-                    let prog_ptr = program as *const rune_bytecode::opcode::BytecodeProgram as *const u8 as u64;
+                    let prog_ptr = program as *const rune_bytecode::opcode::BytecodeProgram
+                        as *const u8 as u64;
                     // Pop value to store from JIT stack into x5
                     self.pop();
-                    mov_reg(&mut self.mem, 5, 0);                // x5 = value_raw
+                    mov_reg(&mut self.mem, 5, 0); // x5 = value_raw
                     // x0 = x19 (vm_ptr), x1 = x20 (gc_ptr)
                     mov_reg(&mut self.mem, 0, VM_REG);
                     mov_reg(&mut self.mem, 1, GC_REG);
@@ -1524,14 +1564,19 @@ impl Aarch64CodeGen {
                     mov_imm64(&mut self.mem, 4, name_idx);
                     // Load global_helper from [x19 + 544] into x15
                     ldr_off(&mut self.mem, 15, VM_REG, 544);
-                    emit(&mut self.mem, 0xD63F01E0);             // BLR x15
-                    self.push();                                 // push result (stored value)
+                    emit(&mut self.mem, 0xD63F01E0); // BLR x15
+                    self.push(); // push result (stored value)
                 }
                 Opcode::IncGlobal | Opcode::DecGlobal => {
                     let name_idx = instr.operands[0] as u64;
                     let is_prefix = instr.operands[1];
-                    let op = if matches!(instr.opcode, Opcode::IncGlobal) { 2u64 } else { 3u64 };
-                    let prog_ptr = program as *const rune_bytecode::opcode::BytecodeProgram as *const u8 as u64;
+                    let op = if matches!(instr.opcode, Opcode::IncGlobal) {
+                        2u64
+                    } else {
+                        3u64
+                    };
+                    let prog_ptr = program as *const rune_bytecode::opcode::BytecodeProgram
+                        as *const u8 as u64;
                     // x0 = x19 (vm_ptr), x1 = x20 (gc_ptr)
                     mov_reg(&mut self.mem, 0, VM_REG);
                     mov_reg(&mut self.mem, 1, GC_REG);
@@ -1543,8 +1588,8 @@ impl Aarch64CodeGen {
                     mov_imm64(&mut self.mem, 5, is_prefix as u64);
                     // Load global_helper from [x19 + 544] into x15
                     ldr_off(&mut self.mem, 15, VM_REG, 544);
-                    emit(&mut self.mem, 0xD63F01E0);             // BLR x15
-                    self.push();                                 // push result (new or old value)
+                    emit(&mut self.mem, 0xD63F01E0); // BLR x15
+                    self.push(); // push result (new or old value)
                 }
                 _ => {
                     // Unknown opcode: emit a trap so we notice quickly.
@@ -1612,12 +1657,7 @@ mod tests {
 
     /// Stub float64 add helper for tests — prevents SIGSEGV when the float64 Add
     /// path is taken (non-Smi input or Smi overflow).
-    extern "C" fn test_float64_add_stub(
-        _vm: *mut u8,
-        _gc: *mut u8,
-        _a: u64,
-        _b: u64,
-    ) -> u64 {
+    extern "C" fn test_float64_add_stub(_vm: *mut u8, _gc: *mut u8, _a: u64, _b: u64) -> u64 {
         0
     }
 
@@ -1670,7 +1710,7 @@ mod tests {
     fn test_aarch64_cset_lt_encoding() {
         let mut mem = ExecutableMemory::allocate(256);
         // CMP x0, x1 (x0=a=1, x1=b=21); CSET x0, LT; RET
-        mov_imm64(&mut mem, 0, 1);  // x0 = 1 = Smi(0)
+        mov_imm64(&mut mem, 0, 1); // x0 = 1 = Smi(0)
         mov_imm64(&mut mem, 1, 21); // x1 = 21 = Smi(10)
         cmp_reg(&mut mem, 0, 1);
         // CSET x0, LT = CSINC x0, XZR, XZR, GE
@@ -1686,7 +1726,7 @@ mod tests {
     fn test_aarch64_cset_lt_false_encoding() {
         let mut mem = ExecutableMemory::allocate(256);
         mov_imm64(&mut mem, 0, 21); // x0 = 21 = Smi(10)
-        mov_imm64(&mut mem, 1, 1);  // x1 = 1 = Smi(0)
+        mov_imm64(&mut mem, 1, 1); // x1 = 1 = Smi(0)
         cmp_reg(&mut mem, 0, 1);
         emit(&mut mem, 0x9A9FA7E0); // CSET x0, LT
         ret(&mut mem);
@@ -1923,14 +1963,19 @@ mod tests {
                     Instruction::new(op, vec![]),
                     Instruction::new(Opcode::Return, vec![]),
                 ],
-                vec![], vec![],
+                vec![],
+                vec![],
             );
             let compiled = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
             compiled.mem.make_executable();
             let vm = jit_vm_ptr();
             let func: JF = unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
             let r = unsafe { func(vm, std::ptr::null_mut(), locals.as_mut_ptr()) };
-            assert_eq!(r, expected, "{:?} {} {}: expected {}, got {}", op, a, b, expected, r);
+            assert_eq!(
+                r, expected,
+                "{:?} {} {}: expected {}, got {}",
+                op, a, b, expected, r
+            );
         }
     }
 
@@ -1949,7 +1994,8 @@ mod tests {
                     Instruction::new(op, vec![]),
                     Instruction::new(Opcode::Return, vec![]),
                 ],
-                vec![], vec![],
+                vec![],
+                vec![],
             );
             let compiled = Aarch64CodeGen::new(prog.instructions.len()).compile(&prog);
             compiled.mem.make_executable();
@@ -2128,8 +2174,8 @@ mod tests {
             jit_stack_base: 0,
         };
         // Stack: [top=key, object] — LoadPropertyIC pops key then object
-        vm.jit_stack[0] = obj_addr;    // second pop: object
-        vm.jit_stack[1] = 0x42;        // first pop: key (discarded in fast path)
+        vm.jit_stack[0] = obj_addr; // second pop: object
+        vm.jit_stack[1] = 0x42; // first pop: key (discarded in fast path)
         let vm_ptr = &mut vm as *mut _ as *mut u8;
         let prog = BytecodeProgram::new(
             vec![
@@ -2147,7 +2193,9 @@ mod tests {
             unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let result = unsafe { func(vm_ptr, std::ptr::null_mut(), std::ptr::null_mut()) };
         assert_eq!(result, slot_value);
-        unsafe { drop(Box::from_raw(shape_ptr)); }
+        unsafe {
+            drop(Box::from_raw(shape_ptr));
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -2175,7 +2223,11 @@ mod tests {
             unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let result = unsafe { func(vm, std::ptr::null_mut(), std::ptr::null_mut()) };
         // Overflow → bailout → returns undefined = 0
-        assert_eq!(result, 0, "Add overflow: expected 0 (bailout), got {}", result);
+        assert_eq!(
+            result, 0,
+            "Add overflow: expected 0 (bailout), got {}",
+            result
+        );
     }
 
     #[test]
@@ -2198,7 +2250,11 @@ mod tests {
         let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
             unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let result = unsafe { func(vm, std::ptr::null_mut(), std::ptr::null_mut()) };
-        assert_eq!(result, 0, "Sub underflow: expected 0 (bailout), got {}", result);
+        assert_eq!(
+            result, 0,
+            "Sub underflow: expected 0 (bailout), got {}",
+            result
+        );
     }
 
     #[test]
@@ -2221,7 +2277,11 @@ mod tests {
         let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
             unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let result = unsafe { func(vm, std::ptr::null_mut(), std::ptr::null_mut()) };
-        assert_eq!(result, 0, "Mul overflow: expected 0 (bailout), got {}", result);
+        assert_eq!(
+            result, 0,
+            "Mul overflow: expected 0 (bailout), got {}",
+            result
+        );
     }
 
     #[test]
@@ -2243,7 +2303,11 @@ mod tests {
         let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
             unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let result = unsafe { func(vm, std::ptr::null_mut(), std::ptr::null_mut()) };
-        assert_eq!(result, 0, "Neg overflow: expected 0 (bailout), got {}", result);
+        assert_eq!(
+            result, 0,
+            "Neg overflow: expected 0 (bailout), got {}",
+            result
+        );
     }
 
     #[test]
@@ -2266,7 +2330,11 @@ mod tests {
         let func: unsafe fn(*mut u8, *mut u8, *mut u64) -> u64 =
             unsafe { std::mem::transmute(compiled.mem.code_ptr()) };
         let result = unsafe { func(vm, std::ptr::null_mut(), std::ptr::null_mut()) };
-        assert_eq!(result, 0, "Shl overflow: expected 0 (bailout), got {}", result);
+        assert_eq!(
+            result, 0,
+            "Shl overflow: expected 0 (bailout), got {}",
+            result
+        );
     }
 
     #[test]
@@ -2356,7 +2424,10 @@ mod tests {
         }
 
         // Jumps — non-Smi condition; target must be ≤ instruction count
-        for &(op, name) in &[(Opcode::JumpIfFalse, "JumpIfFalse"), (Opcode::JumpIfTrue, "JumpIfTrue")] {
+        for &(op, name) in &[
+            (Opcode::JumpIfFalse, "JumpIfFalse"),
+            (Opcode::JumpIfTrue, "JumpIfTrue"),
+        ] {
             let r = run(vec![
                 Instruction::new(Opcode::LoadUndefined, vec![]),
                 Instruction::new(op, vec![3]),
@@ -2389,19 +2460,40 @@ mod tests {
         use core::mem::offset_of;
         // Every hardcoded offset in codegen_aarch64.rs must match JitHelpers layout.
         // Fields are [usize; 8] → 8 bytes each, #[repr(C)].
-        assert_eq!(offset_of!(JitHelpers, lexical_helper), 0,
-            "lexical_helper at offset 512 from VM base");
-        assert_eq!(offset_of!(JitHelpers, bailout_helper), 8,
-            "bailout_helper at offset 520 from VM base");
-        assert_eq!(offset_of!(JitHelpers, typeof_helper), 16,
-            "typeof_helper at offset 528 from VM base");
-        assert_eq!(offset_of!(JitHelpers, string_helper), 24,
-            "string_helper at offset 536 from VM base");
-        assert_eq!(offset_of!(JitHelpers, global_helper), 32,
-            "global_helper at offset 544 from VM base");
-        assert_eq!(offset_of!(JitHelpers, float64_add_helper), 40,
-            "float64_add_helper at offset 552 from VM base");
-        assert_eq!(offset_of!(JitHelpers, call_helper), 48,
-            "call_helper at offset 560 from VM base");
+        assert_eq!(
+            offset_of!(JitHelpers, lexical_helper),
+            0,
+            "lexical_helper at offset 512 from VM base"
+        );
+        assert_eq!(
+            offset_of!(JitHelpers, bailout_helper),
+            8,
+            "bailout_helper at offset 520 from VM base"
+        );
+        assert_eq!(
+            offset_of!(JitHelpers, typeof_helper),
+            16,
+            "typeof_helper at offset 528 from VM base"
+        );
+        assert_eq!(
+            offset_of!(JitHelpers, string_helper),
+            24,
+            "string_helper at offset 536 from VM base"
+        );
+        assert_eq!(
+            offset_of!(JitHelpers, global_helper),
+            32,
+            "global_helper at offset 544 from VM base"
+        );
+        assert_eq!(
+            offset_of!(JitHelpers, float64_add_helper),
+            40,
+            "float64_add_helper at offset 552 from VM base"
+        );
+        assert_eq!(
+            offset_of!(JitHelpers, call_helper),
+            48,
+            "call_helper at offset 560 from VM base"
+        );
     }
 }

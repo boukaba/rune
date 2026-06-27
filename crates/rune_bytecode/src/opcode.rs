@@ -58,7 +58,7 @@ pub enum Opcode {
     ArraySlice,
     SpreadIntoObject,
     LoadProperty,
-    LoadPropertyIC, // shape-guarded fast path (after N hits)
+    LoadPropertyIC,  // shape-guarded fast path (after N hits)
     StorePropertyIC, // shape-guarded store fast path (after N hits)
     StoreProperty,
     DeleteProperty,
@@ -116,8 +116,7 @@ pub enum Opcode {
     DecGlobal,
 }
 
-#[derive(Clone, Debug)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Clone, Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct Instruction {
     pub opcode: Opcode,
     pub operands: Vec<i64>,
@@ -153,8 +152,7 @@ impl Instruction {
 /// contain `InitGenerator` or `Resume`. The `Resume` opcode is a no-op
 /// placeholder for future try/catch/finally restore logic — it currently
 /// pushes `undefined` onto the stack for the resumption value position.
-#[derive(Clone, Debug)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Clone, Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(
     serialize_bounds(__S: rkyv::ser::Allocator + rkyv::ser::Writer + rkyv::ser::Sharing),
     deserialize_bounds(__D: rkyv::rancor::Fallible<Error: rkyv::rancor::Source>),

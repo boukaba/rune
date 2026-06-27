@@ -1782,10 +1782,7 @@ fn test_jit_bailout_count() {
     "#,
     )
     .unwrap();
-    assert!(
-        ctx.vm().jit_entry_count > 0,
-        "JIT must have entered"
-    );
+    assert!(ctx.vm().jit_entry_count > 0, "JIT must have entered");
     assert!(
         ctx.vm().jit_bailout_count > 0,
         "JIT must have bailed at least once"
@@ -1813,12 +1810,10 @@ fn test_jit_no_bail_on_simple_fn() {
     "#,
     )
     .unwrap();
-    assert!(
-        ctx.vm().jit_entry_count > 0,
-        "JIT must have entered"
-    );
+    assert!(ctx.vm().jit_entry_count > 0, "JIT must have entered");
     assert_eq!(
-        ctx.vm().jit_bailout_count, 0,
+        ctx.vm().jit_bailout_count,
+        0,
         "Simple add() should not bail (no MakeArgumentsArray)"
     );
 }
@@ -1843,7 +1838,9 @@ fn test_jit_needs_frame_verification() {
     );
 
     // Function with const — needs frame for DeclareConst.
-    let prog = ctx.compile("function f() { const x = 42; return x; }").unwrap();
+    let prog = ctx
+        .compile("function f() { const x = 42; return x; }")
+        .unwrap();
     assert!(
         prog.functions[0].needs_frame(),
         "function with const should need a frame"
@@ -1910,8 +1907,9 @@ fn test_jit_typeof_native() {
     // TypeOf is now native — the JIT calls typeof_helper instead of bailing.
     // This test verifies all typeof results and that the JIT enters + no bail.
     let mut ctx = Context::new_small();
-    let r = ctx.eval(
-        r#"
+    let r = ctx
+        .eval(
+            r#"
         function check(x) {
             var a = 1;
             var b = 2;
@@ -1930,8 +1928,8 @@ fn test_jit_typeof_native() {
         }
         r
     "#,
-    )
-    .unwrap();
+        )
+        .unwrap();
     // Result should be a heap object (typeof returns a string)
     assert!(r.is_heap_object(), "typeof result should be a string value");
     assert!(
@@ -1939,7 +1937,8 @@ fn test_jit_typeof_native() {
         "JIT must have entered for check()"
     );
     assert_eq!(
-        ctx.vm().jit_bailout_count, 0,
+        ctx.vm().jit_bailout_count,
+        0,
         "TypeOf should be native — no bailout"
     );
 }
@@ -1951,8 +1950,9 @@ fn test_jit_load_string_const() {
     // This test verifies that a function returning a bare string constant
     // runs end-to-end in the JIT without bailing.
     let mut ctx = Context::new_small();
-    let r = ctx.eval(
-        r#"
+    let r = ctx
+        .eval(
+            r#"
         function label() {
             var a = 1;
             var b = 2;
@@ -1965,15 +1965,16 @@ fn test_jit_load_string_const() {
         }
         r
     "#,
-    )
-    .unwrap();
+        )
+        .unwrap();
     assert!(r.is_heap_object(), "should return a string value");
     assert!(
         ctx.vm().jit_entry_count > 0,
         "JIT must have entered for label()"
     );
     assert_eq!(
-        ctx.vm().jit_bailout_count, 0,
+        ctx.vm().jit_bailout_count,
+        0,
         "LoadStringConst should be native — no bailout"
     );
 }
@@ -1982,8 +1983,9 @@ fn test_jit_load_string_const() {
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn test_jit_load_global() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(
-        r#"
+    let r = ctx
+        .eval(
+            r#"
         function reader() {
             var a = 1;
             var b = 2;
@@ -1997,15 +1999,16 @@ fn test_jit_load_global() {
         }
         r
     "#,
-    )
-    .unwrap();
+        )
+        .unwrap();
     assert_eq!(r.as_smi(), Some(42), "should read global g");
     assert!(
         ctx.vm().jit_entry_count > 0,
         "JIT must have entered for reader()"
     );
     assert_eq!(
-        ctx.vm().jit_bailout_count, 0,
+        ctx.vm().jit_bailout_count,
+        0,
         "LoadGlobal should be native — no bailout"
     );
 }
@@ -2014,8 +2017,9 @@ fn test_jit_load_global() {
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn test_jit_store_global() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(
-        r#"
+    let r = ctx
+        .eval(
+            r#"
         function writer(x) {
             var a = 1;
             var b = 2;
@@ -2030,15 +2034,16 @@ fn test_jit_store_global() {
         }
         r
     "#,
-    )
-    .unwrap();
+        )
+        .unwrap();
     assert_eq!(r.as_smi(), Some(99), "g should be 99 after loop");
     assert!(
         ctx.vm().jit_entry_count > 0,
         "JIT must have entered for writer()"
     );
     assert_eq!(
-        ctx.vm().jit_bailout_count, 0,
+        ctx.vm().jit_bailout_count,
+        0,
         "StoreGlobal should be native — no bailout"
     );
 }
@@ -2047,8 +2052,9 @@ fn test_jit_store_global() {
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn test_jit_inc_global() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(
-        r#"
+    let r = ctx
+        .eval(
+            r#"
         function increment() {
             var a = 1;
             var b = 2;
@@ -2063,15 +2069,20 @@ fn test_jit_inc_global() {
         }
         r
     "#,
-    )
-    .unwrap();
-    assert_eq!(r.as_smi(), Some(100), "g should be 100 after 100 increments");
+        )
+        .unwrap();
+    assert_eq!(
+        r.as_smi(),
+        Some(100),
+        "g should be 100 after 100 increments"
+    );
     assert!(
         ctx.vm().jit_entry_count > 0,
         "JIT must have entered for increment()"
     );
     assert_eq!(
-        ctx.vm().jit_bailout_count, 0,
+        ctx.vm().jit_bailout_count,
+        0,
         "Global load/store should be native — no bailout"
     );
 }
@@ -3995,6 +4006,10 @@ mod instanceof_tests {
             "#,
             )
             .unwrap();
-        assert_eq!(r.as_smi(), Some(200_000), "jit_locals_buffer corrupted by GC mid-call");
+        assert_eq!(
+            r.as_smi(),
+            Some(200_000),
+            "jit_locals_buffer corrupted by GC mid-call"
+        );
     }
 }

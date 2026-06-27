@@ -169,7 +169,8 @@ mod tests {
 
     #[test]
     fn test_afpc_cache_roundtrip_and_install() {
-        let source = "function f(n) { let s = 0; for (let i = 0; i < n; i++) s += i; return s; } f(100);";
+        let source =
+            "function f(n) { let s = 0; for (let i = 0; i < n; i++) s += i; return s; } f(100);";
         let tmp = std::env::temp_dir().join("rune_embed_afpc_roundtrip_test.cache");
         let _ = std::fs::remove_file(&tmp);
 
@@ -178,7 +179,9 @@ mod tests {
             let mut ctx = Context::new_small();
             let bytecode = ctx.compile(source).expect("compile failed");
             let compiled_funcs = crate::afpc::aot_compile_functions(&bytecode);
-            let result = ctx.eval_bytecode_owned(bytecode.clone()).expect("execute failed");
+            let result = ctx
+                .eval_bytecode_owned(bytecode.clone())
+                .expect("execute failed");
             assert_eq!(result.as_smi(), Some(4950));
             let ics = ctx.ics();
             let mut cache = crate::afpc::AfpcCache::from_runtime(bytecode, ics);
@@ -196,7 +199,9 @@ mod tests {
                 ctx.install_native_code(native);
             }
             ctx.set_ics(cache.ic_table);
-            let result = ctx.eval_bytecode_owned(cache.bytecode).expect("execute failed");
+            let result = ctx
+                .eval_bytecode_owned(cache.bytecode)
+                .expect("execute failed");
             assert_eq!(result.as_smi(), Some(4950));
         }
 
@@ -286,11 +291,17 @@ s + r + d + len + f10 + fib20;
         eprintln!("╠══════════════════════════════════════════╣");
         eprintln!("║  Compile (parse+emit): {:>8.1} µs       ║", compile_us);
         eprintln!("║  Cache load (disk):    {:>8.1} µs       ║", load_us);
-        eprintln!("║  Speedup (compile):    {:>8.1}x          ║", compile_us / load_us);
+        eprintln!(
+            "║  Speedup (compile):    {:>8.1}x          ║",
+            compile_us / load_us
+        );
         eprintln!("╠══════════════════════════════════════════╣");
         eprintln!("║  Cold (parse+emit+exec):{:>8.1} µs      ║", cold_us);
         eprintln!("║  Cached (load+exec):   {:>8.1} µs       ║", cached_us);
-        eprintln!("║  Speedup (end-to-end): {:>8.1}x          ║", cold_us / cached_us);
+        eprintln!(
+            "║  Speedup (end-to-end): {:>8.1}x          ║",
+            cold_us / cached_us
+        );
         eprintln!("╚══════════════════════════════════════════╝");
 
         let _ = std::fs::remove_file(&cache_path);

@@ -1753,8 +1753,14 @@ fn uses_arguments_stmt(stmt: &Stmt) -> bool {
         Stmt::While(cond, body, _) => uses_arguments_expr(cond) || uses_arguments_stmt(body),
         Stmt::DoWhile(cond, body, _) => uses_arguments_expr(cond) || uses_arguments_stmt(body),
         Stmt::For(init, cond, update, body, _) => {
-            let cond_uses = cond.as_ref().map(|e| uses_arguments_expr(e)).unwrap_or(false);
-            let update_uses = update.as_ref().map(|e| uses_arguments_expr(e)).unwrap_or(false);
+            let cond_uses = cond
+                .as_ref()
+                .map(|e| uses_arguments_expr(e))
+                .unwrap_or(false);
+            let update_uses = update
+                .as_ref()
+                .map(|e| uses_arguments_expr(e))
+                .unwrap_or(false);
             (init.as_deref().is_some_and(uses_arguments_stmt))
                 || cond_uses
                 || update_uses
@@ -1766,7 +1772,10 @@ fn uses_arguments_stmt(stmt: &Stmt) -> bool {
         Stmt::Var(_, decls, _) => decls
             .iter()
             .any(|d| d.init.as_ref().is_some_and(|e| uses_arguments_expr(e))),
-        Stmt::Return(expr, _) => expr.as_ref().map(|e| uses_arguments_expr(e)).unwrap_or(false),
+        Stmt::Return(expr, _) => expr
+            .as_ref()
+            .map(|e| uses_arguments_expr(e))
+            .unwrap_or(false),
         Stmt::Throw(expr, _) => uses_arguments_expr(expr),
         Stmt::Break(_, _) | Stmt::Continue(_, _) => false,
         Stmt::Try(body, catch, finally, _) => {
@@ -1825,7 +1834,9 @@ fn uses_arguments_expr(expr: &Expr) -> bool {
         }
         Expr::Member(obj, prop, _, _) => uses_arguments_expr(obj) || uses_arguments_expr(prop),
         Expr::Assign(lhs, rhs, _) => uses_arguments_expr(lhs) || uses_arguments_expr(rhs),
-        Expr::CompoundAssign(_, lhs, rhs, _) => uses_arguments_expr(lhs) || uses_arguments_expr(rhs),
+        Expr::CompoundAssign(_, lhs, rhs, _) => {
+            uses_arguments_expr(lhs) || uses_arguments_expr(rhs)
+        }
         Expr::Function(fn_node, _) => {
             // Non-arrow function expressions have their own `arguments`.
             // Arrow function expressions inherit `arguments` from enclosing scope.

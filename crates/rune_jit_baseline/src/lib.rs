@@ -3,7 +3,7 @@ pub mod codegen;
 #[cfg(target_arch = "aarch64")]
 pub mod codegen_aarch64;
 pub mod ic;
-pub use ic::{InlineProfile, TraceIcEntry, TraceIcTable};
+pub use ic::{InlineEntry, InlinePlan, InlineProfile, TraceIcEntry, TraceIcTable};
 pub mod templates;
 
 pub use codegen::{CodeGen, JitEntryFn};

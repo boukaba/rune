@@ -56,8 +56,7 @@ impl CacheHeader {
 }
 
 /// A serializable snapshot of a single shape.
-#[derive(Clone, Debug)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Clone, Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct ShapeEntry {
     /// Content-addressed shape id (stable across runs).
     pub shape_id: u64,
@@ -105,8 +104,7 @@ impl ShapeEntry {
 }
 
 /// A native code blob for a compiled function.
-#[derive(Clone, Debug)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Clone, Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct CompiledFunc {
     /// Index into `BytecodeProgram.functions`.
     pub func_idx: usize,
@@ -115,8 +113,7 @@ pub struct CompiledFunc {
 }
 
 /// A native code blob for a compiled hot-loop trace.
-#[derive(Clone, Debug)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Clone, Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct CompiledTrace {
     /// Program counter of the loop header.
     pub target_pc: usize,
@@ -125,8 +122,7 @@ pub struct CompiledTrace {
 }
 
 /// Full AFPC cache contents.
-#[derive(Clone, Debug)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Clone, Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(
     serialize_bounds(__S: rkyv::ser::Allocator + rkyv::ser::Writer + rkyv::ser::Sharing),
     deserialize_bounds(__D: rkyv::rancor::Fallible<Error: rkyv::rancor::Source>),
@@ -225,17 +221,15 @@ impl InstalledNativeCode {
                 continue;
             }
             unsafe {
-                std::ptr::copy_nonoverlapping(
-                    func.code.as_ptr(),
-                    mem.ptr.add(offset),
-                    len,
-                );
+                std::ptr::copy_nonoverlapping(func.code.as_ptr(), mem.ptr.add(offset), len);
             }
             entries.insert(func.func_idx, unsafe { mem.ptr.add(offset) as *const u8 });
             offset += len;
             // Pad to 4-byte alignment for the next blob (ARM/Thumb friendly).
             while !offset.is_multiple_of(4) && offset < mem.size {
-                unsafe { std::ptr::write(mem.ptr.add(offset), 0); }
+                unsafe {
+                    std::ptr::write(mem.ptr.add(offset), 0);
+                }
                 offset += 1;
             }
         }
@@ -265,11 +259,15 @@ pub fn aot_compile_functions(program: &BytecodeProgram) -> Vec<CompiledFunc> {
                 let codegen = CodeGen::new(func_prog.instructions.len());
                 let compiled = codegen.compile(func_prog);
                 let code = unsafe {
-                    std::slice::from_raw_parts(compiled.mem.code_ptr(), compiled.mem.offset).to_vec()
+                    std::slice::from_raw_parts(compiled.mem.code_ptr(), compiled.mem.offset)
+                        .to_vec()
                 };
                 // Keep the bailout table alive so table entries remain valid.
                 std::mem::forget(compiled.bailout_table);
-                out.push(CompiledFunc { func_idx: idx, code });
+                out.push(CompiledFunc {
+                    func_idx: idx,
+                    code,
+                });
             }
         }
         out
@@ -283,11 +281,15 @@ pub fn aot_compile_functions(program: &BytecodeProgram) -> Vec<CompiledFunc> {
                 let codegen = Aarch64CodeGen::new(func_prog.instructions.len());
                 let compiled = codegen.compile(func_prog);
                 let code = unsafe {
-                    std::slice::from_raw_parts(compiled.mem.code_ptr(), compiled.mem.offset).to_vec()
+                    std::slice::from_raw_parts(compiled.mem.code_ptr(), compiled.mem.offset)
+                        .to_vec()
                 };
                 // Keep the bailout table alive so table entries remain valid.
                 std::mem::forget(compiled.bailout_table);
-                out.push(CompiledFunc { func_idx: idx, code });
+                out.push(CompiledFunc {
+                    func_idx: idx,
+                    code,
+                });
             }
         }
         out
@@ -421,21 +423,22 @@ mod tests {
             vec![(PropertyKey::from_string("x"), 0)],
             vec!["x".to_string()],
         );
-        assert!(loaded
-            .shape_table
-            .iter()
-            .any(|e| e.shape_id == restored.id));
+        assert!(loaded.shape_table.iter().any(|e| e.shape_id == restored.id));
     }
 
     #[test]
     fn test_ic_table_roundtrip() {
         use rune_interpreter::ic::IcEntry;
         let mut ic = InlineCache::new();
-        ic.insert(9, 123, IcEntry {
-            offset: 0,
-            is_own: true,
-            proto_depth: 0,
-        });
+        ic.insert(
+            9,
+            123,
+            IcEntry {
+                offset: 0,
+                is_own: true,
+                proto_depth: 0,
+            },
+        );
         let program = BytecodeProgram::new(
             vec![Instruction::new(Opcode::Return, vec![])],
             vec![],

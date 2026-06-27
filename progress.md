@@ -1749,6 +1749,19 @@ F-2 implements end-to-end inlining for eligible JIT-compiled callees. Four layer
 
 **313 integration tests pass. Clippy-clean. Baseline benchmark: 105ms (without inlining).**
 
+### Phase F-2a Whitelist Bugfix (2026-06-27, `7b2c007`)
+
+Whitelist at `vm.rs:3637` included 5 phantom opcodes (Neg, Not, Void, UnaryPlus, BitNot) not handled by `emit_inline_call`. Removed to match exactly. Added `test_jit_inline_skip_unarith` (Sub/Mul callees not inlined). **314 tests pass.** Clippy-clean.
+
+### Phase F-3 — Bailout + Stack Unwinding (In Progress)
+
+Goal: When an inlined callee triggers a bailout (e.g., Smi overflow in `Add`), unwind the JIT stack to restore the caller's state and resume in the interpreter. Design doc §4.4.1.
+
+**Plan:**
+- F-3a: Add `stack_delta`, `call_site_pc`, `callee_arg_count` fields to inline plan entries; populate during codegen. No behavior change.
+- F-3b: Implement unwind procedure in bailout path: pop stack_delta values, push back args+callee+this, set interpreter PC to call_site_pc, do NOT push a Frame.
+- F-3c: `test_jit_inline_bail` — Smi overflow in inlined Add → bail → correct interpreter state.
+
 ---
 
 ## Arxiv Literature Review — Acceleration Hints for Rune

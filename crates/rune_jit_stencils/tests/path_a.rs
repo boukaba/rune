@@ -317,8 +317,66 @@ void stencil_load_smi(void) {
      let _ = std::fs::remove_dir_all(&tmp);
  }
 
- #[test]
- fn test_path_a_helper_determinism() {
+#[test]
+fn test_path_a_load_const_encoding() {
+    // Verify that the real load_const.c compiles to MOVZ W0 + B _rune_push.
+    // This is the Path A validation for the load_const stencil.
+    // Uses the actual C file in the stencils directory (not an inline string)
+    // to ensure build.rs and this test stay in sync.
+    let stencil_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("stencils");
+    let c_file = stencil_dir.join("load_const.c");
+    assert!(c_file.exists(), "load_const.c not found at {}", c_file.display());
+
+    let tmp = std::env::temp_dir().join("rune_path_a_load_const");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::create_dir_all(&tmp);
+
+    let obj_path = tmp.join("load_const.o");
+    let output = Command::new("clang")
+        .args(["-O2", "-c", "-ffreestanding", "-target", "arm64-apple-macos", "-o"])
+        .arg(&obj_path)
+        .arg(&c_file)
+        .output()
+        .expect("failed to execute clang");
+    assert!(output.status.success(),
+        "clang failed:\n{}", String::from_utf8_lossy(&output.stderr));
+
+    let obj = std::fs::read(&obj_path).unwrap();
+    let section = extract_text_section(&obj)
+        .expect("load_const: no __TEXT,__text section");
+    eprintln!("load_const raw section ({} bytes): {:02x?}", section.len(), section);
+
+    // Expected: MOVZ W0, #0xDEAD (4 bytes) + B _rune_push (4 bytes) = 8 bytes
+    assert!(section.len() >= 8, "load_const too small: {}", section.len());
+
+    // Verify MOVZ W0 with 0xDEAD placeholder
+    let mov_instr = u32::from_le_bytes(section[0..4].try_into().unwrap());
+    const MOV_W0_MASK: u32 = 0xFFE0001Fu32;
+    let mov_base = mov_instr & MOV_W0_MASK;
+    assert_eq!(mov_base, 0x52800000u32,
+        "load_const[0]: expected MOVZ W0 pattern {:#010x}, got {:#010x}, full: {:#010x}",
+        0x52800000u32, mov_base, mov_instr);
+    let placeholder = (mov_instr >> 5) & 0xFFFF;
+    assert_eq!(placeholder, 0xDEAD,
+        "load_const: expected placeholder 0xDEAD, got {:#06x}", placeholder);
+
+    // Verify B instruction at offset 4
+    let branch_instr = u32::from_le_bytes(section[4..8].try_into().unwrap());
+    let is_b = (branch_instr >> 31) == 0;
+    assert!(is_b, "load_const[4]: expected B (tail call), got {:#010x}", branch_instr);
+
+    // Verify branch relocation at offset 4
+    let (reloc_addr, _) = find_branch_reloc(&obj)
+        .expect("load_const: no branch relocation found");
+    assert_eq!(reloc_addr, 4, "load_const: expected branch reloc at offset 4, got {reloc_addr}");
+
+    eprintln!("load_const: MOVZ W0, #0xDEAD ; B _rune_push — encoding verified ✓");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_path_a_helper_determinism() {
      // Verify the helper compiles deterministically.
      let tmp = std::env::temp_dir().join("rune_path_a_proto3");
      let _ = std::fs::remove_dir_all(&tmp);

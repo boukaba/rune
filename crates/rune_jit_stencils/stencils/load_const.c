@@ -1,12 +1,9 @@
 #include "runtime.h"
 
-// Load a constant value onto the JIT stack.
-// Naked asm so Clang emits exactly MOVZ + STR + ADD — no prologue/epilogue.
-// Value hole at MOVZ imm16 (byte 0, bits 20:5).
-__attribute__((naked)) void load_const(void) {
-    __asm__(
-        "movz x0, #0xDEAD\n\t"
-        "str x0, [x22]\n\t"
-        "add x22, x22, #8"
-    );
+// LoadConst(imm16): push a raw 64-bit constant onto JIT stack.
+// Compiled as: MOV W0, #0xDEAD ; B _rune_push (value hole at [0], link hole at [4])
+// Value is the raw tagged representation (0=undefined, 2=null, 4=false, 6=true, etc.).
+// Codegen emits MOVZ bytes, patches to 64-bit (sf=1), then inlines STR+ADD helper body.
+void load_const(void) {
+    rune_push(0xDEAD);
 }

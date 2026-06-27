@@ -53,17 +53,17 @@ fn main() {
         (0, 0xD65F03C0u32, "RET"),
     ], &[], 4);
 
-    // ── Naked-asm stencils with value holes ────────────────────────
-    // load_const: MOVZ X0, #0xDEAD + STR x0,[x22] + ADD x22,x22,#8
-    // Value hole at MOVZ imm16 (byte 0, bits 20:5). No link holes.
-    // Used by LoadUndefined (0), LoadNull (2), LoadBoolean (4/6).
-    emit_naked_stencil(&mut emitter, &stencil_dir, "load_const", &[
-        (0, 0xD29BD5A0u32, "MOVZ X0, #0xDEAD"),
-        (4, 0xF90002C0u32, "STR x0, [x22]"),
-        (8, 0x910022D6u32, "ADD x22, x22, #8"),
-    ], &[
-        HoleSpec { byte_offset: 0, bit_offset: 5, bit_width: 16 },
-    ], 12);
+    // ── Real C stencils (value holes + link holes) ─────────────────
+    // load_const: void stencil(void) { rune_push(0xDEAD); }
+    // Clang generates: MOV W0, #0xDEAD ; B _rune_push
+    // Value at imm16 (byte 0, bits 20:5), link to rune_push via B (byte 4).
+    // Used by LoadUndefined (0), LoadNull (2), LoadBoolean (4/6), LoadFloat64.
+    emit_real_c_stencil(&mut emitter, &stencil_dir, "load_const",
+        &[ValueCheck { offset: 0, mask: 0xFFE0001Fu32, expected: 0x52800000u32,
+                        desc: "MOVZ W0, #?" }],
+        &[HoleSpec { byte_offset: 0, bit_offset: 5, bit_width: 16 }],
+        &[LinkHoleSpec { byte_offset: 4, helper_name: "rune_push" }],
+    );
 
     // ── Real C stencils (value holes + link holes) ─────────────────
     // load_smi_16: void stencil(void) { rune_push(0xDEAD); }

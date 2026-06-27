@@ -335,8 +335,10 @@ impl Aarch64CodeGen {
 
     fn emit_const_stencil(&mut self, val: u64) {
         let start = self.mem.current_offset();
-        for &b in LOAD_CONST_BYTES { self.mem.emit_byte(b); }
+        for &b in &LOAD_CONST_BYTES[..4] { self.mem.emit_byte(b); }
+        // 64-bit MOVZ (sf=1, opcode 0xD2800000) — patch from 32-bit sf=0 template
         self.mem.patch_u32(start, 0xD2800000u32 | ((val as u32 & 0xFFFF) << 5));
+        for &b in RUNE_PUSH_HELPER.bytes { self.mem.emit_byte(b); }
         self.stack_depth += 1;
     }
 

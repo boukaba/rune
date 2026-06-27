@@ -4217,6 +4217,31 @@ mod instanceof_tests {
                 for (var i = 0; i < 100; i = i + 1) { r = f(); }
                 r
             "#,
+            // LoadUndefined / LoadNull / LoadBoolean via stencil
+            r#"
+                function f() { return undefined; }
+                var r = 0;
+                for (var i = 0; i < 100; i = i + 1) { r = f(); }
+                r
+            "#,
+            r#"
+                function f() { return null; }
+                var r = 0;
+                for (var i = 0; i < 100; i = i + 1) { r = f(); }
+                r
+            "#,
+            r#"
+                function f() { return true; }
+                var r = 0;
+                for (var i = 0; i < 100; i = i + 1) { r = f(); }
+                r
+            "#,
+            r#"
+                function f() { return false; }
+                var r = 0;
+                for (var i = 0; i < 100; i = i + 1) { r = f(); }
+                r
+            "#,
         ];
 
         for source in cases {

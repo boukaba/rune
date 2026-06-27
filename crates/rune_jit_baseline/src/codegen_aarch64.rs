@@ -16,7 +16,7 @@ use crate::assembler::ExecutableMemory;
 use crate::ic::{InlineEntry, InlinePlan, InlineProfile, TraceIcTable};
 use crate::{BailoutPoint, BailoutReason, BailoutTable, CompiledFunction};
 use rune_bytecode::opcode::Opcode;
-use rune_jit_stencils::{LOAD_SMI_16_BYTES, LOAD_SMI_32_BYTES, RUNE_PUSH_HELPER};
+use rune_jit_stencils::{LOAD_CONST_BYTES, LOAD_SMI_16_BYTES, LOAD_SMI_32_BYTES, RUNE_PUSH_HELPER};
 
 /// Operation codes for the lexical helper callout (must match vm.rs).
 const LEX_BLOCK_ENTER: u64 = 0;
@@ -331,6 +331,13 @@ impl Aarch64CodeGen {
     pub fn with_stencil_jit(mut self, enabled: bool) -> Self {
         self.stencil_jit = enabled;
         self
+    }
+
+    fn emit_const_stencil(&mut self, val: u64) {
+        let start = self.mem.current_offset();
+        for &b in LOAD_CONST_BYTES { self.mem.emit_byte(b); }
+        self.mem.patch_u32(start, 0xD2800000u32 | ((val as u32 & 0xFFFF) << 5));
+        self.stack_depth += 1;
     }
 
     fn push(&mut self) {
@@ -802,25 +809,41 @@ impl Aarch64CodeGen {
                     }
                 }
                 Opcode::LoadUndefined => {
-                    movz(&mut self.mem, 0, 0);
-                    self.push();
+                    if self.stencil_jit {
+                        self.emit_const_stencil(0);
+                    } else {
+                        movz(&mut self.mem, 0, 0);
+                        self.push();
+                    }
                 }
                 Opcode::LoadNull => {
-                    movz(&mut self.mem, 0, 2);
-                    self.push();
+                    if self.stencil_jit {
+                        self.emit_const_stencil(2);
+                    } else {
+                        movz(&mut self.mem, 0, 2);
+                        self.push();
+                    }
                 }
                 Opcode::LoadBoolean => {
                     let raw = if instr.operands[0] != 0 { 6u64 } else { 4u64 };
-                    mov_imm64(&mut self.mem, 0, raw);
-                    self.push();
+                    if self.stencil_jit {
+                        self.emit_const_stencil(raw);
+                    } else {
+                        mov_imm64(&mut self.mem, 0, raw);
+                        self.push();
+                    }
                 }
                 Opcode::LoadFloat64 => {
                     let idx = instr.operands[0] as usize;
                     let val = program.float_pool.get(idx).copied().unwrap_or(0.0);
                     let i = val as i64;
                     let smi_raw = ((i as u64) << 1) | 1;
-                    mov_imm64(&mut self.mem, 0, smi_raw);
-                    self.push();
+                    if self.stencil_jit && smi_raw <= 0xFFFF {
+                        self.emit_const_stencil(smi_raw);
+                    } else {
+                        mov_imm64(&mut self.mem, 0, smi_raw);
+                        self.push();
+                    }
                 }
                 Opcode::LoadStringConst => {
                     let string_idx = instr.operands[0] as u64;

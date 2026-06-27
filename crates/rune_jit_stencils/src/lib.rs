@@ -43,9 +43,9 @@ mod tests {
     fn test_patch_load_smi_16() {
         let expected_smi = (42u64 << 1) | 1;
         let mut buf = LOAD_SMI_16_BYTES.to_vec();
-        patcher::patch_stencil(&mut buf, LOAD_SMI_16_HOLES, &[expected_smi as u64]);
+        patcher::patch_stencil(&mut buf, LOAD_SMI_16_HOLES, &[expected_smi]);
 
-        let expected_movz: u32 = 0xD2800000 | ((0x55 as u32) << 5);
+        let expected_movz: u32 = 0xD2800000 | (0x55_u32 << 5);
         let actual_movz = u32::from_le_bytes(buf[0..4].try_into().unwrap());
         assert_eq!(actual_movz, expected_movz,
             "load_smi_16 patched with 42: expected {:#010x}, got {:#010x}",
@@ -57,11 +57,11 @@ mod tests {
         let value: u64 = 0xDEAD_BEEF;
         let smi_val = (value << 1) | 1;
         let mut buf = LOAD_SMI_32_BYTES.to_vec();
-        let lower16 = (smi_val as u16) as u64;
-        let upper16 = ((smi_val >> 16) as u16) as u64;
+        let lower16 = smi_val & 0xFFFF;
+        let upper16 = (smi_val >> 16) & 0xFFFF;
         patcher::patch_stencil(&mut buf, LOAD_SMI_32_HOLES, &[lower16, upper16]);
 
-        let expected_movz_low: u32 = 0xD2800000 | (((smi_val & 0xFFFF) as u32) << 5);
+        let expected_movz_low: u32 = 0xD2800000 | ((smi_val as u32 & 0xFFFF) << 5);
         let actual_instr0 = u32::from_le_bytes(buf[0..4].try_into().unwrap());
         assert_eq!(actual_instr0, expected_movz_low,
             "load_smi_32 first MOVZ: expected {:#010x}, got {:#010x}",

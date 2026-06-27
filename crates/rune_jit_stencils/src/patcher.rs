@@ -146,7 +146,7 @@ mod tests {
         let smi_val = (42u64 << 1) | 1;
         patcher.emit(&stencil, &[smi_val]);
 
-        let expected_movz: u32 = 0xD2800000 | ((0x55 as u32) << 5);
+        let expected_movz: u32 = 0xD2800000 | (0x55_u32 << 5);
         let actual_movz = u32::from_le_bytes(buf[0..4].try_into().unwrap());
         assert_eq!(actual_movz, expected_movz, "MOVZ encoding");
     }

@@ -1,8 +1,8 @@
 # Phase F: Inlining for JIT-Compiled Traces — Design
 
-> **Status:** Draft for review
+> **Status:** Approved — 5 concerns resolved (see below)
 > **Scope:** v0.2 — inline hot callee JIT code into caller JIT code (traces + function JIT)
-> **Target:** `jit_hot_function_1M`: 129 ms → ~30–50 ms (gap 40× → ~10–15×)
+> **Target:** `jit_hot_function_1M`: 129 ms → ~25–70 ms (gap 40× → ~10–22×, unverified — see §6)
 > **Pre-reqs:** `9b1a385` (N=16 IC table, 309 tests passing, clippy-clean)
 > **Depends on:** Phase E JIT Call (`7540163`), bailout mechanism (`152bc8f`), trace compiler (`b5d11a0`)
 
@@ -40,6 +40,8 @@ Eliminate the `blr` round-trip overhead for JIT-to-JIT calls in hot loops. When 
 - **Per-call-site profile data.** No infrastructure tracks "how many times does this `Call` opcode call this particular callee?" We only have JIT entry counts (function-level) and overall call counts (opcode-level). Phase F needs per-call-site heatmaps.
 - **Callee JIT code reuse.** When a callee is inlined at multiple call sites, the inlined code is duplicated. For v0.2 this is acceptable — code size is small; AFPC caches the combined result.
 - **Inlining budget tracking.** No mechanism limits total inlining depth or code size growth. Phase F adds a simple threshold.
+
+**Verification:** `needs_frame` has been verified empirically for the target benchmark function `function add(a, b) { return a + b; }`. The emitter only emits `MakeArgumentsArray` when the function body uses `arguments` (see `emitter.rs:172`). `add(a,b)` compiles to `LoadLocal 0, LoadLocal 1, Add, Return` — none of the `needs_frame`-triggering opcodes. The existing test `test_jit_no_bail_on_simple_fn` confirms the JIT path works without a frame. This means the headline benchmark IS inlineable — the `needs_frame` concern is resolved.
 
 ---
 
@@ -99,6 +101,10 @@ pub struct InlinedCallee {
 
 **`LoopTrace`:**
 - Add `inline_profiles: Vec<InlineProfile>` — collected during trace recording.
+- Add `enable_inlining: bool` — feature flag, set by `--inline`/`--no-inline` CLI flag.
+
+**`Config`:**
+- Add `enable_inlining: bool` — default `true`. Set via `--no-inline` CLI flag to A/B test or rollback without reverting.
 
 **`BailoutReason`:**
 - Add variant `InlinedBail = 5` — bailout from inlined callee code.
@@ -167,17 +173,35 @@ The callee's stack delta (net pushes minus pops) is added to the caller's `stack
 
 ### 4.4 Bailout from Inlined Code
 
-If a bailout fires from an inlined callee instruction:
+Bailouts from inlined code bail the **entire trace** — the caller + callee go back to the interpreter. No attempt is made at partial recovery (deferred to v0.3 if inlined bailout rates prove high).
+
+When a bailout fires from an inlined callee instruction:
 
 1. The bailout helper (`rune_jit_bailout_helper`) captures the JIT stack snapshot as usual.
 2. The `bc_pc` in `JitBailoutState` refers to the remapped (caller-relative) PC.
-3. The interpreter-side unwind code checks the `bailout_table` to find the original callee PC and determine that this was an inlined call.
-4. The interpreter reconstructs state by:
-   - Pushing a Frame for the caller (as normal)
-   - NOT pushing a Frame for the callee (it was inlined — no frame exists)
-   - Restoring the interpreter stack to the correct depth (args + callee + this are still on the stack)
+3. The interpreter-side unwind code detects the remapped PC (PC > `CALLER_MAX_PC` threshold), extracts the original callee PC and call-site PC, and unwinds the callee's stack effects (see §4.4.1).
+4. The interpreter reconstructs state and resumes from the call site's PC, executing the callee via the normal interpreter path.
 
-**Alternative (simpler but slower):** Don't attempt partial recovery from inlined bailout. Instead, bail the ENTIRE trace — the inlined caller + callee go back to the interpreter. The interpreter loop continues from the call site's bc_pc, executing the callee via the normal interpreter path. This is simpler to implement and is correct for v0.2. The performance loss from bailing the whole trace is negligible — bailouts from inlined code should be rare (shape stability is already verified by the trace recording phase).
+**Why this is safe:** Bailouts from inlined code are expected to be rare — shape stability is already verified by the trace recording phase (iteration 50+), and the callee's bytecode runs unmodified, just in native code. If an inlined bailout does occur, the trace will re-record without inlining (the non-eligible path) and stabilizes.
+
+### 4.4.1 Stack Unwinding on Inlined Bailout
+
+When the inlined callee bails, the JIT stack contains the callee's intermediate values, not the caller's state at the call site. The bailout helper must unwind this before the interpreter resumes.
+
+**Required data per `InlinedCallee` (recorded during codegen):**
+- `stack_delta: i32` — net stack change caused by the callee (pushes minus pops).
+- `call_site_pc: usize` — bytecode PC of the `Call` instruction in the caller.
+- `callee_arg_count: u8` — number of arguments passed to the callee.
+
+**Unwind procedure:**
+1. Pop `stack_delta` values from the JIT stack (the callee's intermediate state).
+2. Push back `callee_arg_count + 2` values (args + callee function + `this`) to restore the pre-call stack depth.
+3. Set the interpreter PC to `call_site_pc` (re-executing the `Call` opcode in the interpreter, which will do a normal interpreted call).
+4. Do NOT push a `Frame` for the callee (it was inlined — no frame exists in the JIT trace).
+
+**Simplification for v0.2:** The inlining eligibility criteria (§4.2, criterion 3) requires `needs_frame == false`. This means the callee does not create any lexical-scope state (`BlockEnter`, `DeclareLet`, etc.). Therefore, the unwind only needs to reverse stack value changes — no scope state to clean up.
+
+**Verification:** Phase F-3 adds `test_jit_inline_bail` which forces a bailout from an inlined callee (e.g., Smi overflow) and asserts correct interpreter state afterward.
 
 ### 4.5 Interaction with Trace Recording
 
@@ -210,7 +234,18 @@ Inlined code is cached as part of the trace. When the trace is saved to `rune-af
 
 ## 5. Implementation Plan
 
-### Phase F-1: Profile Collection (3 days)
+**Total estimate:** 14 days (optimistic), 3–4 weeks (realistic — past JIT features consistently exceeded initial estimates by 1.5–2×).
+
+### Phase F-0: Feature Flag + Eligibility Verification (1 day)
+
+1. Add `--inline`/`--no-inline` CLI flag to `rune_cli` and `rune_embed`. Default: `--inline`.
+2. Add `enable_inlining: bool` to `CodeGen` and `LoopTrace`. When `false`, call sites skip inlining and use the `call_helper` path.
+3. Write `test_jit_needs_frame_verification` — parameterized test over various function shapes (arrow, closure, generator, function with `let`, function with `arguments`). Print `needs_frame` for each. Assert the target `add(a,b)` shape reports `false`.
+4. Write `test_jit_inline_skip_noneligible` — verify that callees with `needs_frame == true` or bodies ≥ 50 instructions are NOT inlined (fall through to `call_helper`).
+
+**Deliverable:** Verified eligibility matrix (no surprise exclusions for the target benchmark). Feature-flag infrastructure allows A/B testing and rollback without reverting.
+
+### Phase F-1: Profile Collection (2 days)
 
 1. Add `InlineProfile` to `LoopTrace` and `CodeGen`.
 2. During trace recording, when a `Call` opcode is hit:
@@ -221,50 +256,42 @@ Inlined code is cached as part of the trace. When the trace is saved to `rune-af
 
 **Deliverable:** Profile data is collected but unused. No behavior change. Verify with `--trace-stats` output.
 
-### Phase F-2: Inlining Engine (5 days)
+### Phase F-2: Inlining Engine (6 days)
 
-1. In `Aarch64CodeGen`, add `inline_depth` and `inline_profiles`.
+1. In `Aarch64CodeGen`, add `inline_depth`, `enable_inlining`, and `inline_profiles`.
 2. When emitting a `Call` opcode:
+   - If `enable_inlining == false`: emit `call_helper` path (no change).
    - Check eligibility against `InlineProfile` for this call site.
    - If eligible: load callee `BytecodeProgram`, iterate callee instructions, emit them with remapped PCs.
    - Convert callee `Return` → caller jump-past-site.
-   - Merge IC tables and bailout tables.
+   - Merge IC tables and bailout tables (including `stack_delta` for §4.4.1).
    - Skip the `call_helper` BLR + bailout check entirely.
 3. Handle `needs_frame == true` case: skip inlining, emit `call_helper` path as before.
 4. Handle multi-level inlining: guard `inline_depth ≤ 2`.
 
 **Deliverable:** `jit_hot_function_1M` runs with inlined `add(a,b)`. Benchmark shows improvement. 0 bailouts.
 
-### Phase F-3: Bailout Semantics (2 days)
+### Phase F-3: Bailout Semantics + Stack Unwinding (3 days)
 
-1. Handle inlined bailout by bailing the entire trace (simpler approach from §4.4).
-2. Add `BailoutReason::InlinedBail` variant.
-3. In the interpreter bailout path:
-   - Detect remapped PC (PC > offset threshold).
-   - Extract original callee PC.
-   - Do NOT push a callee Frame (it was inlined).
-   - Continue interpreter from the call-site's PC (callee will be interpreted normally from here).
-4. Add test: `test_jit_inline_bail` — a trace that inlines a callee, then triggers a bailout (e.g., Smi overflow in the inlined body), verifies the interpreter handles it correctly.
+1. Handle inlined bailout by bailing the entire trace (§4.4).
+2. Implement stack unwinding (§4.4.1) — pop callee `stack_delta`, push back pre-call stack state, set interpreter PC to `call_site_pc`.
+3. Add `BailoutReason::InlinedBail` variant.
+4. Add test: `test_jit_inline_bail` — a trace that inlines a callee, then triggers a bailout (e.g., Smi overflow in the inlined body), verifies the interpreter handles it correctly (correct stack state, correct interpreter PC).
+5. Verify `--no-inline` disables inlining and all tests pass with both `--inline` and `--no-inline`.
 
-**Deliverable:** Inlined bailout is safe. All existing tests pass.
+**Deliverable:** Inlined bailout is safe and stack-unwinding produces correct interpreter state. Feature flag verified for both settings.
 
-### Phase F-4: x86-64 Backend (2 days)
+### Phase F-4: Testing + AFPC (2 days)
 
-1. Same mechanics as aarch64 in `codegen.rs`.
-2. `emit_inline_callee` method mirrors the aarch64 version.
-3. x86-64 JIT-to-JIT calls are currently `bail-on-entry` (not native). Phase F inlining replaces these calls with native inline code — effectively giving x86-64 its first working JIT-to-JIT inlining.
+1. Verify `jit_hot_function_1M` on aarch64. Measure actual speedup (should be 25–70 ms range).
+2. Add `test_jit_inline_monomorphic` — a hot function that calls the same callee 1M times, verify 0 bailouts and `jit_entry_count ≈ 1`.
+3. AFPC cache round-trip test: save a trace with inlined code, reload, verify it produces correct results.
+4. Verify no regressions on `poly_prop`, `proto_chain`, `loop_sum`, `array_push`.
+5. Run full test suite with `--no-inline` to confirm no behavior change when inlining is disabled.
 
-**Deliverable:** Both backends support inlining.
+**Deliverable:** All 309+ tests pass on aarch64. Measured speedup documented.
 
-### Phase F-5: Testing + AFPC (2 days)
-
-1. Verify `jit_hot_function_1M` on both backends.
-2. Add `test_jit_inline_monomorphic` — a hot function that calls the same callee 1M times, verify 0 bailouts and `jit_entry_count ≈ 1` (trace is recorded once with inlined body).
-3. Add `test_jit_inline_skip_noneligible` — verify that callees with `needs_frame == true` or large bodies are NOT inlined (fall through to `call_helper`).
-4. AFPC cache round-trip test: save a trace with inlined code, reload, verify it produces correct results.
-5. Verify no regressions on `poly_prop`, `proto_chain`, `loop_sum`, `array_push`.
-
-**Deliverable:** All 309+ tests pass. Both backends verified.
+**Note on x86-64:** x86-64 inlining is **deferred to v0.3**. x86-64 has no users, no benchmarks, and currently bails-on-entry for JIT-to-JIT calls rather than executing native code. The 2 days saved are better spent on F-3 stack unwinding and F-4 testing. The x86-64 inliner will be added in v0.3 alongside the copy-and-patch backend rewrite (which makes backend portability free).
 
 ---
 
@@ -275,16 +302,21 @@ Inlined code is cached as part of the trace. When the trace is saved to `rune-af
 Current: 129 ms, 999,952 JIT entries, 0 bailouts.
 Breakdown:
 - `blr` round-trip (call_helper + callee prologue/epilogue): ~90 ns per call × 1M = ~90 ms
-- `add()` body: ~39 ns per call × 1M = ~39 ms
+- `add()` body (full JIT): ~39 ns per call × 1M = ~39 ms
 - Total: ~129 ms
 
 After inlining:
 - `blr` round-trip: 0 ns (eliminated)
-- `add()` body: ~39 ns per call × 1M = ~39 ms
+- `add()` body (inlined): **15–30 ns** per call × 1M — prologue/epilogue/arg-copy removed, but untagging, Smi overflow check, and retagging remain
 - Additional: trace body overhead (loop counter, branch, etc.) unchanged at ~10 ns per iter × 1M = ~10 ms
-- Total: ~49 ms
+- Total: **~25–40 ms**
 
-**Expected result: 129 ms → ~49 ms (62% reduction, gap 40× → ~15×)**
+**CAUTION:** The 15–30 ns per-inlined-call estimate is **unverified**. The 39 ns figure above is full JIT execution of `add()` including prologue, arg setup, epilogue. After inlining, those are gone, but the remaining cost depends on:
+- Register pressure from the merged caller+callee locals stack (may cause spills)
+- IC table size growth (the caller's table now includes callee entries)
+- Instruction cache effects from larger trace body
+
+The 15 ns lower bound assumes clean register allocation with no spills. The 30 ns upper bound assumes moderate spill pressure. The honest expected range is **~25–70 ms** (gap ~10–22×). Will be measured empirically after Phase F-2.
 
 ### Secondary impact: `loop_sum_smi_1M`
 
@@ -312,7 +344,54 @@ No change. No function calls in the hot loop.
 
 ---
 
-## 8. Key Decisions
+## 8. What Could Go Wrong
+
+Beyond the enumerated risks above, here are the failure modes that are most likely based on patterns from Phase D (vector IC) and Phase E (JIT Call):
+
+### 8.1 Correctness: Inliner produces wrong code silently
+
+The most dangerous failure mode. The inliner splices callee instructions into the caller's trace. If PC remapping, local slot adjustment, or return-to-jump conversion is wrong, the trace executes incorrect opcodes with no observable error until the wrong result propagates.
+
+**Guard:** The eligibility test plan (§5 F-0, `test_jit_needs_frame_verification`, `test_jit_inline_skip_noneligible`) catches this at compile time (wrong callee selected). The bailout test (`test_jit_inline_bail`) catches stack corruption at runtime. The feature flag (`--no-inline`) ensures we can disable inlining without reverting, isolating regressions.
+
+**Rollback plan:** If the inliner produces incorrect results on any benchmark:
+1. Set `--no-inline` as the CLI default (reverts to Phase E behavior).
+2. Fix the bug, add a test that would have caught it, then re-enable.
+
+### 8.2 Stack unwinding bug on inlined bailout
+
+The stack unwinding procedure (§4.4.1) is the most subtle piece. If `stack_delta` is wrong, the interpreter resumes with corrupted stack depth and silently produces wrong results or crashes.
+
+**Guard:** The explicit `stack_delta` field on `InlinedCallee` forces the codegen phase to track it. `test_jit_inline_bail` forces bailout in an inlined callee and verifies: (a) correct stack depth, (b) correct interpreter PC, (c) correct result. Run this test under both `--inline` and `--no-inline` to confirm they produce identical results.
+
+**Rollback plan:** Use `--no-inline` and debug `stack_delta` computation.
+
+### 8.3 Phase F doesn't improve the target benchmark
+
+If `needs_frame` were `true` (it's not — verified above), or if the inlined body doesn't run faster in practice (register pressure dominates), Phase F delivers no benefit to `jit_hot_function_1M`.
+
+**Mitigation:** The feature flag ensures we can measure A/B. If the speedup is < 10%, the design should be revisited (profile-guided vs. aggressive inlining) rather than shipping the complexity.
+
+### 8.4 Code size explosion from deep inlining
+
+The 50-instruction-per-callee cap plus max depth 2 limits worst-case trace growth to ~150 instrs (50 caller + 2 × 50 callee). Realistic traces are ~30 caller + ~10 callee = ~40 instrs. No explosion risk.
+
+### 8.5 Test Plan for Inlining Eligibility
+
+Before any inlining code runs, the following tests must pass (Phase F-0):
+
+| Test | What it verifies |
+|---|---|
+| `test_jit_needs_frame_verification` | Parameterized — asserts `needs_frame` for various function shapes (arrow, closure, generator, `let`, `arguments`). Confirms `add(a,b)` target is inlineable. |
+| `test_jit_inline_skip_noneligible` | Callee with `needs_frame == true` or body ≥ 50 instrs falls through to `call_helper`. Verify JIT stats show no inlining. |
+| `test_jit_inline_feature_flag` | Toggle `--inline`/`--no-inline`. Verify the same program produces identical results. |
+| `test_jit_inline_no_bail` | Hot function with inlined callee. 1M iterations. 0 bailouts. Result matches interpreter. |
+
+These tests are written and passing **before** F-1 starts. This is the non-negotiable foundation — the pattern that would have caught the vector IC's N=8 assumption before a week of implementation.
+
+---
+
+## 9. Key Decisions
 
 | Decision | Choice | Rationale |
 |---|---|---|
@@ -322,13 +401,17 @@ No change. No function calls in the hot loop.
 | Frame-less callee only | `needs_frame == false` as prerequisite | Inlining with frame manipulation adds significant complexity. Deferred. |
 | Profile collection | During trace recording only | No separate profiling pass needed. The trace recording already observes callee behavior at the call site. |
 | AFPC interaction | Inlining baked into cached trace | Simplest approach. Re-recording handles profile drift naturally. |
+| Feature flag | `--inline`/`--no-inline` (default: `--inline`) | Enables A/B testing and rollback without reverting. Critical for Phase F — if the inliner produces regressions, disabling it via flag takes seconds. |
+| x86-64 backend priority | **Deferred to v0.3** | x86-64 has no users, no benchmarks, no JIT-to-JIT calls today. v0.2 focuses on aarch64 (M4 Pro). The copy-and-patch rewrite in v0.3 makes backend portability free. |
+| Stack unwinding complexity | Explicit `stack_delta` + `call_site_pc` + `callee_arg_count` recorded per `InlinedCallee` | Forces codegen to track this explicitly rather than reconstructing it at bailout time. The 3 fields are the minimum needed for correct unwinding (§4.4.1). |
 
 ---
 
-## 9. Future Work (Post-v0.2)
+## 10. Future Work (Post-v0.2)
 
 - **Cross-module inlining:** Inlining builtins (`Array.push`, `Math.max`, etc.) into JIT code. Requires `needs_frame` relaxation or frame synthesis.
 - **Polymorphic inlining:** Multiple callee versions at the same call site. Requires dispatch table + callee-specific traces.
 - **Speculative inlining:** Inlining based on probabilistic profiling (not just observed monomorphic). Higher risk, higher reward.
 - **Frame-ful inlining:** Inlining callees with lexical-scope opcodes. Requires synthesizing a `Frame` within the inlined body.
 - **Inlining into function JIT (not just traces):** Currently Phase F only inlines during trace recording. Function JIT inlining is a separate effort.
+- **x86-64 inlining:** Mirror the aarch64 inliner in `codegen.rs`. Deferred from v0.2 — x86-64 has no users or benchmarks, and the copy-and-patch rewrite in v0.3 makes backend portability free.

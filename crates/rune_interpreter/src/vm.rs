@@ -2165,12 +2165,10 @@ impl Vm {
                                                 .bailout_table
                                                 .as_ref()
                                                 .and_then(|bt| {
-                                                    bt.points.iter().find(|bp| {
-                                                        bp.bc_pc == trace_idx
-                                                    })
+                                                    bt.points.iter().find(|bp| bp.bc_pc == trace_idx)
                                                 })
-                                                .map_or(false, |bp| {
-                                                    bp.reason
+                                                .map_or(false, |b| {
+                                                    b.reason
                                                         == rune_jit_baseline::BailoutReason::ShapeMiss
                                                 });
                                             if is_shape_miss {

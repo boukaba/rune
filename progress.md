@@ -2317,7 +2317,16 @@ var result = data.items
 - [x] `e2e_json_workload`: full JSON.parse → filter → map → reduce, produces 8
 - [x] `e2e_gc_stress_reduce`: 200K element reduce, GC fires mid-iteration, correct result
 
-### Key Architectural Decisions
+### Task 17I: JSON.stringify 🟡 — Priority 2 ✅
+
+- [x] Recursive serializer: null/true/false → `"null"`/`"true"`/`"false"`, numbers (including NaN→`"null"`, ±Infinity→`"null"`), quoted+escaped strings
+- [x] Array serialization: `[elem1,elem2,...]` with recursive walk, `undefined` → `null`
+- [x] Object serialization: `{key:val,...}` enumerating own shape entries, `undefined` values omitted
+- [x] Cycle detection: `Vec<*mut u8>` stack tracks objects/arrays being serialized; circular reference → TypeError
+- [x] Top-level `undefined` returns `undefined` (not a string), per spec §25.3.2
+- [x] `toJSON` method support deferred (P28)
+- [x] Number formatting uses Rust's `f64::to_string()` — shortest-roundtrip not guaranteed (known limitation, matches real-world JSON)
+- [x] 15 integration tests: number, string, boolean, null, top-level undefined, NaN/Infinity, array, object, nested, cycle, undefined-in-array, omit-undefined-prop, round-trip, empty-object, empty-array
 
 1. **Callback state machine pattern:** Rather than recursive interpreter (V8/JSC approach) or a trampoline, use `pending_array_op` state on Vm. Builtins set it; Call/Return handlers check and advance. This pattern extends to all future callback-based builtins (`forEach`, `find`, `some`, `every`, `Array.from`, `Promise.then`).
 
@@ -2329,7 +2338,7 @@ var result = data.items
 
 ### Test Results
 
-- **358 tests passing** (317 existing + 27 stdlib + 5 forEach + 7 slice + 2 E2E verification)
+- **374 tests passing** (317 existing + 27 stdlib + 5 forEach + 7 slice + 15 JSON.stringify + 3 E2E verification)
 - All crate tests: pass
 - Clippy: clean
 - test262: filter 11/242, map 11/216, reduce 91/260 (inflated by harness — `Ok(Ok(_))` counts non-crash as pass; real spec compliance is lower but not blocking)
@@ -2338,9 +2347,9 @@ var result = data.items
 
 | File | Lines | Changes |
 |---|---|---|
-| `crates/rune_interpreter/src/builtins.rs` | +300 | `json_parse`, `array_filter`, `array_map`, `array_reduce`, `array_for_each` |
-| `crates/rune_interpreter/src/vm.rs` | +120 | `ArrayOpState`/`ArrayOpKind`, `push_callback_call`, Call/Return handler integration, GC roots |
-| `crates/rune_embed/tests/integration_test.rs` | +170 | 41 new integration tests (34 stdlib + 7 slice) |
+| `crates/rune_interpreter/src/builtins.rs` | +450 | `json_parse`, `array_filter`, `array_map`, `array_reduce`, `array_for_each`, `array_slice`, `json_stringify` |
+| `crates/rune_interpreter/src/vm.rs` | +125 | `ArrayOpState`/`ArrayOpKind`, `push_callback_call`, Call/Return handler, GC roots, JSON.stringfy wiring |
+| `crates/rune_embed/tests/integration_test.rs` | +280 | 56 new integration tests (34 stdlib + 7 slice + 15 stringify) |
 | `crates/rune_core/src/array.rs` | (existing) | `RuneArray::allocate/push/get_element/length` |
 
 ### Gap: test262 Harness
@@ -2349,6 +2358,7 @@ The test262 runner at `rune_cli/src/test262.rs` uses `Outcome::Pass = Ok(Ok(_))`
 
 ### Next Steps (after v0.3 JIT + GC milestones)
 
-1. `JSON.stringify` — completes JSON round-trip (highest leverage: JSON-in/JSON-out edge workloads).
+1. ✅ `JSON.stringify` — done at `5723731` — JSON round-trip complete.
 2. `String.prototype.split` (string separator) — enables CSV parsing.
 3. `parseInt`/`parseFloat` — string→number conversion for real workloads.
+4. Fix boolean `+` string coercion (pre-existing bug: `true + ""` → `"undefined"`).

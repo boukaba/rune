@@ -60,10 +60,10 @@ pub fn print_builtin(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mu
 /// For objects with a user-defined toString function, sets up the pending_call
 /// callback pattern and returns None (the caller must return immediately).
 /// For all other values, returns Some(string).
-fn to_primitive_string<'a>(
+fn to_primitive_string(
     gc: &mut SemiSpace,
     val: Value,
-    vm: &'a mut Vm,
+    vm: &mut Vm,
 ) -> Option<String> {
     // Fast path: non-object values
     if !val.is_heap_object() {
@@ -125,8 +125,8 @@ fn to_primitive_string<'a>(
         let value_of_key = PropertyKey::from_string("valueOf");
         if let Some(slot) = shape.lookup(&value_of_key) {
             let value_of_val = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
-            if let Some(smi) = value_of_val.as_smi() {
-                if smi < 0 {
+            if let Some(smi) = value_of_val.as_smi()
+                && smi < 0 {
                     let id = ((-smi) as usize) - 1;
                     if id < vm.builtins.len() {
                         let result = (vm.builtins[id].func)(gc, val, &[], vm);
@@ -146,7 +146,6 @@ fn to_primitive_string<'a>(
                         }
                     }
                 }
-            }
         }
         // Neither toString nor valueOf returned a primitive
         return Some(value_to_js_string(val));

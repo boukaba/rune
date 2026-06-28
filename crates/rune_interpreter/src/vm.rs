@@ -2081,7 +2081,7 @@ impl Vm {
                             let arr = ptr as *mut RuneArray;
                             let len = unsafe { RuneArray::length(arr) };
                             if (index as u32) < len {
-                                unsafe { RuneArray::set_element(arr, index as usize, Value::undefined()) };
+                                unsafe { RuneArray::set_element(arr, index, Value::undefined()) };
                             }
                         }
                         Value::boolean(true)
@@ -3572,62 +3572,59 @@ impl Vm {
                                 while i < current_len as usize {
                                     let element = unsafe { RuneArray::get_element(src_arr, i) };
                                     let has_prop = !element.is_undefined()
-                                        || (self.array_prototype.heap_ptr().map_or(false, |proto_ptr| {
+                                        || self.array_prototype.heap_ptr().is_some_and(|proto_ptr| {
                                             let key = PropertyKey::from_string(&i.to_string());
                                             let shape = unsafe {
                                                 JSObject::shape_ptr(proto_ptr as *mut JSObject)
                                             };
                                             shape.lookup(&key).is_some()
-                                        }));
+                                        });
                                     if has_prop { break 'search Some(i); }
                                     i += 1;
                                 }
                                 None::<usize>
                             };
-                            match next_index {
-                                Some(i) => {
-                                    op.index = i;
-                                    let element = unsafe { RuneArray::get_element(src_arr, i) };
-                                    let resolved_val = if !element.is_undefined() {
-                                        element
-                                    } else if let Some(ptr) = self.array_prototype.heap_ptr() {
-                                        let key = PropertyKey::from_string(&i.to_string());
-                                        let shape = unsafe {
-                                            JSObject::shape_ptr(ptr as *mut JSObject)
-                                        };
-                                        if let Some(slot) = shape.lookup(&key) {
-                                            unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) }
-                                        } else { element }
-                                    } else { element };
-                                    let cb_this = match op_kind {
-                                        ArrayOpKind::Filter | ArrayOpKind::Map | ArrayOpKind::ForEach => op.this_val,
-                                        ArrayOpKind::Reduce => Value::undefined(),
+                            if let Some(i) = next_index {
+                                op.index = i;
+                                let element = unsafe { RuneArray::get_element(src_arr, i) };
+                                let resolved_val = if !element.is_undefined() {
+                                    element
+                                } else if let Some(ptr) = self.array_prototype.heap_ptr() {
+                                    let key = PropertyKey::from_string(&i.to_string());
+                                    let shape = unsafe {
+                                        JSObject::shape_ptr(ptr as *mut JSObject)
                                     };
-                                    let cb_args = match op_kind {
-                                        ArrayOpKind::Filter | ArrayOpKind::Map | ArrayOpKind::ForEach => {
-                                            vec![
-                                                resolved_val,
-                                                Value::smi(i as i32),
-                                                Value::from_heap_ptr(op.source),
-                                            ]
-                                        }
-                                        ArrayOpKind::Reduce => {
-                                            let acc = op.accumulator.unwrap_or(Value::undefined());
-                                            vec![
-                                                acc,
-                                                resolved_val,
-                                                Value::smi(i as i32),
-                                                Value::from_heap_ptr(op.source),
-                                            ]
-                                        }
-                                    };
-                                    let callback_func = op.callback;
-                                    self.stack.truncate(callee_base);
-                                    self.pending_array_op = Some(op);
-                                    self.push_callback_call(gc, callback_func, cb_this, cb_args);
-                                    continue;
-                                }
-                                None => {}
+                                    if let Some(slot) = shape.lookup(&key) {
+                                        unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) }
+                                    } else { element }
+                                } else { element };
+                                let cb_this = match op_kind {
+                                    ArrayOpKind::Filter | ArrayOpKind::Map | ArrayOpKind::ForEach => op.this_val,
+                                    ArrayOpKind::Reduce => Value::undefined(),
+                                };
+                                let cb_args = match op_kind {
+                                    ArrayOpKind::Filter | ArrayOpKind::Map | ArrayOpKind::ForEach => {
+                                        vec![
+                                            resolved_val,
+                                            Value::smi(i as i32),
+                                            Value::from_heap_ptr(op.source),
+                                        ]
+                                    }
+                                    ArrayOpKind::Reduce => {
+                                        let acc = op.accumulator.unwrap_or(Value::undefined());
+                                        vec![
+                                            acc,
+                                            resolved_val,
+                                            Value::smi(i as i32),
+                                            Value::from_heap_ptr(op.source),
+                                        ]
+                                    }
+                                };
+                                let callback_func = op.callback;
+                                self.stack.truncate(callee_base);
+                                self.pending_array_op = Some(op);
+                                self.push_callback_call(gc, callback_func, cb_this, cb_args);
+                                continue;
                             }
                             // Done: push result and advance pc.
                             let final_result = match op_kind {
@@ -3649,25 +3646,25 @@ impl Vm {
                         }
                     }
                     // Check if this return completes a pending assert.throws callback.
-                    if let Some(pa) = self.pending_assert.take() {
-                        if self.frames.len() == pa.source_frame_depth {
-                            // Function returned without throwing — assert.throws failed.
-                            let msg = if let Some(ptr) = pa.expected_error.heap_ptr() {
-                                format!("Expected {} to throw an exception", unsafe {
-                                    rune_core::string::HeapString::to_string(
-                                        ptr as *mut rune_core::string::HeapString
-                                    )
-                                })
-                            } else {
-                                "Expected an exception but none was thrown".to_string()
-                            };
-                            let err = make_error(gc, &msg);
-                            self.stack.truncate(callee_base);
-                            if let Some(exit) = self.handle_throw(gc, err) {
-                                return exit;
-                            }
-                            continue;
+                    if let Some(pa) = self.pending_assert.take()
+                        && self.frames.len() == pa.source_frame_depth
+                    {
+                        // Function returned without throwing — assert.throws failed.
+                        let msg = if let Some(ptr) = pa.expected_error.heap_ptr() {
+                            format!("Expected {} to throw an exception", unsafe {
+                                rune_core::string::HeapString::to_string(
+                                    ptr as *mut rune_core::string::HeapString
+                                )
+                            })
+                        } else {
+                            "Expected an exception but none was thrown".to_string()
+                        };
+                        let err = make_error(gc, &msg);
+                        self.stack.truncate(callee_base);
+                        if let Some(exit) = self.handle_throw(gc, err) {
+                            return exit;
                         }
+                        continue;
                     }
                     if self.frames.is_empty() {
                         self.stack.clear();
@@ -4648,20 +4645,19 @@ fn do_store_property(obj: Value, raw_key: Value, value: Value) {
                     unsafe { RuneArray::set_element(ptr as *mut RuneArray, index, value) };
                 }
             } else if let Some(key_str) = raw_key.heap_ptr()
-                && let Some(k) = (|| { let k = unsafe { HeapString::to_string(key_str as *mut HeapString) }; Some(k) })()
+                && let k = unsafe { HeapString::to_string(key_str as *mut HeapString) }
                 && k == "length"
+                && let Some(n) = value.as_smi()
             {
-                if let Some(n) = value.as_smi() {
-                    let arr = ptr as *mut RuneArray;
-                    let old_len = unsafe { RuneArray::length(arr) };
-                    let new_len = n.max(0) as u32;
-                    if new_len < old_len {
-                        for i in new_len as usize..old_len as usize {
-                            unsafe { RuneArray::set_element(arr, i, Value::undefined()) };
-                        }
+                let arr = ptr as *mut RuneArray;
+                let old_len = unsafe { RuneArray::length(arr) };
+                let new_len = n.max(0) as u32;
+                if new_len < old_len {
+                    for i in new_len as usize..old_len as usize {
+                        unsafe { RuneArray::set_element(arr, i, Value::undefined()) };
                     }
-                    unsafe { RuneArray::set_length(arr, new_len) };
                 }
+                unsafe { RuneArray::set_length(arr, new_len) };
             }
         } else if tag == TAG_FUNC
             && let Some(key) = value_to_prop_key(raw_key)

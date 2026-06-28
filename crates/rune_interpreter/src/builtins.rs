@@ -235,9 +235,9 @@ pub fn string_char_at(gc: &mut SemiSpace, this: Value, args: &[Value], _vm: &mut
 /// Uses byte-level slicing to match the spec (characters are 1 byte in Rune's use case).
 pub fn string_slice(gc: &mut SemiSpace, this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     fn to_number(v: Value) -> f64 {
-        if let Some(n) = v.as_smi() { n as f64 }
-        else if let Some(f) = v.as_float64() { f }
-        else { f64::NAN }
+        v.as_smi().map(|n| n as f64)
+            .or_else(|| v.as_float64())
+            .unwrap_or(f64::NAN)
     }
     if let Some(ptr) = this.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };

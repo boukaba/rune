@@ -1337,6 +1337,15 @@ fn same_value(a: Value, b: Value) -> bool {
     }
     // Both heap pointers (strings, objects)
     if let (Some(ap), Some(bp)) = (a.heap_ptr(), b.heap_ptr()) {
+        // Compare strings by content, objects by identity
+        unsafe {
+            let ta = (*(ap as *const GcHeader)).tag();
+            let tb = (*(bp as *const GcHeader)).tag();
+            if ta == TAG_STRING && tb == TAG_STRING {
+                return HeapString::to_string(ap as *mut HeapString)
+                    == HeapString::to_string(bp as *mut HeapString);
+            }
+        }
         return ap == bp;
     }
     // Numeric comparison (accept both Smi and Float64)

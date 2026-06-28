@@ -425,6 +425,10 @@ impl Vm {
         let includes_handle = find_handle(&self.builtins, "String_prototype_includes");
         let starts_with_handle = find_handle(&self.builtins, "String_prototype_startsWith");
         let ends_with_handle = find_handle(&self.builtins, "String_prototype_endsWith");
+        let char_code_at_handle = find_handle(&self.builtins, "String_prototype_charCodeAt");
+        let code_point_at_handle = find_handle(&self.builtins, "String_prototype_codePointAt");
+        let substring_handle = find_handle(&self.builtins, "String_prototype_substring");
+        let substr_handle = find_handle(&self.builtins, "String_prototype_substr");
         if let (Some(char_at), Some(slice)) = (char_at_handle, slice_handle) {
             let mut str_proto_entries: Vec<(&str, Value)> = vec![
                 ("charAt", char_at),
@@ -444,6 +448,18 @@ impl Vm {
             }
             if let Some(ew) = ends_with_handle {
                 str_proto_entries.push(("endsWith", ew));
+            }
+            if let Some(cc) = char_code_at_handle {
+                str_proto_entries.push(("charCodeAt", cc));
+            }
+            if let Some(cp) = code_point_at_handle {
+                str_proto_entries.push(("codePointAt", cp));
+            }
+            if let Some(sb) = substring_handle {
+                str_proto_entries.push(("substring", sb));
+            }
+            if let Some(sr) = substr_handle {
+                str_proto_entries.push(("substr", sr));
             }
             let str_proto = make_object(gc, &str_proto_entries);
             self.builtin_wrappers

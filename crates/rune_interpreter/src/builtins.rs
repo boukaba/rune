@@ -505,6 +505,100 @@ pub fn string_ends_with(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
     Value::boolean(s[..end].ends_with(&search_str))
 }
 
+fn to_integer_or_infinity(v: Value) -> f64 {
+    if v.is_undefined() || v.is_null() {
+        return 0.0;
+    }
+    if let Some(smi) = v.as_smi() {
+        return smi as f64;
+    }
+    if let Some(f) = v.as_float64() {
+        if f.is_nan() {
+            return 0.0;
+        }
+        return f.trunc();
+    }
+    0.0
+}
+
+/// String.prototype.charCodeAt(index) — returns 16-bit UTF-16 code unit at position.
+pub fn string_char_code_at(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let s = string_from_value(this);
+    let pos = args.first().copied().unwrap_or(Value::undefined());
+    let idx = to_integer_or_infinity(pos) as isize;
+    if idx < 0 || idx as usize >= s.len() {
+        return Value::from_float64(f64::NAN);
+    }
+    let byte = s.as_bytes()[idx as usize];
+    Value::smi(byte as i32)
+}
+
+/// String.prototype.codePointAt(index) — returns Unicode code point at position.
+pub fn string_code_point_at(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let s = string_from_value(this);
+    let pos = args.first().copied().unwrap_or(Value::undefined());
+    let idx = to_integer_or_infinity(pos) as isize;
+    if idx < 0 || idx as usize >= s.len() {
+        return Value::undefined();
+    }
+    let byte = s.as_bytes()[idx as usize];
+    Value::smi(byte as i32)
+}
+
+/// String.prototype.substring(start, end) — returns substring with args clamped/sorted.
+pub fn string_substring(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let s = string_from_value(this);
+    let len = s.len() as f64;
+    let raw_start = to_integer_or_infinity(args.first().copied().unwrap_or(Value::undefined()));
+    let raw_end = args.get(1).map(|&v| to_integer_or_infinity(v));
+    let final_start = raw_start.max(0.0).min(len) as usize;
+    let final_end = match raw_end {
+        Some(e) => e.max(0.0).min(len) as usize,
+        None => s.len(),
+    };
+    let (lo, hi) = if final_start <= final_end {
+        (final_start, final_end)
+    } else {
+        (final_end, final_start)
+    };
+    let result = HeapString::allocate(gc, &s[lo..hi]);
+    Value::from_heap_ptr(result as *mut u8)
+}
+
+/// String.prototype.substr(start, length) — legacy, negative start offset.
+pub fn string_substr(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let s = string_from_value(this);
+    let len = s.len();
+    let raw_start = to_integer_or_infinity(args.first().copied().unwrap_or(Value::undefined()));
+    let int_start = if raw_start < 0.0 {
+        (len as f64 + raw_start).max(0.0) as usize
+    } else {
+        (raw_start as usize).min(len)
+    };
+    let int_len = args.get(1).map(|&v| to_integer_or_infinity(v));
+    let end = match int_len {
+        Some(l) => {
+            let clamped = l.max(0.0) as usize;
+            (int_start + clamped).min(len)
+        }
+        None => len,
+    };
+    let result = HeapString::allocate(gc, &s[int_start..end]);
+    Value::from_heap_ptr(result as *mut u8)
+}
+
 /// String.prototype.split(separator, limit) — splits a string into an array of substrings.
 /// Per §22.1.3.17 (simplified: string separator only, no regex).
 pub fn string_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
@@ -1497,6 +1591,22 @@ pub fn default_builtins() -> Vec<Builtin> {
         Builtin {
             name: "String_prototype_endsWith",
             func: string_ends_with,
+        },
+        Builtin {
+            name: "String_prototype_charCodeAt",
+            func: string_char_code_at,
+        },
+        Builtin {
+            name: "String_prototype_codePointAt",
+            func: string_code_point_at,
+        },
+        Builtin {
+            name: "String_prototype_substring",
+            func: string_substring,
+        },
+        Builtin {
+            name: "String_prototype_substr",
+            func: string_substr,
         },
         Builtin {
             name: "Math_floor",

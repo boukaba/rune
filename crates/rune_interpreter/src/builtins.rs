@@ -1307,6 +1307,14 @@ pub fn default_builtins() -> Vec<Builtin> {
             name: "assert_throws",
             func: assert_throws,
         },
+        Builtin {
+            name: "assert",
+            func: assert_plain,
+        },
+        Builtin {
+            name: "assert__isSameValue",
+            func: assert_is_same_value,
+        },
     ]
 }
 
@@ -1345,7 +1353,7 @@ fn value_to_debug(v: Value) -> String {
     }
 }
 
-fn make_error(gc: &mut SemiSpace, msg: &str) -> Value {
+pub(crate) fn make_error(gc: &mut SemiSpace, msg: &str) -> Value {
     let s = HeapString::allocate(gc, msg);
     make_simple_object(gc, "message", Value::from_heap_ptr(s as *mut u8))
 }
@@ -1405,29 +1413,55 @@ pub fn assert_not_same_value(
     Value::undefined()
 }
 
-/// assert.throws(errorConstructor, func, message)
-/// Calls func and checks that it throws an error of the expected type.
-pub fn assert_throws(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+/// assert() — plain assert function that throws Test262Error if condition is falsy.
+pub fn assert_plain(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let cond = args.first().copied().unwrap_or(Value::undefined());
+    if !cond.to_bool() {
+        let msg = args.get(1).map(|v| value_to_debug(*v)).unwrap_or_default();
+        let full_msg = if msg.is_empty() {
+            "assert: expected truthy value".to_string()
+        } else {
+            format!("assert: {msg}")
+        };
+        let err = make_error(gc, &full_msg);
+        _vm.set_pending_exception(err);
+    }
+    Value::undefined()
+}
+
+/// assert._isSameValue(a, b) — internal helper for test262 assert.js.
+pub fn assert_is_same_value(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let a = args.first().copied().unwrap_or(Value::undefined());
+    let b = args.get(1).copied().unwrap_or(Value::undefined());
+    if value_eq_strict(a, b) {
+        Value::boolean(true)
+    } else {
+        Value::boolean(false)
+    }
+}
+
+/// assert.throws(errorConstructor, func, message) — rewritten to use callback state machine.
+pub fn assert_throws(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if args.len() < 2 {
         let err = make_error(
             gc,
             "assert.throws: expected errorConstructor and func arguments",
         );
-        _vm.set_pending_exception(err);
+        vm.set_pending_exception(err);
         return Value::undefined();
     }
-    let _error_ctor = args[0];
-    let _func = args[1];
-    let _msg = args.get(2).map(|v| value_to_debug(*v)).unwrap_or_default();
+    let error_ctor = args[0];
+    let func = args[1];
 
-    // For now, we can't easily call a JS function from a builtin, so we'll
-    // implement a simplified check that expects the pending_exception
-    // mechanism. Full implementation deferred to Sprint 14+.
-    let err = make_error(
-        gc,
-        "assert.throws: not yet fully implemented (see Sprint 14)",
-    );
-    _vm.set_pending_exception(err);
+    // Set up pending assert state for the Return/Throw handlers
+    vm.pending_assert = Some(crate::vm::PendingAssert {
+        expected_error: error_ctor,
+        source_frame_depth: 0, // will be set by push_callback_call
+    });
+
+    // Push the function call — the Return handler will catch the result
+    vm.push_callback_call(gc, func, Value::undefined(), vec![]);
+
     Value::undefined()
 }
 

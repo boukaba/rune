@@ -1,4 +1,4 @@
-use crate::builtins::{Builtin, BuiltinFn, value_to_js_string};
+use crate::builtins::{Builtin, BuiltinFn, make_error, value_to_js_string};
 use crate::generator::Generator;
 use crate::ic::{IcEntry, IcStats, InlineCache, LoopTrace, TraceOp};
 use rune_bytecode::opcode::{BytecodeProgram, Instruction, Opcode};
@@ -155,6 +155,15 @@ impl Default for CallIcEntry {
     }
 }
 
+/// State for a pending assert.throws callback invocation.
+/// Set by the assert_throws builtin, consumed by the Return/Throw handlers.
+pub(crate) struct PendingAssert {
+    /// The expected error constructor (e.g. TypeError handle).
+    pub(crate) expected_error: Value,
+    /// Number of frames on the stack when the assert was initiated.
+    pub(crate) source_frame_depth: usize,
+}
+
 /// Type of pending array operation (filter/map/reduce).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum ArrayOpKind {
@@ -274,6 +283,8 @@ pub struct Vm {
     /// Pending array operation (filter/map/reduce) with callback state machine.
     /// Set by the builtin, consumed/updated by the Return handler.
     pub(crate) pending_array_op: Option<ArrayOpState>,
+    /// Pending assert.throws callback.
+    pub(crate) pending_assert: Option<PendingAssert>,
 }
 
 impl Default for Vm {
@@ -331,6 +342,7 @@ impl Vm {
             object_prototype: Value::undefined(),
             pending_exception: None,
             pending_array_op: None,
+            pending_assert: None,
         }
     }
 
@@ -593,6 +605,10 @@ impl Vm {
                 gc.push_root(acc as *const Value as *mut u64);
             }
         }
+        // Root pending assert.throws expected error value
+        if let Some(ref pa) = self.pending_assert {
+            gc.push_root(&pa.expected_error as *const Value as *mut u64);
+        }
     }
 
     /// Push a frame for a JS function call (used by array method callbacks).
@@ -638,6 +654,10 @@ impl Vm {
         });
         // Update source_frame_depth if pending array op is active
         if let Some(ref mut state) = self.pending_array_op {
+            state.source_frame_depth = self.frames.len() - 1;
+        }
+        // Update source_frame_depth if pending assert is active
+        if let Some(ref mut state) = self.pending_assert {
             state.source_frame_depth = self.frames.len() - 1;
         }
     }
@@ -2428,6 +2448,22 @@ impl Vm {
                     let callee_base = self.frames.last().unwrap().stack_base;
                     let popped_frame = self.frames.len() - 1;
                     self.last_locals = self.frames[popped_frame].locals.clone();
+                    // Check for pending assert.throws before popping frame
+                    let assert_depth = self.pending_assert.as_ref().map(|pa| pa.source_frame_depth);
+                    if let Some(source_depth) = assert_depth {
+                        if self.frames.len() - 1 == source_depth {
+                            // The callback threw — assert.throws passes for any exception type
+                            self.pending_assert.take();
+                            self.frames.pop();
+                            self.try_stack.retain(|tf| tf.frame_depth != popped_frame);
+                            // Push undefined as the result and continue in the caller frame
+                            self.stack.truncate(callee_base);
+                            self.push(Value::undefined());
+                            let new_fi = self.frames.len() - 1;
+                            self.frames[new_fi].pc += 1;
+                            continue;
+                        }
+                    }
                     self.frames.pop();
                     self.try_stack.retain(|tf| tf.frame_depth != popped_frame);
                     if self.frames.is_empty() {
@@ -2959,8 +2995,8 @@ impl Vm {
                                     self.push(exc);
                                     return Exit::Throw(exc);
                                 }
-                                if self.pending_array_op.is_some() {
-                                    // Array method builtin set up async callback iteration.
+                                if self.pending_array_op.is_some() || self.pending_assert.is_some() {
+                                    // Array method builtin or assert.throws set up a callback.
                                     // Don't push result or advance pc — the callback frame
                                     // is already on the stack. The Return handler will
                                     // continue the state machine.
@@ -3398,6 +3434,7 @@ impl Vm {
                         if self.frames.len() == op.source_frame_depth {
                             // This was the callback frame returning. Process result.
                             match op.kind {
+                                // ... existing array callback handling ...
                                 ArrayOpKind::Filter => {
                                     if result.to_bool() {
                                         let src_val = unsafe {
@@ -3519,6 +3556,25 @@ impl Vm {
                             }
                         } else {
                             self.pending_array_op = Some(op);
+                        }
+                    }
+                    // Check if this return completes a pending assert.throws callback.
+                    if let Some(pa) = self.pending_assert.take() {
+                        if self.frames.len() == pa.source_frame_depth {
+                            // Function returned without throwing — assert.throws failed.
+                            let msg = if let Some(ptr) = pa.expected_error.heap_ptr() {
+                                format!("Expected {} to throw an exception", unsafe {
+                                    rune_core::string::HeapString::to_string(
+                                        ptr as *mut rune_core::string::HeapString
+                                    )
+                                })
+                            } else {
+                                "Expected an exception but none was thrown".to_string()
+                            };
+                            let err = make_error(gc, &msg);
+                            self.stack.truncate(callee_base);
+                            self.push(err);
+                            return Exit::Throw(err);
                         }
                     }
                     if self.frames.is_empty() {

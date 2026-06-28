@@ -4974,3 +4974,58 @@ fn test_string_split_consecutive_delimiters() {
     assert_eq!(eval_str(&mut ctx, r#" "a,,b".split(",")[1] "#), "");
     assert_eq!(eval_str(&mut ctx, r#" "a,,b".split(",")[2] "#), "b");
 }
+
+fn eval_num(ctx: &mut Context, code: &str) -> f64 {
+    let r = ctx.eval(code).unwrap();
+    r.as_smi().map(|n| n as f64)
+        .or_else(|| r.as_float64())
+        .unwrap_or(f64::NAN)
+}
+
+#[test]
+fn test_parse_int_basic() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_num(&mut ctx, "parseInt('42')"), 42.0);
+    assert_eq!(eval_num(&mut ctx, "parseInt('  -42')"), -42.0);
+    assert_eq!(eval_num(&mut ctx, "parseInt('  42  ')"), 42.0);
+    assert!(eval_num(&mut ctx, "parseInt('hello')").is_nan());
+    assert!(eval_num(&mut ctx, "parseInt('')").is_nan());
+}
+
+#[test]
+fn test_parse_int_hex() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_num(&mut ctx, "parseInt('0xFF')"), 255.0);
+    assert_eq!(eval_num(&mut ctx, "parseInt('0xff')"), 255.0);
+    assert_eq!(eval_num(&mut ctx, "parseInt('0x1A')"), 26.0);
+    assert_eq!(eval_num(&mut ctx, "parseInt('0x1a')"), 26.0);
+}
+
+#[test]
+fn test_parse_int_radix() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_num(&mut ctx, "parseInt('101', 2)"), 5.0);
+    assert_eq!(eval_num(&mut ctx, "parseInt('101', 10)"), 101.0);
+    assert_eq!(eval_num(&mut ctx, "parseInt('z', 36)"), 35.0);
+}
+
+#[test]
+fn test_parse_float_basic() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_num(&mut ctx, "parseFloat('3.14')"), 3.14);
+    assert_eq!(eval_num(&mut ctx, "parseFloat('  -3.14')"), -3.14);
+    assert_eq!(eval_num(&mut ctx, "parseFloat('  +42.5')"), 42.5);
+    assert!(eval_num(&mut ctx, "parseFloat('hello')").is_nan());
+    assert!(eval_num(&mut ctx, "parseFloat('')").is_nan());
+}
+
+#[test]
+fn test_parse_float_edge_cases() {
+    let mut ctx = Context::new_small();
+    assert!(eval_num(&mut ctx, "parseFloat('Infinity')").is_infinite());
+    assert!(eval_num(&mut ctx, "parseFloat('NaN')").is_nan());
+    assert_eq!(eval_num(&mut ctx, "parseFloat('12.5abc')"), 12.5);
+    assert_eq!(eval_num(&mut ctx, "parseFloat('0.5e2')"), 50.0);
+    assert_eq!(eval_num(&mut ctx, "parseFloat('1.5e-2')"), 0.015);
+    assert_eq!(eval_num(&mut ctx, "parseFloat('.5')"), 0.5);
+}

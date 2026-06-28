@@ -2338,7 +2338,7 @@ var result = data.items
 
 ### Test Results
 
-- **374 tests passing** (317 existing + 27 stdlib + 5 forEach + 7 slice + 15 JSON.stringify + 3 E2E verification)
+- **382 tests passing** (374 + 8 split)
 - All crate tests: pass
 - Clippy: clean
 - test262: filter 11/242, map 11/216, reduce 91/260 (inflated by harness — `Ok(Ok(_))` counts non-crash as pass; real spec compliance is lower but not blocking)
@@ -2360,5 +2360,5 @@ The test262 runner at `rune_cli/src/test262.rs` uses `Outcome::Pass = Ok(Ok(_))`
 
 1. ✅ `JSON.stringify` — done at `5723731` — JSON round-trip complete.
 2. ✅ Boolean `+` coercion — fixed at `8eee60c` — `true + ""` → `"true"`.
-3. `String.prototype.split` (string separator) — enables CSV parsing.
+3. ✅ `String.prototype.split` — done at `99915c5` — string separator, limit, empty sep, no-sep edge cases.
 4. `parseInt`/`parseFloat` — string→number conversion for real workloads.

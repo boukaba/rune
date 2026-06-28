@@ -432,6 +432,148 @@ pub fn math_sqrt(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm
     math_op_unary(args, f64::sqrt)
 }
 
+/// parseInt(string, radix) — parses a string argument and returns an integer.
+/// Per §21.1.2.9.
+pub fn parse_int_builtin(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let s = match args.first() {
+        Some(v) => value_to_js_string(*v).trim().to_string(),
+        None => return Value::from_float64(f64::NAN),
+    };
+    if s.is_empty() {
+        return Value::from_float64(f64::NAN);
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    let mut sign = 1.0;
+    if chars[i] == '-' { sign = -1.0; i += 1; }
+    else if chars[i] == '+' { i += 1; }
+    if i >= chars.len() {
+        return Value::from_float64(f64::NAN);
+    }
+    // Determine radix
+    let radix = if args.len() > 1 {
+        let r = args[1];
+        if r.is_undefined() { 0 } else {
+            r.as_smi()
+                .or_else(|| r.as_float64().map(|f| f as i32))
+                .unwrap_or(0)
+        }
+    } else { 0 };
+    let radix = if radix == 0 {
+        if i + 2 <= chars.len() && chars[i] == '0' && (chars[i+1] == 'x' || chars[i+1] == 'X') {
+            16
+        } else {
+            10
+        }
+    } else { radix };
+    if !(2..=36).contains(&radix) {
+        return Value::from_float64(f64::NAN);
+    }
+    if radix == 16 && i + 2 <= chars.len() && chars[i] == '0' && (chars[i+1] == 'x' || chars[i+1] == 'X') {
+        i += 2;
+    }
+    let mut result = 0.0;
+    let mut any_digit = false;
+    while i < chars.len() {
+        let d = match chars[i] {
+            '0'..='9' => chars[i] as i32 - '0' as i32,
+            'a'..='z' => chars[i] as i32 - 'a' as i32 + 10,
+            'A'..='Z' => chars[i] as i32 - 'A' as i32 + 10,
+            _ => break,
+        };
+        if d >= radix { break; }
+        result = result * (radix as f64) + d as f64;
+        any_digit = true;
+        i += 1;
+    }
+    if !any_digit {
+        return Value::from_float64(f64::NAN);
+    }
+    let result = sign * result;
+    if result.fract() == 0.0 && result.is_finite() {
+        let i = result as i32;
+        if i as f64 == result {
+            return Value::smi(i);
+        }
+    }
+    Value::from_float64(result)
+}
+
+/// parseFloat(string) — parses a string argument and returns a floating point number.
+/// Per §21.1.2.10.
+pub fn parse_float_builtin(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let s = match args.first() {
+        Some(v) => value_to_js_string(*v).trim().to_string(),
+        None => return Value::from_float64(f64::NAN),
+    };
+    if s.is_empty() {
+        return Value::from_float64(f64::NAN);
+    }
+    // Parse the longest prefix that is a valid StrDecimalLiteral
+    // We use Rust's f64::parse which handles Infinity, NaN, and regular floats
+    // But we need to match JS semantics: leading whitespace already trimmed,
+    // accept optional sign, then parse number.
+    let chars: Vec<char> = s.chars().collect();
+    let mut end = 0;
+    let mut has_dot = false;
+    let mut has_digit = false;
+    let mut has_exp = false;
+    // Skip sign
+    if end < chars.len() && (chars[end] == '-' || chars[end] == '+') {
+        end += 1;
+    }
+    // Check for Infinity
+    if s[end..].starts_with("Infinity") || s[end..].starts_with("infinity") {
+        let prefix = &s[end..end+8];
+        if prefix == "Infinity" {
+            return Value::from_float64(f64::INFINITY);
+        }
+    }
+    // Check for NaN (case-insensitive)
+    if end + 3 <= chars.len() {
+        let na: String = chars[end..end+3].iter().collect();
+        if na.eq_ignore_ascii_case("nan") {
+            return Value::from_float64(f64::NAN);
+        }
+    }
+    // Parse number
+    while end < chars.len() {
+        let c = chars[end];
+        if c.is_ascii_digit() {
+            has_digit = true;
+            end += 1;
+        } else if c == '.' && !has_dot && !has_exp {
+            has_dot = true;
+            end += 1;
+        } else if (c == 'e' || c == 'E') && has_digit && !has_exp {
+            has_exp = true;
+            end += 1;
+            // Optional sign after exponent
+            if end < chars.len() && (chars[end] == '-' || chars[end] == '+') {
+                end += 1;
+            }
+        } else {
+            break;
+        }
+    }
+    if !has_digit {
+        return Value::from_float64(f64::NAN);
+    }
+    let sub: String = chars[..end].iter().collect();
+    match sub.parse::<f64>() {
+        Ok(n) => {
+            if n.fract() == 0.0 && n.is_finite() {
+                let i = n as i32;
+                if i as f64 == n {
+                    return Value::smi(i);
+                }
+            }
+            Value::from_float64(n)
+        }
+        Err(_) => Value::from_float64(f64::NAN),
+    }
+}
+
 /// JSON.parse(text) — parse a JSON string into Rune values.
 pub fn json_parse(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let text = args.first().copied().unwrap_or(Value::undefined());
@@ -1112,6 +1254,15 @@ pub fn default_builtins() -> Vec<Builtin> {
         Builtin {
             name: "Math_sqrt",
             func: math_sqrt,
+        },
+        // Global functions
+        Builtin {
+            name: "parseInt",
+            func: parse_int_builtin,
+        },
+        Builtin {
+            name: "parseFloat",
+            func: parse_float_builtin,
         },
         // JSON
         Builtin {

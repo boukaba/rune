@@ -4659,3 +4659,82 @@ fn e2e_gc_stress_reduce() {
     let val = r.as_float64().expect("GC stress test should produce float64");
     assert!((val - expected).abs() < 1.0, "reduce sum mismatch: got {} expected {}", val, expected);
 }
+
+// ---- Stdlib: Array.prototype.slice ----
+
+#[test]
+fn test_array_slice_basic() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        var a = [1, 2, 3, 4, 5];
+        var b = a.slice(1, 3);
+        b[0] + b[1]
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(2 + 3));
+}
+
+#[test]
+fn test_array_slice_no_end() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        var a = [1, 2, 3, 4, 5];
+        var b = a.slice(2);
+        b[0] + b[1] + b[2]
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(3 + 4 + 5));
+}
+
+#[test]
+fn test_array_slice_full() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        var a = [1, 2, 3];
+        var b = a.slice();
+        b[0] + b[1] + b[2]
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(1 + 2 + 3));
+}
+
+#[test]
+fn test_array_slice_negative_start() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        var a = [10, 20, 30, 40];
+        var b = a.slice(-2);
+        b[0] + b[1]
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(30 + 40));
+}
+
+#[test]
+fn test_array_slice_negative_end() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        var a = [10, 20, 30, 40];
+        var b = a.slice(1, -1);
+        b[0] + b[1]
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(20 + 30));
+}
+
+#[test]
+fn test_array_slice_empty() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        var a = [1, 2, 3];
+        var b = a.slice(5);
+        b.length
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(0));
+}
+
+#[test]
+fn test_array_slice_no_mutate_original() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        var a = [1, 2, 3];
+        var b = a.slice(1, 2);
+        a.length
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(3));
+}

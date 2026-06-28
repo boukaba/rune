@@ -620,6 +620,63 @@ pub fn json_parse(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm)
     parse_value(gc, &chars, &mut pos, array_proto, object_proto).unwrap_or(Value::undefined())
 }
 
+/// Array.prototype.slice(start, end) — returns a new dense array with elements from [start, end).
+pub fn array_slice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let arr_ptr = match this.heap_ptr() {
+        Some(ptr) => {
+            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+            if tag == TAG_ARRAY { ptr } else { return Value::undefined(); }
+        }
+        None => return Value::undefined(),
+    };
+    let length = unsafe { RuneArray::length(arr_ptr as *mut RuneArray) };
+    let relative_start = args.first().and_then(|v| v.as_smi()).unwrap_or(0) as i64;
+    let k = if relative_start < 0 {
+        (length as i64 + relative_start).max(0) as u32
+    } else {
+        (relative_start as u32).min(length)
+    };
+    let final_idx = if args.len() > 1 {
+        if let Some(relative_end) = args.get(1).and_then(|v| v.as_smi()) {
+            let re = relative_end as i64;
+            if re < 0 {
+                ((length as i64 + re).max(0) as u32).min(length)
+            } else {
+                (re as u32).min(length)
+            }
+        } else {
+            length
+        }
+    } else {
+        length
+    };
+    let count = final_idx.saturating_sub(k) as usize;
+    let result_arr = RuneArray::allocate(gc, &[]);
+    unsafe {
+        let ptr = result_arr as *mut u8;
+        *(ptr.add(8) as *mut *const rune_core::shape::Shape) = *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
+        if let Some(proto) = vm.array_prototype.heap_ptr() {
+            *(ptr.add(24) as *mut *mut u8) = proto;
+        }
+    }
+    let mut result_ptr = result_arr as *mut u8;
+    for i in 0..count {
+        unsafe {
+            let resolved_src = if (*(arr_ptr as *const GcHeader)).is_forwarded() {
+                (*(arr_ptr as *const GcHeader)).forwarding_addr()
+            } else {
+                arr_ptr
+            };
+            let element = RuneArray::get_element(resolved_src as *mut RuneArray, (k as usize) + i);
+            let new_ptr = RuneArray::push(gc, result_ptr as *mut RuneArray, element);
+            if new_ptr as *mut u8 != result_ptr {
+                result_ptr = new_ptr as *mut u8;
+            }
+        }
+    }
+    Value::from_heap_ptr(result_ptr)
+}
+
 /// Array.prototype.forEach(callback, thisArg) — same state machine, no result array.
 pub fn array_for_each(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let arr_ptr = match this.heap_ptr() {
@@ -890,6 +947,10 @@ pub fn default_builtins() -> Vec<Builtin> {
         Builtin {
             name: "Array_prototype_forEach",
             func: array_for_each,
+        },
+        Builtin {
+            name: "Array_prototype_slice",
+            func: array_slice,
         },
         // Test262 assert builtins
         Builtin {

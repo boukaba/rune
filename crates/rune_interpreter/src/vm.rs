@@ -369,12 +369,14 @@ impl Vm {
         let map_handle = find_handle(&self.builtins, "Array_prototype_map");
         let reduce_handle = find_handle(&self.builtins, "Array_prototype_reduce");
         let for_each_handle = find_handle(&self.builtins, "Array_prototype_forEach");
+        let slice_handle = find_handle(&self.builtins, "Array_prototype_slice");
         if let (Some(push), Some(pop)) = (push_handle, pop_handle) {
             let mut proto_entries: Vec<(&str, Value)> = vec![("push", push), ("pop", pop)];
             if let Some(f) = filter_handle { proto_entries.push(("filter", f)); }
             if let Some(m) = map_handle { proto_entries.push(("map", m)); }
             if let Some(r) = reduce_handle { proto_entries.push(("reduce", r)); }
             if let Some(fe) = for_each_handle { proto_entries.push(("forEach", fe)); }
+            if let Some(s) = slice_handle { proto_entries.push(("slice", s)); }
             let arr_proto = make_object(gc, &proto_entries);
             self.builtin_wrappers
                 .insert("Array.prototype".to_string(), arr_proto);

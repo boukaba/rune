@@ -417,14 +417,33 @@ impl Vm {
             self.array_prototype = arr_proto;
         }
 
-        // String.prototype with charAt/slice/split methods
+        // String.prototype methods
         let char_at_handle = find_handle(&self.builtins, "String_prototype_charAt");
         let slice_handle = find_handle(&self.builtins, "String_prototype_slice");
         let split_handle = find_handle(&self.builtins, "String_prototype_split");
+        let index_of_handle = find_handle(&self.builtins, "String_prototype_indexOf");
+        let includes_handle = find_handle(&self.builtins, "String_prototype_includes");
+        let starts_with_handle = find_handle(&self.builtins, "String_prototype_startsWith");
+        let ends_with_handle = find_handle(&self.builtins, "String_prototype_endsWith");
         if let (Some(char_at), Some(slice)) = (char_at_handle, slice_handle) {
-            let mut str_proto_entries: Vec<(&str, Value)> = vec![("charAt", char_at), ("slice", slice)];
+            let mut str_proto_entries: Vec<(&str, Value)> = vec![
+                ("charAt", char_at),
+                ("slice", slice),
+            ];
             if let Some(split) = split_handle {
                 str_proto_entries.push(("split", split));
+            }
+            if let Some(idx) = index_of_handle {
+                str_proto_entries.push(("indexOf", idx));
+            }
+            if let Some(incl) = includes_handle {
+                str_proto_entries.push(("includes", incl));
+            }
+            if let Some(sw) = starts_with_handle {
+                str_proto_entries.push(("startsWith", sw));
+            }
+            if let Some(ew) = ends_with_handle {
+                str_proto_entries.push(("endsWith", ew));
             }
             let str_proto = make_object(gc, &str_proto_entries);
             self.builtin_wrappers

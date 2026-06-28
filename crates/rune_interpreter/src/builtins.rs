@@ -337,9 +337,22 @@ fn string_from_value(this: Value) -> String {
     value_to_js_string(this)
 }
 
+/// RequireObjectCoercible(this) — throws TypeError if this is null or undefined.
+fn require_object_coercible(this: Value, vm: &mut Vm, gc: &mut SemiSpace) -> bool {
+    if this.is_null() || this.is_undefined() {
+        let err = make_error(gc, "TypeError: Cannot convert undefined or null to object");
+        vm.set_pending_exception(err);
+        return false;
+    }
+    true
+}
+
 /// String.prototype.charAt(index) — returns the character at index as a string.
 /// Per §22.1.3.1, OOB returns empty string, not undefined.
-pub fn string_char_at(gc: &mut SemiSpace, this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+pub fn string_char_at(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
     let index = args.first().and_then(|v| v.as_smi()).unwrap_or(0) as usize;
     let s = string_from_value(this);
     if index >= s.chars().count() {
@@ -354,7 +367,10 @@ pub fn string_char_at(gc: &mut SemiSpace, this: Value, args: &[Value], _vm: &mut
 /// String.prototype.slice(start, end) — returns a substring.
 /// Per ECMAScript §22.1.3.23 (String.prototype.slice).
 /// Uses byte-level slicing to match the spec (characters are 1 byte in Rune's use case).
-pub fn string_slice(gc: &mut SemiSpace, this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+pub fn string_slice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
     fn to_number(v: Value) -> f64 {
         v.as_smi().map(|n| n as f64)
             .or_else(|| v.as_float64())
@@ -387,6 +403,108 @@ pub fn string_slice(gc: &mut SemiSpace, this: Value, args: &[Value], _vm: &mut V
     Value::from_heap_ptr(result as *mut u8)
 }
 
+/// String.prototype.indexOf(searchString, position) — returns the index of the first occurrence.
+pub fn string_index_of(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let s = string_from_value(this);
+    let search_str = args.first().map(|&v| value_to_js_string(v)).unwrap_or_default();
+    let pos = args.get(1).copied().unwrap_or(Value::undefined());
+    let start = if pos.is_undefined() {
+        0
+    } else if let Some(smi) = pos.as_smi() {
+        if smi < 0 { 0 } else { smi as usize }
+    } else if let Some(f) = pos.as_float64() {
+        let clamped = if f.is_nan() { 0.0 } else if f < 0.0 { 0.0 } else { f };
+        (clamped as usize).min(s.len())
+    } else {
+        0
+    };
+    let start = start.min(s.len());
+    if search_str.is_empty() {
+        return Value::smi(start as i32);
+    }
+    if start + search_str.len() > s.len() {
+        return Value::smi(-1);
+    }
+    if let Some(idx) = s[start..].find(&search_str) {
+        Value::smi((start + idx) as i32)
+    } else {
+        Value::smi(-1)
+    }
+}
+
+/// String.prototype.includes(searchString, position) — returns true if searchString is found.
+pub fn string_includes(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let s = string_from_value(this);
+    let search_str = args.first().map(|&v| value_to_js_string(v)).unwrap_or_default();
+    let pos = args.get(1).copied().unwrap_or(Value::undefined());
+    let start = if pos.is_undefined() {
+        0
+    } else if let Some(smi) = pos.as_smi() {
+        if smi < 0 { 0 } else { smi as usize }
+    } else if let Some(f) = pos.as_float64() {
+        let clamped = if f.is_nan() { 0.0 } else if f < 0.0 { 0.0 } else { f };
+        (clamped as usize).min(s.len())
+    } else {
+        0
+    };
+    let start = start.min(s.len());
+    if search_str.is_empty() {
+        return Value::boolean(true);
+    }
+    if start + search_str.len() > s.len() {
+        return Value::boolean(false);
+    }
+    Value::boolean(s[start..].find(&search_str).is_some())
+}
+
+/// String.prototype.startsWith(searchString, position) — checks if string starts with searchString.
+pub fn string_starts_with(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let s = string_from_value(this);
+    let search_str = args.first().map(|&v| value_to_js_string(v)).unwrap_or_default();
+    let pos = args.get(1).copied().unwrap_or(Value::undefined());
+    let start = if pos.is_undefined() {
+        0
+    } else if let Some(smi) = pos.as_smi() {
+        if smi < 0 { 0 } else { smi as usize }
+    } else if let Some(f) = pos.as_float64() {
+        let clamped = if f.is_nan() { 0.0 } else if f < 0.0 { 0.0 } else { f };
+        (clamped as usize).min(s.len())
+    } else {
+        0
+    };
+    Value::boolean(s[start..].starts_with(&search_str))
+}
+
+/// String.prototype.endsWith(searchString, endPosition) — checks if string ends with searchString.
+pub fn string_ends_with(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let s = string_from_value(this);
+    let search_str = args.first().map(|&v| value_to_js_string(v)).unwrap_or_default();
+    let end_pos = args.get(1).copied().unwrap_or(Value::undefined());
+    let end = if end_pos.is_undefined() {
+        s.len()
+    } else if let Some(smi) = end_pos.as_smi() {
+        if smi < 0 { 0 } else { smi as usize }
+    } else if let Some(f) = end_pos.as_float64() {
+        let clamped = if f.is_nan() { 0.0 } else if f < 0.0 { 0.0 } else { f };
+        (clamped as usize).min(s.len())
+    } else {
+        s.len()
+    };
+    Value::boolean(s[..end].ends_with(&search_str))
+}
+
 /// String.prototype.split(separator, limit) — splits a string into an array of substrings.
 /// Per §22.1.3.17 (simplified: string separator only, no regex).
 pub fn string_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
@@ -398,6 +516,9 @@ pub fn string_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
         } else {
             0
         }
+    }
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
     }
     let s = string_from_value(this);
     let limit = args.get(1).copied().unwrap_or(Value::undefined());
@@ -1360,6 +1481,22 @@ pub fn default_builtins() -> Vec<Builtin> {
         Builtin {
             name: "String_prototype_split",
             func: string_split,
+        },
+        Builtin {
+            name: "String_prototype_indexOf",
+            func: string_index_of,
+        },
+        Builtin {
+            name: "String_prototype_includes",
+            func: string_includes,
+        },
+        Builtin {
+            name: "String_prototype_startsWith",
+            func: string_starts_with,
+        },
+        Builtin {
+            name: "String_prototype_endsWith",
+            func: string_ends_with,
         },
         Builtin {
             name: "Math_floor",

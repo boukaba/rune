@@ -276,7 +276,15 @@ fn run_test(test: &TestCase) -> Outcome {
         // Normal test
         let mut ctx = rune_embed::Context::new();
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctx.eval(&source))) {
-            Ok(Ok(_)) => Outcome::Pass,
+            Ok(Ok(_)) => {
+                if ctx.vm().assert_called {
+                    Outcome::Pass
+                } else {
+                    Outcome::Fail {
+                        message: "test completed without calling any assert.* function".to_string(),
+                    }
+                }
+            }
             Ok(Err(e)) => Outcome::Fail {
                 message: format!("runtime error: {e}"),
             },

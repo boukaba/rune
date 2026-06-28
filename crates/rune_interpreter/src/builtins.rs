@@ -892,8 +892,8 @@ pub fn json_stringify(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
             }
             if tag == TAG_ARRAY {
                 if stack.contains(&ptr) {
-                    let msg = HeapString::allocate(gc, "TypeError: Converting circular structure to JSON");
-                    vm.set_pending_exception(Value::from_heap_ptr(msg as *mut u8));
+                    let err = make_error(gc, "TypeError: Converting circular structure to JSON");
+                    vm.set_pending_exception(err);
                     return Err(());
                 }
                 stack.push(ptr);
@@ -1390,8 +1390,34 @@ pub(crate) fn make_error(gc: &mut SemiSpace, msg: &str) -> Value {
     make_simple_object(gc, "message", Value::from_heap_ptr(s as *mut u8))
 }
 
+/// Extract a human-readable error message from an exception Value.
+/// Returns `None` if the value is not an object with a "message" string property.
+pub fn read_error_message(val: Value) -> Option<String> {
+    let ptr = val.heap_ptr()?;
+    unsafe {
+        let tag = (*(ptr as *const GcHeader)).tag();
+        if tag == TAG_STRING {
+            return Some(HeapString::to_string(ptr as *mut HeapString));
+        }
+        if tag != TAG_OBJECT {
+            return None;
+        }
+        let shape = JSObject::shape_ptr(ptr as *mut JSObject);
+        let key = PropertyKey::from_string("message");
+        let slot = shape.lookup(&key)?;
+        let msg_val = JSObject::get_slot(ptr as *mut JSObject, slot);
+        let msg_ptr = msg_val.heap_ptr()?;
+        let tag2 = (*(msg_ptr as *const GcHeader)).tag();
+        if tag2 != TAG_STRING {
+            return None;
+        }
+        Some(HeapString::to_string(msg_ptr as *mut HeapString))
+    }
+}
+
 /// assert.sameValue(actual, expected, description) — uses SameValue semantics.
 pub fn assert_same_value(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    _vm.assert_called = true;
     let actual = args.first().copied().unwrap_or(Value::undefined());
     let expected = args.get(1).copied().unwrap_or(Value::undefined());
     let desc = args.get(2).map(|v| value_to_debug(*v)).unwrap_or_default();
@@ -1423,6 +1449,7 @@ pub fn assert_not_same_value(
     args: &[Value],
     _vm: &mut Vm,
 ) -> Value {
+    _vm.assert_called = true;
     let actual = args.first().copied().unwrap_or(Value::undefined());
     let expected = args.get(1).copied().unwrap_or(Value::undefined());
     let desc = args.get(2).map(|v| value_to_debug(*v)).unwrap_or_default();
@@ -1447,6 +1474,7 @@ pub fn assert_not_same_value(
 
 /// assert() — plain assert function that throws Test262Error if condition is falsy.
 pub fn assert_plain(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    _vm.assert_called = true;
     let cond = args.first().copied().unwrap_or(Value::undefined());
     if !cond.to_bool() {
         let msg = args.get(1).map(|v| value_to_debug(*v)).unwrap_or_default();
@@ -1462,7 +1490,8 @@ pub fn assert_plain(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut 
 }
 
 /// assert._isSameValue(a, b) — internal helper for test262 assert.js.
-pub fn assert_is_same_value(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+pub fn assert_is_same_value(_gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    vm.assert_called = true;
     let a = args.first().copied().unwrap_or(Value::undefined());
     let b = args.get(1).copied().unwrap_or(Value::undefined());
     if same_value(a, b) {
@@ -1474,6 +1503,7 @@ pub fn assert_is_same_value(_gc: &mut SemiSpace, _this: Value, args: &[Value], _
 
 /// assert.throws(errorConstructor, func, message) — rewritten to use callback state machine.
 pub fn assert_throws(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    vm.assert_called = true;
     if args.len() < 2 {
         let err = make_error(
             gc,

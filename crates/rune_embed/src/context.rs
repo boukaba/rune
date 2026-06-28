@@ -95,7 +95,11 @@ impl Context {
 
         self.vm
             .execute(&mut self.gc, prog_ref)
-            .map_err(|v| format!("Uncaught: {v:?}"))
+            .map_err(|v| {
+                let msg = rune_interpreter::builtins::read_error_message(v)
+                    .unwrap_or_else(|| format!("Uncaught: {v:?}"));
+                format!("Uncaught: {msg}")
+            })
     }
 
     /// Execute a bytecode program and keep it alive in this context.
@@ -105,7 +109,11 @@ impl Context {
         let prog_ref: &BytecodeProgram = &self.programs.last().unwrap().as_ref();
         self.vm
             .execute(&mut self.gc, prog_ref)
-            .map_err(|v| format!("Uncaught: {v:?}"))
+            .map_err(|v| {
+                let msg = rune_interpreter::builtins::read_error_message(v)
+                    .unwrap_or_else(|| format!("Uncaught: {v:?}"));
+                format!("Uncaught: {msg}")
+            })
     }
 
     /// Evaluate raw bytecode instructions and return the top-of-stack Value.

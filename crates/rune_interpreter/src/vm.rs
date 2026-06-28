@@ -285,6 +285,10 @@ pub struct Vm {
     pub(crate) pending_array_op: Option<ArrayOpState>,
     /// Pending assert.throws callback.
     pub(crate) pending_assert: Option<PendingAssert>,
+    /// Whether an assert.* function was called during the current execution.
+    /// Reset to false at the start of execute(). Used by the test262 runner
+    /// to distinguish "test passed" from "test ran without asserting anything."
+    pub assert_called: bool,
 }
 
 impl Default for Vm {
@@ -343,6 +347,7 @@ impl Vm {
             pending_exception: None,
             pending_array_op: None,
             pending_assert: None,
+            assert_called: false,
         }
     }
 
@@ -782,6 +787,7 @@ impl Vm {
         self.frames.clear();
         self.stack.clear();
         self.try_stack.clear();
+        self.assert_called = false;
 
         // Initialize top-level locals from persisted globals
         let locals: Vec<Value> = program

@@ -2075,6 +2075,14 @@ impl Vm {
                             && let Some(key) = value_to_prop_key(raw_key)
                         {
                             unsafe { JSObject::remove_property(ptr as *mut JSObject, &key) };
+                        } else if tag == TAG_ARRAY
+                            && let Some(index) = value_to_array_index(raw_key)
+                        {
+                            let arr = ptr as *mut RuneArray;
+                            let len = unsafe { RuneArray::length(arr) };
+                            if (index as u32) < len {
+                                unsafe { RuneArray::set_element(arr, index as usize, Value::undefined()) };
+                            }
                         }
                         Value::boolean(true)
                     } else {
@@ -3552,59 +3560,90 @@ impl Vm {
                                 }
                                 ArrayOpKind::ForEach => {}
                             }
+                            // Re-read source length each iteration (may have been mutated by callback)
+                            let src_arr = op.source as *mut RuneArray;
+                            let current_len = unsafe { RuneArray::length(src_arr) };
+                            op.length = current_len;
+                            let op_kind = op.kind;
                             op.index += 1;
-                            if op.index >= op.length as usize {
-                                // Done: push result and advance pc.
-                                let final_result = match op.kind {
-                                    ArrayOpKind::Filter | ArrayOpKind::Map => {
-                                        Value::from_heap_ptr(op.result)
-                                    }
-                                    ArrayOpKind::Reduce => {
-                                        op.accumulator.unwrap_or(Value::undefined())
-                                    }
-                                    ArrayOpKind::ForEach => Value::undefined(),
-                                };
-                                let frames_len = self.frames.len();
-                                self.stack.truncate(callee_base);
-                                self.push(final_result);
-                                self.frames[frames_len - 1].pc += 1;
-                                continue;
-                            } else {
-                                // More elements: push next callback call.
-                                let element = unsafe {
-                                    RuneArray::get_element(
-                                        op.source as *mut RuneArray,
-                                        op.index,
-                                    )
-                                };
-                                let cb_this = match op.kind {
-                                    ArrayOpKind::Filter | ArrayOpKind::Map | ArrayOpKind::ForEach => op.this_val,
-                                    ArrayOpKind::Reduce => Value::undefined(),
-                                };
-                                let cb_args = match op.kind {
-                                    ArrayOpKind::Filter | ArrayOpKind::Map | ArrayOpKind::ForEach => {
-                                        vec![
-                                            element,
-                                            Value::smi(op.index as i32),
-                                            Value::from_heap_ptr(op.source),
-                                        ]
-                                    }
-                                    ArrayOpKind::Reduce => {
-                                        let acc = op.accumulator.unwrap_or(Value::undefined());
-                                        vec![
-                                            acc,
-                                            element,
-                                            Value::smi(op.index as i32),
-                                            Value::from_heap_ptr(op.source),
-                                        ]
-                                    }
-                                };
-                                let callback_func = op.callback;
-                                self.stack.truncate(callee_base);
-                                self.pending_array_op = Some(op);
-                                self.push_callback_call(gc, callback_func, cb_this, cb_args);
-                                continue;
+                            // Walk forward to the next existing element (HasProperty check + prototype chain)
+                            let next_index = 'search: {
+                                let mut i = op.index;
+                                while i < current_len as usize {
+                                    let element = unsafe { RuneArray::get_element(src_arr, i) };
+                                    let has_prop = !element.is_undefined()
+                                        || (self.array_prototype.heap_ptr().map_or(false, |proto_ptr| {
+                                            let key = PropertyKey::from_string(&i.to_string());
+                                            let shape = unsafe {
+                                                JSObject::shape_ptr(proto_ptr as *mut JSObject)
+                                            };
+                                            shape.lookup(&key).is_some()
+                                        }));
+                                    if has_prop { break 'search Some(i); }
+                                    i += 1;
+                                }
+                                None::<usize>
+                            };
+                            match next_index {
+                                Some(i) => {
+                                    op.index = i;
+                                    let element = unsafe { RuneArray::get_element(src_arr, i) };
+                                    let resolved_val = if !element.is_undefined() {
+                                        element
+                                    } else if let Some(ptr) = self.array_prototype.heap_ptr() {
+                                        let key = PropertyKey::from_string(&i.to_string());
+                                        let shape = unsafe {
+                                            JSObject::shape_ptr(ptr as *mut JSObject)
+                                        };
+                                        if let Some(slot) = shape.lookup(&key) {
+                                            unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) }
+                                        } else { element }
+                                    } else { element };
+                                    let cb_this = match op_kind {
+                                        ArrayOpKind::Filter | ArrayOpKind::Map | ArrayOpKind::ForEach => op.this_val,
+                                        ArrayOpKind::Reduce => Value::undefined(),
+                                    };
+                                    let cb_args = match op_kind {
+                                        ArrayOpKind::Filter | ArrayOpKind::Map | ArrayOpKind::ForEach => {
+                                            vec![
+                                                resolved_val,
+                                                Value::smi(i as i32),
+                                                Value::from_heap_ptr(op.source),
+                                            ]
+                                        }
+                                        ArrayOpKind::Reduce => {
+                                            let acc = op.accumulator.unwrap_or(Value::undefined());
+                                            vec![
+                                                acc,
+                                                resolved_val,
+                                                Value::smi(i as i32),
+                                                Value::from_heap_ptr(op.source),
+                                            ]
+                                        }
+                                    };
+                                    let callback_func = op.callback;
+                                    self.stack.truncate(callee_base);
+                                    self.pending_array_op = Some(op);
+                                    self.push_callback_call(gc, callback_func, cb_this, cb_args);
+                                    continue;
+                                }
+                                None => {}
                             }
+                            // Done: push result and advance pc.
+                            let final_result = match op_kind {
+                                ArrayOpKind::Filter | ArrayOpKind::Map => {
+                                    Value::from_heap_ptr(op.result)
+                                }
+                                ArrayOpKind::Reduce => {
+                                    op.accumulator.unwrap_or(Value::undefined())
+                                }
+                                ArrayOpKind::ForEach => Value::undefined(),
+                            };
+                            let frames_len = self.frames.len();
+                            self.stack.truncate(callee_base);
+                            self.push(final_result);
+                            self.frames[frames_len - 1].pc += 1;
+                            continue;
                         } else {
                             self.pending_array_op = Some(op);
                         }
@@ -4607,6 +4646,21 @@ fn do_store_property(obj: Value, raw_key: Value, value: Value) {
                 let len = unsafe { RuneArray::length(ptr as *mut RuneArray) };
                 if index < len as usize {
                     unsafe { RuneArray::set_element(ptr as *mut RuneArray, index, value) };
+                }
+            } else if let Some(key_str) = raw_key.heap_ptr()
+                && let Some(k) = (|| { let k = unsafe { HeapString::to_string(key_str as *mut HeapString) }; Some(k) })()
+                && k == "length"
+            {
+                if let Some(n) = value.as_smi() {
+                    let arr = ptr as *mut RuneArray;
+                    let old_len = unsafe { RuneArray::length(arr) };
+                    let new_len = n.max(0) as u32;
+                    if new_len < old_len {
+                        for i in new_len as usize..old_len as usize {
+                            unsafe { RuneArray::set_element(arr, i, Value::undefined()) };
+                        }
+                    }
+                    unsafe { RuneArray::set_length(arr, new_len) };
                 }
             }
         } else if tag == TAG_FUNC

@@ -15,6 +15,8 @@ pub struct Builtin {
 /// Signature for a built-in function: receives GC access, `this` value, args, and VM reference.
 pub type BuiltinFn = fn(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value;
 
+
+
 /// Format a Value into its JS string representation.
 pub fn value_to_js_string(v: Value) -> String {
     if v.is_undefined() {
@@ -971,14 +973,10 @@ fn f64_to_json_string(f: f64) -> String {
 
 /// Array.prototype.slice(start, end) — returns a new dense array with elements from [start, end).
 pub fn array_slice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let arr_ptr = match this.heap_ptr() {
-        Some(ptr) => {
-            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-            if tag == TAG_ARRAY { ptr } else { return Value::undefined(); }
-        }
+    let length = match crate::vm::array_like_length(this) {
+        Some(len) => len,
         None => return Value::undefined(),
     };
-    let length = unsafe { RuneArray::length(arr_ptr as *mut RuneArray) };
     let relative_start = args.first().and_then(|v| v.as_smi()).unwrap_or(0) as i64;
     let k = if relative_start < 0 {
         (length as i64 + relative_start).max(0) as u32
@@ -1010,13 +1008,8 @@ pub fn array_slice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
     }
     let mut result_ptr = result_arr as *mut u8;
     for i in 0..count {
+        let element = crate::vm::array_like_index(this, k + i as u32).unwrap_or(Value::undefined());
         unsafe {
-            let resolved_src = if (*(arr_ptr as *const GcHeader)).is_forwarded() {
-                (*(arr_ptr as *const GcHeader)).forwarding_addr()
-            } else {
-                arr_ptr
-            };
-            let element = RuneArray::get_element(resolved_src as *mut RuneArray, (k as usize) + i);
             let new_ptr = RuneArray::push(gc, result_ptr as *mut RuneArray, element);
             if new_ptr as *mut u8 != result_ptr {
                 result_ptr = new_ptr as *mut u8;
@@ -1028,47 +1021,42 @@ pub fn array_slice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
 
 /// Array.prototype.forEach(callback, thisArg) — same state machine, no result array.
 pub fn array_for_each(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let arr_ptr = match this.heap_ptr() {
-        Some(ptr) => {
-            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-            if tag == TAG_ARRAY { ptr } else { return Value::undefined(); }
-        }
+    let length = match crate::vm::array_like_length(this) {
+        Some(len) => len,
         None => return Value::undefined(),
     };
     let callback = args.first().copied().unwrap_or(Value::undefined());
     let this_arg = args.get(1).copied().unwrap_or(Value::undefined());
-    let length = unsafe { RuneArray::length(arr_ptr as *mut RuneArray) };
+    let source_ptr = this.heap_ptr().unwrap();
     if length == 0 {
         return Value::undefined();
     }
     vm.pending_array_op = Some(crate::vm::ArrayOpState {
         kind: crate::vm::ArrayOpKind::ForEach,
-        source: arr_ptr,
+        source: source_ptr,
         result: std::ptr::null_mut(),
         callback,
         this_val: this_arg,
+        source_val: this,
         index: 0,
         length,
         source_frame_depth: 0,
         accumulator: None,
     });
-    let element = unsafe { RuneArray::get_element(arr_ptr as *mut RuneArray, 0) };
+    let element = crate::vm::array_like_index(this, 0).unwrap_or(Value::undefined());
     vm.push_callback_call(gc, callback, this_arg, vec![element, Value::smi(0), this]);
     Value::undefined()
 }
 
 /// Array.prototype.filter(callback, thisArg) — set up state machine iteration.
 pub fn array_filter(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let arr_ptr = match this.heap_ptr() {
-        Some(ptr) => {
-            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-            if tag == TAG_ARRAY { ptr } else { return Value::undefined(); }
-        }
+    let length = match crate::vm::array_like_length(this) {
+        Some(len) => len,
         None => return Value::undefined(),
     };
     let callback = args.first().copied().unwrap_or(Value::undefined());
     let this_arg = args.get(1).copied().unwrap_or(Value::undefined());
-    let length = unsafe { RuneArray::length(arr_ptr as *mut RuneArray) };
+    let source_ptr = this.heap_ptr().unwrap();
     let result_arr = RuneArray::allocate(gc, &[]);
     unsafe {
         let ptr = result_arr as *mut u8;
@@ -1082,32 +1070,30 @@ pub fn array_filter(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
     }
     vm.pending_array_op = Some(crate::vm::ArrayOpState {
         kind: crate::vm::ArrayOpKind::Filter,
-        source: arr_ptr,
+        source: source_ptr,
         result: result_arr as *mut u8,
         callback,
         this_val: this_arg,
+        source_val: this,
         index: 0,
         length,
         source_frame_depth: 0,
         accumulator: None,
     });
-    let element = unsafe { RuneArray::get_element(arr_ptr as *mut RuneArray, 0) };
+    let element = crate::vm::array_like_index(this, 0).unwrap_or(Value::undefined());
     vm.push_callback_call(gc, callback, this_arg, vec![element, Value::smi(0), this]);
     Value::undefined()
 }
 
 /// Array.prototype.map(callback, thisArg) — set up state machine iteration.
 pub fn array_map(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let arr_ptr = match this.heap_ptr() {
-        Some(ptr) => {
-            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-            if tag == TAG_ARRAY { ptr } else { return Value::undefined(); }
-        }
+    let length = match crate::vm::array_like_length(this) {
+        Some(len) => len,
         None => return Value::undefined(),
     };
     let callback = args.first().copied().unwrap_or(Value::undefined());
     let this_arg = args.get(1).copied().unwrap_or(Value::undefined());
-    let length = unsafe { RuneArray::length(arr_ptr as *mut RuneArray) };
+    let source_ptr = this.heap_ptr().unwrap();
     let result_arr = RuneArray::allocate(gc, &[]);
     unsafe {
         let ptr = result_arr as *mut u8;
@@ -1121,33 +1107,30 @@ pub fn array_map(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -
     }
     vm.pending_array_op = Some(crate::vm::ArrayOpState {
         kind: crate::vm::ArrayOpKind::Map,
-        source: arr_ptr,
+        source: source_ptr,
         result: result_arr as *mut u8,
         callback,
         this_val: this_arg,
+        source_val: this,
         index: 0,
         length,
         source_frame_depth: 0,
         accumulator: None,
     });
-    let element = unsafe { RuneArray::get_element(arr_ptr as *mut RuneArray, 0) };
+    let element = crate::vm::array_like_index(this, 0).unwrap_or(Value::undefined());
     vm.push_callback_call(gc, callback, this_arg, vec![element, Value::smi(0), this]);
     Value::undefined()
 }
 
 /// Array.prototype.reduce(callback, initialValue) — set up state machine iteration.
 pub fn array_reduce(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let arr_ptr = match this.heap_ptr() {
-        Some(ptr) => {
-            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-            if tag == TAG_ARRAY { ptr } else { return Value::undefined(); }
-        }
+    let length = match crate::vm::array_like_length(this) {
+        Some(len) => len,
         None => return Value::undefined(),
     };
     let callback = args.first().copied().unwrap_or(Value::undefined());
     let has_initial = args.len() > 1;
     let initial = args.get(1).copied().unwrap_or(Value::undefined());
-    let length = unsafe { RuneArray::length(arr_ptr as *mut RuneArray) };
     if !has_initial && length == 0 {
         let msg = HeapString::allocate(gc, "TypeError: reduce of empty array with no initial value");
         vm.set_pending_exception(Value::from_heap_ptr(msg as *mut u8));
@@ -1159,31 +1142,25 @@ pub fn array_reduce(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
         initial
     } else {
         start_index = 1;
-        unsafe { RuneArray::get_element(arr_ptr as *mut RuneArray, 0) }
+        crate::vm::array_like_index(this, 0).unwrap_or(Value::undefined())
     };
     if start_index >= length as usize {
         return accumulator;
     }
-    let start_index;
-    let accumulator = if has_initial {
-        start_index = 0;
-        initial
-    } else {
-        start_index = 1;
-        unsafe { RuneArray::get_element(arr_ptr as *mut RuneArray, 0) }
-    };
+    let source_ptr = this.heap_ptr().unwrap();
     vm.pending_array_op = Some(crate::vm::ArrayOpState {
         kind: crate::vm::ArrayOpKind::Reduce,
-        source: arr_ptr,
+        source: source_ptr,
         result: std::ptr::null_mut(),
         callback,
         this_val: Value::undefined(),
+        source_val: this,
         index: start_index,
         length,
         source_frame_depth: 0,
         accumulator: Some(accumulator),
     });
-    let element = unsafe { RuneArray::get_element(arr_ptr as *mut RuneArray, start_index) };
+    let element = crate::vm::array_like_index(this, start_index as u32).unwrap_or(Value::undefined());
     vm.push_callback_call(gc, callback, Value::undefined(), vec![accumulator, element, Value::smi(start_index as i32), this]);
     Value::undefined()
 }

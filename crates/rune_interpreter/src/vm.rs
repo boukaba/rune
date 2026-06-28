@@ -177,7 +177,7 @@ pub(crate) enum ArrayOpKind {
 /// Set by the builtin function, consumed/updated by the Return handler.
 pub(crate) struct ArrayOpState {
     pub(crate) kind: ArrayOpKind,
-    /// Heap pointer to the source RuneArray being iterated.
+    /// Heap pointer to the source RuneArray being iterated (TAG_ARRAY only; use source_val for generic access).
     pub(crate) source: *mut u8,
     /// Heap pointer to the result RuneArray (for filter/map).
     pub(crate) result: *mut u8,
@@ -185,6 +185,8 @@ pub(crate) struct ArrayOpState {
     pub(crate) callback: Value,
     /// `this` value for the callback.
     pub(crate) this_val: Value,
+    /// The original `this` value passed to the array builtin (TAG_ARRAY or TAG_OBJECT).
+    pub(crate) source_val: Value,
     /// Current element index (0-based, post-increment after each callback).
     pub(crate) index: usize,
     /// Total number of elements in the source array.
@@ -715,6 +717,7 @@ impl Vm {
         if let Some(ref op) = self.pending_array_op {
             gc.push_root(&op.callback as *const Value as *mut u64);
             gc.push_root(&op.this_val as *const Value as *mut u64);
+            gc.push_root(&op.source_val as *const Value as *mut u64);
             gc.push_root(&op.source as *const *mut u8 as *mut u64);
             gc.push_root(&op.result as *const *mut u8 as *mut u64);
             if let Some(ref acc) = op.accumulator {
@@ -3496,12 +3499,8 @@ impl Vm {
                                 // ... existing array callback handling ...
                                 ArrayOpKind::Filter => {
                                     if result.to_bool() {
-                                        let src_val = unsafe {
-                                            RuneArray::get_element(
-                                                op.source as *mut RuneArray,
-                                                op.index,
-                                            )
-                                        };
+                                        let src_val = array_like_index(op.source_val, op.index as u32)
+                                            .unwrap_or(Value::undefined());
                                         let old_ptr = op.result;
                                         let new_arr = unsafe {
                                             RuneArray::push(
@@ -3561,43 +3560,25 @@ impl Vm {
                                 ArrayOpKind::ForEach => {}
                             }
                             // Re-read source length each iteration (may have been mutated by callback)
-                            let src_arr = op.source as *mut RuneArray;
-                            let current_len = unsafe { RuneArray::length(src_arr) };
+                            let current_len = array_like_length(op.source_val).unwrap_or(0);
                             op.length = current_len;
                             let op_kind = op.kind;
                             op.index += 1;
-                            // Walk forward to the next existing element (HasProperty check + prototype chain)
+                            // Walk forward to the next existing element (HasProperty check)
                             let next_index = 'search: {
                                 let mut i = op.index;
                                 while i < current_len as usize {
-                                    let element = unsafe { RuneArray::get_element(src_arr, i) };
-                                    let has_prop = !element.is_undefined()
-                                        || self.array_prototype.heap_ptr().is_some_and(|proto_ptr| {
-                                            let key = PropertyKey::from_string(&i.to_string());
-                                            let shape = unsafe {
-                                                JSObject::shape_ptr(proto_ptr as *mut JSObject)
-                                            };
-                                            shape.lookup(&key).is_some()
-                                        });
-                                    if has_prop { break 'search Some(i); }
+                                    if array_like_index(op.source_val, i as u32).is_some() {
+                                        break 'search Some(i);
+                                    }
                                     i += 1;
                                 }
                                 None::<usize>
                             };
                             if let Some(i) = next_index {
                                 op.index = i;
-                                let element = unsafe { RuneArray::get_element(src_arr, i) };
-                                let resolved_val = if !element.is_undefined() {
-                                    element
-                                } else if let Some(ptr) = self.array_prototype.heap_ptr() {
-                                    let key = PropertyKey::from_string(&i.to_string());
-                                    let shape = unsafe {
-                                        JSObject::shape_ptr(ptr as *mut JSObject)
-                                    };
-                                    if let Some(slot) = shape.lookup(&key) {
-                                        unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) }
-                                    } else { element }
-                                } else { element };
+                                let resolved_val = array_like_index(op.source_val, i as u32)
+                                    .unwrap_or(Value::undefined());
                                 let cb_this = match op_kind {
                                     ArrayOpKind::Filter | ArrayOpKind::Map | ArrayOpKind::ForEach => op.this_val,
                                     ArrayOpKind::Reduce => Value::undefined(),
@@ -3607,7 +3588,7 @@ impl Vm {
                                         vec![
                                             resolved_val,
                                             Value::smi(i as i32),
-                                            Value::from_heap_ptr(op.source),
+                                            op.source_val,
                                         ]
                                     }
                                     ArrayOpKind::Reduce => {
@@ -3616,7 +3597,7 @@ impl Vm {
                                             acc,
                                             resolved_val,
                                             Value::smi(i as i32),
-                                            Value::from_heap_ptr(op.source),
+                                            op.source_val,
                                         ]
                                     }
                                 };
@@ -4925,6 +4906,56 @@ fn value_to_array_index(v: Value) -> Option<usize> {
         }
     } else {
         None
+    }
+}
+
+/// Get the length of an array-like value.
+/// Returns None if `this` is not an array-like (neither TAG_ARRAY nor TAG_OBJECT with "length" property).
+pub(crate) fn array_like_length(this: Value) -> Option<u32> {
+    let ptr = this.heap_ptr()?;
+    let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+    match tag {
+        TAG_ARRAY => {
+            Some(unsafe { RuneArray::length(ptr as *mut RuneArray) })
+        }
+        TAG_OBJECT => {
+            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+            let key = PropertyKey::from_string("length");
+            shape.lookup(&key).map(|slot| {
+                let val = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+                if let Some(n) = val.as_smi() { n.max(0) as u32 }
+                else if let Some(f) = val.as_float64() { f.max(0.0) as u32 }
+                else { 0 }
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Get an indexed element from an array-like value ([[Get]](index)).
+/// Returns None if the index is out of bounds or the element is a hole.
+/// For TAG_ARRAY, returns Some(undefined) for deleted elements.
+/// For TAG_OBJECT, returns None if the property doesn't exist (own-property only; no prototype walk).
+pub(crate) fn array_like_index(this: Value, i: u32) -> Option<Value> {
+    let ptr = this.heap_ptr()?;
+    let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+    match tag {
+        TAG_ARRAY => {
+            let len = unsafe { RuneArray::length(ptr as *mut RuneArray) };
+            if i < len {
+                Some(unsafe { RuneArray::get_element(ptr as *mut RuneArray, i as usize) })
+            } else {
+                None
+            }
+        }
+        TAG_OBJECT => {
+            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+            let key = PropertyKey::from_string(&i.to_string());
+            shape.lookup(&key).map(|slot| {
+                unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) }
+            })
+        }
+        _ => None,
     }
 }
 

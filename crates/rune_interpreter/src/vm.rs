@@ -4197,6 +4197,8 @@ fn value_to_debug_string(val: Value) -> String {
         "undefined".to_string()
     } else if val.is_null() {
         "null".to_string()
+    } else if let Some(b) = val.to_boolean() {
+        b.to_string()
     } else if let Some(v) = val.as_smi() {
         v.to_string()
     } else if let Some(v) = val.as_float64() {

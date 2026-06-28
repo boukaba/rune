@@ -179,8 +179,8 @@ pub(crate) fn to_primitive_string_sync(
         let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
         if let Some(slot) = shape.lookup(&key) {
             let to_string_val = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
-            if let Some(smi) = to_string_val.as_smi() {
-                if smi < 0 {
+            if let Some(smi) = to_string_val.as_smi()
+                && smi < 0 {
                     let id = ((-smi) as usize) - 1;
                     if id < vm.builtins.len() {
                         let result = (vm.builtins[id].func)(gc, val, &[], vm);
@@ -198,7 +198,6 @@ pub(crate) fn to_primitive_string_sync(
                         }
                     }
                 }
-            }
             // User-defined or non-callable toString — skip
         }
         let value_of_key = PropertyKey::from_string("valueOf");

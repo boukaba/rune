@@ -83,6 +83,13 @@ fn main() {
                 }
             }
             source => {
+                // Read source code from file, or use inline if it's a valid expression.
+                let source = if let Ok(code) = std::fs::read_to_string(source) {
+                    code
+                } else {
+                    source.to_string()
+                };
+
                 // Source-level snapshot cache (text). If both --snapshot and --cache
                 // are provided, --cache takes precedence for execution.
                 let source = if snapshot_path.is_some() && cache_path.is_none() {
@@ -90,13 +97,13 @@ fn main() {
                         if let Ok(cached) = std::fs::read_to_string(snap_path) {
                             cached
                         } else {
-                            source.to_string()
+                            source
                         }
                     } else {
-                        source.to_string()
+                        source
                     }
                 } else {
-                    source.to_string()
+                    source
                 };
 
                 let result = if let Some(ref path) = cache_path {

@@ -147,11 +147,41 @@ fn bench_parse_emit_execute(c: &mut Criterion) {
     });
 }
 
+const JSON_ROUND_TRIP_SRC: &str = include_str!("../scripts/json_round_trip.js");
+
+/// Full cold-start: create new Context + parse + emit + execute.
+fn bench_json_round_trip(c: &mut Criterion) {
+    c.bench_function("json_round_trip_1k", |b| {
+        b.iter_batched(
+            Context::new,
+            |mut ctx| {
+                let val = ctx.eval(JSON_ROUND_TRIP_SRC).unwrap();
+                assert_eq!(to_i64(val), 166_833);
+                val
+            },
+            BatchSize::SmallInput,
+        )
+    });
+}
+
+/// Warm execution: pre-compiled bytecode on a single context, execution only.
+fn bench_json_round_trip_warm(c: &mut Criterion) {
+    let mut ctx = Context::new();
+    let program = ctx.compile(JSON_ROUND_TRIP_SRC).unwrap();
+    c.bench_function("json_round_trip_1k_warm", |b| {
+        b.iter(|| {
+            let val = ctx.eval_bytecode(&program).unwrap();
+            assert_eq!(to_i64(val), 166_833);
+            val
+        })
+    });
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default();
     targets = bench_loop_sum_smi, bench_array_push_grow, bench_proto_chain_lookup,
         bench_jit_hot_function, bench_jit_hot_function_inline, bench_polymorphic_property_access,
-        bench_parse_emit_execute,
+        bench_parse_emit_execute, bench_json_round_trip, bench_json_round_trip_warm,
 }
 criterion_main!(benches);

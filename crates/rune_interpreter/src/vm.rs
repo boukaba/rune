@@ -161,6 +161,7 @@ pub(crate) enum ArrayOpKind {
     Filter,
     Map,
     Reduce,
+    ForEach,
 }
 
 /// State for an in-progress Array.prototype callback iteration.
@@ -367,11 +368,13 @@ impl Vm {
         let filter_handle = find_handle(&self.builtins, "Array_prototype_filter");
         let map_handle = find_handle(&self.builtins, "Array_prototype_map");
         let reduce_handle = find_handle(&self.builtins, "Array_prototype_reduce");
+        let for_each_handle = find_handle(&self.builtins, "Array_prototype_forEach");
         if let (Some(push), Some(pop)) = (push_handle, pop_handle) {
             let mut proto_entries: Vec<(&str, Value)> = vec![("push", push), ("pop", pop)];
             if let Some(f) = filter_handle { proto_entries.push(("filter", f)); }
             if let Some(m) = map_handle { proto_entries.push(("map", m)); }
             if let Some(r) = reduce_handle { proto_entries.push(("reduce", r)); }
+            if let Some(fe) = for_each_handle { proto_entries.push(("forEach", fe)); }
             let arr_proto = make_object(gc, &proto_entries);
             self.builtin_wrappers
                 .insert("Array.prototype".to_string(), arr_proto);
@@ -3448,6 +3451,7 @@ impl Vm {
                                 ArrayOpKind::Reduce => {
                                     op.accumulator = Some(result);
                                 }
+                                ArrayOpKind::ForEach => {}
                             }
                             op.index += 1;
                             if op.index >= op.length as usize {
@@ -3459,6 +3463,7 @@ impl Vm {
                                     ArrayOpKind::Reduce => {
                                         op.accumulator.unwrap_or(Value::undefined())
                                     }
+                                    ArrayOpKind::ForEach => Value::undefined(),
                                 };
                                 let frames_len = self.frames.len();
                                 self.stack.truncate(callee_base);
@@ -3474,11 +3479,11 @@ impl Vm {
                                     )
                                 };
                                 let cb_this = match op.kind {
-                                    ArrayOpKind::Filter | ArrayOpKind::Map => op.this_val,
+                                    ArrayOpKind::Filter | ArrayOpKind::Map | ArrayOpKind::ForEach => op.this_val,
                                     ArrayOpKind::Reduce => Value::undefined(),
                                 };
                                 let cb_args = match op.kind {
-                                    ArrayOpKind::Filter | ArrayOpKind::Map => {
+                                    ArrayOpKind::Filter | ArrayOpKind::Map | ArrayOpKind::ForEach => {
                                         vec![
                                             element,
                                             Value::smi(op.index as i32),

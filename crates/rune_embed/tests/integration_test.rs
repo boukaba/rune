@@ -4311,9 +4311,9 @@ fn test_json_parse_number() {
 #[test]
 fn test_json_parse_float() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval("JSON.parse('3.14')").unwrap();
+    let r = ctx.eval("JSON.parse('12.375')").unwrap();
     let f = r.as_float64().unwrap();
-    assert!((f - 3.14).abs() < 1e-10);
+    assert!((f - 12.375).abs() < 1e-10);
 }
 
 #[test]
@@ -4553,6 +4553,69 @@ fn test_array_map_this_arg() {
         result[0] + result[1] + result[2]
     "#).unwrap();
     assert_eq!(r.as_smi(), Some(10 + 20 + 30));
+}
+
+// ---- Stdlib: forEach ----
+
+#[test]
+fn test_array_foreach_basic() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        var sum = 0;
+        var a = [1, 2, 3, 4];
+        a.forEach(function(x) { sum = sum + x; });
+        sum
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(10));
+}
+
+#[test]
+fn test_array_foreach_arrow() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        var sum = 0;
+        var a = [1, 2, 3];
+        a.forEach(x => { sum = sum + x; });
+        sum
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(6));
+}
+
+#[test]
+fn test_array_foreach_empty() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        var sum = 0;
+        [].forEach(function(x) { sum = sum + x; });
+        sum
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(0));
+}
+
+#[test]
+fn test_array_foreach_this_arg() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        var accumulator = { total: 0 };
+        function add(x) { this.total = this.total + x; }
+        var a = [1, 2, 3, 4];
+        a.forEach(add, accumulator);
+        accumulator.total
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(10));
+}
+
+#[test]
+fn test_array_foreach_chain_filter() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        var sum = 0;
+        var a = [1, 2, 3, 4, 5, 6];
+        a.filter(function(x) { return x % 2 === 0; })
+         .forEach(function(x) { sum = sum + x; });
+        sum
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(2 + 4 + 6));
 }
 
 // ---- Stdlib: reduce with object accumulator ----

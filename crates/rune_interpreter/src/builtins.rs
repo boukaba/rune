@@ -427,10 +427,9 @@ pub fn json_parse(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm)
                             'u' => {
                                 if *pos + 4 < chars.len() {
                                     let hex: String = chars[*pos + 1..*pos + 5].iter().collect();
-                                    if let Ok(code) = u32::from_str_radix(&hex, 16) {
-                                        if let Some(ch) = char::from_u32(code) {
+                                    if let Ok(code) = u32::from_str_radix(&hex, 16)
+                                        && let Some(ch) = char::from_u32(code) {
                                             s.push(ch);
-                                        }
                                     }
                                     *pos += 4;
                                 } else {
@@ -553,10 +552,9 @@ pub fn json_parse(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm)
                                         if *pos + 4 < chars.len() {
                                             let hex: String =
                                                 chars[*pos + 1..*pos + 5].iter().collect();
-                                            if let Ok(code) = u32::from_str_radix(&hex, 16) {
-                                                if let Some(ch) = char::from_u32(code) {
+                                            if let Ok(code) = u32::from_str_radix(&hex, 16)
+                                                && let Some(ch) = char::from_u32(code) {
                                                     key.push(ch);
-                                                }
                                             }
                                             *pos += 4;
                                         } else {
@@ -605,13 +603,13 @@ pub fn json_parse(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm)
                     .enumerate()
                     .map(|(i, k)| (PropertyKey::from_string(k), i))
                     .collect();
-                let key_names: Vec<String> = keys.iter().cloned().collect();
+                let key_names: Vec<String> = keys.to_vec();
                 let shape = Shape::intern(shape_entries, key_names);
                 let obj_ptr = JSObject::allocate(gc, shape, &values);
                 // Set prototype
                 if let Some(proto) = object_proto {
                     unsafe {
-                        JSObject::set_prototype(obj_ptr as *mut JSObject, proto);
+                        JSObject::set_prototype(obj_ptr, proto);
                     }
                 }
                 Some(Value::from_heap_ptr(obj_ptr as *mut u8))
@@ -620,6 +618,37 @@ pub fn json_parse(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm)
         }
     }
     parse_value(gc, &chars, &mut pos, array_proto, object_proto).unwrap_or(Value::undefined())
+}
+
+/// Array.prototype.forEach(callback, thisArg) — same state machine, no result array.
+pub fn array_for_each(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let arr_ptr = match this.heap_ptr() {
+        Some(ptr) => {
+            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+            if tag == TAG_ARRAY { ptr } else { return Value::undefined(); }
+        }
+        None => return Value::undefined(),
+    };
+    let callback = args.first().copied().unwrap_or(Value::undefined());
+    let this_arg = args.get(1).copied().unwrap_or(Value::undefined());
+    let length = unsafe { RuneArray::length(arr_ptr as *mut RuneArray) };
+    if length == 0 {
+        return Value::undefined();
+    }
+    vm.pending_array_op = Some(crate::vm::ArrayOpState {
+        kind: crate::vm::ArrayOpKind::ForEach,
+        source: arr_ptr,
+        result: std::ptr::null_mut(),
+        callback,
+        this_val: this_arg,
+        index: 0,
+        length,
+        source_frame_depth: 0,
+        accumulator: None,
+    });
+    let element = unsafe { RuneArray::get_element(arr_ptr as *mut RuneArray, 0) };
+    vm.push_callback_call(gc, callback, this_arg, vec![element, Value::smi(0), this]);
+    Value::undefined()
 }
 
 /// Array.prototype.filter(callback, thisArg) — set up state machine iteration.
@@ -857,6 +886,10 @@ pub fn default_builtins() -> Vec<Builtin> {
         Builtin {
             name: "Array_prototype_reduce",
             func: array_reduce,
+        },
+        Builtin {
+            name: "Array_prototype_forEach",
+            func: array_for_each,
         },
         // Test262 assert builtins
         Builtin {

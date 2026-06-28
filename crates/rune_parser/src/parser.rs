@@ -939,7 +939,16 @@ impl Parser {
             TokenKind::Number => {
                 let t = self.tok.clone();
                 self.advance();
-                let val = t.value.replace('_', "").parse::<f64>().unwrap_or(0.0);
+                let cleaned = t.value.replace('_', "");
+                let val = if cleaned.starts_with("0x") || cleaned.starts_with("0X") {
+                    u64::from_str_radix(&cleaned[2..], 16).unwrap_or(0) as f64
+                } else if cleaned.starts_with("0o") || cleaned.starts_with("0O") {
+                    u64::from_str_radix(&cleaned[2..], 8).unwrap_or(0) as f64
+                } else if cleaned.starts_with("0b") || cleaned.starts_with("0B") {
+                    u64::from_str_radix(&cleaned[2..], 2).unwrap_or(0) as f64
+                } else {
+                    cleaned.parse::<f64>().unwrap_or(0.0)
+                };
                 Expr::Number(
                     val,
                     Span {

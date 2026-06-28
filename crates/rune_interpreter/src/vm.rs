@@ -529,6 +529,117 @@ impl Vm {
         Exit::Throw(self.pop())
     }
 
+    /// Unwind stack for a thrown value, routing to try/catch/finally handlers.
+    /// This implements the same logic as the Opcode::Throw handler so that
+    /// builtins can route exceptions through the JS try/catch mechanism
+    /// instead of returning Exit::Throw directly.
+    ///
+    /// Returns `None` if the exception was handled (caught, finally, or
+    /// assert.throws consumed it). Returns `Some(Exit)` if the exception
+    /// must propagate up (no handler anywhere).
+    fn handle_throw(&mut self, _gc: &mut SemiSpace, val: Value) -> Option<Exit> {
+        // Find in-frame handler
+        let handler_idx = self
+            .try_stack
+            .iter()
+            .rposition(|tf| tf.frame_depth == self.frames.len());
+        if let Some(idx) = handler_idx {
+            let (catch_pc, finally_pc, stack_depth, in_catch) = {
+                let tf = &self.try_stack[idx];
+                (tf.catch_pc, tf.finally_pc, tf.stack_depth, tf.in_catch)
+            };
+            if in_catch && finally_pc != 0 {
+                self.try_stack[idx].saved_exception = Some(val);
+                self.stack.truncate(stack_depth);
+                let fi = self.frames.len() - 1;
+                self.frames[fi].pc = finally_pc;
+                return None;
+            }
+            if catch_pc != 0 && !in_catch {
+                if finally_pc != 0 {
+                    self.try_stack[idx].in_catch = true;
+                } else {
+                    self.try_stack.remove(idx);
+                }
+                self.stack.truncate(stack_depth);
+                self.push(val);
+                let fi = self.frames.len() - 1;
+                self.frames[fi].pc = catch_pc;
+                return None;
+            }
+            if finally_pc != 0 {
+                self.try_stack[idx].saved_exception = Some(val);
+                self.stack.truncate(stack_depth);
+                let fi = self.frames.len() - 1;
+                self.frames[fi].pc = finally_pc;
+                return None;
+            }
+        }
+        // No handler — pop frame and check caller
+        let callee_base = self.frames.last().unwrap().stack_base;
+        let popped_frame = self.frames.len() - 1;
+        self.last_locals = self.frames[popped_frame].locals.clone();
+        // Check for pending assert.throws before popping frame
+        let assert_depth = self.pending_assert.as_ref().map(|pa| pa.source_frame_depth);
+        if let Some(source_depth) = assert_depth {
+            if self.frames.len() - 1 == source_depth {
+                self.pending_assert.take();
+                self.frames.pop();
+                self.try_stack.retain(|tf| tf.frame_depth != popped_frame + 1);
+                self.stack.truncate(callee_base);
+                self.push(Value::undefined());
+                let new_fi = self.frames.len() - 1;
+                self.frames[new_fi].pc += 1;
+                return None;
+            }
+        }
+        self.frames.pop();
+        self.try_stack.retain(|tf| tf.frame_depth != popped_frame + 1);
+        if self.frames.is_empty() {
+            self.stack.clear();
+            return Some(Exit::Throw(val));
+        }
+        // Check for try-catch-finally in the caller frame
+        let new_fi = self.frames.len() - 1;
+        let caller_idx = self
+            .try_stack
+            .iter()
+            .rposition(|tf| tf.frame_depth == self.frames.len());
+        if let Some(idx) = caller_idx {
+            let (catch_pc, finally_pc, stack_depth, in_catch) = {
+                let tf = &self.try_stack[idx];
+                (tf.catch_pc, tf.finally_pc, tf.stack_depth, tf.in_catch)
+            };
+            if in_catch && finally_pc != 0 {
+                self.try_stack[idx].saved_exception = Some(val);
+                self.stack.truncate(stack_depth);
+                self.frames[new_fi].pc = finally_pc;
+                return None;
+            }
+            if catch_pc != 0 && !in_catch {
+                if finally_pc != 0 {
+                    self.try_stack[idx].in_catch = true;
+                } else {
+                    self.try_stack.remove(idx);
+                }
+                self.stack.truncate(stack_depth);
+                self.push(val);
+                self.frames[new_fi].pc = catch_pc;
+                return None;
+            }
+            if finally_pc != 0 {
+                self.try_stack[idx].saved_exception = Some(val);
+                self.stack.truncate(stack_depth);
+                self.frames[new_fi].pc = finally_pc;
+                return None;
+            }
+        }
+        self.stack.truncate(callee_base);
+        self.push(val);
+        self.frames[new_fi].pc += 1;
+        Some(Exit::Throw(val))
+    }
+
     /// Register all GC root slots (stack, locals, try_stack saved values).
     /// Must be called after any change to stack/frames/try_stack before GC can run.
     pub fn register_roots(&mut self, gc: &mut SemiSpace) {
@@ -1146,7 +1257,12 @@ impl Vm {
                         if bv < 0 {
                             number_result(gc, (av as f64).powf(bv as f64))
                         } else {
-                            Value::smi(av.wrapping_pow(bv as u32))
+                            let r = av.wrapping_pow(bv as u32);
+                            if (-(1 << 30)..(1 << 30)).contains(&r) {
+                                Value::smi(r)
+                            } else {
+                                number_result(gc, (av as f64).powf(bv as f64))
+                            }
                         }
                     } else {
                         let av = to_number(a);
@@ -1163,7 +1279,12 @@ impl Vm {
                     let a = self.pop();
                     let av = to_int32(a);
                     let bv = to_int32(b);
-                    self.push(Value::smi(av.wrapping_shl(bv as u32)));
+                    let r = av.wrapping_shl(bv as u32);
+                    if (-(1 << 30)..(1 << 30)).contains(&r) {
+                        self.push(Value::smi(r));
+                    } else {
+                        self.push(number_result(gc, r as f64));
+                    }
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::Shr => {
@@ -1179,7 +1300,12 @@ impl Vm {
                     let a = self.pop();
                     let av = to_int32(a);
                     let bv = to_int32(b);
-                    self.push(Value::smi((av as u32).wrapping_shr(bv as u32) as i32));
+                    let r = (av as u32).wrapping_shr(bv as u32);
+                    if r < (1 << 30) as u32 {
+                        self.push(Value::smi(r as i32));
+                    } else {
+                        self.push(number_result(gc, r as f64));
+                    }
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::BitOr => {
@@ -1187,7 +1313,12 @@ impl Vm {
                     let a = self.pop();
                     let av = to_int32(a);
                     let bv = to_int32(b);
-                    self.push(Value::smi(av | bv));
+                    let r = av | bv;
+                    if (-(1 << 30)..(1 << 30)).contains(&r) {
+                        self.push(Value::smi(r));
+                    } else {
+                        self.push(number_result(gc, r as f64));
+                    }
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::BitXor => {
@@ -1195,7 +1326,12 @@ impl Vm {
                     let a = self.pop();
                     let av = to_int32(a);
                     let bv = to_int32(b);
-                    self.push(Value::smi(av ^ bv));
+                    let r = av ^ bv;
+                    if (-(1 << 30)..(1 << 30)).contains(&r) {
+                        self.push(Value::smi(r));
+                    } else {
+                        self.push(number_result(gc, r as f64));
+                    }
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::BitAnd => {
@@ -2408,107 +2544,10 @@ impl Vm {
                 }
                 Opcode::Throw => {
                     let val = self.pop();
-                    // Find in-frame handler
-                    let handler_idx = self
-                        .try_stack
-                        .iter()
-                        .rposition(|tf| tf.frame_depth == self.frames.len());
-                    if let Some(idx) = handler_idx {
-                        let (catch_pc, finally_pc, stack_depth, in_catch) = {
-                            let tf = &self.try_stack[idx];
-                            (tf.catch_pc, tf.finally_pc, tf.stack_depth, tf.in_catch)
-                        };
-                        if in_catch && finally_pc != 0 {
-                            self.try_stack[idx].saved_exception = Some(val);
-                            self.stack.truncate(stack_depth);
-                            self.frames[fi].pc = finally_pc;
-                            continue;
-                        }
-                        if catch_pc != 0 && !in_catch {
-                            if finally_pc != 0 {
-                                // Keep TryFrame for redirecting catch-body exceptions to finally
-                                self.try_stack[idx].in_catch = true;
-                            } else {
-                                // No finally — pop TryFrame, exception is now handled
-                                self.try_stack.remove(idx);
-                            }
-                            self.stack.truncate(stack_depth);
-                            self.push(val);
-                            self.frames[fi].pc = catch_pc;
-                            continue;
-                        }
-                        if finally_pc != 0 {
-                            self.try_stack[idx].saved_exception = Some(val);
-                            self.stack.truncate(stack_depth);
-                            self.frames[fi].pc = finally_pc;
-                            continue;
-                        }
+                    if let Some(exit) = self.handle_throw(gc, val) {
+                        return exit;
                     }
-                    // No handler — pop frame and check caller
-                    let callee_base = self.frames.last().unwrap().stack_base;
-                    let popped_frame = self.frames.len() - 1;
-                    self.last_locals = self.frames[popped_frame].locals.clone();
-                    // Check for pending assert.throws before popping frame
-                    let assert_depth = self.pending_assert.as_ref().map(|pa| pa.source_frame_depth);
-                    if let Some(source_depth) = assert_depth {
-                        if self.frames.len() - 1 == source_depth {
-                            // The callback threw — assert.throws passes for any exception type
-                            self.pending_assert.take();
-                            self.frames.pop();
-                            self.try_stack.retain(|tf| tf.frame_depth != popped_frame);
-                            // Push undefined as the result and continue in the caller frame
-                            self.stack.truncate(callee_base);
-                            self.push(Value::undefined());
-                            let new_fi = self.frames.len() - 1;
-                            self.frames[new_fi].pc += 1;
-                            continue;
-                        }
-                    }
-                    self.frames.pop();
-                    self.try_stack.retain(|tf| tf.frame_depth != popped_frame);
-                    if self.frames.is_empty() {
-                        self.stack.clear();
-                        return Exit::Throw(val);
-                    }
-                    // Check for try-catch-finally in the caller frame
-                    let new_fi = self.frames.len() - 1;
-                    let caller_idx = self
-                        .try_stack
-                        .iter()
-                        .rposition(|tf| tf.frame_depth == self.frames.len());
-                    if let Some(idx) = caller_idx {
-                        let (catch_pc, finally_pc, stack_depth, in_catch) = {
-                            let tf = &self.try_stack[idx];
-                            (tf.catch_pc, tf.finally_pc, tf.stack_depth, tf.in_catch)
-                        };
-                        if in_catch && finally_pc != 0 {
-                            self.try_stack[idx].saved_exception = Some(val);
-                            self.stack.truncate(stack_depth);
-                            self.frames[new_fi].pc = finally_pc;
-                            continue;
-                        }
-                        if catch_pc != 0 && !in_catch {
-                            if finally_pc != 0 {
-                                self.try_stack[idx].in_catch = true;
-                            } else {
-                                self.try_stack.remove(idx);
-                            }
-                            self.stack.truncate(stack_depth);
-                            self.push(val);
-                            self.frames[new_fi].pc = catch_pc;
-                            continue;
-                        }
-                        if finally_pc != 0 {
-                            self.try_stack[idx].saved_exception = Some(val);
-                            self.stack.truncate(stack_depth);
-                            self.frames[new_fi].pc = finally_pc;
-                            continue;
-                        }
-                    }
-                    self.stack.truncate(callee_base);
-                    self.push(val);
-                    self.frames[new_fi].pc += 1;
-                    return Exit::Throw(val);
+                    continue;
                 }
                 Opcode::ThrowIfNullish => {
                     let val = self.peek();
@@ -2559,7 +2598,7 @@ impl Vm {
                         let popped_frame = self.frames.len() - 1;
                         self.last_locals = self.frames[popped_frame].locals.clone();
                         self.frames.pop();
-                        self.try_stack.retain(|tf| tf.frame_depth != popped_frame);
+                        self.try_stack.retain(|tf| tf.frame_depth != popped_frame + 1);
                         if self.frames.is_empty() {
                             self.stack.clear();
                             return Exit::Throw(exc);
@@ -2806,8 +2845,10 @@ impl Vm {
                         if id < self.builtins.len() {
                             let result = (self.builtins[id].func)(gc, obj_val, &args, &mut *self);
                             if let Some(exc) = self.pending_exception.take() {
-                                self.push(exc);
-                                return Exit::Throw(exc);
+                                if let Some(exit) = self.handle_throw(gc, exc) {
+                                    return exit;
+                                }
+                                continue;
                             }
                             if result.is_heap_object() {
                                 self.push(result);
@@ -2898,7 +2939,7 @@ impl Vm {
                                 let popped_frame = self.frames.len() - 1;
                                 self.last_locals = self.frames[popped_frame].locals.clone();
                                 self.frames.pop();
-                                self.try_stack.retain(|tf| tf.frame_depth != popped_frame);
+                                self.try_stack.retain(|tf| tf.frame_depth != popped_frame + 1);
                                 if self.frames.is_empty() {
                                     self.stack.clear();
                                     return Exit::Throw(val);
@@ -2992,8 +3033,10 @@ impl Vm {
                             if id < self.builtins.len() {
                                 let result = (self.builtins[id].func)(gc, this, &args, &mut *self);
                                 if let Some(exc) = self.pending_exception.take() {
-                                    self.push(exc);
-                                    return Exit::Throw(exc);
+                                    if let Some(exit) = self.handle_throw(gc, exc) {
+                                        return exit;
+                                    }
+                                    continue;
                                 }
                                 if self.pending_array_op.is_some() || self.pending_assert.is_some() {
                                     // Array method builtin or assert.throws set up a callback.
@@ -3337,8 +3380,10 @@ impl Vm {
                             if id < self.builtins.len() {
                                 let result = (self.builtins[id].func)(gc, this, &args, &mut *self);
                                 if let Some(exc) = self.pending_exception.take() {
-                                    self.push(exc);
-                                    return Exit::Throw(exc);
+                                    if let Some(exit) = self.handle_throw(gc, exc) {
+                                        return exit;
+                                    }
+                                    continue;
                                 }
                                 if self.pending_array_op.is_some() {
                                     continue;
@@ -3428,7 +3473,7 @@ impl Vm {
                     let constructed_obj = self.frames[popped_frame].constructed_object;
                     self.last_locals = self.frames[popped_frame].locals.clone();
                     self.frames.pop();
-                    self.try_stack.retain(|tf| tf.frame_depth != popped_frame);
+                    self.try_stack.retain(|tf| tf.frame_depth != popped_frame + 1);
                     // Check if this return completes a pending array operation callback.
                     if let Some(mut op) = self.pending_array_op.take() {
                         if self.frames.len() == op.source_frame_depth {
@@ -3573,8 +3618,10 @@ impl Vm {
                             };
                             let err = make_error(gc, &msg);
                             self.stack.truncate(callee_base);
-                            self.push(err);
-                            return Exit::Throw(err);
+                            if let Some(exit) = self.handle_throw(gc, err) {
+                                return exit;
+                            }
+                            continue;
                         }
                     }
                     if self.frames.is_empty() {
@@ -3616,7 +3663,7 @@ impl Vm {
                     let popped_frame = self.frames.len() - 1;
                     self.last_locals = self.frames[popped_frame].locals.clone();
                     self.frames.pop();
-                    self.try_stack.retain(|tf| tf.frame_depth != popped_frame);
+                    self.try_stack.retain(|tf| tf.frame_depth != popped_frame + 1);
                     if self.frames.is_empty() {
                         self.stack.clear();
                         return Exit::Yield(val);

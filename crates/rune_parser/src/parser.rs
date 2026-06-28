@@ -613,6 +613,7 @@ impl Parser {
 
     fn parse_expr(&mut self, min_prec: u32) -> Expr {
         let mut lhs = self.parse_unary();
+        lhs = self.parse_postfix(lhs);
 
         loop {
             let prec = self.binary_precedence();

@@ -5012,8 +5012,8 @@ fn test_parse_int_radix() {
 #[test]
 fn test_parse_float_basic() {
     let mut ctx = Context::new_small();
-    assert_eq!(eval_num(&mut ctx, "parseFloat('3.14')"), 3.14);
-    assert_eq!(eval_num(&mut ctx, "parseFloat('  -3.14')"), -3.14);
+    assert_eq!(eval_num(&mut ctx, "parseFloat('3.5')"), 3.5);
+    assert_eq!(eval_num(&mut ctx, "parseFloat('  -3.5')"), -3.5);
     assert_eq!(eval_num(&mut ctx, "parseFloat('  +42.5')"), 42.5);
     assert!(eval_num(&mut ctx, "parseFloat('hello')").is_nan());
     assert!(eval_num(&mut ctx, "parseFloat('')").is_nan());

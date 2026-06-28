@@ -1370,6 +1370,8 @@ fn value_to_debug(v: Value) -> String {
         "undefined".to_string()
     } else if v.is_null() {
         "null".to_string()
+    } else if let Some(b) = v.to_boolean() {
+        b.to_string()
     } else if let Some(n) = v.as_smi() {
         n.to_string()
     } else if let Some(f) = v.as_float64() {
@@ -1390,7 +1392,7 @@ fn value_to_debug(v: Value) -> String {
             format!("{:p}", ptr)
         }
     } else {
-        "undefined".to_string()
+        format!("{:?}", v)
     }
 }
 

@@ -56,12 +56,119 @@ pub fn print_builtin(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mu
     Value::undefined()
 }
 
+/// Try to convert a value to a string by calling ToPrimitive with string hint.
+/// For objects with a user-defined toString function, sets up the pending_call
+/// callback pattern and returns None (the caller must return immediately).
+/// For all other values, returns Some(string).
+fn to_primitive_string<'a>(
+    gc: &mut SemiSpace,
+    val: Value,
+    vm: &'a mut Vm,
+) -> Option<String> {
+    // Fast path: non-object values
+    if !val.is_heap_object() {
+        return Some(value_to_js_string(val));
+    }
+    let ptr = val.heap_ptr().unwrap();
+    let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+    // Strings and String wrappers are already primitive strings
+    if tag == TAG_STRING {
+        return Some(unsafe { HeapString::to_string(ptr as *mut HeapString) });
+    }
+    if tag == TAG_STRING_OBJ {
+        let str_ptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
+        return Some(unsafe { HeapString::to_string(str_ptr as *mut HeapString) });
+    }
+    if tag == TAG_OBJECT {
+        // §7.1.1 ToPrimitive with string hint: call toString(), then valueOf()
+        let key = PropertyKey::from_string("toString");
+        let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+        if let Some(slot) = shape.lookup(&key) {
+            let to_string_val = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+            if let Some(smi) = to_string_val.as_smi() {
+                if smi < 0 {
+                    // Builtin toString — call it directly
+                    let id = ((-smi) as usize) - 1;
+                    if id < vm.builtins.len() {
+                        let result = (vm.builtins[id].func)(gc, val, &[], vm);
+                        if let Some(exc) = vm.pending_exception.take() {
+                            vm.pending_exception = Some(exc);
+                            return None;
+                        }
+                        // ToPrimitive: if result is a primitive, return it
+                        if !result.is_heap_object() || {
+                            if let Some(rp) = result.heap_ptr() {
+                                let rt = unsafe { (*(rp as *const GcHeader)).tag() };
+                                rt == TAG_STRING
+                            } else {
+                                false
+                            }
+                        } {
+                            return Some(value_to_js_string(result));
+                        }
+                    }
+                }
+            } else if let Some(func_ptr) = to_string_val.heap_ptr() {
+                let func_tag = unsafe { (*(func_ptr as *const GcHeader)).tag() };
+                if func_tag == rune_core::gc::TAG_FUNC {
+                    // User-defined toString — use pending callback pattern
+                    let depth = vm.frame_depth();
+                    vm.pending_call = Some(crate::vm::PendingCall {
+                        source_frame_depth: depth,
+                    });
+                    vm.push_callback_call(gc, to_string_val, val, vec![]);
+                    return None; // caller must return immediately
+                }
+            }
+        }
+        // Fall through to valueOf if no toString or toString didn't return a primitive
+        let value_of_key = PropertyKey::from_string("valueOf");
+        if let Some(slot) = shape.lookup(&value_of_key) {
+            let value_of_val = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+            if let Some(smi) = value_of_val.as_smi() {
+                if smi < 0 {
+                    let id = ((-smi) as usize) - 1;
+                    if id < vm.builtins.len() {
+                        let result = (vm.builtins[id].func)(gc, val, &[], vm);
+                        if let Some(exc) = vm.pending_exception.take() {
+                            vm.pending_exception = Some(exc);
+                            return None;
+                        }
+                        if !result.is_heap_object() || {
+                            if let Some(rp) = result.heap_ptr() {
+                                let rt = unsafe { (*(rp as *const GcHeader)).tag() };
+                                rt == TAG_STRING
+                            } else {
+                                false
+                            }
+                        } {
+                            return Some(value_to_js_string(result));
+                        }
+                    }
+                }
+            }
+        }
+        // Neither toString nor valueOf returned a primitive
+        return Some(value_to_js_string(val));
+    }
+    Some(value_to_js_string(val))
+}
+
 /// String(value) — converts a value to its string representation.
-pub fn string_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+/// Per §21.1.2.1: calls ToString via ToPrimitive with string hint.
+pub fn string_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let arg = args.first().copied().unwrap_or(Value::undefined());
-    let s = value_to_js_string(arg);
-    let ptr = HeapString::allocate(gc, &s);
-    Value::from_heap_ptr(ptr as *mut u8)
+    match to_primitive_string(gc, arg, vm) {
+        Some(s) => {
+            let ptr = HeapString::allocate(gc, &s);
+            Value::from_heap_ptr(ptr as *mut u8)
+        }
+        None => {
+            // Pending callback was set up — return undefined and let the
+            // pending_call machinery handle the result.
+            Value::undefined()
+        }
+    }
 }
 
 /// Create a minimal JS object with the given property key and string value.

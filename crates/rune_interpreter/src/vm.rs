@@ -763,6 +763,10 @@ impl Vm {
     /// Reads the function program from `callee` (must be TAG_FUNC) and sets
     /// up locals with the given args. Updates `source_frame_depth` in the
     /// pending array op state to the frame count before pushing.
+    pub fn frame_depth(&self) -> usize {
+        self.frames.len()
+    }
+
     pub fn push_callback_call(
         &mut self,
         _gc: &mut SemiSpace,
@@ -3147,6 +3151,10 @@ impl Vm {
                             if let Some(exit) = self.handle_throw(gc, exc) {
                                 return exit;
                             }
+                            continue;
+                        }
+                        if self.pending_call.is_some() {
+                            // ToPrimitive callback in progress — don't push result or advance PC
                             continue;
                         }
                         self.push(result);

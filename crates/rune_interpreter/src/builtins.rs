@@ -984,14 +984,13 @@ pub fn call_builtin(_gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
 
     // If target is a builtin, call it directly.
     // If it sets up pending_array_op (like array methods), that works naturally.
-    if let Some(smi) = target.as_smi() {
-        if smi < 0 {
+    if let Some(smi) = target.as_smi()
+        && smi < 0 {
             let id = ((-smi) as usize) - 1;
             if id < vm.builtins.len() {
                 return (vm.builtins[id].func)(_gc, new_this, &call_args, vm);
             }
         }
-    }
     // If target is a JS function, use the pending callback pattern.
     if let Some(ptr) = target.heap_ptr() {
         let tag = unsafe { (*(ptr as *const rune_core::gc::GcHeader)).tag() };

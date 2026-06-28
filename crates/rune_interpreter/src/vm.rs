@@ -1773,7 +1773,7 @@ impl Vm {
                         };
                         if tag == TAG_STRING || tag == TAG_STRING_OBJ {
                             let string_ptr = if tag == TAG_STRING {
-                                obj.heap_ptr().unwrap() as *mut u8
+                                obj.heap_ptr().unwrap()
                             } else {
                                 unsafe { StringObject::string_ptr(obj.heap_ptr().unwrap() as *mut StringObject) }
                             };
@@ -4484,16 +4484,14 @@ fn load_property_recursive(obj: Value, raw_key: Value, function_prototype: Optio
         // Builtin handles (negative Smis) are function-like: check Function.prototype
         if let Some(smi) = current.as_smi() {
             if smi < 0 {
-                if let Some(fp) = function_prototype {
-                    if fp.is_heap_object() && let Some(ptr) = fp.heap_ptr() {
-                        if let Some(key) = value_to_prop_key(raw_key) {
+                if let Some(fp) = function_prototype
+                    && fp.is_heap_object() && let Some(ptr) = fp.heap_ptr()
+                        && let Some(key) = value_to_prop_key(raw_key) {
                             let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
                             if let Some(slot) = shape.lookup(&key) {
                                 return unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
                             }
                         }
-                    }
-                }
                 return Value::undefined();
             }
             // Non-negative Smis (real integers) have no properties
@@ -4575,12 +4573,11 @@ fn load_property_recursive(obj: Value, raw_key: Value, function_prototype: Optio
                     }
                 }
                 // Walk Function.prototype for other properties (e.g. .call, .apply, .bind)
-                if let Some(fp) = function_prototype {
-                    if fp.is_heap_object() {
+                if let Some(fp) = function_prototype
+                    && fp.is_heap_object() {
                         current = fp;
                         continue;
                     }
-                }
                 return Value::undefined();
             }
         }
@@ -4911,11 +4908,10 @@ fn has_property(obj: Value, raw_key: Value, function_prototype: Option<Value>) -
     // Builtin handles (negative Smis) are function-like: check Function.prototype
     if let Some(smi) = obj.as_smi() {
         if smi < 0 {
-            if let Some(fp) = function_prototype {
-                if fp.is_heap_object() {
+            if let Some(fp) = function_prototype
+                && fp.is_heap_object() {
                     return has_property(fp, raw_key, function_prototype);
                 }
-            }
             return false;
         }
         return false;
@@ -4997,11 +4993,10 @@ fn has_property(obj: Value, raw_key: Value, function_prototype: Option<Value>) -
                 return true;
             }
             // Check Function.prototype
-            if let Some(fp) = function_prototype {
-                if fp.is_heap_object() {
+            if let Some(fp) = function_prototype
+                && fp.is_heap_object() {
                     return has_property(fp, raw_key, function_prototype);
                 }
-            }
             false
         } else if tag == TAG_STRING {
             if let Some(index) = value_to_array_index(raw_key) {

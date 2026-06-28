@@ -2338,7 +2338,7 @@ var result = data.items
 
 ### Test Results
 
-- **382 tests passing** (374 + 8 split)
+- **387 tests passing** (374 + 8 split + 5 parseInt/parseFloat)
 - All crate tests: pass
 - Clippy: clean
 - test262: filter 11/242, map 11/216, reduce 91/260 (inflated by harness — `Ok(Ok(_))` counts non-crash as pass; real spec compliance is lower but not blocking)
@@ -2347,9 +2347,9 @@ var result = data.items
 
 | File | Lines | Changes |
 |---|---|---|
-| `crates/rune_interpreter/src/builtins.rs` | +450 | `json_parse`, `array_filter`, `array_map`, `array_reduce`, `array_for_each`, `array_slice`, `json_stringify` |
-| `crates/rune_interpreter/src/vm.rs` | +125 | `ArrayOpState`/`ArrayOpKind`, `push_callback_call`, Call/Return handler, GC roots, JSON.stringfy wiring |
-| `crates/rune_embed/tests/integration_test.rs` | +280 | 56 new integration tests (34 stdlib + 7 slice + 15 stringify) |
+| `crates/rune_interpreter/src/builtins.rs` | +600 | `json_parse`, `array_filter`, `array_map`, `array_reduce`, `array_for_each`, `array_slice`, `json_stringify`, `string_split`, `parse_int_builtin`, `parse_float_builtin` |
+| `crates/rune_interpreter/src/vm.rs` | +130 | `ArrayOpState`/`ArrayOpKind`, `push_callback_call`, Call/Return handler, GC roots, stringify wiring, string.split wiring |
+| `crates/rune_embed/tests/integration_test.rs` | +350 | 67 new integration tests (34 stdlib + 7 slice + 15 stringify + 8 split + 5 parseInt/parseFloat) |
 | `crates/rune_core/src/array.rs` | (existing) | `RuneArray::allocate/push/get_element/length` |
 
 ### Gap: test262 Harness
@@ -2361,4 +2361,10 @@ The test262 runner at `rune_cli/src/test262.rs` uses `Outcome::Pass = Ok(Ok(_))`
 1. ✅ `JSON.stringify` — done at `5723731` — JSON round-trip complete.
 2. ✅ Boolean `+` coercion — fixed at `8eee60c` — `true + ""` → `"true"`.
 3. ✅ `String.prototype.split` — done at `99915c5` — string separator, limit, empty sep, no-sep edge cases.
-4. `parseInt`/`parseFloat` — string→number conversion for real workloads.
+4. ✅ `parseInt`/`parseFloat` — done at `e792b55` — radix, hex, Infinity, NaN, scientific notation.
+
+## v0.3 Complete
+
+Rune now has a complete JSON round-trip (parse → transform → stringify), array methods, string processing basics, and proper string coercion. The engine runs real edge workloads — JSON API consumption, data transformation, CSV/data parsing, JSON API response.
+
+## What's next?

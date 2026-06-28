@@ -4738,3 +4738,164 @@ fn test_array_slice_no_mutate_original() {
     "#).unwrap();
     assert_eq!(r.as_smi(), Some(3));
 }
+
+// ---- Stdlib: JSON.stringify ----
+
+#[test]
+fn test_json_stringify_number() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("JSON.stringify(42)").unwrap();
+    let ptr = r.heap_ptr().unwrap();
+    let s = unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) };
+    assert_eq!(s, "42");
+}
+
+#[test]
+fn test_json_stringify_string() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("JSON.stringify('hello')").unwrap();
+    let ptr = r.heap_ptr().unwrap();
+    let s = unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) };
+    assert_eq!(s, "\"hello\"");
+}
+
+#[test]
+fn test_json_stringify_boolean() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("JSON.stringify(true)").unwrap();
+    let ptr = r.heap_ptr().unwrap();
+    let s = unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) };
+    assert_eq!(s, "true");
+}
+
+#[test]
+fn test_json_stringify_null() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("JSON.stringify(null)").unwrap();
+    let ptr = r.heap_ptr().unwrap();
+    let s = unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) };
+    assert_eq!(s, "null");
+}
+
+#[test]
+fn test_json_stringify_undefined_top_level() {
+    let mut ctx = Context::new_small();
+    // Top-level undefined returns undefined, not a string
+    let r = ctx.eval("JSON.stringify(undefined)").unwrap();
+    assert!(r.is_undefined());
+}
+
+#[test]
+fn test_json_stringify_nan_infinity() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("JSON.stringify(NaN)").unwrap();
+    let ptr = r.heap_ptr().unwrap();
+    let s = unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) };
+    assert_eq!(s, "null");
+}
+
+#[test]
+fn test_json_stringify_infinity() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("JSON.stringify(Infinity)").unwrap();
+    let ptr = r.heap_ptr().unwrap();
+    let s = unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) };
+    assert_eq!(s, "null");
+}
+
+#[test]
+fn test_json_stringify_array() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("JSON.stringify([1, 2, 3])").unwrap();
+    let ptr = r.heap_ptr().unwrap();
+    let s = unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) };
+    assert_eq!(s, "[1,2,3]");
+}
+
+#[test]
+fn test_json_stringify_object() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("JSON.stringify({a:1,b:2})").unwrap();
+    let ptr = r.heap_ptr().unwrap();
+    let s = unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) };
+    assert_eq!(s, "{\"a\":1,\"b\":2}");
+}
+
+#[test]
+fn test_json_stringify_nested() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("JSON.stringify({a:[1,{b:2}]})").unwrap();
+    let ptr = r.heap_ptr().unwrap();
+    let s = unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) };
+    assert_eq!(s, "{\"a\":[1,{\"b\":2}]}");
+}
+
+#[test]
+fn test_json_stringify_cycle() {
+    let mut ctx = Context::new_small();
+    // Builtin-thrown exceptions bypass JS try/catch, so expect eval error
+    let r = ctx.eval(r#"
+        var a = {};
+        a.self = a;
+        JSON.stringify(a)
+    "#);
+    assert!(r.is_err());
+}
+
+#[test]
+fn test_json_stringify_undefined_in_array() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("JSON.stringify([1, undefined, 3])").unwrap();
+    let ptr = r.heap_ptr().unwrap();
+    let s = unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) };
+    assert_eq!(s, "[1,null,3]");
+}
+
+#[test]
+fn test_json_stringify_omit_undefined_prop() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("JSON.stringify({a:1,b:undefined,c:3})").unwrap();
+    let ptr = r.heap_ptr().unwrap();
+    let s = unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) };
+    assert_eq!(s, "{\"a\":1,\"c\":3}");
+}
+
+#[test]
+fn test_json_round_trip() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        var data = JSON.parse('{"name":"rune","values":[1,2,3],"nested":{"a":true,"b":null}}');
+        var out = JSON.stringify(data);
+        var round = JSON.parse(out);
+        round.name
+    "#).unwrap();
+    let ptr = r.heap_ptr().unwrap();
+    let s = unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) };
+    assert_eq!(s, "rune");
+    // Check boolean survived round-trip (can't use + which has a boolean→string bug)
+    let r2 = ctx.eval(r#"
+        var data = JSON.parse('{"nested":{"a":true,"b":null}}');
+        var out = JSON.stringify(data);
+        var round = JSON.parse(out);
+        round.nested.a
+    "#).unwrap();
+    assert!(r2.to_boolean().unwrap());
+}
+
+#[test]
+fn test_json_stringify_empty_object() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("JSON.stringify({})").unwrap();
+    let ptr = r.heap_ptr().unwrap();
+    let s = unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) };
+    assert_eq!(s, "{}");
+}
+
+#[test]
+fn test_json_stringify_empty_array() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("JSON.stringify([])").unwrap();
+    let ptr = r.heap_ptr().unwrap();
+    let s = unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) };
+    assert_eq!(s, "[]");
+}

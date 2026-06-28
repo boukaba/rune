@@ -427,9 +427,13 @@ impl Vm {
             self.builtin_wrappers.insert("Math".to_string(), math_obj);
         }
 
-        // JSON namespace with .parse()
+        // JSON namespace with .parse() and .stringify()
         if let Some(parse_handle) = find_handle(&self.builtins, "JSON_parse") {
-            let json_obj = make_object(gc, &[("parse", parse_handle)]);
+            let mut json_entries: Vec<(&str, Value)> = vec![("parse", parse_handle)];
+            if let Some(stringify_handle) = find_handle(&self.builtins, "JSON_stringify") {
+                json_entries.push(("stringify", stringify_handle));
+            }
+            let json_obj = make_object(gc, &json_entries);
             self.builtin_wrappers.insert("JSON".to_string(), json_obj);
         }
 

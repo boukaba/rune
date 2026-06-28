@@ -1,6 +1,6 @@
 use crate::vm::Vm;
 use rune_core::array::RuneArray;
-use rune_core::gc::{GcHeader, SemiSpace, TAG_ARRAY, TAG_STRING};
+use rune_core::gc::{GcHeader, SemiSpace, TAG_ARRAY, TAG_OBJECT, TAG_STRING};
 use rune_core::object::JSObject;
 use rune_core::shape::{DENSE_ARRAY_SHAPE, PropertyKey, Shape};
 use rune_core::string::HeapString;
@@ -620,6 +620,113 @@ pub fn json_parse(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm)
     parse_value(gc, &chars, &mut pos, array_proto, object_proto).unwrap_or(Value::undefined())
 }
 
+/// JSON.stringify(value) — serialize a JS value to a JSON string.
+pub fn json_stringify(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    fn escape_json(s: &str) -> String {
+        let mut out = String::with_capacity(s.len() + 2);
+        for ch in s.chars() {
+            match ch {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\x08' => out.push_str("\\b"),
+                '\x0C' => out.push_str("\\f"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                c if c.is_control() => {
+                    out.push_str(&format!("\\u{:04x}", c as u32));
+                }
+                c => out.push(c),
+            }
+        }
+        out
+    }
+    fn stringify_val(gc: &mut SemiSpace, val: Value, stack: &mut Vec<*mut u8>, vm: &mut Vm) -> Result<String, ()> {
+        if val.is_undefined() {
+            return Err(());
+        }
+        if val.is_null() {
+            return Ok("null".to_string());
+        }
+        if val.is_boolean() {
+            return Ok(if val.to_boolean().unwrap() { "true" } else { "false" }.to_string());
+        }
+        if let Some(n) = val.as_smi() {
+            return Ok(n.to_string());
+        }
+        if val.is_float64() {
+            let f = val.as_float64().unwrap_or(f64::NAN);
+            if f.is_nan() || f.is_infinite() {
+                return Ok("null".to_string());
+            }
+            return Ok(f64_to_json_string(f));
+        }
+        if let Some(ptr) = val.heap_ptr() {
+            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+            if tag == TAG_STRING {
+                let s = unsafe { HeapString::to_string(ptr as *mut HeapString) };
+                return Ok(format!("\"{}\"", escape_json(&s)));
+            }
+            if tag == TAG_ARRAY {
+                if stack.contains(&ptr) {
+                    let msg = HeapString::allocate(gc, "TypeError: Converting circular structure to JSON");
+                    vm.set_pending_exception(Value::from_heap_ptr(msg as *mut u8));
+                    return Err(());
+                }
+                stack.push(ptr);
+                let len = unsafe { RuneArray::length(ptr as *mut RuneArray) } as usize;
+                let mut parts: Vec<String> = Vec::with_capacity(len);
+                for i in 0..len {
+                    let elem = unsafe { RuneArray::get_element(ptr as *mut RuneArray, i) };
+                    parts.push(stringify_val(gc, elem, stack, vm).unwrap_or_else(|_| "null".to_string()));
+                }
+                stack.pop();
+                return Ok(format!("[{}]", parts.join(",")));
+            }
+            if tag == TAG_OBJECT {
+                if stack.contains(&ptr) {
+                    let msg = HeapString::allocate(gc, "TypeError: Converting circular structure to JSON");
+                    vm.set_pending_exception(Value::from_heap_ptr(msg as *mut u8));
+                    return Err(());
+                }
+                stack.push(ptr);
+                let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                let count = unsafe { JSObject::slot_count(ptr as *mut JSObject) };
+                let mut pairs: Vec<String> = Vec::new();
+                for i in 0..count {
+                    let key_name = shape.key_name_at(i).unwrap_or("");
+                    let val = unsafe { JSObject::get_slot(ptr as *mut JSObject, i) };
+                    if val.is_undefined() {
+                        continue;
+                    }
+                    if let Ok(s) = stringify_val(gc, val, stack, vm) {
+                        pairs.push(format!("\"{}\":{}", escape_json(key_name), s));
+                    }
+                }
+                stack.pop();
+                return Ok(format!("{{{}}}", pairs.join(",")));
+            }
+        }
+        Ok("null".to_string())
+    }
+    let val = args.first().copied().unwrap_or(Value::undefined());
+    let mut stack: Vec<*mut u8> = Vec::new();
+    match stringify_val(gc, val, &mut stack, vm) {
+        Ok(s) => {
+            let heap_s = HeapString::allocate(gc, &s);
+            Value::from_heap_ptr(heap_s as *mut u8)
+        }
+        Err(()) => Value::undefined(),
+    }
+}
+
+/// Convert f64 to shortest-reasonable JSON string representation.
+/// Known limitation: does not guarantee shortest round-trippable (Rust's `f64::to_string()`
+/// differs from JS's Number.prototype.toString() for some high-precision values).
+fn f64_to_json_string(f: f64) -> String {
+    f64::to_string(&f)
+}
+
 /// Array.prototype.slice(start, end) — returns a new dense array with elements from [start, end).
 pub fn array_slice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let arr_ptr = match this.heap_ptr() {
@@ -930,6 +1037,10 @@ pub fn default_builtins() -> Vec<Builtin> {
         Builtin {
             name: "JSON_parse",
             func: json_parse,
+        },
+        Builtin {
+            name: "JSON_stringify",
+            func: json_stringify,
         },
         // Array.prototype methods
         Builtin {

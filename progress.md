@@ -2296,7 +2296,20 @@ var result = data.items
 - [x] `ForEach` variant on `ArrayOpKind` — no-op in result-processing match arm
 - [x] 5 integration tests: basic, arrow, empty, thisArg, chained filter→forEach
 
-### Task 17G: Chained E2E Pipeline 🟡 — Priority 2 ✅
+### Task 17G: Array.prototype.slice 🟡 — Priority 2 ✅
+
+- [x] No callback needed — direct element copy with negative index handling per §23.1.3.3
+- [x] Start/end clamping: `k = max(relativeStart < 0 ? len + relativeStart : relativeStart, 0)`, clamped to `[0, len]`
+- [x] End defaults to `length` when not provided (full tail slice or copy)
+- [x] Result array gets `DENSE_ARRAY_SHAPE` + `Array.prototype` for chaining
+- [x] GC-safe: source pointer re-resolved after each push in case GC forwarded it
+- [x] 7 integration tests: basic, no-end, full (copy), negative-start, negative-end, empty, no-mutate-original
+
+- [x] Trivial: filter without the result array. Returns `undefined`.
+- [x] `ForEach` variant on `ArrayOpKind` — no-op in result-processing match arm
+- [x] 5 integration tests: basic, arrow, empty, thisArg, chained filter→forEach
+
+### Task 17H: Chained E2E Pipeline 🟡 — Priority 2 ✅
 
 - [x] `test_json_parse_then_filter`: JSON.parse → filter
 - [x] `test_array_filter_map_chain`: filter → map chain
@@ -2316,7 +2329,7 @@ var result = data.items
 
 ### Test Results
 
-- **351 tests passing** (317 existing + 27 stdlib + 5 forEach + 2 E2E verification)
+- **358 tests passing** (317 existing + 27 stdlib + 5 forEach + 7 slice + 2 E2E verification)
 - All crate tests: pass
 - Clippy: clean
 - test262: filter 11/242, map 11/216, reduce 91/260 (inflated by harness — `Ok(Ok(_))` counts non-crash as pass; real spec compliance is lower but not blocking)
@@ -2327,7 +2340,7 @@ var result = data.items
 |---|---|---|
 | `crates/rune_interpreter/src/builtins.rs` | +300 | `json_parse`, `array_filter`, `array_map`, `array_reduce`, `array_for_each` |
 | `crates/rune_interpreter/src/vm.rs` | +120 | `ArrayOpState`/`ArrayOpKind`, `push_callback_call`, Call/Return handler integration, GC roots |
-| `crates/rune_embed/tests/integration_test.rs` | +100 | 34 new integration tests |
+| `crates/rune_embed/tests/integration_test.rs` | +170 | 41 new integration tests (34 stdlib + 7 slice) |
 | `crates/rune_core/src/array.rs` | (existing) | `RuneArray::allocate/push/get_element/length` |
 
 ### Gap: test262 Harness
@@ -2336,7 +2349,6 @@ The test262 runner at `rune_cli/src/test262.rs` uses `Outcome::Pass = Ok(Ok(_))`
 
 ### Next Steps (after v0.3 JIT + GC milestones)
 
-1. `Array.prototype.slice` — no callback, handles negative indices. Needed for `Array.from`, spread.
+1. `JSON.stringify` — completes JSON round-trip (highest leverage: JSON-in/JSON-out edge workloads).
 2. `String.prototype.split` (string separator) — enables CSV parsing.
-3. `JSON.stringify` — completes JSON round-trip.
-4. `parseInt`/`parseFloat` — string→number conversion for real workloads.
+3. `parseInt`/`parseFloat` — string→number conversion for real workloads.

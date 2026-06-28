@@ -4568,3 +4568,31 @@ fn test_array_reduce_group() {
     "#).unwrap();
     assert_eq!(r.as_smi(), Some(2 + 4 + 6 + 1 + 3 + 5));
 }
+
+#[test]
+fn e2e_json_workload() {
+    let mut ctx = Context::new();
+    let r = ctx.eval(r#"
+        var data = JSON.parse('{"items":[{"name":"a","value":1,"active":true},{"name":"b","value":2,"active":false},{"name":"c","value":3,"active":true}]}');
+        var result = data.items
+            .filter(function(x) { return x.active; })
+            .map(function(x) { return x.value * 2; })
+            .reduce(function(a, b) { return a + b; }, 0);
+        result
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(8));
+}
+
+#[test]
+fn e2e_gc_stress_reduce() {
+    let mut ctx = Context::new();
+    let r = ctx.eval(r#"
+        var arr = [];
+        for (var i = 0; i < 200000; i = i + 1) { arr.push(i); }
+        var sum = arr.reduce(function(a, b) { return a + b; }, 0);
+        sum
+    "#).unwrap();
+    let expected = 19999900000.0f64;
+    let val = r.as_float64().expect("GC stress test should produce float64");
+    assert!((val - expected).abs() < 1.0, "reduce sum mismatch: got {} expected {}", val, expected);
+}

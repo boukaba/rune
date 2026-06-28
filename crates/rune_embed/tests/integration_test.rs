@@ -4833,7 +4833,7 @@ fn test_json_stringify_nested() {
 #[test]
 fn test_json_stringify_cycle() {
     let mut ctx = Context::new_small();
-    // Builtin-thrown exceptions bypass JS try/catch, so expect eval error
+    // Without try/catch, cycle error propagates as eval error
     let r = ctx.eval(r#"
         var a = {};
         a.self = a;
@@ -5028,4 +5028,64 @@ fn test_parse_float_edge_cases() {
     assert_eq!(eval_num(&mut ctx, "parseFloat('0.5e2')"), 50.0);
     assert_eq!(eval_num(&mut ctx, "parseFloat('1.5e-2')"), 0.015);
     assert_eq!(eval_num(&mut ctx, "parseFloat('.5')"), 0.5);
+}
+
+// ---- P29: builtin throws are catchable by JS try/catch ----
+
+#[test]
+fn test_builtin_throw_catchable_by_try_catch() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(r#"
+            var caught = 0;
+            try { JSON.parse("{invalid"); } catch(e) { caught = 1; }
+            caught;
+        "#)
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(1), "try/catch should catch builtin throw");
+}
+
+#[test]
+fn test_builtin_throw_propagates_without_handler() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"JSON.parse("{invalid")"#);
+    assert!(r.is_err(), "uncaught builtin throw should propagate as Err");
+}
+
+#[test]
+fn test_builtin_throw_does_not_infect_subsequent_code() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(r#"
+            try { JSON.parse("{invalid"); } catch (e) {}
+            42;
+        "#)
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(42), "execution should resume after caught builtin throw");
+}
+
+#[test]
+fn test_json_stringify_cycle_still_propagates() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        var a = {};
+        a.self = a;
+        JSON.stringify(a)
+    "#);
+    assert!(r.is_err(), "cycle in JSON.stringify should still propagate without try/catch");
+}
+
+#[test]
+fn test_json_stringify_cycle_catchable() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(r#"
+            var a = {};
+            a.self = a;
+            var caught = 0;
+            try { JSON.stringify(a); } catch (e) { caught = 1; }
+            caught;
+        "#)
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(1), "try/catch should catch cycle in JSON.stringify");
 }

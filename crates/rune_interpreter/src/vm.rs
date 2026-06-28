@@ -383,11 +383,16 @@ impl Vm {
             self.array_prototype = arr_proto;
         }
 
-        // String.prototype with charAt/slice methods
+        // String.prototype with charAt/slice/split methods
         let char_at_handle = find_handle(&self.builtins, "String_prototype_charAt");
         let slice_handle = find_handle(&self.builtins, "String_prototype_slice");
+        let split_handle = find_handle(&self.builtins, "String_prototype_split");
         if let (Some(char_at), Some(slice)) = (char_at_handle, slice_handle) {
-            let str_proto = make_object(gc, &[("charAt", char_at), ("slice", slice)]);
+            let mut str_proto_entries: Vec<(&str, Value)> = vec![("charAt", char_at), ("slice", slice)];
+            if let Some(split) = split_handle {
+                str_proto_entries.push(("split", split));
+            }
+            let str_proto = make_object(gc, &str_proto_entries);
             self.builtin_wrappers
                 .insert("String.prototype".to_string(), str_proto);
             self.string_prototype = str_proto;

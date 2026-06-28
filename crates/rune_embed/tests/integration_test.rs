@@ -4899,3 +4899,78 @@ fn test_json_stringify_empty_array() {
     let s = unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) };
     assert_eq!(s, "[]");
 }
+
+fn eval_str(ctx: &mut Context, code: &str) -> String {
+    let r = ctx.eval(code).unwrap();
+    let ptr = r.heap_ptr().unwrap();
+    unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) }
+}
+
+fn eval_array_len(ctx: &mut Context, code: &str) -> u32 {
+    let r = ctx.eval(code).unwrap();
+    let ptr = r.heap_ptr().unwrap();
+    unsafe { rune_core::array::RuneArray::length(ptr as *mut rune_core::array::RuneArray) }
+}
+
+#[test]
+fn test_string_split_basic() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_array_len(&mut ctx, r#" "a,b,c".split(",") "#), 3);
+    assert_eq!(eval_str(&mut ctx, r#" "a,b,c".split(",")[0] "#), "a");
+    assert_eq!(eval_str(&mut ctx, r#" "a,b,c".split(",")[1] "#), "b");
+    assert_eq!(eval_str(&mut ctx, r#" "a,b,c".split(",")[2] "#), "c");
+}
+
+#[test]
+fn test_string_split_limit() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_array_len(&mut ctx, r#" "a,b,c".split(",", 2) "#), 2);
+    assert_eq!(eval_str(&mut ctx, r#" "a,b,c".split(",", 2)[0] "#), "a");
+    assert_eq!(eval_str(&mut ctx, r#" "a,b,c".split(",", 2)[1] "#), "b");
+}
+
+#[test]
+fn test_string_split_no_separator() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_array_len(&mut ctx, r#" "a,b,c".split() "#), 1);
+    assert_eq!(eval_str(&mut ctx, r#" "a,b,c".split()[0] "#), "a,b,c");
+}
+
+#[test]
+fn test_string_split_zero_limit() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_array_len(&mut ctx, r#" "a,b,c".split(",", 0) "#), 0);
+}
+
+#[test]
+fn test_string_split_empty_string() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_array_len(&mut ctx, r#" "".split(",") "#), 1);
+    assert_eq!(eval_str(&mut ctx, r#" "".split(",")[0] "#), "");
+}
+
+#[test]
+fn test_string_split_empty_separator() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_array_len(&mut ctx, r#" "abc".split("") "#), 3);
+    assert_eq!(eval_str(&mut ctx, r#" "abc".split("")[0] "#), "a");
+    assert_eq!(eval_str(&mut ctx, r#" "abc".split("")[1] "#), "b");
+    assert_eq!(eval_str(&mut ctx, r#" "abc".split("")[2] "#), "c");
+}
+
+#[test]
+fn test_string_split_space() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_array_len(&mut ctx, r#" "hello world".split(" ") "#), 2);
+    assert_eq!(eval_str(&mut ctx, r#" "hello world".split(" ")[0] "#), "hello");
+    assert_eq!(eval_str(&mut ctx, r#" "hello world".split(" ")[1] "#), "world");
+}
+
+#[test]
+fn test_string_split_consecutive_delimiters() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_array_len(&mut ctx, r#" "a,,b".split(",") "#), 3);
+    assert_eq!(eval_str(&mut ctx, r#" "a,,b".split(",")[0] "#), "a");
+    assert_eq!(eval_str(&mut ctx, r#" "a,,b".split(",")[1] "#), "");
+    assert_eq!(eval_str(&mut ctx, r#" "a,,b".split(",")[2] "#), "b");
+}

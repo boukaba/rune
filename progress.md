@@ -2359,6 +2359,6 @@ The test262 runner at `rune_cli/src/test262.rs` uses `Outcome::Pass = Ok(Ok(_))`
 ### Next Steps (after v0.3 JIT + GC milestones)
 
 1. ✅ `JSON.stringify` — done at `5723731` — JSON round-trip complete.
-2. `String.prototype.split` (string separator) — enables CSV parsing.
-3. `parseInt`/`parseFloat` — string→number conversion for real workloads.
-4. Fix boolean `+` string coercion (pre-existing bug: `true + ""` → `"undefined"`).
+2. ✅ Boolean `+` coercion — fixed at `8eee60c` — `true + ""` → `"true"`.
+3. `String.prototype.split` (string separator) — enables CSV parsing.
+4. `parseInt`/`parseFloat` — string→number conversion for real workloads.

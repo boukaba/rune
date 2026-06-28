@@ -253,6 +253,82 @@ pub fn string_slice(gc: &mut SemiSpace, this: Value, args: &[Value], _vm: &mut V
     Value::undefined()
 }
 
+/// String.prototype.split(separator, limit) — splits a string into an array of substrings.
+/// Per §22.1.3.17 (simplified: string separator only, no regex).
+pub fn string_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    fn to_u32(v: Value) -> u32 {
+        if let Some(n) = v.as_smi() {
+            n.max(0) as u32
+        } else if let Some(f) = v.as_float64() {
+            if f.is_finite() { f.max(0.0) as u32 } else { 0 }
+        } else {
+            0
+        }
+    }
+    let s = match this.heap_ptr() {
+        Some(ptr) => {
+            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+            if tag == TAG_STRING {
+                unsafe { HeapString::to_string(ptr as *mut HeapString) }
+            } else {
+                return Value::undefined();
+            }
+        }
+        None => return Value::undefined(),
+    };
+    let limit = args.get(1).copied().unwrap_or(Value::undefined());
+    let lim = if limit.is_undefined() { u32::MAX } else { to_u32(limit) };
+    if lim == 0 {
+        let arr = RuneArray::allocate(gc, &[]);
+        unsafe {
+            let ptr = arr as *mut u8;
+            *(ptr.add(8) as *mut *const rune_core::shape::Shape) = *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
+            if let Some(proto) = vm.array_prototype.heap_ptr() {
+                *(ptr.add(24) as *mut *mut u8) = proto;
+            }
+        }
+        return Value::from_heap_ptr(arr as *mut u8);
+    }
+    let separator = args.first().copied().unwrap_or(Value::undefined());
+    if separator.is_undefined() {
+        let s_val = Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8);
+        let arr = RuneArray::allocate(gc, &[]);
+        unsafe {
+            let ptr = arr as *mut u8;
+            *(ptr.add(8) as *mut *const rune_core::shape::Shape) = *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
+            if let Some(proto) = vm.array_prototype.heap_ptr() {
+                *(ptr.add(24) as *mut *mut u8) = proto;
+            }
+            let result_ptr = RuneArray::push(gc, arr, s_val);
+            Value::from_heap_ptr(result_ptr as *mut u8)
+        }
+    } else {
+        let sep = value_to_js_string(separator);
+        let pieces: Vec<String> = if sep.is_empty() {
+            s.chars().map(|c| c.to_string()).collect()
+        } else {
+            s.split(&sep).map(|p| p.to_string()).collect()
+        };
+        let elem_count = (pieces.len() as u32).min(lim) as usize;
+        let arr = RuneArray::allocate(gc, &[]);
+        unsafe {
+            let mut arr_ptr = arr as *mut u8;
+            *(arr_ptr.add(8) as *mut *const rune_core::shape::Shape) = *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
+            if let Some(proto) = vm.array_prototype.heap_ptr() {
+                *(arr_ptr.add(24) as *mut *mut u8) = proto;
+            }
+            for p in pieces.iter().take(elem_count) {
+                let heap_str = HeapString::allocate(gc, p);
+                let new_ptr = RuneArray::push(gc, arr_ptr as *mut RuneArray, Value::from_heap_ptr(heap_str as *mut u8));
+                if new_ptr as *mut u8 != arr_ptr {
+                    arr_ptr = new_ptr as *mut u8;
+                }
+            }
+            Value::from_heap_ptr(arr_ptr)
+        }
+    }
+}
+
 /// Math.floor(x) — rounds down.
 fn math_op_unary(args: &[Value], op: fn(f64) -> f64) -> Value {
     let x = args.first().copied().unwrap_or(Value::smi(0));
@@ -1004,6 +1080,10 @@ pub fn default_builtins() -> Vec<Builtin> {
         Builtin {
             name: "String_prototype_slice",
             func: string_slice,
+        },
+        Builtin {
+            name: "String_prototype_split",
+            func: string_split,
         },
         Builtin {
             name: "Math_floor",

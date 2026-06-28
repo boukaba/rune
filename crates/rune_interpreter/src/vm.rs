@@ -482,9 +482,14 @@ impl Vm {
             self.builtin_wrappers.insert("Array".to_string(), arr_ctor);
         }
 
-        // String constructor with .fromCharCode()
+        // String constructor with .fromCharCode() and .prototype
         if let Some(handle) = find_handle(&self.builtins, "String_fromCharCode") {
-            let str_ctor = make_object(gc, &[("fromCharCode", handle)]);
+            let str_proto_val = self
+                .builtin_wrappers
+                .get("String.prototype")
+                .copied()
+                .unwrap_or(Value::undefined());
+            let str_ctor = make_object(gc, &[("fromCharCode", handle), ("prototype", str_proto_val)]);
             self.string_constructor = str_ctor;
             self.builtin_wrappers.insert("String".to_string(), str_ctor);
         }
@@ -563,7 +568,7 @@ impl Vm {
     /// Register a built-in function and return its handle (negative Smi).
     pub fn register_builtin(&mut self, name: &'static str, func: BuiltinFn) -> Value {
         let id = self.builtins.len();
-        self.builtins.push(Builtin { name, func });
+        self.builtins.push(Builtin { name, length: 1, func });
         Value::smi(-(id as i32) - 1)
     }
 
@@ -2020,9 +2025,53 @@ impl Vm {
                             }
                         }
                     } else if let Some(smi) = obj.as_smi() {
-                        // Builtin handles (negative Smis) check Function.prototype
-                        if smi < 0 && self.function_prototype.is_heap_object() {
-                            load_property_recursive(self.function_prototype, raw_key, Some(self.function_prototype))
+                        if smi < 0 {
+                            // Negative Smi = builtin handle — first check metadata properties
+                            if let Some(ptr) = raw_key.heap_ptr() {
+                                let key_tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+                                if key_tag == TAG_STRING {
+                                    let key_str = unsafe { HeapString::to_string(ptr as *mut HeapString) };
+                                    let id = ((-smi) as usize) - 1;
+                                    if id < self.builtins.len() {
+                                        if key_str == "length" {
+                                            let val = self.builtins[id].length as i32;
+                                            Value::smi(val)
+                                        } else if key_str == "name" {
+                                            let display = self.builtins[id].name
+                                                .rsplit('_')
+                                                .next()
+                                                .unwrap_or(self.builtins[id].name);
+                                            let val = HeapString::allocate(gc, display);
+                                            Value::from_heap_ptr(val as *mut u8)
+                                        } else {
+                                            // Not metadata — fall through to Function.prototype
+                                            if self.function_prototype.is_heap_object() {
+                                                load_property_recursive(self.function_prototype, raw_key, Some(self.function_prototype))
+                                            } else {
+                                                Value::undefined()
+                                            }
+                                        }
+                                    } else {
+                                        // Unknown handle — check Function.prototype
+                                        if self.function_prototype.is_heap_object() {
+                                            load_property_recursive(self.function_prototype, raw_key, Some(self.function_prototype))
+                                        } else {
+                                            Value::undefined()
+                                        }
+                                    }
+                                } else {
+                                    // Not a string key — check Function.prototype
+                                    if self.function_prototype.is_heap_object() {
+                                        load_property_recursive(self.function_prototype, raw_key, Some(self.function_prototype))
+                                    } else {
+                                        Value::undefined()
+                                    }
+                                }
+                            } else if self.function_prototype.is_heap_object() {
+                                load_property_recursive(self.function_prototype, raw_key, Some(self.function_prototype))
+                            } else {
+                                Value::undefined()
+                            }
                         } else {
                             Value::undefined()
                         }

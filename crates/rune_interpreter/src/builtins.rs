@@ -10,6 +10,7 @@ use rune_core::value::Value;
 /// A registered built-in function.
 pub struct Builtin {
     pub name: &'static str,
+    pub length: u32,
     pub func: BuiltinFn,
 }
 
@@ -1687,230 +1688,286 @@ pub fn array_reduce(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
 pub fn default_builtins() -> Vec<Builtin> {
     vec![
         Builtin {
+            length: 0,
             name: "print",
             func: print_builtin,
         },
         Builtin {
+            length: 1,
             name: "String",
             func: string_builtin,
         },
         Builtin {
+            length: 1,
             name: "Object",
             func: object_builtin,
         },
         Builtin {
+            length: 1,
             name: "Error",
             func: error_builtin,
         },
         Builtin {
+            length: 1,
             name: "Test262Error",
             func: test262_error_builtin,
         },
         Builtin {
+            length: 0,
             name: "$DONOTEVALUATE",
             func: donot_evaluate_builtin,
         },
         Builtin {
+            length: 1,
             name: "eval",
             func: eval_builtin,
         },
         Builtin {
+            length: 2,
             name: "Object_create",
             func: object_create_builtin,
         }, // accessible only via Object.create
         Builtin {
+            length: 1,
             name: "Array_isArray",
             func: array_is_array,
         },
         Builtin {
+            length: 1,
             name: "Array_prototype_push",
             func: array_push,
         },
         Builtin {
+            length: 0,
             name: "Array_prototype_pop",
             func: array_pop,
         },
         Builtin {
+            length: 1,
             name: "String_fromCharCode",
             func: string_from_char_code,
         },
         Builtin {
+            length: 1,
             name: "String_prototype_charAt",
             func: string_char_at,
         },
         Builtin {
+            length: 2,
             name: "String_prototype_slice",
             func: string_slice,
         },
         Builtin {
+            length: 2,
             name: "String_prototype_split",
             func: string_split,
         },
         Builtin {
+            length: 1,
             name: "String_prototype_indexOf",
             func: string_index_of,
         },
         Builtin {
+            length: 1,
             name: "String_prototype_includes",
             func: string_includes,
         },
         Builtin {
+            length: 1,
             name: "String_prototype_startsWith",
             func: string_starts_with,
         },
         Builtin {
+            length: 1,
             name: "String_prototype_endsWith",
             func: string_ends_with,
         },
         Builtin {
+            length: 1,
             name: "String_prototype_charCodeAt",
             func: string_char_code_at,
         },
         Builtin {
+            length: 1,
             name: "String_prototype_codePointAt",
             func: string_code_point_at,
         },
         Builtin {
+            length: 2,
             name: "String_prototype_substring",
             func: string_substring,
         },
         Builtin {
+            length: 2,
             name: "String_prototype_substr",
             func: string_substr,
         },
         Builtin {
+            length: 0,
             name: "String_prototype_trim",
             func: string_trim,
         },
         Builtin {
+            length: 0,
             name: "String_prototype_trimStart",
             func: string_trim_start,
         },
         Builtin {
+            length: 0,
             name: "String_prototype_trimEnd",
             func: string_trim_end,
         },
         Builtin {
+            length: 0,
             name: "String_prototype_toLowerCase",
             func: string_to_lower_case,
         },
         Builtin {
+            length: 0,
             name: "String_prototype_toUpperCase",
             func: string_to_upper_case,
         },
         Builtin {
+            length: 1,
             name: "String_prototype_repeat",
             func: string_repeat,
         },
         Builtin {
+            length: 1,
             name: "String_prototype_padStart",
             func: string_pad_start,
         },
         Builtin {
+            length: 1,
             name: "String_prototype_padEnd",
             func: string_pad_end,
         },
         Builtin {
+            length: 1,
             name: "String_prototype_concat",
             func: string_concat,
         },
         Builtin {
+            length: 0,
             name: "String_prototype_toString",
             func: string_to_string,
         },
         Builtin {
+            length: 0,
             name: "String_prototype_valueOf",
             func: string_value_of,
         },
         Builtin {
+            length: 1,
             name: "Math_floor",
             func: math_floor,
         },
         Builtin {
+            length: 1,
             name: "Math_ceil",
             func: math_ceil,
         },
         Builtin {
+            length: 1,
             name: "Math_abs",
             func: math_abs,
         },
         Builtin {
+            length: 2,
             name: "Math_min",
             func: math_min,
         },
         Builtin {
+            length: 2,
             name: "Math_max",
             func: math_max,
         },
         Builtin {
+            length: 2,
             name: "Math_pow",
             func: math_pow,
         },
         Builtin {
+            length: 1,
             name: "Math_sqrt",
             func: math_sqrt,
         },
         // Global functions
         Builtin {
+            length: 2,
             name: "parseInt",
             func: parse_int_builtin,
         },
         Builtin {
+            length: 1,
             name: "parseFloat",
             func: parse_float_builtin,
         },
         // JSON
         Builtin {
+            length: 2,
             name: "JSON_parse",
             func: json_parse,
         },
         Builtin {
+            length: 3,
             name: "JSON_stringify",
             func: json_stringify,
         },
         // Array.prototype methods
         Builtin {
+            length: 1,
             name: "Array_prototype_filter",
             func: array_filter,
         },
         Builtin {
+            length: 1,
             name: "Array_prototype_map",
             func: array_map,
         },
         Builtin {
+            length: 1,
             name: "Array_prototype_reduce",
             func: array_reduce,
         },
         Builtin {
+            length: 1,
             name: "Array_prototype_forEach",
             func: array_for_each,
         },
         Builtin {
+            length: 1,
             name: "Array_prototype_slice",
             func: array_slice,
         },
         Builtin {
+            length: 1,
             name: "Function_prototype_call",
             func: call_builtin,
         },
         // Test262 assert builtins
         Builtin {
+            length: 2,
             name: "assert_sameValue",
             func: assert_same_value,
         },
         Builtin {
+            length: 2,
             name: "assert_notSameValue",
             func: assert_not_same_value,
         },
         Builtin {
+            length: 2,
             name: "assert_throws",
             func: assert_throws,
         },
         Builtin {
+            length: 1,
             name: "assert",
             func: assert_plain,
         },
         Builtin {
+            length: 2,
             name: "assert__isSameValue",
             func: assert_is_same_value,
         },

@@ -231,22 +231,41 @@ pub fn string_char_at(gc: &mut SemiSpace, this: Value, args: &[Value], _vm: &mut
 }
 
 /// String.prototype.slice(start, end) — returns a substring.
+/// Per ECMAScript §22.1.3.23 (String.prototype.slice).
+/// Uses byte-level slicing to match the spec (characters are 1 byte in Rune's use case).
 pub fn string_slice(gc: &mut SemiSpace, this: Value, args: &[Value], _vm: &mut Vm) -> Value {
-    let start = args.first().and_then(|v| v.as_smi()).unwrap_or(0) as usize;
-    let end = args.get(1).and_then(|v| v.as_smi()).map(|n| n as usize);
+    fn to_number(v: Value) -> f64 {
+        if let Some(n) = v.as_smi() { n as f64 }
+        else if let Some(f) = v.as_float64() { f }
+        else { f64::NAN }
+    }
     if let Some(ptr) = this.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_STRING {
             let s = unsafe { HeapString::to_string(ptr as *mut HeapString) };
-            let end = end.unwrap_or(s.len());
-            let start = start.min(s.len());
-            let end = end.min(s.len());
-            let result_s: String = s
-                .chars()
-                .skip(start)
-                .take(end.saturating_sub(start))
-                .collect();
-            let result = HeapString::allocate(gc, &result_s);
+            let len = s.len() as f64;
+            let raw_start = args.first().map(|&v| to_number(v)).unwrap_or(0.0);
+            let raw_end = args.get(1).map(|&v| to_number(v));
+            let int_start = if raw_start.is_nan() { 0.0 } else { raw_start };
+            let int_end = match raw_end {
+                Some(e) if e.is_nan() => 0.0,
+                Some(e) => e,
+                None => len,
+            };
+            let clamp = |v: f64| -> usize {
+                let v = if v.is_infinite() { if v.is_sign_negative() { 0.0 } else { len } }
+                        else if v < 0.0 { (len + v).max(0.0) }
+                        else { v.min(len) };
+                v as usize
+            };
+            let start = clamp(int_start);
+            let end = clamp(int_end);
+            if start >= end {
+                let empty = HeapString::allocate(gc, "");
+                return Value::from_heap_ptr(empty as *mut u8);
+            }
+            let result_s = &s[start..end];
+            let result = HeapString::allocate(gc, result_s);
             return Value::from_heap_ptr(result as *mut u8);
         }
     }

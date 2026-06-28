@@ -416,7 +416,7 @@ pub fn string_index_of(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
     } else if let Some(smi) = pos.as_smi() {
         if smi < 0 { 0 } else { smi as usize }
     } else if let Some(f) = pos.as_float64() {
-        let clamped = if f.is_nan() { 0.0 } else if f < 0.0 { 0.0 } else { f };
+        let clamped = if f.is_nan() || f < 0.0 { 0.0 } else { f };
         (clamped as usize).min(s.len())
     } else {
         0
@@ -448,7 +448,7 @@ pub fn string_includes(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
     } else if let Some(smi) = pos.as_smi() {
         if smi < 0 { 0 } else { smi as usize }
     } else if let Some(f) = pos.as_float64() {
-        let clamped = if f.is_nan() { 0.0 } else if f < 0.0 { 0.0 } else { f };
+        let clamped = if f.is_nan() || f < 0.0 { 0.0 } else { f };
         (clamped as usize).min(s.len())
     } else {
         0
@@ -460,7 +460,7 @@ pub fn string_includes(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
     if start + search_str.len() > s.len() {
         return Value::boolean(false);
     }
-    Value::boolean(s[start..].find(&search_str).is_some())
+    Value::boolean(s[start..].contains(&search_str))
 }
 
 /// String.prototype.startsWith(searchString, position) — checks if string starts with searchString.
@@ -476,7 +476,7 @@ pub fn string_starts_with(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
     } else if let Some(smi) = pos.as_smi() {
         if smi < 0 { 0 } else { smi as usize }
     } else if let Some(f) = pos.as_float64() {
-        let clamped = if f.is_nan() { 0.0 } else if f < 0.0 { 0.0 } else { f };
+        let clamped = if f.is_nan() || f < 0.0 { 0.0 } else { f };
         (clamped as usize).min(s.len())
     } else {
         0
@@ -497,7 +497,7 @@ pub fn string_ends_with(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
     } else if let Some(smi) = end_pos.as_smi() {
         if smi < 0 { 0 } else { smi as usize }
     } else if let Some(f) = end_pos.as_float64() {
-        let clamped = if f.is_nan() { 0.0 } else if f < 0.0 { 0.0 } else { f };
+        let clamped = if f.is_nan() || f < 0.0 { 0.0 } else { f };
         (clamped as usize).min(s.len())
     } else {
         s.len()

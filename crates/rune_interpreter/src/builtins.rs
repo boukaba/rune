@@ -492,7 +492,7 @@ pub fn parse_int_builtin(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm:
     let result = sign * result;
     if result.fract() == 0.0 && result.is_finite() {
         let i = result as i32;
-        if i as f64 == result {
+        if i as f64 == result && i >= -(1 << 30) && i < (1 << 30) {
             return Value::smi(i);
         }
     }
@@ -835,7 +835,12 @@ pub fn json_parse(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm)
             _ => None,
         }
     }
-    parse_value(gc, &chars, &mut pos, array_proto, object_proto).unwrap_or(Value::undefined())
+    parse_value(gc, &chars, &mut pos, array_proto, object_proto).unwrap_or_else(|| {
+        let msg_ptr = HeapString::allocate(gc, "JSON.parse: unexpected end of JSON input");
+        let err = make_simple_object(gc, "message", Value::from_heap_ptr(msg_ptr as *mut u8));
+        vm.set_pending_exception(err);
+        Value::undefined()
+    })
 }
 
 /// JSON.stringify(value) — serialize a JS value to a JSON string.
@@ -1320,18 +1325,62 @@ pub fn default_builtins() -> Vec<Builtin> {
 
 // ---- Test262 assert builtins ----
 
-/// `assert.sameValue(actual, expected, description)`
-/// Performs StrictEqual comparison and throws Test262Error if mismatch.
-fn value_eq_strict(a: Value, b: Value) -> bool {
-    if let (Some(av), Some(bv)) = (a.as_smi(), b.as_smi()) {
-        av == bv
-    } else if (a.is_undefined() && b.is_undefined()) || (a.is_null() && b.is_null()) {
-        true
-    } else if let (Some(ap), Some(bp)) = (a.heap_ptr(), b.heap_ptr()) {
-        ap == bp
-    } else {
-        false
+/// SameValue comparison per ECMAScript §7.2.11.
+/// NaN === NaN, +0 !== -0.
+fn same_value(a: Value, b: Value) -> bool {
+    // Both undefined or both null
+    if a.is_undefined() && b.is_undefined() { return true; }
+    if a.is_null() && b.is_null() { return true; }
+    // Both booleans
+    if let (Some(ab), Some(bb)) = (a.to_boolean(), b.to_boolean()) {
+        return ab == bb;
     }
+    // Both heap pointers (strings, objects)
+    if let (Some(ap), Some(bp)) = (a.heap_ptr(), b.heap_ptr()) {
+        return ap == bp;
+    }
+    // Numeric comparison (accept both Smi and Float64)
+    let a_num = a.as_smi().map(|v| v as f64).or_else(|| a.as_float64());
+    let b_num = b.as_smi().map(|v| v as f64).or_else(|| b.as_float64());
+    match (a_num, b_num) {
+        (Some(av), Some(bv)) => {
+            // SameValue: NaN === NaN
+            if av.is_nan() && bv.is_nan() { return true; }
+            // SameValue: +0 !== -0
+            if av == 0.0 && bv == 0.0 {
+                return av.to_bits() == bv.to_bits();
+            }
+            av == bv
+        }
+        _ => false,
+    }
+}
+
+/// Strict equal comparison (JS === semantics).
+fn value_eq_strict(a: Value, b: Value) -> bool {
+    // Both Smi
+    if let (Some(av), Some(bv)) = (a.as_smi(), b.as_smi()) {
+        return av == bv;
+    }
+    // Numeric comparison: Smi vs Float64, or Float64 vs Float64
+    let a_num = a.as_smi().map(|v| v as f64).or_else(|| a.as_float64());
+    let b_num = b.as_smi().map(|v| v as f64).or_else(|| b.as_float64());
+    if let (Some(av), Some(bv)) = (a_num, b_num) {
+        return av == bv; // NaN ≠ NaN, +0 == -0
+    }
+    // Both undefined or both null
+    if (a.is_undefined() && b.is_undefined()) || (a.is_null() && b.is_null()) {
+        return true;
+    }
+    // Both booleans
+    if let (Some(ab), Some(bb)) = (a.to_boolean(), b.to_boolean()) {
+        return ab == bb;
+    }
+    // Both heap pointers
+    if let (Some(ap), Some(bp)) = (a.heap_ptr(), b.heap_ptr()) {
+        return ap == bp;
+    }
+    false
 }
 
 fn value_to_debug(v: Value) -> String {
@@ -1341,6 +1390,16 @@ fn value_to_debug(v: Value) -> String {
         "null".to_string()
     } else if let Some(n) = v.as_smi() {
         n.to_string()
+    } else if let Some(f) = v.as_float64() {
+        if f.is_nan() {
+            "NaN".to_string()
+        } else if f.is_infinite() {
+            if f.is_sign_negative() { "-Infinity".to_string() } else { "Infinity".to_string() }
+        } else if f.fract() == 0.0 && (-(1 << 30) as f64..(1 << 30) as f64).contains(&f) {
+            format!("{}", f as i64)
+        } else {
+            f.to_string()
+        }
     } else if let Some(ptr) = v.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_STRING {
@@ -1358,12 +1417,12 @@ pub(crate) fn make_error(gc: &mut SemiSpace, msg: &str) -> Value {
     make_simple_object(gc, "message", Value::from_heap_ptr(s as *mut u8))
 }
 
-/// assert.sameValue(actual, expected, description)
+/// assert.sameValue(actual, expected, description) — uses SameValue semantics.
 pub fn assert_same_value(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     let actual = args.first().copied().unwrap_or(Value::undefined());
     let expected = args.get(1).copied().unwrap_or(Value::undefined());
     let desc = args.get(2).map(|v| value_to_debug(*v)).unwrap_or_default();
-    if !value_eq_strict(actual, expected) {
+    if !same_value(actual, expected) {
         let msg = if desc.is_empty() {
             format!(
                 "assert.sameValue: expected {} but got {}",
@@ -1384,7 +1443,7 @@ pub fn assert_same_value(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: 
     Value::undefined()
 }
 
-/// assert.notSameValue(actual, expected, description)
+/// assert.notSameValue(actual, expected, description) — uses SameValue semantics.
 pub fn assert_not_same_value(
     gc: &mut SemiSpace,
     _this: Value,
@@ -1394,7 +1453,7 @@ pub fn assert_not_same_value(
     let actual = args.first().copied().unwrap_or(Value::undefined());
     let expected = args.get(1).copied().unwrap_or(Value::undefined());
     let desc = args.get(2).map(|v| value_to_debug(*v)).unwrap_or_default();
-    if value_eq_strict(actual, expected) {
+    if same_value(actual, expected) {
         let msg = if desc.is_empty() {
             format!(
                 "assert.notSameValue: expected different value but got {}",
@@ -1433,7 +1492,7 @@ pub fn assert_plain(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut 
 pub fn assert_is_same_value(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     let a = args.first().copied().unwrap_or(Value::undefined());
     let b = args.get(1).copied().unwrap_or(Value::undefined());
-    if value_eq_strict(a, b) {
+    if same_value(a, b) {
         Value::boolean(true)
     } else {
         Value::boolean(false)

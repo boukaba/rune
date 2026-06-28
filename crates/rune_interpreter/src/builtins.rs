@@ -509,6 +509,9 @@ fn to_integer_or_infinity(v: Value) -> f64 {
     if v.is_undefined() || v.is_null() {
         return 0.0;
     }
+    if let Some(b) = v.to_boolean() {
+        return if b { 1.0 } else { 0.0 };
+    }
     if let Some(smi) = v.as_smi() {
         return smi as f64;
     }
@@ -597,6 +600,173 @@ pub fn string_substr(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
     };
     let result = HeapString::allocate(gc, &s[int_start..end]);
     Value::from_heap_ptr(result as *mut u8)
+}
+
+/// String.prototype.trim() — removes whitespace from both ends.
+pub fn string_trim(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let s = string_from_value(this);
+    let result = HeapString::allocate(gc, s.trim_matches(char::is_whitespace));
+    Value::from_heap_ptr(result as *mut u8)
+}
+
+/// String.prototype.trimStart() — removes leading whitespace.
+pub fn string_trim_start(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let s = string_from_value(this);
+    let result = HeapString::allocate(gc, s.trim_start_matches(char::is_whitespace));
+    Value::from_heap_ptr(result as *mut u8)
+}
+
+/// String.prototype.trimEnd() — removes trailing whitespace.
+pub fn string_trim_end(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let s = string_from_value(this);
+    let result = HeapString::allocate(gc, s.trim_end_matches(char::is_whitespace));
+    Value::from_heap_ptr(result as *mut u8)
+}
+
+/// String.prototype.toLowerCase() — returns lowercased string.
+pub fn string_to_lower_case(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let s = string_from_value(this);
+    let result = HeapString::allocate(gc, &s.to_lowercase());
+    Value::from_heap_ptr(result as *mut u8)
+}
+
+/// String.prototype.toUpperCase() — returns uppercased string.
+pub fn string_to_upper_case(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let s = string_from_value(this);
+    let result = HeapString::allocate(gc, &s.to_uppercase());
+    Value::from_heap_ptr(result as *mut u8)
+}
+
+/// String.prototype.repeat(count) — returns string repeated count times.
+pub fn string_repeat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let s = string_from_value(this);
+    let count = args.first().copied().unwrap_or(Value::undefined());
+    let n = to_integer_or_infinity(count);
+    if n.is_infinite() || n < 0.0 || n.is_nan() {
+        let err = make_error(gc, "RangeError: Invalid count value");
+        vm.set_pending_exception(err);
+        return Value::undefined();
+    }
+    let n = n as usize;
+    if s.is_empty() || n == 0 {
+        let empty = HeapString::allocate(gc, "");
+        return Value::from_heap_ptr(empty as *mut u8);
+    }
+    let mut result = String::with_capacity(s.len() * n);
+    for _ in 0..n {
+        result.push_str(&s);
+    }
+    let heap = HeapString::allocate(gc, &result);
+    Value::from_heap_ptr(heap as *mut u8)
+}
+
+/// String.prototype.padStart(maxLength, fillString) — pads string to maxLength with fillString.
+pub fn string_pad_start(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let s = string_from_value(this);
+    let max_len = args.first().copied().unwrap_or(Value::undefined());
+    let target_len = to_integer_or_infinity(max_len) as usize;
+    if target_len <= s.len() {
+        let result = HeapString::allocate(gc, &s);
+        return Value::from_heap_ptr(result as *mut u8);
+    }
+    let fill = match args.get(1) {
+        Some(v) if !v.is_undefined() => value_to_js_string(*v),
+        None | Some(_) => " ".to_string(),
+    };
+    let fill = if fill.is_empty() { " ".to_string() } else { fill };
+    let pad_len = target_len - s.len();
+    let mut pad = String::with_capacity(pad_len);
+    while pad.len() < pad_len {
+        pad.push_str(&fill);
+    }
+    pad.truncate(pad_len);
+    let result_str = pad + &s;
+    let result = HeapString::allocate(gc, &result_str);
+    Value::from_heap_ptr(result as *mut u8)
+}
+
+/// String.prototype.padEnd(maxLength, fillString) — pads string to maxLength with fillString.
+pub fn string_pad_end(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let s = string_from_value(this);
+    let max_len = args.first().copied().unwrap_or(Value::undefined());
+    let target_len = to_integer_or_infinity(max_len) as usize;
+    if target_len <= s.len() {
+        let result = HeapString::allocate(gc, &s);
+        return Value::from_heap_ptr(result as *mut u8);
+    }
+    let fill = match args.get(1) {
+        Some(v) if !v.is_undefined() => value_to_js_string(*v),
+        None | Some(_) => " ".to_string(),
+    };
+    let fill = if fill.is_empty() { " ".to_string() } else { fill };
+    let pad_len = target_len - s.len();
+    let mut pad = String::with_capacity(pad_len);
+    while pad.len() < pad_len {
+        pad.push_str(&fill);
+    }
+    pad.truncate(pad_len);
+    let result_str = s + &pad;
+    let result = HeapString::allocate(gc, &result_str);
+    Value::from_heap_ptr(result as *mut u8)
+}
+
+/// String.prototype.toString() — returns the string value of the String object.
+pub fn string_to_string(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let s = string_from_value(this);
+    let result = HeapString::allocate(gc, &s);
+    Value::from_heap_ptr(result as *mut u8)
+}
+
+/// String.prototype.valueOf() — returns the primitive string value.
+/// Uses the same logic as toString for String.prototype.
+pub fn string_value_of(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let s = string_from_value(this);
+    let result = HeapString::allocate(gc, &s);
+    Value::from_heap_ptr(result as *mut u8)
+}
+
+/// String.prototype.concat(...args) — concatenates strings.
+pub fn string_concat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let s = string_from_value(this);
+    let mut result = s;
+    for &arg in args {
+        result.push_str(&value_to_js_string(arg));
+    }
+    let heap = HeapString::allocate(gc, &result);
+    Value::from_heap_ptr(heap as *mut u8)
 }
 
 /// String.prototype.split(separator, limit) — splits a string into an array of substrings.
@@ -1607,6 +1777,50 @@ pub fn default_builtins() -> Vec<Builtin> {
         Builtin {
             name: "String_prototype_substr",
             func: string_substr,
+        },
+        Builtin {
+            name: "String_prototype_trim",
+            func: string_trim,
+        },
+        Builtin {
+            name: "String_prototype_trimStart",
+            func: string_trim_start,
+        },
+        Builtin {
+            name: "String_prototype_trimEnd",
+            func: string_trim_end,
+        },
+        Builtin {
+            name: "String_prototype_toLowerCase",
+            func: string_to_lower_case,
+        },
+        Builtin {
+            name: "String_prototype_toUpperCase",
+            func: string_to_upper_case,
+        },
+        Builtin {
+            name: "String_prototype_repeat",
+            func: string_repeat,
+        },
+        Builtin {
+            name: "String_prototype_padStart",
+            func: string_pad_start,
+        },
+        Builtin {
+            name: "String_prototype_padEnd",
+            func: string_pad_end,
+        },
+        Builtin {
+            name: "String_prototype_concat",
+            func: string_concat,
+        },
+        Builtin {
+            name: "String_prototype_toString",
+            func: string_to_string,
+        },
+        Builtin {
+            name: "String_prototype_valueOf",
+            func: string_value_of,
         },
         Builtin {
             name: "Math_floor",

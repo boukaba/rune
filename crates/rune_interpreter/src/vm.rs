@@ -429,38 +429,42 @@ impl Vm {
         let code_point_at_handle = find_handle(&self.builtins, "String_prototype_codePointAt");
         let substring_handle = find_handle(&self.builtins, "String_prototype_substring");
         let substr_handle = find_handle(&self.builtins, "String_prototype_substr");
+        let trim_handle = find_handle(&self.builtins, "String_prototype_trim");
+        let trim_start_handle = find_handle(&self.builtins, "String_prototype_trimStart");
+        let trim_end_handle = find_handle(&self.builtins, "String_prototype_trimEnd");
+        let to_lower_handle = find_handle(&self.builtins, "String_prototype_toLowerCase");
+        let to_upper_handle = find_handle(&self.builtins, "String_prototype_toUpperCase");
+        let repeat_handle = find_handle(&self.builtins, "String_prototype_repeat");
+        let pad_start_handle = find_handle(&self.builtins, "String_prototype_padStart");
+        let pad_end_handle = find_handle(&self.builtins, "String_prototype_padEnd");
+        let concat_handle = find_handle(&self.builtins, "String_prototype_concat");
+        let to_string_handle = find_handle(&self.builtins, "String_prototype_toString");
+        let value_of_handle = find_handle(&self.builtins, "String_prototype_valueOf");
         if let (Some(char_at), Some(slice)) = (char_at_handle, slice_handle) {
             let mut str_proto_entries: Vec<(&str, Value)> = vec![
                 ("charAt", char_at),
                 ("slice", slice),
             ];
-            if let Some(split) = split_handle {
-                str_proto_entries.push(("split", split));
-            }
-            if let Some(idx) = index_of_handle {
-                str_proto_entries.push(("indexOf", idx));
-            }
-            if let Some(incl) = includes_handle {
-                str_proto_entries.push(("includes", incl));
-            }
-            if let Some(sw) = starts_with_handle {
-                str_proto_entries.push(("startsWith", sw));
-            }
-            if let Some(ew) = ends_with_handle {
-                str_proto_entries.push(("endsWith", ew));
-            }
-            if let Some(cc) = char_code_at_handle {
-                str_proto_entries.push(("charCodeAt", cc));
-            }
-            if let Some(cp) = code_point_at_handle {
-                str_proto_entries.push(("codePointAt", cp));
-            }
-            if let Some(sb) = substring_handle {
-                str_proto_entries.push(("substring", sb));
-            }
-            if let Some(sr) = substr_handle {
-                str_proto_entries.push(("substr", sr));
-            }
+            if let Some(split) = split_handle { str_proto_entries.push(("split", split)); }
+            if let Some(idx) = index_of_handle { str_proto_entries.push(("indexOf", idx)); }
+            if let Some(incl) = includes_handle { str_proto_entries.push(("includes", incl)); }
+            if let Some(sw) = starts_with_handle { str_proto_entries.push(("startsWith", sw)); }
+            if let Some(ew) = ends_with_handle { str_proto_entries.push(("endsWith", ew)); }
+            if let Some(cc) = char_code_at_handle { str_proto_entries.push(("charCodeAt", cc)); }
+            if let Some(cp) = code_point_at_handle { str_proto_entries.push(("codePointAt", cp)); }
+            if let Some(sb) = substring_handle { str_proto_entries.push(("substring", sb)); }
+            if let Some(sr) = substr_handle { str_proto_entries.push(("substr", sr)); }
+            if let Some(tr) = trim_handle { str_proto_entries.push(("trim", tr)); }
+            if let Some(ts) = trim_start_handle { str_proto_entries.push(("trimStart", ts)); }
+            if let Some(te) = trim_end_handle { str_proto_entries.push(("trimEnd", te)); }
+            if let Some(tl) = to_lower_handle { str_proto_entries.push(("toLowerCase", tl)); }
+            if let Some(tu) = to_upper_handle { str_proto_entries.push(("toUpperCase", tu)); }
+            if let Some(rp) = repeat_handle { str_proto_entries.push(("repeat", rp)); }
+            if let Some(ps) = pad_start_handle { str_proto_entries.push(("padStart", ps)); }
+            if let Some(pe) = pad_end_handle { str_proto_entries.push(("padEnd", pe)); }
+            if let Some(cn) = concat_handle { str_proto_entries.push(("concat", cn)); }
+            if let Some(ts) = to_string_handle { str_proto_entries.push(("toString", ts)); }
+            if let Some(vo) = value_of_handle { str_proto_entries.push(("valueOf", vo)); }
             let str_proto = make_object(gc, &str_proto_entries);
             self.builtin_wrappers
                 .insert("String.prototype".to_string(), str_proto);

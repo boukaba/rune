@@ -72,12 +72,16 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 - **GC:** Cheney semi-space, sound at 500K+ allocations
 - **SIDT:** O(1) property access via SIMD inline caches (NEON + SSE4.1), no megamorphic cliff
 - **AFPC cache:** rkyv bytecode persistence (13.5× compile speedup), AArch64 + x86-64 native code caching
+- **JSON:** `JSON.parse` + `JSON.stringify` (complete round-trip, cycle detection, NaN/Infinity → `null`)
+- **Array methods:** `filter`, `map`, `reduce`, `forEach`, `slice` (callback state machine, GC-safe across 200K elements)
+- **String methods:** `charAt`, `slice`, `split` (string separator, limit, empty separator edge cases)
+- **Global functions:** `parseInt` (radix, hex), `parseFloat` (Infinity, NaN, scientific notation)
 
 ## What Doesn't Work (Yet)
 
-- **Standard library:** No Map, Set, Promise, JSON, RegExp, Date, TypedArray, WeakRef
-- **String methods:** Only charAt, slice, length
-- **Array methods:** Only push, pop, length
+- **Standard library:** No Map, Set, Promise, RegExp, Date, TypedArray, WeakRef
+- **String methods:** No `charCodeAt`, `indexOf`, `replace`, `trim`, `toUpperCase`, `toLowerCase`
+- **Array methods:** No `find`, `some`, `every`, `sort`, `flat`, `flatMap`, `includes`, `indexOf`
 - **Modules:** No import/export (ESM)
 - **Classes:** No class syntax, super, getters/setters
 - **Async/await:** No async, await, for...of
@@ -92,9 +96,9 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 |---|---|---|---|
 | `rune '1'` / `node -e '1'` | **~4–7 ms** | ~26–33 ms | **~5–8× faster** |
 
-### Hot Loops (2026-06-28, post Float Self-Tagging NaN-boxing)
+### Hot Loops (2026-06-28, v0.3 stdlib — 387 tests)
 
-All benchmarks verified via `assert_eq!` for correctness. NaN-boxing eliminates all `HeapFloat64` allocation — float operations are register ops. JIT stats collected per benchmark (see `crates/rune_bench/results/`).
+All benchmarks verified via `assert_eq!` for correctness. NaN-boxing eliminates all `HeapFloat64` allocation — float operations are register ops. 387 tests pass. JIT stats collected per benchmark (see `crates/rune_bench/results/`).
 
 | Benchmark | Rune | Node 22 | Ratio | JIT entries | Bailouts | Notes |
 |---|---|---|---|---|---|---|
@@ -141,9 +145,11 @@ poly_prop_10shapes_1M timeline:
   + N=16 IC table         ── 169 ms  (-37%, 0 bailouts, trace runs natively)
 ```
 
-**Float Self-Tagging (NaN-boxing)** eliminated all `HeapFloat64` allocation in v0.3. Every interpreter float path (LoadFloat64, Math constants, Neg, comparisons) now uses `Value::from_float64` — inline NaN-encoded Values with zero GC allocation. The JIT's JumpIfFalse/JumpIfTrue handlers were fixed to check NaN-encoded values directly (removed stale float64 bailout branch). 317/317 tests pass.
+**Float Self-Tagging (NaN-boxing)** eliminated all `HeapFloat64` allocation in v0.3. Every interpreter float path (LoadFloat64, Math constants, Neg, comparisons) now uses `Value::from_float64` — inline NaN-encoded Values with zero GC allocation. The JIT's JumpIfFalse/JumpIfTrue handlers were fixed to check NaN-encoded values directly (removed stale float64 bailout branch). 387/387 tests pass.
 
 **Phase F inlining** shipped at 5% improvement on `jit_hot_function_1M` (129ms → 124ms). The design doc estimated 25-70ms — the gap comes from overestimating call dispatch overhead (actual ~6ns/call vs estimated ~90ns). The inliner is correct (316 tests, AFPC round-trip verified) and found a pre-existing silent data corruption bug (P26: Sub/Mul/Mod Smi-range overflow). Ships behind `--no-inline` flag (default) for safety.
+
+**Standard library (stdlib)** delivered JSON round-trip (`JSON.parse`/`JSON.stringify` with cycle detection, NaN/Infinity → `null`), array callback methods (`filter`/`map`/`reduce`/`forEach` via callback state machine), `Array.prototype.slice`, `String.prototype.split` (string separator), and `parseInt`/`parseFloat` globals. Boolean string coercion in the `Add` opcode fixed (`true + ""` → `"true"`, not `"undefined"`). 387 integration tests pass.
 
 ## Key Innovations
 
@@ -175,7 +181,7 @@ This makes Rune uniquely suited for serverless: functions can be compiled once d
 | **v0.0.2** ✅ | Expanded JIT opcode coverage (floats, property access, calls), trace compiler |
 | **v0.1.0** ✅ | Native JIT Call (Phase E, AArch64), property IC traces, trace-compiled loops |
 | **v0.2.0** ✅ | Phase F inlining (5% gain), N=16 IC table, AFPC round-trip with JIT |
-| **v0.3.0** 🔜 | Copy-and-patch JIT rewrite (arxiv `2011.13127`), **float self-tagging ✅** (arxiv `2411.16544`, NaN-boxed Values, 0 heap allocation for floats, 317 tests), Nofl GC (arxiv `2503.16971`) |
+| **v0.3.0** ✅ | Float self-tagging (NaN-boxing), stdlib (JSON round-trip, array methods, string split, parseInt/parseFloat), boolean coercion fix — 387 tests |
 | **v1.0.0** | Test262 >95%, production hardening, fuzzing |
 
 ## Development

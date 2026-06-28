@@ -8,6 +8,7 @@ pub const TAG_FUNC: u64 = 2;
 pub const TAG_FLOAT64: u64 = 3;
 pub const TAG_ARRAY: u64 = 4;
 pub const TAG_ENV: u64 = 5;
+pub const TAG_STRING_OBJ: u64 = 6;
 pub const TAG_FORWARDED: u64 = 7;
 
 /// Tag bits mask for GC header tag.
@@ -57,6 +58,10 @@ const SEMISPACE_SIZE: usize = 16 * 1024 * 1024; // 16 MiB
 const OBJECT_PROTOTYPE_OFFSET: usize = 24;
 /// Offset in bytes from object start to first property slot (matches object.rs OBJECT_HEADER_END)
 const OBJECT_SLOTS_OFFSET: usize = 32;
+/// StringObject layout constants (matches string_object.rs).
+const STRING_OBJ_PROTOTYPE_OFFSET: usize = 8;
+const STRING_OBJ_STRING_PTR_OFFSET: usize = 16;
+const STRING_OBJ_TOTAL_SIZE: usize = 24;
 
 /// Trait for providing current GC root slots.
 /// Implemented by Vm to register stack/frame/locals roots.
@@ -242,6 +247,12 @@ impl SemiSpace {
                         }
                     }
                     TAG_STRING => {}
+                    TAG_STRING_OBJ => {
+                        let str_ptr = scan_ptr.add(STRING_OBJ_STRING_PTR_OFFSET) as *mut u64;
+                        self.forward_value(str_ptr);
+                        let proto_ptr = scan_ptr.add(STRING_OBJ_PROTOTYPE_OFFSET) as *mut u64;
+                        self.forward_value(proto_ptr);
+                    }
                     _ => {}
                 }
 
@@ -284,6 +295,7 @@ impl SemiSpace {
                     let total = 24 + count * size_of::<u64>();
                     obj_start.add(align_up(total, 8))
                 }
+                TAG_STRING_OBJ => obj_start.add(STRING_OBJ_TOTAL_SIZE),
                 _ => obj_start.add(8),
             }
         }

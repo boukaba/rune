@@ -1,9 +1,10 @@
 use crate::vm::Vm;
 use rune_core::array::RuneArray;
-use rune_core::gc::{GcHeader, SemiSpace, TAG_ARRAY, TAG_OBJECT, TAG_STRING};
+use rune_core::gc::{GcHeader, SemiSpace, TAG_ARRAY, TAG_OBJECT, TAG_STRING, TAG_STRING_OBJ};
 use rune_core::object::JSObject;
 use rune_core::shape::{DENSE_ARRAY_SHAPE, PropertyKey, Shape};
 use rune_core::string::HeapString;
+use rune_core::string_object::StringObject;
 use rune_core::value::Value;
 
 /// A registered built-in function.
@@ -33,6 +34,9 @@ pub fn value_to_js_string(v: Value) -> String {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_STRING {
             unsafe { HeapString::to_string(ptr as *mut HeapString) }
+        } else if tag == TAG_STRING_OBJ {
+            let str_ptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
+            unsafe { HeapString::to_string(str_ptr as *mut HeapString) }
         } else {
             "[object Object]".to_string()
         }
@@ -212,22 +216,33 @@ pub fn string_from_char_code(
     Value::from_heap_ptr(ptr as *mut u8)
 }
 
+/// Extract the underlying string content from a TAG_STRING or TAG_STRING_OBJ value.
+fn string_from_value(this: Value) -> Option<String> {
+    if let Some(ptr) = this.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_STRING {
+            return Some(unsafe { HeapString::to_string(ptr as *mut HeapString) });
+        }
+        if tag == TAG_STRING_OBJ {
+            let str_ptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
+            return Some(unsafe { HeapString::to_string(str_ptr as *mut HeapString) });
+        }
+    }
+    None
+}
+
 /// String.prototype.charAt(index) — returns the character at index as a string.
 /// Per §22.1.3.1, OOB returns empty string, not undefined.
 pub fn string_char_at(gc: &mut SemiSpace, this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     let index = args.first().and_then(|v| v.as_smi()).unwrap_or(0) as usize;
-    if let Some(ptr) = this.heap_ptr() {
-        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-        if tag == TAG_STRING {
-            let s = unsafe { HeapString::to_string(ptr as *mut HeapString) };
-            if index >= s.chars().count() {
-                let empty = HeapString::allocate(gc, "");
-                return Value::from_heap_ptr(empty as *mut u8);
-            }
-            let ch = s.chars().nth(index).unwrap();
-            let result = HeapString::allocate(gc, &ch.to_string());
-            return Value::from_heap_ptr(result as *mut u8);
+    if let Some(s) = string_from_value(this) {
+        if index >= s.chars().count() {
+            let empty = HeapString::allocate(gc, "");
+            return Value::from_heap_ptr(empty as *mut u8);
         }
+        let ch = s.chars().nth(index).unwrap();
+        let result = HeapString::allocate(gc, &ch.to_string());
+        return Value::from_heap_ptr(result as *mut u8);
     }
     Value::undefined()
 }
@@ -241,35 +256,31 @@ pub fn string_slice(gc: &mut SemiSpace, this: Value, args: &[Value], _vm: &mut V
             .or_else(|| v.as_float64())
             .unwrap_or(f64::NAN)
     }
-    if let Some(ptr) = this.heap_ptr() {
-        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-        if tag == TAG_STRING {
-            let s = unsafe { HeapString::to_string(ptr as *mut HeapString) };
-            let len = s.len() as f64;
-            let raw_start = args.first().map(|&v| to_number(v)).unwrap_or(0.0);
-            let raw_end = args.get(1).map(|&v| to_number(v));
-            let int_start = if raw_start.is_nan() { 0.0 } else { raw_start };
-            let int_end = match raw_end {
-                Some(e) if e.is_nan() => 0.0,
-                Some(e) => e,
-                None => len,
-            };
-            let clamp = |v: f64| -> usize {
-                let v = if v.is_infinite() { if v.is_sign_negative() { 0.0 } else { len } }
-                        else if v < 0.0 { (len + v).max(0.0) }
-                        else { v.min(len) };
-                v as usize
-            };
-            let start = clamp(int_start);
-            let end = clamp(int_end);
-            if start >= end {
-                let empty = HeapString::allocate(gc, "");
-                return Value::from_heap_ptr(empty as *mut u8);
-            }
-            let result_s = &s[start..end];
-            let result = HeapString::allocate(gc, result_s);
-            return Value::from_heap_ptr(result as *mut u8);
+    if let Some(s) = string_from_value(this) {
+        let len = s.len() as f64;
+        let raw_start = args.first().map(|&v| to_number(v)).unwrap_or(0.0);
+        let raw_end = args.get(1).map(|&v| to_number(v));
+        let int_start = if raw_start.is_nan() { 0.0 } else { raw_start };
+        let int_end = match raw_end {
+            Some(e) if e.is_nan() => 0.0,
+            Some(e) => e,
+            None => len,
+        };
+        let clamp = |v: f64| -> usize {
+            let v = if v.is_infinite() { if v.is_sign_negative() { 0.0 } else { len } }
+                    else if v < 0.0 { (len + v).max(0.0) }
+                    else { v.min(len) };
+            v as usize
+        };
+        let start = clamp(int_start);
+        let end = clamp(int_end);
+        if start >= end {
+            let empty = HeapString::allocate(gc, "");
+            return Value::from_heap_ptr(empty as *mut u8);
         }
+        let result_s = &s[start..end];
+        let result = HeapString::allocate(gc, result_s);
+        return Value::from_heap_ptr(result as *mut u8);
     }
     Value::undefined()
 }
@@ -286,15 +297,8 @@ pub fn string_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
             0
         }
     }
-    let s = match this.heap_ptr() {
-        Some(ptr) => {
-            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-            if tag == TAG_STRING {
-                unsafe { HeapString::to_string(ptr as *mut HeapString) }
-            } else {
-                return Value::undefined();
-            }
-        }
+    let s = match string_from_value(this) {
+        Some(s) => s,
         None => return Value::undefined(),
     };
     let limit = args.get(1).copied().unwrap_or(Value::undefined());
@@ -1419,6 +1423,9 @@ fn value_to_debug(v: Value) -> String {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_STRING {
             unsafe { HeapString::to_string(ptr as *mut HeapString) }
+        } else if tag == TAG_STRING_OBJ {
+            let str_ptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
+            format!("String {{ [[StringData]]: \"{}\" }}", unsafe { HeapString::to_string(str_ptr as *mut HeapString) })
         } else {
             format!("{:p}", ptr)
         }

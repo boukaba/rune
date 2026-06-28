@@ -1087,6 +1087,27 @@ fn test_string_length() {
 }
 
 #[test]
+fn test_new_string_wrapper() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"var s = new String("hello"); typeof s"#).unwrap();
+    assert_eq!(r.as_smi(), None, "typeof result is a string, not smi");
+    let r = ctx.eval(r#"var s = new String("hello"); s.length"#).unwrap();
+    assert_eq!(r.as_smi(), Some(5));
+    let r = ctx.eval(r#"var s = new String("hello"); s[0]"#).unwrap();
+    let s = unsafe { rune_core::string::HeapString::to_string(r.heap_ptr().unwrap() as *mut rune_core::string::HeapString) };
+    assert_eq!(s, "h");
+    let r = ctx.eval(r#"var s = new String("hello"); s.slice(1, 3)"#).unwrap();
+    let s = unsafe { rune_core::string::HeapString::to_string(r.heap_ptr().unwrap() as *mut rune_core::string::HeapString) };
+    assert_eq!(s, "el");
+    let r = ctx.eval(r#"var s = new String("hello"); s.charAt(0)"#).unwrap();
+    let s = unsafe { rune_core::string::HeapString::to_string(r.heap_ptr().unwrap() as *mut rune_core::string::HeapString) };
+    assert_eq!(s, "h");
+    let r = ctx.eval(r#"String("hello")"#).unwrap();
+    let s = unsafe { rune_core::string::HeapString::to_string(r.heap_ptr().unwrap() as *mut rune_core::string::HeapString) };
+    assert_eq!(s, "hello");
+}
+
+#[test]
 fn test_math_floor() {
     let mut ctx = Context::new_small();
     let r = ctx.eval("Math.floor(3.7)").unwrap();

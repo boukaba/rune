@@ -1,4 +1,4 @@
-use crate::builtins::{Builtin, BuiltinFn, make_error, value_to_js_string};
+use crate::builtins::{Builtin, BuiltinFn, make_error, string_builtin, value_to_js_string};
 use crate::generator::Generator;
 use crate::ic::{IcEntry, IcStats, InlineCache, LoopTrace, TraceOp};
 use rune_bytecode::opcode::{BytecodeProgram, Instruction, Opcode};
@@ -7,9 +7,10 @@ use rune_core::env::EnvObject;
 
 use rune_core::function::Func;
 use rune_core::gc::{
-    GcHeader, RootProvider, SemiSpace, TAG_ARRAY, TAG_FLOAT64, TAG_FUNC, TAG_OBJECT, TAG_STRING,
+    GcHeader, RootProvider, SemiSpace, TAG_ARRAY, TAG_FLOAT64, TAG_FUNC, TAG_OBJECT, TAG_STRING, TAG_STRING_OBJ,
 };
 use rune_core::object::JSObject;
+use rune_core::string_object::StringObject;
 use rune_core::shape::{DENSE_ARRAY_SHAPE, PROTOTYPE_KEY, PropertyKey, Shape};
 use rune_core::string::HeapString;
 use rune_core::value::Value;
@@ -286,6 +287,7 @@ pub struct Vm {
     /// Reference to Array.prototype for setting on newly created arrays.
     pub array_prototype: Value,
     pub string_prototype: Value,
+    pub string_constructor: Value,
     pub object_prototype: Value,
     pub function_prototype: Value,
     /// Pending exception set by a builtin (checked after builtin dispatch).
@@ -355,6 +357,7 @@ impl Vm {
             eval_fn: UnsafeCell::new(None),
             array_prototype: Value::undefined(),
             string_prototype: Value::undefined(),
+            string_constructor: Value::undefined(),
             object_prototype: Value::undefined(),
             function_prototype: Value::undefined(),
             pending_exception: None,
@@ -443,6 +446,7 @@ impl Vm {
         // String constructor with .fromCharCode()
         if let Some(handle) = find_handle(&self.builtins, "String_fromCharCode") {
             let str_ctor = make_object(gc, &[("fromCharCode", handle)]);
+            self.string_constructor = str_ctor;
             self.builtin_wrappers.insert("String".to_string(), str_ctor);
         }
 
@@ -710,6 +714,7 @@ impl Vm {
         gc.push_root(&self.object_prototype as *const Value as *mut u64);
         gc.push_root(&self.array_prototype as *const Value as *mut u64);
         gc.push_root(&self.string_prototype as *const Value as *mut u64);
+        gc.push_root(&self.string_constructor as *const Value as *mut u64);
         gc.push_root(&self.function_prototype as *const Value as *mut u64);
         // Root pre-allocated typeof result strings (JIT typeof_helper reads these)
         for v in &self.typeof_strings {
@@ -1766,12 +1771,17 @@ impl Vm {
                             let ptr = obj.heap_ptr().unwrap();
                             unsafe { (*(ptr as *const GcHeader)).tag() }
                         };
-                        if tag == TAG_STRING {
-                            // String property access
+                        if tag == TAG_STRING || tag == TAG_STRING_OBJ {
+                            let string_ptr = if tag == TAG_STRING {
+                                obj.heap_ptr().unwrap() as *mut u8
+                            } else {
+                                unsafe { StringObject::string_ptr(obj.heap_ptr().unwrap() as *mut StringObject) }
+                            };
+                            // String property access (both primitive and wrapper)
                             if let Some(index) = value_to_array_index(raw_key) {
                                 // Numeric index: return character at index
                                 let s = unsafe {
-                                    HeapString::to_string(obj.heap_ptr().unwrap() as *mut HeapString)
+                                    HeapString::to_string(string_ptr as *mut HeapString)
                                 };
                                 let ch = s.chars().nth(index);
                                 match ch {
@@ -1789,9 +1799,7 @@ impl Vm {
                                     if key_str == "length" {
                                         // String length
                                         let s = unsafe {
-                                            HeapString::to_string(
-                                                obj.heap_ptr().unwrap() as *mut HeapString
-                                            )
+                                            HeapString::to_string(string_ptr as *mut HeapString)
                                         };
                                         let len = s.encode_utf16().count();
                                         Value::smi(len as i32)
@@ -2446,6 +2454,7 @@ impl Vm {
                             TAG_STRING => "string",
                             TAG_FUNC => "function",
                             TAG_FLOAT64 => "number",
+                            TAG_STRING_OBJ => "object",
                             _ => "object",
                         }
                     } else {
@@ -2887,6 +2896,26 @@ impl Vm {
                     let mut args: Vec<Value> = (0..argc).map(|_| self.pop()).collect();
                     args.reverse();
                     let constructor = self.pop();
+                    // String constructor [[Construct]]: create String wrapper
+                    if constructor == self.string_constructor {
+                        let arg = args.first().copied().unwrap_or(Value::undefined());
+                        let s = value_to_js_string(arg);
+                        let str_ptr = HeapString::allocate(gc, &s);
+                        let str_obj = if self.string_prototype.is_heap_object()
+                            && let Some(proto_ptr) = self.string_prototype.heap_ptr()
+                        {
+                            StringObject::allocate(
+                                gc,
+                                str_ptr as *mut u8,
+                                Value::from_heap_ptr(proto_ptr),
+                            )
+                        } else {
+                            StringObject::allocate(gc, str_ptr as *mut u8, Value::undefined())
+                        };
+                        self.push(Value::from_heap_ptr(str_obj as *mut u8));
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    }
                     // Create a new empty object
                     let shape = Shape::empty();
                     let obj = JSObject::allocate(gc, shape, &[]);
@@ -3109,6 +3138,20 @@ impl Vm {
                             self.frames[fi].pc = pc + 1;
                             continue;
                         }
+                    }
+
+                    // String constructor called as a function (not new)
+                    if callee == self.string_constructor {
+                        let result = string_builtin(gc, this, &args, self);
+                        if let Some(exc) = self.pending_exception.take() {
+                            if let Some(exit) = self.handle_throw(gc, exc) {
+                                return exit;
+                            }
+                            continue;
+                        }
+                        self.push(result);
+                        self.frames[fi].pc = pc + 1;
+                        continue;
                     }
 
                     if let Some(ptr) = callee.heap_ptr() {
@@ -4386,6 +4429,9 @@ fn value_to_debug_string(val: Value) -> String {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_STRING {
             unsafe { HeapString::to_string(ptr as *mut HeapString) }
+        } else if tag == TAG_STRING_OBJ {
+            let str_ptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
+            unsafe { HeapString::to_string(str_ptr as *mut HeapString) }
         } else {
             "[object Object]".to_string()
         }
@@ -4498,6 +4544,27 @@ fn load_property_recursive(obj: Value, raw_key: Value, function_prototype: Optio
                 }
                 current = Value::from_heap_ptr(proto);
                 continue;
+            } else if tag == TAG_STRING_OBJ {
+                // String wrapper: own "length" property, then walk to String.prototype
+                if let Some(key_ptr) = raw_key.heap_ptr() {
+                    let key_tag = unsafe { (*(key_ptr as *const GcHeader)).tag() };
+                    if key_tag == TAG_STRING {
+                        let key_str = unsafe { HeapString::to_string(key_ptr as *mut HeapString) };
+                        if key_str == "length" {
+                            let str_ptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
+                            let s = unsafe { HeapString::to_string(str_ptr as *mut HeapString) };
+                            let len = s.encode_utf16().count();
+                            return Value::smi(len as i32);
+                        }
+                    }
+                }
+                // Walk to String.prototype
+                let proto = unsafe { StringObject::prototype(ptr as *mut StringObject) };
+                if !proto.is_null() {
+                    current = Value::from_heap_ptr(proto);
+                    continue;
+                }
+                return Value::undefined();
             } else if tag == TAG_FUNC {
                 if let Some(key) = value_to_prop_key(raw_key)
                     && key == *PROTOTYPE_KEY
@@ -4746,8 +4813,13 @@ fn to_number(v: Value) -> f64 {
         }
     } else if let Some(ptr) = v.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-        if tag == TAG_STRING {
-            let s = unsafe { HeapString::to_string(ptr as *mut HeapString) };
+        if tag == TAG_STRING || tag == TAG_STRING_OBJ {
+            let s = if tag == TAG_STRING {
+                unsafe { HeapString::to_string(ptr as *mut HeapString) }
+            } else {
+                let str_ptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
+                unsafe { HeapString::to_string(str_ptr as *mut HeapString) }
+            };
             let trimmed = s.trim();
             if trimmed.is_empty() {
                 return 0.0;
@@ -5237,8 +5309,8 @@ pub unsafe extern "C" fn rune_jit_call_helper(
     let callee_raw = unsafe { *args_ptr.sub(argc_usize + 1) };
     let callee = Value::from_raw(callee_raw);
 
-    if let Some(ptr) = callee.heap_ptr() {
-        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+                    if let Some(ptr) = callee.heap_ptr() {
+                        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_FUNC {
             let func_ptr = ptr as *mut Func;
             let jit_entry = unsafe { Func::jit_entry(func_ptr) };

@@ -96,9 +96,9 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 |---|---|---|---|
 | `rune '1'` / `node -e '1'` | **~4–7 ms** | ~26–33 ms | **~5–8× faster** |
 
-### Hot Loops (2026-06-28, v0.3 stdlib — 387 tests)
+### Hot Loops (2026-06-28, v0.3+ — 392 tests)
 
-All benchmarks verified via `assert_eq!` for correctness. NaN-boxing eliminates all `HeapFloat64` allocation — float operations are register ops. 387 tests pass. JIT stats collected per benchmark (see `crates/rune_bench/results/`).
+All benchmarks verified via `assert_eq!` for correctness. NaN-boxing eliminates all `HeapFloat64` allocation — float operations are register ops. 392 tests pass. JIT stats collected per benchmark (see `crates/rune_bench/results/`).
 
 | Benchmark | Rune | Node 22 | Ratio | JIT entries | Bailouts | Notes |
 |---|---|---|---|---|---|---|
@@ -145,11 +145,13 @@ poly_prop_10shapes_1M timeline:
   + N=16 IC table         ── 169 ms  (-37%, 0 bailouts, trace runs natively)
 ```
 
-**Float Self-Tagging (NaN-boxing)** eliminated all `HeapFloat64` allocation in v0.3. Every interpreter float path (LoadFloat64, Math constants, Neg, comparisons) now uses `Value::from_float64` — inline NaN-encoded Values with zero GC allocation. The JIT's JumpIfFalse/JumpIfTrue handlers were fixed to check NaN-encoded values directly (removed stale float64 bailout branch). 387/387 tests pass.
+**Float Self-Tagging (NaN-boxing)** eliminated all `HeapFloat64` allocation in v0.3. Every interpreter float path (LoadFloat64, Math constants, Neg, comparisons) now uses `Value::from_float64` — inline NaN-encoded Values with zero GC allocation. The JIT's JumpIfFalse/JumpIfTrue handlers were fixed to check NaN-encoded values directly (removed stale float64 bailout branch). 392/392 tests pass.
 
 **Phase F inlining** shipped at 5% improvement on `jit_hot_function_1M` (129ms → 124ms). The design doc estimated 25-70ms — the gap comes from overestimating call dispatch overhead (actual ~6ns/call vs estimated ~90ns). The inliner is correct (316 tests, AFPC round-trip verified) and found a pre-existing silent data corruption bug (P26: Sub/Mul/Mod Smi-range overflow). Ships behind `--no-inline` flag (default) for safety.
 
-**Standard library (stdlib)** delivered JSON round-trip (`JSON.parse`/`JSON.stringify` with cycle detection, NaN/Infinity → `null`), array callback methods (`filter`/`map`/`reduce`/`forEach` via callback state machine), `Array.prototype.slice`, `String.prototype.split` (string separator), and `parseInt`/`parseFloat` globals. Boolean string coercion in the `Add` opcode fixed (`true + ""` → `"true"`, not `"undefined"`). 387 integration tests pass.
+**Standard library (stdlib)** delivered JSON round-trip (`JSON.parse`/`JSON.stringify` with cycle detection, NaN/Infinity → `null`), array callback methods (`filter`/`map`/`reduce`/`forEach` via callback state machine), `Array.prototype.slice`, `String.prototype.split` (string separator), and `parseInt`/`parseFloat` globals. Boolean string coercion in the `Add` opcode fixed (`true + ""` → `"true"`, not `"undefined"`). 392 integration tests pass.
+
+**Sprint 18** extended the callback state machine to support non-TAG_ARRAY objects via `array_like_length`/`array_like_index` helpers — array builtins now work on arguments objects and other array-like receivers. `Function.prototype.call` implemented using the same pending-callback pattern. Builtin exceptions now route through the pending-exception mechanism, making all builtin errors catchable by JS `try/catch`. Test262 harness tracks assert calls and reports spec-conformant human-readable errors. String comparison in `StrictEq` fixed to compare by content, not heap pointer. 392/392 tests pass.
 
 ## Key Innovations
 
@@ -182,6 +184,7 @@ This makes Rune uniquely suited for serverless: functions can be compiled once d
 | **v0.1.0** ✅ | Native JIT Call (Phase E, AArch64), property IC traces, trace-compiled loops |
 | **v0.2.0** ✅ | Phase F inlining (5% gain), N=16 IC table, AFPC round-trip with JIT |
 | **v0.3.0** ✅ | Float self-tagging (NaN-boxing), stdlib (JSON round-trip, array methods, string split, parseInt/parseFloat), boolean coercion fix — 387 tests |
+| **Sprint 18** ✅ | Non-TAG_ARRAY refactor, Function.prototype.call, P27 test262 harness (assert tracking + human-readable errors), P29 builtin throws catchable by try/catch, string same-value fix, boolean display fix, string_slice float edge cases, reduce mutation fix — 392 tests |
 | **v1.0.0** | Test262 >95%, production hardening, fuzzing |
 
 ## Development

@@ -164,6 +164,15 @@ pub(crate) struct PendingAssert {
     pub(crate) source_frame_depth: usize,
 }
 
+/// State for a pending Function.prototype.call invocation.
+/// Set by the call builtin, consumed by the Return handler
+/// when the target function's frame returns.
+pub(crate) struct PendingCall {
+    /// Number of frames on the stack when the call was initiated
+    /// (the frame depth that, after pop, indicates the call returned).
+    pub(crate) source_frame_depth: usize,
+}
+
 /// Type of pending array operation (filter/map/reduce).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum ArrayOpKind {
@@ -276,15 +285,16 @@ pub struct Vm {
     pub eval_fn: UnsafeCell<Option<EvalFn>>,
     /// Reference to Array.prototype for setting on newly created arrays.
     pub array_prototype: Value,
-    /// Reference to String.prototype for string property access.
     pub string_prototype: Value,
-    /// Reference to Object.prototype for setting on newly created objects.
     pub object_prototype: Value,
+    pub function_prototype: Value,
     /// Pending exception set by a builtin (checked after builtin dispatch).
     pub pending_exception: Option<Value>,
     /// Pending array operation (filter/map/reduce) with callback state machine.
     /// Set by the builtin, consumed/updated by the Return handler.
     pub(crate) pending_array_op: Option<ArrayOpState>,
+    /// Pending Function.prototype.call invocation.
+    pub(crate) pending_call: Option<PendingCall>,
     /// Pending assert.throws callback.
     pub(crate) pending_assert: Option<PendingAssert>,
     /// Whether an assert.* function was called during the current execution.
@@ -346,8 +356,10 @@ impl Vm {
             array_prototype: Value::undefined(),
             string_prototype: Value::undefined(),
             object_prototype: Value::undefined(),
+            function_prototype: Value::undefined(),
             pending_exception: None,
             pending_array_op: None,
+            pending_call: None,
             pending_assert: None,
             assert_called: false,
         }
@@ -417,9 +429,14 @@ impl Vm {
             self.string_prototype = str_proto;
         }
 
-        // Array constructor with .isArray()
+        // Array constructor with .isArray() and .prototype
         if let Some(handle) = find_handle(&self.builtins, "Array_isArray") {
-            let arr_ctor = make_object(gc, &[("isArray", handle)]);
+            let arr_proto_val = self
+                .builtin_wrappers
+                .get("Array.prototype")
+                .copied()
+                .unwrap_or(Value::undefined());
+            let arr_ctor = make_object(gc, &[("isArray", handle), ("prototype", arr_proto_val)]);
             self.builtin_wrappers.insert("Array".to_string(), arr_ctor);
         }
 
@@ -459,6 +476,12 @@ impl Vm {
             }
             let json_obj = make_object(gc, &json_entries);
             self.builtin_wrappers.insert("JSON".to_string(), json_obj);
+        }
+
+        // Function.prototype with .call() method
+        if let Some(call_handle) = find_handle(&self.builtins, "Function_prototype_call") {
+            let func_proto = make_object(gc, &[("call", call_handle)]);
+            self.function_prototype = func_proto;
         }
 
         // Object.prototype — an empty object that serves as default [[Prototype]]
@@ -687,6 +710,7 @@ impl Vm {
         gc.push_root(&self.object_prototype as *const Value as *mut u64);
         gc.push_root(&self.array_prototype as *const Value as *mut u64);
         gc.push_root(&self.string_prototype as *const Value as *mut u64);
+        gc.push_root(&self.function_prototype as *const Value as *mut u64);
         // Root pre-allocated typeof result strings (JIT typeof_helper reads these)
         for v in &self.typeof_strings {
             gc.push_root(v as *const Value as *mut u64);
@@ -773,6 +797,10 @@ impl Vm {
         });
         // Update source_frame_depth if pending array op is active
         if let Some(ref mut state) = self.pending_array_op {
+            state.source_frame_depth = self.frames.len() - 1;
+        }
+        // Update source_frame_depth if pending call is active
+        if let Some(ref mut state) = self.pending_call {
             state.source_frame_depth = self.frames.len() - 1;
         }
         // Update source_frame_depth if pending assert is active
@@ -1490,7 +1518,7 @@ impl Vm {
                 Opcode::In => {
                     let obj = self.pop();
                     let key = self.pop();
-                    let found = has_property(obj, key);
+                    let found = has_property(obj, key, Some(self.function_prototype));
                     self.push(Value::boolean(found));
                     self.frames[fi].pc = pc + 1;
                 }
@@ -1933,11 +1961,19 @@ impl Vm {
                                     &instr,
                                     obj,
                                     raw_key,
+                                    Some(self.function_prototype),
                                 )
                             } else {
                                 // No IC attached — fall back to full lookup
-                                load_property_recursive(obj, raw_key)
+                                load_property_recursive(obj, raw_key, Some(self.function_prototype))
                             }
+                        }
+                    } else if let Some(smi) = obj.as_smi() {
+                        // Builtin handles (negative Smis) check Function.prototype
+                        if smi < 0 && self.function_prototype.is_heap_object() {
+                            load_property_recursive(self.function_prototype, raw_key, Some(self.function_prototype))
+                        } else {
+                            Value::undefined()
                         }
                     } else {
                         Value::undefined()
@@ -2007,6 +2043,7 @@ impl Vm {
                         &instr,
                         obj,
                         raw_key,
+                        Some(self.function_prototype),
                     );
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
@@ -3055,11 +3092,11 @@ impl Vm {
                                     }
                                     continue;
                                 }
-                                if self.pending_array_op.is_some() || self.pending_assert.is_some() {
-                                    // Array method builtin or assert.throws set up a callback.
-                                    // Don't push result or advance pc — the callback frame
-                                    // is already on the stack. The Return handler will
-                                    // continue the state machine.
+                                if self.pending_array_op.is_some() || self.pending_call.is_some() || self.pending_assert.is_some() {
+                                    // Array method builtin or .call() or assert.throws
+                                    // set up a callback. Don't push result or advance pc —
+                                    // the callback frame is already on the stack.
+                                    // The Return handler will continue the state machine.
                                     continue;
                                 }
                                 self.push(result);
@@ -3402,7 +3439,7 @@ impl Vm {
                                     }
                                     continue;
                                 }
-                                if self.pending_array_op.is_some() {
+                                if self.pending_array_op.is_some() || self.pending_call.is_some() {
                                     continue;
                                 }
                                 self.push(result);
@@ -3645,6 +3682,17 @@ impl Vm {
                         if let Some(exit) = self.handle_throw(gc, err) {
                             return exit;
                         }
+                        continue;
+                    }
+                    // Check if this return completes a pending .call() invocation.
+                    if let Some(pc) = self.pending_call.take()
+                        && self.frames.len() == pc.source_frame_depth
+                    {
+                        // Target function returned. Push result and advance caller PC.
+                        self.stack.truncate(callee_base);
+                        self.push(result);
+                        let caller_idx = self.frames.len() - 1;
+                        self.frames[caller_idx].pc += 1;
                         continue;
                     }
                     if self.frames.is_empty() {
@@ -4379,7 +4427,7 @@ const MAX_PROTOTYPE_DEPTH: usize = 256;
 /// Implements OrdinaryGet (§10.1.8.1): check own property, then recurse on [[Prototype]].
 /// For dense arrays: numeric keys access elements directly; non-numeric walks to prototype.
 /// Returns undefined if the chain exceeds MAX_PROTOTYPE_DEPTH (prevents infinite loops on cycles).
-fn load_property_recursive(obj: Value, raw_key: Value) -> Value {
+fn load_property_recursive(obj: Value, raw_key: Value, function_prototype: Option<Value>) -> Value {
     let mut current = obj;
     let mut depth = 0;
     loop {
@@ -4387,6 +4435,24 @@ fn load_property_recursive(obj: Value, raw_key: Value) -> Value {
             return Value::undefined();
         }
         depth += 1;
+        // Builtin handles (negative Smis) are function-like: check Function.prototype
+        if let Some(smi) = current.as_smi() {
+            if smi < 0 {
+                if let Some(fp) = function_prototype {
+                    if fp.is_heap_object() && let Some(ptr) = fp.heap_ptr() {
+                        if let Some(key) = value_to_prop_key(raw_key) {
+                            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                            if let Some(slot) = shape.lookup(&key) {
+                                return unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+                            }
+                        }
+                    }
+                }
+                return Value::undefined();
+            }
+            // Non-negative Smis (real integers) have no properties
+            return Value::undefined();
+        }
         if let Some(ptr) = current.heap_ptr() {
             let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
             if tag == TAG_OBJECT {
@@ -4441,6 +4507,13 @@ fn load_property_recursive(obj: Value, raw_key: Value) -> Value {
                         return Value::from_heap_ptr(proto_ptr);
                     }
                 }
+                // Walk Function.prototype for other properties (e.g. .call, .apply, .bind)
+                if let Some(fp) = function_prototype {
+                    if fp.is_heap_object() {
+                        current = fp;
+                        continue;
+                    }
+                }
                 return Value::undefined();
             }
         }
@@ -4459,6 +4532,7 @@ fn load_property_recursive_ic(
     instr: &Instruction,
     obj: Value,
     raw_key: Value,
+    function_prototype: Option<Value>,
 ) -> Value {
     // Check IC first before doing full lookup
     if instr.ic_index >= 0
@@ -4494,7 +4568,7 @@ fn load_property_recursive_ic(
         }
     }
 
-    let result = load_property_recursive(obj, raw_key);
+    let result = load_property_recursive(obj, raw_key, function_prototype);
     // Populate IC for all result types
     if instr.ic_index >= 0
         && let Some(ptr) = obj.heap_ptr()
@@ -4761,7 +4835,19 @@ fn ic_cache_key(shape_id: u64, raw_key: Value) -> (u64, u64) {
 
 /// Check if an object has a property (for the `in` operator).
 /// Returns false for non-object values (primitives are not objects).
-fn has_property(obj: Value, raw_key: Value) -> bool {
+fn has_property(obj: Value, raw_key: Value, function_prototype: Option<Value>) -> bool {
+    // Builtin handles (negative Smis) are function-like: check Function.prototype
+    if let Some(smi) = obj.as_smi() {
+        if smi < 0 {
+            if let Some(fp) = function_prototype {
+                if fp.is_heap_object() {
+                    return has_property(fp, raw_key, function_prototype);
+                }
+            }
+            return false;
+        }
+        return false;
+    }
     if let Some(ptr) = obj.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_OBJECT {
@@ -4830,12 +4916,19 @@ fn has_property(obj: Value, raw_key: Value) -> bool {
                     Value::from_heap_ptr(proto)
                 },
                 raw_key,
+                function_prototype,
             )
         } else if tag == TAG_FUNC {
             if let Some(key) = value_to_prop_key(raw_key)
                 && key == *PROTOTYPE_KEY
             {
                 return true;
+            }
+            // Check Function.prototype
+            if let Some(fp) = function_prototype {
+                if fp.is_heap_object() {
+                    return has_property(fp, raw_key, function_prototype);
+                }
             }
             false
         } else if tag == TAG_STRING {

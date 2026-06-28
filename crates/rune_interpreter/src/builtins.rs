@@ -971,6 +971,37 @@ fn f64_to_json_string(f: f64) -> String {
     f64::to_string(&f)
 }
 
+/// Function.prototype.call(thisArg, ...args) — calls `this` with the given thisArg and arguments.
+/// `this` is the function to call, args[0] is the new this value, args[1..] are call arguments.
+pub fn call_builtin(_gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let target = this;
+    let new_this = args.first().copied().unwrap_or(Value::undefined());
+    let call_args: Vec<Value> = args.iter().skip(1).copied().collect();
+
+    // If target is a builtin, call it directly.
+    // If it sets up pending_array_op (like array methods), that works naturally.
+    if let Some(smi) = target.as_smi() {
+        if smi < 0 {
+            let id = ((-smi) as usize) - 1;
+            if id < vm.builtins.len() {
+                return (vm.builtins[id].func)(_gc, new_this, &call_args, vm);
+            }
+        }
+    }
+    // If target is a JS function, use the pending callback pattern.
+    if let Some(ptr) = target.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const rune_core::gc::GcHeader)).tag() };
+        if tag == rune_core::gc::TAG_FUNC {
+            vm.pending_call = Some(crate::vm::PendingCall {
+                source_frame_depth: 0,
+            });
+            vm.push_callback_call(_gc, target, new_this, call_args);
+            return Value::undefined();
+        }
+    }
+    Value::undefined()
+}
+
 /// Array.prototype.slice(start, end) — returns a new dense array with elements from [start, end).
 pub fn array_slice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let length = match crate::vm::array_like_length(this) {
@@ -1294,6 +1325,10 @@ pub fn default_builtins() -> Vec<Builtin> {
         Builtin {
             name: "Array_prototype_slice",
             func: array_slice,
+        },
+        Builtin {
+            name: "Function_prototype_call",
+            func: call_builtin,
         },
         // Test262 assert builtins
         Builtin {

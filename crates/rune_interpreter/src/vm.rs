@@ -1,4 +1,4 @@
-use crate::builtins::{Builtin, BuiltinFn, make_error, string_builtin, value_to_js_string};
+use crate::builtins::{Builtin, BuiltinFn, make_error, string_builtin, to_primitive_string, value_to_js_string};
 use crate::generator::Generator;
 use crate::ic::{IcEntry, IcStats, InlineCache, LoopTrace, TraceOp};
 use rune_bytecode::opcode::{BytecodeProgram, Instruction, Opcode};
@@ -174,6 +174,15 @@ pub(crate) struct PendingCall {
     pub(crate) source_frame_depth: usize,
 }
 
+/// State for a pending primitive conversion (ToPrimitive via user-defined toString/valueOf).
+/// Set by Opcode::Add, Opcode::ToString, etc., consumed by the Return handler.
+pub(crate) struct PendingPrimitiveConversion {
+    /// Frame depth when the conversion was requested.
+    pub(crate) source_frame_depth: usize,
+    /// The other operand (already primitive), to be pushed back after conversion completes.
+    pub(crate) other_operand: Value,
+}
+
 /// Type of pending array operation (filter/map/reduce).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum ArrayOpKind {
@@ -299,6 +308,8 @@ pub struct Vm {
     pub(crate) pending_call: Option<PendingCall>,
     /// Pending assert.throws callback.
     pub(crate) pending_assert: Option<PendingAssert>,
+    /// Pending primitive conversion (ToPrimitive on object for +, ToString, etc.).
+    pub(crate) pending_primitive_conversion: Option<PendingPrimitiveConversion>,
     /// Whether an assert.* function was called during the current execution.
     /// Reset to false at the start of execute(). Used by the test262 runner
     /// to distinguish "test passed" from "test ran without asserting anything."
@@ -364,6 +375,7 @@ impl Vm {
             pending_array_op: None,
             pending_call: None,
             pending_assert: None,
+            pending_primitive_conversion: None,
             assert_called: false,
         }
     }
@@ -1251,6 +1263,30 @@ impl Vm {
                 Opcode::Add => {
                     let b = self.pop();
                     let a = self.pop();
+                    // §12.8.5: ToPrimitive both operands (no hint → "default").
+                    // §7.1.1: OrdinaryToPrimitive with "default" hint tries valueOf then toString.
+                    // We use to_primitive_string with a string bias (acceptable simplification:
+                    // for objects, toString is the common path. valueOf is tried if toString returns an object).
+                    let a = match try_convert_object_to_string(a, gc, self) {
+                        Ok(v) => v,
+                        Err(()) => {
+                            self.pending_primitive_conversion = Some(PendingPrimitiveConversion {
+                                source_frame_depth: self.frame_depth() - 1,
+                                other_operand: b,
+                            });
+                            continue;
+                        }
+                    };
+                    let b = match try_convert_object_to_string(b, gc, self) {
+                        Ok(v) => v,
+                        Err(()) => {
+                            self.pending_primitive_conversion = Some(PendingPrimitiveConversion {
+                                source_frame_depth: self.frame_depth() - 1,
+                                other_operand: a,
+                            });
+                            continue;
+                        }
+                    };
                     let a_is_str = value_is_string(a);
                     let b_is_str = value_is_string(b);
                     let result = if a_is_str || b_is_str {
@@ -1741,6 +1777,16 @@ impl Vm {
                 }
                 Opcode::ToString => {
                     let val = self.pop();
+                    let val = match try_convert_object_to_string(val, gc, self) {
+                        Ok(v) => v,
+                        Err(()) => {
+                            self.pending_primitive_conversion = Some(PendingPrimitiveConversion {
+                                source_frame_depth: self.frame_depth() - 1,
+                                other_operand: Value::undefined(),
+                            });
+                            continue;
+                        }
+                    };
                     let s = value_to_js_string(val);
                     let ptr = HeapString::allocate(gc, &s);
                     self.push(Value::from_heap_ptr(ptr as *mut u8));
@@ -1749,6 +1795,26 @@ impl Vm {
                 Opcode::StringConcat => {
                     let rhs = self.pop();
                     let lhs = self.pop();
+                    let lhs = match try_convert_object_to_string(lhs, gc, self) {
+                        Ok(v) => v,
+                        Err(()) => {
+                            self.pending_primitive_conversion = Some(PendingPrimitiveConversion {
+                                source_frame_depth: self.frame_depth() - 1,
+                                other_operand: rhs,
+                            });
+                            continue;
+                        }
+                    };
+                    let rhs = match try_convert_object_to_string(rhs, gc, self) {
+                        Ok(v) => v,
+                        Err(()) => {
+                            self.pending_primitive_conversion = Some(PendingPrimitiveConversion {
+                                source_frame_depth: self.frame_depth() - 1,
+                                other_operand: lhs,
+                            });
+                            continue;
+                        }
+                    };
                     let lhs_s = value_to_js_string(lhs);
                     let rhs_s = value_to_js_string(rhs);
                     let combined = lhs_s + &rhs_s;
@@ -2991,7 +3057,7 @@ impl Vm {
                     // String constructor [[Construct]]: create String wrapper
                     if constructor == self.string_constructor {
                         let arg = args.first().copied().unwrap_or(Value::undefined());
-                        let s = value_to_js_string(arg);
+                        let s = arg_to_js_string_for_ctor(arg, gc, self);
                         let str_ptr = HeapString::allocate(gc, &s);
                         let str_obj = if self.string_prototype.is_heap_object()
                             && let Some(proto_ptr) = self.string_prototype.heap_ptr()
@@ -3834,6 +3900,18 @@ impl Vm {
                         self.frames[caller_idx].pc += 1;
                         continue;
                     }
+                    // Check if this return completes a pending primitive conversion.
+                    if let Some(pc) = self.pending_primitive_conversion.take()
+                        && self.frames.len() == pc.source_frame_depth
+                    {
+                        // Conversion callback returned. Push result + saved operand
+                        // but do NOT advance the PC, so the original opcode re-executes
+                        // with the converted primitive on the stack.
+                        self.stack.truncate(callee_base);
+                        self.push(result);
+                        self.push(pc.other_operand);
+                        continue;
+                    }
                     if self.frames.is_empty() {
                         self.stack.clear();
                         return Exit::Return(result);
@@ -4534,6 +4612,54 @@ fn value_to_debug_string(val: Value) -> String {
     } else {
         "undefined".to_string()
     }
+}
+
+/// For TAG_OBJECT values, try to convert to a primitive via OrdinaryToPrimitive.
+/// Returns Ok(converted_value) on success (sync), or Err(()) if a callback is pending.
+fn try_convert_object_to_string(
+    val: Value,
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+) -> Result<Value, ()> {
+    let ptr = match val.heap_ptr() {
+        Some(p) => p,
+        None => return Ok(val),
+    };
+    let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+    if tag != TAG_OBJECT {
+        return Ok(val);
+    }
+    match to_primitive_string(gc, val, vm) {
+        Some(s) => {
+            let heap_ptr = HeapString::allocate(gc, &s);
+            Ok(Value::from_heap_ptr(heap_ptr as *mut u8))
+        }
+        None => {
+            // to_primitive_string set pending_call + pushed callback frame.
+            // Clear pending_call (we use pending_primitive_conversion instead).
+            vm.pending_call = None;
+            Err(())
+        }
+    }
+}
+
+/// Convert a value to a string for the String constructor (new String(x)).
+/// Tries builtin toString synchronously; if user-defined toString is needed,
+/// falls back to value_to_js_string (which may produce [object Object]).
+/// The full ToPrimitive with callback is TODO for constructor paths.
+fn arg_to_js_string_for_ctor(val: Value, gc: &mut SemiSpace, vm: &mut Vm) -> String {
+    if let Some(ptr) = val.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_OBJECT {
+            if let Some(s) = to_primitive_string(gc, val, vm) {
+                return s;
+            }
+            // User-defined toString needs callback — not supported here yet.
+            // Clear pending_call and fall through to value_to_js_string.
+            vm.pending_call = None;
+        }
+    }
+    value_to_js_string(val)
 }
 
 fn value_to_prop_key(val: Value) -> Option<PropertyKey> {

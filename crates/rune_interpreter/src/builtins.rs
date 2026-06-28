@@ -61,7 +61,7 @@ pub fn print_builtin(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mu
 /// For objects with a user-defined toString function, sets up the pending_call
 /// callback pattern and returns None (the caller must return immediately).
 /// For all other values, returns Some(string).
-fn to_primitive_string(
+pub(crate) fn to_primitive_string(
     gc: &mut SemiSpace,
     val: Value,
     vm: &mut Vm,
@@ -404,13 +404,25 @@ pub fn string_slice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
     Value::from_heap_ptr(result as *mut u8)
 }
 
+/// Convert an optional argument to a string via ToPrimitive.
+/// Returns None if a user-defined toString callback is pending (caller should return immediately).
+fn arg_to_string(gc: &mut SemiSpace, v: Option<Value>, vm: &mut Vm) -> Option<String> {
+    match v {
+        None => Some(String::new()),
+        Some(val) => to_primitive_string(gc, val, vm),
+    }
+}
+
 /// String.prototype.indexOf(searchString, position) — returns the index of the first occurrence.
 pub fn string_index_of(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
     let s = string_from_value(this);
-    let search_str = args.first().map(|&v| value_to_js_string(v)).unwrap_or_default();
+    let search_str = match arg_to_string(gc, args.first().copied(), vm) {
+        Some(s) => s,
+        None => return Value::undefined(),
+    };
     let pos = args.get(1).copied().unwrap_or(Value::undefined());
     let start = if pos.is_undefined() {
         0
@@ -442,7 +454,10 @@ pub fn string_includes(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
         return Value::undefined();
     }
     let s = string_from_value(this);
-    let search_str = args.first().map(|&v| value_to_js_string(v)).unwrap_or_default();
+    let search_str = match arg_to_string(gc, args.first().copied(), vm) {
+        Some(s) => s,
+        None => return Value::undefined(),
+    };
     let pos = args.get(1).copied().unwrap_or(Value::undefined());
     let start = if pos.is_undefined() {
         0
@@ -470,7 +485,10 @@ pub fn string_starts_with(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
         return Value::undefined();
     }
     let s = string_from_value(this);
-    let search_str = args.first().map(|&v| value_to_js_string(v)).unwrap_or_default();
+    let search_str = match arg_to_string(gc, args.first().copied(), vm) {
+        Some(s) => s,
+        None => return Value::undefined(),
+    };
     let pos = args.get(1).copied().unwrap_or(Value::undefined());
     let start = if pos.is_undefined() {
         0
@@ -491,7 +509,10 @@ pub fn string_ends_with(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
         return Value::undefined();
     }
     let s = string_from_value(this);
-    let search_str = args.first().map(|&v| value_to_js_string(v)).unwrap_or_default();
+    let search_str = match arg_to_string(gc, args.first().copied(), vm) {
+        Some(s) => s,
+        None => return Value::undefined(),
+    };
     let end_pos = args.get(1).copied().unwrap_or(Value::undefined());
     let end = if end_pos.is_undefined() {
         s.len()
@@ -692,7 +713,10 @@ pub fn string_pad_start(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
         return Value::from_heap_ptr(result as *mut u8);
     }
     let fill = match args.get(1) {
-        Some(v) if !v.is_undefined() => value_to_js_string(*v),
+        Some(v) if !v.is_undefined() => match arg_to_string(gc, Some(*v), vm) {
+            Some(s) => s,
+            None => return Value::undefined(),
+        },
         None | Some(_) => " ".to_string(),
     };
     let fill = if fill.is_empty() { " ".to_string() } else { fill };
@@ -720,7 +744,10 @@ pub fn string_pad_end(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
         return Value::from_heap_ptr(result as *mut u8);
     }
     let fill = match args.get(1) {
-        Some(v) if !v.is_undefined() => value_to_js_string(*v),
+        Some(v) if !v.is_undefined() => match arg_to_string(gc, Some(*v), vm) {
+            Some(s) => s,
+            None => return Value::undefined(),
+        },
         None | Some(_) => " ".to_string(),
     };
     let fill = if fill.is_empty() { " ".to_string() } else { fill };
@@ -764,7 +791,10 @@ pub fn string_concat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
     let s = string_from_value(this);
     let mut result = s;
     for &arg in args {
-        result.push_str(&value_to_js_string(arg));
+        match arg_to_string(gc, Some(arg), vm) {
+            Some(s) => result.push_str(&s),
+            None => return Value::undefined(),
+        }
     }
     let heap = HeapString::allocate(gc, &result);
     Value::from_heap_ptr(heap as *mut u8)
@@ -813,7 +843,10 @@ pub fn string_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
             Value::from_heap_ptr(result_ptr as *mut u8)
         }
     } else {
-        let sep = value_to_js_string(separator);
+        let sep = match arg_to_string(gc, Some(separator), vm) {
+            Some(s) => s,
+            None => return Value::undefined(),
+        };
         let pieces: Vec<String> = if sep.is_empty() {
             s.chars().map(|c| c.to_string()).collect()
         } else {

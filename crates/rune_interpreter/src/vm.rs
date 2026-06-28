@@ -1,4 +1,4 @@
-use crate::builtins::{Builtin, BuiltinFn, make_error, string_builtin, to_primitive_string, value_to_js_string};
+use crate::builtins::{Builtin, BuiltinFn, make_error, string_builtin, to_primitive_string, to_primitive_string_sync, value_to_js_string};
 use crate::generator::Generator;
 use crate::ic::{IcEntry, IcStats, InlineCache, LoopTrace, TraceOp};
 use rune_bytecode::opcode::{BytecodeProgram, Instruction, Opcode};
@@ -4644,22 +4644,9 @@ fn try_convert_object_to_string(
 }
 
 /// Convert a value to a string for the String constructor (new String(x)).
-/// Tries builtin toString synchronously; if user-defined toString is needed,
-/// falls back to value_to_js_string (which may produce [object Object]).
-/// The full ToPrimitive with callback is TODO for constructor paths.
+/// Uses the sync version (user-defined toString/valueOf fall through to [object Object]).
 fn arg_to_js_string_for_ctor(val: Value, gc: &mut SemiSpace, vm: &mut Vm) -> String {
-    if let Some(ptr) = val.heap_ptr() {
-        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-        if tag == TAG_OBJECT {
-            if let Some(s) = to_primitive_string(gc, val, vm) {
-                return s;
-            }
-            // User-defined toString needs callback — not supported here yet.
-            // Clear pending_call and fall through to value_to_js_string.
-            vm.pending_call = None;
-        }
-    }
-    value_to_js_string(val)
+    to_primitive_string_sync(val, gc, vm)
 }
 
 fn value_to_prop_key(val: Value) -> Option<PropertyKey> {

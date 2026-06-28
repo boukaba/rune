@@ -154,6 +154,82 @@ pub(crate) fn to_primitive_string(
     Some(value_to_js_string(val))
 }
 
+/// Synchronous version of to_primitive_string — never sets up callbacks.
+/// User-defined toString/valueOf are skipped (fall through to [object Object]).
+/// Use this for string method arguments where the callback pattern would leak.
+pub(crate) fn to_primitive_string_sync(
+    val: Value,
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+) -> String {
+    if !val.is_heap_object() {
+        return value_to_js_string(val);
+    }
+    let ptr = val.heap_ptr().unwrap();
+    let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+    if tag == TAG_STRING {
+        return unsafe { HeapString::to_string(ptr as *mut HeapString) };
+    }
+    if tag == TAG_STRING_OBJ {
+        let str_ptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
+        return unsafe { HeapString::to_string(str_ptr as *mut HeapString) };
+    }
+    if tag == TAG_OBJECT {
+        let key = PropertyKey::from_string("toString");
+        let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+        if let Some(slot) = shape.lookup(&key) {
+            let to_string_val = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+            if let Some(smi) = to_string_val.as_smi() {
+                if smi < 0 {
+                    let id = ((-smi) as usize) - 1;
+                    if id < vm.builtins.len() {
+                        let result = (vm.builtins[id].func)(gc, val, &[], vm);
+                        if let Some(exc) = vm.pending_exception.take() {
+                            vm.pending_exception = Some(exc);
+                            return value_to_js_string(val);
+                        }
+                        if !result.is_heap_object() || {
+                            if let Some(rp) = result.heap_ptr() {
+                                let rt = unsafe { (*(rp as *const GcHeader)).tag() };
+                                rt == TAG_STRING
+                            } else { false }
+                        } {
+                            return value_to_js_string(result);
+                        }
+                    }
+                }
+            }
+            // User-defined or non-callable toString — skip
+        }
+        let value_of_key = PropertyKey::from_string("valueOf");
+        if let Some(slot) = shape.lookup(&value_of_key) {
+            let value_of_val = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+            if let Some(smi) = value_of_val.as_smi()
+                && smi < 0 {
+                    let id = ((-smi) as usize) - 1;
+                    if id < vm.builtins.len() {
+                        let result = (vm.builtins[id].func)(gc, val, &[], vm);
+                        if let Some(exc) = vm.pending_exception.take() {
+                            vm.pending_exception = Some(exc);
+                            return value_to_js_string(val);
+                        }
+                        if !result.is_heap_object() || {
+                            if let Some(rp) = result.heap_ptr() {
+                                let rt = unsafe { (*(rp as *const GcHeader)).tag() };
+                                rt == TAG_STRING
+                            } else { false }
+                        } {
+                            return value_to_js_string(result);
+                        }
+                    }
+                }
+            // User-defined or non-callable valueOf — skip
+        }
+        return value_to_js_string(val);
+    }
+    value_to_js_string(val)
+}
+
 /// String(value) — converts a value to its string representation.
 /// Per §21.1.2.1: calls ToString via ToPrimitive with string hint.
 pub fn string_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
@@ -404,13 +480,12 @@ pub fn string_slice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
     Value::from_heap_ptr(result as *mut u8)
 }
 
-/// Convert an optional argument to a string via ToPrimitive.
-/// Returns None if a user-defined toString callback is pending (caller should return immediately).
-fn arg_to_string(gc: &mut SemiSpace, v: Option<Value>, vm: &mut Vm) -> Option<String> {
-    match v {
-        None => Some(String::new()),
-        Some(val) => to_primitive_string(gc, val, vm),
-    }
+/// Convert an optional argument to a string via ToPrimitive (sync, no callbacks).
+/// Never returns pending — use for string method arguments where the callback
+/// pattern would leak the callback's result to the builtin's caller.
+fn arg_to_string(gc: &mut SemiSpace, v: Option<Value>, vm: &mut Vm) -> String {
+    let val = v.unwrap_or(Value::undefined());
+    to_primitive_string_sync(val, gc, vm)
 }
 
 /// String.prototype.indexOf(searchString, position) — returns the index of the first occurrence.
@@ -419,10 +494,7 @@ pub fn string_index_of(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
         return Value::undefined();
     }
     let s = string_from_value(this);
-    let search_str = match arg_to_string(gc, args.first().copied(), vm) {
-        Some(s) => s,
-        None => return Value::undefined(),
-    };
+    let search_str = arg_to_string(gc, args.first().copied(), vm);
     let pos = args.get(1).copied().unwrap_or(Value::undefined());
     let start = if pos.is_undefined() {
         0
@@ -454,10 +526,7 @@ pub fn string_includes(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
         return Value::undefined();
     }
     let s = string_from_value(this);
-    let search_str = match arg_to_string(gc, args.first().copied(), vm) {
-        Some(s) => s,
-        None => return Value::undefined(),
-    };
+    let search_str = arg_to_string(gc, args.first().copied(), vm);
     let pos = args.get(1).copied().unwrap_or(Value::undefined());
     let start = if pos.is_undefined() {
         0
@@ -485,10 +554,7 @@ pub fn string_starts_with(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
         return Value::undefined();
     }
     let s = string_from_value(this);
-    let search_str = match arg_to_string(gc, args.first().copied(), vm) {
-        Some(s) => s,
-        None => return Value::undefined(),
-    };
+    let search_str = arg_to_string(gc, args.first().copied(), vm);
     let pos = args.get(1).copied().unwrap_or(Value::undefined());
     let start = if pos.is_undefined() {
         0
@@ -509,10 +575,7 @@ pub fn string_ends_with(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
         return Value::undefined();
     }
     let s = string_from_value(this);
-    let search_str = match arg_to_string(gc, args.first().copied(), vm) {
-        Some(s) => s,
-        None => return Value::undefined(),
-    };
+    let search_str = arg_to_string(gc, args.first().copied(), vm);
     let end_pos = args.get(1).copied().unwrap_or(Value::undefined());
     let end = if end_pos.is_undefined() {
         s.len()
@@ -713,10 +776,7 @@ pub fn string_pad_start(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
         return Value::from_heap_ptr(result as *mut u8);
     }
     let fill = match args.get(1) {
-        Some(v) if !v.is_undefined() => match arg_to_string(gc, Some(*v), vm) {
-            Some(s) => s,
-            None => return Value::undefined(),
-        },
+        Some(v) if !v.is_undefined() => arg_to_string(gc, Some(*v), vm),
         None | Some(_) => " ".to_string(),
     };
     let fill = if fill.is_empty() { " ".to_string() } else { fill };
@@ -744,10 +804,7 @@ pub fn string_pad_end(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
         return Value::from_heap_ptr(result as *mut u8);
     }
     let fill = match args.get(1) {
-        Some(v) if !v.is_undefined() => match arg_to_string(gc, Some(*v), vm) {
-            Some(s) => s,
-            None => return Value::undefined(),
-        },
+        Some(v) if !v.is_undefined() => arg_to_string(gc, Some(*v), vm),
         None | Some(_) => " ".to_string(),
     };
     let fill = if fill.is_empty() { " ".to_string() } else { fill };
@@ -791,10 +848,7 @@ pub fn string_concat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
     let s = string_from_value(this);
     let mut result = s;
     for &arg in args {
-        match arg_to_string(gc, Some(arg), vm) {
-            Some(s) => result.push_str(&s),
-            None => return Value::undefined(),
-        }
+        result.push_str(&arg_to_string(gc, Some(arg), vm));
     }
     let heap = HeapString::allocate(gc, &result);
     Value::from_heap_ptr(heap as *mut u8)
@@ -843,10 +897,7 @@ pub fn string_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
             Value::from_heap_ptr(result_ptr as *mut u8)
         }
     } else {
-        let sep = match arg_to_string(gc, Some(separator), vm) {
-            Some(s) => s,
-            None => return Value::undefined(),
-        };
+        let sep = arg_to_string(gc, Some(separator), vm);
         let pieces: Vec<String> = if sep.is_empty() {
             s.chars().map(|c| c.to_string()).collect()
         } else {

@@ -581,17 +581,17 @@ impl Vm {
         self.last_locals = self.frames[popped_frame].locals.clone();
         // Check for pending assert.throws before popping frame
         let assert_depth = self.pending_assert.as_ref().map(|pa| pa.source_frame_depth);
-        if let Some(source_depth) = assert_depth {
-            if self.frames.len() - 1 == source_depth {
-                self.pending_assert.take();
-                self.frames.pop();
-                self.try_stack.retain(|tf| tf.frame_depth != popped_frame + 1);
-                self.stack.truncate(callee_base);
-                self.push(Value::undefined());
-                let new_fi = self.frames.len() - 1;
-                self.frames[new_fi].pc += 1;
-                return None;
-            }
+        if let Some(source_depth) = assert_depth
+            && self.frames.len() - 1 == source_depth
+        {
+            self.pending_assert.take();
+            self.frames.pop();
+            self.try_stack.retain(|tf| tf.frame_depth != popped_frame + 1);
+            self.stack.truncate(callee_base);
+            self.push(Value::undefined());
+            let new_fi = self.frames.len() - 1;
+            self.frames[new_fi].pc += 1;
+            return None;
         }
         self.frames.pop();
         self.try_stack.retain(|tf| tf.frame_depth != popped_frame + 1);

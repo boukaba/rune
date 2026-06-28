@@ -492,7 +492,7 @@ pub fn parse_int_builtin(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm:
     let result = sign * result;
     if result.fract() == 0.0 && result.is_finite() {
         let i = result as i32;
-        if i as f64 == result && i >= -(1 << 30) && i < (1 << 30) {
+        if i as f64 == result && (-(1 << 30)..(1 << 30)).contains(&i) {
             return Value::smi(i);
         }
     }
@@ -1354,33 +1354,6 @@ fn same_value(a: Value, b: Value) -> bool {
         }
         _ => false,
     }
-}
-
-/// Strict equal comparison (JS === semantics).
-fn value_eq_strict(a: Value, b: Value) -> bool {
-    // Both Smi
-    if let (Some(av), Some(bv)) = (a.as_smi(), b.as_smi()) {
-        return av == bv;
-    }
-    // Numeric comparison: Smi vs Float64, or Float64 vs Float64
-    let a_num = a.as_smi().map(|v| v as f64).or_else(|| a.as_float64());
-    let b_num = b.as_smi().map(|v| v as f64).or_else(|| b.as_float64());
-    if let (Some(av), Some(bv)) = (a_num, b_num) {
-        return av == bv; // NaN ≠ NaN, +0 == -0
-    }
-    // Both undefined or both null
-    if (a.is_undefined() && b.is_undefined()) || (a.is_null() && b.is_null()) {
-        return true;
-    }
-    // Both booleans
-    if let (Some(ab), Some(bb)) = (a.to_boolean(), b.to_boolean()) {
-        return ab == bb;
-    }
-    // Both heap pointers
-    if let (Some(ap), Some(bp)) = (a.heap_ptr(), b.heap_ptr()) {
-        return ap == bp;
-    }
-    false
 }
 
 fn value_to_debug(v: Value) -> String {

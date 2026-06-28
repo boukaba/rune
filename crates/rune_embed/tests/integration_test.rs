@@ -4272,8 +4272,299 @@ mod instanceof_tests {
             ctx_new.stencil_jit = true;
             let r_new = ctx_new.eval(source).unwrap();
 
-            assert_eq!(r_old, r_new,
-                "stencil vs old codegen: old={:?} new={:?}", r_old, r_new);
+    assert_eq!(r_old, r_new,
+            "stencil vs old codegen: old={:?} new={:?}", r_old, r_new);
         }
     }
+} // close mod instanceof_tests
+
+// ---- Stdlib: JSON.parse ----
+
+#[test]
+fn test_json_parse_null() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("JSON.parse('null')").unwrap();
+    assert!(r.is_null());
+}
+
+#[test]
+fn test_json_parse_true() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("JSON.parse('true')").unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}
+
+#[test]
+fn test_json_parse_false() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("JSON.parse('false')").unwrap();
+    assert_eq!(r.to_boolean(), Some(false));
+}
+
+#[test]
+fn test_json_parse_number() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("JSON.parse('42')").unwrap();
+    assert_eq!(r.as_smi(), Some(42));
+}
+
+#[test]
+fn test_json_parse_float() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("JSON.parse('3.14')").unwrap();
+    let f = r.as_float64().unwrap();
+    assert!((f - 3.14).abs() < 1e-10);
+}
+
+#[test]
+fn test_json_parse_string() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("JSON.parse('\"hello\"')").unwrap();
+    let ptr = r.heap_ptr().unwrap();
+    let s = unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) };
+    assert_eq!(s, "hello");
+}
+
+#[test]
+fn test_json_parse_array() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("JSON.parse('[1,2,3]')").unwrap();
+    assert!(r.is_heap_object());
+    // Access elements after parsing
+    let r2 = ctx.eval("var a = JSON.parse('[10,20,30]'); a[0] + a[1] + a[2]").unwrap();
+    assert_eq!(r2.as_smi(), Some(60));
+}
+
+#[test]
+fn test_json_parse_nested() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("var o = JSON.parse('{\"x\":{\"y\":[1,2]}}'); o.x.y[0] + o.x.y[1]").unwrap();
+    assert_eq!(r.as_smi(), Some(3));
+}
+
+#[test]
+fn test_json_parse_object() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("var o = JSON.parse('{\"a\":1,\"b\":2}'); o.a + o.b").unwrap();
+    assert_eq!(r.as_smi(), Some(3));
+}
+
+// ---- Stdlib: Array.prototype.filter ----
+
+#[test]
+fn test_array_filter_basic() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        function isEven(x) { return x % 2 === 0; }
+        var a = [1, 2, 3, 4, 5, 6];
+        var result = a.filter(isEven);
+        result[0] + result[1] + result[2]
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(2 + 4 + 6));
+}
+
+#[test]
+fn test_array_filter_arrow() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        var a = [1, 2, 3, 4, 5];
+        var result = a.filter(n => n > 2);
+        result[0] + result[1] + result[2]
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(3 + 4 + 5));
+}
+
+#[test]
+fn test_array_filter_empty() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        var a = [];
+        var result = a.filter(n => true);
+        result.length
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(0));
+}
+
+#[test]
+fn test_array_filter_all_match() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        var a = [1, 2, 3];
+        var result = a.filter(n => n > 0);
+        result[0] + result[1] + result[2]
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(6));
+}
+
+// ---- Stdlib: Array.prototype.map ----
+
+#[test]
+fn test_array_map_basic() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        function double(x) { return x * 2; }
+        var a = [1, 2, 3];
+        var result = a.map(double);
+        result[0] + result[1] + result[2]
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(2 + 4 + 6));
+}
+
+#[test]
+fn test_array_map_arrow() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        var a = [1, 2, 3];
+        var result = a.map(n => n * 10);
+        result[0] + result[1] + result[2]
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(10 + 20 + 30));
+}
+
+#[test]
+fn test_array_map_empty() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        var a = [];
+        var result = a.map(n => n * 2);
+        result.length
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(0));
+}
+
+// ---- Stdlib: Array.prototype.reduce ----
+
+#[test]
+fn test_array_reduce_sum() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        function add(acc, x) { return acc + x; }
+        var a = [1, 2, 3, 4, 5];
+        a.reduce(add, 0)
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(15));
+}
+
+#[test]
+fn test_array_reduce_no_initial() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        function add(acc, x) { return acc + x; }
+        var a = [1, 2, 3, 4, 5];
+        a.reduce(add)
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(15));
+}
+
+#[test]
+fn test_array_reduce_arrow() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        var a = [1, 2, 3, 4];
+        a.reduce((acc, x) => acc + x, 100)
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(110));
+}
+
+#[test]
+fn test_array_reduce_single_element_no_init() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        var a = [42];
+        a.reduce((acc, x) => acc + x)
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(42));
+}
+
+// ---- Stdlib: chained array methods ----
+
+#[test]
+fn test_array_filter_map_chain() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        function even(n) { return n % 2 === 0; }
+        function times10(n) { return n * 10; }
+        var a = [1, 2, 3, 4, 5, 6];
+        var result = a.filter(even).map(times10);
+        result[0] + result[1] + result[2]
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(20 + 40 + 60));
+}
+
+#[test]
+fn test_array_filter_then_reduce() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        var a = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        a.filter(n => n % 2 === 0).reduce((acc, n) => acc + n, 0)
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(2 + 4 + 6 + 8 + 10));
+}
+
+// ---- Stdlib: JSON round-trip with array methods ----
+
+#[test]
+fn test_json_parse_then_filter() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        function gt3(x) { return x > 3; }
+        var data = JSON.parse('[4,5,6]');
+        var filtered = data.filter(gt3);
+        filtered[0] + filtered[1] + filtered[2]
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(4 + 5 + 6));
+}
+
+#[test]
+fn test_json_parse_then_map() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        function div10(x) { return x / 10; }
+        var data = JSON.parse('[10, 20, 30]');
+        var mapped = data.map(div10);
+        mapped[0] + mapped[1] + mapped[2]
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(1 + 2 + 3));
+}
+
+// ---- Stdlib: filter/map with thisArg ----
+
+#[test]
+fn test_array_filter_this_arg() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        var threshold = { limit: 3 };
+        function checkLimit(x) { return x > this.limit; }
+        var a = [1, 2, 3, 4, 5];
+        var result = a.filter(checkLimit, threshold);
+        result[0] + result[1]
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(4 + 5));
+}
+
+#[test]
+fn test_array_map_this_arg() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        var multiplier = { factor: 10 };
+        function scale(x) { return x * this.factor; }
+        var a = [1, 2, 3];
+        var result = a.map(scale, multiplier);
+        result[0] + result[1] + result[2]
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(10 + 20 + 30));
+}
+
+// ---- Stdlib: reduce with object accumulator ----
+
+#[test]
+fn test_array_reduce_group() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        function group(acc, x) { if (x % 2 === 0) { acc.even.push(x); } else { acc.odd.push(x); } return acc; }
+        var a = [1, 2, 3, 4, 5, 6];
+        var result = a.reduce(group, {even: [], odd: []});
+        result.even[0] + result.even[1] + result.even[2] + result.odd[0] + result.odd[1] + result.odd[2]
+    "#).unwrap();
+    assert_eq!(r.as_smi(), Some(2 + 4 + 6 + 1 + 3 + 5));
 }

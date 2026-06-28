@@ -155,6 +155,37 @@ impl Default for CallIcEntry {
     }
 }
 
+/// Type of pending array operation (filter/map/reduce).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum ArrayOpKind {
+    Filter,
+    Map,
+    Reduce,
+}
+
+/// State for an in-progress Array.prototype callback iteration.
+/// Set by the builtin function, consumed/updated by the Return handler.
+pub(crate) struct ArrayOpState {
+    pub(crate) kind: ArrayOpKind,
+    /// Heap pointer to the source RuneArray being iterated.
+    pub(crate) source: *mut u8,
+    /// Heap pointer to the result RuneArray (for filter/map).
+    pub(crate) result: *mut u8,
+    /// The callback function value (a TAG_FUNC heap pointer).
+    pub(crate) callback: Value,
+    /// `this` value for the callback.
+    pub(crate) this_val: Value,
+    /// Current element index (0-based, post-increment after each callback).
+    pub(crate) index: usize,
+    /// Total number of elements in the source array.
+    pub(crate) length: u32,
+    /// Number of frames on the stack before the last callback frame was pushed.
+    /// Set by the builtin before pushing the first callback frame.
+    pub(crate) source_frame_depth: usize,
+    /// Accumulator for reduce (set from initial value, updated per callback result).
+    pub(crate) accumulator: Option<Value>,
+}
+
 /// Stack-based bytecode interpreter with call frame support.
 #[repr(C)]
 pub struct Vm {
@@ -239,6 +270,9 @@ pub struct Vm {
     pub object_prototype: Value,
     /// Pending exception set by a builtin (checked after builtin dispatch).
     pub pending_exception: Option<Value>,
+    /// Pending array operation (filter/map/reduce) with callback state machine.
+    /// Set by the builtin, consumed/updated by the Return handler.
+    pub(crate) pending_array_op: Option<ArrayOpState>,
 }
 
 impl Default for Vm {
@@ -295,6 +329,7 @@ impl Vm {
             string_prototype: Value::undefined(),
             object_prototype: Value::undefined(),
             pending_exception: None,
+            pending_array_op: None,
         }
     }
 
@@ -326,11 +361,18 @@ impl Vm {
             self.builtin_wrappers.insert("Object".to_string(), obj_val);
         }
 
-        // Array.prototype with push/pop methods
+        // Array.prototype with push/pop/filter/map/reduce methods
         let push_handle = find_handle(&self.builtins, "Array_prototype_push");
         let pop_handle = find_handle(&self.builtins, "Array_prototype_pop");
+        let filter_handle = find_handle(&self.builtins, "Array_prototype_filter");
+        let map_handle = find_handle(&self.builtins, "Array_prototype_map");
+        let reduce_handle = find_handle(&self.builtins, "Array_prototype_reduce");
         if let (Some(push), Some(pop)) = (push_handle, pop_handle) {
-            let arr_proto = make_object(gc, &[("push", push), ("pop", pop)]);
+            let mut proto_entries: Vec<(&str, Value)> = vec![("push", push), ("pop", pop)];
+            if let Some(f) = filter_handle { proto_entries.push(("filter", f)); }
+            if let Some(m) = map_handle { proto_entries.push(("map", m)); }
+            if let Some(r) = reduce_handle { proto_entries.push(("reduce", r)); }
+            let arr_proto = make_object(gc, &proto_entries);
             self.builtin_wrappers
                 .insert("Array.prototype".to_string(), arr_proto);
             self.array_prototype = arr_proto;
@@ -378,6 +420,12 @@ impl Vm {
         if !math_entries.is_empty() {
             let math_obj = make_object(gc, &math_entries);
             self.builtin_wrappers.insert("Math".to_string(), math_obj);
+        }
+
+        // JSON namespace with .parse()
+        if let Some(parse_handle) = find_handle(&self.builtins, "JSON_parse") {
+            let json_obj = make_object(gc, &[("parse", parse_handle)]);
+            self.builtin_wrappers.insert("JSON".to_string(), json_obj);
         }
 
         // Object.prototype — an empty object that serves as default [[Prototype]]
@@ -520,6 +568,63 @@ impl Vm {
         // Root pending exception (holds thrown Value between throw and catch)
         if let Some(ref val) = self.pending_exception {
             gc.push_root(val as *const Value as *mut u64);
+        }
+        // Root pending array operation pointers (GC may forward source/result arrays)
+        if let Some(ref op) = self.pending_array_op {
+            gc.push_root(&op.callback as *const Value as *mut u64);
+            gc.push_root(&op.this_val as *const Value as *mut u64);
+            gc.push_root(&op.source as *const *mut u8 as *mut u64);
+            gc.push_root(&op.result as *const *mut u8 as *mut u64);
+            if let Some(ref acc) = op.accumulator {
+                gc.push_root(acc as *const Value as *mut u64);
+            }
+        }
+    }
+
+    /// Push a frame for a JS function call (used by array method callbacks).
+    /// Reads the function program from `callee` (must be TAG_FUNC) and sets
+    /// up locals with the given args. Updates `source_frame_depth` in the
+    /// pending array op state to the frame count before pushing.
+    pub fn push_callback_call(
+        &mut self,
+        _gc: &mut SemiSpace,
+        callee: Value,
+        this: Value,
+        args: Vec<Value>,
+    ) {
+        let ptr = callee.heap_ptr().expect("callback must be heap object");
+        let func_ptr = ptr as *mut Func;
+        let func_env = unsafe { Func::env_ptr(func_ptr) };
+        let func_idx = unsafe { Func::func_index(func_ptr) } as usize;
+        let creator_prog =
+            unsafe { &*(Func::prog_ptr(func_ptr) as *const BytecodeProgram) };
+        let func_prog = &creator_prog.functions[func_idx];
+        let passed_argc = args.len();
+        let mut locals: Vec<Value> = if func_prog.named_function {
+            vec![callee]
+        } else {
+            vec![]
+        };
+        locals.extend(args);
+        self.frames.push(Frame {
+            locals,
+            lexical_slots: Vec::new(),
+            lexical_tdz: Vec::new(),
+            lexical_const: Vec::new(),
+            scope_boundaries: Vec::new(),
+            passed_argc,
+            pc: 0,
+            stack_base: self.stack.len(),
+            prog: func_prog as *const BytecodeProgram,
+            generator_id: None,
+            this,
+            is_constructor_call: false,
+            constructed_object: Value::undefined(),
+            env: func_env,
+        });
+        // Update source_frame_depth if pending array op is active
+        if let Some(ref mut state) = self.pending_array_op {
+            state.source_frame_depth = self.frames.len() - 1;
         }
     }
 
@@ -2840,6 +2945,13 @@ impl Vm {
                                     self.push(exc);
                                     return Exit::Throw(exc);
                                 }
+                                if self.pending_array_op.is_some() {
+                                    // Array method builtin set up async callback iteration.
+                                    // Don't push result or advance pc — the callback frame
+                                    // is already on the stack. The Return handler will
+                                    // continue the state machine.
+                                    continue;
+                                }
                                 self.push(result);
                                 self.frames[fi].pc = pc + 1;
                                 continue;
@@ -3178,6 +3290,9 @@ impl Vm {
                                     self.push(exc);
                                     return Exit::Throw(exc);
                                 }
+                                if self.pending_array_op.is_some() {
+                                    continue;
+                                }
                                 self.push(result);
                                 self.frames[fi].pc = pc + 1;
                                 continue;
@@ -3264,6 +3379,132 @@ impl Vm {
                     self.last_locals = self.frames[popped_frame].locals.clone();
                     self.frames.pop();
                     self.try_stack.retain(|tf| tf.frame_depth != popped_frame);
+                    // Check if this return completes a pending array operation callback.
+                    if let Some(mut op) = self.pending_array_op.take() {
+                        if self.frames.len() == op.source_frame_depth {
+                            // This was the callback frame returning. Process result.
+                            match op.kind {
+                                ArrayOpKind::Filter => {
+                                    if result.to_bool() {
+                                        let src_val = unsafe {
+                                            RuneArray::get_element(
+                                                op.source as *mut RuneArray,
+                                                op.index,
+                                            )
+                                        };
+                                        let old_ptr = op.result;
+                                        let new_arr = unsafe {
+                                            RuneArray::push(
+                                                gc,
+                                                old_ptr as *mut RuneArray,
+                                                src_val,
+                                            )
+                                        };
+                                        if new_arr as *mut u8 != old_ptr {
+                                            let resolved = if unsafe {
+                                                (*(old_ptr as *const GcHeader)).is_forwarded()
+                                            } {
+                                                unsafe {
+                                                    (*(old_ptr as *const GcHeader))
+                                                        .forwarding_addr()
+                                                }
+                                            } else {
+                                                old_ptr
+                                            };
+                                            if resolved != new_arr as *mut u8 {
+                                                self.update_heap_reference(
+                                                    resolved,
+                                                    new_arr as *mut u8,
+                                                );
+                                            }
+                                        }
+                                        op.result = new_arr as *mut u8;
+                                    }
+                                }
+                                ArrayOpKind::Map => {
+                                    let old_ptr = op.result;
+                                    let new_arr = unsafe {
+                                        RuneArray::push(gc, old_ptr as *mut RuneArray, result)
+                                    };
+                                    if new_arr as *mut u8 != old_ptr {
+                                        let resolved = if unsafe {
+                                            (*(old_ptr as *const GcHeader)).is_forwarded()
+                                        } {
+                                            unsafe {
+                                                (*(old_ptr as *const GcHeader)).forwarding_addr()
+                                            }
+                                        } else {
+                                            old_ptr
+                                        };
+                                        if resolved != new_arr as *mut u8 {
+                                            self.update_heap_reference(
+                                                resolved,
+                                                new_arr as *mut u8,
+                                            );
+                                        }
+                                    }
+                                    op.result = new_arr as *mut u8;
+                                }
+                                ArrayOpKind::Reduce => {
+                                    op.accumulator = Some(result);
+                                }
+                            }
+                            op.index += 1;
+                            if op.index >= op.length as usize {
+                                // Done: push result and advance pc.
+                                let final_result = match op.kind {
+                                    ArrayOpKind::Filter | ArrayOpKind::Map => {
+                                        Value::from_heap_ptr(op.result)
+                                    }
+                                    ArrayOpKind::Reduce => {
+                                        op.accumulator.unwrap_or(Value::undefined())
+                                    }
+                                };
+                                let frames_len = self.frames.len();
+                                self.stack.truncate(callee_base);
+                                self.push(final_result);
+                                self.frames[frames_len - 1].pc += 1;
+                                continue;
+                            } else {
+                                // More elements: push next callback call.
+                                let element = unsafe {
+                                    RuneArray::get_element(
+                                        op.source as *mut RuneArray,
+                                        op.index,
+                                    )
+                                };
+                                let cb_this = match op.kind {
+                                    ArrayOpKind::Filter | ArrayOpKind::Map => op.this_val,
+                                    ArrayOpKind::Reduce => Value::undefined(),
+                                };
+                                let cb_args = match op.kind {
+                                    ArrayOpKind::Filter | ArrayOpKind::Map => {
+                                        vec![
+                                            element,
+                                            Value::smi(op.index as i32),
+                                            Value::from_heap_ptr(op.source),
+                                        ]
+                                    }
+                                    ArrayOpKind::Reduce => {
+                                        let acc = op.accumulator.unwrap_or(Value::undefined());
+                                        vec![
+                                            acc,
+                                            element,
+                                            Value::smi(op.index as i32),
+                                            Value::from_heap_ptr(op.source),
+                                        ]
+                                    }
+                                };
+                                let callback_func = op.callback;
+                                self.stack.truncate(callee_base);
+                                self.pending_array_op = Some(op);
+                                self.push_callback_call(gc, callback_func, cb_this, cb_args);
+                                continue;
+                            }
+                        } else {
+                            self.pending_array_op = Some(op);
+                        }
+                    }
                     if self.frames.is_empty() {
                         self.stack.clear();
                         return Exit::Return(result);
@@ -3283,8 +3524,6 @@ impl Vm {
                     }
                     self.frames[new_fi].pc += 1;
                 }
-
-                // ---- Generators ----
                 Opcode::InitGenerator => {
                     self.frames[fi].pc = pc + 1;
                 }

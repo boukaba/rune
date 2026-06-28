@@ -2,7 +2,7 @@ use crate::vm::Vm;
 use rune_core::array::RuneArray;
 use rune_core::gc::{GcHeader, SemiSpace, TAG_ARRAY, TAG_STRING};
 use rune_core::object::JSObject;
-use rune_core::shape::{PropertyKey, Shape};
+use rune_core::shape::{DENSE_ARRAY_SHAPE, PropertyKey, Shape};
 use rune_core::string::HeapString;
 use rune_core::value::Value;
 
@@ -356,6 +356,403 @@ pub fn math_sqrt(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm
     math_op_unary(args, f64::sqrt)
 }
 
+/// JSON.parse(text) — parse a JSON string into Rune values.
+pub fn json_parse(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let text = args.first().copied().unwrap_or(Value::undefined());
+    let s = value_to_js_string(text);
+    let chars = s.chars().collect::<Vec<char>>();
+    let mut pos = 0;
+    fn skip_ws(chars: &[char], pos: &mut usize) {
+        while *pos < chars.len() && chars[*pos].is_ascii_whitespace() {
+            *pos += 1;
+        }
+    }
+    let array_proto = vm.array_prototype.heap_ptr();
+    let object_proto = vm.object_prototype.heap_ptr();
+    fn parse_value(
+        gc: &mut SemiSpace,
+        chars: &[char],
+        pos: &mut usize,
+        array_proto: Option<*mut u8>,
+        object_proto: Option<*mut u8>,
+    ) -> Option<Value> {
+        use rune_core::shape::DENSE_ARRAY_SHAPE;
+        skip_ws(chars, pos);
+        if *pos >= chars.len() {
+            return None;
+        }
+        match chars[*pos] {
+            'n' => {
+                if chars[*pos..].starts_with(&['n', 'u', 'l', 'l']) {
+                    *pos += 4;
+                    Some(Value::null())
+                } else {
+                    None
+                }
+            }
+            't' => {
+                if chars[*pos..].starts_with(&['t', 'r', 'u', 'e']) {
+                    *pos += 4;
+                    Some(Value::boolean(true))
+                } else {
+                    None
+                }
+            }
+            'f' => {
+                if chars[*pos..].starts_with(&['f', 'a', 'l', 's', 'e']) {
+                    *pos += 5;
+                    Some(Value::boolean(false))
+                } else {
+                    None
+                }
+            }
+            '"' => {
+                *pos += 1; // skip opening quote
+                let mut s = String::new();
+                while *pos < chars.len() && chars[*pos] != '"' {
+                    if chars[*pos] == '\\' {
+                        *pos += 1;
+                        if *pos >= chars.len() {
+                            return None;
+                        }
+                        match chars[*pos] {
+                            '"' => s.push('"'),
+                            '\\' => s.push('\\'),
+                            '/' => s.push('/'),
+                            'b' => s.push('\u{0008}'),
+                            'f' => s.push('\u{000C}'),
+                            'n' => s.push('\n'),
+                            'r' => s.push('\r'),
+                            't' => s.push('\t'),
+                            'u' => {
+                                if *pos + 4 < chars.len() {
+                                    let hex: String = chars[*pos + 1..*pos + 5].iter().collect();
+                                    if let Ok(code) = u32::from_str_radix(&hex, 16) {
+                                        if let Some(ch) = char::from_u32(code) {
+                                            s.push(ch);
+                                        }
+                                    }
+                                    *pos += 4;
+                                } else {
+                                    return None;
+                                }
+                            }
+                            _ => return None,
+                        }
+                    } else {
+                        s.push(chars[*pos]);
+                    }
+                    *pos += 1;
+                }
+                if *pos >= chars.len() {
+                    return None;
+                }
+                *pos += 1; // skip closing quote
+                let ptr = HeapString::allocate(gc, &s);
+                Some(Value::from_heap_ptr(ptr as *mut u8))
+            }
+            '-' | '0'..='9' => {
+                let num_start = *pos;
+                if chars[*pos] == '-' {
+                    *pos += 1;
+                }
+                while *pos < chars.len() && chars[*pos].is_ascii_digit() {
+                    *pos += 1;
+                }
+                if *pos < chars.len() && chars[*pos] == '.' {
+                    *pos += 1;
+                    while *pos < chars.len() && chars[*pos].is_ascii_digit() {
+                        *pos += 1;
+                    }
+                }
+                if *pos < chars.len() && (chars[*pos] == 'e' || chars[*pos] == 'E') {
+                    *pos += 1;
+                    if *pos < chars.len() && (chars[*pos] == '+' || chars[*pos] == '-') {
+                        *pos += 1;
+                    }
+                    while *pos < chars.len() && chars[*pos].is_ascii_digit() {
+                        *pos += 1;
+                    }
+                }
+                let num_str: String = chars[num_start..*pos].iter().collect();
+                if let Ok(n) = num_str.parse::<i32>() {
+                    Some(Value::smi(n))
+                } else if let Ok(f) = num_str.parse::<f64>() {
+                    Some(Value::from_float64(f))
+                } else {
+                    None
+                }
+            }
+            '[' => {
+                *pos += 1;
+                skip_ws(chars, pos);
+                let mut elements: Vec<Value> = Vec::new();
+                if *pos < chars.len() && chars[*pos] != ']' {
+                    loop {
+                        skip_ws(chars, pos);
+                        if let Some(val) = parse_value(gc, chars, pos, array_proto, object_proto) {
+                            elements.push(val);
+                        } else {
+                            return None;
+                        }
+                        skip_ws(chars, pos);
+                        if *pos < chars.len() && chars[*pos] == ',' {
+                            *pos += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                skip_ws(chars, pos);
+                if *pos >= chars.len() || chars[*pos] != ']' {
+                    return None;
+                }
+                *pos += 1;
+                let arr_ptr = RuneArray::allocate(gc, &elements);
+                unsafe {
+                    let ptr = arr_ptr as *mut u8;
+                    let shape_ptr = ptr.add(8) as *mut *const rune_core::shape::Shape;
+                    *shape_ptr = *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
+                    if let Some(proto) = array_proto {
+                        let proto_ptr = ptr.add(24) as *mut *mut u8;
+                        *proto_ptr = proto;
+                    }
+                }
+                Some(Value::from_heap_ptr(arr_ptr as *mut u8))
+            }
+            '{' => {
+                *pos += 1;
+                skip_ws(chars, pos);
+                let mut keys: Vec<String> = Vec::new();
+                let mut values: Vec<Value> = Vec::new();
+                if *pos < chars.len() && chars[*pos] != '}' {
+                    loop {
+                        skip_ws(chars, pos);
+                        if *pos >= chars.len() || chars[*pos] != '"' {
+                            return None;
+                        }
+                        // Parse string key
+                        *pos += 1;
+                        let mut key = String::new();
+                        while *pos < chars.len() && chars[*pos] != '"' {
+                            if chars[*pos] == '\\' {
+                                *pos += 1;
+                                if *pos >= chars.len() {
+                                    return None;
+                                }
+                                match chars[*pos] {
+                                    '"' => key.push('"'),
+                                    '\\' => key.push('\\'),
+                                    '/' => key.push('/'),
+                                    'b' => key.push('\u{0008}'),
+                                    'f' => key.push('\u{000C}'),
+                                    'n' => key.push('\n'),
+                                    'r' => key.push('\r'),
+                                    't' => key.push('\t'),
+                                    'u' => {
+                                        if *pos + 4 < chars.len() {
+                                            let hex: String =
+                                                chars[*pos + 1..*pos + 5].iter().collect();
+                                            if let Ok(code) = u32::from_str_radix(&hex, 16) {
+                                                if let Some(ch) = char::from_u32(code) {
+                                                    key.push(ch);
+                                                }
+                                            }
+                                            *pos += 4;
+                                        } else {
+                                            return None;
+                                        }
+                                    }
+                                    _ => return None,
+                                }
+                            } else {
+                                key.push(chars[*pos]);
+                            }
+                            *pos += 1;
+                        }
+                        if *pos >= chars.len() {
+                            return None;
+                        }
+                        *pos += 1; // skip closing quote
+                        skip_ws(chars, pos);
+                        if *pos >= chars.len() || chars[*pos] != ':' {
+                            return None;
+                        }
+                        *pos += 1;
+                        skip_ws(chars, pos);
+                        if let Some(val) = parse_value(gc, chars, pos, array_proto, object_proto) {
+                            keys.push(key);
+                            values.push(val);
+                        } else {
+                            return None;
+                        }
+                        skip_ws(chars, pos);
+                        if *pos < chars.len() && chars[*pos] == ',' {
+                            *pos += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                skip_ws(chars, pos);
+                if *pos >= chars.len() || chars[*pos] != '}' {
+                    return None;
+                }
+                *pos += 1;
+                // Build object with string-keyed properties
+                let shape_entries: Vec<(PropertyKey, usize)> = keys
+                    .iter()
+                    .enumerate()
+                    .map(|(i, k)| (PropertyKey::from_string(k), i))
+                    .collect();
+                let key_names: Vec<String> = keys.iter().cloned().collect();
+                let shape = Shape::intern(shape_entries, key_names);
+                let obj_ptr = JSObject::allocate(gc, shape, &values);
+                // Set prototype
+                if let Some(proto) = object_proto {
+                    unsafe {
+                        JSObject::set_prototype(obj_ptr as *mut JSObject, proto);
+                    }
+                }
+                Some(Value::from_heap_ptr(obj_ptr as *mut u8))
+            }
+            _ => None,
+        }
+    }
+    parse_value(gc, &chars, &mut pos, array_proto, object_proto).unwrap_or(Value::undefined())
+}
+
+/// Array.prototype.filter(callback, thisArg) — set up state machine iteration.
+pub fn array_filter(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let arr_ptr = match this.heap_ptr() {
+        Some(ptr) => {
+            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+            if tag == TAG_ARRAY { ptr } else { return Value::undefined(); }
+        }
+        None => return Value::undefined(),
+    };
+    let callback = args.first().copied().unwrap_or(Value::undefined());
+    let this_arg = args.get(1).copied().unwrap_or(Value::undefined());
+    let length = unsafe { RuneArray::length(arr_ptr as *mut RuneArray) };
+    let result_arr = RuneArray::allocate(gc, &[]);
+    unsafe {
+        let ptr = result_arr as *mut u8;
+        *(ptr.add(8) as *mut *const rune_core::shape::Shape) = *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
+        if let Some(proto) = vm.array_prototype.heap_ptr() {
+            *(ptr.add(24) as *mut *mut u8) = proto;
+        }
+    }
+    if length == 0 {
+        return Value::from_heap_ptr(result_arr as *mut u8);
+    }
+    vm.pending_array_op = Some(crate::vm::ArrayOpState {
+        kind: crate::vm::ArrayOpKind::Filter,
+        source: arr_ptr,
+        result: result_arr as *mut u8,
+        callback,
+        this_val: this_arg,
+        index: 0,
+        length,
+        source_frame_depth: 0,
+        accumulator: None,
+    });
+    let element = unsafe { RuneArray::get_element(arr_ptr as *mut RuneArray, 0) };
+    vm.push_callback_call(gc, callback, this_arg, vec![element, Value::smi(0), this]);
+    Value::undefined()
+}
+
+/// Array.prototype.map(callback, thisArg) — set up state machine iteration.
+pub fn array_map(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let arr_ptr = match this.heap_ptr() {
+        Some(ptr) => {
+            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+            if tag == TAG_ARRAY { ptr } else { return Value::undefined(); }
+        }
+        None => return Value::undefined(),
+    };
+    let callback = args.first().copied().unwrap_or(Value::undefined());
+    let this_arg = args.get(1).copied().unwrap_or(Value::undefined());
+    let length = unsafe { RuneArray::length(arr_ptr as *mut RuneArray) };
+    let result_arr = RuneArray::allocate(gc, &[]);
+    unsafe {
+        let ptr = result_arr as *mut u8;
+        *(ptr.add(8) as *mut *const rune_core::shape::Shape) = *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
+        if let Some(proto) = vm.array_prototype.heap_ptr() {
+            *(ptr.add(24) as *mut *mut u8) = proto;
+        }
+    }
+    if length == 0 {
+        return Value::from_heap_ptr(result_arr as *mut u8);
+    }
+    vm.pending_array_op = Some(crate::vm::ArrayOpState {
+        kind: crate::vm::ArrayOpKind::Map,
+        source: arr_ptr,
+        result: result_arr as *mut u8,
+        callback,
+        this_val: this_arg,
+        index: 0,
+        length,
+        source_frame_depth: 0,
+        accumulator: None,
+    });
+    let element = unsafe { RuneArray::get_element(arr_ptr as *mut RuneArray, 0) };
+    vm.push_callback_call(gc, callback, this_arg, vec![element, Value::smi(0), this]);
+    Value::undefined()
+}
+
+/// Array.prototype.reduce(callback, initialValue) — set up state machine iteration.
+pub fn array_reduce(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let arr_ptr = match this.heap_ptr() {
+        Some(ptr) => {
+            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+            if tag == TAG_ARRAY { ptr } else { return Value::undefined(); }
+        }
+        None => return Value::undefined(),
+    };
+    let callback = args.first().copied().unwrap_or(Value::undefined());
+    let has_initial = args.len() > 1;
+    let initial = args.get(1).copied().unwrap_or(Value::undefined());
+    let length = unsafe { RuneArray::length(arr_ptr as *mut RuneArray) };
+    if !has_initial && length == 0 {
+        let msg = HeapString::allocate(gc, "TypeError: reduce of empty array with no initial value");
+        vm.set_pending_exception(Value::from_heap_ptr(msg as *mut u8));
+        return Value::undefined();
+    }
+    let start_index;
+    let accumulator = if has_initial {
+        start_index = 0;
+        initial
+    } else {
+        start_index = 1;
+        unsafe { RuneArray::get_element(arr_ptr as *mut RuneArray, 0) }
+    };
+    if start_index >= length as usize {
+        return accumulator;
+    }
+    let start_index;
+    let accumulator = if has_initial {
+        start_index = 0;
+        initial
+    } else {
+        start_index = 1;
+        unsafe { RuneArray::get_element(arr_ptr as *mut RuneArray, 0) }
+    };
+    vm.pending_array_op = Some(crate::vm::ArrayOpState {
+        kind: crate::vm::ArrayOpKind::Reduce,
+        source: arr_ptr,
+        result: std::ptr::null_mut(),
+        callback,
+        this_val: Value::undefined(),
+        index: start_index,
+        length,
+        source_frame_depth: 0,
+        accumulator: Some(accumulator),
+    });
+    let element = unsafe { RuneArray::get_element(arr_ptr as *mut RuneArray, start_index) };
+    vm.push_callback_call(gc, callback, Value::undefined(), vec![accumulator, element, Value::smi(start_index as i32), this]);
+    Value::undefined()
+}
+
 /// Return a list of builtins to register in every new Vm.
 pub fn default_builtins() -> Vec<Builtin> {
     vec![
@@ -442,6 +839,24 @@ pub fn default_builtins() -> Vec<Builtin> {
         Builtin {
             name: "Math_sqrt",
             func: math_sqrt,
+        },
+        // JSON
+        Builtin {
+            name: "JSON_parse",
+            func: json_parse,
+        },
+        // Array.prototype methods
+        Builtin {
+            name: "Array_prototype_filter",
+            func: array_filter,
+        },
+        Builtin {
+            name: "Array_prototype_map",
+            func: array_map,
+        },
+        Builtin {
+            name: "Array_prototype_reduce",
+            func: array_reduce,
         },
         // Test262 assert builtins
         Builtin {

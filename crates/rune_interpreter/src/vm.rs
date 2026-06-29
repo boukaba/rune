@@ -1402,6 +1402,29 @@ impl Vm {
                     self.frames[fi].pc = pc + 1;
                 }
 
+                Opcode::LoadRegExp => {
+                    let idx = instr.operands[0] as usize;
+                    let (pattern, flags) = prog.regex_pool.get(idx).cloned().unwrap_or_default();
+                    let pattern_ptr = HeapString::allocate(gc, &pattern) as *mut u8;
+                    let mut flag_bits = 0u32;
+                    for c in flags.chars() {
+                        match c {
+                            'g' => flag_bits |= 1,
+                            'i' => flag_bits |= 2,
+                            'm' => flag_bits |= 4,
+                            's' => flag_bits |= 8,
+                            'u' => flag_bits |= 16,
+                            'y' => flag_bits |= 32,
+                            'd' => flag_bits |= 64,
+                            _ => {}
+                        }
+                    }
+                    let ptr = rune_core::regexp::RegExp::allocate(gc, pattern_ptr, flag_bits);
+                    self.register_roots(gc);
+                    self.push(Value::from_heap_ptr(ptr));
+                    self.frames[fi].pc = pc + 1;
+                }
+
                 // ---- `this` binding ----
                 Opcode::LoadThis => {
                     self.push(self.frames[fi].this);

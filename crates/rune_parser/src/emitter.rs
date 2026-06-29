@@ -15,6 +15,7 @@ pub struct Emitter {
     pub named_function: bool,
     pub string_pool: Vec<String>,
     pub float_pool: Vec<f64>,
+    pub regex_pool: Vec<(String, String)>,
     pub nested_funcs: Vec<BytecodeProgram>,
     locals: Vec<String>,
     /// Lexical scope stack (let/const per block). Each scope knows its
@@ -50,6 +51,7 @@ impl Emitter {
             named_function: false,
             string_pool: Vec::new(),
             float_pool: Vec::new(),
+            regex_pool: Vec::new(),
             nested_funcs: Vec::new(),
             locals: Vec::new(),
             lexical_scopes: Vec::new(),
@@ -1432,6 +1434,11 @@ impl Emitter {
                 self.emit_expression(arg);
                 self.emit(Opcode::Await, vec![]);
             }
+            Expr::RegExp(pattern, flags, _) => {
+                let idx = self.regex_pool.len();
+                self.regex_pool.push((pattern.to_string(), flags.to_string()));
+                self.emit(Opcode::LoadRegExp, vec![idx as i64]);
+            }
         }
     }
 
@@ -1595,6 +1602,7 @@ impl Emitter {
         program.local_names = self.locals;
         program.captured_env_size = self.captured_env_size;
         program.float_pool = self.float_pool;
+        program.regex_pool = self.regex_pool;
         program.assign_ic_indices();
         program
     }
@@ -1696,7 +1704,8 @@ fn contains_inner_function_expr(expr: &Expr) -> bool {
         | Expr::Undefined(_)
         | Expr::This(_)
         | Expr::Assign(_, _, _)
-        | Expr::Yield(_, _) => false,
+        | Expr::Yield(_, _)
+        | Expr::RegExp(_, _, _) => false,
         Expr::Await(expr, _) => contains_inner_function_expr(expr),
     }
 }
@@ -1859,6 +1868,7 @@ fn uses_arguments_expr(expr: &Expr) -> bool {
         Expr::Update(_, expr, _, _) => uses_arguments_expr(expr),
         Expr::Yield(expr, _) => expr.as_ref().is_some_and(|e| uses_arguments_expr(e)),
         Expr::Await(expr, _) => uses_arguments_expr(expr),
+        Expr::RegExp(_, _, _) => false,
     }
 }
 

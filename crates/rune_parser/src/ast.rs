@@ -42,6 +42,7 @@ pub enum Expr {
     Update(UpdateOp, Box<Expr>, bool, Span), // op, argument, is_prefix, span
     Yield(Option<Box<Expr>>, Span),
     Await(Box<Expr>, Span),
+    RegExp(Box<str>, Box<str>, Span), // pattern, flags, span
 }
 
 #[derive(Clone, Debug, PartialEq)]

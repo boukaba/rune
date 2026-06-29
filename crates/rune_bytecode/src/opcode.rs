@@ -116,6 +116,8 @@ pub enum Opcode {
     DecGlobal,
     // Async
     Await,
+    // RegExp
+    LoadRegExp,
 }
 
 #[derive(Clone, Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -174,6 +176,8 @@ pub struct BytecodeProgram {
     /// Set by the emitter when escape analysis detects that variables in this
     /// function are captured by nested closures.
     pub captured_env_size: usize,
+    /// Pre-compiled regex patterns and flags for LoadRegExp.
+    pub regex_pool: Vec<(String, String)>,
 }
 
 impl BytecodeProgram {
@@ -192,6 +196,7 @@ impl BytecodeProgram {
             is_async: false,
             local_names: vec![],
             captured_env_size: 0,
+            regex_pool: vec![],
         }
     }
 
@@ -208,6 +213,13 @@ impl BytecodeProgram {
     /// Build the control-flow graph from this program's instructions.
     pub fn build_cfg(&self) -> crate::block::ControlFlowGraph {
         crate::block::build_cfg(&self.instructions)
+    }
+
+    /// Intern a regex into the pool and return its index.
+    pub fn intern_regex(&mut self, pattern: &str, flags: &str) -> usize {
+        let idx = self.regex_pool.len();
+        self.regex_pool.push((pattern.to_string(), flags.to_string()));
+        idx
     }
 
     /// Run liveness analysis on this program.

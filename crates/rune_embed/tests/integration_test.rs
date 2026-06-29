@@ -5212,3 +5212,15 @@ fn test_promise_finally_non_callable() {
         .unwrap();
     assert_eq!(r.as_smi(), Some(0), "non-callable finally should not fire handler");
 }
+
+#[test]
+fn test_regex_literal() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(r#"
+            var r = /abc/;
+            typeof r;
+        "#)
+        .unwrap();
+    assert!(r.heap_ptr().is_some(), "typeof regex literal should return a string");
+}

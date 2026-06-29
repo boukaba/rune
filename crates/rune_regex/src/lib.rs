@@ -1,5 +1,10 @@
-// Roadmap placeholder — Phase 6 (Sprint 17+). See progress.md.
+pub mod ast;
 pub mod backtrack;
 pub mod nfa;
 pub mod parse;
 pub mod pikevm;
+
+pub use nfa::{compile, Nfa, State as NfaState};
+pub use pikevm::PikeVm;
+pub use parse::parse_regex;
+

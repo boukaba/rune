@@ -10,6 +10,7 @@ pub enum TokenKind {
     TemplateMiddle,
     TemplateTail,
     TemplateNoSub,
+    RegExp,
     Identifier,
     True,
     False,
@@ -118,6 +119,7 @@ pub struct Token {
     pub kind: TokenKind,
     pub span: Span,
     pub value: String,
+    pub flags: String,
 }
 
 impl Token {
@@ -126,6 +128,16 @@ impl Token {
             kind,
             span: Span { start, end },
             value,
+            flags: String::new(),
+        }
+    }
+
+    pub fn new_regex(start: usize, end: usize, pattern: String, flags: String) -> Self {
+        Token {
+            kind: TokenKind::RegExp,
+            span: Span { start, end },
+            value: pattern,
+            flags,
         }
     }
 }
@@ -136,6 +148,7 @@ pub struct Lexer {
     start: usize,
     pub errors: Vec<String>,
     pub had_newline: bool,
+    pub regex_allowed: bool,
     template_brace_stack: Vec<usize>,
 }
 
@@ -147,6 +160,7 @@ impl Lexer {
             start: 0,
             errors: Vec::new(),
             had_newline: false,
+            regex_allowed: true,
             template_brace_stack: Vec::new(),
         }
     }
@@ -714,6 +728,9 @@ impl Lexer {
                 }
             }
             '/' => {
+                if self.regex_allowed {
+                    return self.scan_regex();
+                }
                 if self.peek() == Some('=') {
                     self.advance();
                     Token::new(TokenKind::SlashAssign, self.start, self.pos, "/=".into())
@@ -895,5 +912,74 @@ impl Lexer {
         let is_eof = peek.is_none();
         self.pos = saved;
         is_eof
+    }
+
+    /// Scan a regex literal: /pattern/flags
+    /// Assumes the opening `/` has been consumed (pos is after it).
+    fn scan_regex(&mut self) -> Token {
+        let start = self.start;
+        let mut pattern = String::new();
+        loop {
+            match self.peek() {
+                None => {
+                    self.errors.push("Unterminated regex".into());
+                    break;
+                }
+                Some('\\') => {
+                    self.advance();
+                    pattern.push('\\');
+                    if let Some(c) = self.advance() {
+                        pattern.push(c);
+                    }
+                }
+                Some('[') => {
+                    pattern.push('[');
+                    self.advance();
+                    loop {
+                        match self.peek() {
+                            None | Some('\n') | Some('\r') => {
+                                self.errors.push("Unterminated character class in regex".into());
+                                break;
+                            }
+                            Some('\\') => {
+                                pattern.push('\\');
+                                self.advance();
+                                if let Some(c) = self.advance() { pattern.push(c); }
+                            }
+                            Some(']') => {
+                                pattern.push(']');
+                                self.advance();
+                                break;
+                            }
+                            Some(c) => { pattern.push(c); self.advance(); }
+                        }
+                    }
+                }
+                Some('/') => {
+                    self.advance();
+                    break;
+                }
+                Some(c) if c == '\n' || c == '\r' => {
+                    self.errors.push("Unterminated regex".into());
+                    break;
+                }
+                Some(c) => {
+                    pattern.push(c);
+                    self.advance();
+                }
+            }
+        }
+        // Scan flags
+        let mut flags = String::new();
+        while let Some(c) = self.peek() {
+            match c {
+                'g' | 'i' | 'm' | 's' | 'u' | 'y' | 'd' => {
+                    flags.push(c);
+                    self.advance();
+                }
+                _ => break,
+            }
+        }
+        Token::new_regex(start, self.pos, pattern, flags)
     }
 }

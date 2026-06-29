@@ -19,6 +19,17 @@ impl Parser {
     }
 
     fn advance(&mut self) {
+        // Update regex_allowed based on current token kind
+        // After value-producing tokens, / is division; after operators/keywords, / is regex.
+        self.lexer.regex_allowed = match self.tok.kind {
+            TokenKind::Number | TokenKind::String | TokenKind::RegExp
+            | TokenKind::Identifier
+            | TokenKind::True | TokenKind::False | TokenKind::Null | TokenKind::This
+            | TokenKind::RParen | TokenKind::RBracket
+            | TokenKind::PlusPlus | TokenKind::MinusMinus
+            | TokenKind::Template | TokenKind::TemplateTail => false,
+            _ => true,
+        };
         self.tok = self.lexer.next_token();
     }
 
@@ -1465,6 +1476,18 @@ impl Parser {
                     end: self.span().end,
                 };
                 Expr::Function(Box::new(body), span)
+            }
+            TokenKind::RegExp => {
+                let t = self.tok.clone();
+                self.advance();
+                Expr::RegExp(
+                    t.value.into_boxed_str(),
+                    t.flags.into_boxed_str(),
+                    Span {
+                        start: start.start,
+                        end: self.span().end,
+                    },
+                )
             }
             _ => {
                 self.error(format!("Unexpected token {:?}", self.tok.kind));

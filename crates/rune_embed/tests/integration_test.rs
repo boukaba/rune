@@ -5527,3 +5527,66 @@ fn test_class_super_multi_level() {
          var c = new Child(1, 2, 3); c.gx + c.py + c.cz;"
     ), 6);
 }
+
+#[test]
+fn test_class_super_prop_read() {
+    let mut ctx = Context::new_small();
+    assert_eq!(class_eval_num(&mut ctx,
+        "class Parent { getX() { return 42; } }
+         class Child extends Parent { constructor() { super(); }
+           method() { return this.getX(); } }
+         new Child().method();"
+    ), 42);
+}
+
+#[test]
+fn test_class_super_method_call() {
+    let mut ctx = Context::new_small();
+    assert_eq!(class_eval_num(&mut ctx,
+        "class Parent { add(a, b) { return a + b; } }
+         class Child extends Parent { sum(a, b) { return super.add(a, b); } }
+         new Child().sum(3, 4);"
+    ), 7);
+}
+
+#[test]
+fn test_class_super_method_multi_level() {
+    let mut ctx = Context::new_small();
+    assert_eq!(class_eval_num(&mut ctx,
+        "class GrandParent { base() { return 1; } }
+         class Parent extends GrandParent { parent() { return super.base() + 10; } }
+         class Child extends Parent { child() { return super.parent() + 100; } }
+         new Child().child();"
+    ), 111);
+}
+
+#[test]
+fn test_class_super_method() {
+    let mut ctx = Context::new_small();
+    assert_eq!(class_eval_num(&mut ctx,
+        "class Parent { getX() { return 42; } }
+         class Child extends Parent { constructor() { super(); }
+           method() { return super.getX(); } }
+         new Child().method();"
+    ), 42);
+}
+
+#[test]
+fn test_class_super_method_with_args() {
+    let mut ctx = Context::new_small();
+    assert_eq!(class_eval_num(&mut ctx,
+        "class Parent { add(a, b) { return a + b; } }
+         class Child extends Parent { sum(a, b) { return super.add(a, b); } }
+         new Child().sum(3, 4);"
+    ), 7);
+}
+
+#[test]
+fn test_class_super_prop_read_data() {
+    let mut ctx = Context::new_small();
+    assert_eq!(class_eval_num(&mut ctx,
+        "class Parent { constructor() { this.val = 99; } getVal() { return this.val; } }
+         class Child extends Parent { constructor() { super(); } read() { return super.getVal(); } }
+         new Child().read();"
+    ), 99);
+}

@@ -5483,6 +5483,14 @@ pub(crate) fn load_property_recursive(obj: Value, raw_key: Value, function_proto
             let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
             if tag == TAG_OBJECT {
                 if let Some(key) = value_to_prop_key(raw_key) {
+                    // __proto__ read returns the internal [[Prototype]]
+                    if is_proto_key(raw_key) {
+                        let proto = unsafe { JSObject::prototype(ptr as *mut JSObject) };
+                        if proto.is_null() {
+                            return Value::undefined();
+                        }
+                        return Value::from_heap_ptr(proto);
+                    }
                     let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
                     if let Some(slot) = shape.lookup(&key) {
                         return unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };

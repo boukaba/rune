@@ -273,14 +273,12 @@ impl Emitter {
         self.emit(Opcode::NewObject, vec![0]);
 
         // 2.5 Handle heritage (extends)
-        let mut heritage_proto_slot = None;
         let mut heritage_super_slot = None;
         if let Some(heritage) = &class.heritage {
             let pslot = self.locals.len();
             self.locals.push(format!("__ext_proto_{}", pslot));
             let sslot = self.locals.len();
             self.locals.push(format!("__ext_super_{}", sslot));
-            heritage_proto_slot = Some(pslot);
             heritage_super_slot = Some(sslot);
 
             // Save child proto to local (StoreLocal keeps value on stack too)
@@ -1342,16 +1340,38 @@ impl Emitter {
                     // Build args array for spread calls
                     match callee.as_ref() {
                         Expr::Member(obj, prop, computed, _) => {
-                            self.emit_expression(obj);
-                            self.emit(Opcode::Dup, vec![]);
-                            if *computed {
-                                self.emit_expression(prop);
-                            } else {
-                                let name = prop_name_as_string(prop);
-                                let idx = self.intern_string(&name) as i64;
-                                self.emit(Opcode::LoadStringConst, vec![idx]);
+                            match obj.as_ref() {
+                                Expr::Super(_) => {
+                                    // super.method(...args): receiver=this, lookup via this.__proto__.__proto__
+                                    self.emit(Opcode::LoadThis, vec![]);
+                                    self.emit(Opcode::Dup, vec![]);
+                                    let proto_key = self.intern_string("__proto__") as i64;
+                                    self.emit(Opcode::LoadStringConst, vec![proto_key]);
+                                    self.emit(Opcode::LoadProperty, vec![]);
+                                    self.emit(Opcode::LoadStringConst, vec![proto_key]);
+                                    self.emit(Opcode::LoadProperty, vec![]);
+                                    if *computed {
+                                        self.emit_expression(prop);
+                                    } else {
+                                        let name = prop_name_as_string(prop);
+                                        let idx = self.intern_string(&name) as i64;
+                                        self.emit(Opcode::LoadStringConst, vec![idx]);
+                                    }
+                                    self.emit(Opcode::LoadProperty, vec![]);
+                                }
+                                _ => {
+                                    self.emit_expression(obj);
+                                    self.emit(Opcode::Dup, vec![]);
+                                    if *computed {
+                                        self.emit_expression(prop);
+                                    } else {
+                                        let name = prop_name_as_string(prop);
+                                        let idx = self.intern_string(&name) as i64;
+                                        self.emit(Opcode::LoadStringConst, vec![idx]);
+                                    }
+                                    self.emit(Opcode::LoadProperty, vec![]);
+                                }
                             }
-                            self.emit(Opcode::LoadProperty, vec![]);
                             // stack: [receiver, method]
                             self.emit(Opcode::NewArray, vec![0]);
                             for arg in args {
@@ -1391,17 +1411,39 @@ impl Emitter {
                 } else {
                     match callee.as_ref() {
                         Expr::Member(obj, prop, computed, _) => {
-                            // Method call: preserve receiver (this) below the method
-                            self.emit_expression(obj);
-                            self.emit(Opcode::Dup, vec![]);
-                            if *computed {
-                                self.emit_expression(prop);
-                            } else {
-                                let name = prop_name_as_string(prop);
-                                let idx = self.intern_string(&name) as i64;
-                                self.emit(Opcode::LoadStringConst, vec![idx]);
+                            match obj.as_ref() {
+                                Expr::Super(_) => {
+                                    // super.method(): receiver=this, lookup via this.__proto__.__proto__
+                                    self.emit(Opcode::LoadThis, vec![]);
+                                    self.emit(Opcode::Dup, vec![]);
+                                    let proto_key = self.intern_string("__proto__") as i64;
+                                    self.emit(Opcode::LoadStringConst, vec![proto_key]);
+                                    self.emit(Opcode::LoadProperty, vec![]);
+                                    self.emit(Opcode::LoadStringConst, vec![proto_key]);
+                                    self.emit(Opcode::LoadProperty, vec![]);
+                                    if *computed {
+                                        self.emit_expression(prop);
+                                    } else {
+                                        let name = prop_name_as_string(prop);
+                                        let idx = self.intern_string(&name) as i64;
+                                        self.emit(Opcode::LoadStringConst, vec![idx]);
+                                    }
+                                    self.emit(Opcode::LoadProperty, vec![]);
+                                }
+                                _ => {
+                                    // Method call: preserve receiver (this) below the method
+                                    self.emit_expression(obj);
+                                    self.emit(Opcode::Dup, vec![]);
+                                    if *computed {
+                                        self.emit_expression(prop);
+                                    } else {
+                                        let name = prop_name_as_string(prop);
+                                        let idx = self.intern_string(&name) as i64;
+                                        self.emit(Opcode::LoadStringConst, vec![idx]);
+                                    }
+                                    self.emit(Opcode::LoadProperty, vec![]);
+                                }
                             }
-                            self.emit(Opcode::LoadProperty, vec![]);
                         }
                         Expr::Super(_) => {
                             // super() call: this = current this (for constructor)
@@ -1429,7 +1471,20 @@ impl Emitter {
                 self.emit(Opcode::New, vec![args.len() as i64]);
             }
             Expr::Member(obj, prop, computed, _) => {
-                self.emit_expression(obj);
+                match obj.as_ref() {
+                    Expr::Super(_) => {
+                        // super.prop: lookup via this.__proto__.__proto__
+                        self.emit(Opcode::LoadThis, vec![]);
+                        let proto_key = self.intern_string("__proto__") as i64;
+                        self.emit(Opcode::LoadStringConst, vec![proto_key]);
+                        self.emit(Opcode::LoadProperty, vec![]);
+                        self.emit(Opcode::LoadStringConst, vec![proto_key]);
+                        self.emit(Opcode::LoadProperty, vec![]);
+                    }
+                    _ => {
+                        self.emit_expression(obj);
+                    }
+                }
                 if *computed {
                     self.emit_expression(prop);
                 } else {

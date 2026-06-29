@@ -2960,10 +2960,50 @@ Added `ClassNode` (name, methods, span), `ClassMethod` (key, func, is_static, sp
 | `test_class_super_call_property_setting` | `super(a, b)` sets multiple parent properties |
 | `test_class_super_multi_level` | 3-level chain: GrandParent → Parent → Child with `super()` at each level |
 
+---
+
+## Sprint 26 — Class `super.prop` Member Access
+
+> **2026-06-29**: `super.method()` and `super.prop` now resolve via `this.__proto__.__proto__` chain. `__proto__` read in `load_property_recursive` returns the internal [[Prototype]] for TAG_OBJECT. 8 new tests. 448/448 tests pass.
+
+### Implementation
+
+#### VM (`crates/rune_interpreter/src/vm.rs`)
+- `load_property_recursive` TAG_OBJECT handler: added `__proto__` key check — returns `JSObject::prototype()` directly instead of walking the prototype chain looking for a shape property named `"__proto__"`. Uses `is_proto_key(raw_key)` to detect the `__proto__` accessor.
+
+#### Emitter (`crates/rune_parser/src/emitter.rs`)
+- `Expr::Member(Expr::Super, prop, _, _)` in `emit_expression`: emits `LoadThis → "__proto__" LoadProperty → "__proto__" LoadProperty → key LoadProperty` chain, resolving `super.prop` to `this.__proto__.__proto__.prop` (which is `Parent.prototype.prop`)
+- `Expr::Call(callee, args, _)` for `callee = Expr::Member(Expr::Super, ...)`:
+  - **Spread path**: emits `LoadThis → Dup → "__proto__" ×2 → LoadProperty ×2 → key LoadProperty`, then builds args array and `CallFromArray`
+  - **Non-spread path**: emits `LoadThis → Dup → "__proto__" ×2 → LoadProperty ×2 → key LoadProperty`, then args + `Call N`
+- Removed unused `heritage_proto_slot` variable from `emit_class` (leftover from earlier approach)
+
+#### Integration Tests
+8 tests:
+
+| Test | What it validates |
+|---|---|
+| `test_class_super_method` | `super.getX()` returns value from parent prototype method |
+| `test_class_super_method_call` | `super.add(a, b)` with arguments |
+| `test_class_super_method_with_args` | Same with explicit constructor |
+| `test_class_super_method_multi_level` | 3-level chain: GrandParent → Parent → Child, `super.base()` → `super.parent()` |
+| `test_class_super_multi_level` | 3-level super() call chain |
+| `test_class_super_prop_read` | `this.getX()` works through prototype chain |
+| `test_class_super_prop_read_data` | `super.getVal()` reads instance data set by parent constructor |
+| `test_class_super_call` | `super(x)` + parent constructor runs |
+
+### Design Decision
+- **`this.__proto__.__proto__` chain** chosen over `LoadSuperclass + "prototype"` approach because `LoadSuperclass` reads from `frame.func_ptr`, which points to the method function (not class constructor) inside method bodies — so `Func::superclass()` returns null from methods. The `__proto__` chain is more robust: it works from both constructors and methods.
+- **`__proto__` read fix** in `load_property_recursive` is required for correctness — reading `obj.__proto__` should return the internal [[Prototype]], not walk the prototype chain looking for a shape property named `"__proto__"` (which doesn't exist on plain objects).
+
 ### Known Gaps
-- `super.prop` member access not implemented (e.g., `super.method()`)
 - Default derived constructor does not synthesize `super(...args)` — user must write explicit constructor
 - `instanceof` with class constructors fails when RHS is a builtin (Smi handle) — pre-existing
+- `__proto__` read in `load_property_recursive` returns the internal [[Prototype]] only for TAG_OBJECT; TAG_ARRAY and other types not handled
+- JIT bailout on `SetSuperclass`/`LoadSuperclass` (catch-all `_ => return false`)
 
 ### Next Steps
-1. `class` `super.prop` member access
+1. Default derived constructor — synthesize `super(...args)` body when no explicit constructor in a derived class
+2. `instanceof` fix — handle non-heap RHS (negative Smi builtins)
+3. `super.prop = val` assignment pattern
+4. `static` methods

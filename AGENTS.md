@@ -51,7 +51,11 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - **RegExp function replacement** — `String.prototype.replace` supports function as replacement for regex pattern. Calls `fn(match, ...captures, offset, input)`, uses return value. Uses `PendingReplaceOp` state machine in Return handler. 2 integration tests. 429/429 tests pass.
 - **`class` `extends` (heritage)** — prototype chain setup (`Child.prototype.__proto__ = Parent.prototype`), constructor `__proto__` linking for static inheritance (`Child.__proto__ = Parent`). 3 integration tests. 434/434 tests pass.
 - **`class` `super()` calls** — `super(x, y)` in constructors: `Expr::Super` AST + parser, `LoadSuperclass` opcode (reads `Func::superclass` stored via `SetSuperclass` at class setup), `LoadThis` for receiver, `Call` to parent constructor. `func_ptr` field on Frame for superclass access. 4 integration tests. 438/438 tests pass.
-- **Known gaps**: `async_reject` is_throw path not yet wired to generator throw, `.finally` pending case falls back to old .then behavior, RegExp: no match/search/split, `replaceAll` function replacement not yet implemented, class: no `static` methods, no `super.prop` member access, `this.prop++` not supported (Update only handles Identifier targets).
+- **`class` `super.prop` member access** — `super.method()` and `super.prop` resolve via `this.__proto__.__proto__` chain. `__proto__` read in `load_property_recursive` returns internal [[Prototype]] for TAG_OBJECT. 8 new tests. 448/448 tests pass.
+- **Known gaps**: `async_reject` is_throw path not yet wired to generator throw, `.finally` pending case falls back to old .then behavior, RegExp: no match/search/split, `replaceAll` function replacement not yet implemented, class: no `static` methods, no `super.prop = val` assignment, `this.prop++` not supported (Update only handles Identifier targets).
 
 ### Next Steps — v0.5 (ordered by leverage)
-1. `class` `super.prop` member access
+1. Default derived constructor — synthesize `super(...args)` body
+2. `instanceof` fix — handle non-heap RHS (negative Smi builtins)
+3. `super.prop = val` assignment
+4. `static` methods

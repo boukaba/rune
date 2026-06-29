@@ -1,4 +1,4 @@
-use crate::builtins::{Builtin, BuiltinFn, make_error, string_builtin, to_primitive_string, to_primitive_string_sync, value_to_js_string};
+use crate::builtins::{Builtin, BuiltinFn, make_error, number_builtin, string_builtin, to_primitive_string, to_primitive_string_sync, value_to_js_string};
 use crate::generator::Generator;
 use crate::ic::{IcEntry, IcStats, InlineCache, LoopTrace, TraceOp};
 use rune_bytecode::opcode::{BytecodeProgram, Instruction, Opcode};
@@ -302,6 +302,7 @@ pub struct Vm {
     pub array_prototype: Value,
     pub string_prototype: Value,
     pub string_constructor: Value,
+    pub number_constructor: Value,
     pub object_prototype: Value,
     pub function_prototype: Value,
     /// Pending exception set by a builtin (checked after builtin dispatch).
@@ -374,6 +375,7 @@ impl Vm {
             array_prototype: Value::undefined(),
             string_prototype: Value::undefined(),
             string_constructor: Value::undefined(),
+            number_constructor: Value::undefined(),
             object_prototype: Value::undefined(),
             function_prototype: Value::undefined(),
             pending_exception: None,
@@ -539,6 +541,13 @@ impl Vm {
             let str_ctor = make_object(gc, &[("fromCharCode", handle), ("prototype", str_proto_val)]);
             self.string_constructor = str_ctor;
             self.builtin_wrappers.insert("String".to_string(), str_ctor);
+        }
+
+        // Number constructor with .prototype
+        if find_handle(&self.builtins, "Number").is_some() {
+            let num_ctor = make_object(gc, &[("prototype", Value::undefined())]);
+            self.number_constructor = num_ctor;
+            self.builtin_wrappers.insert("Number".to_string(), num_ctor);
         }
 
         // Math namespace with all methods + constants
@@ -806,6 +815,7 @@ impl Vm {
         gc.push_root(&self.array_prototype as *const Value as *mut u64);
         gc.push_root(&self.string_prototype as *const Value as *mut u64);
         gc.push_root(&self.string_constructor as *const Value as *mut u64);
+        gc.push_root(&self.number_constructor as *const Value as *mut u64);
         gc.push_root(&self.function_prototype as *const Value as *mut u64);
         // Root pre-allocated typeof result strings (JIT typeof_helper reads these)
         for v in &self.typeof_strings {
@@ -3343,7 +3353,20 @@ impl Vm {
                             continue;
                         }
                         if self.pending_call.is_some() {
-                            // ToPrimitive callback in progress — don't push result or advance PC
+                            continue;
+                        }
+                        self.push(result);
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    }
+
+                    // Number constructor called as a function (not new)
+                    if callee == self.number_constructor {
+                        let result = number_builtin(gc, this, &args, self);
+                        if let Some(exc) = self.pending_exception.take() {
+                            if let Some(exit) = self.handle_throw(gc, exc) {
+                                return exit;
+                            }
                             continue;
                         }
                         self.push(result);

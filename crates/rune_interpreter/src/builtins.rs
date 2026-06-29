@@ -229,6 +229,90 @@ pub(crate) fn to_primitive_string_sync(
     value_to_js_string(val)
 }
 
+/// Convert a string to f64 per ToNumber(string) spec.
+fn string_to_number(s: &str) -> f64 {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return 0.0;
+    }
+    if let Ok(n) = trimmed.parse::<f64>() {
+        return n;
+    }
+    let upper = trimmed.to_uppercase();
+    if upper.starts_with("0X") && let Ok(n) = u64::from_str_radix(&upper[2..], 16) {
+        return n as f64;
+    }
+    if trimmed.eq_ignore_ascii_case("infinity")
+        || trimmed == "+Infinity"
+    {
+        return f64::INFINITY;
+    }
+    if trimmed == "-Infinity" {
+        return f64::NEG_INFINITY;
+    }
+    f64::NAN
+}
+
+/// Build a comma-separated string representation of a dense array.
+fn array_to_string(arr: *mut RuneArray) -> String {
+    unsafe {
+        let len = RuneArray::length(arr);
+        if len == 0 {
+            return String::new();
+        }
+        let mut parts: Vec<String> = Vec::with_capacity(len as usize);
+        for i in 0..len as usize {
+            let elem = RuneArray::get_element(arr, i);
+            parts.push(value_to_js_string(elem));
+        }
+        parts.join(",")
+    }
+}
+
+/// Number(value) — converts a value to a number.
+/// Per §21.1.2.1: calls ToNumber via ToPrimitive with NUMBER hint.
+pub fn number_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    // §21.1.2.1: If no arguments, return +0
+    let val = match args.first().copied() {
+        Some(v) => v,
+        None => return Value::smi(0),
+    };
+    if val.is_undefined() {
+        return Value::from_float64(f64::NAN);
+    }
+    if val.is_null() || val.is_boolean() {
+        let n = if val.is_null() || val.to_boolean() == Some(false) { 0.0 } else { 1.0 };
+        return Value::from_float64(n);
+    }
+    if let Some(n) = val.as_smi() {
+        return Value::smi(n);
+    }
+    if let Some(f) = val.as_float64() {
+        return Value::from_float64(f);
+    }
+    if let Some(ptr) = val.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_STRING {
+            let s = unsafe { HeapString::to_string(ptr as *mut HeapString) };
+            return Value::from_float64(string_to_number(&s));
+        }
+        if tag == TAG_STRING_OBJ {
+            let str_ptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
+            let s = unsafe { HeapString::to_string(str_ptr as *mut HeapString) };
+            return Value::from_float64(string_to_number(&s));
+        }
+        if tag == TAG_ARRAY {
+            let s = array_to_string(ptr as *mut RuneArray);
+            return Value::from_float64(string_to_number(&s));
+        }
+        if tag == TAG_OBJECT {
+            let s = to_primitive_string_sync(val, gc, vm);
+            return Value::from_float64(string_to_number(&s));
+        }
+    }
+    Value::from_float64(f64::NAN)
+}
+
 /// String(value) — converts a value to its string representation.
 /// Per §21.1.2.1: calls ToString via ToPrimitive with string hint.
 pub fn string_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
@@ -2314,6 +2398,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 1,
             name: "String",
             func: string_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "Number",
+            func: number_builtin,
         },
         Builtin {
             length: 1,

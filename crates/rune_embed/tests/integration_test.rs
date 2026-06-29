@@ -5458,6 +5458,30 @@ fn test_class_default_constructor() {
 }
 
 #[test]
+fn test_class_default_derived_constructor() {
+    let mut ctx = Context::new_small();
+    // Derived class with no explicit constructor should synthesize constructor(...args) { super(...args); }
+    assert_eq!(class_eval_num(&mut ctx,
+        "class Parent { constructor(x) { this.x = x; } getX() { return this.x; } }
+         class Child extends Parent { getDouble() { return this.x * 2; } }
+         new Child(21).getX();"
+    ), 21);
+    // Multiple args
+    assert_eq!(class_eval_num(&mut ctx,
+        "class Parent { constructor(a, b) { this.sum = a + b; } }
+         class Child extends Parent { }
+         new Child(3, 4).sum;"
+    ), 7);
+    // Three-level chain with default constructors
+    assert_eq!(class_eval_num(&mut ctx,
+        "class GrandParent { constructor(x) { this.val = x; } }
+         class Parent extends GrandParent { }
+         class Child extends Parent { }
+         new Child(42).val;"
+    ), 42);
+}
+
+#[test]
 fn test_class_method_this_context() {
     let mut ctx = Context::new_small();
     assert_eq!(class_eval_num(&mut ctx,

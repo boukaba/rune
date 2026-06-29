@@ -321,12 +321,33 @@ impl Emitter {
         }
 
         // 4. Create constructor function
+        let has_heritage = class.heritage.is_some();
         let ctor_idx = constructor_idx.unwrap_or_else(|| {
+            let body = if has_heritage {
+                // Derived class default constructor: constructor(...args) { super(...args); }
+                Stmt::Block(vec![
+                    Stmt::Expr(
+                        Expr::Call(
+                            Box::new(Expr::Super(Span { start: 0, end: 0 })),
+                            vec![ArrayElement {
+                                expr: Expr::Identifier(Box::from("args"), Span { start: 0, end: 0 }),
+                                is_spread: true,
+                                span: Span { start: 0, end: 0 },
+                            }],
+                            Span { start: 0, end: 0 },
+                        ),
+                        Span { start: 0, end: 0 },
+                    ),
+                ], Span { start: 0, end: 0 })
+            } else {
+                // Base class default constructor: empty body
+                Stmt::Block(vec![], Span { start: 0, end: 0 })
+            };
             let synth = FnNode {
                 name: class.name.clone(),
                 params: vec![],
-                rest_param: None,
-                body: Stmt::Block(vec![], Span { start: 0, end: 0 }),
+                rest_param: if has_heritage { Some(Box::from("args")) } else { None },
+                body,
                 is_generator: false,
                 is_async: false,
                 is_arrow: false,
@@ -1389,6 +1410,15 @@ impl Emitter {
                             self.emit_expression(callee);
                             // stack: [this, callee]
                             self.emit(Opcode::NewArray, vec![0]);
+                            for arg in args {
+                                self.emit_expression(&arg.expr);
+                                if arg.is_spread {
+                                    self.emit(Opcode::ArrayExtend, vec![]);
+                                } else {
+                                    self.emit(Opcode::ArrayPush, vec![]);
+                                }
+                            }
+                            // stack: [this, callee, args_array] — correct for CallFromArray
                         }
                         _ => {
                             self.emit(Opcode::LoadUndefined, vec![]);

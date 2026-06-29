@@ -2996,14 +2996,43 @@ Added `ClassNode` (name, methods, span), `ClassMethod` (key, func, is_static, sp
 - **`this.__proto__.__proto__` chain** chosen over `LoadSuperclass + "prototype"` approach because `LoadSuperclass` reads from `frame.func_ptr`, which points to the method function (not class constructor) inside method bodies — so `Func::superclass()` returns null from methods. The `__proto__` chain is more robust: it works from both constructors and methods.
 - **`__proto__` read fix** in `load_property_recursive` is required for correctness — reading `obj.__proto__` should return the internal [[Prototype]], not walk the prototype chain looking for a shape property named `"__proto__"` (which doesn't exist on plain objects).
 
+---
+
+## Sprint 27 — Default Derived Constructor
+
+> **2026-06-29**: `class Child extends Parent { }` now synthesizes `constructor(...args) { super(...args); }`. 3 new tests. 451/451 tests pass.
+
+### Implementation
+
+#### Emitter (`crates/rune_parser/src/emitter.rs`)
+- `emit_class` step 4: when no explicit constructor AND class has heritage (`extends`), generate a `FnNode` with rest param `args` and body `Stmt::Expr(Expr::Call(Expr::Super, [spread_args]))` instead of the empty body used for base classes
+- Base classes (no heritage) continue to get the previous empty-body default constructor
+- `rest_param` set to `Some(Box::from("args"))` for derived classes, `None` for base classes
+
+#### Bug Fix — Spread Call with `Expr::Super`
+- Spread handler in `Expr::Call` for `Expr::Super` callee was creating an empty `NewArray(0)` but not iterating over args to push them into the array — the `for arg in args` loop was only inside the `_ =>` default branch
+- Fixed by adding the same `for arg in args { ArrayPush/ArrayExtend }` loop to the `Expr::Super` branch
+- Without this fix, `super(...args)` would call the parent constructor with zero arguments regardless of what was passed
+
+#### Integration Tests
+3 new tests:
+
+| Test | What it validates |
+|---|---|
+| `test_class_default_derived_constructor` | `super(x)` with single arg, default derived constructor |
+| | `super(a, b)` with multiple args |
+| | 3-level default constructor chain |
+
+### Design Decision
+- **Rest param approach**: using `...args` as the sole parameter of the synthesized constructor captures all arguments in an array, then `super(...args)` spreads them to the parent
+- **Leverages existing spread-Call machinery**: `CallFromArray` + `ArrayExtend` already handle spread arguments correctly; the only gap was that the `Expr::Super` spread branch was missing the arg-pushing loop
+
 ### Known Gaps
-- Default derived constructor does not synthesize `super(...args)` — user must write explicit constructor
 - `instanceof` with class constructors fails when RHS is a builtin (Smi handle) — pre-existing
 - `__proto__` read in `load_property_recursive` returns the internal [[Prototype]] only for TAG_OBJECT; TAG_ARRAY and other types not handled
 - JIT bailout on `SetSuperclass`/`LoadSuperclass` (catch-all `_ => return false`)
 
 ### Next Steps
-1. Default derived constructor — synthesize `super(...args)` body when no explicit constructor in a derived class
-2. `instanceof` fix — handle non-heap RHS (negative Smi builtins)
-3. `super.prop = val` assignment pattern
-4. `static` methods
+1. `instanceof` fix — handle non-heap RHS (negative Smi builtins)
+2. `super.prop = val` assignment pattern
+3. `static` methods

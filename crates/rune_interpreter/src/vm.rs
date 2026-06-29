@@ -603,6 +603,8 @@ impl Vm {
             let mut ctor_entries: Vec<(&str, Value)> = vec![("prototype", proto_obj)];
             if let Some(r) = find_handle(&self.builtins, "Promise_resolve") { ctor_entries.push(("resolve", r)); }
             if let Some(r) = find_handle(&self.builtins, "Promise_reject") { ctor_entries.push(("reject", r)); }
+            if let Some(r) = find_handle(&self.builtins, "Promise_all") { ctor_entries.push(("all", r)); }
+            if let Some(r) = find_handle(&self.builtins, "Promise_race") { ctor_entries.push(("race", r)); }
             let prom_ctor = make_object(gc, &ctor_entries);
             self.promise_constructor = prom_ctor;
             self.builtin_wrappers.insert("Promise".to_string(), prom_ctor);

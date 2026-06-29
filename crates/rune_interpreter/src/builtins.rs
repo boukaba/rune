@@ -2502,6 +2502,82 @@ pub fn promise_static_reject(gc: &mut SemiSpace, _this: Value, args: &[Value], v
     Value::from_heap_ptr(ptr)
 }
 
+/// Promise.all(iterable) — returns a promise that fulfills when all items fulfill,
+/// or rejects on the first rejection.
+pub fn promise_static_all(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let iterable = args.first().copied().unwrap_or(Value::undefined());
+    let proto = vm.promise_prototype.heap_ptr();
+    let result_ptr = Promise::allocate(gc, proto);
+    let result_val = Value::from_heap_ptr(result_ptr);
+    let len = if let Some(l) = crate::vm::array_like_length(iterable) { l } else {
+        unsafe { Promise::set_state(result_ptr, PROMISE_FULFILLED); }
+        return result_val;
+    };
+    if len == 0 {
+        let arr = RuneArray::allocate(gc, &[]);
+        unsafe { Promise::set_state(result_ptr, PROMISE_FULFILLED); Promise::set_result(result_ptr, Value::from_heap_ptr(arr as *mut u8)); }
+        return result_val;
+    }
+    let mut arr_ptr = RuneArray::allocate(gc, &[]);
+    let mut remaining: u32 = len;
+    for i in 0..len {
+        let item = crate::vm::array_like_index(iterable, i).unwrap_or(Value::undefined());
+        let is_promise = if let Some(ptr) = item.heap_ptr() { unsafe { (*(ptr as *const GcHeader)).tag() == TAG_PROMISE } } else { false };
+        if is_promise {
+            let ptr = item.heap_ptr().unwrap();
+            let state = unsafe { Promise::state(ptr) };
+            if state == PROMISE_FULFILLED {
+                let r = unsafe { Promise::result(ptr) };
+                arr_ptr = unsafe { RuneArray::push(gc, arr_ptr, r) };
+                remaining -= 1;
+            } else if state == PROMISE_REJECTED {
+                let r = unsafe { Promise::result(ptr) };
+                unsafe { Promise::set_state(result_ptr, PROMISE_REJECTED); Promise::set_result(result_ptr, r); }
+                return result_val;
+            }
+        } else {
+            arr_ptr = unsafe { RuneArray::push(gc, arr_ptr, item) };
+            remaining -= 1;
+        }
+    }
+    if remaining == 0 {
+        unsafe { Promise::set_state(result_ptr, PROMISE_FULFILLED); Promise::set_result(result_ptr, Value::from_heap_ptr(arr_ptr as *mut u8)); }
+    }
+    result_val
+}
+
+/// Promise.race(iterable) — settles with the first settled promise or value.
+pub fn promise_static_race(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let iterable = args.first().copied().unwrap_or(Value::undefined());
+    let proto = vm.promise_prototype.heap_ptr();
+    let result_ptr = Promise::allocate(gc, proto);
+    let result_val = Value::from_heap_ptr(result_ptr);
+    let len = if let Some(l) = crate::vm::array_like_length(iterable) { l } else { return result_val; };
+    if len == 0 { return result_val; }
+    for i in 0..len {
+        let item = crate::vm::array_like_index(iterable, i).unwrap_or(Value::undefined());
+        let is_promise = if let Some(ptr) = item.heap_ptr() { unsafe { (*(ptr as *const GcHeader)).tag() == TAG_PROMISE } } else { false };
+        if is_promise {
+            let ptr = item.heap_ptr().unwrap();
+            let state = unsafe { Promise::state(ptr) };
+            if state == PROMISE_FULFILLED {
+                let r = unsafe { Promise::result(ptr) };
+                unsafe { Promise::set_state(result_ptr, PROMISE_FULFILLED); Promise::set_result(result_ptr, r); }
+                return result_val;
+            }
+            if state == PROMISE_REJECTED {
+                let r = unsafe { Promise::result(ptr) };
+                unsafe { Promise::set_state(result_ptr, PROMISE_REJECTED); Promise::set_result(result_ptr, r); }
+                return result_val;
+            }
+        } else {
+            unsafe { Promise::set_state(result_ptr, PROMISE_FULFILLED); Promise::set_result(result_ptr, item); }
+            return result_val;
+        }
+    }
+    result_val
+}
+
 pub fn default_builtins() -> Vec<Builtin> {
     vec![
         Builtin {
@@ -2546,6 +2622,8 @@ pub fn default_builtins() -> Vec<Builtin> {
         },
         Builtin { length: 1, name: "Promise_resolve", func: promise_static_resolve },
         Builtin { length: 1, name: "Promise_reject", func: promise_static_reject },
+        Builtin { length: 1, name: "Promise_all", func: promise_static_all },
+        Builtin { length: 1, name: "Promise_race", func: promise_static_race },
         Builtin {
             length: 1,
             name: "Object",

@@ -41,6 +41,10 @@ function handler(requestBody) {
     // Use flatMap to transform top active items into rank-value pairs
     var rankValues = active.slice(0, 3).flatMap(function(x) { return [x.value * 2, x.value * 3]; });
     if (rankValues.length !== 6) { throw new Error("flatMap length mismatch: " + rankValues.length); }
+
+    // Use sort on item names (default lexicographic)
+    var names = items.map(function(x) { return x.name; }).sort();
+    if (names[0] !== "item0") { throw new Error("sort failed: first should be item0"); }
     var total = active.reduce(function(sum, x) { return sum + x.value; }, 0);
     var top = active
         .map(function(x) { return { name: x.name, value: x.value }; })

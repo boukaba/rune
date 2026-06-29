@@ -2155,6 +2155,60 @@ pub fn array_flat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
     Value::from_heap_ptr(result_ptr)
 }
 
+/// Array.prototype.sort(compareFn) — default lexicographic sort (no comparator). Throws TypeError if comparator is passed.
+pub fn array_sort(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if let Some(cmp) = args.first().copied() {
+        if !cmp.is_undefined() {
+            let msg = HeapString::allocate(gc, "TypeError: comparator sort is not yet supported");
+            vm.set_pending_exception(Value::from_heap_ptr(msg as *mut u8));
+            return Value::undefined();
+        }
+    }
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let length = match crate::vm::array_like_length(this) {
+        Some(len) => len,
+        None => return this,
+    };
+    if length <= 1 {
+        return this;
+    }
+    let mut elements: Vec<Value> = Vec::with_capacity(length as usize);
+    for i in 0..length {
+        elements.push(crate::vm::array_like_index(this, i).unwrap_or(Value::undefined()));
+    }
+    elements.sort_by(|a, b| string_from_value(*a).cmp(&string_from_value(*b)));
+    // Write back sorted elements in-place
+    if let Some(ptr) = this.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_ARRAY {
+            unsafe {
+                RuneArray::set_length(ptr as *mut RuneArray, 0);
+            }
+            let mut cur_ptr = ptr;
+            for elem in &elements {
+                unsafe {
+                    let new_ptr = RuneArray::push(gc, cur_ptr as *mut RuneArray, *elem);
+                    if new_ptr as *mut u8 != cur_ptr {
+                        let resolved = if (*(cur_ptr as *const GcHeader)).is_forwarded() {
+                            (*(cur_ptr as *const GcHeader)).forwarding_addr()
+                        } else {
+                            cur_ptr
+                        };
+                        if resolved != new_ptr as *mut u8 {
+                            vm.update_heap_reference(resolved, new_ptr as *mut u8);
+                        }
+                        cur_ptr = new_ptr as *mut u8;
+                    }
+                }
+            }
+            return Value::from_heap_ptr(cur_ptr);
+        }
+    }
+    this
+}
+
 /// Array.prototype.flatMap(callback, thisArg) — set up state machine iteration, spreading array results.
 pub fn array_flat_map(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let length = match crate::vm::array_like_length(this) {
@@ -2565,6 +2619,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 1,
             name: "Array_prototype_flatMap",
             func: array_flat_map,
+        },
+        Builtin {
+            length: 1,
+            name: "Array_prototype_sort",
+            func: array_sort,
         },
         Builtin {
             length: 1,

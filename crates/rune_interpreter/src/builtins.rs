@@ -1,8 +1,9 @@
 use crate::vm::Vm;
 use rune_core::array::RuneArray;
-use rune_core::gc::{GcHeader, SemiSpace, TAG_ARRAY, TAG_FUNC, TAG_OBJECT, TAG_PROMISE, TAG_STRING, TAG_STRING_OBJ};
+use rune_core::gc::{GcHeader, SemiSpace, TAG_ARRAY, TAG_FUNC, TAG_OBJECT, TAG_PROMISE, TAG_REGEXP, TAG_STRING, TAG_STRING_OBJ};
 use rune_core::object::JSObject;
 use rune_core::promise::{Promise, PROMISE_FULFILLED, PROMISE_PENDING, PROMISE_REJECTED};
+use rune_core::regexp::RegExp;
 use rune_core::shape::{DENSE_ARRAY_SHAPE, PropertyKey, Shape};
 use rune_core::string::HeapString;
 use rune_core::string_object::StringObject;
@@ -1159,19 +1160,50 @@ pub fn string_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
     }
 }
 
-/// String.prototype.replace(searchValue, replaceValue) — first match only (string pattern, no regex).
+/// String.prototype.replace(searchValue, replaceValue) — first match only.
+/// Supports string and RegExp patterns (no function replacement yet).
 pub fn string_replace(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
     let s = string_from_value(this);
-    let search_str = arg_to_string(gc, args.first().copied(), vm);
+    let search = args.first().copied().unwrap_or(Value::undefined());
     let replacement = if args.len() > 1 {
         arg_to_string(gc, Some(args[1]), vm)
     } else {
-        HeapString::allocate(gc, "undefined");
         "undefined".to_string()
     };
+
+    // Check if search is a RegExp
+    if let Some(ptr) = search.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_REGEXP {
+            let pattern_ptr = unsafe { RegExp::pattern(ptr) };
+            let pattern = unsafe { HeapString::to_string(pattern_ptr as *mut HeapString) };
+            // Parse and execute regex
+            match rune_regex::parse_regex(&pattern) {
+                Ok(expr) => {
+                    let nfa = rune_regex::nfa::compile(&expr);
+                    let pike_vm = rune_regex::pikevm::PikeVm::new();
+                    if let Some((start, end)) = pike_vm.exec(&nfa, &s, 0) {
+                        // Expand $&, $`, $' in replacement
+                        let expanded = expand_replacement(&s, start, end, &replacement);
+                        let result = s[..start].to_string() + &expanded + &s[end..];
+                        return Value::from_heap_ptr(HeapString::allocate(gc, &result) as *mut u8);
+                    } else {
+                        return Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8);
+                    }
+                }
+                Err(_) => {
+                    // Bad regex — return original string
+                    return Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8);
+                }
+            }
+        }
+    }
+
+    // String pattern (original logic)
+    let search_str = arg_to_string(gc, args.first().copied(), vm);
     if search_str.is_empty() {
         let result = replacement.clone() + &s;
         return Value::from_heap_ptr(HeapString::allocate(gc, &result) as *mut u8);
@@ -1184,18 +1216,74 @@ pub fn string_replace(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
     }
 }
 
-/// String.prototype.replaceAll(searchValue, replaceValue) — replace all non-overlapping matches (string pattern, no regex).
+/// Expand $&, $`, $' in a replacement string for regex match.
+fn expand_replacement(s: &str, start: usize, end: usize, replacement: &str) -> String {
+    let mut result = String::new();
+    let mut chars = replacement.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '$' {
+            match chars.next() {
+                Some('&') => result.push_str(&s[start..end]),
+                Some('`') => result.push_str(&s[..start]),
+                Some('\'') => result.push_str(&s[end..]),
+                Some(d) => { result.push('$'); result.push(d); }
+                None => result.push('$'),
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// String.prototype.replaceAll(searchValue, replaceValue) — replace all non-overlapping matches.
+/// Supports string and RegExp patterns.
 pub fn string_replace_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
     let s = string_from_value(this);
-    let search_str = arg_to_string(gc, args.first().copied(), vm);
+    let search = args.first().copied().unwrap_or(Value::undefined());
     let replacement = if args.len() > 1 {
         arg_to_string(gc, Some(args[1]), vm)
     } else {
         "undefined".to_string()
     };
+
+    // Check if search is a RegExp
+    if let Some(ptr) = search.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_REGEXP {
+            let pattern_ptr = unsafe { RegExp::pattern(ptr) };
+            let pattern = unsafe { HeapString::to_string(pattern_ptr as *mut HeapString) };
+            match rune_regex::parse_regex(&pattern) {
+                Ok(expr) => {
+                    let nfa = rune_regex::nfa::compile(&expr);
+                    let pike_vm = rune_regex::pikevm::PikeVm::new();
+                    let mut result = String::new();
+                    let mut last_end = 0;
+                    while let Some((start, end)) = pike_vm.exec(&nfa, &s, last_end) {
+                        result.push_str(&s[last_end..start]);
+                        result.push_str(&expand_replacement(&s, start, end, &replacement));
+                        last_end = end;
+                        if start == end {
+                            // Avoid infinite loop for zero-length matches
+                            result.push_str(&s[last_end..last_end+1]);
+                            last_end += 1;
+                        }
+                    }
+                    result.push_str(&s[last_end..]);
+                    return Value::from_heap_ptr(HeapString::allocate(gc, &result) as *mut u8);
+                }
+                Err(_) => {
+                    return Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8);
+                }
+            }
+        }
+    }
+
+    // String pattern (original logic)
+    let search_str = arg_to_string(gc, args.first().copied(), vm);
     if search_str.is_empty() {
         let result = s.chars().map(|c| replacement.clone() + &c.to_string()).collect::<String>() + &replacement;
         return Value::from_heap_ptr(HeapString::allocate(gc, &result) as *mut u8);

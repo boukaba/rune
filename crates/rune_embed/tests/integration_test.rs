@@ -5224,3 +5224,45 @@ fn test_regex_literal() {
         .unwrap();
     assert!(r.heap_ptr().is_some(), "typeof regex literal should return a string");
 }
+
+#[test]
+fn test_regex_replace_simple() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_str(&mut ctx, r#""hello world".replace(/world/, "there")"#), "hello there");
+}
+
+#[test]
+fn test_regex_replace_with_dollar() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_str(&mut ctx, r#""hello world".replace(/world/, "($&)")"#), "hello (world)");
+}
+
+#[test]
+fn test_regex_replace_backtick() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_str(&mut ctx, r#""hello world".replace(/world/, "$`")"#), "hello hello ");
+}
+
+#[test]
+fn test_regex_replace_dot() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_str(&mut ctx, r#""hello.world".replace(/\./, "-")"#), "hello-world");
+}
+
+#[test]
+fn test_regex_replace_no_match() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_str(&mut ctx, r#""hello world".replace(/xyz/, "there")"#), "hello world");
+}
+
+#[test]
+fn test_regex_replace_all_simple() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_str(&mut ctx, r#""a.b.c".replaceAll(/\./g, "-")"#), "a-b-c");
+}
+
+#[test]
+fn test_regex_replace_all_with_dollar() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_str(&mut ctx, r#""hello world hello".replaceAll(/hello/g, "($&)")"#), "(hello) world (hello)");
+}

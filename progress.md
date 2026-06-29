@@ -2664,3 +2664,53 @@ A new `PendingFinallyOp` state machine on the Vm:
 ### Known Limitations
 - **Pending promise case**: falls back to `.then(on_finally, on_finally)` which has the same passthrough bug as the old implementation. In practice `.finally` is almost always called on settled promises. Fixing this requires creating ThenFinally/CatchFinally wrapper functions (CreateThenFinally/CreateCatchFinally per spec §27.2.5.3).
 - **Exception in on_finally**: if `on_finally()` throws, the exception propagates and the chained promise is left pending (same limitation as `.then` callbacks that throw — a pre-existing microtask architecture gap).
+
+---
+
+## Sprint 19 — RegExp engine + String replace
+
+### Goal
+Land a minimal RegExp engine and wire it into `String.prototype.replace`/`replaceAll` for regex patterns, unlocking test262 coverage for these methods.
+
+### Implementation
+
+#### PikeVM leftmost-longest fix
+The original PikeVM returned the **first** match found (shallow), causing `[0-9]+` to match only one digit. Fixed to track the longest match per start position by continuing simulation after recording a match end.
+
+| Pattern | Text | Before | After |
+|---|---|---|---|
+| `[0-9]+` | `abc123def` | `(3, 4)` | `(3, 6)` |
+| `a*` at pos 2 | `bba` | `(2, 2)` | `(2, 3)` |
+
+#### `string_replace` regex support
+When `args[0]` is a TAG_REGEXP:
+1. Extract pattern string from RegExp heap object
+2. Parse via `rune_regex::parse_regex`
+3. Compile NFA via `rune_regex::nfa::compile`
+4. Run PikeVM to find first match
+5. Expand replacement string (`$&`, ``$` ``, `$'`)
+6. Concatenate before + expanded + after
+
+#### `string_replace_all` regex support
+Same as above but loops finding all non-overlapping matches via repeated `PikeVm::exec(start_pos)` calls, advancing `last_end` after each match. Zero-length match guard prevents infinite loop.
+
+### File changes
+| File | Change |
+|---|---|
+| `crates/rune_interpreter/Cargo.toml` | Added `rune_regex` dependency |
+| `crates/rune_interpreter/src/builtins.rs` | Rewrote `string_replace`/`string_replace_all` with TAG_REGEXP detection, regex compilation, PikeVM match, `$` expansion helpers |
+| `crates/rune_regex/src/pikevm.rs` | Leftmost-longest match: record match_end via `match_end: Option<usize>` instead of `return Some(...)`; return longest at end of inner loop; removed unused `Thread` struct |
+| `crates/rune_regex/src/parse.rs` | Fixed `mut` warning on `chars` |
+| `crates/rune_embed/tests/integration_test.rs` | Added `test_regex_replace_simple`, `test_regex_replace_with_dollar`, `test_regex_replace_backtick`, `test_regex_replace_dot`, `test_regex_replace_no_match`, `test_regex_replace_all_simple`, `test_regex_replace_all_with_dollar` |
+
+### Test Results
+- **407 integration tests passing** (400 + 7 new regex replace tests), 0 failed, 2 ignored
+- **10 regex crate tests passing** (8 original + 2 new: `test_multiple_matches`, `test_replace_all`)
+- PikeVM fix verified: `test_char_class` `(3, 6)`, `test_star` at pos 2 `(2, 3)`
+
+### Known Limitations
+- **No capture groups in replace** — `$1`, `$2`, etc. not supported (PikeVM doesn't track capture groups yet)
+- **No function replacement** — `replace(/regex/, fn)` not implemented
+- **Regex not available for match/search/split** — only replace/replaceAll
+- **No `RegExp` constructor builtin** — only literal `/pattern/flags` form works
+- **No `RegExp.prototype.exec`/`test`** — regex matching only available via String methods internally

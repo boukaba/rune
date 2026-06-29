@@ -1151,6 +1151,7 @@ dependencies = [
  "rune_bytecode",
  "rune_core",
  "rune_jit_baseline",
+ "rune_regex",
  "tracing",
 ]
 

@@ -1,7 +1,7 @@
 use crate::ast::RegexExpr;
 
 pub fn parse_regex(pattern: &str) -> Result<RegexExpr, String> {
-    let mut chars: Vec<char> = pattern.chars().collect();
+    let chars: Vec<char> = pattern.chars().collect();
     let mut i = 0;
     parse_alt(&chars, &mut i)
 }

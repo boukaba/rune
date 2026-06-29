@@ -10,7 +10,7 @@ use rune_core::gc::{
     GcHeader, RootProvider, SemiSpace, TAG_ARRAY, TAG_FLOAT64, TAG_FUNC, TAG_OBJECT, TAG_PROMISE, TAG_STRING, TAG_STRING_OBJ,
 };
 use rune_core::object::JSObject;
-use rune_core::promise::{Promise, PROMISE_FULFILLED, PROMISE_PENDING};
+use rune_core::promise::{Promise, PROMISE_FULFILLED, PROMISE_PENDING, PROMISE_REJECTED};
 use rune_core::string_object::StringObject;
 use rune_core::shape::{DENSE_ARRAY_SHAPE, PROTOTYPE_KEY, PropertyKey, Shape};
 use rune_core::string::HeapString;
@@ -216,6 +216,17 @@ pub(crate) enum ArrayOpKind {
     FlatMap,
 }
 
+/// Pending Promise.prototype.finally operation.
+/// Set by the finally builtin, consumed by the Return handler.
+/// When onFinally returns, we settle the chained promise with
+/// the original value (not the callback's return value).
+pub(crate) struct PendingFinallyOp {
+    pub(crate) promise: Value,
+    pub(crate) orig_value: Value,
+    pub(crate) is_reject: bool,
+    pub(crate) source_frame_depth: usize,
+}
+
 /// State for async generator resumption via bridge function (async_continue/async_reject).
 pub(crate) struct PendingAsyncGen {
     pub(crate) gen_id: usize,
@@ -360,6 +371,8 @@ pub struct Vm {
     /// Pending async generator resumption, set by async_continue/async_reject builtins.
     /// Consumed by the Return handler to restore the generator's frame.
     pub(crate) pending_async_gen: Option<PendingAsyncGen>,
+    /// Pending Promise.prototype.finally operation.
+    pub(crate) pending_finally_op: Option<PendingFinallyOp>,
     /// Pending assert.throws callback.
     pub(crate) pending_assert: Option<PendingAssert>,
     /// Pending primitive conversion (ToPrimitive on object for +, ToString, etc.).
@@ -437,6 +450,7 @@ impl Vm {
             promise_reactions: HashMap::new(),
             async_tasks: Vec::new(),
             pending_async_gen: None,
+            pending_finally_op: None,
             pending_assert: None,
             pending_primitive_conversion: None,
             assert_called: false,
@@ -1097,6 +1111,10 @@ impl Vm {
         }
         // Update source_frame_depth if pending promise ctor is active
         if let Some(ref mut state) = self.pending_promise_ctor {
+            state.source_frame_depth = self.frames.len() - 1;
+        }
+        // Update source_frame_depth if pending finally op is active
+        if let Some(ref mut state) = self.pending_finally_op {
             state.source_frame_depth = self.frames.len() - 1;
         }
     }
@@ -3525,7 +3543,7 @@ impl Vm {
                                     }
                                     continue;
                                 }
-                                if self.pending_array_op.is_some() || self.pending_call.is_some() || self.pending_assert.is_some() || self.pending_promise_ctor.is_some() {
+                                if self.pending_array_op.is_some() || self.pending_call.is_some() || self.pending_assert.is_some() || self.pending_promise_ctor.is_some() || self.pending_finally_op.is_some() {
                                     // Array method builtin or .call() or assert.throws
                                     // set up a callback. Don't push result or advance pc —
                                     // the callback frame is already on the stack.
@@ -4377,6 +4395,50 @@ impl Vm {
                         self.push(result);
                         let caller_idx = self.frames.len() - 1;
                         self.frames[caller_idx].pc += 1;
+                        continue;
+                    }
+                    // Check if this return completes a Promise.prototype.finally callback.
+                    if let Some(ref fop) = self.pending_finally_op
+                        && self.frames.len() == fop.source_frame_depth
+                    {
+                        let fop = self.pending_finally_op.take().unwrap();
+                        let ptr = match fop.promise.heap_ptr() { Some(p) => p, None => continue };
+                        unsafe {
+                            if fop.is_reject {
+                                Promise::set_state(ptr, PROMISE_REJECTED);
+                            } else {
+                                Promise::set_state(ptr, PROMISE_FULFILLED);
+                            }
+                            Promise::set_result(ptr, fop.orig_value);
+                        }
+                        // Drain reactions on the chained promise
+                        let reactions_ptr = unsafe { Promise::reactions(ptr) };
+                        if !reactions_ptr.is_null() {
+                            let arr = reactions_ptr as *mut RuneArray;
+                            let len = unsafe { RuneArray::length(arr) };
+                            let mut idx = 0;
+                            while idx + 1 < len as usize {
+                                let cb = unsafe { RuneArray::get_element(arr, idx) };
+                                let chained = unsafe { RuneArray::get_element(arr, idx + 1) };
+                                if cb.is_heap_object() {
+                                    let ppc = PendingPromiseCtor {
+                                        source_frame_depth: 0, promise: chained,
+                                        resolve_handle: Value::undefined(), reject_handle: Value::undefined(),
+                                        resolve_with_result: true,
+                                    };
+                                    self.enqueue_microtask(cb, vec![fop.orig_value], Some(ppc));
+                                }
+                                idx += 2;
+                            }
+                        }
+                        self.stack.truncate(callee_base);
+                        self.push(fop.promise);
+                        if self.frames.is_empty() {
+                            self.stack.clear();
+                            return Exit::Return(fop.promise);
+                        }
+                        let new_fi = self.frames.len() - 1;
+                        self.frames[new_fi].pc += 1;
                         continue;
                     }
                     // Check if this return completes a pending primitive conversion.

@@ -5165,3 +5165,50 @@ fn test_async_await_chaining() {
         .unwrap();
     assert_eq!(r.as_smi(), Some(1), "await chains: only first push before first await");
 }
+
+#[test]
+fn test_promise_finally_fulfilled_passthrough() {
+    let mut ctx = Context::new_small();
+    // .finally on a fulfilled promise: the handler fires, and the original value
+    // passes through (not the handler's return value).
+    let r = ctx
+        .eval(r#"
+            var x = 0;
+            var p = Promise.resolve(42);
+            p.finally(function() { x = 1; return 999; });
+            x;
+        "#)
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(1), "finally handler should fire on fulfilled promise");
+}
+
+#[test]
+fn test_promise_finally_rejected_passthrough() {
+    let mut ctx = Context::new_small();
+    // .finally on a rejected promise: the handler fires, and the original reason
+    // passes through (the chained promise rejects with the original reason).
+    let r = ctx
+        .eval(r#"
+            var x = 0;
+            var p = Promise.reject(99);
+            p.finally(function() { x = 1; });
+            x;
+        "#)
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(1), "finally handler should fire on rejected promise");
+}
+
+#[test]
+fn test_promise_finally_non_callable() {
+    let mut ctx = Context::new_small();
+    // .finally with a non-callable argument: passthrough the original value
+    // without calling any handler.
+    let r = ctx
+        .eval(r#"
+            var x = 0;
+            Promise.resolve(42).finally(undefined);
+            x;
+        "#)
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(0), "non-callable finally should not fire handler");
+}

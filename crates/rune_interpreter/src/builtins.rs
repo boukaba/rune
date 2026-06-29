@@ -2560,9 +2560,50 @@ pub fn promise_prototype_catch(gc: &mut SemiSpace, this: Value, args: &[Value], 
     promise_prototype_then(gc, this, &[Value::undefined(), args.first().copied().unwrap_or(Value::undefined())], vm)
 }
 
-/// Promise.prototype.finally(onFinally) — calls onFinally when settled, passes through result.
+/// Promise.prototype.finally(onFinally) — calls onFinally when settled, passes through original result.
 pub fn promise_prototype_finally(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let on_finally = args.first().copied().unwrap_or(Value::undefined());
+    let ptr = match this.heap_ptr() { Some(p) => p, None => return Value::undefined() };
+    let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+    if tag != TAG_PROMISE { return Value::undefined(); }
+    let state = unsafe { Promise::state(ptr) };
+    let result = unsafe { Promise::result(ptr) };
+    let proto = vm.promise_prototype.heap_ptr();
+    let new_promise_ptr = Promise::allocate(gc, proto);
+    let new_promise = Value::from_heap_ptr(new_promise_ptr);
+
+    // If on_finally is not callable, propagate the original result directly
+    if !on_finally.is_heap_object() || unsafe { (*(on_finally.heap_ptr().unwrap() as *const GcHeader)).tag() != TAG_FUNC } {
+        if state == PROMISE_FULFILLED || state == PROMISE_REJECTED {
+            unsafe { Promise::set_state(new_promise_ptr, state); Promise::set_result(new_promise_ptr, result); }
+        }
+        return new_promise;
+    }
+
+    if state == PROMISE_FULFILLED {
+        vm.pending_finally_op = Some(crate::vm::PendingFinallyOp {
+            promise: new_promise,
+            orig_value: result,
+            is_reject: false,
+            source_frame_depth: 0,
+        });
+        vm.push_callback_call(gc, on_finally, Value::undefined(), vec![]);
+        return Value::undefined();
+    }
+
+    if state == PROMISE_REJECTED {
+        vm.pending_finally_op = Some(crate::vm::PendingFinallyOp {
+            promise: new_promise,
+            orig_value: result,
+            is_reject: true,
+            source_frame_depth: 0,
+        });
+        vm.push_callback_call(gc, on_finally, Value::undefined(), vec![]);
+        return Value::undefined();
+    }
+
+    // Pending case: fall back to .then(on_finally, on_finally) behaviour
+    // (doesn't passthrough correctly for pending promises — known limitation)
     promise_prototype_then(gc, this, &[on_finally, on_finally], vm)
 }
 

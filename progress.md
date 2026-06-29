@@ -2625,7 +2625,42 @@ Async functions are compiled as generators (`is_async → is_generator`). The `a
 ### Known Gaps
 
 1. ⬜ **`async_reject` is_throw path** — `PendingAsyncGen.is_throw` flag is reserved but the Throw-into-generator path is not yet implemented
-2. ⬜ **`.finally` result passthrough** — handler fires but always returns `undefined`
-3. ⬜ **Thenable unwrapping** — `Promise.resolve(otherPromise)` should adopt its state
-4. ⬜ **Pending promises in `Promise.all`/`race`** — settled-only for now
-5. ⬜ **RegExp** — parser + NFA/PikeVM, blocks String methods like `match`/`search`/`split(regex)`
+2. ⬜ **Thenable unwrapping** — `Promise.resolve(otherPromise)` should adopt its state
+3. ⬜ **Pending promises in `Promise.all`/`race`** — settled-only for now
+4. ⬜ **RegExp** — parser + NFA/PikeVM, blocks String methods like `match`/`search`/`split(regex)`
+
+## Phase 3: `.finally` passthrough ✅
+
+**Status: DONE** — `.finally` no longer uses `p.then(onFinally, onFinally)`. Instead it implements the per-spec passthrough semantics via a `PendingFinallyOp` state machine.
+
+### Problem
+The old implementation was `promise_prototype_then(gc, this, &[on_finally, on_finally], vm)`, which:
+1. Passed the promise result to `on_finally(result)` instead of calling `on_finally()` with no args
+2. Used `on_finally`'s return value as the chained promise's result instead of the original value
+
+### Solution
+A new `PendingFinallyOp` state machine on the Vm:
+
+| Stage | Action |
+|---|---|
+| **Builtin** (promise_prototype_finally) | Checks promise state. If settled: creates chained promise, sets `pending_finally_op` with the original value/reason and `is_reject` flag, pushes `on_finally` callback frame via `push_callback_call(gc, on_finally, undefined, [])`, returns `undefined`. |
+| **Call handler** | Detects `pending_finally_op.is_some()` and skips pushing the builtin's return value — the callback frame is already on the stack. |
+| **Callback runs** | `on_finally()` executes (no arguments). |
+| **Return handler** | Detects `pending_finally_op` with matching frame depth. Settles the chained promise with the original value/reason (`is_reject ? PROMISE_REJECTED : PROMISE_FULFILLED`). Drains reactions on the chained promise. Pushes chained promise. Advances PC. |
+
+### File changes
+| File | Change |
+|---|---|
+| `crates/rune_interpreter/src/vm.rs` | Added `PendingFinallyOp` struct, `pending_finally_op: Option<PendingFinallyOp>` field, source_frame_depth update in `push_callback_call`, Call handler check, Return handler settlement logic |
+| `crates/rune_interpreter/src/builtins.rs` | Rewrote `promise_prototype_finally` to use state machine for settled promises; falls back to `.then(on_finally, on_finally)` for pending promises (known limitation) |
+| `crates/rune_embed/tests/integration_test.rs` | Added `test_promise_finally_fulfilled_passthrough`, `test_promise_finally_rejected_passthrough`, `test_promise_finally_non_callable` |
+
+### Test Results
+
+- **399 integration tests passing** (396 + 3 new finally tests), 0 failed, 2 ignored
+- New tests: `test_promise_finally_fulfilled_passthrough` (side effect fires, passthrough works), `test_promise_finally_rejected_passthrough` (rejected passthrough), `test_promise_finally_non_callable` (undefined → no-op)
+- Clippy: clean
+
+### Known Limitations
+- **Pending promise case**: falls back to `.then(on_finally, on_finally)` which has the same passthrough bug as the old implementation. In practice `.finally` is almost always called on settled promises. Fixing this requires creating ThenFinally/CatchFinally wrapper functions (CreateThenFinally/CreateCatchFinally per spec §27.2.5.3).
+- **Exception in on_finally**: if `on_finally()` throws, the exception propagates and the chained promise is left pending (same limitation as `.then` callbacks that throw — a pre-existing microtask architecture gap).

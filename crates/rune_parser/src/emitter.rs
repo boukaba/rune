@@ -359,6 +359,14 @@ impl Emitter {
             self.emit(Opcode::StoreLocal, vec![idx as i64]);
         }
 
+        // 5a. Set superclass on the constructor for super() calls in derived classes
+        if let (Some(sslot), Some(ctor_slot)) = (heritage_super_slot, save_slot) {
+            self.emit(Opcode::LoadLocal, vec![sslot as i64]);
+            self.emit(Opcode::SetSuperclass, vec![]);
+            // ctor was consumed by SetSuperclass, restore from saved slot
+            self.emit(Opcode::LoadLocal, vec![ctor_slot as i64]);
+        }
+
         // 6. Link: Constructor.prototype = Proto
         //    Stack: [..., proto, ctor]
         //    StoreProperty pops: obj=ctor, key="prototype", value=proto
@@ -1356,6 +1364,12 @@ impl Emitter {
                             }
                             // stack: [receiver, method, args_array] — correct for CallFromArray
                         }
+                        Expr::Super(_) => {
+                            self.emit(Opcode::LoadThis, vec![]);
+                            self.emit_expression(callee);
+                            // stack: [this, callee]
+                            self.emit(Opcode::NewArray, vec![0]);
+                        }
                         _ => {
                             self.emit(Opcode::LoadUndefined, vec![]);
                             self.emit_expression(callee);
@@ -1388,6 +1402,11 @@ impl Emitter {
                                 self.emit(Opcode::LoadStringConst, vec![idx]);
                             }
                             self.emit(Opcode::LoadProperty, vec![]);
+                        }
+                        Expr::Super(_) => {
+                            // super() call: this = current this (for constructor)
+                            self.emit(Opcode::LoadThis, vec![]);
+                            self.emit_expression(callee);
                         }
                         _ => {
                             // Regular call: this = undefined
@@ -1591,6 +1610,9 @@ impl Emitter {
                 let idx = self.regex_pool.len();
                 self.regex_pool.push((pattern.to_string(), flags.to_string()));
                 self.emit(Opcode::LoadRegExp, vec![idx as i64]);
+            }
+            Expr::Super(_) => {
+                self.emit(Opcode::LoadSuperclass, vec![]);
             }
             Expr::Class(class, _) => {
                 self.emit_class(class, true);
@@ -1863,6 +1885,7 @@ fn contains_inner_function_expr(expr: &Expr) -> bool {
         | Expr::Assign(_, _, _)
         | Expr::Yield(_, _)
         | Expr::RegExp(_, _, _) => false,
+        Expr::Super(_) => false,
         Expr::Class(_, _) => true,
         Expr::Await(expr, _) => contains_inner_function_expr(expr),
     }
@@ -2027,6 +2050,7 @@ fn uses_arguments_expr(expr: &Expr) -> bool {
         Expr::Update(_, expr, _, _) => uses_arguments_expr(expr),
         Expr::Yield(expr, _) => expr.as_ref().is_some_and(|e| uses_arguments_expr(e)),
         Expr::Await(expr, _) => uses_arguments_expr(expr),
+        Expr::Super(_) => false,
         Expr::RegExp(_, _, _) => false,
         Expr::Class(_, _) => false,
     }

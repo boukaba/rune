@@ -236,6 +236,9 @@ impl SemiSpace {
                         // Forward the environment pointer (byte offset 40 from object start)
                         let env_ptr = scan_ptr.add(40) as *mut u64;
                         self.forward_value(env_ptr);
+                        // Forward the superclass pointer (byte offset 56 from object start)
+                        let super_ptr = scan_ptr.add(56) as *mut u64;
+                        self.forward_value(super_ptr);
                     }
                     TAG_ENV => {
                         // Forward parent pointer at byte offset 16 from object start
@@ -289,8 +292,9 @@ impl SemiSpace {
                 }
                 TAG_FUNC => {
                     // Func layout: GcHeader(8) + func_idx(8) + prog_ptr(8) + prototype(8)
-                    //   + call_count(4) + flags(4) + env_ptr(8) + jit_entry(8) = 56 bytes
-                    obj_start.add(56)
+                    //   + call_count(4) + flags(4) + env_ptr(8) + jit_entry(8)
+                    //   + superclass(8) = 64 bytes
+                    obj_start.add(64)
                 }
                 TAG_FLOAT64 => obj_start.add(size_of::<GcHeader>() + 8),
                 TAG_OBJECT => {

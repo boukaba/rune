@@ -44,6 +44,7 @@ pub enum Expr {
     Await(Box<Expr>, Span),
     RegExp(Box<str>, Box<str>, Span), // pattern, flags, span
     Class(Box<ClassNode>, Span),
+    Super(Span),
 }
 
 #[derive(Clone, Debug, PartialEq)]

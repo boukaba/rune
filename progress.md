@@ -2920,4 +2920,50 @@ Added `ClassNode` (name, methods, span), `ClassMethod` (key, func, is_static, sp
 - `instanceof` with class constructors fails when RHS is a builtin (Smi handle); only works with user-defined TAG_FUNC constructors
 
 ### Next Steps
-1. `class` `super()` calls in constructors
+1. `class` `super.prop` member access
+
+---
+
+## Sprint 25 — Class `super()` Calls
+
+> **2026-06-29**: `super(x, y)` in constructors invokes parent constructor with correct `this`. 438/438 tests pass.
+
+### Implementation
+
+#### Parser (`crates/rune_parser/src/parser.rs`)
+- `TokenKind::Super` → `Expr::Super(Span)` in `parse_primary_inner`
+
+#### AST (`crates/rune_parser/src/ast.rs`)
+- `Expr::Super(Span)` variant for the `super` keyword
+
+#### Emitter (`crates/rune_parser/src/emitter.rs`)
+- `emit_expression`: `Expr::Super(_)` emits `LoadSuperclass` opcode
+- `Expr::Call(Expr::Super, args)` special-cased: emits `LoadThis` (instead of `LoadUndefined`) then `LoadSuperclass`, arguments, `Call N`
+- `emit_class`: step 5a emits `SetSuperclass` after saving constructor and superclass to locals — links child constructor's Func struct to parent constructor
+
+#### VM (`crates/rune_interpreter/src/vm.rs`)
+- `Frame.func_ptr: *mut u8` field added — points to the executing function's `Func` struct
+- `SetSuperclass` opcode: pops superclass Value + function Value, stores superclass pointer via `Func::set_superclass`
+- `LoadSuperclass` opcode: reads `frame.func_ptr`, calls `Func::superclass()`, pushes result or `undefined`
+- All 8+ frame push sites updated with `func_ptr`
+
+#### Function Model (`crates/rune_core/src/function.rs`)
+- `Func::superclass()` / `Func::set_superclass()` — stores parent constructor pointer in Func struct
+
+#### Integration Tests
+4 tests:
+
+| Test | What it validates |
+|---|---|
+| `test_class_super_call` | `super(x)` in constructor sets parent property |
+| `test_class_super_call_no_args` | `super()` with no arguments |
+| `test_class_super_call_property_setting` | `super(a, b)` sets multiple parent properties |
+| `test_class_super_multi_level` | 3-level chain: GrandParent → Parent → Child with `super()` at each level |
+
+### Known Gaps
+- `super.prop` member access not implemented (e.g., `super.method()`)
+- Default derived constructor does not synthesize `super(...args)` — user must write explicit constructor
+- `instanceof` with class constructors fails when RHS is a builtin (Smi handle) — pre-existing
+
+### Next Steps
+1. `class` `super.prop` member access

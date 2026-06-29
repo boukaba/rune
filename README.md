@@ -68,7 +68,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 - **Generators:** function*, yield, next() (basic)
 - **Async/await:** `async function`, `async () =>`, `await expr` — generator-based, synchronous until first await, Promise-based continuation
 - **Promise:** constructor, resolve/reject, `.then`/`.catch`/`.finally`, `Promise.resolve`/`.reject`/`.all`/`.race`, microtask queue, **thenable unwrapping**
-- **Classes:** declarations, expressions (named & anonymous), default constructor, prototype methods, `extends` (heritage)
+- **Classes:** declarations, expressions (named & anonymous), default constructor, prototype methods, `extends` (heritage), `super()` calls
 - **Template literals:** substitutions, nested, escapes
 - **Error objects:** TypeError, ReferenceError with `.name`/`.message`
 - **Prototype chains:** `__proto__`, Object.create, instanceof
@@ -87,7 +87,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 - **String methods:** `replace` (string + regex pattern), `replaceAll`, `indexOf`, `charAt`, `slice`, `split`. No `trim`, `toUpperCase`, `toLowerCase`, `charCodeAt`.
 - **Array methods:** `filter`, `map`, `reduce`, `forEach`, `slice`, `find`, `some`, `every`, `sort`, `flat`, `flatMap`, `includes`, `push`, `pop`, `indexOf`.
 - **Modules:** No import/export (ESM)
-- **Classes:** Class declarations, expressions, constructor, prototype methods, `extends` (no `static`/computed names/`super()` yet)
+- **Classes:** Class declarations, expressions, constructor, prototype methods, `extends`, `super()` calls (no `static`/computed names yet)
 - **Async/await:** `async function`, `async () =>`, `await expr` — full support with generator-based desugaring, synchronous until first await. 396 tests.
 - **JIT:** 57 opcodes whitelisted (out of 93 total opcode variants). Float Self-Tagging (NaN-boxing) eliminates all float heap allocation — all interpreter float paths use inline `Value::from_float64`. JIT only has float64 Add promotion; Sub/Mul/Div/Mod/Exp bail to interpreter (which handles them via NaN-boxed Values). Phase F inlining shipped (5% on `jit_hot_function_1M`).
 - **Debugger:** No CDP/DevTools
@@ -189,7 +189,7 @@ This makes Rune uniquely suited for serverless: functions can be compiled once d
 | **v0.2.0** ✅ | Phase F inlining (5% gain), N=16 IC table, AFPC round-trip with JIT |
 | **v0.3.0** ✅ | Float self-tagging (NaN-boxing), stdlib (JSON round-trip, array methods, string split, parseInt/parseFloat), boolean coercion fix — 387 tests |
 | **v0.4.0** ✅ | 14 builtins: Object.keys/values/entries, Array find/some/every/sort/flat/flatMap/includes/indexOf, String replace/replaceAll, Number(), Function.prototype.call. 393 tests. |
-| **v0.5.0** 🚧 | **Promise**: constructor, `.then`/`.catch`/`.finally`, 3-level chaining, `resolve`/`reject`/`all`/`race`, **microtask queue** with reaction storage. **Async/await**: generator-based desugaring, `async function`/`async () =>`/`await`, synchronous until first await. Parser reserved-word fix. Array/String indexOf. **RegExp**: engine (parse→NFA→PikeVM), capture groups, `$1..$n` expansion, `RegExp.prototype.exec`/`.test`, prototype chain. test262 Promise 46%. 416 tests. |
+| **v0.5.0** 🚧 | **Promise**: constructor, `.then`/`.catch`/`.finally`, 3-level chaining, `resolve`/`reject`/`all`/`race`, **microtask queue** with reaction storage. **Async/await**: generator-based desugaring, `async function`/`async () =>`/`await`, synchronous until first await. Parser reserved-word fix. Array/String indexOf. **RegExp**: engine (parse→NFA→PikeVM), capture groups, `$1..$n` expansion, `RegExp.prototype.exec`/`.test`, prototype chain. **Class**: declarations, expressions, `extends`, `super()`. test262 Promise 46%. 438 tests. |
 | **Sprint 18** ✅ | Non-TAG_ARRAY refactor, Function.prototype.call, P27 test262 harness (assert tracking + human-readable errors), P29 builtin throws catchable by try/catch, string same-value fix, boolean display fix, string_slice float edge cases, reduce mutation fix — 392 tests |
 | **v1.0.0** | Test262 >95%, production hardening, fuzzing |
 

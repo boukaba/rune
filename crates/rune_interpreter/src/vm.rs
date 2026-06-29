@@ -70,6 +70,9 @@ struct Frame {
     /// Pointer to this frame's lexical environment object (may be null).
     /// Set by MakeEnv at function entry. Child closures capture this pointer.
     env: *mut u8,
+    /// Pointer to the Func struct of the function executing in this frame.
+    /// Null for top-level script frames and generator resume frames.
+    func_ptr: *mut u8,
 }
 
 /// Result of the bytecode loop: normal return, generator yield, or throw.
@@ -1131,6 +1134,7 @@ impl Vm {
             is_constructor_call: false,
             constructed_object: Value::undefined(),
             env: func_env,
+            func_ptr: func_ptr as *mut u8,
         });
         // Update source_frame_depth if pending array op is active
         if let Some(ref mut state) = self.pending_array_op {
@@ -1195,6 +1199,7 @@ impl Vm {
             is_constructor_call: false,
             constructed_object: Value::undefined(),
             env: std::ptr::null_mut(),
+            func_ptr: std::ptr::null_mut(),
         });
 
         self.register_roots(gc);
@@ -1275,6 +1280,7 @@ impl Vm {
             is_constructor_call: false,
             constructed_object: Value::undefined(),
             env: std::ptr::null_mut(),
+            func_ptr: std::ptr::null_mut(),
         });
 
         if started {
@@ -3318,6 +3324,30 @@ impl Vm {
                     }
                     self.frames[fi].pc = pc + 1;
                 }
+                Opcode::SetSuperclass => {
+                    let superclass = self.pop();
+                    // func is below superclass on stack
+                    let func_val = self.pop();
+                    if let Some(ptr) = func_val.heap_ptr() {
+                        let super_ptr = superclass.heap_ptr().unwrap_or(std::ptr::null_mut());
+                        unsafe { Func::set_superclass(ptr as *mut Func, super_ptr) };
+                    }
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::LoadSuperclass => {
+                    let func_ptr = self.frames[fi].func_ptr;
+                    if func_ptr.is_null() {
+                        self.push(Value::undefined());
+                    } else {
+                        let super_ptr = unsafe { Func::superclass(func_ptr as *mut Func) };
+                        if super_ptr.is_null() {
+                            self.push(Value::undefined());
+                        } else {
+                            self.push(Value::from_heap_ptr(super_ptr));
+                        }
+                    }
+                    self.frames[fi].pc = pc + 1;
+                }
                 Opcode::MakeEnv => {
                     let count = instr.operands[0] as usize;
                     let new_env =
@@ -3580,6 +3610,7 @@ impl Vm {
                                     is_constructor_call: true,
                                     constructed_object: obj_val,
                                     env: func_env,
+                                    func_ptr: func_ptr as *mut u8,
                                 });
                                 continue;
                             }
@@ -3717,6 +3748,7 @@ impl Vm {
                                         is_constructor_call: false,
                                         constructed_object: Value::undefined(),
                                         env: func_env,
+                                        func_ptr: func_ptr as *mut u8,
                                     });
                                     continue;
                                 }
@@ -3813,6 +3845,7 @@ impl Vm {
                                                         is_constructor_call: false,
                                                         constructed_object: Value::undefined(),
                                                         env: func_env,
+                                                        func_ptr: ptr as *mut u8,
                                                     });
                                                     let snapshot = std::mem::take(
                                                         &mut self.jit_bailout.stack_snapshot,
@@ -3956,6 +3989,7 @@ impl Vm {
                                                 is_constructor_call: false,
                                                 constructed_object: Value::undefined(),
                                                 env: func_env,
+                                                func_ptr: ptr as *mut u8,
                                             });
                                             let snapshot = std::mem::take(
                                                 &mut self.jit_bailout.stack_snapshot,
@@ -3981,23 +4015,24 @@ impl Vm {
                                 };
                                 let passed_argc = args.len();
                                 locals.extend(args);
-                                self.frames.push(Frame {
-                                    locals,
-                                    lexical_slots: Vec::new(),
-                                    lexical_tdz: Vec::new(),
-                                    lexical_const: Vec::new(),
-                                    scope_boundaries: Vec::new(),
-                                    passed_argc,
-                                    pc: 0,
-                                    stack_base: self.stack.len(),
-                                    prog: func_prog as *const BytecodeProgram,
-                                    generator_id: None,
-                                    this,
-                                    is_constructor_call: false,
-                                    constructed_object: Value::undefined(),
-                                    env: func_env,
-                                });
-                                continue;
+                                    self.frames.push(Frame {
+                                        locals,
+                                        lexical_slots: Vec::new(),
+                                        lexical_tdz: Vec::new(),
+                                        lexical_const: Vec::new(),
+                                        scope_boundaries: Vec::new(),
+                                        passed_argc,
+                                        pc: 0,
+                                        stack_base: self.stack.len(),
+                                        prog: func_prog as *const BytecodeProgram,
+                                        generator_id: None,
+                                        this,
+                                        is_constructor_call: false,
+                                        constructed_object: Value::undefined(),
+                                        env: func_env,
+                                        func_ptr: func_ptr as *mut u8,
+                                    });
+                                    continue;
                             }
                         }
                     }
@@ -4100,6 +4135,7 @@ impl Vm {
                                         is_constructor_call: false,
                                         constructed_object: Value::undefined(),
                                         env: func_env,
+                                        func_ptr: func_ptr as *mut u8,
                                     });
                                     continue;
                                 }
@@ -4136,6 +4172,7 @@ impl Vm {
                                     is_constructor_call: false,
                                     constructed_object: Value::undefined(),
                                     env: func_env,
+                                    func_ptr: func_ptr as *mut u8,
                                 });
                                 continue;
                             }
@@ -4588,6 +4625,7 @@ impl Vm {
                             is_constructor_call: false,
                             constructed_object: Value::undefined(),
                             env: g.env,
+                            func_ptr: std::ptr::null_mut(),
                         });
                         if g.started {
                             self.push(pag.arg);
@@ -6362,6 +6400,7 @@ pub unsafe extern "C" fn rune_jit_call_helper(
                             is_constructor_call: false,
                             constructed_object: Value::undefined(),
                             env: func_env,
+                            func_ptr: func_ptr as *mut u8,
                         });
                         vm.frames[fi].locals.as_mut_ptr() as *mut u64
                     } else {

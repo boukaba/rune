@@ -7,8 +7,8 @@ use crate::gc::{GcHeader, SemiSpace, TAG_FUNC, size_of};
 ///
 /// Memory layout:
 ///   [GcHeader(8) | func_idx(8) | prog_ptr(8) | prototype(8) |
-///    call_count(4) | flags(4) | env_ptr(8) | jit_entry(8)]
-///   Total: 56 bytes
+///    call_count(4) | flags(4) | env_ptr(8) | jit_entry(8) | superclass(8)]
+///   Total: 64 bytes
 ///
 /// flags: bit 0 = is_arrow
 pub struct Func;
@@ -21,7 +21,7 @@ impl Func {
         is_arrow: bool,
         env_ptr: *mut u8,
     ) -> *mut Func {
-        let ptr = ss.alloc(56);
+        let ptr = ss.alloc(64);
         unsafe {
             let header = &mut *(ptr as *mut GcHeader);
             header.word = std::sync::atomic::AtomicU64::new(TAG_FUNC);
@@ -44,6 +44,9 @@ impl Func {
             // jit_entry = null
             let jit_ptr = ptr.add(size_of::<GcHeader>() + 40) as *mut u64;
             *jit_ptr = 0;
+            // superclass = null
+            let super_ptr = ptr.add(size_of::<GcHeader>() + 48) as *mut u64;
+            *super_ptr = 0;
         }
         ptr as *mut Func
     }
@@ -145,6 +148,23 @@ impl Func {
             } else {
                 raw as *const u8
             }
+        }
+    }
+
+    /// Get the superclass constructor pointer (for extends). Returns null if no superclass.
+    pub unsafe fn superclass(ptr: *mut Func) -> *mut u8 {
+        unsafe {
+            let ptr_bytes = ptr as *mut u8;
+            *(ptr_bytes.add(size_of::<GcHeader>() + 48) as *const u64) as *mut u8
+        }
+    }
+
+    /// Set the superclass constructor pointer.
+    pub unsafe fn set_superclass(ptr: *mut Func, superclass: *mut u8) {
+        unsafe {
+            let ptr_bytes = ptr as *mut u8;
+            let field = ptr_bytes.add(size_of::<GcHeader>() + 48) as *mut u64;
+            *field = superclass as u64;
         }
     }
 }

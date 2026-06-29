@@ -1175,6 +1175,13 @@ impl Parser {
                     end: self.span().end,
                 })
             }
+            TokenKind::Super => {
+                self.advance();
+                Expr::Super(Span {
+                    start: start.start,
+                    end: self.span().end,
+                })
+            }
             TokenKind::Identifier => {
                 let t = self.tok.clone();
                 self.advance();

@@ -118,6 +118,9 @@ pub enum Opcode {
     Await,
     // RegExp
     LoadRegExp,
+    // Class extends
+    SetSuperclass,  // pop func, pop superclass → store superclass in func's struct
+    LoadSuperclass, // push current func's superclass onto stack
 }
 
 #[derive(Clone, Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]

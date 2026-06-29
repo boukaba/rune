@@ -5488,3 +5488,42 @@ fn test_class_extends_prototype_chain() {
         "class GrandParent { gp() { return 10; } } class Parent extends GrandParent { p() { return 3; } } class Child extends Parent { c() { return 7; } } var c = new Child(); c.gp() * 10 + c.p() * 100 + c.c();"
     ), 100 + 300 + 7);
 }
+
+#[test]
+fn test_class_super_call() {
+    let mut ctx = Context::new_small();
+    assert_eq!(class_eval_num(&mut ctx,
+        "class Parent { constructor(x) { this.x = x; } } class Child extends Parent { constructor(x, y) { super(x); this.y = y; } } var c = new Child(10, 20); c.x;"
+    ), 10);
+}
+
+#[test]
+fn test_class_super_call_property_setting() {
+    let mut ctx = Context::new_small();
+    assert_eq!(class_eval_num(&mut ctx,
+        "class Parent { constructor(a, b) { this.a = a; this.b = b; } }
+         class Child extends Parent { constructor(a, b, c) { super(a, b); this.c = c; } }
+         new Child(10, 20, 30).c;"
+    ), 30);
+}
+
+#[test]
+fn test_class_super_call_no_args() {
+    let mut ctx = Context::new_small();
+    assert_eq!(class_eval_num(&mut ctx,
+        "class Parent { constructor() { this.x = 5; } }
+         class Child extends Parent { constructor() { super(); } }
+         new Child().x;"
+    ), 5);
+}
+
+#[test]
+fn test_class_super_multi_level() {
+    let mut ctx = Context::new_small();
+    assert_eq!(class_eval_num(&mut ctx,
+        "class GrandParent { constructor(x) { this.gx = x; } }
+         class Parent extends GrandParent { constructor(x, y) { super(x); this.py = y; } }
+         class Child extends Parent { constructor(x, y, z) { super(x, y); this.cz = z; } }
+         var c = new Child(1, 2, 3); c.gx + c.py + c.cz;"
+    ), 6);
+}

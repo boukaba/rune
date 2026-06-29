@@ -2885,3 +2885,39 @@ Added `ClassNode` (name, methods, span), `ClassMethod` (key, func, is_static, sp
 
 ### Next Steps
 1. `class` `extends` support
+
+---
+
+## Sprint 24 — Class `extends` (Heritage)
+
+> **2026-06-29**: `class Child extends Parent { }` sets up prototype chain for instance inheritance and constructor `__proto__` for static inheritance. 434/434 tests pass.
+
+### Emitter (`crates/rune_parser/src/emitter.rs`)
+- `emit_class` extended with heritage handling (step 2.5): after creating the child prototype (`NewObject(0)`), evaluates heritage expression, loads `super.prototype` via `LoadProperty`, sets `child_proto.__proto__ = super.prototype` via `StoreProperty`
+- Constructor `__proto__` linking (step 7): after `ctor.prototype = proto`, sets `ctor.__proto__ = superclass_ctor` for static method inheritance
+- Temp local slots allocated for child prototype and superclass constructor references
+
+#### Stack discipline for heritage
+1. `NewObject(0)` → `[child_proto]`
+2. `StoreLocal(proto_slot)` → save child proto (value stays on stack)
+3. Emit heritage expression → `[child_proto, superclass_ctor]`
+4. `StoreLocal(super_slot)` → save superclass (value stays on stack)
+5. `LoadStringConst("prototype"), LoadProperty` → `[child_proto, super_prototype]`
+6. `LoadStringConst("__proto__"), Swap, StoreProperty, Pop` → set `child_proto.__proto__ = super_prototype`, restore child proto
+
+### Integration Tests
+3 tests:
+
+| Test | What it validates |
+|---|---|
+| `test_class_extends_basic` | `new Child().parentMethod()` returns inherited value |
+| `test_class_extends_multiple_methods` | Combined `c.getX() + c.getY()` from Parent + Child |
+| `test_class_extends_prototype_chain` | 3-level chain: GrandParent → Parent → Child |
+
+### Known Gaps
+- `super()` calls in constructors not implemented (default subclass constructor has empty body, not `super(...args)`)
+- Static method inheritance needs TAG_FUNC `__proto__` support in VM (`do_store_property` only handles `"prototype"` key for TAG_FUNC, `"__proto__"` fallthrough is a no-op)
+- `instanceof` with class constructors fails when RHS is a builtin (Smi handle); only works with user-defined TAG_FUNC constructors
+
+### Next Steps
+1. `class` `super()` calls in constructors

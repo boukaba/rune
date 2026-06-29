@@ -68,7 +68,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 - **Generators:** function*, yield, next() (basic)
 - **Async/await:** `async function`, `async () =>`, `await expr` — generator-based, synchronous until first await, Promise-based continuation
 - **Promise:** constructor, resolve/reject, `.then`/`.catch`/`.finally`, `Promise.resolve`/`.reject`/`.all`/`.race`, microtask queue, **thenable unwrapping**
-- **Classes:** declarations, expressions (named & anonymous), default constructor, prototype methods
+- **Classes:** declarations, expressions (named & anonymous), default constructor, prototype methods, `extends` (heritage)
 - **Template literals:** substitutions, nested, escapes
 - **Error objects:** TypeError, ReferenceError with `.name`/`.message`
 - **Prototype chains:** `__proto__`, Object.create, instanceof
@@ -87,7 +87,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 - **String methods:** `replace` (string + regex pattern), `replaceAll`, `indexOf`, `charAt`, `slice`, `split`. No `trim`, `toUpperCase`, `toLowerCase`, `charCodeAt`.
 - **Array methods:** `filter`, `map`, `reduce`, `forEach`, `slice`, `find`, `some`, `every`, `sort`, `flat`, `flatMap`, `includes`, `push`, `pop`, `indexOf`.
 - **Modules:** No import/export (ESM)
-- **Classes:** Class declarations, expressions, constructor, prototype methods (no `extends`/`static`/computed names yet)
+- **Classes:** Class declarations, expressions, constructor, prototype methods, `extends` (no `static`/computed names/`super()` yet)
 - **Async/await:** `async function`, `async () =>`, `await expr` — full support with generator-based desugaring, synchronous until first await. 396 tests.
 - **JIT:** 57 opcodes whitelisted (out of 93 total opcode variants). Float Self-Tagging (NaN-boxing) eliminates all float heap allocation — all interpreter float paths use inline `Value::from_float64`. JIT only has float64 Add promotion; Sub/Mul/Div/Mod/Exp bail to interpreter (which handles them via NaN-boxed Values). Phase F inlining shipped (5% on `jit_hot_function_1M`).
 - **Debugger:** No CDP/DevTools

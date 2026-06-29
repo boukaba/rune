@@ -5464,3 +5464,27 @@ fn test_class_method_this_context() {
         "class Foo { constructor() { this.val = 1; } inc() { this.val = this.val + 1; return this; } get() { return this.val; } } var a = new Foo(); var b = new Foo(); a.inc(); a.get();"
     ), 2);
 }
+
+#[test]
+fn test_class_extends_basic() {
+    let mut ctx = Context::new_small();
+    assert_eq!(class_eval_num(&mut ctx,
+        "class Parent { parentMethod() { return 1; } } class Child extends Parent { } new Child().parentMethod();"
+    ), 1);
+}
+
+#[test]
+fn test_class_extends_multiple_methods() {
+    let mut ctx = Context::new_small();
+    assert_eq!(class_eval_num(&mut ctx,
+        "class Parent { getX() { return 42; } } class Child extends Parent { getY() { return 7; } } var c = new Child(); c.getX() + c.getY();"
+    ), 49);
+}
+
+#[test]
+fn test_class_extends_prototype_chain() {
+    let mut ctx = Context::new_small();
+    assert_eq!(class_eval_num(&mut ctx,
+        "class GrandParent { gp() { return 10; } } class Parent extends GrandParent { p() { return 3; } } class Child extends Parent { c() { return 7; } } var c = new Child(); c.gp() * 10 + c.p() * 100 + c.c();"
+    ), 100 + 300 + 7);
+}

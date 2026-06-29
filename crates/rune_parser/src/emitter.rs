@@ -267,9 +267,47 @@ impl Emitter {
         }
 
         let proto_key_idx = self.intern_string("prototype") as i64;
+        let proto_proto_idx = self.intern_string("__proto__") as i64;
 
         // 2. Create empty prototype object
         self.emit(Opcode::NewObject, vec![0]);
+
+        // 2.5 Handle heritage (extends)
+        let mut heritage_proto_slot = None;
+        let mut heritage_super_slot = None;
+        if let Some(heritage) = &class.heritage {
+            let pslot = self.locals.len();
+            self.locals.push(format!("__ext_proto_{}", pslot));
+            let sslot = self.locals.len();
+            self.locals.push(format!("__ext_super_{}", sslot));
+            heritage_proto_slot = Some(pslot);
+            heritage_super_slot = Some(sslot);
+
+            // Save child proto to local (StoreLocal keeps value on stack too)
+            self.emit(Opcode::StoreLocal, vec![pslot as i64]);
+
+            // Evaluate heritage expression → pushes superclass constructor
+            self.emit_expression(heritage);
+
+            // Save superclass constructor (value stays on stack AND saved in local)
+            self.emit(Opcode::StoreLocal, vec![sslot as i64]);
+
+            // Load super.prototype (consumes the superclass copy on stack, but saved in sslot)
+            self.emit(Opcode::LoadStringConst, vec![proto_key_idx]);
+            self.emit(Opcode::LoadProperty, vec![]);
+
+            // Set child_proto.__proto__ = super.prototype
+            // Stack: [child_proto, super_prototype]
+            self.emit(Opcode::LoadStringConst, vec![proto_proto_idx]);
+            // Stack: [child_proto, super_prototype, "__proto__"]
+            self.emit(Opcode::Swap, vec![]);
+            // Stack: [child_proto, "__proto__", super_prototype]
+            self.emit(Opcode::StoreProperty, vec![]);
+            self.emit(Opcode::Pop, vec![]);
+
+            // Restore child proto onto stack for method definitions
+            self.emit(Opcode::LoadLocal, vec![pslot as i64]);
+        }
 
         // 3. Add non-constructor, non-static methods to prototype
         for (key, func_idx) in &method_funcs {
@@ -331,7 +369,18 @@ impl Emitter {
         self.emit(Opcode::StoreProperty, vec![]);
         self.emit(Opcode::Pop, vec![]);
 
-        // 7. For expressions: restore constructor onto stack from the saved slot.
+        // 7. Link: Constructor.__proto__ = SuperClass (for extends, static inheritance)
+        if let Some(sslot) = heritage_super_slot {
+            if let Some(ctor_slot) = save_slot {
+                self.emit(Opcode::LoadLocal, vec![ctor_slot as i64]);
+                self.emit(Opcode::LoadStringConst, vec![proto_proto_idx]);
+                self.emit(Opcode::LoadLocal, vec![sslot as i64]);
+                self.emit(Opcode::StoreProperty, vec![]);
+                self.emit(Opcode::Pop, vec![]);
+            }
+        }
+
+        // 8. For expressions: restore constructor onto stack from the saved slot.
         if for_expr && let Some(idx) = save_slot {
             self.emit(Opcode::LoadLocal, vec![idx as i64]);
         }

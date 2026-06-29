@@ -49,7 +49,8 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - **Thenable unwrapping** — `Promise.resolve` detects objects with `.then` callable, creates a pending Promise, bridges via `PendingPromiseCtor` + `push_callback_call`. `.then` is called synchronously; fulfillment/rejection propagates through bridge functions. 3 integration tests. 425/425 tests pass.
 - **RegExp prototype properties** — `source`, `flags`, `lastIndex` getters on `RegExp.prototype`, handled as own properties in `load_property_recursive`. `last_index` field added to RegExp struct (reused 4-byte padding). 3 integration tests.
 - **RegExp function replacement** — `String.prototype.replace` supports function as replacement for regex pattern. Calls `fn(match, ...captures, offset, input)`, uses return value. Uses `PendingReplaceOp` state machine in Return handler. 2 integration tests. 429/429 tests pass.
-- **Known gaps**: `async_reject` is_throw path not yet wired to generator throw, `.finally` pending case falls back to old .then behavior, RegExp: no match/search/split, `replaceAll` function replacement not yet implemented, `class`: no `extends`, no `static` methods, no computed method names, `this.prop++` not supported (Update only handles Identifier targets).
+- **`class` `extends` (heritage)** — prototype chain setup (`Child.prototype.__proto__ = Parent.prototype`), constructor `__proto__` linking for static inheritance (`Child.__proto__ = Parent`). 3 integration tests. 434/434 tests pass.
+- **Known gaps**: `async_reject` is_throw path not yet wired to generator throw, `.finally` pending case falls back to old .then behavior, RegExp: no match/search/split, `replaceAll` function replacement not yet implemented, `class`: no `static` methods, no `super()` calls in constructors, `this.prop++` not supported (Update only handles Identifier targets).
 
 ### Next Steps — v0.5 (ordered by leverage)
-1. `class` `extends` support
+1. `class` `super()` calls in constructors

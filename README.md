@@ -79,9 +79,9 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 
 ## What Doesn't Work (Yet)
 
-- **Standard library:** No Map, Set, Promise, RegExp, Date, TypedArray, WeakRef
+- **Standard library:** No Map, Set, RegExp, Date, TypedArray, WeakRef. Promise: constructor + .then/.catch + chaining working (microtask queue deferred).
 - **String methods:** No `charCodeAt`, `indexOf`, `replace`, `trim`, `toUpperCase`, `toLowerCase`
-- **Array methods:** No `find`, `some`, `every`, `sort`, `flat`, `flatMap`, `includes`, `indexOf`
+- **Array methods:** `find`, `some`, `every`, `sort`, `flat`, `flatMap`, `includes`, `indexOf`, `push`, `pop`
 - **Modules:** No import/export (ESM)
 - **Classes:** No class syntax, super, getters/setters
 - **Async/await:** No async, await, for...of

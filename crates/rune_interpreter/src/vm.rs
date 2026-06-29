@@ -468,6 +468,7 @@ impl Vm {
         let for_each_handle = find_handle(&self.builtins, "Array_prototype_forEach");
         let slice_handle = find_handle(&self.builtins, "Array_prototype_slice");
         let includes_handle = find_handle(&self.builtins, "Array_prototype_includes");
+        let index_of_handle = find_handle(&self.builtins, "Array_prototype_indexOf");
         let find_h = find_handle(&self.builtins, "Array_prototype_find");
         let find_index_h = find_handle(&self.builtins, "Array_prototype_findIndex");
         let some_h = find_handle(&self.builtins, "Array_prototype_some");
@@ -482,6 +483,7 @@ impl Vm {
             if let Some(fe) = for_each_handle { proto_entries.push(("forEach", fe)); }
             if let Some(s) = slice_handle { proto_entries.push(("slice", s)); }
             if let Some(incl) = includes_handle { proto_entries.push(("includes", incl)); }
+            if let Some(iof) = index_of_handle { proto_entries.push(("indexOf", iof)); }
             if let Some(fnd) = find_h { proto_entries.push(("find", fnd)); }
             if let Some(fi) = find_index_h { proto_entries.push(("findIndex", fi)); }
             if let Some(sm) = some_h { proto_entries.push(("some", sm)); }
@@ -750,14 +752,14 @@ impl Vm {
     }
 
     /// Enqueue a microtask to be executed after the current synchronous task.
-    pub fn enqueue_microtask(&mut self, callback: Value, args: Vec<Value>, ppc: Option<PendingPromiseCtor>) {
+    pub(crate) fn enqueue_microtask(&mut self, callback: Value, args: Vec<Value>, ppc: Option<PendingPromiseCtor>) {
         self.microtask_queue.push(Microtask { callback, args, promise_ctor: ppc });
     }
 
     /// Drain all enqueued microtasks. Each microtask is executed synchronously
     /// via push_callback_call. New microtasks enqueued during draining are
     /// processed in the current batch.
-    pub fn drain_microtask_queue(&mut self, gc: &mut SemiSpace) {
+    pub(crate) fn drain_microtask_queue(&mut self, gc: &mut SemiSpace) {
         while !self.microtask_queue.is_empty() {
             let tasks: Vec<Microtask> = std::mem::take(&mut self.microtask_queue);
             for task in tasks {

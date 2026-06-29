@@ -1946,6 +1946,41 @@ fn to_index(v: Value, length: u32) -> u32 {
     }
 }
 
+/// Array.prototype.indexOf(searchElement, fromIndex) — returns index of first match, -1 if not found.
+pub fn array_index_of(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) { return Value::undefined(); }
+    let search = args.first().copied().unwrap_or(Value::undefined());
+    let len = crate::vm::array_like_length(this).unwrap_or(0) as usize;
+    let from = to_index(args.get(1).copied().unwrap_or(Value::smi(0)), len as u32) as usize;
+    if from >= len { return Value::smi(-1); }
+    for i in from..len {
+        if let Some(elem) = crate::vm::array_like_index(this, i as u32) {
+            let mut eq = false;
+            if elem.is_smi() && search.is_smi() {
+                eq = elem.as_smi() == search.as_smi();
+            } else if let (Some(ep), Some(sp)) = (elem.heap_ptr(), search.heap_ptr()) {
+                let et = unsafe { (*(ep as *const GcHeader)).tag() };
+                let st = unsafe { (*(sp as *const GcHeader)).tag() };
+                if et == TAG_STRING && st == TAG_STRING {
+                    let es = unsafe { HeapString::to_string(ep as *mut HeapString) };
+                    let ss = unsafe { HeapString::to_string(sp as *mut HeapString) };
+                    eq = es == ss;
+                } else {
+                    eq = ep == sp;
+                }
+            } else if let (Some(ef), Some(sf)) = (elem.as_float64(), search.as_float64()) {
+                eq = ef.to_bits() == sf.to_bits();
+            } else {
+                eq = (elem.is_undefined() && search.is_undefined())
+                    || (elem.is_null() && search.is_null())
+                    || (elem.is_boolean() && search.is_boolean() && elem.as_smi() == search.as_smi());
+            }
+            if eq { return Value::smi(i as i32); }
+        }
+    }
+    Value::smi(-1)
+}
+
 /// Array.prototype.includes(searchElement, fromIndex) — SameValueZero search.
 pub fn array_includes(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
@@ -2944,6 +2979,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 2,
             name: "Array_prototype_includes",
             func: array_includes,
+        },
+        Builtin {
+            length: 2,
+            name: "Array_prototype_indexOf",
+            func: array_index_of,
         },
         Builtin {
             length: 1,

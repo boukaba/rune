@@ -598,6 +598,7 @@ impl Vm {
             let mut proto_entries: Vec<(&str, Value)> = Vec::new();
             if let Some(then_h) = tf { proto_entries.push(("then", then_h)); }
             if let Some(catch_h) = cf { proto_entries.push(("catch", catch_h)); }
+            if let Some(fin_h) = find_handle(&self.builtins, "Promise_prototype_finally") { proto_entries.push(("finally", fin_h)); }
             let proto_obj = make_object(gc, &proto_entries);
             self.promise_prototype = proto_obj;
             let mut ctor_entries: Vec<(&str, Value)> = vec![("prototype", proto_obj)];

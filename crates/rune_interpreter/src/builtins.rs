@@ -2480,6 +2480,12 @@ pub fn promise_prototype_catch(gc: &mut SemiSpace, this: Value, args: &[Value], 
     promise_prototype_then(gc, this, &[Value::undefined(), args.first().copied().unwrap_or(Value::undefined())], vm)
 }
 
+/// Promise.prototype.finally(onFinally) — calls onFinally when settled, passes through result.
+pub fn promise_prototype_finally(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let on_finally = args.first().copied().unwrap_or(Value::undefined());
+    promise_prototype_then(gc, this, &[on_finally, on_finally], vm)
+}
+
 /// Promise.resolve(value) — returns a fulfilled promise. If value is a promise, returns it.
 pub fn promise_static_resolve(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let val = args.first().copied().unwrap_or(Value::undefined());
@@ -2617,6 +2623,7 @@ pub fn default_builtins() -> Vec<Builtin> {
             name: "Promise_prototype_catch",
             func: promise_prototype_catch,
         },
+        Builtin { length: 1, name: "Promise_prototype_finally", func: promise_prototype_finally },
         Builtin { length: 1, name: "Promise_resolve", func: promise_static_resolve },
         Builtin { length: 1, name: "Promise_reject", func: promise_static_reject },
         Builtin { length: 1, name: "Promise_all", func: promise_static_all },

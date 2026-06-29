@@ -11,6 +11,7 @@ struct LexicalBinding {
 pub struct Emitter {
     pub instructions: Vec<Instruction>,
     pub is_generator: bool,
+    pub is_async: bool,
     pub named_function: bool,
     pub string_pool: Vec<String>,
     pub float_pool: Vec<f64>,
@@ -45,6 +46,7 @@ impl Emitter {
         Emitter {
             instructions: Vec::new(),
             is_generator: false,
+            is_async: false,
             named_function: false,
             string_pool: Vec::new(),
             float_pool: Vec::new(),
@@ -128,6 +130,7 @@ impl Emitter {
         let mut sub = Emitter::new();
         sub.env_scope_stack = self.env_scope_stack.clone();
         sub.is_generator = func.is_generator;
+        sub.is_async = func.is_async;
         let named_offset = if let Some(name) = &func.name {
             sub.named_function = true;
             sub.locals.push(name.to_string());
@@ -1425,6 +1428,10 @@ impl Emitter {
                 }
                 self.emit(Opcode::Yield, vec![]);
             }
+            Expr::Await(arg, _) => {
+                self.emit_expression(arg);
+                self.emit(Opcode::Await, vec![]);
+            }
         }
     }
 
@@ -1584,6 +1591,7 @@ impl Emitter {
         let mut program = BytecodeProgram::new(instructions, self.string_pool, self.nested_funcs);
         program.named_function = self.named_function;
         program.is_generator = self.is_generator;
+        program.is_async = self.is_async;
         program.local_names = self.locals;
         program.captured_env_size = self.captured_env_size;
         program.float_pool = self.float_pool;
@@ -1689,6 +1697,7 @@ fn contains_inner_function_expr(expr: &Expr) -> bool {
         | Expr::This(_)
         | Expr::Assign(_, _, _)
         | Expr::Yield(_, _) => false,
+        Expr::Await(expr, _) => contains_inner_function_expr(expr),
     }
 }
 
@@ -1849,6 +1858,7 @@ fn uses_arguments_expr(expr: &Expr) -> bool {
         Expr::Template { exprs, .. } => exprs.iter().any(uses_arguments_expr),
         Expr::Update(_, expr, _, _) => uses_arguments_expr(expr),
         Expr::Yield(expr, _) => expr.as_ref().is_some_and(|e| uses_arguments_expr(e)),
+        Expr::Await(expr, _) => uses_arguments_expr(expr),
     }
 }
 

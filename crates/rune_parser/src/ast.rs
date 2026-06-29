@@ -41,6 +41,7 @@ pub enum Expr {
     This(Span),
     Update(UpdateOp, Box<Expr>, bool, Span), // op, argument, is_prefix, span
     Yield(Option<Box<Expr>>, Span),
+    Await(Box<Expr>, Span),
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -5110,3 +5110,58 @@ fn test_json_stringify_cycle_catchable() {
         .unwrap();
     assert_eq!(r.as_smi(), Some(1), "try/catch should catch cycle in JSON.stringify");
 }
+
+#[test]
+fn test_async_basic() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(r#"
+            var result = 0;
+            async function f() {
+                result = 42;
+            }
+            var p = f();
+            result;
+        "#)
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(42), "async function should execute body synchronously until first await");
+}
+
+#[test]
+fn test_async_await_basic() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(r#"
+            var result = 0;
+            async function f() {
+                result = 10;
+                await 1;
+                result = 20;
+            }
+            var p = f();
+            result;
+        "#)
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(10), "await should suspend execution; result should be 10");
+}
+
+#[test]
+fn test_async_await_chaining() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(r#"
+            var results = [];
+            async function f() {
+                results.push(1);
+                await 1;
+                results.push(2);
+                await 2;
+                results.push(3);
+                return "done";
+            }
+            var p = f();
+            results.length;
+        "#)
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(1), "await chains: only first push before first await");
+}

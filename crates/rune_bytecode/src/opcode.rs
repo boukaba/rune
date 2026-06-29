@@ -114,6 +114,8 @@ pub enum Opcode {
     DecLocal,
     IncGlobal,
     DecGlobal,
+    // Async
+    Await,
 }
 
 #[derive(Clone, Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -166,6 +168,7 @@ pub struct BytecodeProgram {
     pub functions: Vec<BytecodeProgram>,
     pub named_function: bool,
     pub is_generator: bool,
+    pub is_async: bool,
     pub local_names: Vec<String>,
     /// Number of slots in this function's lexical environment object (0 = no env).
     /// Set by the emitter when escape analysis detects that variables in this
@@ -186,6 +189,7 @@ impl BytecodeProgram {
             functions,
             named_function: false,
             is_generator: false,
+            is_async: false,
             local_names: vec![],
             captured_env_size: 0,
         }

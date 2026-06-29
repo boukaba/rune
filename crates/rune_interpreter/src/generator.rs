@@ -18,6 +18,8 @@ pub struct Generator {
     pub started: bool,
     /// Whether the generator has completed (returned or finished).
     pub done: bool,
+    pub this: Value,
+    pub env: *mut u8,
 }
 
 impl Generator {
@@ -32,6 +34,8 @@ impl Generator {
             prog,
             started: false,
             done: false,
+            this: Value::undefined(),
+            env: std::ptr::null_mut(),
         }
     }
 }

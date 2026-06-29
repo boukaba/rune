@@ -216,6 +216,20 @@ pub(crate) enum ArrayOpKind {
     FlatMap,
 }
 
+/// State for async generator resumption via bridge function (async_continue/async_reject).
+pub(crate) struct PendingAsyncGen {
+    pub(crate) gen_id: usize,
+    pub(crate) arg: Value,
+    #[allow(dead_code)]
+    pub(crate) is_throw: bool,
+}
+
+/// Tracks an async function's outer Promise so the Return handler can resolve it.
+pub(crate) struct AsyncTask {
+    pub(crate) gen_id: usize,
+    pub(crate) promise: *mut u8,
+}
+
 /// State for an in-progress Array.prototype callback iteration.
 /// Set by the builtin function, consumed/updated by the Return handler.
 pub(crate) struct ArrayOpState {
@@ -341,6 +355,11 @@ pub struct Vm {
     pub(crate) microtask_queue: Vec<Microtask>,
     /// Pending promise reactions: (callback, chained_promise) pairs keyed by promise ptr.
     pub(crate) promise_reactions: HashMap<*mut u8, Vec<(Value, Value)>>,
+    /// Async generator tasks: maps gen_id → outer Promise so the Return handler can resolve it.
+    pub(crate) async_tasks: Vec<AsyncTask>,
+    /// Pending async generator resumption, set by async_continue/async_reject builtins.
+    /// Consumed by the Return handler to restore the generator's frame.
+    pub(crate) pending_async_gen: Option<PendingAsyncGen>,
     /// Pending assert.throws callback.
     pub(crate) pending_assert: Option<PendingAssert>,
     /// Pending primitive conversion (ToPrimitive on object for +, ToString, etc.).
@@ -416,6 +435,8 @@ impl Vm {
             pending_promise_ctor: None,
             microtask_queue: Vec::new(),
             promise_reactions: HashMap::new(),
+            async_tasks: Vec::new(),
+            pending_async_gen: None,
             pending_assert: None,
             pending_primitive_conversion: None,
             assert_called: false,
@@ -714,6 +735,37 @@ impl Vm {
 
     /// Create a resolve/reject bridge function that closes over a promise
     /// and a builtin handle. Returns a callable TAG_FUNC Value.
+    /// Find a builtin handle by name, returning a negative Smi handle or undefined.
+    pub fn find_builtin_handle(&self, name: &str) -> Value {
+        self.builtins
+            .iter()
+            .position(|b| b.name == name)
+            .map(|id| Value::smi(-(id as i32) - 1))
+            .unwrap_or(Value::undefined())
+    }
+
+    /// Create a bridge function for async generator resume/reject.
+    /// The bridge calls `builtin(this=gen_id_smi, args=[value])` via the bridge_inner program.
+    pub fn create_async_bridge(&mut self, gc: &mut SemiSpace, gen_id: usize, handle: Value) -> Value {
+        let env = EnvObject::allocate(gc, 2, std::ptr::null_mut()) as *mut u8;
+        unsafe {
+            let resolved_env = if (*(env as *const GcHeader)).is_forwarded() {
+                (*(env as *const GcHeader)).forwarding_addr() as *mut EnvObject
+            } else {
+                env as *mut EnvObject
+            };
+            EnvObject::set_slot(resolved_env, 0, Value::smi(gen_id as i32));
+            EnvObject::set_slot(resolved_env, 1, handle);
+            let func = Func::allocate(gc, 0, self.promise_bridge_prog as *const u8, false, resolved_env as *mut u8);
+            let resolved_func = if (*(func as *const GcHeader)).is_forwarded() {
+                (*(func as *const GcHeader)).forwarding_addr() as *mut Func
+            } else {
+                func
+            };
+            Value::from_heap_ptr(resolved_func as *mut u8)
+        }
+    }
+
     pub fn create_promise_bridge(
         &self,
         gc: &mut SemiSpace,
@@ -3549,6 +3601,43 @@ impl Vm {
                             };
                             if func_idx < creator_prog.functions.len() {
                                 let func_prog = &creator_prog.functions[func_idx];
+                                if func_prog.is_async {
+                                    let passed_argc = args.len();
+                                    let mut g = Generator::new(args.clone(), func_prog as *const BytecodeProgram);
+                                    g.this = this;
+                                    g.env = unsafe { Func::env_ptr(ptr as *mut Func) };
+                                    g.started = true;
+                                    let gen_id = self.generators.len();
+                                    self.generators.push(g);
+                                    let proto = self.promise_prototype.heap_ptr();
+                                    let promise_ptr = Promise::allocate(gc, proto);
+                                    self.async_tasks.push(AsyncTask { gen_id, promise: promise_ptr });
+                                    let func_ptr = ptr as *mut Func;
+                                    let func_env = unsafe { Func::env_ptr(func_ptr) };
+                                    let mut locals = if func_prog.named_function {
+                                        vec![callee]
+                                    } else {
+                                        vec![]
+                                    };
+                                    locals.extend(args);
+                                    self.frames.push(Frame {
+                                        locals,
+                                        lexical_slots: Vec::new(),
+                                        lexical_tdz: Vec::new(),
+                                        lexical_const: Vec::new(),
+                                        scope_boundaries: Vec::new(),
+                                        passed_argc,
+                                        pc: 0,
+                                        stack_base: self.stack.len(),
+                                        prog: func_prog as *const BytecodeProgram,
+                                        generator_id: Some(gen_id),
+                                        this,
+                                        is_constructor_call: false,
+                                        constructed_object: Value::undefined(),
+                                        env: func_env,
+                                    });
+                                    continue;
+                                }
                                 if func_prog.is_generator {
                                     let g =
                                         Generator::new(args, func_prog as *const BytecodeProgram);
@@ -3891,6 +3980,47 @@ impl Vm {
                             };
                             if func_idx < creator_prog.functions.len() {
                                 let func_prog = &creator_prog.functions[func_idx];
+                                // CallFromArray for async
+                                if func_prog.is_async {
+                                    let passed_argc = args.len();
+                                    let mut g = Generator::new(args, func_prog as *const BytecodeProgram);
+                                    g.this = this;
+                                    g.env = unsafe { Func::env_ptr(ptr as *mut Func) };
+                                    g.started = true;
+                                    let gen_id = self.generators.len();
+                                    self.generators.push(g);
+                                    let proto = self.promise_prototype.heap_ptr();
+                                    let promise_ptr = Promise::allocate(gc, proto);
+                                    self.async_tasks.push(AsyncTask { gen_id, promise: promise_ptr });
+                                    let func_ptr = ptr as *mut Func;
+                                    let func_env = unsafe { Func::env_ptr(func_ptr) };
+                                    // Restore args for the frame: Generator::new moved them,
+                                    // so repack from the generator we just stored.
+                                    let g_args = self.generators[gen_id].locals.clone();
+                                    let mut locals = if func_prog.named_function {
+                                        vec![callee]
+                                    } else {
+                                        vec![]
+                                    };
+                                    locals.extend(g_args);
+                                    self.frames.push(Frame {
+                                        locals,
+                                        lexical_slots: Vec::new(),
+                                        lexical_tdz: Vec::new(),
+                                        lexical_const: Vec::new(),
+                                        scope_boundaries: Vec::new(),
+                                        passed_argc,
+                                        pc: 0,
+                                        stack_base: self.stack.len(),
+                                        prog: func_prog as *const BytecodeProgram,
+                                        generator_id: Some(gen_id),
+                                        this,
+                                        is_constructor_call: false,
+                                        constructed_object: Value::undefined(),
+                                        env: func_env,
+                                    });
+                                    continue;
+                                }
                                 if func_prog.is_generator {
                                     let g =
                                         Generator::new(args, func_prog as *const BytecodeProgram);
@@ -3951,6 +4081,12 @@ impl Vm {
                     if let Some(id) = gen_id {
                         self.generators[id].done = true;
                     }
+                    let is_async_return = gen_id.is_some_and(|id| self.async_tasks.iter().any(|t| t.gen_id == id));
+                    let async_promise_ptr = if is_async_return {
+                        self.async_tasks.iter().find(|t| t.gen_id == gen_id.unwrap()).map(|t| t.promise)
+                    } else {
+                        None
+                    };
                     let popped_frame = self.frames.len() - 1;
                     let is_constructor = self.frames[popped_frame].is_constructor_call;
                     let constructed_obj = self.frames[popped_frame].constructed_object;
@@ -4255,6 +4391,68 @@ impl Vm {
                         self.push(pc.other_operand);
                         continue;
                     }
+                    // Async return: resolve outer Promise when async generator completes.
+                    if let Some(ptr) = async_promise_ptr {
+                        unsafe {
+                            Promise::set_state(ptr, PROMISE_FULFILLED);
+                            Promise::set_result(ptr, result);
+                        }
+                        let reactions_ptr = unsafe { Promise::reactions(ptr) };
+                        if !reactions_ptr.is_null() {
+                            let arr = reactions_ptr as *mut RuneArray;
+                            let len = unsafe { RuneArray::length(arr) };
+                            let mut idx = 0;
+                            while idx + 1 < len as usize {
+                                let cb = unsafe { RuneArray::get_element(arr, idx) };
+                                let chained = unsafe { RuneArray::get_element(arr, idx + 1) };
+                                if cb.is_heap_object() {
+                                    let ppc = PendingPromiseCtor {
+                                        source_frame_depth: 0, promise: chained,
+                                        resolve_handle: Value::undefined(), reject_handle: Value::undefined(),
+                                        resolve_with_result: true,
+                                    };
+                                    self.enqueue_microtask(cb, vec![result], Some(ppc));
+                                }
+                                idx += 2;
+                            }
+                        }
+                        self.stack.truncate(callee_base);
+                        let promise_val = Value::from_heap_ptr(ptr);
+                        self.push(promise_val);
+                        if self.frames.is_empty() {
+                            self.stack.clear();
+                            return Exit::Return(promise_val);
+                        }
+                        let new_fi = self.frames.len() - 1;
+                        self.frames[new_fi].pc += 1;
+                        continue;
+                    }
+                    // Check if this return completes an async generator resume bridge.
+                    if let Some(pag) = self.pending_async_gen.take()
+                        && self.frames.is_empty()
+                    {
+                        let g = &self.generators[pag.gen_id];
+                        self.frames.push(Frame {
+                            locals: g.locals.clone(),
+                            lexical_slots: g.lexical_slots.clone(),
+                            lexical_tdz: g.lexical_tdz.clone(),
+                            lexical_const: g.lexical_const.clone(),
+                            scope_boundaries: g.scope_boundaries.clone(),
+                            passed_argc: 0,
+                            pc: g.pc,
+                            stack_base: self.stack.len(),
+                            prog: g.prog,
+                            generator_id: Some(pag.gen_id),
+                            this: g.this,
+                            is_constructor_call: false,
+                            constructed_object: Value::undefined(),
+                            env: g.env,
+                        });
+                        if g.started {
+                            self.push(pag.arg);
+                        }
+                        continue;
+                    }
                     if self.frames.is_empty() {
                         self.stack.clear();
                         return Exit::Return(result);
@@ -4289,6 +4487,8 @@ impl Vm {
                         g.pc = pc + 1;
                         g.prog = self.frames[fi].prog;
                         g.started = true;
+                        g.this = self.frames[fi].this;
+                        g.env = self.frames[fi].env;
                     }
                     let callee_base = self.frames.last().unwrap().stack_base;
                     let popped_frame = self.frames.len() - 1;
@@ -4304,6 +4504,57 @@ impl Vm {
                     self.push(val);
                     self.frames[new_fi].pc += 1;
                     return Exit::Yield(val);
+                }
+                Opcode::Await => {
+                    let val = self.pop();
+                    if let Some(gen_id) = self.frames[fi].generator_id {
+                        // Save generator state
+                        let g = &mut self.generators[gen_id];
+                        g.locals = self.frames[fi].locals.clone();
+                        g.lexical_slots = self.frames[fi].lexical_slots.clone();
+                        g.lexical_tdz = self.frames[fi].lexical_tdz.clone();
+                        g.lexical_const = self.frames[fi].lexical_const.clone();
+                        g.scope_boundaries = self.frames[fi].scope_boundaries.clone();
+                        g.pc = pc + 1;
+                        g.prog = self.frames[fi].prog;
+                        g.started = true;
+                        g.this = self.frames[fi].this;
+                        g.env = self.frames[fi].env;
+                        // Create bridge functions for resume/reject
+                        let continue_handle = self.find_builtin_handle("async_continue");
+                        let reject_handle = self.find_builtin_handle("async_reject");
+                        let continue_bridge = self.create_async_bridge(gc, gen_id, continue_handle);
+                        let reject_bridge = self.create_async_bridge(gc, gen_id, reject_handle);
+                        // Call Promise.resolve(val)
+                        let resolved = crate::builtins::promise_static_resolve(
+                            gc, Value::undefined(), &[val], self,
+                        );
+                        // Call .then(continue_bridge, reject_bridge) on the resolved promise
+                        crate::builtins::promise_prototype_then(
+                            gc, resolved, &[continue_bridge, reject_bridge], self,
+                        );
+                        // Push the outer Promise as the "return value" for the caller
+                        let promise_ptr = self.async_tasks.iter()
+                            .find(|t| t.gen_id == gen_id)
+                            .map(|t| t.promise)
+                            .unwrap();
+                        let callee_base = self.frames.last().unwrap().stack_base;
+                        let popped_frame = self.frames.len() - 1;
+                        self.last_locals = self.frames[popped_frame].locals.clone();
+                        self.frames.pop();
+                        self.try_stack.retain(|tf| tf.frame_depth != popped_frame + 1);
+                        self.stack.truncate(callee_base);
+                        self.push(Value::from_heap_ptr(promise_ptr));
+                        if self.frames.is_empty() {
+                            break;
+                        }
+                        // Advance the caller's PC past the Call instruction
+                        let caller_fi = self.frames.len() - 1;
+                        self.frames[caller_fi].pc += 1;
+                        continue;
+                    }
+                    self.push(val);
+                    self.frames[fi].pc = pc + 1;
                 }
                 Opcode::YieldStar => {
                     // Stub: return undefined (delegate yield not yet implemented)

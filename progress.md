@@ -2588,3 +2588,44 @@ Two tracks, depends on target market:
 | Promise.all | 47 | 51 | 98 | 48.0% |
 | Promise.race | 46 | 48 | 94 | 48.9% |
 | **Total** | **166** | **193** | **361** | **46.0%** |
+
+## Phase 2: Async/Await ✅
+
+**Status: DONE** — parser desugaring + generator reuse, full end-to-end async functions with `await`.
+
+### Architecture
+
+Async functions are compiled as generators (`is_async → is_generator`). The `await` expression maps to `Opcode::Await` (bytecode identical to `Yield`). The key difference from regular generators is at call time and suspend time:
+
+- **Call handler**: Pushes a generator frame directly (synchronous execution until first `await`). Creates a Promise via `Promise::allocate` and stores it in `AsyncTask { gen_id, promise }`. Returns the Promise to the caller.
+- **`Opcode::Await` handler**: Saves generator state (locals, lexical slots, pc, this, env) to the Generator struct. Creates async bridge functions via `create_async_bridge` which reuse `promise_bridge_prog` (the same BytecodeProgram used by Promise resolve/reject bridges). Calls `Promise.resolve(value).then(continue_bridge, reject_bridge)` using the existing `promise_static_resolve` and `promise_prototype_then` builtins directly. Pushes the outer Promise on the stack and advances the caller's PC, effectively returning the Promise to the caller.
+- **Resume mechanism**: `PendingAsyncGen` struct on Vm, set by `async_continue`/`async_reject` builtins. The Return handler checks `pending_async_gen` and restores the generator's frame from saved state before the empty-frames exit.
+- **Return path**: When an async generator's Return handler fires, it resolves the outer Promise via `async_tasks` lookup, drains reactions, and pushes the resolved Promise as the return value.
+
+#### Files changed
+
+| File | Change |
+|---|---|
+| `crates/rune_bytecode/src/opcode.rs` | Added `Await` opcode variant, `BytecodeProgram.is_async` field |
+| `crates/rune_parser/src/ast.rs` | Added `Expr::Await(Box<Expr>, Span)` variant |
+| `crates/rune_parser/src/parser.rs` | `Async` token handling in parse_statement, parse_unary, parse_primary_inner; `parse_async_function_decl` method |
+| `crates/rune_parser/src/emitter.rs` | `is_async` field on Emitter; `Expr::Await → Opcode::Await`; `program.is_async` |
+| `crates/rune_interpreter/src/vm.rs` | `PendingAsyncGen`, `AsyncTask` structs; `async_tasks`, `pending_async_gen` fields; `find_builtin_handle`, `create_async_bridge` helpers; `is_async` branch in Call/CallFromArray; `pending_async_gen` check + async return in Return handler; `Opcode::Await` handler |
+| `crates/rune_interpreter/src/builtins.rs` | `async_continue`, `async_reject` builtins registered |
+| `crates/rune_interpreter/src/generator.rs` | Added `this: Value`, `env: *mut u8` fields to Generator |
+| `crates/rune_jit_baseline/src/codegen.rs` | Added `is_async: false` to test helper `make_prog` |
+
+### Test Results
+
+- **396 integration tests passing** (393 + 3 new async tests), 0 failed, 2 ignored
+- New tests: `test_async_basic`, `test_async_await_basic`, `test_async_await_chaining`
+- All crate tests: pass
+- Clippy: clean
+
+### Known Gaps
+
+1. ⬜ **`async_reject` is_throw path** — `PendingAsyncGen.is_throw` flag is reserved but the Throw-into-generator path is not yet implemented
+2. ⬜ **`.finally` result passthrough** — handler fires but always returns `undefined`
+3. ⬜ **Thenable unwrapping** — `Promise.resolve(otherPromise)` should adopt its state
+4. ⬜ **Pending promises in `Promise.all`/`race`** — settled-only for now
+5. ⬜ **RegExp** — parser + NFA/PikeVM, blocks String methods like `match`/`search`/`split(regex)`

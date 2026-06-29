@@ -63,6 +63,7 @@ impl Parser {
     fn parse_statement(&mut self) -> Stmt {
         match self.tok.kind {
             TokenKind::Function => self.parse_function_decl(),
+            TokenKind::Async if self.lexer.peek_token().kind == TokenKind::Function => self.parse_async_function_decl(),
             TokenKind::Var | TokenKind::Let | TokenKind::Const => self.parse_var_decl(),
             TokenKind::Return => self.parse_return(),
             TokenKind::Throw => self.parse_throw(),
@@ -123,6 +124,33 @@ impl Parser {
             None
         };
         let body = self.parse_function_body(name, is_generator, false, start);
+        Stmt::Function(
+            Box::new(body),
+            Span {
+                start: start.start,
+                end: self.span().end,
+            },
+        )
+    }
+
+    fn parse_async_function_decl(&mut self) -> Stmt {
+        let start = self.span();
+        self.expect(TokenKind::Async);
+        self.expect(TokenKind::Function);
+        let is_generator = if self.tok.kind == TokenKind::Star {
+            self.advance();
+            true
+        } else {
+            false
+        };
+        let name = if self.tok.kind == TokenKind::Identifier {
+            let t = self.tok.clone();
+            self.advance();
+            Some(t.value.into_boxed_str())
+        } else {
+            None
+        };
+        let body = self.parse_function_body(name, is_generator, true, start);
         Stmt::Function(
             Box::new(body),
             Span {
@@ -903,6 +931,17 @@ impl Parser {
                     },
                 )
             }
+            TokenKind::Await => {
+                self.advance();
+                let arg = self.parse_unary();
+                Expr::Await(
+                    Box::new(arg),
+                    Span {
+                        start: start.start,
+                        end: self.span().end,
+                    },
+                )
+            }
             _ => self.parse_primary(),
         }
     }
@@ -1398,6 +1437,29 @@ impl Parser {
                     None
                 };
                 let body = self.parse_function_body(name.clone(), is_generator, false, start);
+                let span = Span {
+                    start: start.start,
+                    end: self.span().end,
+                };
+                Expr::Function(Box::new(body), span)
+            }
+            TokenKind::Async if self.lexer.peek_token().kind == TokenKind::Function => {
+                self.advance();
+                self.expect(TokenKind::Function);
+                let is_generator = if self.tok.kind == TokenKind::Star {
+                    self.advance();
+                    true
+                } else {
+                    false
+                };
+                let name = if self.tok.kind == TokenKind::Identifier {
+                    let t = self.tok.clone();
+                    self.advance();
+                    Some(t.value.into_boxed_str())
+                } else {
+                    None
+                };
+                let body = self.parse_function_body(name.clone(), is_generator, true, start);
                 let span = Span {
                     start: start.start,
                     end: self.span().end,

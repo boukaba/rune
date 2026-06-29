@@ -2585,6 +2585,24 @@ pub fn promise_static_reject(gc: &mut SemiSpace, _this: Value, args: &[Value], v
     Value::from_heap_ptr(ptr)
 }
 
+/// Async generator continuation: resumes an async generator with a resolved value.
+/// Called via bridge function: async_continue(this=gen_id_smi, args=[value])
+pub fn async_continue(_gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let gen_id = this.as_smi().unwrap_or(0) as usize;
+    let value = args.first().copied().unwrap_or(Value::undefined());
+    vm.pending_async_gen = Some(crate::vm::PendingAsyncGen { gen_id, arg: value, is_throw: false });
+    Value::undefined()
+}
+
+/// Async generator rejection: resumes an async generator with a thrown error.
+/// Called via bridge function: async_reject(this=gen_id_smi, args=[reason])
+pub fn async_reject(_gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let gen_id = this.as_smi().unwrap_or(0) as usize;
+    let reason = args.first().copied().unwrap_or(Value::undefined());
+    vm.pending_async_gen = Some(crate::vm::PendingAsyncGen { gen_id, arg: reason, is_throw: true });
+    Value::undefined()
+}
+
 /// Promise.all(iterable) — returns a promise that fulfills when all items fulfill,
 /// or rejects on the first rejection.
 pub fn promise_static_all(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
@@ -2708,6 +2726,8 @@ pub fn default_builtins() -> Vec<Builtin> {
         Builtin { length: 1, name: "Promise_reject", func: promise_static_reject },
         Builtin { length: 1, name: "Promise_all", func: promise_static_all },
         Builtin { length: 1, name: "Promise_race", func: promise_static_race },
+        Builtin { length: 1, name: "async_continue", func: async_continue },
+        Builtin { length: 1, name: "async_reject", func: async_reject },
         Builtin {
             length: 1,
             name: "Object",

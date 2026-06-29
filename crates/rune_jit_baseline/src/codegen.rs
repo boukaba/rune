@@ -1292,6 +1292,7 @@ mod tests {
             functions: vec![],
             named_function: false,
             is_generator: false,
+            is_async: false,
             local_names: vec![],
             captured_env_size: 0,
         }

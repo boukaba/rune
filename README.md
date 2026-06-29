@@ -79,7 +79,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 
 ## What Doesn't Work (Yet)
 
-- **Standard library:** No Map, Set, RegExp, Date, TypedArray, WeakRef. Promise: constructor + .then/.catch + chaining working (microtask queue deferred).
+- **Standard library:** No Map, Set, RegExp, Date, TypedArray, WeakRef. Promise: full async support with microtask queue.
 - **String methods:** No `charCodeAt`, `indexOf`, `replace`, `trim`, `toUpperCase`, `toLowerCase`
 - **Array methods:** `find`, `some`, `every`, `sort`, `flat`, `flatMap`, `includes`, `indexOf`, `push`, `pop`
 - **Modules:** No import/export (ESM)
@@ -185,7 +185,7 @@ This makes Rune uniquely suited for serverless: functions can be compiled once d
 | **v0.2.0** ✅ | Phase F inlining (5% gain), N=16 IC table, AFPC round-trip with JIT |
 | **v0.3.0** ✅ | Float self-tagging (NaN-boxing), stdlib (JSON round-trip, array methods, string split, parseInt/parseFloat), boolean coercion fix — 387 tests |
 | **v0.4.0** ✅ | 14 builtins: Object.keys/values/entries, Array find/some/every/sort/flat/flatMap/includes, String replace/replaceAll, Number(), Function.prototype.call. 393 tests. |
-| **v0.5.0** 🚧 | Promise constructor + `.then`/`.catch` + chaining + `Promise.resolve`/`reject`/`all`/`race`. Bridge functions, pending-callback state machine, 4-bit GC tag mask. 393 tests. |
+| **v0.5.0** 🚧 | Promise: constructor, `.then`/`.catch` chaining, `resolve`/`reject`/`all`/`race`, `.finally`, **microtask queue** with reaction storage. Parser reserved-word fix. test262 Promise 46%. 393 tests. |
 | **Sprint 18** ✅ | Non-TAG_ARRAY refactor, Function.prototype.call, P27 test262 harness (assert tracking + human-readable errors), P29 builtin throws catchable by try/catch, string same-value fix, boolean display fix, string_slice float edge cases, reduce mutation fix — 392 tests |
 | **v1.0.0** | Test262 >95%, production hardening, fuzzing |
 

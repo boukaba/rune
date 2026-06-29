@@ -2547,28 +2547,31 @@ Two tracks, depends on target market:
 
 ### Phase 1: Promise Core ✅
 
-**Status: DONE** — constructor, resolve/reject, `.then`/`.catch` working.
+**Status: DONE** — constructor, resolve/reject, `.then`/`.catch`, chaining, microtask queue.
 
 #### Architecture
-- **TAG_PROMISE = 8** — new heap type with 4-bit GC tag mask (was 3-bit, expanded to accommodate). Layout: `[GcHeader | state: u32 | result: Value | prototype: *mut u8]`, 32 bytes.
-- **PendingPromiseCtor** — pending-callback state machine on Vm, stores promise + resolve/reject handles. Set by `promise_constructor`, consumed by Return handler after executor/callback returns.
-- **Bridge functions** — resolve/reject are TAG_FUNC closures (EnvObject + Func) pointing to a BytecodeProgram that reads captured env slots and calls the builtin with `this=promise`.
-- **resolve_with_result** flag — `.then` callbacks set this; Return handler resolves the chained promise with the callback's return value before pushing it.
-- **GC forwarding fix** — `PendingPromiseCtor.take()` was consuming state even when frame depth didn't match (e.g., bridge function's Return triggered check at wrong depth). Fixed with `is_some()` + `as_ref()` check before `take()`.
+- **TAG_PROMISE = 8** — 4-bit GC tag mask, 40-byte layout: `[GcHeader | state:u32 | pad:u32 | result:Value | prototype:*mut u8 | reactions:*mut u8]`
+- **PendingPromiseCtor** — pending-callback state machine on Vm
+- **Bridge functions** — resolve/reject are TAG_FUNC closures (EnvObject + Func) calling builtins with `this=promise`
+- **Microtask queue** — `Microtask` struct with `promise_ctor: Option<PendingPromiseCtor>`, drained at end of `execute()` via `drain_microtask_queue()`
+- **Reaction storage** — per-promise TAG_ARRAY at offset 32, stores `[callback, chained_promise]` pairs, triggered on settlement by resolve/reject/PPCR
+- **GC forwarding fix** — raw proto pointer resolved after `RuneArray::allocate` inside `Promise::allocate`
 
 #### Commits
 | Commit | Description |
 |---|---|
-| `fcaf9e4` | Promise constructor + resolve/reject bridge functions + `.then`/`.catch` + TAG_PROMISE in load_property_recursive |
-| `6a3448e` | Fix unsafe blocks in promise.rs |
-| `06e42ca` | Allow dead_code on PendingPromiseCtor fields |
+| `0caf9a4` | Promise.resolve / Promise.reject |
+| `d464d54` | Promise.all / Promise.race |
+| `1f3b1d2` | Parser: reserved words as property names after dot |
+| `959ff89` | Promise.prototype.finally |
+| `2f3150a` | **Microtask queue + reaction storage** (array-based, GC-safe) |
+| `028ba61` | Clippy fix |
 
 #### Known Gaps (ordered by priority)
-1. ⬜ **Microtask queue** — callbacks are synchronous per-task
-2. ⬜ **Thenable unwrapping** — `resolve(otherPromise)` should adopt its state
-3. ⬜ **`.finally` result passthrough** — handler fires but always returns `undefined`
-4. ⬜ **`async`/`await`** — parser desugaring + generator reuse
-5. ⬜ **Pending promises in `Promise.all`/`race`** — settled-only for now
+1. ⬜ **Thenable unwrapping** — `resolve(otherPromise)` should adopt its state
+2. ⬜ **`.finally` result passthrough** — handler fires but always returns `undefined`
+3. ⬜ **`async`/`await`** — parser desugaring + generator reuse (microtask queue now available)
+4. ⬜ **Pending promises in `Promise.all`/`race`** — settled-only for now
 
 #### test262 (v0.5 baseline)
 | Suite | Pass | Fail | Total | % |

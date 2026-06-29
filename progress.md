@@ -2566,6 +2566,16 @@ Two tracks, depends on target market:
 #### Known Gaps (ordered by priority)
 1. ⬜ **Microtask queue** — callbacks are synchronous per-task
 2. ⬜ **Thenable unwrapping** — `resolve(otherPromise)` should adopt its state
-3. ⬜ **`async`/`await`** — parser desugaring + generator reuse
-4. ⬜ **Parser `catch` reserved word** — `.catch(handler)` fails to parse; bracket notation works
+3. ⬜ **`.finally` result passthrough** — handler fires but always returns `undefined`
+4. ⬜ **`async`/`await`** — parser desugaring + generator reuse
 5. ⬜ **Pending promises in `Promise.all`/`race`** — settled-only for now
+
+#### test262 (v0.5 baseline)
+| Suite | Pass | Fail | Total | % |
+|---|---|---|---|---|
+| Promise.prototype | 58 | 64 | 124 | 46.8% |
+| Promise.resolve | 12 | 18 | 30 | 40.0% |
+| Promise.reject | 3 | 12 | 15 | 20.0% |
+| Promise.all | 47 | 51 | 98 | 48.0% |
+| Promise.race | 46 | 48 | 94 | 48.9% |
+| **Total** | **166** | **193** | **361** | **46.0%** |

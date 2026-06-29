@@ -5656,3 +5656,28 @@ fn test_class_super_prop_read_data() {
          new Child().read();"
     ), 99);
 }
+
+#[test]
+fn test_class_super_prop_assign() {
+    let mut ctx = Context::new_small();
+    // super.prop = val should write to this (child instance)
+    assert_eq!(class_eval_num(&mut ctx,
+        "class Parent { getX() { return 10; } }
+         class Child extends Parent { constructor() { super(); }
+           method() { super.x = 42; return this.x; } }
+         new Child().method();"
+    ), 42);
+}
+
+#[test]
+fn test_class_super_prop_assign_overrides_parent() {
+    let mut ctx = Context::new_small();
+    // super.prop = val on a parent property should shadow it on the child
+    assert_eq!(class_eval_num(&mut ctx,
+        "class Parent { constructor() { this.val = 1; } }
+         class Child extends Parent { constructor() { super(); }
+           method() { super.val = 99; return this.val; } }
+         var c = new Child();
+         c.method();"
+    ), 99);
+}

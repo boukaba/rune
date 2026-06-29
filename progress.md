@@ -3052,11 +3052,31 @@ Added `ClassNode` (name, methods, span), `ClassMethod` (key, func, is_static, sp
 | `test_instanceof_class_constructor` | Class instances instanceof their class |
 | `test_instanceof_extends_class` | Extended class instanceof parent class |
 
+---
+
+## Sprint 29 — `super.prop = val` Assignment
+
+> **2026-06-29**: `super.prop = val` inside methods/constructors writes to `this` (child instance). 2 new tests. 458/458 tests pass.
+
+### Implementation
+
+#### Emitter (`crates/rune_parser/src/emitter.rs`)
+- `Expr::Assign` handler for `Expr::Member(Expr::Super, ...)` target: emits `LoadThis` (instead of `emit_expression(obj)`), followed by property key, value, and `StoreProperty`
+- Semantics: `super.prop = val` is equivalent to `this.prop = val` — the assignment lands on the child instance (receiver = `this` in [[Set]])
+
+#### Integration Tests
+2 new tests:
+
+| Test | What it validates |
+|---|---|
+| `test_class_super_prop_assign` | `super.x = 42` writes to `this.x` on child instance |
+| `test_class_super_prop_assign_overrides_parent` | `super.val = 99` shadows parent's `this.val` |
+
 ### Known Gaps
+- Compound assignment (`super.prop += val`) not implemented for Expr::Super target
 - StringObject/TAG_STRING_OBJ and other wrapper types not handled in `ordinary_has_instance` prototype chain walk (only TAG_OBJECT and TAG_ARRAY)
 - `__proto__` read in `load_property_recursive` returns the internal [[Prototype]] only for TAG_OBJECT; TAG_ARRAY and other types not handled
 - JIT bailout on `SetSuperclass`/`LoadSuperclass` (catch-all `_ => return false`)
 
 ### Next Steps
-1. `super.prop = val` assignment pattern
-2. `static` methods
+1. `static` methods

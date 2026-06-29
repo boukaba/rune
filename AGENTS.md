@@ -54,8 +54,8 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - **`class` `super.prop` member access** — `super.method()` and `super.prop` resolve via `this.__proto__.__proto__` chain. `__proto__` read in `load_property_recursive` returns internal [[Prototype]] for TAG_OBJECT. 8 new tests. 448/448 tests pass.
 - **Default derived constructor** — `class Child extends Parent { }` synthesizes `constructor(...args) { super(...args); }`. Fixed spread-Call `Expr::Super` handler bug (args were not being pushed). 3 new tests. 451/451 tests pass.
 - **`instanceof` fix** — `instanceof` now works with builtin constructors (`Array`, `Promise`, `RegExp`) and class constructors. TAG_OBJECT builtin wrappers with `"prototype"` property are supported via shape lookup. 4 new tests. 456/456 tests pass.
-- **Known gaps**: `async_reject` is_throw path not yet wired to generator throw, `.finally` pending case falls back to old .then behavior, RegExp: no match/search/split, `replaceAll` function replacement not yet implemented, class: no `static` methods, no `super.prop = val` assignment, `this.prop++` not supported (Update only handles Identifier targets).
+- **`super.prop = val` assignment** — `super.prop = val` writes to `this` (child instance). `LoadThis` as receiver instead of obj on `Expr::Member(Expr::Super)` target. 2 new tests. 458/458 tests pass.
+- **Known gaps**: `async_reject` is_throw path not yet wired to generator throw, `.finally` pending case falls back to old .then behavior, RegExp: no match/search/split, `replaceAll` function replacement not yet implemented, class: no `static` methods, `this.prop++` not supported (Update only handles Identifier targets).
 
 ### Next Steps — v0.5 (ordered by leverage)
-1. `super.prop = val` assignment
-2. `static` methods
+1. `static` methods

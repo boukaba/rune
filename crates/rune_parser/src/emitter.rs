@@ -1539,7 +1539,16 @@ impl Emitter {
                     }
                 }
                 Expr::Member(obj, prop, computed, _) => {
-                    self.emit_expression(obj);
+                    match obj.as_ref() {
+                        Expr::Super(_) => {
+                            // super.prop = val → this.prop = val
+                            // ([[Set]] receiver is this, assignment lands on child instance)
+                            self.emit(Opcode::LoadThis, vec![]);
+                        }
+                        _ => {
+                            self.emit_expression(obj);
+                        }
+                    }
                     if *computed {
                         self.emit_expression(prop);
                     } else {

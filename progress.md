@@ -3027,12 +3027,36 @@ Added `ClassNode` (name, methods, span), `ClassMethod` (key, func, is_static, sp
 - **Rest param approach**: using `...args` as the sole parameter of the synthesized constructor captures all arguments in an array, then `super(...args)` spreads them to the parent
 - **Leverages existing spread-Call machinery**: `CallFromArray` + `ArrayExtend` already handle spread arguments correctly; the only gap was that the `Expr::Super` spread branch was missing the arg-pushing loop
 
+---
+
+## Sprint 28 — `instanceof` with Builtin Constructors
+
+> **2026-06-29**: `instanceof` now works with builtin constructors (`Array`, `Promise`, `RegExp`) and class constructors via `extends`. 9 tests. 456/456 tests pass.
+
+### Implementation
+
+#### VM (`crates/rune_interpreter/src/vm.rs`)
+- `Opcode::Instanceof` handler: extended to handle TAG_OBJECT RHS (builtin constructor wrappers like `Array`, `String`, `Promise`, `RegExp`)
+- Previously only checked `rhs_tag == TAG_FUNC` — builtin wrappers are TAG_OBJECT with a `"prototype"` property
+- For TAG_OBJECT RHS, lookup `PROTOTYPE_KEY` (`"prototype"`) via shape slots, extract heap pointer, use in `ordinary_has_instance`
+- TAG_FUNC path unchanged (user-defined functions and class constructors)
+- All other tag types still produce `"TypeError: RHS of 'instanceof' is not callable"`
+
+#### Integration Tests
+9 tests — 4 new:
+
+| Test | What it validates |
+|---|---|
+| `test_instanceof_array` | `[] instanceof Array` → true |
+| `test_instanceof_array_false` | `({}) instanceof Array` → false |
+| `test_instanceof_class_constructor` | Class instances instanceof their class |
+| `test_instanceof_extends_class` | Extended class instanceof parent class |
+
 ### Known Gaps
-- `instanceof` with class constructors fails when RHS is a builtin (Smi handle) — pre-existing
+- StringObject/TAG_STRING_OBJ and other wrapper types not handled in `ordinary_has_instance` prototype chain walk (only TAG_OBJECT and TAG_ARRAY)
 - `__proto__` read in `load_property_recursive` returns the internal [[Prototype]] only for TAG_OBJECT; TAG_ARRAY and other types not handled
 - JIT bailout on `SetSuperclass`/`LoadSuperclass` (catch-all `_ => return false`)
 
 ### Next Steps
-1. `instanceof` fix — handle non-heap RHS (negative Smi builtins)
-2. `super.prop = val` assignment pattern
-3. `static` methods
+1. `super.prop = val` assignment pattern
+2. `static` methods

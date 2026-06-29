@@ -2287,6 +2287,48 @@ mod instanceof_tests {
     use rune_embed::Context;
 
     #[test]
+    fn test_instanceof_array() {
+        let mut ctx = Context::new_small();
+        assert_eq!(ctx.eval("[] instanceof Array").unwrap().to_boolean(), Some(true));
+    }
+
+    #[test]
+    fn test_instanceof_extends_class() {
+        let mut ctx = Context::new_small();
+        assert_eq!(ctx.eval(
+            "class Parent {}
+             class Child extends Parent {}
+             new Child() instanceof Parent;"
+        ).unwrap().to_boolean(), Some(true));
+    }
+
+    #[test]
+    fn test_instanceof_extends_class_false() {
+        let mut ctx = Context::new_small();
+        assert_eq!(ctx.eval(
+            "class Parent {}
+             class Child extends Parent {}
+             new Child() instanceof Child;"
+        ).unwrap().to_boolean(), Some(true));
+    }
+
+    #[test]
+    fn test_instanceof_array_false() {
+        let mut ctx = Context::new_small();
+        assert_eq!(ctx.eval("({}) instanceof Array").unwrap().to_boolean(), Some(false));
+    }
+
+    #[test]
+    fn test_instanceof_class_constructor() {
+        let mut ctx = Context::new_small();
+        assert_eq!(ctx.eval(
+            "class Foo {}
+             var f = new Foo();
+             f instanceof Foo;"
+        ).unwrap().to_boolean(), Some(true));
+    }
+
+    #[test]
     fn test_instanceof_instance() {
         let mut ctx = Context::new_small();
         let r = ctx

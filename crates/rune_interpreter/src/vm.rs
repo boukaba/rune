@@ -1945,17 +1945,28 @@ impl Vm {
                     }
                     let rhs_ptr = rhs.heap_ptr().unwrap();
                     let rhs_tag = unsafe { (*(rhs_ptr as *const GcHeader)).tag() };
-                    // §13.10.1: If IsCallable(rhs) is false → TypeError
-                    if rhs_tag != TAG_FUNC {
+                    // §13.10.2 OrdinaryHasInstance: get rhs.prototype
+                    let rhs_proto_ptr: *mut u8 = if rhs_tag == TAG_FUNC {
+                        unsafe { Func::prototype(rhs_ptr as *mut Func) }
+                    } else if rhs_tag == TAG_OBJECT {
+                        // Builtin constructor wrappers (Array, String, Promise, etc.)
+                        // are stored as TAG_OBJECT with a "prototype" property
+                        let shape = unsafe { JSObject::shape_ptr(rhs_ptr as *mut JSObject) };
+                        if let Some(slot) = shape.lookup(&PROTOTYPE_KEY) {
+                            let proto_val =
+                                unsafe { JSObject::get_slot(rhs_ptr as *mut JSObject, slot) };
+                            proto_val.heap_ptr().unwrap_or(std::ptr::null_mut())
+                        } else {
+                            std::ptr::null_mut()
+                        }
+                    } else {
                         let msg = HeapString::allocate(
                             gc,
                             "TypeError: RHS of 'instanceof' is not callable",
                         );
                         self.push(Value::from_heap_ptr(msg as *mut u8));
                         return Exit::Throw(self.pop());
-                    }
-                    // OrdinaryHasInstance §13.10.2
-                    let rhs_proto_ptr = unsafe { Func::prototype(rhs_ptr as *mut Func) };
+                    };
                     if rhs_proto_ptr.is_null() {
                         let msg = HeapString::allocate(
                             gc,

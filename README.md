@@ -84,7 +84,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 - **String methods:** No `charCodeAt`, `replace`, `trim`, `toUpperCase`, `toLowerCase`
 - **Array methods:** `find`, `some`, `every`, `sort`, `flat`, `flatMap`, `includes`, `push`, `pop`
 - **Modules:** No import/export (ESM)
-- **Classes:** No class syntax, super, getters/setters
+- **Classes:** Class declarations, expressions, constructor, prototype methods (no `extends`/`static` yet)
 - **Async/await:** `async function`, `async () =>`, `await expr` — full support with generator-based desugaring, synchronous until first await. 396 tests.
 - **JIT:** 57 opcodes whitelisted (out of 93 total opcode variants). Float Self-Tagging (NaN-boxing) eliminates all float heap allocation — all interpreter float paths use inline `Value::from_float64`. JIT only has float64 Add promotion; Sub/Mul/Div/Mod/Exp bail to interpreter (which handles them via NaN-boxed Values). Phase F inlining shipped (5% on `jit_hot_function_1M`).
 - **Debugger:** No CDP/DevTools

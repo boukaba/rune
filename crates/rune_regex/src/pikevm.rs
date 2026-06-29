@@ -38,7 +38,8 @@ impl PikeVm {
 
             let mut longest_match: Option<Match> = None;
 
-            for p in pos..chars.len() {
+            for (i, &c) in chars[pos..].iter().enumerate() {
+                let p = pos + i;
                 if clist.is_empty() {
                     break;
                 }
@@ -61,7 +62,6 @@ impl PikeVm {
                 }
 
                 // Advance threads with current character
-                let c = chars[p];
                 let mut nlist: Vec<Thread> = Vec::new();
                 for t in &expanded {
                     for edge in &nfa.states[t.pc].edges {

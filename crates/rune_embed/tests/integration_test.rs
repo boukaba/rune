@@ -5326,3 +5326,65 @@ fn test_regexp_test_false() {
     let mut ctx = Context::new_small();
     assert_eq!(ctx.eval(r#"/xyz/.test("hello world")"#).unwrap().to_boolean(), Some(false));
 }
+
+// ---- Class Syntax Tests ----
+
+fn class_eval_num(ctx: &mut Context, code: &str) -> i32 {
+    ctx.eval(code).unwrap().as_smi().unwrap()
+}
+
+#[test]
+fn test_class_basic() {
+    let mut ctx = Context::new_small();
+    assert_eq!(class_eval_num(&mut ctx,
+        "class Foo { constructor(x) { this.x = x; } getX() { return this.x; } } var f = new Foo(42); f.getX();"
+    ), 42);
+}
+
+#[test]
+fn test_class_no_constructor() {
+    let mut ctx = Context::new_small();
+    assert_eq!(class_eval_num(&mut ctx,
+        "class Foo { method() { return 1; } } var f = new Foo(); f.method();"
+    ), 1);
+}
+
+#[test]
+fn test_class_multiple_methods() {
+    let mut ctx = Context::new_small();
+    assert_eq!(class_eval_num(&mut ctx,
+        "class Calc { constructor(x) { this.val = x; } add(n) { this.val = this.val + n; return this; } get() { return this.val; } } var c = new Calc(10); c.add(5).add(3); c.get();"
+    ), 18);
+}
+
+#[test]
+fn test_class_expression() {
+    let mut ctx = Context::new_small();
+    assert_eq!(class_eval_num(&mut ctx,
+        "var Foo = class { constructor(x) { this.x = x; } getX() { return this.x; } }; var f = new Foo(99); f.getX();"
+    ), 99);
+}
+
+#[test]
+fn test_class_expression_anonymous_direct() {
+    let mut ctx = Context::new_small();
+    assert_eq!(class_eval_num(&mut ctx,
+        "var result = new (class { constructor(v) { this.val = v; } getVal() { return this.val; } })(7).getVal(); result;"
+    ), 7);
+}
+
+#[test]
+fn test_class_default_constructor() {
+    let mut ctx = Context::new_small();
+    assert_eq!(class_eval_num(&mut ctx,
+        "class Foo { getVal() { return 42; } } new Foo().getVal();"
+    ), 42);
+}
+
+#[test]
+fn test_class_method_this_context() {
+    let mut ctx = Context::new_small();
+    assert_eq!(class_eval_num(&mut ctx,
+        "class Foo { constructor() { this.val = 1; } inc() { this.val = this.val + 1; return this; } get() { return this.val; } } var a = new Foo(); var b = new Foo(); a.inc(); a.get();"
+    ), 2);
+}

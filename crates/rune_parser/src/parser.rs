@@ -21,15 +21,14 @@ impl Parser {
     fn advance(&mut self) {
         // Update regex_allowed based on current token kind
         // After value-producing tokens, / is division; after operators/keywords, / is regex.
-        self.lexer.regex_allowed = match self.tok.kind {
+        self.lexer.regex_allowed = !matches!(self.tok.kind,
             TokenKind::Number | TokenKind::String | TokenKind::RegExp
             | TokenKind::Identifier
             | TokenKind::True | TokenKind::False | TokenKind::Null | TokenKind::This
             | TokenKind::RParen | TokenKind::RBracket
             | TokenKind::PlusPlus | TokenKind::MinusMinus
-            | TokenKind::Template | TokenKind::TemplateTail => false,
-            _ => true,
-        };
+            | TokenKind::Template | TokenKind::TemplateTail
+        );
         self.tok = self.lexer.next_token();
     }
 
@@ -75,6 +74,7 @@ impl Parser {
         match self.tok.kind {
             TokenKind::Function => self.parse_function_decl(),
             TokenKind::Async if self.lexer.peek_token().kind == TokenKind::Function => self.parse_async_function_decl(),
+            TokenKind::Class => self.parse_class_decl(),
             TokenKind::Var | TokenKind::Let | TokenKind::Const => self.parse_var_decl(),
             TokenKind::Return => self.parse_return(),
             TokenKind::Throw => self.parse_throw(),
@@ -169,6 +169,128 @@ impl Parser {
                 end: self.span().end,
             },
         )
+    }
+
+    fn parse_class_decl(&mut self) -> Stmt {
+        let start = self.span();
+        self.expect(TokenKind::Class);
+        let name = if self.tok.kind == TokenKind::Identifier {
+            let t = self.tok.clone();
+            self.advance();
+            Some(t.value.into_boxed_str())
+        } else {
+            None
+        };
+        let heritage = if self.tok.kind == TokenKind::Extends {
+            self.advance();
+            Some(Box::new(self.parse_expr(0)))
+        } else {
+            None
+        };
+        let methods = self.parse_class_body();
+        Stmt::Class(
+            Box::new(ClassNode {
+                name: name.clone(),
+                heritage,
+                methods,
+                span: Span {
+                    start: start.start,
+                    end: self.span().end,
+                },
+            }),
+            Span {
+                start: start.start,
+                end: self.span().end,
+            },
+        )
+    }
+
+    fn parse_class_expr(&mut self, name_hint: Option<Box<str>>) -> Expr {
+        let start = self.span();
+        self.expect(TokenKind::Class);
+        let name = if self.tok.kind == TokenKind::Identifier {
+            let t = self.tok.clone();
+            self.advance();
+            Some(t.value.into_boxed_str())
+        } else {
+            name_hint
+        };
+        let heritage = if self.tok.kind == TokenKind::Extends {
+            self.advance();
+            Some(Box::new(self.parse_expr(0)))
+        } else {
+            None
+        };
+        let methods = self.parse_class_body();
+        Expr::Class(
+            Box::new(ClassNode {
+                name,
+                heritage,
+                methods,
+                span: Span {
+                    start: start.start,
+                    end: self.span().end,
+                },
+            }),
+            Span {
+                start: start.start,
+                end: self.span().end,
+            },
+        )
+    }
+
+    fn parse_class_body(&mut self) -> Vec<ClassMethod> {
+        self.expect(TokenKind::LBrace);
+        let mut methods = Vec::new();
+        while self.tok.kind != TokenKind::RBrace && self.tok.kind != TokenKind::Eof {
+            let mstart = self.span();
+            let is_static = if self.tok.kind == TokenKind::Identifier
+                && self.tok.value == "static"
+                && self.lexer.peek_token().kind != TokenKind::LParen
+            {
+                self.advance();
+                true
+            } else {
+                false
+            };
+            let key = if self.tok.kind == TokenKind::LBracket {
+                // Computed property key: [expr]() {}
+                self.advance();
+                let key_expr = self.parse_expr(0);
+                self.expect(TokenKind::RBracket);
+                PropKey::Computed(Box::new(key_expr))
+            } else {
+                self.parse_prop_key()
+            };
+            // Method definition: key(params) { body }
+            if self.tok.kind == TokenKind::LParen {
+                let name = match &key {
+                    PropKey::Identifier(n) => Some(n.clone()),
+                    PropKey::String(n) => Some(n.clone()),
+                    PropKey::Number(n) => Some(Box::from(n.to_string())),
+                    _ => None,
+                };
+                let func = self.parse_function_body(name, false, false, mstart);
+                methods.push(ClassMethod {
+                    key,
+                    func,
+                    is_static,
+                    span: Span {
+                        start: mstart.start,
+                        end: self.span().end,
+                    },
+                });
+            } else {
+                self.error("Expected method definition".to_string());
+                self.advance();
+            }
+            // Semicolons are optional between class members
+            if self.tok.kind == TokenKind::Semicolon {
+                self.advance();
+            }
+        }
+        self.expect(TokenKind::RBrace);
+        methods
     }
 
     fn parse_function_body(
@@ -1454,6 +1576,7 @@ impl Parser {
                 };
                 Expr::Function(Box::new(body), span)
             }
+            TokenKind::Class => self.parse_class_expr(None),
             TokenKind::Async if self.lexer.peek_token().kind == TokenKind::Function => {
                 self.advance();
                 self.expect(TokenKind::Function);

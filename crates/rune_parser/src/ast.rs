@@ -43,6 +43,7 @@ pub enum Expr {
     Yield(Option<Box<Expr>>, Span),
     Await(Box<Expr>, Span),
     RegExp(Box<str>, Box<str>, Span), // pattern, flags, span
+    Class(Box<ClassNode>, Span),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -131,6 +132,22 @@ pub struct FnNode {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct ClassNode {
+    pub name: Option<Box<str>>,
+    pub heritage: Option<Box<Expr>>,
+    pub methods: Vec<ClassMethod>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClassMethod {
+    pub key: PropKey,
+    pub func: FnNode,
+    pub is_static: bool,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Stmt {
     Expr(Expr, Span),
     Block(Vec<Stmt>, Span),
@@ -154,6 +171,7 @@ pub enum Stmt {
     Switch(Box<Expr>, Vec<SwitchCase>, Option<Box<[Stmt]>>, Span),
     Function(Box<FnNode>, Span),
     Empty(Span),
+    Class(Box<ClassNode>, Span),
 }
 
 #[derive(Clone, Debug, PartialEq)]

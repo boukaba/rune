@@ -236,6 +236,107 @@ impl Emitter {
         idx
     }
 
+    /// Emit bytecode for a class node.
+    /// `for_expr`: true for class expressions (leaves constructor on stack), false for declarations (statement, no stack value).
+    fn emit_class(&mut self, class: &ClassNode, for_expr: bool) {
+        // 1. Compile all methods, identify constructor
+        let mut constructor_idx = None;
+        let mut method_funcs: Vec<(PropKey, usize)> = Vec::new();
+
+        for method in &class.methods {
+            let is_constructor = matches!(&method.key, PropKey::Identifier(n) if n.as_ref() == "constructor");
+            let func_name = if is_constructor {
+                class.name.clone()
+            } else {
+                match &method.key {
+                    PropKey::Identifier(n) => Some(n.clone()),
+                    PropKey::String(n) => Some(n.clone()),
+                    PropKey::Number(n) => Some(Box::from(n.to_string())),
+                    PropKey::Computed(_) => None,
+                }
+            };
+
+            let mut func = method.func.clone();
+            func.name = func_name;
+            let idx = self.compile_function(&func);
+            if is_constructor {
+                constructor_idx = Some(idx);
+            } else if !method.is_static {
+                method_funcs.push((method.key.clone(), idx));
+            }
+        }
+
+        let proto_key_idx = self.intern_string("prototype") as i64;
+
+        // 2. Create empty prototype object
+        self.emit(Opcode::NewObject, vec![0]);
+
+        // 3. Add non-constructor, non-static methods to prototype
+        for (key, func_idx) in &method_funcs {
+            self.emit(Opcode::MakeFunction, vec![*func_idx as i64]);
+            let key_str = match key {
+                PropKey::String(s) => s.to_string(),
+                PropKey::Identifier(s) => s.to_string(),
+                PropKey::Number(n) => n.to_string(),
+                PropKey::Computed(_) => continue,
+            };
+            let key_idx = self.intern_string(&key_str) as i64;
+            self.emit(Opcode::DefineProperty, vec![key_idx]);
+        }
+
+        // 4. Create constructor function
+        let ctor_idx = constructor_idx.unwrap_or_else(|| {
+            let synth = FnNode {
+                name: class.name.clone(),
+                params: vec![],
+                rest_param: None,
+                body: Stmt::Block(vec![], Span { start: 0, end: 0 }),
+                is_generator: false,
+                is_async: false,
+                is_arrow: false,
+                span: Span { start: 0, end: 0 },
+            };
+            self.compile_function(&synth)
+        });
+        self.emit(Opcode::MakeFunction, vec![ctor_idx as i64]);
+
+        // 5. Save constructor to a local slot so it can be restored after
+        //    StoreProperty (which consumes it as the obj argument and pushes
+        //    the value back instead). Named classes use the class-name local.
+        //    Anonymous class expressions use a temp local slot.
+        let save_slot: Option<usize> = if let Some(ref name) = class.name {
+            if !self.locals.contains(&name.to_string()) {
+                self.locals.push(name.to_string());
+            }
+            self.local_index(name)
+        } else if for_expr {
+            let temp = format!("__cc_{}", self.locals.len());
+            self.locals.push(temp);
+            self.local_index(&self.locals[self.locals.len() - 1])
+        } else {
+            // anonymous declaration (spec-invalid but handled)
+            None
+        };
+        if let Some(idx) = save_slot {
+            self.emit(Opcode::StoreLocal, vec![idx as i64]);
+        }
+
+        // 6. Link: Constructor.prototype = Proto
+        //    Stack: [..., proto, ctor]
+        //    StoreProperty pops: obj=ctor, key="prototype", value=proto
+        //    and pushes value (proto) back.
+        self.emit(Opcode::Swap, vec![]);
+        self.emit(Opcode::LoadStringConst, vec![proto_key_idx]);
+        self.emit(Opcode::Swap, vec![]);
+        self.emit(Opcode::StoreProperty, vec![]);
+        self.emit(Opcode::Pop, vec![]);
+
+        // 7. For expressions: restore constructor onto stack from the saved slot.
+        if for_expr && let Some(idx) = save_slot {
+            self.emit(Opcode::LoadLocal, vec![idx as i64]);
+        }
+    }
+
     /// Emit bytecode for destructuring a value according to the pattern.
     fn emit_destructuring(&mut self, pattern: &Pattern, kind: &VarKind) {
         // §14.5.1 step 4: throw TypeError if value is null or undefined
@@ -707,6 +808,9 @@ impl Emitter {
                     }
                     self.emit(Opcode::Pop, vec![]);
                 }
+            }
+            Stmt::Class(class, _) => {
+                self.emit_class(class, false);
             }
             Stmt::Try(body, catch_opt, finalizer_opt, _) => {
                 let try_idx = self.current();
@@ -1439,6 +1543,9 @@ impl Emitter {
                 self.regex_pool.push((pattern.to_string(), flags.to_string()));
                 self.emit(Opcode::LoadRegExp, vec![idx as i64]);
             }
+            Expr::Class(class, _) => {
+                self.emit_class(class, true);
+            }
         }
     }
 
@@ -1658,6 +1765,7 @@ fn contains_inner_function_stmt(stmt: &Stmt) -> bool {
                     .is_some_and(|stmts| stmts.iter().any(contains_inner_function_stmt))
         }
         Stmt::Function(_, _) => true,
+        Stmt::Class(_, _) => true,
         Stmt::Break(_, _) | Stmt::Continue(_, _) | Stmt::Return(None, _) | Stmt::Empty(_) => false,
     }
 }
@@ -1706,6 +1814,7 @@ fn contains_inner_function_expr(expr: &Expr) -> bool {
         | Expr::Assign(_, _, _)
         | Expr::Yield(_, _)
         | Expr::RegExp(_, _, _) => false,
+        Expr::Class(_, _) => true,
         Expr::Await(expr, _) => contains_inner_function_expr(expr),
     }
 }
@@ -1823,6 +1932,7 @@ fn uses_arguments_stmt(stmt: &Stmt) -> bool {
                 false
             }
         }
+        Stmt::Class(_, _) => false,
         Stmt::Empty(_) => false,
     }
 }
@@ -1869,6 +1979,7 @@ fn uses_arguments_expr(expr: &Expr) -> bool {
         Expr::Yield(expr, _) => expr.as_ref().is_some_and(|e| uses_arguments_expr(e)),
         Expr::Await(expr, _) => uses_arguments_expr(expr),
         Expr::RegExp(_, _, _) => false,
+        Expr::Class(_, _) => false,
     }
 }
 

@@ -1230,14 +1230,12 @@ fn expand_replacement(s: &str, groups: &[(usize, usize)], replacement: &str) -> 
                 Some(d) if d.is_ascii_digit() => {
                     let mut n = (d as u8 - b'0') as usize;
                     // Check for two-digit
-                    if let Some(&d2) = chars.peek() {
-                        if d2.is_ascii_digit() {
-                            let n2 = (d2 as u8 - b'0') as usize;
-                            let combined = n * 10 + n2;
-                            if combined < groups.len() {
-                                n = combined;
-                                chars.next();
-                            }
+                    if let Some(&d2) = chars.peek() && d2.is_ascii_digit() {
+                        let n2 = (d2 as u8 - b'0') as usize;
+                        let combined = n * 10 + n2;
+                        if combined < groups.len() {
+                            n = combined;
+                            chars.next();
                         }
                     }
                     if n < groups.len() {

@@ -2744,3 +2744,45 @@ Same as above but loops finding all non-overlapping matches via repeated `PikeVm
 ### Test Results
 - **416 integration tests passing** (all 17 regex tests pass including 4 exec/test)
 - All workspace tests pass, clippy + fmt clean
+
+---
+
+## Sprint 20 — Class Syntax (declarations, expressions, methods, constructor)
+
+> **2026-06-29**: `class` keyword support — parser + emitter + 7 integration tests. 423/423 tests pass.
+
+### Implementation
+
+#### AST (`crates/rune_parser/src/ast.rs`)
+Added `ClassNode` (name, methods, span), `ClassMethod` (key, func, is_static, span), `Stmt::Class(ClassNode)`, `Expr::Class(ClassNode)`.
+
+#### Parser (`crates/rune_parser/src/parser.rs`)
+- `parse_class_decl` / `parse_class_expr` — parse `class Foo { ... }` with or without name
+- `parse_class_body` — parses method definitions, identifies `constructor`, `static` (stored, not emitted)
+- Default constructor synthesized when no explicit `constructor` method
+- `class` keyword in `parse_statement` (line 78) and `parse_primary_inner` (line 1459+)
+
+#### Emitter (`crates/rune_parser/src/emitter.rs`)
+- `emit_class` — compact `NewObject(0)` → method definitions → `MakeFunction` constructor → `StoreProperty` for prototype link
+- Stack discipline fix: `StoreProperty` consumes the constructor as `obj` and pushes the value back → save constructor to local first, `Pop` the proto value, `LoadLocal` to restore for expressions
+- Named classes use class-name local; anonymous expression uses temp `__cc_N` local
+- Exhaustiveness: `Stmt::Class`/`Expr::Class` arms in `uses_arguments_*`, `contains_inner_function_*`
+
+#### Integration Tests (`crates/rune_embed/tests/integration_test.rs`)
+7 tests covering all paths:
+
+| Test | What it validates |
+|---|---|
+| `test_class_basic` | Named declaration, constructor with args, method call |
+| `test_class_no_constructor` | Default constructor auto-generated |
+| `test_class_multiple_methods` | Multiple prototype methods, method chaining |
+| `test_class_expression` | Named class expression `var Foo = class { ... }` |
+| `test_class_expression_anonymous_direct` | Anonymous class expression `new (class { ... })(7).method()` |
+| `test_class_default_constructor` | Default constructor, method returns value |
+| `test_class_method_this_context` | Per-instance state isolation via `this` |
+
+### Known Gaps
+- No `extends` support (heritage evaluation, prototype chaining)
+- No `static` method emission (stored but skipped)
+- No computed method names in prototype assignment (skipped with `continue`)
+- `this.prop++` not supported — Update expression only handles `Identifier` targets

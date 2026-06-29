@@ -1955,6 +1955,7 @@ pub fn array_index_of(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
     if from >= len { return Value::smi(-1); }
     for i in from..len {
         if let Some(elem) = crate::vm::array_like_index(this, i as u32) {
+            #[allow(unused_assignments)]
             let mut eq = false;
             if elem.is_smi() && search.is_smi() {
                 eq = elem.as_smi() == search.as_smi();

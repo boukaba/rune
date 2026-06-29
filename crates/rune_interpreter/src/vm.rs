@@ -4194,8 +4194,8 @@ impl Vm {
                         && self.frames.len() == ppc.source_frame_depth
                     {
                         let ppc = self.pending_promise_ctor.take().unwrap();
-                        if ppc.resolve_with_result {
-                            if let Some(ptr) = ppc.promise.heap_ptr() {
+                        if ppc.resolve_with_result
+                            && let Some(ptr) = ppc.promise.heap_ptr() {
                                 let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
                                 if tag == TAG_PROMISE && unsafe { Promise::state(ptr) == PROMISE_PENDING } {
                                     unsafe {
@@ -4223,7 +4223,6 @@ impl Vm {
                                     }
                                 }
                             }
-                        }
                         self.stack.truncate(callee_base);
                         self.push(ppc.promise);
                         if self.frames.is_empty() {

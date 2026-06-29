@@ -2440,21 +2440,23 @@ pub fn promise_reject_impl(_gc: &mut SemiSpace, this: Value, args: &[Value], _vm
 /// Promise.prototype.then(onFulfilled, onRejected)
 pub fn promise_prototype_then(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let ptr = match this.heap_ptr() { Some(p) => p, None => return Value::undefined() };
-    if unsafe { (*(ptr as *const GcHeader)).tag() != TAG_PROMISE } { return Value::undefined(); }
+    let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+    if tag != TAG_PROMISE { return Value::undefined(); }
     let state = unsafe { Promise::state(ptr) };
     let result = unsafe { Promise::result(ptr) };
+    let proto_ptr = unsafe { Promise::prototype(ptr) };
     let on_fulfilled = args.first().copied().unwrap_or(Value::undefined());
     let on_rejected = args.get(1).copied().unwrap_or(Value::undefined());
-    let new_promise_ptr = Promise::allocate(gc, None);
+    let new_promise_ptr = Promise::allocate(gc, if proto_ptr.is_null() { None } else { Some(proto_ptr) });
     let new_promise = Value::from_heap_ptr(new_promise_ptr);
     if state == PROMISE_FULFILLED {
         if let Some(op) = on_fulfilled.heap_ptr() && unsafe { (*(op as *const GcHeader)).tag() == TAG_FUNC } {
-            vm.push_callback_call(gc, on_fulfilled, Value::undefined(), vec![result]);
             vm.pending_promise_ctor = Some(crate::vm::PendingPromiseCtor {
                 source_frame_depth: 0, promise: new_promise,
                 resolve_handle: Value::undefined(), reject_handle: Value::undefined(),
                 resolve_with_result: true,
             });
+            vm.push_callback_call(gc, on_fulfilled, Value::undefined(), vec![result]);
             return Value::undefined();
         }
         unsafe { Promise::set_state(new_promise_ptr, PROMISE_FULFILLED); Promise::set_result(new_promise_ptr, result); }
@@ -2462,12 +2464,12 @@ pub fn promise_prototype_then(gc: &mut SemiSpace, this: Value, args: &[Value], v
     }
     if state == PROMISE_REJECTED {
         if let Some(op) = on_rejected.heap_ptr() && unsafe { (*(op as *const GcHeader)).tag() == TAG_FUNC } {
-            vm.push_callback_call(gc, on_rejected, Value::undefined(), vec![result]);
             vm.pending_promise_ctor = Some(crate::vm::PendingPromiseCtor {
                 source_frame_depth: 0, promise: new_promise,
                 resolve_handle: Value::undefined(), reject_handle: Value::undefined(),
                 resolve_with_result: true,
             });
+            vm.push_callback_call(gc, on_rejected, Value::undefined(), vec![result]);
             return Value::undefined();
         }
         unsafe { Promise::set_state(new_promise_ptr, PROMISE_REJECTED); Promise::set_result(new_promise_ptr, result); }

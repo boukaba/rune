@@ -3905,6 +3905,7 @@ impl Vm {
                         self.frames.last().unwrap().stack_base,
                     );
                     let result = self.pop();
+                    eprintln!("[RRR] result={:?} framelen={}", result, self.frames.len());
                     let callee_base = self.frames.last().unwrap().stack_base;
                     let gen_id = self.frames.last().unwrap().generator_id;
                     if let Some(id) = gen_id {
@@ -4150,10 +4151,17 @@ impl Vm {
                     // Check if this return completes a pending Promise constructor (executor).
                     if self.pending_promise_ctor.is_some()
                         && let Some(ref ppc) = self.pending_promise_ctor
+                    {
+                        eprintln!("[PPCR_CHECK] framelen={} sfd={} resolve_result={} match={}",
+                            self.frames.len(), ppc.source_frame_depth, ppc.resolve_with_result,
+                            self.frames.len() == ppc.source_frame_depth);
+                    }
+                    if self.pending_promise_ctor.is_some()
+                        && let Some(ref ppc) = self.pending_promise_ctor
                         && self.frames.len() == ppc.source_frame_depth
                     {
+                        eprintln!("[PPCR] MATCH! resolve_result={} framelen={} sfd={} result={:?}", ppc.resolve_with_result, self.frames.len(), ppc.source_frame_depth, result);
                         let ppc = self.pending_promise_ctor.take().unwrap();
-                        eprintln!("[PPCR] resolve_result={} promise={:?} result={:?}", ppc.resolve_with_result, ppc.promise, result);
                         if ppc.resolve_with_result {
                             // .then() callback: resolve chained promise with callback's return value
                             if let Some(ptr) = ppc.promise.heap_ptr() {

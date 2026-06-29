@@ -33,12 +33,10 @@ impl Promise {
             } else { ptr }
         };
         // Re-extract proto AFTER GC (it may have been moved)
-        let proto_resolved = proto.and_then(|p| {
-            unsafe {
-                if (*(p as *const GcHeader)).is_forwarded() {
-                    Some((*(p as *const GcHeader)).forwarding_addr())
-                } else { Some(p) }
-            }
+        let proto_resolved = proto.map(|p| unsafe {
+            if (*(p as *const GcHeader)).is_forwarded() {
+                (*(p as *const GcHeader)).forwarding_addr()
+            } else { p }
         });
         unsafe {
             let state_ptr = ptr.add(std::mem::size_of::<GcHeader>()) as *mut u32;

@@ -1607,7 +1607,21 @@ impl Parser {
                 }
                 TokenKind::Dot => {
                     self.advance();
-                    let name = if self.tok.kind == TokenKind::Identifier {
+                    let name = if self.tok.kind == TokenKind::Identifier
+                        || matches!(self.tok.kind,
+                            TokenKind::Catch | TokenKind::Finally | TokenKind::Class
+                            | TokenKind::Const | TokenKind::Delete | TokenKind::Do
+                            | TokenKind::Else | TokenKind::Export | TokenKind::Extends
+                            | TokenKind::For | TokenKind::Function | TokenKind::If
+                            | TokenKind::Import | TokenKind::Let | TokenKind::New
+                            | TokenKind::Return | TokenKind::Switch | TokenKind::This
+                            | TokenKind::Throw | TokenKind::Try | TokenKind::Var
+                            | TokenKind::While | TokenKind::Yield | TokenKind::Await
+                            | TokenKind::Async | TokenKind::Default | TokenKind::Case
+                            | TokenKind::Instanceof | TokenKind::In | TokenKind::Void
+                            | TokenKind::Typeof | TokenKind::Break | TokenKind::Continue
+                            | TokenKind::Super)
+                    {
                         let t = self.tok.clone();
                         self.advance();
                         Expr::String(t.value.into_boxed_str(), t.span)
@@ -1647,7 +1661,21 @@ impl Parser {
             match self.tok.kind {
                 TokenKind::Dot => {
                     self.advance();
-                    let name = if self.tok.kind == TokenKind::Identifier {
+                    let name = if self.tok.kind == TokenKind::Identifier
+                        || matches!(self.tok.kind,
+                            TokenKind::Catch | TokenKind::Finally | TokenKind::Class
+                            | TokenKind::Const | TokenKind::Delete | TokenKind::Do
+                            | TokenKind::Else | TokenKind::Export | TokenKind::Extends
+                            | TokenKind::For | TokenKind::Function | TokenKind::If
+                            | TokenKind::Import | TokenKind::Let | TokenKind::New
+                            | TokenKind::Return | TokenKind::Switch | TokenKind::This
+                            | TokenKind::Throw | TokenKind::Try | TokenKind::Var
+                            | TokenKind::While | TokenKind::Yield | TokenKind::Await
+                            | TokenKind::Async | TokenKind::Default | TokenKind::Case
+                            | TokenKind::Instanceof | TokenKind::In | TokenKind::Void
+                            | TokenKind::Typeof | TokenKind::Break | TokenKind::Continue
+                            | TokenKind::Super)
+                    {
                         let t = self.tok.clone();
                         self.advance();
                         Expr::String(t.value.into_boxed_str(), t.span)

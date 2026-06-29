@@ -2157,12 +2157,10 @@ pub fn array_flat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
 
 /// Array.prototype.sort(compareFn) — default lexicographic sort (no comparator). Throws TypeError if comparator is passed.
 pub fn array_sort(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    if let Some(cmp) = args.first().copied() {
-        if !cmp.is_undefined() {
-            let msg = HeapString::allocate(gc, "TypeError: comparator sort is not yet supported");
-            vm.set_pending_exception(Value::from_heap_ptr(msg as *mut u8));
-            return Value::undefined();
-        }
+    if args.first().filter(|c| !c.is_undefined()).is_some() {
+        let msg = HeapString::allocate(gc, "TypeError: comparator sort is not yet supported");
+        vm.set_pending_exception(Value::from_heap_ptr(msg as *mut u8));
+        return Value::undefined();
     }
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
@@ -2178,7 +2176,7 @@ pub fn array_sort(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
     for i in 0..length {
         elements.push(crate::vm::array_like_index(this, i).unwrap_or(Value::undefined()));
     }
-    elements.sort_by(|a, b| string_from_value(*a).cmp(&string_from_value(*b)));
+    elements.sort_by_key(|a| string_from_value(*a));
     // Write back sorted elements in-place
     if let Some(ptr) = this.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };

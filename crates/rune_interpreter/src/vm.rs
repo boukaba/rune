@@ -451,8 +451,8 @@ impl Vm {
             if let Some(ev) = every_h { proto_entries.push(("every", ev)); }
             if let Some(fl) = flat_h { proto_entries.push(("flat", fl)); }
             if let Some(fm) = flat_map_h { proto_entries.push(("flatMap", fm)); }
-            if let Some(sort_handle) = find_handle(&self.builtins, "Array_prototype_sort") {
-                proto_entries.push(("sort", sort_handle));
+            if let Some(sh) = find_handle(&self.builtins, "Array_prototype_sort") {
+                proto_entries.push(("sort", sh));
             }
             let arr_proto = make_object(gc, &proto_entries);
             self.builtin_wrappers

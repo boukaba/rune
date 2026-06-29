@@ -186,6 +186,13 @@ pub(crate) struct PendingPromiseCtor {
     pub(crate) resolve_with_result: bool,
 }
 
+/// A microtask — a callback deferred to after the current synchronous task.
+pub(crate) struct Microtask {
+    pub(crate) callback: Value,
+    pub(crate) args: Vec<Value>,
+    pub(crate) promise_ctor: Option<PendingPromiseCtor>,
+}
+
 /// State for a pending primitive conversion (ToPrimitive via user-defined toString/valueOf).
 /// Set by Opcode::Add, Opcode::ToString, etc., consumed by the Return handler.
 pub(crate) struct PendingPrimitiveConversion {
@@ -330,6 +337,10 @@ pub struct Vm {
     pub(crate) pending_call: Option<PendingCall>,
     /// Pending Promise constructor call (executor → resolve/reject → return promise).
     pub(crate) pending_promise_ctor: Option<PendingPromiseCtor>,
+    /// Microtask queue — Promise callbacks deferred to after sync execution.
+    pub(crate) microtask_queue: Vec<Microtask>,
+    /// Pending promise reactions: (callback, chained_promise) pairs keyed by promise ptr.
+    pub(crate) promise_reactions: HashMap<*mut u8, Vec<(Value, Value)>>,
     /// Pending assert.throws callback.
     pub(crate) pending_assert: Option<PendingAssert>,
     /// Pending primitive conversion (ToPrimitive on object for +, ToString, etc.).
@@ -403,6 +414,8 @@ impl Vm {
             pending_array_op: None,
             pending_call: None,
             pending_promise_ctor: None,
+            microtask_queue: Vec::new(),
+            promise_reactions: HashMap::new(),
             pending_assert: None,
             pending_primitive_conversion: None,
             assert_called: false,
@@ -736,6 +749,26 @@ impl Vm {
         self.pending_exception = Some(val);
     }
 
+    /// Enqueue a microtask to be executed after the current synchronous task.
+    pub fn enqueue_microtask(&mut self, callback: Value, args: Vec<Value>, ppc: Option<PendingPromiseCtor>) {
+        self.microtask_queue.push(Microtask { callback, args, promise_ctor: ppc });
+    }
+
+    /// Drain all enqueued microtasks. Each microtask is executed synchronously
+    /// via push_callback_call. New microtasks enqueued during draining are
+    /// processed in the current batch.
+    pub fn drain_microtask_queue(&mut self, gc: &mut SemiSpace) {
+        while !self.microtask_queue.is_empty() {
+            let tasks: Vec<Microtask> = std::mem::take(&mut self.microtask_queue);
+            for task in tasks {
+                self.pending_promise_ctor = task.promise_ctor;
+                self.push_callback_call(gc, task.callback, Value::undefined(), task.args);
+                self.register_roots(gc);
+                let _ = self.run_loop(gc);
+            }
+        }
+    }
+
     /// Throw a ReferenceError from the run loop.
     fn throw_reference_error(&mut self, gc: &mut SemiSpace, msg: &str) -> Exit {
         let full_msg = format!("ReferenceError: {}", msg);
@@ -1064,6 +1097,9 @@ impl Vm {
             Exit::Yield(_) => Ok(Value::undefined()),
             Exit::Throw(v) => Err(v),
         };
+
+        // Drain microtask queue after the synchronous task completes
+        self.drain_microtask_queue(gc);
 
         // Disable root provider until next execute
         gc.root_provider = None;
@@ -4157,13 +4193,31 @@ impl Vm {
                     {
                         let ppc = self.pending_promise_ctor.take().unwrap();
                         if ppc.resolve_with_result {
-                            // .then() callback: resolve chained promise with callback's return value
                             if let Some(ptr) = ppc.promise.heap_ptr() {
                                 let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
                                 if tag == TAG_PROMISE && unsafe { Promise::state(ptr) == PROMISE_PENDING } {
                                     unsafe {
                                         Promise::set_state(ptr, PROMISE_FULFILLED);
                                         Promise::set_result(ptr, result);
+                                    }
+                                    let reactions_ptr = unsafe { Promise::reactions(ptr) };
+                                    if !reactions_ptr.is_null() {
+                                        let arr = reactions_ptr as *mut RuneArray;
+                                        let len = unsafe { RuneArray::length(arr) };
+                                        let mut idx = 0;
+                                        while idx + 1 < len as usize {
+                                            let cb = unsafe { RuneArray::get_element(arr, idx) };
+                                            let chained = unsafe { RuneArray::get_element(arr, idx + 1) };
+                                            if cb.is_heap_object() {
+                                                let ppc2 = PendingPromiseCtor {
+                                                    source_frame_depth: 0, promise: chained,
+                                                    resolve_handle: Value::undefined(), reject_handle: Value::undefined(),
+                                                    resolve_with_result: true,
+                                                };
+                                                self.enqueue_microtask(cb, vec![result], Some(ppc2));
+                                            }
+                                            idx += 2;
+                                        }
                                     }
                                 }
                             }

@@ -2411,24 +2411,62 @@ pub fn promise_constructor(gc: &mut SemiSpace, _this: Value, args: &[Value], vm:
 }
 
 /// Internal: resolve a promise. Promise is `this`.
-pub fn promise_resolve_impl(_gc: &mut SemiSpace, this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+pub fn promise_resolve_impl(_gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if let Some(ptr) = this.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_PROMISE && unsafe { Promise::state(ptr) == PROMISE_PENDING } {
             let val = args.first().copied().unwrap_or(Value::undefined());
             unsafe { Promise::set_state(ptr, PROMISE_FULFILLED); Promise::set_result(ptr, val); }
+            let reactions_ptr = unsafe { Promise::reactions(ptr) };
+            if !reactions_ptr.is_null() {
+                let arr = reactions_ptr as *mut RuneArray;
+                let len = unsafe { RuneArray::length(arr) };
+                let mut idx = 0;
+                while idx + 1 < len as usize {
+                    let cb = unsafe { RuneArray::get_element(arr, idx) };
+                    let chained = unsafe { RuneArray::get_element(arr, idx + 1) };
+                    if cb.is_heap_object() {
+                        let ppc = crate::vm::PendingPromiseCtor {
+                            source_frame_depth: 0, promise: chained,
+                            resolve_handle: Value::undefined(), reject_handle: Value::undefined(),
+                            resolve_with_result: true,
+                        };
+                        vm.enqueue_microtask(cb, vec![val], Some(ppc));
+                    }
+                    idx += 2;
+                }
+            }
         }
     }
     Value::undefined()
 }
 
 /// Internal: reject a promise. Promise is `this`.
-pub fn promise_reject_impl(_gc: &mut SemiSpace, this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+pub fn promise_reject_impl(_gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if let Some(ptr) = this.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_PROMISE && unsafe { Promise::state(ptr) == PROMISE_PENDING } {
             let reason = args.first().copied().unwrap_or(Value::undefined());
             unsafe { Promise::set_state(ptr, PROMISE_REJECTED); Promise::set_result(ptr, reason); }
+            let reactions_ptr = unsafe { Promise::reactions(ptr) };
+            if !reactions_ptr.is_null() {
+                let arr = reactions_ptr as *mut RuneArray;
+                let len = unsafe { RuneArray::length(arr) };
+                let mut idx = 0;
+                while idx + 1 < len as usize {
+                    let cb = unsafe { RuneArray::get_element(arr, idx) };
+                    let chained = unsafe { RuneArray::get_element(arr, idx + 1) };
+                    if cb.is_heap_object() {
+                        let ppc = crate::vm::PendingPromiseCtor {
+                            source_frame_depth: 0, promise: chained,
+                            resolve_handle: Value::undefined(), reject_handle: Value::undefined(),
+                            resolve_with_result: true,
+                        };
+                        vm.enqueue_microtask(cb, vec![reason], Some(ppc));
+                    }
+                    idx += 2;
+                }
+            }
         }
     }
     Value::undefined()
@@ -2441,36 +2479,42 @@ pub fn promise_prototype_then(gc: &mut SemiSpace, this: Value, args: &[Value], v
     if tag != TAG_PROMISE { return Value::undefined(); }
     let state = unsafe { Promise::state(ptr) };
     let result = unsafe { Promise::result(ptr) };
-    let proto_ptr = unsafe { Promise::prototype(ptr) };
     let on_fulfilled = args.first().copied().unwrap_or(Value::undefined());
     let on_rejected = args.get(1).copied().unwrap_or(Value::undefined());
-    let new_promise_ptr = Promise::allocate(gc, if proto_ptr.is_null() { None } else { Some(proto_ptr) });
+    let proto = vm.promise_prototype.heap_ptr();
+    let new_promise_ptr = Promise::allocate(gc, proto);
     let new_promise = Value::from_heap_ptr(new_promise_ptr);
     if state == PROMISE_FULFILLED {
         if let Some(op) = on_fulfilled.heap_ptr() && unsafe { (*(op as *const GcHeader)).tag() == TAG_FUNC } {
-            vm.pending_promise_ctor = Some(crate::vm::PendingPromiseCtor {
+            let ppc = crate::vm::PendingPromiseCtor {
                 source_frame_depth: 0, promise: new_promise,
                 resolve_handle: Value::undefined(), reject_handle: Value::undefined(),
                 resolve_with_result: true,
-            });
-            vm.push_callback_call(gc, on_fulfilled, Value::undefined(), vec![result]);
-            return Value::undefined();
+            };
+            vm.enqueue_microtask(on_fulfilled, vec![result], Some(ppc));
+            return new_promise;
         }
         unsafe { Promise::set_state(new_promise_ptr, PROMISE_FULFILLED); Promise::set_result(new_promise_ptr, result); }
         return new_promise;
     }
     if state == PROMISE_REJECTED {
         if let Some(op) = on_rejected.heap_ptr() && unsafe { (*(op as *const GcHeader)).tag() == TAG_FUNC } {
-            vm.pending_promise_ctor = Some(crate::vm::PendingPromiseCtor {
+            let ppc = crate::vm::PendingPromiseCtor {
                 source_frame_depth: 0, promise: new_promise,
                 resolve_handle: Value::undefined(), reject_handle: Value::undefined(),
                 resolve_with_result: true,
-            });
-            vm.push_callback_call(gc, on_rejected, Value::undefined(), vec![result]);
-            return Value::undefined();
+            };
+            vm.enqueue_microtask(on_rejected, vec![result], Some(ppc));
+            return new_promise;
         }
         unsafe { Promise::set_state(new_promise_ptr, PROMISE_REJECTED); Promise::set_result(new_promise_ptr, result); }
         return new_promise;
+    }
+    // Pending — store reaction in the promise's reactions array
+    let reactions_ptr = unsafe { Promise::reactions(ptr) };
+    if !reactions_ptr.is_null() {
+        unsafe { RuneArray::push(gc, reactions_ptr as *mut RuneArray, on_fulfilled); }
+        unsafe { RuneArray::push(gc, reactions_ptr as *mut RuneArray, new_promise); }
     }
     new_promise
 }

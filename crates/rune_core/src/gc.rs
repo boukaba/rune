@@ -259,6 +259,8 @@ impl SemiSpace {
                         self.forward_value(result_ptr);
                         let proto_ptr = scan_ptr.add(size_of::<GcHeader>() + 16) as *mut u64;
                         self.forward_value(proto_ptr);
+                        let reactions_ptr = scan_ptr.add(size_of::<GcHeader>() + 24) as *mut u64;
+                        self.forward_value(reactions_ptr);
                     }
                     _ => {}
                 }

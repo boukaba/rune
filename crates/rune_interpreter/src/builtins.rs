@@ -1162,18 +1162,17 @@ pub fn string_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
 }
 
 /// String.prototype.replace(searchValue, replaceValue) — first match only.
-/// Supports string and RegExp patterns (no function replacement yet).
+/// Supports string and RegExp patterns, including function replacement.
 pub fn string_replace(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
     let s = string_from_value(this);
     let search = args.first().copied().unwrap_or(Value::undefined());
-    let replacement = if args.len() > 1 {
-        arg_to_string(gc, Some(args[1]), vm)
-    } else {
-        "undefined".to_string()
-    };
+    let replacement_fn = args.get(1).copied();
+    let is_fn_replacement = replacement_fn.is_some_and(|v| {
+        v.heap_ptr().is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC })
+    });
 
     // Check if search is a RegExp
     if let Some(ptr) = search.heap_ptr() {
@@ -1188,7 +1187,32 @@ pub fn string_replace(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
                     let pike_vm = rune_regex::pikevm::PikeVm::new();
                     if let Some(m) = pike_vm.exec(&nfa, &s, 0) {
                         let (start, end) = m.groups[0];
-                        // Expand $&, $`, $', $1..$n in replacement
+                        if is_fn_replacement {
+                            let fn_val = replacement_fn.unwrap();
+                            let mut fn_args = Vec::with_capacity(m.groups.len() + 2);
+                            // Full match
+                            let match_str = HeapString::allocate(gc, &s[start..end]);
+                            fn_args.push(Value::from_heap_ptr(match_str as *mut u8));
+                            // Captures (groups[1..])
+                            for i in 1..m.groups.len() {
+                                let (gs, ge) = m.groups[i];
+                                let cap_str = HeapString::allocate(gc, &s[gs..ge]);
+                                fn_args.push(Value::from_heap_ptr(cap_str as *mut u8));
+                            }
+                            // Offset and input
+                            fn_args.push(Value::smi(start as i32));
+                            let input_str = HeapString::allocate(gc, &s);
+                            fn_args.push(Value::from_heap_ptr(input_str as *mut u8));
+                            vm.pending_replace_op = Some(crate::vm::PendingReplaceOp {
+                                source_frame_depth: 0,
+                                input: s,
+                                groups: m.groups,
+                            });
+                            vm.push_callback_call(gc, fn_val, Value::undefined(), fn_args);
+                            return Value::undefined();
+                        }
+                        // String replacement (original logic)
+                        let replacement = arg_to_string(gc, replacement_fn, vm);
                         let expanded = expand_replacement(&s, &m.groups, &replacement);
                         let result = s[..start].to_string() + &expanded + &s[end..];
                         return Value::from_heap_ptr(HeapString::allocate(gc, &result) as *mut u8);
@@ -1204,14 +1228,15 @@ pub fn string_replace(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
         }
     }
 
-    // String pattern (original logic)
+    // String pattern
+    let replacement_str = arg_to_string(gc, replacement_fn, vm);
     let search_str = arg_to_string(gc, args.first().copied(), vm);
     if search_str.is_empty() {
-        let result = replacement.clone() + &s;
+        let result = replacement_str.clone() + &s;
         return Value::from_heap_ptr(HeapString::allocate(gc, &result) as *mut u8);
     }
     if let Some(pos) = s.find(&search_str) {
-        let result = s[..pos].to_string() + &replacement + &s[pos + search_str.len()..];
+        let result = s[..pos].to_string() + &replacement_str + &s[pos + search_str.len()..];
         Value::from_heap_ptr(HeapString::allocate(gc, &result) as *mut u8)
     } else {
         Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8)
@@ -2730,7 +2755,7 @@ pub fn promise_static_resolve(gc: &mut SemiSpace, _this: Value, args: &[Value], 
     if val.heap_ptr().is_some() {
         let then_str = HeapString::allocate(gc, "then");
         let then_key = Value::from_heap_ptr(then_str as *mut u8);
-        let then_val = load_property_recursive(val, then_key, Some(vm.function_prototype));
+        let then_val = load_property_recursive(val, then_key, Some(vm.function_prototype), gc);
         if let Some(then_ptr) = then_val.heap_ptr() {
             let then_tag = unsafe { (*(then_ptr as *const GcHeader)).tag() };
             if then_tag == TAG_FUNC {
@@ -2911,6 +2936,9 @@ pub fn default_builtins() -> Vec<Builtin> {
         Builtin { length: 1, name: "async_reject", func: async_reject },
         Builtin { length: 1, name: "RegExp_prototype_exec", func: regexp_exec },
         Builtin { length: 1, name: "RegExp_prototype_test", func: regexp_test },
+        Builtin { length: 0, name: "RegExp_prototype_source", func: regexp_source },
+        Builtin { length: 0, name: "RegExp_prototype_flags", func: regexp_flags },
+        Builtin { length: 0, name: "RegExp_prototype_lastIndex", func: regexp_last_index },
         Builtin {
             length: 1,
             name: "Object",
@@ -3542,4 +3570,42 @@ fn get_regexp_this(this: Value) -> Option<*mut u8> {
         }
     }
     None
+}
+
+/// RegExp.prototype.source getter — returns the pattern string.
+pub fn regexp_source(gc: &mut SemiSpace, this: Value, _args: &[Value], _vm: &mut Vm) -> Value {
+    let regexp_ptr = match get_regexp_this(this) {
+        Some(p) => p,
+        None => return Value::undefined(),
+    };
+    let pattern = unsafe { HeapString::to_string(RegExp::pattern(regexp_ptr) as *mut HeapString) };
+    Value::from_heap_ptr(HeapString::allocate(gc, &pattern) as *mut u8)
+}
+
+/// RegExp.prototype.flags getter — returns a string like "gimsuyd".
+pub fn regexp_flags(gc: &mut SemiSpace, this: Value, _args: &[Value], _vm: &mut Vm) -> Value {
+    let regexp_ptr = match get_regexp_this(this) {
+        Some(p) => p,
+        None => return Value::undefined(),
+    };
+    let flags = unsafe { RegExp::flags(regexp_ptr) };
+    let mut s = String::new();
+    if flags & 1 != 0 { s.push('g'); }
+    if flags & 2 != 0 { s.push('i'); }
+    if flags & 4 != 0 { s.push('m'); }
+    if flags & 8 != 0 { s.push('s'); }
+    if flags & 16 != 0 { s.push('u'); }
+    if flags & 32 != 0 { s.push('y'); }
+    if flags & 64 != 0 { s.push('d'); }
+    Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8)
+}
+
+/// RegExp.prototype.lastIndex getter — returns the lastIndex value.
+pub fn regexp_last_index(_gc: &mut SemiSpace, this: Value, _args: &[Value], _vm: &mut Vm) -> Value {
+    let regexp_ptr = match get_regexp_this(this) {
+        Some(p) => p,
+        None => return Value::undefined(),
+    };
+    let li = unsafe { RegExp::last_index(regexp_ptr) };
+    Value::smi(li as i32)
 }

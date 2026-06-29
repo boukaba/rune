@@ -5327,6 +5327,40 @@ fn test_regexp_test_false() {
     assert_eq!(ctx.eval(r#"/xyz/.test("hello world")"#).unwrap().to_boolean(), Some(false));
 }
 
+#[test]
+fn test_regexp_prototype_source() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_str(&mut ctx, r#"/hello/.source"#), "hello");
+    assert_eq!(eval_str(&mut ctx, r#"/world/.source"#), "world");
+}
+
+#[test]
+fn test_regexp_prototype_flags() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_str(&mut ctx, r#"/hello/gi.flags"#), "gi");
+    assert_eq!(eval_str(&mut ctx, r#"/hello/m.flags"#), "m");
+    assert_eq!(eval_str(&mut ctx, r#"/hello/.flags"#), "");
+}
+
+#[test]
+fn test_regexp_prototype_lastIndex() {
+    let mut ctx = Context::new_small();
+    // lastIndex defaults to 0
+    assert_eq!(ctx.eval(r#"/hello/.lastIndex"#).unwrap().as_smi(), Some(0));
+}
+
+#[test]
+fn test_regex_replace_function() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_str(&mut ctx, r#""hello".replace(/l/, function(m) { return "X"; })"#), "heXlo");
+}
+
+#[test]
+fn test_regex_replace_function_captures() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_str(&mut ctx, r#""a1b2c3".replace(/(\d)/, function(m, c1, off, s) { return c1 + c1; })"#), "a11b2c3");
+}
+
 // ---- Thenable Unwrapping Tests ----
 
 #[test]

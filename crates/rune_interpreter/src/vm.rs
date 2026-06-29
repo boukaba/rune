@@ -227,6 +227,16 @@ pub(crate) struct PendingFinallyOp {
     pub(crate) source_frame_depth: usize,
 }
 
+/// State for a pending String.prototype.replace callback.
+/// Set by the replace builtin, consumed by the Return handler.
+/// Stores the match groups and input string so the Return handler
+/// can construct the final result from the callback's return value.
+pub(crate) struct PendingReplaceOp {
+    pub(crate) source_frame_depth: usize,
+    pub(crate) input: String,
+    pub(crate) groups: Vec<(usize, usize)>,
+}
+
 /// State for async generator resumption via bridge function (async_continue/async_reject).
 pub(crate) struct PendingAsyncGen {
     pub(crate) gen_id: usize,
@@ -374,6 +384,8 @@ pub struct Vm {
     pub(crate) pending_async_gen: Option<PendingAsyncGen>,
     /// Pending Promise.prototype.finally operation.
     pub(crate) pending_finally_op: Option<PendingFinallyOp>,
+    /// Pending String.prototype.replace callback state.
+    pub(crate) pending_replace_op: Option<PendingReplaceOp>,
     /// Pending assert.throws callback.
     pub(crate) pending_assert: Option<PendingAssert>,
     /// Pending primitive conversion (ToPrimitive on object for +, ToString, etc.).
@@ -453,6 +465,7 @@ impl Vm {
             async_tasks: Vec::new(),
             pending_async_gen: None,
             pending_finally_op: None,
+            pending_replace_op: None,
             pending_assert: None,
             pending_primitive_conversion: None,
             assert_called: false,
@@ -663,17 +676,23 @@ impl Vm {
             self.builtin_wrappers.insert("Promise".to_string(), prom_ctor);
         }
 
-        // RegExp namespace — prototype with exec/test
+        // RegExp namespace — prototype with exec/test/source/flags/lastIndex
         {
             let exec_h = find_handle(&self.builtins, "RegExp_prototype_exec");
             let test_h = find_handle(&self.builtins, "RegExp_prototype_test");
-            if let (Some(exec), Some(test)) = (exec_h, test_h) {
-                let proto_entries: Vec<(&str, Value)> = vec![("exec", exec), ("test", test)];
-                let re_proto = make_object(gc, &proto_entries);
-                self.regexp_prototype = re_proto;
-                let re_ctor = make_object(gc, &[("prototype", re_proto)]);
-                self.builtin_wrappers.insert("RegExp".to_string(), re_ctor);
-            }
+            let source_h = find_handle(&self.builtins, "RegExp_prototype_source");
+            let flags_h = find_handle(&self.builtins, "RegExp_prototype_flags");
+            let li_h = find_handle(&self.builtins, "RegExp_prototype_lastIndex");
+            let mut proto_entries: Vec<(&str, Value)> = Vec::new();
+            if let Some(h) = exec_h { proto_entries.push(("exec", h)); }
+            if let Some(h) = test_h { proto_entries.push(("test", h)); }
+            if let Some(h) = source_h { proto_entries.push(("source", h)); }
+            if let Some(h) = flags_h { proto_entries.push(("flags", h)); }
+            if let Some(h) = li_h { proto_entries.push(("lastIndex", h)); }
+            let re_proto = make_object(gc, &proto_entries);
+            self.regexp_prototype = re_proto;
+            let re_ctor = make_object(gc, &[("prototype", re_proto)]);
+            self.builtin_wrappers.insert("RegExp".to_string(), re_ctor);
         }
 
         // Math namespace with all methods + constants
@@ -1131,6 +1150,9 @@ impl Vm {
         }
         // Update source_frame_depth if pending finally op is active
         if let Some(ref mut state) = self.pending_finally_op {
+            state.source_frame_depth = self.frames.len() - 1;
+        }
+        if let Some(ref mut state) = self.pending_replace_op {
             state.source_frame_depth = self.frames.len() - 1;
         }
     }
@@ -2377,7 +2399,7 @@ impl Vm {
                                 )
                             } else {
                                 // No IC attached — fall back to full lookup
-                                load_property_recursive(obj, raw_key, Some(self.function_prototype))
+                                load_property_recursive(obj, raw_key, Some(self.function_prototype), gc)
                             }
                         }
                     } else if let Some(smi) = obj.as_smi() {
@@ -2402,7 +2424,7 @@ impl Vm {
                                         } else {
                                             // Not metadata — fall through to Function.prototype
                                             if self.function_prototype.is_heap_object() {
-                                                load_property_recursive(self.function_prototype, raw_key, Some(self.function_prototype))
+                                                load_property_recursive(self.function_prototype, raw_key, Some(self.function_prototype), gc)
                                             } else {
                                                 Value::undefined()
                                             }
@@ -2410,7 +2432,7 @@ impl Vm {
                                     } else {
                                         // Unknown handle — check Function.prototype
                                         if self.function_prototype.is_heap_object() {
-                                            load_property_recursive(self.function_prototype, raw_key, Some(self.function_prototype))
+                                            load_property_recursive(self.function_prototype, raw_key, Some(self.function_prototype), gc)
                                         } else {
                                             Value::undefined()
                                         }
@@ -2418,13 +2440,13 @@ impl Vm {
                                 } else {
                                     // Not a string key — check Function.prototype
                                     if self.function_prototype.is_heap_object() {
-                                        load_property_recursive(self.function_prototype, raw_key, Some(self.function_prototype))
+                                        load_property_recursive(self.function_prototype, raw_key, Some(self.function_prototype), gc)
                                     } else {
                                         Value::undefined()
                                     }
                                 }
                             } else if self.function_prototype.is_heap_object() {
-                                load_property_recursive(self.function_prototype, raw_key, Some(self.function_prototype))
+                                load_property_recursive(self.function_prototype, raw_key, Some(self.function_prototype), gc)
                             } else {
                                 Value::undefined()
                             }
@@ -3585,7 +3607,7 @@ impl Vm {
                                     }
                                     continue;
                                 }
-                                if self.pending_array_op.is_some() || self.pending_call.is_some() || self.pending_assert.is_some() || self.pending_promise_ctor.is_some() || self.pending_finally_op.is_some() {
+                                if self.pending_array_op.is_some() || self.pending_call.is_some() || self.pending_assert.is_some() || self.pending_promise_ctor.is_some() || self.pending_finally_op.is_some() || self.pending_replace_op.is_some() {
                                     // Array method builtin or .call() or assert.throws
                                     // set up a callback. Don't push result or advance pc —
                                     // the callback frame is already on the stack.
@@ -4495,6 +4517,21 @@ impl Vm {
                         self.push(pc.other_operand);
                         continue;
                     }
+                    // Check if this return completes a String.prototype.replace callback.
+                    if let Some(ref pro) = self.pending_replace_op
+                        && self.frames.len() == pro.source_frame_depth
+                    {
+                        let pro = self.pending_replace_op.take().unwrap();
+                        let repl_str = crate::builtins::value_to_js_string(result);
+                        let (start, end) = pro.groups[0];
+                        let final_str = pro.input[..start].to_string() + &repl_str + &pro.input[end..];
+                        let ptr = HeapString::allocate(gc, &final_str);
+                        self.stack.truncate(callee_base);
+                        self.push(Value::from_heap_ptr(ptr as *mut u8));
+                        let caller_idx = self.frames.len() - 1;
+                        self.frames[caller_idx].pc += 1;
+                        continue;
+                    }
                     // Async return: resolve outer Promise when async generator completes.
                     if let Some(ptr) = async_promise_ptr {
                         unsafe {
@@ -5380,7 +5417,7 @@ const MAX_PROTOTYPE_DEPTH: usize = 256;
 /// Implements OrdinaryGet (§10.1.8.1): check own property, then recurse on [[Prototype]].
 /// For dense arrays: numeric keys access elements directly; non-numeric walks to prototype.
 /// Returns undefined if the chain exceeds MAX_PROTOTYPE_DEPTH (prevents infinite loops on cycles).
-pub(crate) fn load_property_recursive(obj: Value, raw_key: Value, function_prototype: Option<Value>) -> Value {
+pub(crate) fn load_property_recursive(obj: Value, raw_key: Value, function_prototype: Option<Value>, gc: &mut SemiSpace) -> Value {
     let mut current = obj;
     let mut depth = 0;
     loop {
@@ -5494,6 +5531,33 @@ pub(crate) fn load_property_recursive(obj: Value, raw_key: Value, function_proto
                     }
                 return Value::undefined();
             } else if tag == TAG_REGEXP {
+                // Check own properties (source, flags, lastIndex)
+                if let Some(key_ptr) = raw_key.heap_ptr()
+                    && unsafe { (*(key_ptr as *const GcHeader)).tag() == TAG_STRING }
+                {
+                    let key_str = unsafe { HeapString::to_string(key_ptr as *mut HeapString) };
+                    if key_str == "source" {
+                        let pattern_ptr = unsafe { rune_core::regexp::RegExp::pattern(ptr) };
+                        return Value::from_heap_ptr(pattern_ptr);
+                    }
+                    if key_str == "flags" {
+                        let f = unsafe { rune_core::regexp::RegExp::flags(ptr) };
+                        let mut s = String::new();
+                        if f & 1 != 0 { s.push('g'); }
+                        if f & 2 != 0 { s.push('i'); }
+                        if f & 4 != 0 { s.push('m'); }
+                        if f & 8 != 0 { s.push('s'); }
+                        if f & 16 != 0 { s.push('u'); }
+                        if f & 32 != 0 { s.push('y'); }
+                        if f & 64 != 0 { s.push('d'); }
+                        let ptr = HeapString::allocate(gc, &s);
+                        return Value::from_heap_ptr(ptr as *mut u8);
+                    }
+                    if key_str == "lastIndex" {
+                        let li = unsafe { rune_core::regexp::RegExp::last_index(ptr) };
+                        return Value::smi(li as i32);
+                    }
+                }
                 // Walk RegExp.prototype for exec/test and other properties
                 let proto_ptr = unsafe { rune_core::regexp::RegExp::prototype(ptr) };
                 if !proto_ptr.is_null() {
@@ -5510,7 +5574,7 @@ pub(crate) fn load_property_recursive(obj: Value, raw_key: Value, function_proto
 /// Full property lookup that populates the inline cache on miss.
 #[allow(clippy::too_many_arguments)] // several distinct mutable VM subsystems are required
 fn load_property_recursive_ic(
-    _gc: &mut SemiSpace,
+    gc: &mut SemiSpace,
     ics: &mut Vec<InlineCache>,
     ic_entries: &mut Vec<IcEntry>,
     ic_hit_counts: &mut Vec<u32>,
@@ -5554,7 +5618,7 @@ fn load_property_recursive_ic(
         }
     }
 
-    let result = load_property_recursive(obj, raw_key, function_prototype);
+    let result = load_property_recursive(obj, raw_key, function_prototype, gc);
     // Populate IC for all result types
     if instr.ic_index >= 0
         && let Some(ptr) = obj.heap_ptr()

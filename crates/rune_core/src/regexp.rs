@@ -4,13 +4,13 @@ use std::sync::atomic::Ordering;
 pub const REGEXP_SIZE: usize = 32;
 
 /// Heap-allocated RegExp object.
-/// Layout: [GcHeader(8) | pattern_ptr(8) | flags:u32(4) | pad(4) | prototype(8)] = 32 bytes
+/// Layout: [GcHeader(8) | pattern_ptr(8) | flags:u32(4) | last_index:u32(4) | prototype(8)] = 32 bytes
 #[repr(C)]
 pub struct RegExp {
     header: GcHeader,
     pattern: *mut u8,
     flags: u32,
-    _pad: u32,
+    last_index: u32,
     prototype: *mut u8,
 }
 
@@ -23,7 +23,7 @@ impl RegExp {
             let re = ptr as *mut RegExp;
             (*re).pattern = pattern;
             (*re).flags = flags;
-            (*re)._pad = 0;
+            (*re).last_index = 0;
             (*re).prototype = std::ptr::null_mut();
         }
         ptr
@@ -47,5 +47,13 @@ impl RegExp {
 
     pub unsafe fn set_prototype(ptr: *mut u8, proto: *mut u8) {
         unsafe { (*(ptr as *mut RegExp)).prototype = proto; }
+    }
+
+    pub unsafe fn last_index(ptr: *mut u8) -> u32 {
+        unsafe { (*(ptr as *mut RegExp)).last_index }
+    }
+
+    pub unsafe fn set_last_index(ptr: *mut u8, val: u32) {
+        unsafe { (*(ptr as *mut RegExp)).last_index = val; }
     }
 }

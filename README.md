@@ -76,7 +76,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 - **SIDT:** O(1) property access via SIMD inline caches (NEON + SSE4.1), no megamorphic cliff
 - **AFPC cache:** rkyv bytecode persistence (13.5× compile speedup), AArch64 + x86-64 native code caching
 - **JSON:** `JSON.parse` + `JSON.stringify` (complete round-trip, cycle detection, NaN/Infinity → `null`)
-- **RegExp:** Thompson NFA + PikeVM engine, `/pattern/flags` literals, `exec`/`test`, replace with `$&`/``$` ``/`$'`/`$1..$n` expansion
+- **RegExp:** Thompson NFA + PikeVM engine, `/pattern/flags` literals, `exec`/`test`, `.source`/`.flags`/`.lastIndex` properties, replace with `$&`/``$` ``/`$'`/`$1..$n` expansion and function replacement
 - **Array methods:** `filter`, `map`, `reduce`, `forEach`, `slice` (callback state machine, GC-safe across 200K elements), `find`, `some`, `every`, `sort`, `flat`, `flatMap`, `includes`, `push`, `pop`, `indexOf`
 - **String methods:** `replace`/`replaceAll` (string + regex), `indexOf`, `charAt`, `slice`, `split` (string separator, limit, empty separator edge cases)
 - **Global functions:** `parseInt` (radix, hex), `parseFloat` (Infinity, NaN, scientific notation)

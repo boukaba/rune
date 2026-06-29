@@ -2816,3 +2816,72 @@ Added `ClassNode` (name, methods, span), `ClassMethod` (key, func, is_static, sp
 ### Next Steps
 1. RegExp prototype properties (source/flags/lastIndex), function replacement for replace
 2. `class` `extends` support
+
+## Sprint 22 — RegExp Prototype Properties (source, flags, lastIndex)
+
+> **2026-06-29**: `RegExp.prototype.{source,flags,lastIndex}` getters implemented as own-property lookups. 427/427 tests pass.
+
+### Implementation
+
+#### Struct (`crates/rune_core/src/regexp.rs`)
+- `_pad: u32` field replaced with `last_index: u32` — reuses existing 4-byte padding, struct stays 32 bytes
+- Added `last_index()` and `set_last_index()` accessors, initialized to 0
+
+#### Property Lookup (`crates/rune_interpreter/src/vm.rs`)
+- `load_property_recursive` now takes `gc: &mut SemiSpace` parameter
+- TAG_REGEXP handler checks `source`, `flags`, `lastIndex` own properties before walking prototype chain:
+  - `source` — returns `RegExp::pattern` (existing HeapString, no allocation)
+  - `flags` — constructs flags string "gimsuyd" from bitfield, allocates HeapString
+  - `lastIndex` — returns `RegExp::last_index` as Smi
+- `load_property_recursive_ic` passes `gc` through
+- All callers updated (builtins.rs, 6 callers in vm.rs LoadProperty handler)
+
+#### Builtins (`crates/rune_interpreter/src/builtins.rs`)
+- `regexp_source`, `regexp_flags`, `regexp_last_index` getter functions (still registered on prototype but not used as accessors — own-property lookup takes precedence)
+
+#### Wrappers (`crates/rune_interpreter/src/vm.rs`)
+- RegExp prototype now includes `source`, `flags`, `lastIndex` properties (alongside `exec`, `test`)
+
+#### Integration Tests
+3 tests:
+
+| Test | What it validates |
+|---|---|
+| `test_regexp_prototype_source` | `.source` returns pattern string |
+| `test_regexp_prototype_flags` | `.flags` returns flag strings like "gi", "m", "" |
+| `test_regexp_prototype_lastIndex` | `.lastIndex` defaults to 0 |
+
+## Sprint 23 — RegExp Function Replacement for String.prototype.replace
+
+> **2026-06-29**: `String.prototype.replace` supports function as replacement value for regex patterns. 429/429 tests pass.
+
+### Implementation
+
+#### VM (`crates/rune_interpreter/src/vm.rs`)
+- `PendingReplaceOp` struct: captures `input` string and `groups` for constructing the final result after callback
+- `pending_replace_op: Option<PendingReplaceOp>` field on Vm
+- Return handler: when `pending_replace_op` matches the returned frame, converts callback return to string via `value_to_js_string`, constructs `input[..start] + repl_str + input[end..]`, pushes result
+- Call handler `pending_replace_op.is_some()` check prevents result push/PC advance
+
+#### Builtins (`crates/rune_interpreter/src/builtins.rs`)
+- `string_replace`: detects if replacement arg is TAG_FUNC
+- For regex match with function replacement:
+  - Builds args: `[match, ...captures, offset, input]`
+  - Sets `pending_replace_op` with input + groups
+  - `push_callback_call(gc, fn_val, undefined, args)`
+  - Returns `undefined` → state machine takes over
+
+#### Integration Tests
+2 tests:
+
+| Test | What it validates |
+|---|---|
+| `test_regex_replace_function` | Basic fn([match], X) → "heXlo" |
+| `test_regex_replace_function_captures` | fn(match, cap1, offset, input) → capture doubling |
+
+### Known Gaps
+- `replaceAll` function replacement not yet implemented (global regex requires iterating multiple callback calls)
+- String pattern + function replacement not yet handled
+
+### Next Steps
+1. `class` `extends` support

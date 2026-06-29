@@ -2568,10 +2568,12 @@ Two tracks, depends on target market:
 | `028ba61` | Clippy fix |
 
 #### Known Gaps (ordered by priority)
-1. ⬜ **Thenable unwrapping** — `resolve(otherPromise)` should adopt its state
-2. ⬜ **`.finally` result passthrough** — handler fires but always returns `undefined`
-3. ⬜ **`async`/`await`** — parser desugaring + generator reuse (microtask queue now available)
+1. ⬜ **`async`/`await`** — parser desugaring + generator reuse (microtask queue available)
+2. ⬜ **Thenable unwrapping** — `resolve(otherPromise)` should adopt its state
+3. ⬜ **`.finally` result passthrough** — handler fires but always returns `undefined`
 4. ⬜ **Pending promises in `Promise.all`/`race`** — settled-only for now
+5. ⬜ **RegExp** — parser + NFA/PikeVM, unblocks String methods
+6. ⬜ **`class` syntax** — parser + emitter
 
 #### test262 (v0.5 baseline)
 | Suite | Pass | Fail | Total | % |

@@ -1,6 +1,7 @@
 // TODO: document safety invariants for each unsafe fn (Sprint 14+)
 #![allow(clippy::missing_safety_doc)]
 
+pub mod accessor;
 pub mod array;
 pub mod barrier;
 pub mod env;

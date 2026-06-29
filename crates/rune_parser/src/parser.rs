@@ -253,6 +253,22 @@ impl Parser {
             } else {
                 false
             };
+            // Detect getter/setter: `get foo() {}` or `set foo(v) {}`
+            let (is_getter, is_setter) = if self.tok.kind == TokenKind::Identifier
+                && self.tok.value == "get"
+                && self.lexer.peek_token().kind != TokenKind::LParen
+            {
+                self.advance();
+                (true, false)
+            } else if self.tok.kind == TokenKind::Identifier
+                && self.tok.value == "set"
+                && self.lexer.peek_token().kind != TokenKind::LParen
+            {
+                self.advance();
+                (false, true)
+            } else {
+                (false, false)
+            };
             let key = if self.tok.kind == TokenKind::LBracket {
                 // Computed property key: [expr]() {}
                 self.advance();
@@ -271,10 +287,19 @@ impl Parser {
                     _ => None,
                 };
                 let func = self.parse_function_body(name, false, false, mstart);
+                // Validate getter/setter param counts
+                if is_getter && func.params.len() != 0 {
+                    self.error("Getter must have 0 parameters".to_string());
+                }
+                if is_setter && func.params.len() != 1 {
+                    self.error("Setter must have exactly 1 parameter".to_string());
+                }
                 methods.push(ClassMethod {
                     key,
                     func,
                     is_static,
+                    is_getter,
+                    is_setter,
                     span: Span {
                         start: mstart.start,
                         end: self.span().end,

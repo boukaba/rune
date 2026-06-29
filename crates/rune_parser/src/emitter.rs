@@ -243,6 +243,10 @@ impl Emitter {
         let mut constructor_idx = None;
         let mut method_funcs: Vec<(PropKey, usize)> = Vec::new();
         let mut static_method_funcs: Vec<(PropKey, usize)> = Vec::new();
+        let mut getter_funcs: Vec<(PropKey, usize)> = Vec::new();
+        let mut setter_funcs: Vec<(PropKey, usize)> = Vec::new();
+        let mut static_getter_funcs: Vec<(PropKey, usize)> = Vec::new();
+        let mut static_setter_funcs: Vec<(PropKey, usize)> = Vec::new();
 
         for method in &class.methods {
             let is_constructor = matches!(&method.key, PropKey::Identifier(n) if n.as_ref() == "constructor");
@@ -262,6 +266,12 @@ impl Emitter {
             let idx = self.compile_function(&func);
             if is_constructor {
                 constructor_idx = Some(idx);
+            } else if method.is_getter {
+                if method.is_static { static_getter_funcs.push((method.key.clone(), idx)); }
+                else { getter_funcs.push((method.key.clone(), idx)); }
+            } else if method.is_setter {
+                if method.is_static { static_setter_funcs.push((method.key.clone(), idx)); }
+                else { setter_funcs.push((method.key.clone(), idx)); }
             } else if method.is_static {
                 static_method_funcs.push((method.key.clone(), idx));
             } else {
@@ -321,6 +331,41 @@ impl Emitter {
             };
             let key_idx = self.intern_string(&key_str) as i64;
             self.emit(Opcode::DefineProperty, vec![key_idx]);
+        }
+
+        // 3a. Add getter/setter accessors to prototype
+        {
+            let mut all_acc_names: Vec<PropKey> = Vec::new();
+            for (key, _) in &getter_funcs {
+                if !all_acc_names.contains(key) { all_acc_names.push(key.clone()); }
+            }
+            for (key, _) in &setter_funcs {
+                if !all_acc_names.contains(key) { all_acc_names.push(key.clone()); }
+            }
+            for key in &all_acc_names {
+                let has_getter = getter_funcs.iter().any(|(k, _)| k == key);
+                let has_setter = setter_funcs.iter().any(|(k, _)| k == key);
+                if has_getter {
+                    let gi = getter_funcs.iter().find(|(k, _)| k == key).unwrap().1;
+                    self.emit(Opcode::MakeFunction, vec![gi as i64]);
+                } else {
+                    self.emit(Opcode::LoadUndefined, vec![]);
+                }
+                if has_setter {
+                    let si = setter_funcs.iter().find(|(k, _)| k == key).unwrap().1;
+                    self.emit(Opcode::MakeFunction, vec![si as i64]);
+                } else {
+                    self.emit(Opcode::LoadUndefined, vec![]);
+                }
+                let key_str = match key {
+                    PropKey::String(s) => s.to_string(),
+                    PropKey::Identifier(s) => s.to_string(),
+                    PropKey::Number(n) => n.to_string(),
+                    PropKey::Computed(_) => continue,
+                };
+                let key_idx = self.intern_string(&key_str) as i64;
+                self.emit(Opcode::DefineAccessor, vec![key_idx]);
+            }
         }
 
         // 4. Create constructor function
@@ -411,11 +456,45 @@ impl Emitter {
         }
 
         // 7.5 Add static methods to constructor
-        if !static_method_funcs.is_empty() {
-            if let Some(ctor_slot) = save_slot {
-                for (key, func_idx) in &static_method_funcs {
+        if let Some(ctor_slot) = save_slot {
+            for (key, func_idx) in &static_method_funcs {
+                self.emit(Opcode::LoadLocal, vec![ctor_slot as i64]);
+                self.emit(Opcode::MakeFunction, vec![*func_idx as i64]);
+                let key_str = match key {
+                    PropKey::String(s) => s.to_string(),
+                    PropKey::Identifier(s) => s.to_string(),
+                    PropKey::Number(n) => n.to_string(),
+                    PropKey::Computed(_) => continue,
+                };
+                let key_idx = self.intern_string(&key_str) as i64;
+                self.emit(Opcode::DefineProperty, vec![key_idx]);
+                self.emit(Opcode::Pop, vec![]);
+            }
+            // 7.6 Add static getter/setter accessors to constructor
+            {
+                let mut all_acc_names: Vec<PropKey> = Vec::new();
+                for (key, _) in &static_getter_funcs {
+                    if !all_acc_names.contains(key) { all_acc_names.push(key.clone()); }
+                }
+                for (key, _) in &static_setter_funcs {
+                    if !all_acc_names.contains(key) { all_acc_names.push(key.clone()); }
+                }
+                for key in &all_acc_names {
                     self.emit(Opcode::LoadLocal, vec![ctor_slot as i64]);
-                    self.emit(Opcode::MakeFunction, vec![*func_idx as i64]);
+                    let has_getter = static_getter_funcs.iter().any(|(k, _)| k == key);
+                    let has_setter = static_setter_funcs.iter().any(|(k, _)| k == key);
+                    if has_getter {
+                        let gi = static_getter_funcs.iter().find(|(k, _)| k == key).unwrap().1;
+                        self.emit(Opcode::MakeFunction, vec![gi as i64]);
+                    } else {
+                        self.emit(Opcode::LoadUndefined, vec![]);
+                    }
+                    if has_setter {
+                        let si = static_setter_funcs.iter().find(|(k, _)| k == key).unwrap().1;
+                        self.emit(Opcode::MakeFunction, vec![si as i64]);
+                    } else {
+                        self.emit(Opcode::LoadUndefined, vec![]);
+                    }
                     let key_str = match key {
                         PropKey::String(s) => s.to_string(),
                         PropKey::Identifier(s) => s.to_string(),
@@ -423,7 +502,7 @@ impl Emitter {
                         PropKey::Computed(_) => continue,
                     };
                     let key_idx = self.intern_string(&key_str) as i64;
-                    self.emit(Opcode::DefineProperty, vec![key_idx]);
+                    self.emit(Opcode::DefineAccessor, vec![key_idx]);
                     self.emit(Opcode::Pop, vec![]);
                 }
             }

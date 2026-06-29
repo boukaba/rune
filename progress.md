@@ -3124,3 +3124,57 @@ Added `ClassNode` (name, methods, span), `ClassMethod` (key, func, is_static, sp
 - `let inst = new Foo(x); return inst.x;` inside a static method returns `undefined` (pre-existing `let`+`new` scoping bug in function bodies, affects regular functions too)
 - Compound assignment (`super.prop += val`) not implemented for Expr::Super target
 - StringObject/TAG_STRING_OBJ not handled in `ordinary_has_instance` prototype chain walk
+
+---
+
+## Sprint 31 — Getter/Setter Syntax
+
+> **2026-06-30**: `class Foo { get prop() { ... } set prop(v) { ... } }` supported. New AST fields, Parser detects `get foo()`/`set foo(v)`, new GC type `AccessorPair` (TAG_ACCESSOR), new `DefineAccessor` opcode, VM dispatches getter/setter via `PendingAccessorCall` mechanism. 6 new tests. 468/468 tests pass.
+
+### Implementation
+
+#### Parser (`crates/rune_parser/src/ast.rs`, `src/parser.rs`)
+- `ClassMethod` struct: added `is_getter`/`is_setter` bool fields
+- `parse_class_body`: lookahead for `Ident("get")`/`Ident("set")` followed by property name
+- Validates parameter count: getter must have 0 params, setter must have 1 param
+
+#### GC (`crates/rune_core/src/accessor.rs`, `src/gc.rs`)
+- New `AccessorPair` type: `[GcHeader(8) | getter(8) | setter(8)]` = 24 bytes
+- `TAG_ACCESSOR = 10` in GC tag enum
+- GC scanner forwards both getter+setter value slots; `scan_end` returns 24
+
+#### Bytecode (`crates/rune_bytecode/src/opcode.rs`)
+- New `DefineAccessor` opcode: pops `setter`, `getter`, `obj`; allocates AccessorPair; stores as property
+
+#### VM (`crates/rune_interpreter/src/vm.rs`)
+- `PendingAccessorCall` struct: tracks getter/setter frame return routing
+- `resolve_accessor_for_read()`: checks AccessorPair, pushes getter frame, sets pending state
+- `DefineAccessor` handler: allocates AccessorPair with GC pointer re-resolution
+- **LoadProperty** (generic + IC hit + IC miss): dispatch getter via `resolve_accessor_for_read`
+- **StoreProperty**: walk prototype chain, dispatch setter via frame push
+- **Return handler**: intercept returns for pending accessor calls, route result back to original opcode
+- **IC exclusion**: `load_property_recursive_ic` returns TAG_ACCESSOR without caching
+- **Bug fix**: `continue 'run` label used for outer loop, matching `source_frame_depth` guard prevents child frame interference
+
+#### Integration Tests
+6 new tests:
+
+| Test | What it validates |
+|---|---|
+| `test_class_getter_simple` | Getter returns a constant value |
+| `test_class_getter_setter` | Getter + setter pair: set stores, get retrieves |
+| `test_class_getter_no_setter` | Getter-only: assignment is no-op (per spec) |
+| `test_class_static_getter` | Static getter on constructor |
+| `test_class_getter_this` | Getter `this` refers to instance |
+| `test_class_setter_this` | Setter `this` refers to instance |
+
+### Known Gaps
+- `this.prop++` not supported (Update only handles Identifier targets)
+- No `test_class_setter_no_getter` test (setter-only accessor)
+- Compound assignment (`super.prop += val`) for Expr::Super target
+- StringObject not in `ordinary_has_instance` prototype chain
+
+### Next Steps
+1. Compound assignment for `super.prop += val`
+2. `String.prototype.match`/`search`/`split` for RegExp
+3. Private fields (`#`)

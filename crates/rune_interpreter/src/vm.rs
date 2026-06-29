@@ -6,8 +6,9 @@ use rune_core::array::RuneArray;
 use rune_core::env::EnvObject;
 
 use rune_core::function::Func;
+use rune_core::accessor::AccessorPair;
 use rune_core::gc::{
-    GcHeader, RootProvider, SemiSpace, TAG_ARRAY, TAG_FLOAT64, TAG_FUNC, TAG_OBJECT, TAG_PROMISE, TAG_REGEXP, TAG_STRING, TAG_STRING_OBJ,
+    GcHeader, RootProvider, SemiSpace, TAG_ACCESSOR, TAG_ARRAY, TAG_FLOAT64, TAG_FUNC, TAG_OBJECT, TAG_PROMISE, TAG_REGEXP, TAG_STRING, TAG_STRING_OBJ,
 };
 use rune_core::object::JSObject;
 use rune_core::promise::{Promise, PROMISE_FULFILLED, PROMISE_PENDING, PROMISE_REJECTED};
@@ -254,7 +255,15 @@ pub(crate) struct AsyncTask {
     pub(crate) promise: *mut u8,
 }
 
-/// State for an in-progress Array.prototype callback iteration.
+/// State for a pending accessor (getter/setter) call during property access.
+/// Set by the LoadProperty or StoreProperty handler when the resolved property
+/// value is an AccessorPair. Consumed by the Return handler when the getter/setter
+/// frame returns.
+pub(crate) struct PendingAccessorCall {
+    pub(crate) source_frame_depth: usize,
+    /// true if this is a getter call (load), false for a setter call (store)
+    pub(crate) is_getter: bool,
+}
 /// Set by the builtin function, consumed/updated by the Return handler.
 pub(crate) struct ArrayOpState {
     pub(crate) kind: ArrayOpKind,
@@ -391,6 +400,8 @@ pub struct Vm {
     pub(crate) pending_replace_op: Option<PendingReplaceOp>,
     /// Pending assert.throws callback.
     pub(crate) pending_assert: Option<PendingAssert>,
+    /// Pending accessor call (getter/setter).
+    pub(crate) pending_accessor_call: Option<PendingAccessorCall>,
     /// Pending primitive conversion (ToPrimitive on object for +, ToString, etc.).
     pub(crate) pending_primitive_conversion: Option<PendingPrimitiveConversion>,
     /// Whether an assert.* function was called during the current execution.
@@ -470,6 +481,7 @@ impl Vm {
             pending_finally_op: None,
             pending_replace_op: None,
             pending_assert: None,
+            pending_accessor_call: None,
             pending_primitive_conversion: None,
             assert_called: false,
         }
@@ -1162,6 +1174,62 @@ impl Vm {
     }
 
     /// Execute a bytecode program and return its result.
+    /// Check if a value is an AccessorPair. If so, extract the getter and push a
+    /// frame to call it, setting `pending_accessor_call` so the Return handler
+    /// can route the getter's return value back to the LoadProperty caller.
+    /// Returns the original value if not an accessor, or undefined if getter undefined.
+    /// When a getter frame is pushed, the caller MUST `continue` the VM loop.
+    fn resolve_accessor_for_read(&mut self, val: Value, this: Value, _gc: &mut SemiSpace) -> Value {
+        if let Some(ptr) = val.heap_ptr()
+            && unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_ACCESSOR
+        {
+            let getter = unsafe { AccessorPair::getter(ptr) };
+            if !getter.is_undefined()
+                && let Some(gptr) = getter.heap_ptr()
+                && unsafe { (*(gptr as *const GcHeader)).tag() } == TAG_FUNC
+            {
+                let func_ptr = gptr;
+                let func_idx = unsafe { Func::func_index(func_ptr as *mut Func) } as usize;
+                let creator_prog = unsafe {
+                    &*(Func::prog_ptr(func_ptr as *mut Func) as *const BytecodeProgram)
+                };
+                if func_idx < creator_prog.functions.len() {
+                    let func_prog = &creator_prog.functions[func_idx];
+                    let func_env = unsafe { Func::env_ptr(func_ptr as *mut Func) };
+                    let locals = if func_prog.named_function {
+                        vec![getter]
+                    } else {
+                        vec![]
+                    };
+                    self.pending_accessor_call = Some(PendingAccessorCall {
+                        source_frame_depth: self.frames.len(),
+                        is_getter: true,
+                    });
+                    self.frames.push(Frame {
+                        locals,
+                        lexical_slots: Vec::new(),
+                        lexical_tdz: Vec::new(),
+                        lexical_const: Vec::new(),
+                        scope_boundaries: Vec::new(),
+                        passed_argc: 0,
+                        pc: 0,
+                        stack_base: self.stack.len(),
+                        prog: func_prog as *const BytecodeProgram,
+                        generator_id: None,
+                        this,
+                        is_constructor_call: false,
+                        constructed_object: Value::undefined(),
+                        env: func_env,
+                        func_ptr: func_ptr as *mut u8,
+                    });
+                    return Value::undefined();
+                }
+            }
+            return Value::undefined();
+        }
+        val
+    }
+
     pub fn execute(
         &mut self,
         gc: &mut SemiSpace,
@@ -1296,7 +1364,7 @@ impl Vm {
     }
 
     fn run_loop(&mut self, gc: &mut SemiSpace) -> Exit {
-        loop {
+        'run: loop {
             let fi = self.frames.len() - 1;
             let pc = self.frames[fi].pc;
             let prog_ptr = self.frames[fi].prog;
@@ -2275,194 +2343,15 @@ impl Vm {
                             } else {
                                 Value::undefined()
                             }
+                        } else if tag == TAG_ARRAY || tag == TAG_OBJECT || tag == TAG_FUNC || tag == TAG_REGEXP || tag == TAG_PROMISE || tag == TAG_STRING_OBJ {
+                            load_property_recursive(obj, raw_key, Some(self.function_prototype), gc)
                         } else {
-                            // IC fast path: check inline cache before full walk
-                            if instr.ic_index >= 0 {
-                                let ic_idx = instr.ic_index as usize;
-                                self.ic_stats.lookups += 1;
-                                if ic_idx < self.ics.len()
-                                    && let Some(ptr) = obj.heap_ptr()
-                                {
-                                    if tag == TAG_OBJECT {
-                                        let shape =
-                                            unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
-                                        let (shape_id, key_hash) = ic_cache_key(shape.id, raw_key);
-                                        if let Some(entry) =
-                                            self.ics[ic_idx].get(shape_id, key_hash)
-                                        {
-                                            self.ic_stats.hits += 1;
-                                            // Record shape_id for trace analysis
-                                            if let Some(target) = self.recording_trace
-                                                && let Some(trace) =
-                                                    self.loop_traces.get_mut(&target)
-                                            {
-                                                if !trace.shape_ids.contains(&shape.id) {
-                                                    trace.shape_ids.push(shape.id);
-                                                }
-                                                if let Some(last) = trace.ops.last_mut() {
-                                                    last.shape_id = shape.id;
-                                                }
-                                            }
-                                            // Hot-path specialization: after 8 hits, patch
-                                            // LoadProperty → LoadPropertyIC for shape-guarded access.
-                                            if ic_idx < self.ic_hit_counts.len()
-                                                && self.ic_hit_counts[ic_idx] < 8
-                                            {
-                                                self.ic_hit_counts[ic_idx] += 1;
-                                                if self.ic_hit_counts[ic_idx] == 8 {
-                                                    let instr_mut = unsafe {
-                                                        let instrs_ptr =
-                                                            (*prog_ptr).instructions.as_ptr()
-                                                                as *mut Instruction;
-                                                        &mut *instrs_ptr.add(pc)
-                                                    };
-                                                    instr_mut.opcode = Opcode::LoadPropertyIC;
-                                                    instr_mut.operands.clear();
-                                                    instr_mut.operands.extend_from_slice(&[
-                                                        shape.id as i64,
-                                                        entry.offset as i64,
-                                                        entry.proto_depth as i64,
-                                                    ]);
-                                                    self.ic_entries[ic_idx] = entry;
-                                                }
-                                            }
-                                            let val = if entry.is_own {
-                                                unsafe {
-                                                    JSObject::get_slot(
-                                                        ptr as *mut JSObject,
-                                                        entry.offset,
-                                                    )
-                                                }
-                                            } else {
-                                                let mut p = ptr;
-                                                for _ in 0..entry.proto_depth {
-                                                    let next = unsafe {
-                                                        JSObject::prototype(p as *mut JSObject)
-                                                    };
-                                                    if next.is_null() {
-                                                        break;
-                                                    }
-                                                    p = next;
-                                                }
-                                                unsafe {
-                                                    JSObject::get_slot(
-                                                        p as *mut JSObject,
-                                                        entry.offset,
-                                                    )
-                                                }
-                                            };
-                                            self.push(val);
-                                            self.frames[fi].pc = pc + 1;
-                                            continue;
-                                        }
-                                    } else if tag == TAG_ARRAY {
-                                        let (shape_id, key_hash) =
-                                            ic_cache_key(DENSE_ARRAY_SHAPE.id, raw_key);
-                                        if let Some(entry) =
-                                            self.ics[ic_idx].get(shape_id, key_hash)
-                                        {
-                                            self.ic_stats.hits += 1;
-                                            let len =
-                                                unsafe { RuneArray::length(ptr as *mut RuneArray) };
-                                            let val = if entry.is_own {
-                                                if entry.offset < len as usize {
-                                                    unsafe {
-                                                        RuneArray::get_element(
-                                                            ptr as *mut RuneArray,
-                                                            entry.offset,
-                                                        )
-                                                    }
-                                                } else {
-                                                    Value::undefined()
-                                                }
-                                            } else {
-                                                // Inherited from Array.prototype
-                                                let mut p = ptr;
-                                                for _ in 0..entry.proto_depth {
-                                                    let next = unsafe {
-                                                        JSObject::prototype(p as *mut JSObject)
-                                                    };
-                                                    if next.is_null() {
-                                                        break;
-                                                    }
-                                                    p = next;
-                                                }
-                                                unsafe {
-                                                    JSObject::get_slot(
-                                                        p as *mut JSObject,
-                                                        entry.offset,
-                                                    )
-                                                }
-                                            };
-                                            self.push(val);
-                                            self.frames[fi].pc = pc + 1;
-                                            continue;
-                                        }
-                                    }
-                                }
-                                self.ic_stats.misses += 1;
-                                // Full lookup with IC population
-
-                                load_property_recursive_ic(
-                                    gc,
-                                    &mut self.ics,
-                                    &mut self.ic_entries,
-                                    &mut self.ic_hit_counts,
-                                    &mut self.ic_stats,
-                                    &instr,
-                                    obj,
-                                    raw_key,
-                                    Some(self.function_prototype),
-                                )
-                            } else {
-                                // No IC attached — fall back to full lookup
-                                load_property_recursive(obj, raw_key, Some(self.function_prototype), gc)
-                            }
+                            Value::undefined()
                         }
                     } else if let Some(smi) = obj.as_smi() {
                         if smi < 0 {
-                            // Negative Smi = builtin handle — first check metadata properties
-                            if let Some(ptr) = raw_key.heap_ptr() {
-                                let key_tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-                                if key_tag == TAG_STRING {
-                                    let key_str = unsafe { HeapString::to_string(ptr as *mut HeapString) };
-                                    let id = ((-smi) as usize) - 1;
-                                    if id < self.builtins.len() {
-                                        if key_str == "length" {
-                                            let val = self.builtins[id].length as i32;
-                                            Value::smi(val)
-                                        } else if key_str == "name" {
-                                            let display = self.builtins[id].name
-                                                .rsplit('_')
-                                                .next()
-                                                .unwrap_or(self.builtins[id].name);
-                                            let val = HeapString::allocate(gc, display);
-                                            Value::from_heap_ptr(val as *mut u8)
-                                        } else {
-                                            // Not metadata — fall through to Function.prototype
-                                            if self.function_prototype.is_heap_object() {
-                                                load_property_recursive(self.function_prototype, raw_key, Some(self.function_prototype), gc)
-                                            } else {
-                                                Value::undefined()
-                                            }
-                                        }
-                                    } else {
-                                        // Unknown handle — check Function.prototype
-                                        if self.function_prototype.is_heap_object() {
-                                            load_property_recursive(self.function_prototype, raw_key, Some(self.function_prototype), gc)
-                                        } else {
-                                            Value::undefined()
-                                        }
-                                    }
-                                } else {
-                                    // Not a string key — check Function.prototype
-                                    if self.function_prototype.is_heap_object() {
-                                        load_property_recursive(self.function_prototype, raw_key, Some(self.function_prototype), gc)
-                                    } else {
-                                        Value::undefined()
-                                    }
-                                }
-                            } else if self.function_prototype.is_heap_object() {
+                            // Negative Smi = builtin handle — check Function.prototype
+                            if self.function_prototype.is_heap_object() {
                                 load_property_recursive(self.function_prototype, raw_key, Some(self.function_prototype), gc)
                             } else {
                                 Value::undefined()
@@ -2473,6 +2362,12 @@ impl Vm {
                     } else {
                         Value::undefined()
                     };
+                    let result = self.resolve_accessor_for_read(result, obj, gc);
+                    if let Some(ref acc) = self.pending_accessor_call
+                        && self.frames.len() == acc.source_frame_depth
+                    {
+                        continue;
+                    }
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
                 }
@@ -2520,6 +2415,12 @@ impl Vm {
                                     }
                                     unsafe { JSObject::get_slot(p as *mut JSObject, offset) }
                                 };
+                                let val = self.resolve_accessor_for_read(val, obj, gc);
+                                if let Some(ref acc) = self.pending_accessor_call
+                                    && self.frames.len() == acc.source_frame_depth
+                                {
+                                    continue;
+                                }
                                 self.push(val);
                                 self.frames[fi].pc = pc + 1;
                                 continue;
@@ -2540,6 +2441,12 @@ impl Vm {
                         raw_key,
                         Some(self.function_prototype),
                     );
+                    let result = self.resolve_accessor_for_read(result, obj, gc);
+                    if let Some(ref acc) = self.pending_accessor_call
+                        && self.frames.len() == acc.source_frame_depth
+                    {
+                        continue;
+                    }
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
                 }
@@ -2547,6 +2454,77 @@ impl Vm {
                     let value = self.pop();
                     let raw_key = self.pop();
                     let obj = self.pop();
+                    // Check for accessor setter on own or prototype chain
+                    if let Some(ptr) = obj.heap_ptr()
+                        && let tag = unsafe { (*(ptr as *const GcHeader)).tag() }
+                        && tag == TAG_OBJECT
+                        && let Some(key) = value_to_prop_key(raw_key)
+                    {
+                        let mut search_ptr = ptr;
+                        loop {
+                            let search_shape = unsafe { JSObject::shape_ptr(search_ptr as *mut JSObject) };
+                            if let Some(slot) = search_shape.lookup(&key) {
+                                let val = unsafe { JSObject::get_slot(search_ptr as *mut JSObject, slot) };
+                                if val.is_heap_object() && let Some(vptr) = val.heap_ptr()
+                                    && unsafe { (*(vptr as *const GcHeader)).tag() } == TAG_ACCESSOR
+                                    {
+                                        let setter = unsafe { AccessorPair::setter(vptr) };
+                                        if !setter.is_undefined()
+                                            && let Some(sptr) = setter.heap_ptr()
+                                            && unsafe { (*(sptr as *const GcHeader)).tag() } == TAG_FUNC
+                                        {
+                                            self.pending_accessor_call = Some(PendingAccessorCall {
+                                                source_frame_depth: self.frames.len(),
+                                                is_getter: false,
+                                            });
+                                            let func_ptr = sptr;
+                                            let func_idx = unsafe { Func::func_index(func_ptr as *mut Func) } as usize;
+                                            let creator_prog = unsafe {
+                                                &*(Func::prog_ptr(func_ptr as *mut Func) as *const BytecodeProgram)
+                                            };
+                                            if func_idx < creator_prog.functions.len() {
+                                                let func_prog = &creator_prog.functions[func_idx];
+                                                let func_env = unsafe { Func::env_ptr(func_ptr as *mut Func) };
+                                                let mut locals = if func_prog.named_function {
+                                                    vec![setter]
+                                                } else {
+                                                    vec![]
+                                                };
+                                                locals.push(value);
+                                                self.frames.push(Frame {
+                                                    locals,
+                                                    lexical_slots: Vec::new(),
+                                                    lexical_tdz: Vec::new(),
+                                                    lexical_const: Vec::new(),
+                                                    scope_boundaries: Vec::new(),
+                                                    passed_argc: 1,
+                                                    pc: 0,
+                                                    stack_base: self.stack.len(),
+                                                    prog: func_prog as *const BytecodeProgram,
+                                                    generator_id: None,
+                                                    this: obj,
+                                                    is_constructor_call: false,
+                                                    constructed_object: Value::undefined(),
+                                                    env: func_env,
+                                                    func_ptr: func_ptr as *mut u8,
+                                                });
+                                                continue 'run;
+                                            }
+                                        }
+                                        // Setter undefined — skip store (spec: return false)
+                                        self.push(Value::undefined());
+                                        self.frames[fi].pc = pc + 1;
+                                        continue 'run;
+                                    }
+                                    // Found a data property — stop walk, do normal store
+                                    break;
+                                }
+                                // Walk to prototype
+                                let proto = unsafe { JSObject::prototype(search_ptr as *mut JSObject) };
+                                if proto.is_null() { break; }
+                                search_ptr = proto;
+                            }
+                        }
                     // IC hit counting: track successful own-property writes for patching
                     if let Some(ptr) = obj.heap_ptr() {
                         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
@@ -2655,6 +2633,51 @@ impl Vm {
                                 HeapString::allocate(gc, &key_str) as *mut u8
                             );
                             do_store_property(obj, raw_key, value, gc);
+                        }
+                    }
+                    self.push(obj);
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::DefineAccessor => {
+                    let setter = self.pop();
+                    let getter = self.pop();
+                    let obj = self.pop();
+                    let key_idx = instr.operands[0] as usize;
+                    if let Some(key_str) = self.frames[fi].prog_str(key_idx)
+                        && let Some(ptr) = obj.heap_ptr()
+                    {
+                        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+                        if tag == TAG_OBJECT || tag == TAG_FUNC {
+                            let acc_ptr = AccessorPair::allocate(gc, getter, setter);
+                            let acc_val = Value::from_heap_ptr(acc_ptr);
+                            let key = PropertyKey::from_string(&key_str);
+                            // Re-resolve obj pointer after allocation (GC may have moved it)
+                            let ptr = obj.heap_ptr().unwrap();
+                            let ptr = if unsafe { (*(ptr as *const GcHeader)).is_forwarded() } {
+                                unsafe { (*(ptr as *const GcHeader)).forwarding_addr() }
+                            } else { ptr };
+                            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+                            if tag == TAG_OBJECT {
+                                let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                                if let Some(slot) = shape.lookup(&key) {
+                                    unsafe { JSObject::set_slot(ptr as *mut JSObject, slot, acc_val) };
+                                } else {
+                                    unsafe {
+                                        JSObject::add_property(
+                                            ptr as *mut JSObject,
+                                            key,
+                                            key_str.to_string(),
+                                            acc_val,
+                                        )
+                                    };
+                                }
+                            } else {
+                                // TAG_FUNC (after re-resolution tag may have changed)
+                                let raw_key = Value::from_heap_ptr(
+                                    HeapString::allocate(gc, &key_str) as *mut u8
+                                );
+                                do_store_property(obj, raw_key, acc_val, gc);
+                            }
                         }
                     }
                     self.push(obj);
@@ -4559,6 +4582,16 @@ impl Vm {
                         self.frames[new_fi].pc += 1;
                         continue;
                     }
+                    // Check if this return completes an accessor (getter/setter) call.
+                    if let Some(acc) = self.pending_accessor_call.take()
+                        && self.frames.len() == acc.source_frame_depth
+                    {
+                        self.stack.truncate(callee_base);
+                        self.push(result);
+                        let caller_idx = self.frames.len() - 1;
+                        self.frames[caller_idx].pc += 1;
+                        continue;
+                    }
                     // Check if this return completes a pending primitive conversion.
                     if let Some(pc) = self.pending_primitive_conversion.take()
                         && self.frames.len() == pc.source_frame_depth
@@ -5695,6 +5728,13 @@ fn load_property_recursive_ic(
     }
 
     let result = load_property_recursive(obj, raw_key, function_prototype, gc);
+    // Don't cache accessor properties in the IC (getter/setter dispatch needs
+    // the non-IC path to call the getter function).
+    if result.is_heap_object() && let Some(rptr) = result.heap_ptr()
+        && unsafe { (*(rptr as *const GcHeader)).tag() } == TAG_ACCESSOR
+    {
+        return result;
+    }
     // Populate IC for all result types
     if instr.ic_index >= 0
         && let Some(ptr) = obj.heap_ptr()

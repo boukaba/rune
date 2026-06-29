@@ -63,6 +63,7 @@ pub enum Opcode {
     StoreProperty,
     DeleteProperty,
     DefineProperty,
+    DefineAccessor,
     // Template literals
     ToString,
     StringConcat,

@@ -145,6 +145,8 @@ pub struct ClassMethod {
     pub key: PropKey,
     pub func: FnNode,
     pub is_static: bool,
+    pub is_getter: bool,
+    pub is_setter: bool,
     pub span: Span,
 }
 

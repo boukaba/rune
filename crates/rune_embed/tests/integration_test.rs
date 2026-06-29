@@ -5448,7 +5448,8 @@ fn test_thenable_unwrapping_non_thenable() {
 // ---- Class Syntax Tests ----
 
 fn class_eval_num(ctx: &mut Context, code: &str) -> i32 {
-    ctx.eval(code).unwrap().as_smi().unwrap()
+    let r = ctx.eval(code).unwrap();
+    r.as_smi().unwrap()
 }
 
 #[test]
@@ -5728,4 +5729,77 @@ fn test_class_super_prop_assign_overrides_parent() {
          var c = new Child();
          c.method();"
     ), 99);
+}
+
+#[test]
+fn test_class_getter_simple() {
+    let mut ctx = Context::new_small();
+    // Simple getter: get prop() { return expr; }
+    assert_eq!(class_eval_num(&mut ctx,
+        "class Foo { get prop() { return 42; } }
+         var f = new Foo();
+         f.prop;"
+    ), 42);
+}
+
+#[test]
+fn test_class_getter_setter() {
+    let mut ctx = Context::new_small();
+    // Getter and setter for same property
+    assert_eq!(class_eval_num(&mut ctx,
+        "class Foo { constructor() { this._x = 0; }
+           get x() { return this._x; }
+           set x(v) { this._x = v; } }
+         var f = new Foo();
+         f.x = 10;
+         f.x;"
+    ), 10);
+}
+
+#[test]
+fn test_class_getter_no_setter() {
+    let mut ctx = Context::new_small();
+    // Getter without setter — assignment does not shadow the accessor (per spec)
+    assert_eq!(class_eval_num(&mut ctx,
+        "class Foo { get x() { return 1; } }
+         var f = new Foo();
+         f.x = 2;
+         f.x;"
+    ), 1);
+}
+
+#[test]
+fn test_class_static_getter() {
+    let mut ctx = Context::new_small();
+    // Static getter
+    assert_eq!(class_eval_num(&mut ctx,
+        "class Foo { static get count() { return 42; } }
+         Foo.count;"
+    ), 42);
+}
+
+#[test]
+fn test_class_getter_this() {
+    let mut ctx = Context::new_small();
+    // Getter `this` refers to the instance
+    assert_eq!(class_eval_num(&mut ctx,
+        "class Foo { constructor(v) { this.val = v; }
+           get doubled() { return this.val * 2; } }
+         var f = new Foo(21);
+         f.doubled;"
+    ), 42);
+}
+
+#[test]
+fn test_class_setter_this() {
+    let mut ctx = Context::new_small();
+    // Setter `this` refers to the instance
+    assert_eq!(class_eval_num(&mut ctx,
+        "class Foo { constructor() { this._x = 0; }
+           set x(v) { this._x = v + 1; }
+           get x() { return this._x; } }
+         var f = new Foo();
+         f.x = 10;
+         f.x;"
+    ), 11);
 }

@@ -12,6 +12,7 @@ pub const TAG_STRING_OBJ: u64 = 6;
 pub const TAG_FORWARDED: u64 = 7;
 pub const TAG_PROMISE: u64 = 8;
 pub const TAG_REGEXP: u64 = 9;
+pub const TAG_ACCESSOR: u64 = 10;
 
 /// Tag bits mask for GC header tag.
 pub const GC_TAG_MASK: u64 = 0b1111;
@@ -275,6 +276,12 @@ impl SemiSpace {
                         let proto_ptr = scan_ptr.add(24) as *mut u64;
                         self.forward_value(proto_ptr);
                     }
+                    TAG_ACCESSOR => {
+                        let getter_ptr = scan_ptr.add(size_of::<GcHeader>()) as *mut u64;
+                        self.forward_value(getter_ptr);
+                        let setter_ptr = scan_ptr.add(size_of::<GcHeader>() + 8) as *mut u64;
+                        self.forward_value(setter_ptr);
+                    }
                     _ => {}
                 }
 
@@ -321,6 +328,7 @@ impl SemiSpace {
                 TAG_STRING_OBJ => obj_start.add(STRING_OBJ_TOTAL_SIZE),
                 TAG_PROMISE => obj_start.add(crate::promise::PROMISE_SIZE),
                 TAG_REGEXP => obj_start.add(32),
+                TAG_ACCESSOR => obj_start.add(crate::accessor::ACCESSOR_SIZE),
                 _ => obj_start.add(8),
             }
         }

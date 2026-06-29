@@ -2542,3 +2542,31 @@ Two tracks, depends on target market:
 | **Features: Promise + RegExp + iterators** | Promise + microtask queue (~2-3 weeks), RegExp (~2 weeks), iterator protocol + for...of (~1 week) | 🔴 High (serverless needs fetch/Promise) | 🟡 Medium (most JS workloads work without these) |
 
 **Recommendation:** Serverless/edge target → features first (Promise unblocks real frameworks). General JS target → perf first (close warm gap).
+
+## v0.5 — Promise + Async Patterns
+
+### Phase 1: Promise Core ✅
+
+**Status: DONE** — constructor, resolve/reject, `.then`/`.catch` working.
+
+#### Architecture
+- **TAG_PROMISE = 8** — new heap type with 4-bit GC tag mask (was 3-bit, expanded to accommodate). Layout: `[GcHeader | state: u32 | result: Value | prototype: *mut u8]`, 32 bytes.
+- **PendingPromiseCtor** — pending-callback state machine on Vm, stores promise + resolve/reject handles. Set by `promise_constructor`, consumed by Return handler after executor/callback returns.
+- **Bridge functions** — resolve/reject are TAG_FUNC closures (EnvObject + Func) pointing to a BytecodeProgram that reads captured env slots and calls the builtin with `this=promise`.
+- **resolve_with_result** flag — `.then` callbacks set this; Return handler resolves the chained promise with the callback's return value before pushing it.
+- **GC forwarding fix** — `PendingPromiseCtor.take()` was consuming state even when frame depth didn't match (e.g., bridge function's Return triggered check at wrong depth). Fixed with `is_some()` + `as_ref()` check before `take()`.
+
+#### Commits
+| Commit | Description |
+|---|---|
+| `fcaf9e4` | Promise constructor + resolve/reject bridge functions + `.then`/`.catch` + TAG_PROMISE in load_property_recursive |
+| `6a3448e` | Fix unsafe blocks in promise.rs |
+| `06e42ca` | Allow dead_code on PendingPromiseCtor fields |
+
+#### Known Gaps (ordered by priority)
+1. ⬜ **`.then` chaining** — `p.then(f).then(g)` doesn't call `g`; the Return handler pushes the resolved promise but the chain stops
+2. ⬜ **Microtask queue** — callbacks are synchronous per-task, no microtask semantics (breaks `Promise.resolve().then(() => print("later")); print("now")` ordering)
+3. ⬜ **`Promise.all` / `Promise.race` / `Promise.resolve` / `Promise.reject`**
+4. ⬜ **Thenable unwrapping** — `resolve(otherPromise)` should adopt its state
+5. ⬜ **`async`/`await`** — parser desugaring + generator reuse
+6. ⬜ **test262** — not yet run; expected very low (most tests need chaining + microtask)

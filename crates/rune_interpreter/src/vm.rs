@@ -177,6 +177,7 @@ pub(crate) struct PendingCall {
 
 /// State for a pending Promise constructor — stores the promise so it can be pushed
 /// as the result after the executor callback returns.
+#[allow(dead_code)]
 pub(crate) struct PendingPromiseCtor {
     pub(crate) source_frame_depth: usize,
     pub(crate) promise: Value,

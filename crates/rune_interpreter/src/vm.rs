@@ -190,6 +190,10 @@ pub(crate) enum ArrayOpKind {
     Map,
     Reduce,
     ForEach,
+    Find,
+    FindIndex,
+    Some,
+    Every,
 }
 
 /// State for an in-progress Array.prototype callback iteration.
@@ -425,6 +429,11 @@ impl Vm {
         let reduce_handle = find_handle(&self.builtins, "Array_prototype_reduce");
         let for_each_handle = find_handle(&self.builtins, "Array_prototype_forEach");
         let slice_handle = find_handle(&self.builtins, "Array_prototype_slice");
+        let includes_handle = find_handle(&self.builtins, "Array_prototype_includes");
+        let find_h = find_handle(&self.builtins, "Array_prototype_find");
+        let find_index_h = find_handle(&self.builtins, "Array_prototype_findIndex");
+        let some_h = find_handle(&self.builtins, "Array_prototype_some");
+        let every_h = find_handle(&self.builtins, "Array_prototype_every");
         if let (Some(push), Some(pop)) = (push_handle, pop_handle) {
             let mut proto_entries: Vec<(&str, Value)> = vec![("push", push), ("pop", pop)];
             if let Some(f) = filter_handle { proto_entries.push(("filter", f)); }
@@ -432,6 +441,11 @@ impl Vm {
             if let Some(r) = reduce_handle { proto_entries.push(("reduce", r)); }
             if let Some(fe) = for_each_handle { proto_entries.push(("forEach", fe)); }
             if let Some(s) = slice_handle { proto_entries.push(("slice", s)); }
+            if let Some(incl) = includes_handle { proto_entries.push(("includes", incl)); }
+            if let Some(fnd) = find_h { proto_entries.push(("find", fnd)); }
+            if let Some(fi) = find_index_h { proto_entries.push(("findIndex", fi)); }
+            if let Some(sm) = some_h { proto_entries.push(("some", sm)); }
+            if let Some(ev) = every_h { proto_entries.push(("every", ev)); }
             let arr_proto = make_object(gc, &proto_entries);
             self.builtin_wrappers
                 .insert("Array.prototype".to_string(), arr_proto);
@@ -3809,6 +3823,40 @@ impl Vm {
                                     op.accumulator = Some(result);
                                 }
                                 ArrayOpKind::ForEach => {}
+                                ArrayOpKind::Find | ArrayOpKind::FindIndex => {
+                                    if result.to_bool() {
+                                        let found = match op.kind {
+                                            ArrayOpKind::Find => {
+                                                array_like_index(op.source_val, op.index as u32)
+                                                    .unwrap_or(Value::undefined())
+                                            }
+                                            _ => Value::smi(op.index as i32),
+                                        };
+                                        let frames_len = self.frames.len();
+                                        self.stack.truncate(callee_base);
+                                        self.push(found);
+                                        self.frames[frames_len - 1].pc += 1;
+                                        continue;
+                                    }
+                                }
+                                ArrayOpKind::Some => {
+                                    if result.to_bool() {
+                                        let frames_len = self.frames.len();
+                                        self.stack.truncate(callee_base);
+                                        self.push(Value::boolean(true));
+                                        self.frames[frames_len - 1].pc += 1;
+                                        continue;
+                                    }
+                                }
+                                ArrayOpKind::Every => {
+                                    if !result.to_bool() {
+                                        let frames_len = self.frames.len();
+                                        self.stack.truncate(callee_base);
+                                        self.push(Value::boolean(false));
+                                        self.frames[frames_len - 1].pc += 1;
+                                        continue;
+                                    }
+                                }
                             }
                             // Re-read source length each iteration (may have been mutated by callback)
                             let current_len = array_like_length(op.source_val).unwrap_or(0);
@@ -3831,11 +3879,11 @@ impl Vm {
                                 let resolved_val = array_like_index(op.source_val, i as u32)
                                     .unwrap_or(Value::undefined());
                                 let cb_this = match op_kind {
-                                    ArrayOpKind::Filter | ArrayOpKind::Map | ArrayOpKind::ForEach => op.this_val,
+                                    ArrayOpKind::Filter | ArrayOpKind::Map | ArrayOpKind::ForEach | ArrayOpKind::Find | ArrayOpKind::FindIndex | ArrayOpKind::Some | ArrayOpKind::Every => op.this_val,
                                     ArrayOpKind::Reduce => Value::undefined(),
                                 };
                                 let cb_args = match op_kind {
-                                    ArrayOpKind::Filter | ArrayOpKind::Map | ArrayOpKind::ForEach => {
+                                    ArrayOpKind::Filter | ArrayOpKind::Map | ArrayOpKind::ForEach | ArrayOpKind::Find | ArrayOpKind::FindIndex | ArrayOpKind::Some | ArrayOpKind::Every => {
                                         vec![
                                             resolved_val,
                                             Value::smi(i as i32),
@@ -3867,6 +3915,10 @@ impl Vm {
                                     op.accumulator.unwrap_or(Value::undefined())
                                 }
                                 ArrayOpKind::ForEach => Value::undefined(),
+                                ArrayOpKind::Find => Value::undefined(),
+                                ArrayOpKind::FindIndex => Value::smi(-1),
+                                ArrayOpKind::Some => Value::boolean(false),
+                                ArrayOpKind::Every => Value::boolean(true),
                             };
                             let frames_len = self.frames.len();
                             self.stack.truncate(callee_base);

@@ -246,6 +246,24 @@ pub fn string_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
     }
 }
 
+/// SameValueZero comparison for Array.prototype.includes.
+/// - NaN matches NaN (unlike ===)
+/// - +0 and -0 are equal (unlike SameValue)
+/// - Smi 0 and float64 -0/+0 are equal (same numeric value)
+fn same_value_zero(a: Value, b: Value) -> bool {
+    if a.raw() == b.raw() {
+        return true;
+    }
+    // Check for +0 vs -0 in any encoding (Smi or float64)
+    let is_zero = |v: Value| -> bool {
+        v.as_smi() == Some(0) || (v.is_float64() && f64::from_bits(v.raw()) == 0.0)
+    };
+    if is_zero(a) && is_zero(b) {
+        return true;
+    }
+    false
+}
+
 /// Create a minimal JS object with the given property key and string value.
 fn make_simple_object(gc: &mut SemiSpace, key: &str, val: Value) -> Value {
     let entries = vec![(PropertyKey::from_string(key), 0usize)];
@@ -1755,6 +1773,75 @@ pub fn array_slice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
     Value::from_heap_ptr(result_ptr)
 }
 
+/// Convert a Value to an integer for use as fromIndex in array methods.
+/// Approximates ToInteger (omits valueOf/getter callbacks for objects).
+fn to_index(v: Value, length: u32) -> u32 {
+    if v.is_undefined() || v.is_null() {
+        return 0;
+    }
+    if let Some(b) = v.to_boolean() {
+        let n: i32 = if b { 1 } else { 0 };
+        return if n < 0 { length.saturating_sub(n.unsigned_abs()) } else { (n as u32).min(length) };
+    }
+    if let Some(smi) = v.as_smi() {
+        if smi < 0 {
+            let tmp = length as i64 + smi as i64;
+            if tmp < 0 { 0 } else { tmp as u32 }
+        } else {
+            smi as u32
+        }
+    } else if let Some(f) = v.as_float64() {
+        if f.is_nan() || f < 0.0 {
+            let tmp = length as f64 + f;
+            if tmp < 0.0 { 0 } else { tmp as u32 }
+        } else {
+            (f as u32).min(length)
+        }
+    } else if let Some(ptr) = v.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_STRING || tag == TAG_STRING_OBJ {
+            let s = if tag == TAG_STRING {
+                unsafe { HeapString::to_string(ptr as *mut HeapString) }
+            } else {
+                let str_ptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
+                unsafe { HeapString::to_string(str_ptr as *mut HeapString) }
+            };
+            let n: f64 = s.parse().unwrap_or(0.0);
+            if n.is_nan() || n < 0.0 { 0 } else { (n as u32).min(length) }
+        } else {
+            0
+        }
+    } else {
+        0
+    }
+}
+
+/// Array.prototype.includes(searchElement, fromIndex) — SameValueZero search.
+pub fn array_includes(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let length = match crate::vm::array_like_length(this) {
+        Some(len) => len,
+        None => return Value::boolean(false),
+    };
+    let search = args.first().copied().unwrap_or(Value::undefined());
+    let from_idx = args.get(1).copied().unwrap_or(Value::undefined());
+
+    let k = to_index(from_idx, length);
+    if k >= length {
+        return Value::boolean(false);
+    }
+
+    for i in k..length {
+        let element = crate::vm::array_like_index(this, i).unwrap_or(Value::undefined());
+        if same_value_zero(element, search) {
+            return Value::boolean(true);
+        }
+    }
+    Value::boolean(false)
+}
+
 /// Array.prototype.forEach(callback, thisArg) — same state machine, no result array.
 pub fn array_for_each(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let length = match crate::vm::array_like_length(this) {
@@ -1898,6 +1985,122 @@ pub fn array_reduce(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
     });
     let element = crate::vm::array_like_index(this, start_index as u32).unwrap_or(Value::undefined());
     vm.push_callback_call(gc, callback, Value::undefined(), vec![accumulator, element, Value::smi(start_index as i32), this]);
+    Value::undefined()
+}
+
+/// Array.prototype.find(callback, thisArg) — set up state machine iteration.
+pub fn array_find(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let length = match crate::vm::array_like_length(this) {
+        Some(len) => len,
+        None => return Value::undefined(),
+    };
+    let callback = args.first().copied().unwrap_or(Value::undefined());
+    let this_arg = args.get(1).copied().unwrap_or(Value::undefined());
+    let source_ptr = this.heap_ptr().unwrap();
+    if length == 0 {
+        return Value::undefined();
+    }
+    vm.pending_array_op = Some(crate::vm::ArrayOpState {
+        kind: crate::vm::ArrayOpKind::Find,
+        source: source_ptr,
+        result: std::ptr::null_mut(),
+        callback,
+        this_val: this_arg,
+        source_val: this,
+        index: 0,
+        length,
+        source_frame_depth: 0,
+        accumulator: None,
+    });
+    let element = crate::vm::array_like_index(this, 0).unwrap_or(Value::undefined());
+    vm.push_callback_call(gc, callback, this_arg, vec![element, Value::smi(0), this]);
+    Value::undefined()
+}
+
+/// Array.prototype.findIndex(callback, thisArg) — set up state machine iteration.
+pub fn array_find_index(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let length = match crate::vm::array_like_length(this) {
+        Some(len) => len,
+        None => return Value::smi(-1),
+    };
+    let callback = args.first().copied().unwrap_or(Value::undefined());
+    let this_arg = args.get(1).copied().unwrap_or(Value::undefined());
+    let source_ptr = this.heap_ptr().unwrap();
+    if length == 0 {
+        return Value::smi(-1);
+    }
+    vm.pending_array_op = Some(crate::vm::ArrayOpState {
+        kind: crate::vm::ArrayOpKind::FindIndex,
+        source: source_ptr,
+        result: std::ptr::null_mut(),
+        callback,
+        this_val: this_arg,
+        source_val: this,
+        index: 0,
+        length,
+        source_frame_depth: 0,
+        accumulator: None,
+    });
+    let element = crate::vm::array_like_index(this, 0).unwrap_or(Value::undefined());
+    vm.push_callback_call(gc, callback, this_arg, vec![element, Value::smi(0), this]);
+    Value::undefined()
+}
+
+/// Array.prototype.some(callback, thisArg) — set up state machine iteration.
+pub fn array_some(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let length = match crate::vm::array_like_length(this) {
+        Some(len) => len,
+        None => return Value::boolean(false),
+    };
+    let callback = args.first().copied().unwrap_or(Value::undefined());
+    let this_arg = args.get(1).copied().unwrap_or(Value::undefined());
+    let source_ptr = this.heap_ptr().unwrap();
+    if length == 0 {
+        return Value::boolean(false);
+    }
+    vm.pending_array_op = Some(crate::vm::ArrayOpState {
+        kind: crate::vm::ArrayOpKind::Some,
+        source: source_ptr,
+        result: std::ptr::null_mut(),
+        callback,
+        this_val: this_arg,
+        source_val: this,
+        index: 0,
+        length,
+        source_frame_depth: 0,
+        accumulator: None,
+    });
+    let element = crate::vm::array_like_index(this, 0).unwrap_or(Value::undefined());
+    vm.push_callback_call(gc, callback, this_arg, vec![element, Value::smi(0), this]);
+    Value::undefined()
+}
+
+/// Array.prototype.every(callback, thisArg) — set up state machine iteration.
+pub fn array_every(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let length = match crate::vm::array_like_length(this) {
+        Some(len) => len,
+        None => return Value::boolean(true),
+    };
+    let callback = args.first().copied().unwrap_or(Value::undefined());
+    let this_arg = args.get(1).copied().unwrap_or(Value::undefined());
+    let source_ptr = this.heap_ptr().unwrap();
+    if length == 0 {
+        return Value::boolean(true);
+    }
+    vm.pending_array_op = Some(crate::vm::ArrayOpState {
+        kind: crate::vm::ArrayOpKind::Every,
+        source: source_ptr,
+        result: std::ptr::null_mut(),
+        callback,
+        this_val: this_arg,
+        source_val: this,
+        index: 0,
+        length,
+        source_frame_depth: 0,
+        accumulator: None,
+    });
+    let element = crate::vm::array_like_index(this, 0).unwrap_or(Value::undefined());
+    vm.push_callback_call(gc, callback, this_arg, vec![element, Value::smi(0), this]);
     Value::undefined()
 }
 
@@ -2171,6 +2374,31 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 1,
             name: "Array_prototype_slice",
             func: array_slice,
+        },
+        Builtin {
+            length: 2,
+            name: "Array_prototype_includes",
+            func: array_includes,
+        },
+        Builtin {
+            length: 1,
+            name: "Array_prototype_find",
+            func: array_find,
+        },
+        Builtin {
+            length: 1,
+            name: "Array_prototype_findIndex",
+            func: array_find_index,
+        },
+        Builtin {
+            length: 1,
+            name: "Array_prototype_some",
+            func: array_some,
+        },
+        Builtin {
+            length: 1,
+            name: "Array_prototype_every",
+            func: array_every,
         },
         Builtin {
             length: 1,

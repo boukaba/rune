@@ -6,13 +6,6 @@ pub const PROMISE_PENDING: u32 = 0;
 pub const PROMISE_FULFILLED: u32 = 1;
 pub const PROMISE_REJECTED: u32 = 2;
 
-/// Promise heap object layout.
-///
-/// ```text
-/// [ GcHeader(TAG_PROMISE) | state: u32 | _pad: u32 | result: Value | prototype: *mut u8 ]
-/// ```
-///
-/// Size: 32 bytes.
 pub struct Promise;
 pub(crate) const PROMISE_SIZE: usize = 32;
 
@@ -33,32 +26,26 @@ impl Promise {
     }
 
     pub unsafe fn state(ptr: *mut u8) -> u32 {
-        let p = ptr.add(std::mem::size_of::<GcHeader>()) as *const u32;
-        unsafe { *p }
+        unsafe { *(ptr.add(std::mem::size_of::<GcHeader>()) as *const u32) }
     }
 
     pub unsafe fn set_state(ptr: *mut u8, s: u32) {
-        let p = ptr.add(std::mem::size_of::<GcHeader>()) as *mut u32;
-        unsafe { *p = s; }
+        unsafe { *(ptr.add(std::mem::size_of::<GcHeader>()) as *mut u32) = s; }
     }
 
     pub unsafe fn result(ptr: *mut u8) -> Value {
-        let p = ptr.add(std::mem::size_of::<GcHeader>() + 8) as *const Value;
-        unsafe { *p }
+        unsafe { *(ptr.add(std::mem::size_of::<GcHeader>() + 8) as *const Value) }
     }
 
     pub unsafe fn set_result(ptr: *mut u8, v: Value) {
-        let p = ptr.add(std::mem::size_of::<GcHeader>() + 8) as *mut Value;
-        unsafe { *p = v; }
+        unsafe { *(ptr.add(std::mem::size_of::<GcHeader>() + 8) as *mut Value) = v; }
     }
 
     pub unsafe fn prototype(ptr: *mut u8) -> *mut u8 {
-        let p = ptr.add(std::mem::size_of::<GcHeader>() + 16) as *const *mut u8;
-        unsafe { *p }
+        unsafe { *(ptr.add(std::mem::size_of::<GcHeader>() + 16) as *const *mut u8) }
     }
 
     pub unsafe fn set_prototype(ptr: *mut u8, proto: *mut u8) {
-        let p = ptr.add(std::mem::size_of::<GcHeader>() + 16) as *mut *mut u8;
-        unsafe { *p = proto; }
+        unsafe { *(ptr.add(std::mem::size_of::<GcHeader>() + 16) as *mut *mut u8) = proto; }
     }
 }

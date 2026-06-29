@@ -10,7 +10,7 @@ use rune_core::gc::{
     GcHeader, RootProvider, SemiSpace, TAG_ARRAY, TAG_FLOAT64, TAG_FUNC, TAG_OBJECT, TAG_PROMISE, TAG_STRING, TAG_STRING_OBJ,
 };
 use rune_core::object::JSObject;
-use rune_core::promise::{Promise, PROMISE_FULFILLED, PROMISE_PENDING, PROMISE_REJECTED};
+use rune_core::promise::{Promise, PROMISE_FULFILLED, PROMISE_PENDING};
 use rune_core::string_object::StringObject;
 use rune_core::shape::{DENSE_ARRAY_SHAPE, PROTOTYPE_KEY, PropertyKey, Shape};
 use rune_core::string::HeapString;

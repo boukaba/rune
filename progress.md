@@ -2463,7 +2463,7 @@ Rune now has a complete JSON round-trip (parse → transform → stringify), arr
 
 ## v0.4 Stdlib Breadth — Edge-Workload Milestone ✅
 
-**Status: DONE** — 13 builtins across 5 commits, benchmark-proven cold-start advantage.
+**Status: DONE** — 14 builtins across 6 commits, benchmark-proven cold-start advantage.
 
 ### Builtins implemented
 
@@ -2483,6 +2483,7 @@ Rune now has a complete JSON round-trip (parse → transform → stringify), arr
 | `Array.prototype.flatMap` | §22.1.3.11 | `12d3140` | ArrayOpKind::FlatMap with result-spread. |
 | `Array.prototype.sort` | §22.1.3.25 | `bb9738f` | Default lexicographic. Comparator → TypeError (v0.5 deferral). |
 | `Number()` | §21.1.2.1 | `cf404b8` | ToNumber via ToPrimitive (NUMBER hint). Handles primitives, strings, arrays, objects. |
+| `Array.prototype.indexOf` | §22.1.3.12 | `d609036` | Strict equality (Smi/float64/string/null/undefined/boolean). Returns -1 for no match. |
 
 ### test262 pass rates (honest baseline)
 
@@ -2502,6 +2503,7 @@ Rune now has a complete JSON round-trip (parse → transform → stringify), arr
 | `Array.prototype.flatMap` | — | ~30-50% | Expected |
 | `Array.prototype.sort` | 3/54 | 5.6% | Comparator deferral (~20 tests), parser trailing comma/for-of (~15), not-a-constructor, stability, ToString |
 | `Number()` | 132/340 | 38.8% | Static properties (MIN_SAFE_INTEGER, MAX_VALUE, NaN), prototype methods (toFixed, toExponential, toPrecision, toString), isSafeInteger/isInteger/isFinite/isNaN |
+| `Array.prototype.indexOf` | — | ~25-35% | Expected (Strict Equality, sparse arrays, thisArg, fromIndex edge cases) |
 
 **Key finding:** All low pass rates are **infrastructure gaps**, not implementation bugs. The core builtin logic is correct for every method. The gaps are shared across all methods: ToPrimitive callback, regex parser, Symbol/Proxy protocols, not-a-constructor, sparse arrays, parser trailing comma, property descriptors.
 
@@ -2566,6 +2568,8 @@ Two tracks, depends on target market:
 | `959ff89` | Promise.prototype.finally |
 | `2f3150a` | **Microtask queue + reaction storage** (array-based, GC-safe) |
 | `028ba61` | Clippy fix |
+| `d609036` | Array.prototype.indexOf + clippy privacy fix |
+| `e4c1b9e` | Clippy: suppress unused_assignments warning in indexOf eq |
 
 #### Known Gaps (ordered by priority)
 1. ⬜ **`async`/`await`** — parser desugaring + generator reuse (microtask queue available)

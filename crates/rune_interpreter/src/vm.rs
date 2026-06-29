@@ -600,7 +600,10 @@ impl Vm {
             if let Some(catch_h) = cf { proto_entries.push(("catch", catch_h)); }
             let proto_obj = make_object(gc, &proto_entries);
             self.promise_prototype = proto_obj;
-            let prom_ctor = make_object(gc, &[("prototype", proto_obj)]);
+            let mut ctor_entries: Vec<(&str, Value)> = vec![("prototype", proto_obj)];
+            if let Some(r) = find_handle(&self.builtins, "Promise_resolve") { ctor_entries.push(("resolve", r)); }
+            if let Some(r) = find_handle(&self.builtins, "Promise_reject") { ctor_entries.push(("reject", r)); }
+            let prom_ctor = make_object(gc, &ctor_entries);
             self.promise_constructor = prom_ctor;
             self.builtin_wrappers.insert("Promise".to_string(), prom_ctor);
         }

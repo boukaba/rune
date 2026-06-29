@@ -2483,6 +2483,25 @@ pub fn promise_prototype_catch(gc: &mut SemiSpace, this: Value, args: &[Value], 
     promise_prototype_then(gc, this, &[Value::undefined(), args.first().copied().unwrap_or(Value::undefined())], vm)
 }
 
+/// Promise.resolve(value) — returns a fulfilled promise. If value is a promise, returns it.
+pub fn promise_static_resolve(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let val = args.first().copied().unwrap_or(Value::undefined());
+    if let Some(ptr) = val.heap_ptr() && unsafe { (*(ptr as *const GcHeader)).tag() == TAG_PROMISE } {
+        return val;
+    }
+    let ptr = Promise::allocate(gc, vm.promise_prototype.heap_ptr());
+    unsafe { Promise::set_state(ptr, PROMISE_FULFILLED); Promise::set_result(ptr, val); }
+    Value::from_heap_ptr(ptr)
+}
+
+/// Promise.reject(reason) — returns a rejected promise.
+pub fn promise_static_reject(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let val = args.first().copied().unwrap_or(Value::undefined());
+    let ptr = Promise::allocate(gc, vm.promise_prototype.heap_ptr());
+    unsafe { Promise::set_state(ptr, PROMISE_REJECTED); Promise::set_result(ptr, val); }
+    Value::from_heap_ptr(ptr)
+}
+
 pub fn default_builtins() -> Vec<Builtin> {
     vec![
         Builtin {
@@ -2525,6 +2544,8 @@ pub fn default_builtins() -> Vec<Builtin> {
             name: "Promise_prototype_catch",
             func: promise_prototype_catch,
         },
+        Builtin { length: 1, name: "Promise_resolve", func: promise_static_resolve },
+        Builtin { length: 1, name: "Promise_reject", func: promise_static_reject },
         Builtin {
             length: 1,
             name: "Object",

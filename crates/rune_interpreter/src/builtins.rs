@@ -2412,14 +2412,11 @@ pub fn promise_constructor(gc: &mut SemiSpace, _this: Value, args: &[Value], vm:
 
 /// Internal: resolve a promise. Promise is `this`.
 pub fn promise_resolve_impl(_gc: &mut SemiSpace, this: Value, args: &[Value], _vm: &mut Vm) -> Value {
-    eprintln!("[RESOLVE] this={:?} args={:?}", this, args);
     if let Some(ptr) = this.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-        eprintln!("[RESOLVE] tag={} TAG_PROMISE={}", tag, TAG_PROMISE);
         if tag == TAG_PROMISE && unsafe { Promise::state(ptr) == PROMISE_PENDING } {
             let val = args.first().copied().unwrap_or(Value::undefined());
             unsafe { Promise::set_state(ptr, PROMISE_FULFILLED); Promise::set_result(ptr, val); }
-            eprintln!("[RESOLVE] done, new state={}", unsafe { Promise::state(ptr) });
         }
     }
     Value::undefined()

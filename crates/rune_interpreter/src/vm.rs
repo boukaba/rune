@@ -1010,7 +1010,6 @@ impl Vm {
         // Update source_frame_depth if pending promise ctor is active
         if let Some(ref mut state) = self.pending_promise_ctor {
             state.source_frame_depth = self.frames.len() - 1;
-            eprintln!("[PUSH_CALLBACK] promise_ctor source_frame_depth={}", state.source_frame_depth);
         }
     }
 
@@ -2025,7 +2024,6 @@ impl Vm {
                             let ptr = obj.heap_ptr().unwrap();
                             unsafe { (*(ptr as *const GcHeader)).tag() }
                         };
-                        eprintln!("[LOADPROP] tag={} TAG_PROMISE={}", tag, TAG_PROMISE);
                         if tag == TAG_STRING || tag == TAG_STRING_OBJ {
                             let string_ptr = if tag == TAG_STRING {
                                 obj.heap_ptr().unwrap()
@@ -3218,7 +3216,6 @@ impl Vm {
                     // Promise constructor [[Construct]] / [[Call]]
                     if constructor == self.promise_constructor {
                         let result = crate::builtins::promise_constructor(gc, Value::undefined(), &args, self);
-                        eprintln!("[NEW_PROMISE] result={:?} pending_ctor={}", result, self.pending_promise_ctor.is_some());
                         if let Some(exc) = self.pending_exception.take() {
                             if let Some(exit) = self.handle_throw(gc, exc) {
                                 return exit;
@@ -3910,7 +3907,6 @@ impl Vm {
                         self.frames.last().unwrap().stack_base,
                     );
                     let result = self.pop();
-                    eprintln!("[RRR] result={:?} framelen={}", result, self.frames.len());
                     let callee_base = self.frames.last().unwrap().stack_base;
                     let gen_id = self.frames.last().unwrap().generator_id;
                     if let Some(id) = gen_id {
@@ -4156,16 +4152,8 @@ impl Vm {
                     // Check if this return completes a pending Promise constructor (executor).
                     if self.pending_promise_ctor.is_some()
                         && let Some(ref ppc) = self.pending_promise_ctor
-                    {
-                        eprintln!("[PPCR_CHECK] framelen={} sfd={} resolve_result={} match={}",
-                            self.frames.len(), ppc.source_frame_depth, ppc.resolve_with_result,
-                            self.frames.len() == ppc.source_frame_depth);
-                    }
-                    if self.pending_promise_ctor.is_some()
-                        && let Some(ref ppc) = self.pending_promise_ctor
                         && self.frames.len() == ppc.source_frame_depth
                     {
-                        eprintln!("[PPCR] MATCH! resolve_result={} framelen={} sfd={} result={:?}", ppc.resolve_with_result, self.frames.len(), ppc.source_frame_depth, result);
                         let ppc = self.pending_promise_ctor.take().unwrap();
                         if ppc.resolve_with_result {
                             // .then() callback: resolve chained promise with callback's return value
@@ -5009,10 +4997,8 @@ fn load_property_recursive(obj: Value, raw_key: Value, function_prototype: Optio
             let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
             if tag == TAG_OBJECT {
                 if let Some(key) = value_to_prop_key(raw_key) {
-                    eprintln!("[LOAD_PROP] TAG_OBJECT key={:?}", key);
                     let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
                     if let Some(slot) = shape.lookup(&key) {
-                        eprintln!("[LOAD_PROP] TAG_OBJECT found slot={}", slot);
                         return unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
                     }
                     // Not found — walk to prototype
@@ -5075,7 +5061,6 @@ fn load_property_recursive(obj: Value, raw_key: Value, function_prototype: Optio
                 return Value::undefined();
             } else if tag == TAG_PROMISE {
                 let proto = unsafe { Promise::prototype(ptr) };
-                eprintln!("[LOAD_PROP] TAG_PROMISE proto={:?}", proto);
                 if !proto.is_null() {
                     current = Value::from_heap_ptr(proto);
                     continue;

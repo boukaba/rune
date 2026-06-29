@@ -402,9 +402,18 @@ impl Vm {
             Value::from_heap_ptr(obj_ptr as *mut u8)
         }
 
-        // Object constructor with .create() method
-        if let Some(handle) = find_handle(&self.builtins, "Object_create") {
-            let obj_val = make_object(gc, &[("create", handle)]);
+        // Object constructor with .create(), .keys(), .values(), .entries()
+        let create_handle = find_handle(&self.builtins, "Object_create");
+        let keys_handle = find_handle(&self.builtins, "Object_keys");
+        let values_handle = find_handle(&self.builtins, "Object_values");
+        let entries_handle = find_handle(&self.builtins, "Object_entries");
+        if create_handle.is_some() || keys_handle.is_some() {
+            let mut obj_entries: Vec<(&str, Value)> = Vec::new();
+            if let Some(h) = create_handle { obj_entries.push(("create", h)); }
+            if let Some(h) = keys_handle { obj_entries.push(("keys", h)); }
+            if let Some(h) = values_handle { obj_entries.push(("values", h)); }
+            if let Some(h) = entries_handle { obj_entries.push(("entries", h)); }
+            let obj_val = make_object(gc, &obj_entries);
             self.builtin_wrappers.insert("Object".to_string(), obj_val);
         }
 

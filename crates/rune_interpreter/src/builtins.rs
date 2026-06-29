@@ -294,6 +294,140 @@ pub fn object_builtin(gc: &mut SemiSpace, _this: Value, _args: &[Value], _vm: &m
     Value::from_heap_ptr(ptr as *mut u8)
 }
 
+// ── Object.keys / values / entries ────────────────────────────────
+
+/// Iterate own enumerable string-keyed properties of a value.
+/// Returns Ok(entries) or Err(()) if a TypeError was thrown (null/undefined).
+fn object_own_entries(
+    gc: &mut SemiSpace,
+    val: Value,
+    vm: &mut Vm,
+) -> Result<Vec<(String, Value)>, ()> {
+    if val.is_null() || val.is_undefined() {
+        let msg = crate::vm::heap_string(gc, "TypeError: Object.keys called on null or undefined");
+        vm.set_pending_exception(Value::from_heap_ptr(msg));
+        return Err(());
+    }
+    if let Some(ptr) = val.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        match tag {
+            TAG_OBJECT => {
+                let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                let count = unsafe { JSObject::slot_count(ptr as *mut JSObject) };
+                let mut entries = Vec::with_capacity(count);
+                for i in 0..count {
+                    let key = shape.key_name_at(i).unwrap_or("").to_string();
+                    let value = unsafe { JSObject::get_slot(ptr as *mut JSObject, i) };
+                    entries.push((key, value));
+                }
+                Ok(entries)
+            }
+            TAG_ARRAY => {
+                let len = unsafe { RuneArray::length(ptr as *mut RuneArray) } as usize;
+                let mut entries = Vec::with_capacity(len);
+                for i in 0..len {
+                    let value = unsafe { RuneArray::get_element(ptr as *mut RuneArray, i) };
+                    entries.push((i.to_string(), value));
+                }
+                Ok(entries)
+            }
+            TAG_STRING => {
+                let s = unsafe { HeapString::to_string(ptr as *mut HeapString) };
+                let mut entries = Vec::with_capacity(s.len());
+                for (i, c) in s.chars().enumerate() {
+                    let ch: String = c.to_string();
+                    let ch_val =
+                        Value::from_heap_ptr(HeapString::allocate(gc, &ch) as *mut u8);
+                    entries.push((i.to_string(), ch_val));
+                }
+                Ok(entries)
+            }
+            TAG_STRING_OBJ => {
+                let str_ptr =
+                    unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
+                let s = unsafe { HeapString::to_string(str_ptr as *mut HeapString) };
+                let mut entries = Vec::with_capacity(s.len());
+                for (i, c) in s.chars().enumerate() {
+                    let ch: String = c.to_string();
+                    let ch_val =
+                        Value::from_heap_ptr(HeapString::allocate(gc, &ch) as *mut u8);
+                    entries.push((i.to_string(), ch_val));
+                }
+                Ok(entries)
+            }
+            _ => Ok(Vec::new()),
+        }
+    } else {
+        // Smi, float64, boolean — no own enumerable properties
+        Ok(Vec::new())
+    }
+}
+
+/// Build a dense RuneArray from element values, wired to Array.prototype.
+fn build_array(gc: &mut SemiSpace, elements: &[Value], vm: &Vm) -> Value {
+    let arr = RuneArray::allocate(gc, elements);
+    unsafe {
+        let arr_u8 = arr as *mut u8;
+        *(arr_u8.add(8) as *mut *const Shape) = *DENSE_ARRAY_SHAPE as *const Shape;
+        if let Some(proto) = vm.array_prototype.heap_ptr() {
+            *(arr_u8.add(24) as *mut *mut u8) = proto;
+        }
+    }
+    Value::from_heap_ptr(arr as *mut u8)
+}
+
+/// Object.keys(obj) — returns array of own enumerable string-keyed property names.
+pub fn object_keys(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let target = args.first().copied().unwrap_or(Value::undefined());
+    let entries = match object_own_entries(gc, target, vm) {
+        Ok(e) => e,
+        Err(()) => return Value::undefined(),
+    };
+    let keys: Vec<Value> = entries
+        .iter()
+        .map(|(k, _)| Value::from_heap_ptr(HeapString::allocate(gc, k) as *mut u8))
+        .collect();
+    build_array(gc, &keys, vm)
+}
+
+/// Object.values(obj) — returns array of own enumerable property values.
+pub fn object_values(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let target = args.first().copied().unwrap_or(Value::undefined());
+    let entries = match object_own_entries(gc, target, vm) {
+        Ok(e) => e,
+        Err(()) => return Value::undefined(),
+    };
+    let vals: Vec<Value> = entries.iter().map(|(_, v)| *v).collect();
+    build_array(gc, &vals, vm)
+}
+
+/// Object.entries(obj) — returns array of [key, value] pairs.
+pub fn object_entries(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let target = args.first().copied().unwrap_or(Value::undefined());
+    let entries = match object_own_entries(gc, target, vm) {
+        Ok(e) => e,
+        Err(()) => return Value::undefined(),
+    };
+    let pairs: Vec<Value> = entries
+        .iter()
+        .map(|(k, v)| {
+            let key_val =
+                Value::from_heap_ptr(HeapString::allocate(gc, k) as *mut u8);
+            let pair_elems = [key_val, *v];
+            let pair_arr = RuneArray::allocate(gc, &pair_elems);
+            unsafe {
+                let ptr = pair_arr as *mut u8;
+                *(ptr.add(8) as *mut *const Shape) = *DENSE_ARRAY_SHAPE as *const Shape;
+                if let Some(proto) = vm.array_prototype.heap_ptr() {
+                    *(ptr.add(24) as *mut *mut u8) = proto;
+                }
+            }
+            Value::from_heap_ptr(pair_arr as *mut u8)
+        })
+        .collect();
+    build_array(gc, &pairs, vm)
+}
+
 /// Object.create(proto) — creates a new object with the given prototype.
 /// Per §20.1.2.2, throws TypeError if proto is not an Object or null.
 pub fn object_create_builtin(
@@ -1810,6 +1944,21 @@ pub fn default_builtins() -> Vec<Builtin> {
             name: "Object_create",
             func: object_create_builtin,
         }, // accessible only via Object.create
+        Builtin {
+            length: 1,
+            name: "Object_keys",
+            func: object_keys,
+        },
+        Builtin {
+            length: 1,
+            name: "Object_values",
+            func: object_values,
+        },
+        Builtin {
+            length: 1,
+            name: "Object_entries",
+            func: object_entries,
+        },
         Builtin {
             length: 1,
             name: "Array_isArray",

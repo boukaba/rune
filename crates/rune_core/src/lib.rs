@@ -9,6 +9,7 @@ pub mod function;
 pub mod gc;
 pub mod heap;
 pub mod object;
+pub mod promise;
 pub mod shape;
 pub mod string_object;
 pub mod string;

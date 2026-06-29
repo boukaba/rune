@@ -7,9 +7,10 @@ use rune_core::env::EnvObject;
 
 use rune_core::function::Func;
 use rune_core::gc::{
-    GcHeader, RootProvider, SemiSpace, TAG_ARRAY, TAG_FLOAT64, TAG_FUNC, TAG_OBJECT, TAG_STRING, TAG_STRING_OBJ,
+    GcHeader, RootProvider, SemiSpace, TAG_ARRAY, TAG_FLOAT64, TAG_FUNC, TAG_OBJECT, TAG_PROMISE, TAG_STRING, TAG_STRING_OBJ,
 };
 use rune_core::object::JSObject;
+use rune_core::promise::{Promise, PROMISE_FULFILLED, PROMISE_PENDING, PROMISE_REJECTED};
 use rune_core::string_object::StringObject;
 use rune_core::shape::{DENSE_ARRAY_SHAPE, PROTOTYPE_KEY, PropertyKey, Shape};
 use rune_core::string::HeapString;
@@ -174,6 +175,16 @@ pub(crate) struct PendingCall {
     pub(crate) source_frame_depth: usize,
 }
 
+/// State for a pending Promise constructor — stores the promise so it can be pushed
+/// as the result after the executor callback returns.
+pub(crate) struct PendingPromiseCtor {
+    pub(crate) source_frame_depth: usize,
+    pub(crate) promise: Value,
+    pub(crate) resolve_handle: Value,
+    pub(crate) reject_handle: Value,
+    pub(crate) resolve_with_result: bool,
+}
+
 /// State for a pending primitive conversion (ToPrimitive via user-defined toString/valueOf).
 /// Set by Opcode::Add, Opcode::ToString, etc., consumed by the Return handler.
 pub(crate) struct PendingPrimitiveConversion {
@@ -303,6 +314,10 @@ pub struct Vm {
     pub string_prototype: Value,
     pub string_constructor: Value,
     pub number_constructor: Value,
+    pub promise_constructor: Value,
+    pub promise_prototype: Value,
+    /// Bytecode bridge program for resolve/reject functions.
+    promise_bridge_prog: *const BytecodeProgram,
     pub object_prototype: Value,
     pub function_prototype: Value,
     /// Pending exception set by a builtin (checked after builtin dispatch).
@@ -312,6 +327,8 @@ pub struct Vm {
     pub(crate) pending_array_op: Option<ArrayOpState>,
     /// Pending Function.prototype.call invocation.
     pub(crate) pending_call: Option<PendingCall>,
+    /// Pending Promise constructor call (executor → resolve/reject → return promise).
+    pub(crate) pending_promise_ctor: Option<PendingPromiseCtor>,
     /// Pending assert.throws callback.
     pub(crate) pending_assert: Option<PendingAssert>,
     /// Pending primitive conversion (ToPrimitive on object for +, ToString, etc.).
@@ -376,11 +393,15 @@ impl Vm {
             string_prototype: Value::undefined(),
             string_constructor: Value::undefined(),
             number_constructor: Value::undefined(),
+            promise_constructor: Value::undefined(),
+            promise_prototype: Value::undefined(),
+            promise_bridge_prog: std::ptr::null(),
             object_prototype: Value::undefined(),
             function_prototype: Value::undefined(),
             pending_exception: None,
             pending_array_op: None,
             pending_call: None,
+            pending_promise_ctor: None,
             pending_assert: None,
             pending_primitive_conversion: None,
             assert_called: false,
@@ -550,6 +571,39 @@ impl Vm {
             self.builtin_wrappers.insert("Number".to_string(), num_ctor);
         }
 
+        // Promise constructor — resolve/reject bridge program (lazy init)
+        {
+            let bridge_inner = BytecodeProgram::new(
+                vec![
+                    Instruction::new(Opcode::LoadCaptured, vec![0, 0]),
+                    Instruction::new(Opcode::LoadCaptured, vec![0, 1]),
+                    Instruction::new(Opcode::LoadLocal, vec![0]),
+                    Instruction::new(Opcode::Call, vec![1]),
+                    Instruction::new(Opcode::Return, vec![]),
+                ],
+                vec![],
+                vec![],
+            );
+            let bridge_prog = Box::new(BytecodeProgram::new(
+                vec![],
+                vec![],
+                vec![bridge_inner],
+            ));
+            self.promise_bridge_prog = Box::leak(bridge_prog) as *const BytecodeProgram;
+        }
+        if find_handle(&self.builtins, "Promise").is_some() {
+            let tf = find_handle(&self.builtins, "Promise_prototype_then");
+            let cf = find_handle(&self.builtins, "Promise_prototype_catch");
+            let mut proto_entries: Vec<(&str, Value)> = Vec::new();
+            if let Some(then_h) = tf { proto_entries.push(("then", then_h)); }
+            if let Some(catch_h) = cf { proto_entries.push(("catch", catch_h)); }
+            let proto_obj = make_object(gc, &proto_entries);
+            self.promise_prototype = proto_obj;
+            let prom_ctor = make_object(gc, &[("prototype", proto_obj)]);
+            self.promise_constructor = prom_ctor;
+            self.builtin_wrappers.insert("Promise".to_string(), prom_ctor);
+        }
+
         // Math namespace with all methods + constants
         let pi_val = Value::from_float64(std::f64::consts::PI);
         let e_val = Value::from_float64(std::f64::consts::E);
@@ -634,6 +688,34 @@ impl Vm {
             .iter()
             .position(|b| b.name == name)
             .map(|id| Value::smi(-(id as i32) - 1))
+    }
+
+    /// Create a resolve/reject bridge function that closes over a promise
+    /// and a builtin handle. Returns a callable TAG_FUNC Value.
+    pub fn create_promise_bridge(
+        &self,
+        gc: &mut SemiSpace,
+        promise: Value,
+        builtin_handle: Value,
+    ) -> Value {
+        unsafe {
+            let env = EnvObject::allocate(gc, 2, std::ptr::null_mut());
+            let func = Func::allocate(gc, 0, self.promise_bridge_prog as *const u8, false, env as *mut u8);
+            let env_ptr = if (*(env as *const GcHeader)).is_forwarded() {
+                (*(env as *const GcHeader)).forwarding_addr() as *mut EnvObject
+            } else {
+                env
+            };
+            EnvObject::set_slot(env_ptr, 0, promise);
+            EnvObject::set_slot(env_ptr, 1, builtin_handle);
+            let func_ptr = if (*(func as *const GcHeader)).is_forwarded() {
+                (*(func as *const GcHeader)).forwarding_addr() as *mut Func
+            } else {
+                func
+            };
+            Func::set_env_ptr(func_ptr, env_ptr as *mut u8);
+            Value::from_heap_ptr(func_ptr as *mut u8)
+        }
     }
 
     /// Check if all values in the slice are Smi (tag bit 0 = 1).
@@ -816,6 +898,8 @@ impl Vm {
         gc.push_root(&self.string_prototype as *const Value as *mut u64);
         gc.push_root(&self.string_constructor as *const Value as *mut u64);
         gc.push_root(&self.number_constructor as *const Value as *mut u64);
+        gc.push_root(&self.promise_constructor as *const Value as *mut u64);
+        gc.push_root(&self.promise_prototype as *const Value as *mut u64);
         gc.push_root(&self.function_prototype as *const Value as *mut u64);
         // Root pre-allocated typeof result strings (JIT typeof_helper reads these)
         for v in &self.typeof_strings {
@@ -916,6 +1000,11 @@ impl Vm {
         // Update source_frame_depth if pending assert is active
         if let Some(ref mut state) = self.pending_assert {
             state.source_frame_depth = self.frames.len() - 1;
+        }
+        // Update source_frame_depth if pending promise ctor is active
+        if let Some(ref mut state) = self.pending_promise_ctor {
+            state.source_frame_depth = self.frames.len() - 1;
+            eprintln!("[PUSH_CALLBACK] promise_ctor source_frame_depth={}", state.source_frame_depth);
         }
     }
 
@@ -1930,6 +2019,7 @@ impl Vm {
                             let ptr = obj.heap_ptr().unwrap();
                             unsafe { (*(ptr as *const GcHeader)).tag() }
                         };
+                        eprintln!("[LOADPROP] tag={} TAG_PROMISE={}", tag, TAG_PROMISE);
                         if tag == TAG_STRING || tag == TAG_STRING_OBJ {
                             let string_ptr = if tag == TAG_STRING {
                                 obj.heap_ptr().unwrap()
@@ -3119,6 +3209,23 @@ impl Vm {
                         self.frames[fi].pc = pc + 1;
                         continue;
                     }
+                    // Promise constructor [[Construct]] / [[Call]]
+                    if constructor == self.promise_constructor {
+                        let result = crate::builtins::promise_constructor(gc, Value::undefined(), &args, self);
+                        eprintln!("[NEW_PROMISE] result={:?} pending_ctor={}", result, self.pending_promise_ctor.is_some());
+                        if let Some(exc) = self.pending_exception.take() {
+                            if let Some(exit) = self.handle_throw(gc, exc) {
+                                return exit;
+                            }
+                            continue;
+                        }
+                        if self.pending_promise_ctor.is_some() || self.pending_array_op.is_some() || self.pending_call.is_some() {
+                            continue;
+                        }
+                        self.push(result);
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    }
                     // Create a new empty object
                     let shape = Shape::empty();
                     let obj = JSObject::allocate(gc, shape, &[]);
@@ -3324,7 +3431,7 @@ impl Vm {
                                     }
                                     continue;
                                 }
-                                if self.pending_array_op.is_some() || self.pending_call.is_some() || self.pending_assert.is_some() {
+                                if self.pending_array_op.is_some() || self.pending_call.is_some() || self.pending_assert.is_some() || self.pending_promise_ctor.is_some() {
                                     // Array method builtin or .call() or assert.throws
                                     // set up a callback. Don't push result or advance pc —
                                     // the callback frame is already on the stack.
@@ -3367,6 +3474,23 @@ impl Vm {
                             if let Some(exit) = self.handle_throw(gc, exc) {
                                 return exit;
                             }
+                            continue;
+                        }
+                        self.push(result);
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    }
+
+                    // Promise constructor called as a function (not new)
+                    if callee == self.promise_constructor {
+                        let result = crate::builtins::promise_constructor(gc, this, &args, self);
+                        if let Some(exc) = self.pending_exception.take() {
+                            if let Some(exit) = self.handle_throw(gc, exc) {
+                                return exit;
+                            }
+                            continue;
+                        }
+                        if self.pending_promise_ctor.is_some() || self.pending_array_op.is_some() || self.pending_call.is_some() {
                             continue;
                         }
                         self.push(result);
@@ -4020,6 +4144,34 @@ impl Vm {
                         if let Some(exit) = self.handle_throw(gc, err) {
                             return exit;
                         }
+                        continue;
+                    }
+                    // Check if this return completes a pending Promise constructor (executor).
+                    if self.pending_promise_ctor.is_some()
+                        && let Some(ref ppc) = self.pending_promise_ctor
+                        && self.frames.len() == ppc.source_frame_depth
+                    {
+                        let ppc = self.pending_promise_ctor.take().unwrap();
+                        eprintln!("[PPCR] resolve_result={} promise={:?} result={:?}", ppc.resolve_with_result, ppc.promise, result);
+                        if ppc.resolve_with_result {
+                            // .then() callback: resolve chained promise with callback's return value
+                            if let Some(ptr) = ppc.promise.heap_ptr() {
+                                let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+                                if tag == TAG_PROMISE && unsafe { Promise::state(ptr) == PROMISE_PENDING } {
+                                    unsafe {
+                                        Promise::set_state(ptr, PROMISE_FULFILLED);
+                                        Promise::set_result(ptr, result);
+                                    }
+                                }
+                            }
+                        }
+                        self.stack.truncate(callee_base);
+                        self.push(ppc.promise);
+                        if self.frames.is_empty() {
+                            return Exit::Return(ppc.promise);
+                        }
+                        let caller_idx = self.frames.len() - 1;
+                        self.frames[caller_idx].pc += 1;
                         continue;
                     }
                     // Check if this return completes a pending .call() invocation.
@@ -4843,8 +4995,10 @@ fn load_property_recursive(obj: Value, raw_key: Value, function_prototype: Optio
             let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
             if tag == TAG_OBJECT {
                 if let Some(key) = value_to_prop_key(raw_key) {
+                    eprintln!("[LOAD_PROP] TAG_OBJECT key={:?}", key);
                     let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
                     if let Some(slot) = shape.lookup(&key) {
+                        eprintln!("[LOAD_PROP] TAG_OBJECT found slot={}", slot);
                         return unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
                     }
                     // Not found — walk to prototype
@@ -4900,6 +5054,14 @@ fn load_property_recursive(obj: Value, raw_key: Value, function_prototype: Optio
                 }
                 // Walk to String.prototype
                 let proto = unsafe { StringObject::prototype(ptr as *mut StringObject) };
+                if !proto.is_null() {
+                    current = Value::from_heap_ptr(proto);
+                    continue;
+                }
+                return Value::undefined();
+            } else if tag == TAG_PROMISE {
+                let proto = unsafe { Promise::prototype(ptr) };
+                eprintln!("[LOAD_PROP] TAG_PROMISE proto={:?}", proto);
                 if !proto.is_null() {
                     current = Value::from_heap_ptr(proto);
                     continue;

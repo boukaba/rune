@@ -1,7 +1,8 @@
 use crate::vm::Vm;
 use rune_core::array::RuneArray;
-use rune_core::gc::{GcHeader, SemiSpace, TAG_ARRAY, TAG_OBJECT, TAG_STRING, TAG_STRING_OBJ};
+use rune_core::gc::{GcHeader, SemiSpace, TAG_ARRAY, TAG_FUNC, TAG_OBJECT, TAG_PROMISE, TAG_STRING, TAG_STRING_OBJ};
 use rune_core::object::JSObject;
+use rune_core::promise::{Promise, PROMISE_FULFILLED, PROMISE_PENDING, PROMISE_REJECTED};
 use rune_core::shape::{DENSE_ARRAY_SHAPE, PropertyKey, Shape};
 use rune_core::string::HeapString;
 use rune_core::string_object::StringObject;
@@ -2387,6 +2388,99 @@ pub fn array_every(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
 }
 
 /// Return a list of builtins to register in every new Vm.
+/// Promise(value) or new Promise(executor) — creates a Promise.
+pub fn promise_constructor(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let proto_ptr = vm.promise_prototype.heap_ptr();
+    let promise_ptr = Promise::allocate(gc, proto_ptr);
+    let promise_val = Value::from_heap_ptr(promise_ptr);
+    let resolve_handle = vm.get_builtin("_promise_resolve").unwrap_or(Value::undefined());
+    let reject_handle = vm.get_builtin("_promise_reject").unwrap_or(Value::undefined());
+    let executor = args.first().copied().unwrap_or(Value::undefined());
+    if executor.is_undefined() { return promise_val; }
+    let resolve_func = vm.create_promise_bridge(gc, promise_val, resolve_handle);
+    let reject_func = vm.create_promise_bridge(gc, promise_val, reject_handle);
+    vm.pending_promise_ctor = Some(crate::vm::PendingPromiseCtor {
+        source_frame_depth: 0,
+        promise: promise_val,
+        resolve_handle,
+        reject_handle,
+        resolve_with_result: false,
+    });
+    vm.push_callback_call(gc, executor, Value::undefined(), vec![resolve_func, reject_func]);
+    Value::undefined()
+}
+
+/// Internal: resolve a promise. Promise is `this`.
+pub fn promise_resolve_impl(_gc: &mut SemiSpace, this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    eprintln!("[RESOLVE] this={:?} args={:?}", this, args);
+    if let Some(ptr) = this.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        eprintln!("[RESOLVE] tag={} TAG_PROMISE={}", tag, TAG_PROMISE);
+        if tag == TAG_PROMISE && unsafe { Promise::state(ptr) == PROMISE_PENDING } {
+            let val = args.first().copied().unwrap_or(Value::undefined());
+            unsafe { Promise::set_state(ptr, PROMISE_FULFILLED); Promise::set_result(ptr, val); }
+            eprintln!("[RESOLVE] done, new state={}", unsafe { Promise::state(ptr) });
+        }
+    }
+    Value::undefined()
+}
+
+/// Internal: reject a promise. Promise is `this`.
+pub fn promise_reject_impl(_gc: &mut SemiSpace, this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    if let Some(ptr) = this.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_PROMISE && unsafe { Promise::state(ptr) == PROMISE_PENDING } {
+            let reason = args.first().copied().unwrap_or(Value::undefined());
+            unsafe { Promise::set_state(ptr, PROMISE_REJECTED); Promise::set_result(ptr, reason); }
+        }
+    }
+    Value::undefined()
+}
+
+/// Promise.prototype.then(onFulfilled, onRejected)
+pub fn promise_prototype_then(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let ptr = match this.heap_ptr() { Some(p) => p, None => return Value::undefined() };
+    if unsafe { (*(ptr as *const GcHeader)).tag() != TAG_PROMISE } { return Value::undefined(); }
+    let state = unsafe { Promise::state(ptr) };
+    let result = unsafe { Promise::result(ptr) };
+    let on_fulfilled = args.first().copied().unwrap_or(Value::undefined());
+    let on_rejected = args.get(1).copied().unwrap_or(Value::undefined());
+    let new_promise_ptr = Promise::allocate(gc, None);
+    let new_promise = Value::from_heap_ptr(new_promise_ptr);
+    if state == PROMISE_FULFILLED {
+        if let Some(op) = on_fulfilled.heap_ptr() && unsafe { (*(op as *const GcHeader)).tag() == TAG_FUNC } {
+            vm.push_callback_call(gc, on_fulfilled, Value::undefined(), vec![result]);
+            vm.pending_promise_ctor = Some(crate::vm::PendingPromiseCtor {
+                source_frame_depth: 0, promise: new_promise,
+                resolve_handle: Value::undefined(), reject_handle: Value::undefined(),
+                resolve_with_result: true,
+            });
+            return Value::undefined();
+        }
+        unsafe { Promise::set_state(new_promise_ptr, PROMISE_FULFILLED); Promise::set_result(new_promise_ptr, result); }
+        return new_promise;
+    }
+    if state == PROMISE_REJECTED {
+        if let Some(op) = on_rejected.heap_ptr() && unsafe { (*(op as *const GcHeader)).tag() == TAG_FUNC } {
+            vm.push_callback_call(gc, on_rejected, Value::undefined(), vec![result]);
+            vm.pending_promise_ctor = Some(crate::vm::PendingPromiseCtor {
+                source_frame_depth: 0, promise: new_promise,
+                resolve_handle: Value::undefined(), reject_handle: Value::undefined(),
+                resolve_with_result: true,
+            });
+            return Value::undefined();
+        }
+        unsafe { Promise::set_state(new_promise_ptr, PROMISE_REJECTED); Promise::set_result(new_promise_ptr, result); }
+        return new_promise;
+    }
+    new_promise
+}
+
+/// Promise.prototype.catch(onRejected)
+pub fn promise_prototype_catch(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    promise_prototype_then(gc, this, &[Value::undefined(), args.first().copied().unwrap_or(Value::undefined())], vm)
+}
+
 pub fn default_builtins() -> Vec<Builtin> {
     vec![
         Builtin {
@@ -2403,6 +2497,31 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 1,
             name: "Number",
             func: number_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "_promise_resolve",
+            func: promise_resolve_impl,
+        },
+        Builtin {
+            length: 1,
+            name: "_promise_reject",
+            func: promise_reject_impl,
+        },
+        Builtin {
+            length: 1,
+            name: "Promise",
+            func: promise_constructor,
+        },
+        Builtin {
+            length: 2,
+            name: "Promise_prototype_then",
+            func: promise_prototype_then,
+        },
+        Builtin {
+            length: 1,
+            name: "Promise_prototype_catch",
+            func: promise_prototype_catch,
         },
         Builtin {
             length: 1,

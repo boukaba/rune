@@ -1,7 +1,7 @@
 use std::alloc::Layout;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Object type tags (stored in low 3 bits of header word).
+/// Object type tags (stored in low 4 bits of header word).
 pub const TAG_OBJECT: u64 = 0;
 pub const TAG_STRING: u64 = 1;
 pub const TAG_FUNC: u64 = 2;
@@ -10,9 +10,10 @@ pub const TAG_ARRAY: u64 = 4;
 pub const TAG_ENV: u64 = 5;
 pub const TAG_STRING_OBJ: u64 = 6;
 pub const TAG_FORWARDED: u64 = 7;
+pub const TAG_PROMISE: u64 = 8;
 
 /// Tag bits mask for GC header tag.
-const GC_TAG_MASK: u64 = 0b111;
+pub const GC_TAG_MASK: u64 = 0b1111;
 
 /// Float Self-Tagging constants (mirrors value.rs).
 const FST_QNAN_TOP: u64 = 0x7FF8;
@@ -253,6 +254,12 @@ impl SemiSpace {
                         let proto_ptr = scan_ptr.add(STRING_OBJ_PROTOTYPE_OFFSET) as *mut u64;
                         self.forward_value(proto_ptr);
                     }
+                    TAG_PROMISE => {
+                        let result_ptr = scan_ptr.add(size_of::<GcHeader>() + 8) as *mut u64;
+                        self.forward_value(result_ptr);
+                        let proto_ptr = scan_ptr.add(size_of::<GcHeader>() + 16) as *mut u64;
+                        self.forward_value(proto_ptr);
+                    }
                     _ => {}
                 }
 
@@ -296,6 +303,7 @@ impl SemiSpace {
                     obj_start.add(align_up(total, 8))
                 }
                 TAG_STRING_OBJ => obj_start.add(STRING_OBJ_TOTAL_SIZE),
+                TAG_PROMISE => obj_start.add(crate::promise::PROMISE_SIZE),
                 _ => obj_start.add(8),
             }
         }

@@ -46,9 +46,9 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - `Array.prototype.indexOf` / `String.prototype.indexOf`
 - **RegExp engine** — Thompson NFA + PikeVM, `TAG_REGEXP` GC type, `/pattern/flags` literal parsing, `RegExp.prototype.exec`/`.test`, regex replace with `$&`/``$` ``/`$'`/`$1..$n` expansion. 417/417 tests pass.
 - **`class` syntax** — `class` declarations, expressions (named & anonymous), default constructor, method shorthand on prototype, `prototype` property linking via `StoreProperty` TAG_FUNC path in `do_store_property`. 7 integration tests. 423/423 tests pass.
-- **Known gaps**: No thenable unwrapping, `async_reject` is_throw path not yet wired to generator throw, `.finally` pending case falls back to old .then behavior, RegExp: no function replacement, no match/search/split, prototype properties missing (source/flags/lastIndex), `class`: no `extends`, no `static` methods, no computed method names, `this.prop++` not supported (Update only handles Identifier targets).
+- **Thenable unwrapping** — `Promise.resolve` detects objects with `.then` callable, creates a pending Promise, bridges via `PendingPromiseCtor` + `push_callback_call`. `.then` is called synchronously; fulfillment/rejection propagates through bridge functions. 3 integration tests. 425/425 tests pass.
+- **Known gaps**: `async_reject` is_throw path not yet wired to generator throw, `.finally` pending case falls back to old .then behavior, RegExp: no function replacement, no match/search/split, prototype properties missing (source/flags/lastIndex), `class`: no `extends`, no `static` methods, no computed method names, `this.prop++` not supported (Update only handles Identifier targets).
 
 ### Next Steps — v0.5 (ordered by leverage)
-1. Thenable unwrapping for `Promise.resolve`
-2. RegExp prototype properties (source/flags/lastIndex), function replacement for replace
-3. `class` `extends` support
+1. RegExp prototype properties (source/flags/lastIndex), function replacement for replace
+2. `class` `extends` support

@@ -5380,7 +5380,7 @@ const MAX_PROTOTYPE_DEPTH: usize = 256;
 /// Implements OrdinaryGet (§10.1.8.1): check own property, then recurse on [[Prototype]].
 /// For dense arrays: numeric keys access elements directly; non-numeric walks to prototype.
 /// Returns undefined if the chain exceeds MAX_PROTOTYPE_DEPTH (prevents infinite loops on cycles).
-fn load_property_recursive(obj: Value, raw_key: Value, function_prototype: Option<Value>) -> Value {
+pub(crate) fn load_property_recursive(obj: Value, raw_key: Value, function_prototype: Option<Value>) -> Value {
     let mut current = obj;
     let mut depth = 0;
     loop {

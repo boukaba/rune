@@ -5327,6 +5327,48 @@ fn test_regexp_test_false() {
     assert_eq!(ctx.eval(r#"/xyz/.test("hello world")"#).unwrap().to_boolean(), Some(false));
 }
 
+// ---- Thenable Unwrapping Tests ----
+
+#[test]
+fn test_thenable_unwrapping_sync() {
+    let mut ctx = Context::new_small();
+    let val = ctx.eval(r#"
+        var side_effect = 0;
+        var thenable = { then: function(resolve) { side_effect = 1; resolve(42); } };
+        var p = Promise.resolve(thenable);
+        side_effect;
+    "#).unwrap();
+    assert_eq!(val.as_smi(), Some(1), ".then should have been called synchronously");
+}
+
+#[test]
+fn test_thenable_unwrapping_resolve_value() {
+    let mut ctx = Context::new_small();
+    // First eval: set up thenable, resolve it, chain .then (microtask enqueued)
+    ctx.eval(r#"
+        var thenable = { then: function(resolve) { resolve(42); } };
+        var p = Promise.resolve(thenable);
+        var resolvedValue;
+        p.then(function(v) { resolvedValue = v; });
+    "#).unwrap();
+    // Microtasks are drained at end of execute(); resolvedValue is now 42
+    let val = ctx.eval("resolvedValue;").unwrap();
+    assert_eq!(val.as_smi(), Some(42), "promise should be fulfilled with 42");
+}
+
+#[test]
+fn test_thenable_unwrapping_non_thenable() {
+    let mut ctx = Context::new_small();
+    ctx.eval(r#"
+        var obj = { foo: 'bar' };
+        var p = Promise.resolve(obj);
+        var result;
+        p.then(function(v) { result = v; });
+    "#).unwrap();
+    let val = ctx.eval("result;").unwrap();
+    assert!(val.is_heap_object(), "plain object should be wrapped in promise");
+}
+
 // ---- Class Syntax Tests ----
 
 fn class_eval_num(ctx: &mut Context, code: &str) -> i32 {

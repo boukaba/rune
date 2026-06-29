@@ -2786,3 +2786,33 @@ Added `ClassNode` (name, methods, span), `ClassMethod` (key, func, is_static, sp
 - No `static` method emission (stored but skipped)
 - No computed method names in prototype assignment (skipped with `continue`)
 - `this.prop++` not supported — Update expression only handles `Identifier` targets
+
+## Sprint 21 — Thenable Unwrapping for Promise.resolve
+
+> **2026-06-29**: `Promise.resolve` now unwraps thenable objects (objects with a callable `.then` property). 425/425 tests pass.
+
+### Implementation
+
+#### Builtins (`crates/rune_interpreter/src/builtins.rs`)
+- `promise_static_resolve`: detects heap objects with `.then` as TAG_FUNC
+- Creates a new pending Promise P
+- Creates resolve/reject bridge functions via `create_promise_bridge`
+- Uses `pending_promise_ctor` + `push_callback_call` to call `thenable.then(resolveBridge, rejectBridge)` synchronously
+- `pending_promise_ctor` returns P as the result of `Promise.resolve()` (same pattern as Promise constructor)
+
+#### VM (`crates/rune_interpreter/src/vm.rs`)
+- `load_property_recursive` made `pub(crate)` for builtins use (at `vm.rs:5386`)
+- `PendingPromiseCtor` reused for thenable unwrapping with `resolve_with_result: false`
+
+#### Integration Tests
+3 tests:
+
+| Test | What it validates |
+|---|---|
+| `test_thenable_unwrapping_sync` | `.then` called synchronously, side effect visible |
+| `test_thenable_unwrapping_resolve_value` | Promise resolves with correct value via microtask |
+| `test_thenable_unwrapping_non_thenable` | Plain object without `.then` wrapped in fulfilled promise |
+
+### Next Steps
+1. RegExp prototype properties (source/flags/lastIndex), function replacement for replace
+2. `class` `extends` support

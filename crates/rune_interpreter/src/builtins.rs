@@ -1,4 +1,5 @@
 use crate::vm::Vm;
+use crate::vm::load_property_recursive;
 use rune_core::array::RuneArray;
 use rune_core::gc::{GcHeader, SemiSpace, TAG_ARRAY, TAG_FUNC, TAG_OBJECT, TAG_PROMISE, TAG_REGEXP, TAG_STRING, TAG_STRING_OBJ};
 use rune_core::object::JSObject;
@@ -2719,9 +2720,39 @@ pub fn promise_prototype_finally(gc: &mut SemiSpace, this: Value, args: &[Value]
 /// Promise.resolve(value) — returns a fulfilled promise. If value is a promise, returns it.
 pub fn promise_static_resolve(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let val = args.first().copied().unwrap_or(Value::undefined());
+
+    // §27.2.4.1.2 Promise.resolve: if already a native Promise, return as-is
     if let Some(ptr) = val.heap_ptr() && unsafe { (*(ptr as *const GcHeader)).tag() == TAG_PROMISE } {
         return val;
     }
+
+    // §27.2.4.1.1 PromiseResolve: thenable unwrapping for objects with .then callable
+    if val.heap_ptr().is_some() {
+        let then_str = HeapString::allocate(gc, "then");
+        let then_key = Value::from_heap_ptr(then_str as *mut u8);
+        let then_val = load_property_recursive(val, then_key, Some(vm.function_prototype));
+        if let Some(then_ptr) = then_val.heap_ptr() {
+            let then_tag = unsafe { (*(then_ptr as *const GcHeader)).tag() };
+            if then_tag == TAG_FUNC {
+                let promise_ptr = Promise::allocate(gc, vm.promise_prototype.heap_ptr());
+                let promise_val = Value::from_heap_ptr(promise_ptr);
+                let resolve_h = vm.get_builtin("_promise_resolve").unwrap_or(Value::undefined());
+                let reject_h = vm.get_builtin("_promise_reject").unwrap_or(Value::undefined());
+                let resolve_bridge = vm.create_promise_bridge(gc, promise_val, resolve_h);
+                let reject_bridge = vm.create_promise_bridge(gc, promise_val, reject_h);
+                vm.pending_promise_ctor = Some(crate::vm::PendingPromiseCtor {
+                    source_frame_depth: 0,
+                    promise: promise_val,
+                    resolve_handle: resolve_h,
+                    reject_handle: reject_h,
+                    resolve_with_result: false,
+                });
+                vm.push_callback_call(gc, then_val, val, vec![resolve_bridge, reject_bridge]);
+                return Value::undefined();
+            }
+        }
+    }
+
     let ptr = Promise::allocate(gc, vm.promise_prototype.heap_ptr());
     unsafe { Promise::set_state(ptr, PROMISE_FULFILLED); Promise::set_result(ptr, val); }
     Value::from_heap_ptr(ptr)

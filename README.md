@@ -67,6 +67,8 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 - **Control flow:** if/else, while, do/while, for, for-in, switch, try/catch/finally
 - **Generators:** function*, yield, next() (basic)
 - **Async/await:** `async function`, `async () =>`, `await expr` — generator-based, synchronous until first await, Promise-based continuation
+- **Promise:** constructor, resolve/reject, `.then`/`.catch`/`.finally`, `Promise.resolve`/`.reject`/`.all`/`.race`, microtask queue, **thenable unwrapping**
+- **Classes:** declarations, expressions (named & anonymous), default constructor, prototype methods
 - **Template literals:** substitutions, nested, escapes
 - **Error objects:** TypeError, ReferenceError with `.name`/`.message`
 - **Prototype chains:** `__proto__`, Object.create, instanceof
@@ -74,17 +76,18 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 - **SIDT:** O(1) property access via SIMD inline caches (NEON + SSE4.1), no megamorphic cliff
 - **AFPC cache:** rkyv bytecode persistence (13.5× compile speedup), AArch64 + x86-64 native code caching
 - **JSON:** `JSON.parse` + `JSON.stringify` (complete round-trip, cycle detection, NaN/Infinity → `null`)
-- **Array methods:** `filter`, `map`, `reduce`, `forEach`, `slice` (callback state machine, GC-safe across 200K elements)
-- **String methods:** `charAt`, `slice`, `split` (string separator, limit, empty separator edge cases)
+- **RegExp:** Thompson NFA + PikeVM engine, `/pattern/flags` literals, `exec`/`test`, replace with `$&`/``$` ``/`$'`/`$1..$n` expansion
+- **Array methods:** `filter`, `map`, `reduce`, `forEach`, `slice` (callback state machine, GC-safe across 200K elements), `find`, `some`, `every`, `sort`, `flat`, `flatMap`, `includes`, `push`, `pop`, `indexOf`
+- **String methods:** `replace`/`replaceAll` (string + regex), `indexOf`, `charAt`, `slice`, `split` (string separator, limit, empty separator edge cases)
 - **Global functions:** `parseInt` (radix, hex), `parseFloat` (Infinity, NaN, scientific notation)
 
 ## What Doesn't Work (Yet)
 
-- **Standard library:** No Map, Set, RegExp, Date, TypedArray, WeakRef. Promise: full async support with microtask queue.
-- **String methods:** No `charCodeAt`, `replace`, `trim`, `toUpperCase`, `toLowerCase`
-- **Array methods:** `find`, `some`, `every`, `sort`, `flat`, `flatMap`, `includes`, `push`, `pop`
+- **Standard library:** No Map, Set, Date, TypedArray, WeakRef. RegExp: exec, test, replace with `$&`/``$` ``/`$'`/`$1..$n` expansion. Promise: full async support with microtask queue.
+- **String methods:** `replace` (string + regex pattern), `replaceAll`, `indexOf`, `charAt`, `slice`, `split`. No `trim`, `toUpperCase`, `toLowerCase`, `charCodeAt`.
+- **Array methods:** `filter`, `map`, `reduce`, `forEach`, `slice`, `find`, `some`, `every`, `sort`, `flat`, `flatMap`, `includes`, `push`, `pop`, `indexOf`.
 - **Modules:** No import/export (ESM)
-- **Classes:** Class declarations, expressions, constructor, prototype methods (no `extends`/`static` yet)
+- **Classes:** Class declarations, expressions, constructor, prototype methods (no `extends`/`static`/computed names yet)
 - **Async/await:** `async function`, `async () =>`, `await expr` — full support with generator-based desugaring, synchronous until first await. 396 tests.
 - **JIT:** 57 opcodes whitelisted (out of 93 total opcode variants). Float Self-Tagging (NaN-boxing) eliminates all float heap allocation — all interpreter float paths use inline `Value::from_float64`. JIT only has float64 Add promotion; Sub/Mul/Div/Mod/Exp bail to interpreter (which handles them via NaN-boxed Values). Phase F inlining shipped (5% on `jit_hot_function_1M`).
 - **Debugger:** No CDP/DevTools

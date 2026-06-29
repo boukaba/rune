@@ -55,7 +55,10 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - **Default derived constructor** — `class Child extends Parent { }` synthesizes `constructor(...args) { super(...args); }`. Fixed spread-Call `Expr::Super` handler bug (args were not being pushed). 3 new tests. 451/451 tests pass.
 - **`instanceof` fix** — `instanceof` now works with builtin constructors (`Array`, `Promise`, `RegExp`) and class constructors. TAG_OBJECT builtin wrappers with `"prototype"` property are supported via shape lookup. 4 new tests. 456/456 tests pass.
 - **`super.prop = val` assignment** — `super.prop = val` writes to `this` (child instance). `LoadThis` as receiver instead of obj on `Expr::Member(Expr::Super)` target. 2 new tests. 458/458 tests pass.
-- **Known gaps**: `async_reject` is_throw path not yet wired to generator throw, `.finally` pending case falls back to old .then behavior, RegExp: no match/search/split, `replaceAll` function replacement not yet implemented, class: no `static` methods, `this.prop++` not supported (Update only handles Identifier targets).
+- **`static` methods** — `class Foo { static bar() { ... } }` supported. Static methods collected in emitter step 1, added to constructor after prototype link via `DefineProperty`. Func struct extended with `extra_props` field (lazily allocated JSObject for arbitrary properties on TAG_FUNC). `do_store_property`/`load_property_recursive`/`DefineProperty` all handle TAG_FUNC for non-prototype keys. GC traces `extra_props`. 4 new tests. 462/462 tests pass.
+- **Known gaps**: `async_reject` is_throw path not yet wired to generator throw, `.finally` pending case falls back to old .then behavior, RegExp: no match/search/split, `replaceAll` function replacement not yet implemented, `this.prop++` not supported (Update only handles Identifier targets), `let` + `new` in function body has a scoping bug.
 
 ### Next Steps — v0.5 (ordered by leverage)
-1. `static` methods
+1. `static` methods — done
+2. `class` private fields (`#`)
+3. `getter`/`setter` syntax

@@ -3080,3 +3080,47 @@ Added `ClassNode` (name, methods, span), `ClassMethod` (key, func, is_static, sp
 
 ### Next Steps
 1. `static` methods
+
+---
+
+## Sprint 30 — `static` Methods
+
+> **2026-06-29**: `class Foo { static bar() { ... } }` supported. Static methods collected in emitter step 1, added to constructor after prototype link via `DefineProperty`. 4 new tests. 462/462 tests pass.
+
+### Implementation
+
+#### Emitter (`crates/rune_parser/src/emitter.rs`)
+- Step 1: collect static methods into `static_method_funcs` vec alongside `method_funcs` (non-static) and `constructor_idx`
+- New step 7.5 (after prototype link, heritage `__proto__` link): for each static method, `LoadLocal(ctor_slot)`, `MakeFunction`, `DefineProperty(key)`, `Pop`
+- Static method functions compiled alongside regular methods during step 1, same compilation path
+
+#### Func (`crates/rune_core/src/function.rs`)
+- Added `extra_props: *mut u8` field at offset 56 (total struct size 64→72 bytes)
+- Lazy allocation: first write of arbitrary property to a TAG_FUNC creates a JSObject for property storage
+- `Func::extra_props()` / `Func::set_extra_props()` accessors
+
+#### VM (`crates/rune_interpreter/src/vm.rs`)
+- `do_store_property()` now handles TAG_FUNC for arbitrary (non-prototype) keys: lazily allocates extra_props JSObject, recursively calls `do_store_property` on it
+- `load_property_recursive()` for TAG_FUNC: checks `extra_props` before falling through to Function.prototype walk
+- `DefineProperty` opcode: handles TAG_FUNC by delegating to `do_store_property` (was only TAG_OBJECT)
+- GC tracing: `forward_value` for `extra_props` pointer in TAG_FUNC scan
+- `scan_end` for TAG_FUNC: 72 bytes (was 64)
+
+#### GC (`crates/rune_core/src/gc.rs`)
+- TAG_FUNC Cheney scan: forward `extra_props` pointer at byte offset 64
+- `scan_end` for TAG_FUNC: 72 bytes
+
+#### Integration Tests
+4 new tests:
+
+| Test | What it validates |
+|---|---|
+| `test_class_static_method` | Static method returns value |
+| `test_class_static_multiple_methods` | Multiple static methods, each working independently |
+| `test_class_static_method_this` | `this` inside static method refers to the constructor |
+| `test_class_static_with_instance` | Static factory method uses `new Foo(x)` to create instances |
+
+### Known Gaps
+- `let inst = new Foo(x); return inst.x;` inside a static method returns `undefined` (pre-existing `let`+`new` scoping bug in function bodies, affects regular functions too)
+- Compound assignment (`super.prop += val`) not implemented for Expr::Super target
+- StringObject/TAG_STRING_OBJ not handled in `ordinary_has_instance` prototype chain walk

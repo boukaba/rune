@@ -7,8 +7,8 @@ use crate::gc::{GcHeader, SemiSpace, TAG_FUNC, size_of};
 ///
 /// Memory layout:
 ///   [GcHeader(8) | func_idx(8) | prog_ptr(8) | prototype(8) |
-///    call_count(4) | flags(4) | env_ptr(8) | jit_entry(8) | superclass(8)]
-///   Total: 64 bytes
+///    call_count(4) | flags(4) | env_ptr(8) | jit_entry(8) | superclass(8) | extra_props(8)]
+///   Total: 72 bytes
 ///
 /// flags: bit 0 = is_arrow
 pub struct Func;
@@ -21,7 +21,7 @@ impl Func {
         is_arrow: bool,
         env_ptr: *mut u8,
     ) -> *mut Func {
-        let ptr = ss.alloc(64);
+        let ptr = ss.alloc(72);
         unsafe {
             let header = &mut *(ptr as *mut GcHeader);
             header.word = std::sync::atomic::AtomicU64::new(TAG_FUNC);
@@ -47,6 +47,9 @@ impl Func {
             // superclass = null
             let super_ptr = ptr.add(size_of::<GcHeader>() + 48) as *mut u64;
             *super_ptr = 0;
+            // extra_props = null (lazily allocated extensible object for arbitrary properties)
+            let props_ptr = ptr.add(size_of::<GcHeader>() + 56) as *mut u64;
+            *props_ptr = 0;
         }
         ptr as *mut Func
     }
@@ -165,6 +168,23 @@ impl Func {
             let ptr_bytes = ptr as *mut u8;
             let field = ptr_bytes.add(size_of::<GcHeader>() + 48) as *mut u64;
             *field = superclass as u64;
+        }
+    }
+
+    /// Get the extra properties object pointer (may be null).
+    pub unsafe fn extra_props(ptr: *mut Func) -> *mut u8 {
+        unsafe {
+            let ptr_bytes = ptr as *mut u8;
+            *(ptr_bytes.add(size_of::<GcHeader>() + 56) as *const u64) as *mut u8
+        }
+    }
+
+    /// Set the extra properties object pointer.
+    pub unsafe fn set_extra_props(ptr: *mut Func, props: *mut u8) {
+        unsafe {
+            let ptr_bytes = ptr as *mut u8;
+            let field = ptr_bytes.add(size_of::<GcHeader>() + 56) as *mut u64;
+            *field = props as u64;
         }
     }
 }

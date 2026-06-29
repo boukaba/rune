@@ -5658,6 +5658,54 @@ fn test_class_super_prop_read_data() {
 }
 
 #[test]
+fn test_class_static_method() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(
+        "class Foo { static greet() { return 42; } }
+         var r = Foo.greet();
+         r;"
+    );
+    assert_eq!(r.unwrap().as_smi(), Some(42), "static method should return 42");
+}
+
+#[test]
+fn test_class_static_multiple_methods() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(
+        "class Calc { static add(a, b) { return a + b; } static mul(a, b) { return a * b; } }
+         var r1 = Calc.add(3, 4);
+         var r2 = Calc.mul(3, 4);
+         r1 + r2;"
+    );
+    assert_eq!(r.unwrap().as_smi(), Some(19), "3+4 + 3*4 = 19");
+}
+
+#[test]
+fn test_class_static_method_this() {
+    let mut ctx = Context::new_small();
+    // Static method 'this' refers to the constructor
+    let r = ctx.eval(
+        "class Foo { static getThis() { return this; } }
+         var t = Foo.getThis();
+         t === Foo;"
+    );
+    assert_eq!(r.unwrap().to_boolean(), Some(true), "this should be the constructor");
+}
+
+#[test]
+fn test_class_static_with_instance() {
+    let mut ctx = Context::new_small();
+    // Test that static methods can create instances via new (in separate eval)
+    let r = ctx.eval(
+        "class Foo { constructor(x) { this.x = x; } static create(x) { return new Foo(x); } }
+         undefined;"
+    );
+    assert!(r.is_ok());
+    let r = ctx.eval("Foo.create(42).x;");
+    assert_eq!(r.unwrap().as_smi(), Some(42), "static factory should return 42");
+}
+
+#[test]
 fn test_class_super_prop_assign() {
     let mut ctx = Context::new_small();
     // super.prop = val should write to this (child instance)

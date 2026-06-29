@@ -2579,7 +2579,7 @@ impl Vm {
                             }
                         }
                     }
-                    do_store_property(obj, raw_key, value);
+                    do_store_property(obj, raw_key, value, gc);
                     self.push(value);
                     self.frames[fi].pc = pc + 1;
                 }
@@ -2596,7 +2596,7 @@ impl Vm {
                     {
                         unsafe { JSObject::set_slot(ptr as *mut JSObject, offset, value) };
                     } else {
-                        do_store_property(obj, raw_key, value);
+                        do_store_property(obj, raw_key, value, gc);
                     }
                     self.push(value);
                     self.frames[fi].pc = pc + 1;
@@ -2649,6 +2649,12 @@ impl Vm {
                                     )
                                 };
                             }
+                        } else if tag == TAG_FUNC {
+                            // For functions, delegate to do_store_property
+                            let raw_key = Value::from_heap_ptr(
+                                HeapString::allocate(gc, &key_str) as *mut u8
+                            );
+                            do_store_property(obj, raw_key, value, gc);
                         }
                     }
                     self.push(obj);
@@ -5580,6 +5586,19 @@ pub(crate) fn load_property_recursive(obj: Value, raw_key: Value, function_proto
                         return Value::from_heap_ptr(proto_ptr);
                     }
                 }
+                // Check extra properties stored on the function (e.g. static methods)
+                let extra_props_ptr = unsafe { Func::extra_props(ptr as *mut Func) };
+                if !extra_props_ptr.is_null() {
+                    let result = load_property_recursive(
+                        Value::from_heap_ptr(extra_props_ptr),
+                        raw_key,
+                        None,
+                        gc,
+                    );
+                    if !result.is_undefined() {
+                        return result;
+                    }
+                }
                 // Walk Function.prototype for other properties (e.g. .call, .apply, .bind)
                 if let Some(fp) = function_prototype
                     && fp.is_heap_object() {
@@ -5781,7 +5800,7 @@ fn load_property_recursive_ic(
 }
 
 /// Perform the full store-property logic (modelled after StoreProperty handler body).
-fn do_store_property(obj: Value, raw_key: Value, value: Value) {
+fn do_store_property(obj: Value, raw_key: Value, value: Value, gc: &mut SemiSpace) {
     if let Some(ptr) = obj.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_OBJECT {
@@ -5828,6 +5847,37 @@ fn do_store_property(obj: Value, raw_key: Value, value: Value) {
         {
             unsafe {
                 Func::set_prototype(ptr as *mut Func, val_ptr);
+            }
+        } else if tag == TAG_FUNC
+            && value_to_prop_key(raw_key).is_some()
+        {
+            // Store arbitrary properties on the function's extra_props object
+            // Must re-resolve ptr from obj after each allocation since GC may move objects
+            let mut obj_ptr = obj.heap_ptr().unwrap();
+            unsafe {
+                let mut props = Func::extra_props(obj_ptr as *mut Func);
+                if props.is_null() {
+                    // Lazily allocate a JSObject for extra properties.
+                    // GC may move objects during allocation; re-resolve from the Value.
+                    let new_obj = JSObject::allocate(gc, Shape::empty(), &[]);
+                    // After allocation, resolve forwarding for obj (it may have moved)
+                    let gc_tag = (*(obj_ptr as *const GcHeader)).tag();
+                    if gc_tag == TAG_FUNC
+                        && (*(obj_ptr as *const GcHeader)).is_forwarded()
+                    {
+                        obj_ptr =
+                            (*(obj_ptr as *const GcHeader)).forwarding_addr()
+                        ;
+                    }
+                    Func::set_extra_props(obj_ptr as *mut Func, new_obj as *mut u8);
+                    props = new_obj as *mut u8;
+                }
+                do_store_property(
+                    Value::from_heap_ptr(props),
+                    raw_key,
+                    value,
+                    gc,
+                );
             }
         }
     }

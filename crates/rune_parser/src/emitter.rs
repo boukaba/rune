@@ -242,6 +242,7 @@ impl Emitter {
         // 1. Compile all methods, identify constructor
         let mut constructor_idx = None;
         let mut method_funcs: Vec<(PropKey, usize)> = Vec::new();
+        let mut static_method_funcs: Vec<(PropKey, usize)> = Vec::new();
 
         for method in &class.methods {
             let is_constructor = matches!(&method.key, PropKey::Identifier(n) if n.as_ref() == "constructor");
@@ -261,7 +262,9 @@ impl Emitter {
             let idx = self.compile_function(&func);
             if is_constructor {
                 constructor_idx = Some(idx);
-            } else if !method.is_static {
+            } else if method.is_static {
+                static_method_funcs.push((method.key.clone(), idx));
+            } else {
                 method_funcs.push((method.key.clone(), idx));
             }
         }
@@ -404,6 +407,25 @@ impl Emitter {
                 self.emit(Opcode::LoadLocal, vec![sslot as i64]);
                 self.emit(Opcode::StoreProperty, vec![]);
                 self.emit(Opcode::Pop, vec![]);
+            }
+        }
+
+        // 7.5 Add static methods to constructor
+        if !static_method_funcs.is_empty() {
+            if let Some(ctor_slot) = save_slot {
+                for (key, func_idx) in &static_method_funcs {
+                    self.emit(Opcode::LoadLocal, vec![ctor_slot as i64]);
+                    self.emit(Opcode::MakeFunction, vec![*func_idx as i64]);
+                    let key_str = match key {
+                        PropKey::String(s) => s.to_string(),
+                        PropKey::Identifier(s) => s.to_string(),
+                        PropKey::Number(n) => n.to_string(),
+                        PropKey::Computed(_) => continue,
+                    };
+                    let key_idx = self.intern_string(&key_str) as i64;
+                    self.emit(Opcode::DefineProperty, vec![key_idx]);
+                    self.emit(Opcode::Pop, vec![]);
+                }
             }
         }
 

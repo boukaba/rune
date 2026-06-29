@@ -2564,8 +2564,9 @@ Two tracks, depends on target market:
 | `06e42ca` | Allow dead_code on PendingPromiseCtor fields |
 
 #### Known Gaps (ordered by priority)
-1. ⬜ **Microtask queue** — callbacks are synchronous per-task; `Promise.resolve().then(f)` should defer `f` to after sync code. Requires reaction storage for pending promises + drain loop.
-2. ⬜ **`Promise.all` / `Promise.race` / `Promise.resolve` / `Promise.reject`**
+1. ⬜ **Microtask queue** — callbacks are synchronous per-task; `Promise.resolve().then(f)` should defer `f` to after sync code
+2. ⬜ **`Promise.all` / `Promise.race`**
 3. ⬜ **Thenable unwrapping** — `resolve(otherPromise)` should adopt its state
 4. ⬜ **`async`/`await`** — parser desugaring + generator reuse
-5. ⬜ **test262** — not yet run; expected moderate pass rate (constructor + chaining covered)
+5. ⬜ **Parser `catch` reserved word** — `.catch(handler)` fails to parse; bracket notation `["catch"](handler)` works
+6. ⬜ **test262** — not yet run

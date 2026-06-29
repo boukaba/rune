@@ -2880,6 +2880,8 @@ pub fn default_builtins() -> Vec<Builtin> {
         Builtin { length: 1, name: "Promise_race", func: promise_static_race },
         Builtin { length: 1, name: "async_continue", func: async_continue },
         Builtin { length: 1, name: "async_reject", func: async_reject },
+        Builtin { length: 1, name: "RegExp_prototype_exec", func: regexp_exec },
+        Builtin { length: 1, name: "RegExp_prototype_test", func: regexp_test },
         Builtin {
             length: 1,
             name: "Object",
@@ -3451,4 +3453,64 @@ pub fn build_object_constructor(gc: &mut SemiSpace) -> Value {
     let shape = Shape::empty();
     let ptr = JSObject::allocate(gc, shape, &[]);
     Value::from_heap_ptr(ptr as *mut u8)
+}
+
+/// RegExp.prototype.exec(string) — run regex, return match array or null.
+pub fn regexp_exec(gc: &mut SemiSpace, this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let regexp_ptr = match get_regexp_this(this) {
+        Some(p) => p,
+        None => return Value::null(),
+    };
+    let pattern = unsafe { HeapString::to_string(RegExp::pattern(regexp_ptr) as *mut HeapString) };
+    let input = args.first().map(|v| string_from_value(*v)).unwrap_or_default();
+
+    match rune_regex::parse_regex(&pattern) {
+        Ok(expr) => {
+            let nfa = rune_regex::nfa::compile(&expr);
+            let pike_vm = rune_regex::pikevm::PikeVm::new();
+            match pike_vm.exec(&nfa, &input, 0) {
+                Some(m) => {
+                    let group_count = m.groups.len();
+                    let mut elements = Vec::with_capacity(group_count);
+                    for i in 0..group_count {
+                        let (gs, ge) = m.groups[i];
+                        let s = HeapString::allocate(gc, &input[gs..ge]);
+                        elements.push(Value::from_heap_ptr(s as *mut u8));
+                    }
+                    let arr = RuneArray::allocate(gc, &elements);
+                    unsafe {
+                        let ptr = arr as *mut u8;
+                        *(ptr.add(8) as *mut *const rune_core::shape::Shape) = *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
+                        if _vm.array_prototype.heap_ptr().is_some() {
+                            let proto = _vm.array_prototype.heap_ptr().unwrap();
+                            *(ptr.add(24) as *mut *mut u8) = proto;
+                        }
+                    }
+                    Value::from_heap_ptr(arr as *mut u8)
+                }
+                None => Value::null(),
+            }
+        }
+        Err(_) => Value::null(),
+    }
+}
+
+/// RegExp.prototype.test(string) — return true if pattern matches.
+pub fn regexp_test(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let result = regexp_exec(gc, this, args, vm);
+    if result.is_null() {
+        Value::boolean(false)
+    } else {
+        Value::boolean(true)
+    }
+}
+
+fn get_regexp_this(this: Value) -> Option<*mut u8> {
+    if let Some(ptr) = this.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_REGEXP {
+            return Some(ptr);
+        }
+    }
+    None
 }

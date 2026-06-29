@@ -266,6 +266,8 @@ impl SemiSpace {
                     TAG_REGEXP => {
                         let pattern_ptr = scan_ptr.add(size_of::<GcHeader>()) as *mut u64;
                         self.forward_value(pattern_ptr);
+                        let proto_ptr = scan_ptr.add(24) as *mut u64;
+                        self.forward_value(proto_ptr);
                     }
                     _ => {}
                 }
@@ -311,7 +313,7 @@ impl SemiSpace {
                 }
                 TAG_STRING_OBJ => obj_start.add(STRING_OBJ_TOTAL_SIZE),
                 TAG_PROMISE => obj_start.add(crate::promise::PROMISE_SIZE),
-                TAG_REGEXP => obj_start.add(24),
+                TAG_REGEXP => obj_start.add(32),
                 _ => obj_start.add(8),
             }
         }

@@ -1289,6 +1289,7 @@ mod tests {
             instructions,
             string_pool: vec![],
             float_pool: vec![],
+            regex_pool: vec![],
             functions: vec![],
             named_function: false,
             is_generator: false,

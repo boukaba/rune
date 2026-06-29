@@ -7,7 +7,7 @@ use rune_core::env::EnvObject;
 
 use rune_core::function::Func;
 use rune_core::gc::{
-    GcHeader, RootProvider, SemiSpace, TAG_ARRAY, TAG_FLOAT64, TAG_FUNC, TAG_OBJECT, TAG_PROMISE, TAG_STRING, TAG_STRING_OBJ,
+    GcHeader, RootProvider, SemiSpace, TAG_ARRAY, TAG_FLOAT64, TAG_FUNC, TAG_OBJECT, TAG_PROMISE, TAG_REGEXP, TAG_STRING, TAG_STRING_OBJ,
 };
 use rune_core::object::JSObject;
 use rune_core::promise::{Promise, PROMISE_FULFILLED, PROMISE_PENDING, PROMISE_REJECTED};
@@ -353,6 +353,7 @@ pub struct Vm {
     promise_bridge_prog: *const BytecodeProgram,
     pub object_prototype: Value,
     pub function_prototype: Value,
+    pub regexp_prototype: Value,
     /// Pending exception set by a builtin (checked after builtin dispatch).
     pub pending_exception: Option<Value>,
     /// Pending array operation (filter/map/reduce) with callback state machine.
@@ -442,6 +443,7 @@ impl Vm {
             promise_bridge_prog: std::ptr::null(),
             object_prototype: Value::undefined(),
             function_prototype: Value::undefined(),
+            regexp_prototype: Value::undefined(),
             pending_exception: None,
             pending_array_op: None,
             pending_call: None,
@@ -659,6 +661,19 @@ impl Vm {
             let prom_ctor = make_object(gc, &ctor_entries);
             self.promise_constructor = prom_ctor;
             self.builtin_wrappers.insert("Promise".to_string(), prom_ctor);
+        }
+
+        // RegExp namespace — prototype with exec/test
+        {
+            let exec_h = find_handle(&self.builtins, "RegExp_prototype_exec");
+            let test_h = find_handle(&self.builtins, "RegExp_prototype_test");
+            if let (Some(exec), Some(test)) = (exec_h, test_h) {
+                let proto_entries: Vec<(&str, Value)> = vec![("exec", exec), ("test", test)];
+                let re_proto = make_object(gc, &proto_entries);
+                self.regexp_prototype = re_proto;
+                let re_ctor = make_object(gc, &[("prototype", re_proto)]);
+                self.builtin_wrappers.insert("RegExp".to_string(), re_ctor);
+            }
         }
 
         // Math namespace with all methods + constants
@@ -1009,6 +1024,7 @@ impl Vm {
         gc.push_root(&self.promise_constructor as *const Value as *mut u64);
         gc.push_root(&self.promise_prototype as *const Value as *mut u64);
         gc.push_root(&self.function_prototype as *const Value as *mut u64);
+        gc.push_root(&self.regexp_prototype as *const Value as *mut u64);
         // Root pre-allocated typeof result strings (JIT typeof_helper reads these)
         for v in &self.typeof_strings {
             gc.push_root(v as *const Value as *mut u64);
@@ -1420,6 +1436,9 @@ impl Vm {
                         }
                     }
                     let ptr = rune_core::regexp::RegExp::allocate(gc, pattern_ptr, flag_bits);
+                    if let Some(proto_ptr) = self.regexp_prototype.heap_ptr() {
+                        unsafe { rune_core::regexp::RegExp::set_prototype(ptr, proto_ptr); }
+                    }
                     self.register_roots(gc);
                     self.push(Value::from_heap_ptr(ptr));
                     self.frames[fi].pc = pc + 1;
@@ -5473,6 +5492,14 @@ fn load_property_recursive(obj: Value, raw_key: Value, function_prototype: Optio
                         current = fp;
                         continue;
                     }
+                return Value::undefined();
+            } else if tag == TAG_REGEXP {
+                // Walk RegExp.prototype for exec/test and other properties
+                let proto_ptr = unsafe { rune_core::regexp::RegExp::prototype(ptr) };
+                if !proto_ptr.is_null() {
+                    current = Value::from_heap_ptr(proto_ptr);
+                    continue;
+                }
                 return Value::undefined();
             }
         }

@@ -5290,3 +5290,39 @@ fn test_regex_replace_all_capture() {
     let mut ctx = Context::new_small();
     assert_eq!(eval_str(&mut ctx, r#""a1 b2 c3".replaceAll(/(\w)(\d)/g, "$2$1")"#), "1a 2b 3c");
 }
+
+#[test]
+fn test_regexp_exec_match() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(r#"
+        var re = /world/;
+        var m = re.exec("hello world");
+        m[0];
+    "#).unwrap();
+    assert_eq!(eval_str(&mut ctx, r#"/world/.exec("hello world")[0]"#), "world");
+}
+
+#[test]
+fn test_regexp_exec_no_match() {
+    let mut ctx = Context::new_small();
+    assert_eq!(ctx.eval(r#"/xyz/.exec("hello world")"#).unwrap().is_null(), true);
+}
+
+#[test]
+fn test_regexp_exec_capture() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_str(&mut ctx, r#"/(\w+) (\w+)/.exec("hello world")[1]"#), "hello");
+    assert_eq!(eval_str(&mut ctx, r#"/(\w+) (\w+)/.exec("hello world")[2]"#), "world");
+}
+
+#[test]
+fn test_regexp_test_true() {
+    let mut ctx = Context::new_small();
+    assert_eq!(ctx.eval(r#"/hello/.test("hello world")"#).unwrap().to_boolean(), Some(true));
+}
+
+#[test]
+fn test_regexp_test_false() {
+    let mut ctx = Context::new_small();
+    assert_eq!(ctx.eval(r#"/xyz/.test("hello world")"#).unwrap().to_boolean(), Some(false));
+}

@@ -2714,3 +2714,33 @@ Same as above but loops finding all non-overlapping matches via repeated `PikeVm
 - **Regex not available for match/search/split** — only replace/replaceAll
 - **No `RegExp` constructor builtin** — only literal `/pattern/flags` form works
 - **No `RegExp.prototype.exec`/`test`** — regex matching only available via String methods internally
+
+---
+
+## Hotfix Session — TAG_REGEXP Prototype Chain for exec/test Builtins
+
+> **2026-06-29**: RegExp literal instances could not access `.exec` or `.test` because TAG_REGEXP had no prototype chain — property lookup returned `undefined`.
+
+### Root Cause
+`load_property_recursive` only handled TAG_OBJECT, TAG_ARRAY, TAG_STRING/STRING_OBJ, TAG_FUNC, and TAG_PROMISE. TAG_REGEXP fell through to `Value::undefined()`. The `RegExp` prototype wrapper was created in `init_builtin_wrappers` but was unreachable from RegExp instances.
+
+### Fix
+1. **`RegExp` struct expanded from 24→32 bytes** (`crates/rune_core/src/regexp.rs`): Added `prototype: *mut u8` field at offset 24. `RegExp::allocate` sets it to null; `set_prototype()`/`prototype()` accessors added.
+2. **`regexp_prototype` field on `Vm`** (`vm.rs:347`): Stores the `RegExp.prototype` value. Rooted in `register_roots`. Initialized in `init_builtin_wrappers` after creating the prototype object.
+3. **Prototype set on literal allocation** (`vm.rs:1438`): After `RegExp::allocate`, reads `self.regexp_prototype.heap_ptr()` and calls `RegExp::set_prototype`.
+4. **TAG_REGEXP case in `load_property_recursive`** (`vm.rs:5496`): Reads the prototype pointer from the RegExp struct and walks to it for property lookup.
+5. **GC scanning updated** (`gc.rs:266`): TAG_REGEXP now forwards the prototype pointer in Cheney scan (offset 24). `scan_end` returns 32 bytes (was 24).
+6. **JIT baseline fix** (`codegen.rs:1288`): Added `regex_pool: vec![]` to `BytecodeProgram` initializer (missing field).
+
+### File changes
+| File | Change |
+|---|---|
+| `crates/rune_core/src/regexp.rs` | REGEXP_SIZE 24→32, added prototype field + accessors |
+| `crates/rune_core/src/gc.rs` | TAG_REGEXP scan: forward proto ptr; scan_end 32 |
+| `crates/rune_interpreter/src/vm.rs` | regexp_prototype field, set in init_builtin_wrappers, rooted, set on literal alloc, TAG_REGEXP in load_property_recursive |
+| `crates/rune_embed/tests/integration_test.rs` | Fixed capture test pattern (leading space bug) |
+| `crates/rune_jit_baseline/src/codegen.rs` | Added regex_pool to BytecodeProgram init |
+
+### Test Results
+- **416 integration tests passing** (all 17 regex tests pass including 4 exec/test)
+- All workspace tests pass, clippy + fmt clean

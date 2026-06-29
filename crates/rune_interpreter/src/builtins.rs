@@ -1185,9 +1185,10 @@ pub fn string_replace(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
                 Ok(expr) => {
                     let nfa = rune_regex::nfa::compile(&expr);
                     let pike_vm = rune_regex::pikevm::PikeVm::new();
-                    if let Some((start, end)) = pike_vm.exec(&nfa, &s, 0) {
-                        // Expand $&, $`, $' in replacement
-                        let expanded = expand_replacement(&s, start, end, &replacement);
+                    if let Some(m) = pike_vm.exec(&nfa, &s, 0) {
+                        let (start, end) = m.groups[0];
+                        // Expand $&, $`, $', $1..$n in replacement
+                        let expanded = expand_replacement(&s, &m.groups, &replacement);
                         let result = s[..start].to_string() + &expanded + &s[end..];
                         return Value::from_heap_ptr(HeapString::allocate(gc, &result) as *mut u8);
                     } else {
@@ -1216,16 +1217,37 @@ pub fn string_replace(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
     }
 }
 
-/// Expand $&, $`, $' in a replacement string for regex match.
-fn expand_replacement(s: &str, start: usize, end: usize, replacement: &str) -> String {
+/// Expand $&, $`, $', $1..$n in a replacement string for regex match.
+fn expand_replacement(s: &str, groups: &[(usize, usize)], replacement: &str) -> String {
     let mut result = String::new();
     let mut chars = replacement.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '$' {
             match chars.next() {
-                Some('&') => result.push_str(&s[start..end]),
-                Some('`') => result.push_str(&s[..start]),
-                Some('\'') => result.push_str(&s[end..]),
+                Some('&') => result.push_str(&s[groups[0].0..groups[0].1]),
+                Some('`') => result.push_str(&s[..groups[0].0]),
+                Some('\'') => result.push_str(&s[groups[0].1..]),
+                Some(d) if d.is_ascii_digit() => {
+                    let mut n = (d as u8 - b'0') as usize;
+                    // Check for two-digit
+                    if let Some(&d2) = chars.peek() {
+                        if d2.is_ascii_digit() {
+                            let n2 = (d2 as u8 - b'0') as usize;
+                            let combined = n * 10 + n2;
+                            if combined < groups.len() {
+                                n = combined;
+                                chars.next();
+                            }
+                        }
+                    }
+                    if n < groups.len() {
+                        let (gs, ge) = groups[n];
+                        result.push_str(&s[gs..ge]);
+                    } else {
+                        result.push('$');
+                        result.push(char::from_digit(n as u32, 10).unwrap());
+                    }
+                }
                 Some(d) => { result.push('$'); result.push(d); }
                 None => result.push('$'),
             }
@@ -1262,9 +1284,10 @@ pub fn string_replace_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
                     let pike_vm = rune_regex::pikevm::PikeVm::new();
                     let mut result = String::new();
                     let mut last_end = 0;
-                    while let Some((start, end)) = pike_vm.exec(&nfa, &s, last_end) {
+                    while let Some(m) = pike_vm.exec(&nfa, &s, last_end) {
+                        let (start, end) = m.groups[0];
                         result.push_str(&s[last_end..start]);
-                        result.push_str(&expand_replacement(&s, start, end, &replacement));
+                        result.push_str(&expand_replacement(&s, &m.groups, &replacement));
                         last_end = end;
                         if start == end {
                             // Avoid infinite loop for zero-length matches

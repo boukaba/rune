@@ -5266,3 +5266,27 @@ fn test_regex_replace_all_with_dollar() {
     let mut ctx = Context::new_small();
     assert_eq!(eval_str(&mut ctx, r#""hello world hello".replaceAll(/hello/g, "($&)")"#), "(hello) world (hello)");
 }
+
+#[test]
+fn test_regex_replace_capture_dollar_1() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_str(&mut ctx, r#""hello world".replace(/(\w+)/, "$1")"#), "hello world");
+}
+
+#[test]
+fn test_regex_replace_capture_swap() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_str(&mut ctx, r#""hello world".replace(/(\w+) (\w+)/, "$2 $1")"#), "world hello");
+}
+
+#[test]
+fn test_regex_replace_capture_nested() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_str(&mut ctx, r#""abc".replace(/(a(b)c)/, "[$1][$2]")"#), "[abc][b]");
+}
+
+#[test]
+fn test_regex_replace_all_capture() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_str(&mut ctx, r#""a1 b2 c3".replaceAll(/(\w)(\d)/g, "$2$1")"#), "1a 2b 3c");
+}

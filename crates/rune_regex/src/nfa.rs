@@ -12,11 +12,13 @@ pub enum Edge {
     CharClass { negated: bool, ranges: Vec<(char, char)>, target: usize },
     Epsilon(usize),
     Dot(usize),
+    Save(usize, usize),
 }
 
 pub struct Nfa {
     pub start: usize,
     pub states: Vec<State>,
+    pub num_captures: usize,
 }
 
 fn alloc_state(states: &mut Vec<State>) -> usize {
@@ -80,14 +82,10 @@ fn compile_expr(expr: &RegexExpr, states: &mut Vec<State>, group_count: &mut usi
             let (s_in, s_out) = compile_expr(inner, states, group_count);
             let s_end = alloc_state(states);
             states[s_end].is_match = true;
-            // s_start → epsilon → s_in (one or more times)
             states[s_start].edges.push(Edge::Epsilon(s_in));
-            // s_start → epsilon → s_end (zero times)
             states[s_start].edges.push(Edge::Epsilon(s_end));
-            // s_out → epsilon → s_in (loop back)
             states[s_out].edges.push(Edge::Epsilon(s_in));
             states[s_out].is_match = false;
-            // s_out → epsilon → s_end (exit)
             states[s_out].edges.push(Edge::Epsilon(s_end));
             (s_start, s_end)
         }
@@ -96,10 +94,8 @@ fn compile_expr(expr: &RegexExpr, states: &mut Vec<State>, group_count: &mut usi
             let s_start = s_in;
             let s_end = alloc_state(states);
             states[s_end].is_match = true;
-            // s_out → epsilon → s_in (loop back for more)
             states[s_out].edges.push(Edge::Epsilon(s_in));
             states[s_out].is_match = false;
-            // s_out → epsilon → s_end (exit after at least one)
             states[s_out].edges.push(Edge::Epsilon(s_end));
             (s_start, s_end)
         }
@@ -108,18 +104,29 @@ fn compile_expr(expr: &RegexExpr, states: &mut Vec<State>, group_count: &mut usi
             let (s_in, s_out) = compile_expr(inner, states, group_count);
             let s_end = alloc_state(states);
             states[s_end].is_match = true;
-            // Skip the inner expression
             states[s_start].edges.push(Edge::Epsilon(s_end));
-            // Or take it
             states[s_start].edges.push(Edge::Epsilon(s_in));
             states[s_out].edges.push(Edge::Epsilon(s_end));
             states[s_out].is_match = false;
             (s_start, s_end)
         }
         RegexExpr::Group(inner, cap_idx) => {
-            let _ = cap_idx; // capture group indices tracked by caller
-            let (s1, s2) = compile_expr(inner, states, group_count);
-            (s1, s2)
+            if cap_idx.is_some() {
+                let idx = *group_count;
+                *group_count += 1;
+                let slot_start = idx * 2 + 2;
+                let slot_end = idx * 2 + 3;
+                let s_save_start = alloc_state(states);
+                let (s_in, s_out) = compile_expr(inner, states, group_count);
+                let s_save_end = alloc_state(states);
+                states[s_save_end].is_match = true;
+                states[s_save_start].edges.push(Edge::Save(slot_start, s_in));
+                states[s_out].edges.push(Edge::Save(slot_end, s_save_end));
+                states[s_out].is_match = false;
+                (s_save_start, s_save_end)
+            } else {
+                compile_expr(inner, states, group_count)
+            }
         }
         RegexExpr::CharClass { negated, ranges } => {
             let s1 = alloc_state(states);
@@ -129,7 +136,6 @@ fn compile_expr(expr: &RegexExpr, states: &mut Vec<State>, group_count: &mut usi
             (s1, s2)
         }
         RegexExpr::AnchorStart | RegexExpr::AnchorEnd | RegexExpr::Backref(_) => {
-            // Simplified: treat anchors/backrefs as epsilon (match anything)
             let s = alloc_state(states);
             (s, s)
         }
@@ -139,7 +145,15 @@ fn compile_expr(expr: &RegexExpr, states: &mut Vec<State>, group_count: &mut usi
 pub fn compile(expr: &RegexExpr) -> Nfa {
     let mut states = Vec::new();
     let mut group_count = 0;
-    let (start, end) = compile_expr(expr, &mut states, &mut group_count);
-    states[end].is_match = true;
-    Nfa { start, states }
+
+    let s_start = alloc_state(&mut states);
+    let (s_inner, s_inner_end) = compile_expr(expr, &mut states, &mut group_count);
+    let s_end = alloc_state(&mut states);
+    states[s_end].is_match = true;
+
+    states[s_start].edges.push(Edge::Save(0, s_inner));
+    states[s_inner_end].edges.push(Edge::Save(1, s_end));
+    states[s_inner_end].is_match = false;
+
+    Nfa { start: s_start, states, num_captures: group_count }
 }

@@ -5,6 +5,6 @@ pub mod parse;
 pub mod pikevm;
 
 pub use nfa::{compile, Nfa, State as NfaState};
-pub use pikevm::PikeVm;
+pub use pikevm::{Match, PikeVm};
 pub use parse::parse_regex;
 

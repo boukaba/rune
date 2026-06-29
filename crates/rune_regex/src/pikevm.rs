@@ -2,6 +2,17 @@ use crate::nfa::{Edge, Nfa};
 
 pub struct PikeVm;
 
+#[derive(Clone, Debug)]
+pub struct Match {
+    pub groups: Vec<(usize, usize)>,
+}
+
+#[derive(Clone)]
+struct Thread {
+    pc: usize,
+    saves: Vec<Option<usize>>,
+}
+
 impl Default for PikeVm {
     fn default() -> Self {
         Self::new()
@@ -13,77 +24,162 @@ impl PikeVm {
         PikeVm
     }
 
-    /// Find the leftmost-longest match in `text` starting at or after `start`.
-    /// Returns `(start, end)` byte offsets of the match, or `None`.
-    pub fn exec(&self, nfa: &Nfa, text: &str, start: usize) -> Option<(usize, usize)> {
+    pub fn exec(&self, nfa: &Nfa, text: &str, start: usize) -> Option<Match> {
         let chars: Vec<char> = text.chars().collect();
         if start >= chars.len() {
             return None;
         }
 
-        // Try each position as the start of a match
+        let num_slots = (nfa.num_captures + 1) * 2;
+
         for pos in start..chars.len() {
-            let mut clist: Vec<usize> = Vec::new();
-            add_state(&mut clist, nfa, nfa.start);
+            let mut clist: Vec<Thread> = Vec::new();
+            add_thread(&mut clist, nfa, nfa.start, &vec![None; num_slots]);
 
-            let mut match_end: Option<usize> = None;
+            let mut longest_match: Option<Match> = None;
 
-            // Simulate forward from pos
             for p in pos..chars.len() {
                 if clist.is_empty() {
                     break;
                 }
-                // Check if any thread reached a match state (before consuming char at p)
-                if clist.iter().any(|&pc| nfa.states[pc].is_match) {
-                    match_end = Some(match_end.map_or(p, |prev| prev.max(p)));
+
+                // Follow Save and Epsilon edges (non-consuming) until fixpoint
+                let expanded = follow_nonconsuming(&clist, nfa, p);
+
+                // Check match in expanded threads
+                for t in &expanded {
+                    if nfa.states[t.pc].is_match {
+                        let match_groups = build_groups(&t.saves, pos, p, nfa.num_captures);
+                        let should_replace = match &longest_match {
+                            None => true,
+                            Some(prev) => p > prev.groups[0].1,
+                        };
+                        if should_replace {
+                            longest_match = Some(match_groups);
+                        }
+                    }
                 }
-                // Advance each thread with the current character
+
+                // Advance threads with current character
                 let c = chars[p];
-                let mut nlist = Vec::new();
-                for &pc in &clist {
-                    for edge in &nfa.states[pc].edges {
+                let mut nlist: Vec<Thread> = Vec::new();
+                for t in &expanded {
+                    for edge in &nfa.states[t.pc].edges {
                         match edge {
                             Edge::Char(ch, target) => {
                                 if *ch == c {
-                                    add_state(&mut nlist, nfa, *target);
+                                    add_thread(&mut nlist, nfa, *target, &t.saves);
                                 }
                             }
                             Edge::CharClass { negated, ranges, target } => {
                                 let in_class = ranges.iter().any(|(lo, hi)| c >= *lo && c <= *hi);
                                 if *negated != in_class {
-                                    add_state(&mut nlist, nfa, *target);
+                                    add_thread(&mut nlist, nfa, *target, &t.saves);
                                 }
                             }
                             Edge::Dot(target) => {
-                                add_state(&mut nlist, nfa, *target);
+                                add_thread(&mut nlist, nfa, *target, &t.saves);
                             }
-                            Edge::Epsilon(_) => {} // epsilon already followed in add_state
+                            Edge::Epsilon(_) | Edge::Save(_, _) => {}
                         }
                     }
                 }
                 clist = nlist;
             }
+
             // Check match at end of string
-            if clist.iter().any(|&pc| nfa.states[pc].is_match) {
-                match_end = Some(chars.len());
+            let expanded = follow_nonconsuming(&clist, nfa, chars.len());
+            for t in &expanded {
+                if nfa.states[t.pc].is_match {
+                    let end_pos = chars.len();
+                    let match_groups = build_groups(&t.saves, pos, end_pos, nfa.num_captures);
+                    let should_replace = match &longest_match {
+                        None => true,
+                        Some(prev) => end_pos > prev.groups[0].1,
+                    };
+                    if should_replace {
+                        longest_match = Some(match_groups);
+                    }
+                }
             }
 
-            if let Some(end) = match_end {
-                return Some((pos, end));
+            if let Some(m) = longest_match {
+                return Some(m);
             }
         }
         None
     }
 }
 
-fn add_state(nlist: &mut Vec<usize>, nfa: &Nfa, pc: usize) {
-    if nlist.contains(&pc) {
-        return;
+/// Follow all non-consuming edges (Save and Epsilon) until fixpoint.
+fn follow_nonconsuming(threads: &[Thread], nfa: &Nfa, pos: usize) -> Vec<Thread> {
+    let mut result: Vec<Thread> = Vec::new();
+    let mut worklist: Vec<Thread> = threads.to_vec();
+
+    while let Some(t) = worklist.pop() {
+        let mut has_nonconsuming = false;
+        for edge in &nfa.states[t.pc].edges {
+            match edge {
+                Edge::Save(slot, target) => {
+                    has_nonconsuming = true;
+                    let mut saves = t.saves.clone();
+                    saves[*slot] = Some(pos);
+                    let new_t = Thread { pc: *target, saves };
+                    if !in_sets(&new_t, &worklist, &result) {
+                        worklist.push(new_t);
+                    }
+                }
+                Edge::Epsilon(target) => {
+                    has_nonconsuming = true;
+                    let new_t = Thread { pc: *target, saves: t.saves.clone() };
+                    if !in_sets(&new_t, &worklist, &result) {
+                        worklist.push(new_t);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !has_nonconsuming && !in_result(&t, &result) {
+            result.push(t);
+        }
     }
-    nlist.push(pc);
+    result
+}
+
+fn in_sets(t: &Thread, worklist: &[Thread], result: &[Thread]) -> bool {
+    worklist.iter().any(|w| w.pc == t.pc && w.saves == t.saves)
+        || result.iter().any(|r| r.pc == t.pc && r.saves == t.saves)
+}
+
+fn in_result(t: &Thread, result: &[Thread]) -> bool {
+    result.iter().any(|r| r.pc == t.pc && r.saves == t.saves)
+}
+
+fn build_groups(saves: &[Option<usize>], match_start: usize, match_end: usize, num_captures: usize) -> Match {
+    let mut groups = vec![(0, 0); num_captures + 1];
+    groups[0] = (saves[0].unwrap_or(match_start), match_end);
+    for i in 0..num_captures {
+        let s = i * 2 + 2;
+        let e = i * 2 + 3;
+        groups[i + 1] = (
+            saves[s].unwrap_or(match_end),
+            saves[e].unwrap_or(match_end),
+        );
+    }
+    Match { groups }
+}
+
+fn add_thread(nlist: &mut Vec<Thread>, nfa: &Nfa, pc: usize, saves: &[Option<usize>]) {
+    // Skip if already in nlist (same pc + saves)
+    for t in nlist.iter() {
+        if t.pc == pc && t.saves == saves {
+            return;
+        }
+    }
+    nlist.push(Thread { pc, saves: saves.to_vec() });
     for edge in &nfa.states[pc].edges {
         if let Edge::Epsilon(target) = edge {
-            add_state(nlist, nfa, *target);
+            add_thread(nlist, nfa, *target, saves);
         }
     }
 }
@@ -99,7 +195,7 @@ mod tests {
         let nfa = crate::nfa::compile(&expr);
         let vm = PikeVm::new();
         let m = vm.exec(&nfa, "xyzabcdef", 0);
-        assert_eq!(m, Some((3, 6)));
+        assert_eq!(m.as_ref().map(|m| m.groups[0]), Some((3, 6)));
     }
 
     #[test]
@@ -108,9 +204,9 @@ mod tests {
         let nfa = crate::nfa::compile(&expr);
         let vm = PikeVm::new();
         let m = vm.exec(&nfa, "xyz", 0);
-        assert_eq!(m, None);
+        assert!(m.is_none());
         let m = vm.exec(&nfa, "cat", 0);
-        assert_eq!(m, Some((1, 2)));
+        assert_eq!(m.as_ref().map(|m| m.groups[0]), Some((1, 2)));
     }
 
     #[test]
@@ -119,9 +215,9 @@ mod tests {
         let nfa = crate::nfa::compile(&expr);
         let vm = PikeVm::new();
         let m = vm.exec(&nfa, "bba", 0);
-        assert_eq!(m, Some((0, 0))); // matches zero a's at position 0
+        assert_eq!(m.as_ref().map(|m| m.groups[0]), Some((0, 0)));
         let m = vm.exec(&nfa, "bba", 2);
-        assert_eq!(m, Some((2, 3))); // matches one a at position 2
+        assert_eq!(m.as_ref().map(|m| m.groups[0]), Some((2, 3)));
     }
 
     #[test]
@@ -130,7 +226,7 @@ mod tests {
         let nfa = crate::nfa::compile(&expr);
         let vm = PikeVm::new();
         let m = vm.exec(&nfa, "cat", 0);
-        assert_eq!(m, Some((0, 3)));
+        assert_eq!(m.as_ref().map(|m| m.groups[0]), Some((0, 3)));
     }
 
     #[test]
@@ -139,11 +235,11 @@ mod tests {
         let nfa = crate::nfa::compile(&expr);
         let vm = PikeVm::new();
         let m = vm.exec(&nfa, "a.b.c", 0);
-        assert_eq!(m, Some((1, 2)));
+        assert_eq!(m.as_ref().map(|m| m.groups[0]), Some((1, 2)));
         let m = vm.exec(&nfa, "a.b.c", 2);
-        assert_eq!(m, Some((3, 4)));
+        assert_eq!(m.as_ref().map(|m| m.groups[0]), Some((3, 4)));
         let m = vm.exec(&nfa, "a.b.c", 4);
-        assert_eq!(m, None);
+        assert!(m.is_none());
     }
 
     #[test]
@@ -154,9 +250,9 @@ mod tests {
         let text = "a.b.c";
         let mut results = Vec::new();
         let mut last_end = 0;
-        while let Some((s, e)) = vm.exec(&nfa, text, last_end) {
-            results.push((s, e));
-            last_end = e;
+        while let Some(m) = vm.exec(&nfa, text, last_end) {
+            results.push(m.groups[0]);
+            last_end = m.groups[0].1;
         }
         assert_eq!(results, vec![(1, 2), (3, 4)]);
     }
@@ -167,6 +263,42 @@ mod tests {
         let nfa = crate::nfa::compile(&expr);
         let vm = PikeVm::new();
         let m = vm.exec(&nfa, "abc123def", 0);
-        assert_eq!(m, Some((3, 6)));
+        assert_eq!(m.as_ref().map(|m| m.groups[0]), Some((3, 6)));
+    }
+
+    #[test]
+    fn test_capture_group() {
+        let expr = parse_regex(r"(a)(b)").unwrap();
+        let nfa = crate::nfa::compile(&expr);
+        assert_eq!(nfa.num_captures, 2);
+        let vm = PikeVm::new();
+        let m = vm.exec(&nfa, "xab", 0).unwrap();
+        assert_eq!(m.groups[0], (1, 3));
+        assert_eq!(m.groups[1], (1, 2));
+        assert_eq!(m.groups[2], (2, 3));
+    }
+
+    #[test]
+    fn test_nested_capture() {
+        let expr = parse_regex(r"(a(b))").unwrap();
+        let nfa = crate::nfa::compile(&expr);
+        assert_eq!(nfa.num_captures, 2);
+        let vm = PikeVm::new();
+        let m = vm.exec(&nfa, "xab", 0).unwrap();
+        assert_eq!(m.groups[0], (1, 3));
+        assert_eq!(m.groups[1], (1, 3));
+        assert_eq!(m.groups[2], (2, 3));
+    }
+
+    #[test]
+    fn test_capture_with_dollar() {
+        let expr = parse_regex(r"(hello) (world)").unwrap();
+        let nfa = crate::nfa::compile(&expr);
+        assert_eq!(nfa.num_captures, 2);
+        let vm = PikeVm::new();
+        let m = vm.exec(&nfa, "say hello world here", 0).unwrap();
+        assert_eq!(m.groups[0], (4, 15));
+        assert_eq!(m.groups[1], (4, 9));
+        assert_eq!(m.groups[2], (10, 15));
     }
 }

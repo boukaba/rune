@@ -32,6 +32,10 @@ function handler(requestBody) {
     var topNames = items.slice(0, 3).map(function(x) { return x.name; });
     if (topNames.indexOf("item0") === -1) { throw new Error("includes check failed"); }
 
+    // Use replace to sanitize body (normalize newlines, empty → default)
+    var cleaned = requestBody.replace("\n", "").replace("", "{\"default\":true}");
+    if (cleaned.indexOf("default") === -1) { throw new Error("replace failed"); }
+
     var active = items.filter(function(x) { return x.active; });
     var total = active.reduce(function(sum, x) { return sum + x.value; }, 0);
     var top = active

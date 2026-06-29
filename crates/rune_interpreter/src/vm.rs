@@ -475,6 +475,8 @@ impl Vm {
         let concat_handle = find_handle(&self.builtins, "String_prototype_concat");
         let to_string_handle = find_handle(&self.builtins, "String_prototype_toString");
         let value_of_handle = find_handle(&self.builtins, "String_prototype_valueOf");
+        let replace_handle = find_handle(&self.builtins, "String_prototype_replace");
+        let replace_all_handle = find_handle(&self.builtins, "String_prototype_replaceAll");
         if let (Some(char_at), Some(slice)) = (char_at_handle, slice_handle) {
             let mut str_proto_entries: Vec<(&str, Value)> = vec![
                 ("charAt", char_at),
@@ -500,6 +502,8 @@ impl Vm {
             if let Some(cn) = concat_handle { str_proto_entries.push(("concat", cn)); }
             if let Some(ts) = to_string_handle { str_proto_entries.push(("toString", ts)); }
             if let Some(vo) = value_of_handle { str_proto_entries.push(("valueOf", vo)); }
+            if let Some(rp) = replace_handle { str_proto_entries.push(("replace", rp)); }
+            if let Some(ra) = replace_all_handle { str_proto_entries.push(("replaceAll", ra)); }
             let str_proto = make_object(gc, &str_proto_entries);
             self.builtin_wrappers
                 .insert("String.prototype".to_string(), str_proto);

@@ -1074,6 +1074,51 @@ pub fn string_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
     }
 }
 
+/// String.prototype.replace(searchValue, replaceValue) — first match only (string pattern, no regex).
+pub fn string_replace(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let s = string_from_value(this);
+    let search_str = arg_to_string(gc, args.first().copied(), vm);
+    let replacement = if args.len() > 1 {
+        arg_to_string(gc, Some(args[1]), vm)
+    } else {
+        HeapString::allocate(gc, "undefined");
+        "undefined".to_string()
+    };
+    if search_str.is_empty() {
+        let result = replacement.clone() + &s;
+        return Value::from_heap_ptr(HeapString::allocate(gc, &result) as *mut u8);
+    }
+    if let Some(pos) = s.find(&search_str) {
+        let result = s[..pos].to_string() + &replacement + &s[pos + search_str.len()..];
+        Value::from_heap_ptr(HeapString::allocate(gc, &result) as *mut u8)
+    } else {
+        Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8)
+    }
+}
+
+/// String.prototype.replaceAll(searchValue, replaceValue) — replace all non-overlapping matches (string pattern, no regex).
+pub fn string_replace_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let s = string_from_value(this);
+    let search_str = arg_to_string(gc, args.first().copied(), vm);
+    let replacement = if args.len() > 1 {
+        arg_to_string(gc, Some(args[1]), vm)
+    } else {
+        "undefined".to_string()
+    };
+    if search_str.is_empty() {
+        let result = s.chars().map(|c| replacement.clone() + &c.to_string()).collect::<String>() + &replacement;
+        return Value::from_heap_ptr(HeapString::allocate(gc, &result) as *mut u8);
+    }
+    let result = s.replace(&search_str, &replacement);
+    Value::from_heap_ptr(HeapString::allocate(gc, &result) as *mut u8)
+}
+
 /// Math.floor(x) — rounds down.
 fn math_op_unary(args: &[Value], op: fn(f64) -> f64) -> Value {
     let x = args.first().copied().unwrap_or(Value::smi(0));
@@ -2291,6 +2336,16 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 0,
             name: "String_prototype_valueOf",
             func: string_value_of,
+        },
+        Builtin {
+            length: 2,
+            name: "String_prototype_replace",
+            func: string_replace,
+        },
+        Builtin {
+            length: 2,
+            name: "String_prototype_replaceAll",
+            func: string_replace_all,
         },
         Builtin {
             length: 1,

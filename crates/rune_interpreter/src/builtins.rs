@@ -2091,6 +2091,107 @@ pub fn array_find_index(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
     Value::undefined()
 }
 
+/// Check if a Value is an Array (TAG_ARRAY).
+fn is_array_val(v: Value) -> bool {
+    if let Some(ptr) = v.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        return tag == TAG_ARRAY;
+    }
+    false
+}
+
+/// Array.prototype.flat(depth) — flatten nested arrays to specified depth.
+pub fn array_flat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let depth = args.first().copied().unwrap_or(Value::undefined());
+    let depth_num = if depth.is_undefined() {
+        1.0
+    } else if let Some(smi) = depth.as_smi() {
+        smi as f64
+    } else if let Some(f) = depth.as_float64() {
+        f
+    } else {
+        to_integer_or_infinity(depth)
+    };
+    let effective_depth = if depth_num.is_infinite() || depth_num.is_nan() {
+        if depth_num.is_sign_negative() { 0 } else { u32::MAX }
+    } else {
+        depth_num.max(0.0) as u32
+    };
+    fn flatten(gc: &mut SemiSpace, vm: &Vm, arr_val: Value, depth: u32) -> *mut u8 {
+        let result_arr = RuneArray::allocate(gc, &[]);
+        let mut result_ptr = result_arr as *mut u8;
+        unsafe {
+            *(result_ptr.add(8) as *mut *const rune_core::shape::Shape) = *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
+            if let Some(proto) = vm.array_prototype.heap_ptr() {
+                *(result_ptr.add(24) as *mut *mut u8) = proto;
+            }
+        }
+        let src_len = crate::vm::array_like_length(arr_val).unwrap_or(0);
+        for i in 0..src_len {
+            let elem = crate::vm::array_like_index(arr_val, i).unwrap_or(Value::undefined());
+            if depth > 0 && is_array_val(elem) {
+                let flattened = flatten(gc, vm, elem, depth - 1);
+                unsafe {
+                    let flat_len = RuneArray::length(flattened as *mut RuneArray);
+                    for j in 0..flat_len {
+                        let flat_elem = RuneArray::get_element(flattened as *mut RuneArray, j as usize);
+                        let new_ptr = RuneArray::push(gc, result_ptr as *mut RuneArray, flat_elem);
+                        result_ptr = new_ptr as *mut u8;
+                    }
+                }
+            } else {
+                unsafe {
+                    let new_ptr = RuneArray::push(gc, result_ptr as *mut RuneArray, elem);
+                    result_ptr = new_ptr as *mut u8;
+                }
+            }
+        }
+        result_ptr
+    }
+    let result_ptr = flatten(gc, vm, this, effective_depth);
+    Value::from_heap_ptr(result_ptr)
+}
+
+/// Array.prototype.flatMap(callback, thisArg) — set up state machine iteration, spreading array results.
+pub fn array_flat_map(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let length = match crate::vm::array_like_length(this) {
+        Some(len) => len,
+        None => return Value::undefined(),
+    };
+    let callback = args.first().copied().unwrap_or(Value::undefined());
+    let this_arg = args.get(1).copied().unwrap_or(Value::undefined());
+    let source_ptr = this.heap_ptr().unwrap();
+    let result_arr = RuneArray::allocate(gc, &[]);
+    unsafe {
+        let ptr = result_arr as *mut u8;
+        *(ptr.add(8) as *mut *const rune_core::shape::Shape) = *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
+        if let Some(proto) = vm.array_prototype.heap_ptr() {
+            *(ptr.add(24) as *mut *mut u8) = proto;
+        }
+    }
+    if length == 0 {
+        return Value::from_heap_ptr(result_arr as *mut u8);
+    }
+    vm.pending_array_op = Some(crate::vm::ArrayOpState {
+        kind: crate::vm::ArrayOpKind::FlatMap,
+        source: source_ptr,
+        result: result_arr as *mut u8,
+        callback,
+        this_val: this_arg,
+        source_val: this,
+        index: 0,
+        length,
+        source_frame_depth: 0,
+        accumulator: None,
+    });
+    let element = crate::vm::array_like_index(this, 0).unwrap_or(Value::undefined());
+    vm.push_callback_call(gc, callback, this_arg, vec![element, Value::smi(0), this]);
+    Value::undefined()
+}
+
 /// Array.prototype.some(callback, thisArg) — set up state machine iteration.
 pub fn array_some(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let length = match crate::vm::array_like_length(this) {
@@ -2454,6 +2555,16 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 1,
             name: "Array_prototype_every",
             func: array_every,
+        },
+        Builtin {
+            length: 1,
+            name: "Array_prototype_flat",
+            func: array_flat,
+        },
+        Builtin {
+            length: 1,
+            name: "Array_prototype_flatMap",
+            func: array_flat_map,
         },
         Builtin {
             length: 1,

@@ -194,6 +194,7 @@ pub(crate) enum ArrayOpKind {
     FindIndex,
     Some,
     Every,
+    FlatMap,
 }
 
 /// State for an in-progress Array.prototype callback iteration.
@@ -434,6 +435,8 @@ impl Vm {
         let find_index_h = find_handle(&self.builtins, "Array_prototype_findIndex");
         let some_h = find_handle(&self.builtins, "Array_prototype_some");
         let every_h = find_handle(&self.builtins, "Array_prototype_every");
+        let flat_h = find_handle(&self.builtins, "Array_prototype_flat");
+        let flat_map_h = find_handle(&self.builtins, "Array_prototype_flatMap");
         if let (Some(push), Some(pop)) = (push_handle, pop_handle) {
             let mut proto_entries: Vec<(&str, Value)> = vec![("push", push), ("pop", pop)];
             if let Some(f) = filter_handle { proto_entries.push(("filter", f)); }
@@ -446,6 +449,8 @@ impl Vm {
             if let Some(fi) = find_index_h { proto_entries.push(("findIndex", fi)); }
             if let Some(sm) = some_h { proto_entries.push(("some", sm)); }
             if let Some(ev) = every_h { proto_entries.push(("every", ev)); }
+            if let Some(fl) = flat_h { proto_entries.push(("flat", fl)); }
+            if let Some(fm) = flat_map_h { proto_entries.push(("flatMap", fm)); }
             let arr_proto = make_object(gc, &proto_entries);
             self.builtin_wrappers
                 .insert("Array.prototype".to_string(), arr_proto);
@@ -3823,6 +3828,43 @@ impl Vm {
                                     }
                                     op.result = new_arr as *mut u8;
                                 }
+                                ArrayOpKind::FlatMap => {
+                                    let old_ptr = op.result;
+                                    if result.heap_ptr().is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_ARRAY }) {
+                                        let src_ptr = result.heap_ptr().unwrap();
+                                        let arr_len = unsafe { RuneArray::length(src_ptr as *mut RuneArray) };
+                                        let mut cur_ptr = old_ptr;
+                                        for k in 0..arr_len {
+                                            let elem = unsafe { RuneArray::get_element(src_ptr as *mut RuneArray, k as usize) };
+                                            let new_arr = unsafe { RuneArray::push(gc, cur_ptr as *mut RuneArray, elem) };
+                                            if new_arr as *mut u8 != cur_ptr {
+                                                let resolved = if unsafe { (*(cur_ptr as *const GcHeader)).is_forwarded() } {
+                                                    unsafe { (*(cur_ptr as *const GcHeader)).forwarding_addr() }
+                                                } else {
+                                                    cur_ptr
+                                                };
+                                                if resolved != new_arr as *mut u8 {
+                                                    self.update_heap_reference(resolved, new_arr as *mut u8);
+                                                }
+                                                cur_ptr = new_arr as *mut u8;
+                                            }
+                                        }
+                                        op.result = cur_ptr;
+                                    } else {
+                                        let new_arr = unsafe { RuneArray::push(gc, old_ptr as *mut RuneArray, result) };
+                                        if new_arr as *mut u8 != old_ptr {
+                                            let resolved = if unsafe { (*(old_ptr as *const GcHeader)).is_forwarded() } {
+                                                unsafe { (*(old_ptr as *const GcHeader)).forwarding_addr() }
+                                            } else {
+                                                old_ptr
+                                            };
+                                            if resolved != new_arr as *mut u8 {
+                                                self.update_heap_reference(resolved, new_arr as *mut u8);
+                                            }
+                                        }
+                                        op.result = new_arr as *mut u8;
+                                    }
+                                }
                                 ArrayOpKind::Reduce => {
                                     op.accumulator = Some(result);
                                 }
@@ -3883,11 +3925,11 @@ impl Vm {
                                 let resolved_val = array_like_index(op.source_val, i as u32)
                                     .unwrap_or(Value::undefined());
                                 let cb_this = match op_kind {
-                                    ArrayOpKind::Filter | ArrayOpKind::Map | ArrayOpKind::ForEach | ArrayOpKind::Find | ArrayOpKind::FindIndex | ArrayOpKind::Some | ArrayOpKind::Every => op.this_val,
+                                    ArrayOpKind::Filter | ArrayOpKind::Map | ArrayOpKind::ForEach | ArrayOpKind::Find | ArrayOpKind::FindIndex | ArrayOpKind::Some | ArrayOpKind::Every | ArrayOpKind::FlatMap => op.this_val,
                                     ArrayOpKind::Reduce => Value::undefined(),
                                 };
                                 let cb_args = match op_kind {
-                                    ArrayOpKind::Filter | ArrayOpKind::Map | ArrayOpKind::ForEach | ArrayOpKind::Find | ArrayOpKind::FindIndex | ArrayOpKind::Some | ArrayOpKind::Every => {
+                                    ArrayOpKind::Filter | ArrayOpKind::Map | ArrayOpKind::ForEach | ArrayOpKind::Find | ArrayOpKind::FindIndex | ArrayOpKind::Some | ArrayOpKind::Every | ArrayOpKind::FlatMap => {
                                         vec![
                                             resolved_val,
                                             Value::smi(i as i32),
@@ -3912,7 +3954,7 @@ impl Vm {
                             }
                             // Done: push result and advance pc.
                             let final_result = match op_kind {
-                                ArrayOpKind::Filter | ArrayOpKind::Map => {
+                                ArrayOpKind::Filter | ArrayOpKind::Map | ArrayOpKind::FlatMap => {
                                     Value::from_heap_ptr(op.result)
                                 }
                                 ArrayOpKind::Reduce => {

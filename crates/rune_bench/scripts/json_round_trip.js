@@ -37,6 +37,10 @@ function handler(requestBody) {
     if (cleaned.indexOf("default") === -1) { throw new Error("replace failed"); }
 
     var active = items.filter(function(x) { return x.active; });
+
+    // Use flatMap to transform top active items into rank-value pairs
+    var rankValues = active.slice(0, 3).flatMap(function(x) { return [x.value * 2, x.value * 3]; });
+    if (rankValues.length !== 6) { throw new Error("flatMap length mismatch: " + rankValues.length); }
     var total = active.reduce(function(sum, x) { return sum + x.value; }, 0);
     var top = active
         .map(function(x) { return { name: x.name, value: x.value }; })

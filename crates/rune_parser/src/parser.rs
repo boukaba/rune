@@ -188,12 +188,13 @@ impl Parser {
         } else {
             None
         };
-        let methods = self.parse_class_body();
+        let (methods, private_fields) = self.parse_class_body();
         Stmt::Class(
             Box::new(ClassNode {
                 name: name.clone(),
                 heritage,
                 methods,
+                private_fields,
                 span: Span {
                     start: start.start,
                     end: self.span().end,
@@ -222,12 +223,13 @@ impl Parser {
         } else {
             None
         };
-        let methods = self.parse_class_body();
+        let (methods, private_fields) = self.parse_class_body();
         Expr::Class(
             Box::new(ClassNode {
                 name,
                 heritage,
                 methods,
+                private_fields,
                 span: Span {
                     start: start.start,
                     end: self.span().end,
@@ -240,9 +242,10 @@ impl Parser {
         )
     }
 
-    fn parse_class_body(&mut self) -> Vec<ClassMethod> {
+    fn parse_class_body(&mut self) -> (Vec<ClassMethod>, Vec<PrivateField>) {
         self.expect(TokenKind::LBrace);
         let mut methods = Vec::new();
+        let mut private_fields = Vec::new();
         while self.tok.kind != TokenKind::RBrace && self.tok.kind != TokenKind::Eof {
             let mstart = self.span();
             let is_static = if self.tok.kind == TokenKind::Identifier
@@ -254,6 +257,37 @@ impl Parser {
             } else {
                 false
             };
+            // Detect private field: #name or #name = expr
+            if self.tok.kind == TokenKind::Hash {
+                self.advance(); // consume '#'
+                let name = if self.tok.kind == TokenKind::Identifier {
+                    let t = self.tok.clone();
+                    self.advance();
+                    t.value.into_boxed_str()
+                } else {
+                    self.error("Expected identifier after #".to_string());
+                    Box::from("")
+                };
+                let init = if self.tok.kind == TokenKind::EqAssign {
+                    self.advance(); // consume '='
+                    Some(Box::new(self.parse_expr(0)))
+                } else {
+                    None
+                };
+                private_fields.push(PrivateField {
+                    name,
+                    init,
+                    is_static,
+                    span: Span {
+                        start: mstart.start,
+                        end: self.span().end,
+                    },
+                });
+                if self.tok.kind == TokenKind::Semicolon {
+                    self.advance();
+                }
+                continue;
+            }
             // Detect getter/setter: `get foo() {}` or `set foo(v) {}`
             let (is_getter, is_setter) = if self.tok.kind == TokenKind::Identifier
                 && self.tok.value == "get"
@@ -316,7 +350,7 @@ impl Parser {
             }
         }
         self.expect(TokenKind::RBrace);
-        methods
+        (methods, private_fields)
     }
 
     fn parse_function_body(

@@ -34,6 +34,8 @@ pub struct Emitter {
     loop_cont_stack: Vec<usize>,
     switch_exit_stack: Vec<usize>,
     switch_break_jumps: Vec<usize>,
+    /// Private field names declared by the enclosing class (for #name → slot index resolution).
+    private_field_names: Vec<String>,
 }
 
 impl Default for Emitter {
@@ -63,6 +65,7 @@ impl Emitter {
             loop_cont_stack: Vec::new(),
             switch_exit_stack: Vec::new(),
             switch_break_jumps: Vec::new(),
+            private_field_names: Vec::new(),
         }
     }
 
@@ -131,6 +134,7 @@ impl Emitter {
     fn compile_function(&mut self, func: &FnNode) -> usize {
         let mut sub = Emitter::new();
         sub.env_scope_stack = self.env_scope_stack.clone();
+        sub.private_field_names = self.private_field_names.clone();
         sub.is_generator = func.is_generator;
         sub.is_async = func.is_async;
         let named_offset = if let Some(name) = &func.name {
@@ -239,6 +243,10 @@ impl Emitter {
     /// Emit bytecode for a class node.
     /// `for_expr`: true for class expressions (leaves constructor on stack), false for declarations (statement, no stack value).
     fn emit_class(&mut self, class: &ClassNode, for_expr: bool) {
+        // 0. Save and set private field names for method sub-emitters
+        let _saved_private = self.private_field_names.clone();
+        self.private_field_names = class.private_fields.iter().map(|pf| pf.name.to_string()).collect();
+
         // 1. Compile all methods, identify constructor
         let mut constructor_idx = None;
         let mut method_funcs: Vec<(PropKey, usize)> = Vec::new();
@@ -284,6 +292,14 @@ impl Emitter {
 
         // 2. Create empty prototype object
         self.emit(Opcode::NewObject, vec![0]);
+
+        // 2.1 Emit PrivateNameScope if the class has private fields.
+        //     This must happen BEFORE any MakeFunction calls so that sub-methods
+        //     inherit the private name IDs from the class-evaluation function.
+        let private_count = class.private_fields.len();
+        if private_count > 0 {
+            self.emit(Opcode::PrivateNameScope, vec![private_count as i64]);
+        }
 
         // 2.5 Handle heritage (extends)
         let mut heritage_super_slot = None;
@@ -405,6 +421,43 @@ impl Emitter {
         });
         self.emit(Opcode::MakeFunction, vec![ctor_idx as i64]);
 
+        // 4.5 Inject private field initialization into the constructor body.
+        //     For each private field with an initializer, inject:
+        //       LoadThis; <init_expr>; DefinePrivateField slot_idx
+        //     at the end of the constructor (before the implicit Return).
+        if !class.private_fields.is_empty() {
+            let ctor_prog = &mut self.nested_funcs[ctor_idx];
+            // Find the last Return instruction
+            let return_pos = ctor_prog.instructions.iter().rposition(|i| i.opcode == Opcode::Return);
+            let mut inject = Vec::new();
+            for (slot, field) in class.private_fields.iter().enumerate() {
+                if !field.is_static {
+                    inject.push(Instruction::new(Opcode::LoadThis, vec![]));
+                    if let Some(init) = &field.init {
+                        // Emit the initializer expression
+                        let mut sub = Emitter::new();
+                        sub.private_field_names = self.private_field_names.clone();
+                        sub.emit_expression(init);
+                        inject.extend(sub.instructions);
+                    } else {
+                        inject.push(Instruction::new(Opcode::LoadUndefined, vec![]));
+                    }
+                    inject.push(Instruction::new(Opcode::DefinePrivateField, vec![slot as i64]));
+                }
+            }
+            if let Some(pos) = return_pos {
+                // Insert injected instructions before Return
+                for (i, instr) in inject.into_iter().enumerate() {
+                    ctor_prog.instructions.insert(pos + i, instr);
+                }
+            } else {
+                // No Return found; append at end
+                ctor_prog.instructions.extend(inject);
+                ctor_prog.instructions.push(Instruction::new(Opcode::LoadUndefined, vec![]));
+                ctor_prog.instructions.push(Instruction::new(Opcode::Return, vec![]));
+            }
+        }
+
         // 5. Save constructor to a local slot so it can be restored after
         //    StoreProperty (which consumes it as the obj argument and pushes
         //    the value back instead). Named classes use the class-name local.
@@ -512,6 +565,9 @@ impl Emitter {
         if for_expr && let Some(idx) = save_slot {
             self.emit(Opcode::LoadLocal, vec![idx as i64]);
         }
+
+        // 9. Restore parent's private field names (may be empty for top-level)
+        self.private_field_names = _saved_private;
     }
 
     /// Emit bytecode for destructuring a value according to the pattern.
@@ -1603,9 +1659,10 @@ impl Emitter {
             }
             Expr::PrivateMember(obj, name, _) => {
                 self.emit_expression(obj);
-                let name_idx = self.intern_string(name) as i64;
-                self.emit(Opcode::LoadStringConst, vec![name_idx]);
-                self.emit(Opcode::LoadPrivateProperty, vec![]);
+                // Resolve #name to slot index from private_field_names
+                let slot_idx = self.private_field_names.iter().position(|n| n.as_str() == name.as_ref())
+                    .unwrap_or(0);
+                self.emit(Opcode::LoadPrivateProperty, vec![slot_idx as i64]);
             }
             Expr::Member(obj, prop, computed, _) => {
                 match obj.as_ref() {
@@ -1668,10 +1725,10 @@ impl Emitter {
                 }
                 Expr::PrivateMember(obj, name, _) => {
                     self.emit_expression(obj);
-                    let name_idx = self.intern_string(name) as i64;
-                    self.emit(Opcode::LoadStringConst, vec![name_idx]);
                     self.emit_expression(value);
-                    self.emit(Opcode::StorePrivateProperty, vec![]);
+                    let slot_idx = self.private_field_names.iter().position(|n| n.as_str() == name.as_ref())
+                        .unwrap_or(0);
+                    self.emit(Opcode::StorePrivateProperty, vec![slot_idx as i64]);
                 }
                 _ => {
                     self.emit_expression(value);
@@ -1765,17 +1822,16 @@ impl Emitter {
                         }
                     }
                     Expr::PrivateMember(obj, name, _) => {
+                        let slot_idx = self.private_field_names.iter().position(|n| n.as_str() == name.as_ref())
+                            .unwrap_or(0);
                         // Desugar: obj.#name += rhs
-                        // Stack setup: [obj, priv_name_key, obj, priv_name_key]
+                        // Stack: [obj, obj] → LoadPrivateProperty → [obj, value] → binop → [obj, result] → StorePrivateProperty
                         self.emit_expression(obj);
-                        let name_idx = self.intern_string(name) as i64;
-                        self.emit(Opcode::LoadStringConst, vec![name_idx]);
                         self.emit_expression(obj);
-                        self.emit(Opcode::LoadStringConst, vec![name_idx]);
-                        self.emit(Opcode::LoadPrivateProperty, vec![]);
+                        self.emit(Opcode::LoadPrivateProperty, vec![slot_idx as i64]);
                         self.emit_expression(rhs);
                         self.emit(bin_opcode, vec![]);
-                        self.emit(Opcode::StorePrivateProperty, vec![]);
+                        self.emit(Opcode::StorePrivateProperty, vec![slot_idx as i64]);
                     }
                     _ => {}
                 }

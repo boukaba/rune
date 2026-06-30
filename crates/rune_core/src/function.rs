@@ -7,8 +7,9 @@ use crate::gc::{GcHeader, SemiSpace, TAG_FUNC, size_of};
 ///
 /// Memory layout:
 ///   [GcHeader(8) | func_idx(8) | prog_ptr(8) | prototype(8) |
-///    call_count(4) | flags(4) | env_ptr(8) | jit_entry(8) | superclass(8) | extra_props(8)]
-///   Total: 72 bytes
+///    call_count(4) | flags(4) | env_ptr(8) | jit_entry(8) | superclass(8) | extra_props(8) |
+///    private_name_ids(8)]
+///   Total: 80 bytes
 ///
 /// flags: bit 0 = is_arrow
 pub struct Func;
@@ -21,7 +22,7 @@ impl Func {
         is_arrow: bool,
         env_ptr: *mut u8,
     ) -> *mut Func {
-        let ptr = ss.alloc(72);
+        let ptr = ss.alloc(80);
         unsafe {
             let header = &mut *(ptr as *mut GcHeader);
             header.word = std::sync::atomic::AtomicU64::new(TAG_FUNC);
@@ -50,6 +51,9 @@ impl Func {
             // extra_props = null (lazily allocated extensible object for arbitrary properties)
             let props_ptr = ptr.add(size_of::<GcHeader>() + 56) as *mut u64;
             *props_ptr = 0;
+            // private_name_ids = null (set by PrivateNameScope during class evaluation)
+            let priv_ids_ptr = ptr.add(size_of::<GcHeader>() + 64) as *mut u64;
+            *priv_ids_ptr = 0;
         }
         ptr as *mut Func
     }
@@ -185,6 +189,23 @@ impl Func {
             let ptr_bytes = ptr as *mut u8;
             let field = ptr_bytes.add(size_of::<GcHeader>() + 56) as *mut u64;
             *field = props as u64;
+        }
+    }
+
+    /// Get the private name IDs pointer (set by PrivateNameScope during class evaluation).
+    pub unsafe fn private_name_ids(ptr: *mut Func) -> *mut u8 {
+        unsafe {
+            let ptr_bytes = ptr as *mut u8;
+            *(ptr_bytes.add(size_of::<GcHeader>() + 64) as *const u64) as *mut u8
+        }
+    }
+
+    /// Set the private name IDs pointer.
+    pub unsafe fn set_private_name_ids(ptr: *mut Func, ids: *mut u8) {
+        unsafe {
+            let ptr_bytes = ptr as *mut u8;
+            let field = ptr_bytes.add(size_of::<GcHeader>() + 64) as *mut u64;
+            *field = ids as u64;
         }
     }
 }

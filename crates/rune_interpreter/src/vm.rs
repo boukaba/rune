@@ -74,6 +74,11 @@ struct Frame {
     /// Pointer to the Func struct of the function executing in this frame.
     /// Null for top-level script frames and generator resume frames.
     func_ptr: *mut u8,
+    /// Private name IDs for the current class scope (RuneArray of SMI values).
+    /// Set by PrivateNameScope, used by PrivateGet/Set/DefinePrivateField.
+    /// This field exists on Frame rather than Func because the top-level
+    /// script frame has no Func object (func_ptr is null).
+    private_name_ids: *mut u8,
 }
 
 /// Result of the bytecode loop: normal return, generator yield, or throw.
@@ -408,6 +413,9 @@ pub struct Vm {
     /// Reset to false at the start of execute(). Used by the test262 runner
     /// to distinguish "test passed" from "test ran without asserting anything."
     pub assert_called: bool,
+    /// Counter for allocating unique private name IDs (class fields).
+    /// Incremented per PrivateNameScope allocation.
+    next_private_name_id: u64,
 }
 
 impl Default for Vm {
@@ -484,6 +492,7 @@ impl Vm {
             pending_accessor_call: None,
             pending_primitive_conversion: None,
             assert_called: false,
+            next_private_name_id: 1,
         }
     }
 
@@ -1147,6 +1156,7 @@ impl Vm {
             constructed_object: Value::undefined(),
             env: func_env,
             func_ptr: func_ptr as *mut u8,
+            private_name_ids: std::ptr::null_mut(),
         });
         // Update source_frame_depth if pending array op is active
         if let Some(ref mut state) = self.pending_array_op {
@@ -1221,6 +1231,7 @@ impl Vm {
                         constructed_object: Value::undefined(),
                         env: func_env,
                         func_ptr: func_ptr as *mut u8,
+                        private_name_ids: std::ptr::null_mut(),
                     });
                     return Value::undefined();
                 }
@@ -1268,6 +1279,7 @@ impl Vm {
             constructed_object: Value::undefined(),
             env: std::ptr::null_mut(),
             func_ptr: std::ptr::null_mut(),
+            private_name_ids: std::ptr::null_mut(),
         });
 
         self.register_roots(gc);
@@ -1349,6 +1361,7 @@ impl Vm {
             constructed_object: Value::undefined(),
             env: std::ptr::null_mut(),
             func_ptr: std::ptr::null_mut(),
+            private_name_ids: std::ptr::null_mut(),
         });
 
         if started {
@@ -2507,6 +2520,7 @@ impl Vm {
                                                     constructed_object: Value::undefined(),
                                                     env: func_env,
                                                     func_ptr: func_ptr as *mut u8,
+                                                    private_name_ids: std::ptr::null_mut(),
                                                 });
                                                 continue 'run;
                                             }
@@ -3360,6 +3374,13 @@ impl Vm {
                             };
                             Func::set_prototype(resolved_ptr, resolved_proto);
                         }
+                        // Propagate private name IDs from class evaluation frame to Func
+                        if !self.frames[fi].private_name_ids.is_null() {
+                            Func::set_private_name_ids(
+                                resolved_ptr,
+                                self.frames[fi].private_name_ids,
+                            );
+                        }
                         self.push(Value::from_heap_ptr(resolved_ptr as *mut u8));
                     }
                     self.frames[fi].pc = pc + 1;
@@ -3389,18 +3410,91 @@ impl Vm {
                     self.frames[fi].pc = pc + 1;
                 }
                 // ---- Private field/method ----
-                Opcode::PrivateNameScope
-                | Opcode::LoadPrivateProperty
-                | Opcode::StorePrivateProperty
-                | Opcode::DefinePrivateField => {
-                    self.register_roots(gc);
-                    let err = make_error_object(gc, "TypeError",
-                        "Private fields are not yet implemented");
-                    self.push(err);
-                    if let Some(exit) = self.handle_throw(gc, err) {
-                        return exit;
+                Opcode::PrivateNameScope => {
+                    let count = instr.operands[0] as usize;
+                    // Allocate unique private name IDs and store in RuneArray
+                    let mut ids = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        let id = self.next_private_name_id;
+                        self.next_private_name_id += 1;
+                        ids.push(Value::smi(id as i32));
                     }
-                    continue;
+                    let array_ptr = RuneArray::allocate(gc, &ids);
+                    // Store on current frame's private_name_ids field
+                    self.frames[fi].private_name_ids = array_ptr as *mut u8;
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::DefinePrivateField => {
+                    let slot_idx = instr.operands[0] as u32;
+                    let val = self.pop();
+                    let obj = self.pop();
+                    // Get private name ID from the current executing function
+                    let priv_id = self.get_private_name_id(fi, slot_idx);
+                    let priv_name_id = if let Some(id) = priv_id {
+                        id
+                    } else {
+                        self.register_roots(gc);
+                        let err = make_error_object(gc, "TypeError",
+                            "Private field access outside class body");
+                        self.push(err);
+                        if let Some(exit) = self.handle_throw(gc, err) {
+                            return exit;
+                        }
+                        continue;
+                    };
+                    let key_str = format!("\x00private_{}", priv_name_id);
+                    let key_val = Value::from_heap_ptr(HeapString::allocate(gc, &key_str) as *mut u8);
+                    do_store_property(obj, key_val, val, gc);
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::LoadPrivateProperty => {
+                    let slot_idx = instr.operands[0] as u32;
+                    let obj = self.pop();
+                    let priv_id = self.get_private_name_id(fi, slot_idx);
+                    let priv_name_id = if let Some(id) = priv_id {
+                        id
+                    } else {
+                        self.register_roots(gc);
+                        let err = make_error_object(gc, "TypeError",
+                            "Private field access outside class body");
+                        self.push(err);
+                        if let Some(exit) = self.handle_throw(gc, err) {
+                            return exit;
+                        }
+                        continue;
+                    };
+                    let key_str = format!("\x00private_{}", priv_name_id);
+                    let key_val = Value::from_heap_ptr(HeapString::allocate(gc, &key_str) as *mut u8);
+                    let result = load_property_recursive(
+                        obj,
+                        key_val,
+                        Some(self.function_prototype),
+                        gc,
+                    );
+                    self.push(result);
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::StorePrivateProperty => {
+                    let slot_idx = instr.operands[0] as u32;
+                    let val = self.pop();
+                    let obj = self.pop();
+                    let priv_id = self.get_private_name_id(fi, slot_idx);
+                    let priv_name_id = if let Some(id) = priv_id {
+                        id
+                    } else {
+                        self.register_roots(gc);
+                        let err = make_error_object(gc, "TypeError",
+                            "Private field access outside class body");
+                        self.push(err);
+                        if let Some(exit) = self.handle_throw(gc, err) {
+                            return exit;
+                        }
+                        continue;
+                    };
+                    let key_str = format!("\x00private_{}", priv_name_id);
+                    let key_val = Value::from_heap_ptr(HeapString::allocate(gc, &key_str) as *mut u8);
+                    do_store_property(obj, key_val, val, gc);
+                    self.frames[fi].pc = pc + 1;
                 }
                 Opcode::MakeEnv => {
                     let count = instr.operands[0] as usize;
@@ -3665,6 +3759,7 @@ impl Vm {
                                     constructed_object: obj_val,
                                     env: func_env,
                                     func_ptr: func_ptr as *mut u8,
+                                    private_name_ids: std::ptr::null_mut(),
                                 });
                                 continue;
                             }
@@ -3803,6 +3898,7 @@ impl Vm {
                                         constructed_object: Value::undefined(),
                                         env: func_env,
                                         func_ptr: func_ptr as *mut u8,
+                                        private_name_ids: std::ptr::null_mut(),
                                     });
                                     continue;
                                 }
@@ -3900,6 +3996,7 @@ impl Vm {
                                                         constructed_object: Value::undefined(),
                                                         env: func_env,
                                                         func_ptr: ptr as *mut u8,
+                                                        private_name_ids: std::ptr::null_mut(),
                                                     });
                                                     let snapshot = std::mem::take(
                                                         &mut self.jit_bailout.stack_snapshot,
@@ -3925,9 +4022,6 @@ impl Vm {
                                     const JIT_THRESHOLD: u32 = 50;
                                     const MIN_JIT_FUNCTION_SIZE: usize = 3;
 
-                                    // Only JIT-compile functions large enough to amortize
-                                    // prologue/epilogue overhead. Tiny leaf functions like
-                                    // `add(a,b){return a+b;}` are faster in the interpreter.
                                     let large_enough =
                                         func_prog.instructions.len() >= MIN_JIT_FUNCTION_SIZE;
 
@@ -3971,7 +4065,6 @@ impl Vm {
 
                                     let jit_entry = unsafe { Func::jit_entry(ptr as *mut Func) };
                                     if !jit_entry.is_null() && large_enough {
-                                        // Update call IC now that JIT entry is available
                                         if instr.call_ic_index >= 0 {
                                             let ic_idx = instr.call_ic_index as usize;
                                             if ic_idx >= self.call_ics.len() {
@@ -3993,18 +4086,11 @@ impl Vm {
                                         while self.jit_locals_buffer.len() < local_count {
                                             self.jit_locals_buffer.push(Value::undefined());
                                         }
-                                        // Phase D: JIT accepts any argument types. Input Smi guards
-                                        // on every value-consuming opcode handle non-Smi values by
-                                        // bailing to the interpreter.
                                         self.jit_entry_count += 1;
                                         let func: JitEntryFn =
                                             unsafe { std::mem::transmute(jit_entry) };
                                         let vm_ptr = self as *mut Vm as *mut u8;
                                         let gc_ptr = gc as *mut SemiSpace as *mut u8;
-                                        // Clear pending flag before entering JIT; the bailout
-                                        // helper sets it if a bailout occurs (cannot use
-                                        // bc_pc != 0 as sentinel — MakeArgumentsArray at PC 0
-                                        // would collide).
                                         self.jit_bailout.pending = false;
                                         let result_raw = unsafe {
                                             func(
@@ -4014,14 +4100,9 @@ impl Vm {
                                             )
                                         };
                                         if self.jit_bailout.pending {
-                                            // Bailout occurred — materialise interpreter state.
-                                            // Push a new Frame for the callee per §6.2: the
-                                            // bc_pc is inside the callee's bytecode, not the
-                                            // caller's frame at fi.
                                             let bailout_bc_pc = self.jit_bailout.bc_pc;
                                             self.jit_bailout.pending = false;
                                             self.jit_bailout.bc_pc = 0;
-                                            // Clone locals for the frame (bailout is rare).
                                             let mut bailout_locals = self.jit_locals_buffer.clone();
                                             while bailout_locals.len() < local_count {
                                                 bailout_locals.push(Value::undefined());
@@ -4044,6 +4125,7 @@ impl Vm {
                                                 constructed_object: Value::undefined(),
                                                 env: func_env,
                                                 func_ptr: ptr as *mut u8,
+                                                private_name_ids: std::ptr::null_mut(),
                                             });
                                             let snapshot = std::mem::take(
                                                 &mut self.jit_bailout.stack_snapshot,
@@ -4069,148 +4151,6 @@ impl Vm {
                                 };
                                 let passed_argc = args.len();
                                 locals.extend(args);
-                                    self.frames.push(Frame {
-                                        locals,
-                                        lexical_slots: Vec::new(),
-                                        lexical_tdz: Vec::new(),
-                                        lexical_const: Vec::new(),
-                                        scope_boundaries: Vec::new(),
-                                        passed_argc,
-                                        pc: 0,
-                                        stack_base: self.stack.len(),
-                                        prog: func_prog as *const BytecodeProgram,
-                                        generator_id: None,
-                                        this,
-                                        is_constructor_call: false,
-                                        constructed_object: Value::undefined(),
-                                        env: func_env,
-                                        func_ptr: func_ptr as *mut u8,
-                                    });
-                                    continue;
-                            }
-                        }
-                    }
-                    self.push(Value::undefined());
-                    self.frames[fi].pc = pc + 1;
-                }
-                Opcode::CallFromArray => {
-                    let args_arr = self.pop();
-                    let callee = self.pop();
-                    let this = self.pop();
-                    let argc = if let Some(ptr) = args_arr.heap_ptr() {
-                        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-                        if tag == TAG_ARRAY {
-                            unsafe { RuneArray::length(ptr as *mut RuneArray) as usize }
-                        } else {
-                            0
-                        }
-                    } else {
-                        0
-                    };
-                    let mut args: Vec<Value> = Vec::with_capacity(argc);
-                    if let Some(ptr) = args_arr.heap_ptr() {
-                        let arr_ptr = ptr as *mut RuneArray;
-                        for i in 0..argc {
-                            let v = unsafe { RuneArray::get_element(arr_ptr, i) };
-                            args.push(v);
-                        }
-                    }
-
-                    // Builtin dispatch: negative Smi handles
-                    if let Some(smi_val) = callee.as_smi() {
-                        if smi_val < 0 {
-                            let id = ((-smi_val) as usize) - 1;
-                            if id < self.builtins.len() {
-                                let result = (self.builtins[id].func)(gc, this, &args, &mut *self);
-                                if let Some(exc) = self.pending_exception.take() {
-                                    if let Some(exit) = self.handle_throw(gc, exc) {
-                                        return exit;
-                                    }
-                                    continue;
-                                }
-                                if self.pending_array_op.is_some() || self.pending_call.is_some() {
-                                    continue;
-                                }
-                                self.push(result);
-                                self.frames[fi].pc = pc + 1;
-                                continue;
-                            }
-                        } else {
-                            self.push(Value::undefined());
-                            self.frames[fi].pc = pc + 1;
-                            continue;
-                        }
-                    }
-
-                    if let Some(ptr) = callee.heap_ptr() {
-                        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-                        if tag == TAG_FUNC {
-                            let func_idx = unsafe { Func::func_index(ptr as *mut Func) } as usize;
-                            let creator_prog = unsafe {
-                                &*(Func::prog_ptr(ptr as *mut Func) as *const BytecodeProgram)
-                            };
-                            if func_idx < creator_prog.functions.len() {
-                                let func_prog = &creator_prog.functions[func_idx];
-                                // CallFromArray for async
-                                if func_prog.is_async {
-                                    let passed_argc = args.len();
-                                    let mut g = Generator::new(args, func_prog as *const BytecodeProgram);
-                                    g.this = this;
-                                    g.env = unsafe { Func::env_ptr(ptr as *mut Func) };
-                                    g.started = true;
-                                    let gen_id = self.generators.len();
-                                    self.generators.push(g);
-                                    let proto = self.promise_prototype.heap_ptr();
-                                    let promise_ptr = Promise::allocate(gc, proto);
-                                    self.async_tasks.push(AsyncTask { gen_id, promise: promise_ptr });
-                                    let func_ptr = ptr as *mut Func;
-                                    let func_env = unsafe { Func::env_ptr(func_ptr) };
-                                    // Restore args for the frame: Generator::new moved them,
-                                    // so repack from the generator we just stored.
-                                    let g_args = self.generators[gen_id].locals.clone();
-                                    let mut locals = if func_prog.named_function {
-                                        vec![callee]
-                                    } else {
-                                        vec![]
-                                    };
-                                    locals.extend(g_args);
-                                    self.frames.push(Frame {
-                                        locals,
-                                        lexical_slots: Vec::new(),
-                                        lexical_tdz: Vec::new(),
-                                        lexical_const: Vec::new(),
-                                        scope_boundaries: Vec::new(),
-                                        passed_argc,
-                                        pc: 0,
-                                        stack_base: self.stack.len(),
-                                        prog: func_prog as *const BytecodeProgram,
-                                        generator_id: Some(gen_id),
-                                        this,
-                                        is_constructor_call: false,
-                                        constructed_object: Value::undefined(),
-                                        env: func_env,
-                                        func_ptr: func_ptr as *mut u8,
-                                    });
-                                    continue;
-                                }
-                                if func_prog.is_generator {
-                                    let g =
-                                        Generator::new(args, func_prog as *const BytecodeProgram);
-                                    let gen_id = self.generators.len();
-                                    self.generators.push(g);
-                                    self.push(Value::smi(gen_id as i32));
-                                    self.frames[fi].pc = pc + 1;
-                                    continue;
-                                }
-                                let func_ptr = ptr as *mut Func;
-                                let func_env = unsafe { Func::env_ptr(func_ptr) };
-                                let mut locals: Vec<Value> = if func_prog.named_function {
-                                    vec![callee]
-                                } else {
-                                    vec![]
-                                };
-                                let passed_argc = args.len();
-                                locals.extend(args);
                                 self.frames.push(Frame {
                                     locals,
                                     lexical_slots: Vec::new(),
@@ -4227,6 +4167,7 @@ impl Vm {
                                     constructed_object: Value::undefined(),
                                     env: func_env,
                                     func_ptr: func_ptr as *mut u8,
+                                    private_name_ids: std::ptr::null_mut(),
                                 });
                                 continue;
                             }
@@ -4690,6 +4631,7 @@ impl Vm {
                             constructed_object: Value::undefined(),
                             env: g.env,
                             func_ptr: std::ptr::null_mut(),
+                            private_name_ids: std::ptr::null_mut(),
                         });
                         if g.started {
                             self.push(pag.arg);
@@ -4808,6 +4750,150 @@ impl Vm {
                     self.push(Value::undefined());
                     self.frames[fi].pc = pc + 1;
                 }
+                Opcode::CallFromArray => {
+                    let args_arr = self.pop();
+                    let callee = self.pop();
+                    let this = self.pop();
+                    let argc = if let Some(ptr) = args_arr.heap_ptr() {
+                        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+                        if tag == TAG_ARRAY {
+                            unsafe { RuneArray::length(ptr as *mut RuneArray) as usize }
+                        } else {
+                            0
+                        }
+                    } else {
+                        0
+                    };
+                    let mut args: Vec<Value> = Vec::with_capacity(argc);
+                    if let Some(ptr) = args_arr.heap_ptr() {
+                        let arr_ptr = ptr as *mut RuneArray;
+                        for i in 0..argc {
+                            let v = unsafe { RuneArray::get_element(arr_ptr, i) };
+                            args.push(v);
+                        }
+                    }
+
+                    // Builtin dispatch: negative Smi handles
+                    if let Some(smi_val) = callee.as_smi() {
+                        if smi_val < 0 {
+                            let id = ((-smi_val) as usize) - 1;
+                            if id < self.builtins.len() {
+                                let result = (self.builtins[id].func)(gc, this, &args, &mut *self);
+                                if let Some(exc) = self.pending_exception.take() {
+                                    if let Some(exit) = self.handle_throw(gc, exc) {
+                                        return exit;
+                                    }
+                                    continue;
+                                }
+                                if self.pending_array_op.is_some() || self.pending_call.is_some() {
+                                    continue;
+                                }
+                                self.push(result);
+                                self.frames[fi].pc = pc + 1;
+                                continue;
+                            }
+                        } else {
+                            self.push(Value::undefined());
+                            self.frames[fi].pc = pc + 1;
+                            continue;
+                        }
+                    }
+
+                    if let Some(ptr) = callee.heap_ptr() {
+                        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+                        if tag == TAG_FUNC {
+                            let func_idx = unsafe { Func::func_index(ptr as *mut Func) } as usize;
+                            let creator_prog = unsafe {
+                                &*(Func::prog_ptr(ptr as *mut Func) as *const BytecodeProgram)
+                            };
+                            if func_idx < creator_prog.functions.len() {
+                                let func_prog = &creator_prog.functions[func_idx];
+                                // CallFromArray for async
+                                if func_prog.is_async {
+                                    let passed_argc = args.len();
+                                    let mut g = Generator::new(args, func_prog as *const BytecodeProgram);
+                                    g.this = this;
+                                    g.env = unsafe { Func::env_ptr(ptr as *mut Func) };
+                                    g.started = true;
+                                    let gen_id = self.generators.len();
+                                    self.generators.push(g);
+                                    let proto = self.promise_prototype.heap_ptr();
+                                    let promise_ptr = Promise::allocate(gc, proto);
+                                    self.async_tasks.push(AsyncTask { gen_id, promise: promise_ptr });
+                                    let func_ptr = ptr as *mut Func;
+                                    let func_env = unsafe { Func::env_ptr(func_ptr) };
+                                    // Restore args for the frame: Generator::new moved them,
+                                    // so repack from the generator we just stored.
+                                    let g_args = self.generators[gen_id].locals.clone();
+                                    let mut locals = if func_prog.named_function {
+                                        vec![callee]
+                                    } else {
+                                        vec![]
+                                    };
+                                    locals.extend(g_args);
+                                    self.frames.push(Frame {
+                                        locals,
+                                        lexical_slots: Vec::new(),
+                                        lexical_tdz: Vec::new(),
+                                        lexical_const: Vec::new(),
+                                        scope_boundaries: Vec::new(),
+                                        passed_argc,
+                                        pc: 0,
+                                        stack_base: self.stack.len(),
+                                        prog: func_prog as *const BytecodeProgram,
+                                        generator_id: Some(gen_id),
+                                        this,
+                                        is_constructor_call: false,
+                                        constructed_object: Value::undefined(),
+                                        env: func_env,
+                                        func_ptr: func_ptr as *mut u8,
+                                        private_name_ids: std::ptr::null_mut(),
+                                    });
+                                    continue;
+                                }
+                                if func_prog.is_generator {
+                                    let g =
+                                        Generator::new(args, func_prog as *const BytecodeProgram);
+                                    let gen_id = self.generators.len();
+                                    self.generators.push(g);
+                                    self.push(Value::smi(gen_id as i32));
+                                    self.frames[fi].pc = pc + 1;
+                                    continue;
+                                }
+                                let func_ptr = ptr as *mut Func;
+                                let func_env = unsafe { Func::env_ptr(func_ptr) };
+                                let mut locals: Vec<Value> = if func_prog.named_function {
+                                    vec![callee]
+                                } else {
+                                    vec![]
+                                };
+                                let passed_argc = args.len();
+                                locals.extend(args);
+                                self.frames.push(Frame {
+                                    locals,
+                                    lexical_slots: Vec::new(),
+                                    lexical_tdz: Vec::new(),
+                                    lexical_const: Vec::new(),
+                                    scope_boundaries: Vec::new(),
+                                    passed_argc,
+                                    pc: 0,
+                                    stack_base: self.stack.len(),
+                                    prog: func_prog as *const BytecodeProgram,
+                                    generator_id: None,
+                                    this,
+                                    is_constructor_call: false,
+                                    constructed_object: Value::undefined(),
+                                    env: func_env,
+                                    func_ptr: func_ptr as *mut u8,
+                                    private_name_ids: std::ptr::null_mut(),
+                                });
+                                continue;
+                            }
+                        }
+                    }
+                    self.push(Value::undefined());
+                    self.frames[fi].pc = pc + 1;
+                }
             }
         }
 
@@ -4834,6 +4920,37 @@ impl Vm {
 
     pub fn peek(&self) -> Value {
         self.stack.last().copied().unwrap_or(Value::undefined())
+    }
+
+    /// Get the private name ID for a given slot index from the executing frame.
+    /// First checks the frame's direct private_name_ids, then falls back to
+    /// the Func's private_name_ids (propagated via MakeFunction).
+    fn get_private_name_id(&self, fi: usize, slot_idx: u32) -> Option<u64> {
+        let check_array = |ids: *mut u8| -> Option<u64> {
+            if !ids.is_null() {
+                unsafe {
+                    let len = RuneArray::length(ids as *mut RuneArray) as usize;
+                    if (slot_idx as usize) < len {
+                        let val = RuneArray::get_element(ids as *mut RuneArray, slot_idx as usize);
+                        return val.as_smi().map(|v| v as u64);
+                    }
+                }
+            }
+            None
+        };
+        // Check the frame's private_name_ids (set by PrivateNameScope)
+        if let Some(id) = check_array(self.frames[fi].private_name_ids) {
+            return Some(id);
+        }
+        // Fall back to Func's private_name_ids (propagated by MakeFunction)
+        let func_ptr = self.frames[fi].func_ptr;
+        if !func_ptr.is_null() {
+            let ids = unsafe { Func::private_name_ids(func_ptr as *mut Func) };
+            if let Some(id) = check_array(ids) {
+                return Some(id);
+            }
+        }
+        None
     }
 
     /// Update all root references from `old_ptr` to `new_ptr` after a heap object
@@ -6524,6 +6641,7 @@ pub unsafe extern "C" fn rune_jit_call_helper(
                             constructed_object: Value::undefined(),
                             env: func_env,
                             func_ptr: func_ptr as *mut u8,
+                            private_name_ids: std::ptr::null_mut(),
                         });
                         vm.frames[fi].locals.as_mut_ptr() as *mut u64
                     } else {

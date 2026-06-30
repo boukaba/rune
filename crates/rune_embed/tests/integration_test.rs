@@ -5820,28 +5820,28 @@ fn test_class_super_compound_assign() {
 #[test]
 fn test_private_member_access_error() {
     let mut ctx = Context::new_small();
-    // Private member access throws a clear TypeError (not yet implemented)
+    // Private member access on a class that doesn't define the field throws TypeError
     let result = ctx.eval("class Foo { method() { return this.#x; } } new Foo().method();");
     assert!(result.is_err(), "private member access should error");
     let err = result.unwrap_err();
-    assert!(err.contains("not yet implemented"), "error should mention not implemented");
+    assert!(err.contains("class body"), "error should mention class body: {}", err);
 }
 
 #[test]
-fn test_private_field_syntax_error() {
+fn test_private_field_syntax_works() {
     let mut ctx = Context::new_small();
-    // Private field declaration in class body is not yet supported by parser
-    // This should give a parse error
-    let result = ctx.eval("class Foo { #x = 1; }");
-    assert!(result.is_err());
+    // Private field declaration in class body is now supported
+    let result = ctx.eval("class Foo { #x = 1; get() { return this.#x; } } var f = new Foo(); f.get();");
+    assert!(result.is_ok(), "private field should work: {:?}", result);
+    assert_eq!(result.unwrap().as_smi(), Some(1));
 }
 
 #[test]
 fn test_private_member_write_error() {
     let mut ctx = Context::new_small();
-    // Private member write also throws TypeError
+    // Private member write on a class that doesn't define the field throws TypeError
     let result = ctx.eval("class Foo { method() { this.#x = 1; } } new Foo().method();");
     assert!(result.is_err());
     let err = result.unwrap_err();
-    assert!(err.contains("not yet implemented"));
+    assert!(err.contains("class body"), "error should mention class body: {}", err);
 }

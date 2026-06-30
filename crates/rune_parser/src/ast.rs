@@ -138,6 +138,15 @@ pub struct ClassNode {
     pub name: Option<Box<str>>,
     pub heritage: Option<Box<Expr>>,
     pub methods: Vec<ClassMethod>,
+    pub private_fields: Vec<PrivateField>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PrivateField {
+    pub name: Box<str>,
+    pub init: Option<Box<Expr>>,
+    pub is_static: bool,
     pub span: Span,
 }
 

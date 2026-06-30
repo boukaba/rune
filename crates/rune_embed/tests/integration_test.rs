@@ -5803,3 +5803,16 @@ fn test_class_setter_this() {
          f.x;"
     ), 11);
 }
+
+#[test]
+fn test_class_super_compound_assign() {
+    let mut ctx = Context::new_small();
+    // super.prop += val reads from parent prototype, writes to this
+    assert_eq!(class_eval_num(&mut ctx,
+        "class Parent { }
+         Parent.prototype.val = 5;
+         class Child extends Parent { constructor() { super(); }
+           method() { super.val += 10; return this.val; } }
+         new Child().method();"
+    ), 15);
+}

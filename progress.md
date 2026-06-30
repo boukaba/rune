@@ -3171,10 +3171,34 @@ Added `ClassNode` (name, methods, span), `ClassMethod` (key, func, is_static, sp
 ### Known Gaps
 - `this.prop++` not supported (Update only handles Identifier targets)
 - No `test_class_setter_no_getter` test (setter-only accessor)
-- Compound assignment (`super.prop += val`) for Expr::Super target
 - StringObject not in `ordinary_has_instance` prototype chain
 
 ### Next Steps
-1. Compound assignment for `super.prop += val`
-2. `String.prototype.match`/`search`/`split` for RegExp
-3. Private fields (`#`)
+1. `String.prototype.match`/`search`/`split` for RegExp
+2. Private fields (`#`)
+
+## Sprint 32 — Compound Assignment `super.prop += val`
+
+> **2026-06-30**: `super.prop += val` (and all compound assignment operators) now supported. The emitter desugars `super.a += rhs` differently from regular `o.a += rhs`: write-target setup emits `LoadThis` (child instance), read path emits `this.__proto__.__proto__` chain (superclass prototype), then applies binary op and `StoreProperty`. 1 new test. 469/469 class tests pass.
+
+### Implementation
+
+#### Emitter (`crates/rune_parser/src/emitter.rs`)
+- `Expr::CompoundAssign` → `Expr::Member` handler: added `Expr::Super` match arm
+- Stack layout for `super.a += rhs`:
+  1. `LoadThis` + key (write target setup: child instance)
+  2. `LoadThis` → `__proto__` → `LoadProperty` → `__proto__` → `LoadProperty` (superclass prototype chain)
+  3. Key → `LoadProperty` (read old value)
+  4. `emit_expression(rhs)` + `bin_opcode` (apply operator)
+  5. `StoreProperty` (write to child instance)
+
+#### Integration Tests
+1 new test:
+| Test | What it validates |
+|---|---|
+| `test_class_super_compound_assign` | `super.val += 10` reads parent prototype, writes to child instance |
+
+### Known Gaps (unchanged)
+- `this.prop++` not supported (Update only handles Identifier targets)
+- No `test_class_setter_no_getter` test (setter-only accessor)  
+- StringObject not in `ordinary_has_instance` prototype chain

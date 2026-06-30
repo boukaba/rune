@@ -1692,29 +1692,64 @@ impl Emitter {
                         }
                     }
                     Expr::Member(obj, prop, computed, _) => {
-                        // Desugar: o.a += rhs → o.a = o.a + rhs
-                        // Emit obj+key first for StoreProperty (bottom of stack)
-                        self.emit_expression(obj);
-                        if *computed {
-                            self.emit_expression(prop);
-                        } else {
-                            let name = prop_name_as_string(prop);
-                            let idx = self.intern_string(&name) as i64;
-                            self.emit(Opcode::LoadStringConst, vec![idx]);
+                        match obj.as_ref() {
+                            Expr::Super(_) => {
+                                // super.prop += rhs
+                                // Stack after write-setup: [this, key]
+                                self.emit(Opcode::LoadThis, vec![]);
+                                let key_idx = if *computed {
+                                    self.emit_expression(prop);
+                                    // can't statically determine key
+                                    0
+                                } else {
+                                    let name = prop_name_as_string(prop);
+                                    let idx = self.intern_string(&name) as i64;
+                                    self.emit(Opcode::LoadStringConst, vec![idx]);
+                                    idx
+                                };
+                                // Read old value: this.__proto__.__proto__.prop
+                                self.emit(Opcode::LoadThis, vec![]);
+                                let proto_key = self.intern_string("__proto__") as i64;
+                                self.emit(Opcode::LoadStringConst, vec![proto_key]);
+                                self.emit(Opcode::LoadProperty, vec![]);
+                                self.emit(Opcode::LoadStringConst, vec![proto_key]);
+                                self.emit(Opcode::LoadProperty, vec![]);
+                                if *computed {
+                                    self.emit_expression(prop);
+                                } else {
+                                    self.emit(Opcode::LoadStringConst, vec![key_idx]);
+                                }
+                                self.emit(Opcode::LoadProperty, vec![]);
+                                self.emit_expression(rhs);
+                                self.emit(bin_opcode, vec![]);
+                                self.emit(Opcode::StoreProperty, vec![]);
+                            }
+                            _ => {
+                                // Desugar: o.a += rhs → o.a = o.a + rhs
+                                // Emit obj+key first for StoreProperty (bottom of stack)
+                                self.emit_expression(obj);
+                                if *computed {
+                                    self.emit_expression(prop);
+                                } else {
+                                    let name = prop_name_as_string(prop);
+                                    let idx = self.intern_string(&name) as i64;
+                                    self.emit(Opcode::LoadStringConst, vec![idx]);
+                                }
+                                // Emit obj+key again for LoadProperty
+                                self.emit_expression(obj);
+                                if *computed {
+                                    self.emit_expression(prop);
+                                } else {
+                                    let name = prop_name_as_string(prop);
+                                    let idx = self.intern_string(&name) as i64;
+                                    self.emit(Opcode::LoadStringConst, vec![idx]);
+                                }
+                                self.emit(Opcode::LoadProperty, vec![]);
+                                self.emit_expression(rhs);
+                                self.emit(bin_opcode, vec![]);
+                                self.emit(Opcode::StoreProperty, vec![]);
+                            }
                         }
-                        // Emit obj+key again for LoadProperty
-                        self.emit_expression(obj);
-                        if *computed {
-                            self.emit_expression(prop);
-                        } else {
-                            let name = prop_name_as_string(prop);
-                            let idx = self.intern_string(&name) as i64;
-                            self.emit(Opcode::LoadStringConst, vec![idx]);
-                        }
-                        self.emit(Opcode::LoadProperty, vec![]);
-                        self.emit_expression(rhs);
-                        self.emit(bin_opcode, vec![]);
-                        self.emit(Opcode::StoreProperty, vec![]);
                     }
                     _ => {}
                 }

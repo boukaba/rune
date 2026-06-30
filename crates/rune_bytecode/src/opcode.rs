@@ -122,6 +122,11 @@ pub enum Opcode {
     // Class extends
     SetSuperclass,  // pop func, pop superclass → store superclass in func's struct
     LoadSuperclass, // push current func's superclass onto stack
+    // Private field/method
+    PrivateNameScope,  // operands[0] = number of private names; creates PrivateEnvironment
+    LoadPrivateProperty, // pop obj, private slot index → PrivateGet
+    StorePrivateProperty, // pop value, obj, private slot index → PrivateSet
+    DefinePrivateField,   // pop value, obj, private slot index → PrivateFieldAdd
 }
 
 #[derive(Clone, Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]

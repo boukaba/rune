@@ -3202,3 +3202,57 @@ Added `ClassNode` (name, methods, span), `ClassMethod` (key, func, is_static, sp
 - `this.prop++` not supported (Update only handles Identifier targets)
 - No `test_class_setter_no_getter` test (setter-only accessor)  
 - StringObject not in `ordinary_has_instance` prototype chain
+
+## Sprint 33 — Private Field Syntax (Lexer/Parser/Bytecode Scaffold)
+
+> **2026-06-30**: Partial implementation — lexer, parser, AST, bytecode opcodes, and VM error handling for class private fields (`#`). `this.#x` member access now parses and emits `LoadPrivateProperty` which throws a clear `TypeError`. Full runtime support (actual private field storage and initialization) deferred. 3 new tests. 472/472 class tests pass.
+
+### Implementation
+
+#### Lexer (`crates/rune_parser/src/lexer.rs`)
+- Added `TokenKind::Hash` token for `#` character
+- `regex_allowed` set to `false` after `#` (prevents regex interpretation)
+
+#### Parser (`crates/rune_parser/src/parser.rs`)
+- `parse_call_expression` and `parse_member_tail`: `.` handler now checks for `Hash` token after `.`
+- On `.#name` sequence: consumes `#` + `Identifier`, creates `Expr::PrivateMember(obj, name)`
+- Private field declarations in class body (`#x = val`) not yet parsed — gives a parse error
+
+#### AST (`crates/rune_parser/src/ast.rs`)
+- Added `Expr::PrivateMember(Box<Expr>, Box<str>, Span)` variant for `obj.#name` access
+
+#### Bytecode (`crates/rune_bytecode/src/opcode.rs`)
+- Added 4 new opcodes:
+  - `PrivateNameScope(count)` — creates private environment (placeholder)
+  - `LoadPrivateProperty` — read private field
+  - `StorePrivateProperty` — write private field
+  - `DefinePrivateField` — define private field during construction
+
+#### Emitter (`crates/rune_parser/src/emitter.rs`)
+- `Expr::PrivateMember` emits `LoadPrivateProperty`
+- `Expr::Assign` with `PrivateMember` target emits `StorePrivateProperty`
+- `Expr::CompoundAssign` with `PrivateMember` target emits read+write pair
+
+#### VM (`crates/rune_interpreter/src/vm.rs`)
+- All 4 private opcodes throw `TypeError: Private fields are not yet implemented`
+- Proper GC root registration and `handle_throw` dispatch
+
+#### Integration Tests
+3 new tests:
+| Test | What it validates |
+|---|---|
+| `test_private_member_access_error` | `this.#x` throws TypeError with "not yet implemented" message |
+| `test_private_member_write_error` | `this.#x = val` throws TypeError |
+| `test_private_field_syntax_error` | `#x = 1` in class body gives parse error |
+
+### Known Gaps
+- Private field declarations (`#x = val`) — parser rejects with parse error
+- Private method syntax (`#method() {}`)
+- `#x in obj` check syntax
+- Actual private field storage (PrivateGet/PrivateSet/PrivateFieldAdd runtime)
+- Private environment scope management
+- Early errors for duplicate private names and `#constructor`
+
+### Next Steps
+1. Private field parsing in class body + runtime initialization
+2. `String.prototype.match`/`search`/`split` for RegExp

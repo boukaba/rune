@@ -3388,6 +3388,20 @@ impl Vm {
                     }
                     self.frames[fi].pc = pc + 1;
                 }
+                // ---- Private field/method ----
+                Opcode::PrivateNameScope
+                | Opcode::LoadPrivateProperty
+                | Opcode::StorePrivateProperty
+                | Opcode::DefinePrivateField => {
+                    self.register_roots(gc);
+                    let err = make_error_object(gc, "TypeError",
+                        "Private fields are not yet implemented");
+                    self.push(err);
+                    if let Some(exit) = self.handle_throw(gc, err) {
+                        return exit;
+                    }
+                    continue;
+                }
                 Opcode::MakeEnv => {
                     let count = instr.operands[0] as usize;
                     let new_env =

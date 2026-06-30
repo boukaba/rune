@@ -30,6 +30,7 @@ pub enum Expr {
     Call(Box<Expr>, Vec<ArrayElement>, Span),
     New(Box<Expr>, Vec<ArrayElement>, Span),
     Member(Box<Expr>, Box<Expr>, bool, Span), // computed = true for a[b]
+    PrivateMember(Box<Expr>, Box<str>, Span), // a.#name
     Assign(Box<Expr>, Box<Expr>, Span),
     CompoundAssign(BinaryOp, Box<Expr>, Box<Expr>, Span),
     Function(Box<FnNode>, Span),

@@ -28,6 +28,7 @@ impl Parser {
             | TokenKind::RParen | TokenKind::RBracket
             | TokenKind::PlusPlus | TokenKind::MinusMinus
             | TokenKind::Template | TokenKind::TemplateTail
+            | TokenKind::Hash
         );
         self.tok = self.lexer.next_token();
     }
@@ -1847,29 +1848,44 @@ impl Parser {
                 }
                 TokenKind::Dot => {
                     self.advance();
-                    let name = if self.tok.kind == TokenKind::Identifier
-                        || matches!(self.tok.kind,
-                            TokenKind::Catch | TokenKind::Finally | TokenKind::Class
-                            | TokenKind::Const | TokenKind::Delete | TokenKind::Do
-                            | TokenKind::Else | TokenKind::Export | TokenKind::Extends
-                            | TokenKind::For | TokenKind::Function | TokenKind::If
-                            | TokenKind::Import | TokenKind::Let | TokenKind::New
-                            | TokenKind::Return | TokenKind::Switch | TokenKind::This
-                            | TokenKind::Throw | TokenKind::Try | TokenKind::Var
-                            | TokenKind::While | TokenKind::Yield | TokenKind::Await
-                            | TokenKind::Async | TokenKind::Default | TokenKind::Case
-                            | TokenKind::Instanceof | TokenKind::In | TokenKind::Void
-                            | TokenKind::Typeof | TokenKind::Break | TokenKind::Continue
-                            | TokenKind::Super)
-                    {
-                        let t = self.tok.clone();
+                    if self.tok.kind == TokenKind::Hash {
+                        // Private member access: obj.#name
                         self.advance();
-                        Expr::String(t.value.into_boxed_str(), t.span)
+                        let name = if self.tok.kind == TokenKind::Identifier {
+                            let t = self.tok.clone();
+                            self.advance();
+                            t.value.into_boxed_str()
+                        } else {
+                            self.error("Expected identifier after #".to_string());
+                            Box::from("")
+                        };
+                        let span = self.span();
+                        lhs = Expr::PrivateMember(Box::new(lhs), name, span);
                     } else {
-                        Expr::Undefined(self.span())
-                    };
-                    let span = self.span();
-                    lhs = Expr::Member(Box::new(lhs), Box::new(name), false, span);
+                        let name = if self.tok.kind == TokenKind::Identifier
+                            || matches!(self.tok.kind,
+                                TokenKind::Catch | TokenKind::Finally | TokenKind::Class
+                                | TokenKind::Const | TokenKind::Delete | TokenKind::Do
+                                | TokenKind::Else | TokenKind::Export | TokenKind::Extends
+                                | TokenKind::For | TokenKind::Function | TokenKind::If
+                                | TokenKind::Import | TokenKind::Let | TokenKind::New
+                                | TokenKind::Return | TokenKind::Switch | TokenKind::This
+                                | TokenKind::Throw | TokenKind::Try | TokenKind::Var
+                                | TokenKind::While | TokenKind::Yield | TokenKind::Await
+                                | TokenKind::Async | TokenKind::Default | TokenKind::Case
+                                | TokenKind::Instanceof | TokenKind::In | TokenKind::Void
+                                | TokenKind::Typeof | TokenKind::Break | TokenKind::Continue
+                                | TokenKind::Super)
+                        {
+                            let t = self.tok.clone();
+                            self.advance();
+                            Expr::String(t.value.into_boxed_str(), t.span)
+                        } else {
+                            Expr::Undefined(self.span())
+                        };
+                        let span = self.span();
+                        lhs = Expr::Member(Box::new(lhs), Box::new(name), false, span);
+                    }
                 }
                 TokenKind::LBracket => {
                     self.advance();
@@ -1901,29 +1917,44 @@ impl Parser {
             match self.tok.kind {
                 TokenKind::Dot => {
                     self.advance();
-                    let name = if self.tok.kind == TokenKind::Identifier
-                        || matches!(self.tok.kind,
-                            TokenKind::Catch | TokenKind::Finally | TokenKind::Class
-                            | TokenKind::Const | TokenKind::Delete | TokenKind::Do
-                            | TokenKind::Else | TokenKind::Export | TokenKind::Extends
-                            | TokenKind::For | TokenKind::Function | TokenKind::If
-                            | TokenKind::Import | TokenKind::Let | TokenKind::New
-                            | TokenKind::Return | TokenKind::Switch | TokenKind::This
-                            | TokenKind::Throw | TokenKind::Try | TokenKind::Var
-                            | TokenKind::While | TokenKind::Yield | TokenKind::Await
-                            | TokenKind::Async | TokenKind::Default | TokenKind::Case
-                            | TokenKind::Instanceof | TokenKind::In | TokenKind::Void
-                            | TokenKind::Typeof | TokenKind::Break | TokenKind::Continue
-                            | TokenKind::Super)
-                    {
-                        let t = self.tok.clone();
+                    if self.tok.kind == TokenKind::Hash {
+                        // Private member access: new X().#name
                         self.advance();
-                        Expr::String(t.value.into_boxed_str(), t.span)
+                        let name = if self.tok.kind == TokenKind::Identifier {
+                            let t = self.tok.clone();
+                            self.advance();
+                            t.value.into_boxed_str()
+                        } else {
+                            self.error("Expected identifier after #".to_string());
+                            Box::from("")
+                        };
+                        let span = self.span();
+                        lhs = Expr::PrivateMember(Box::new(lhs), name, span);
                     } else {
-                        Expr::Undefined(self.span())
-                    };
-                    let span = self.span();
-                    lhs = Expr::Member(Box::new(lhs), Box::new(name), false, span);
+                        let name = if self.tok.kind == TokenKind::Identifier
+                            || matches!(self.tok.kind,
+                                TokenKind::Catch | TokenKind::Finally | TokenKind::Class
+                                | TokenKind::Const | TokenKind::Delete | TokenKind::Do
+                                | TokenKind::Else | TokenKind::Export | TokenKind::Extends
+                                | TokenKind::For | TokenKind::Function | TokenKind::If
+                                | TokenKind::Import | TokenKind::Let | TokenKind::New
+                                | TokenKind::Return | TokenKind::Switch | TokenKind::This
+                                | TokenKind::Throw | TokenKind::Try | TokenKind::Var
+                                | TokenKind::While | TokenKind::Yield | TokenKind::Await
+                                | TokenKind::Async | TokenKind::Default | TokenKind::Case
+                                | TokenKind::Instanceof | TokenKind::In | TokenKind::Void
+                                | TokenKind::Typeof | TokenKind::Break | TokenKind::Continue
+                                | TokenKind::Super)
+                        {
+                            let t = self.tok.clone();
+                            self.advance();
+                            Expr::String(t.value.into_boxed_str(), t.span)
+                        } else {
+                            Expr::Undefined(self.span())
+                        };
+                        let span = self.span();
+                        lhs = Expr::Member(Box::new(lhs), Box::new(name), false, span);
+                    }
                 }
                 TokenKind::LBracket => {
                     self.advance();

@@ -1601,6 +1601,12 @@ impl Emitter {
                 }
                 self.emit(Opcode::New, vec![args.len() as i64]);
             }
+            Expr::PrivateMember(obj, name, _) => {
+                self.emit_expression(obj);
+                let name_idx = self.intern_string(name) as i64;
+                self.emit(Opcode::LoadStringConst, vec![name_idx]);
+                self.emit(Opcode::LoadPrivateProperty, vec![]);
+            }
             Expr::Member(obj, prop, computed, _) => {
                 match obj.as_ref() {
                     Expr::Super(_) => {
@@ -1659,6 +1665,13 @@ impl Emitter {
                     }
                     self.emit_expression(value);
                     self.emit(Opcode::StoreProperty, vec![]);
+                }
+                Expr::PrivateMember(obj, name, _) => {
+                    self.emit_expression(obj);
+                    let name_idx = self.intern_string(name) as i64;
+                    self.emit(Opcode::LoadStringConst, vec![name_idx]);
+                    self.emit_expression(value);
+                    self.emit(Opcode::StorePrivateProperty, vec![]);
                 }
                 _ => {
                     self.emit_expression(value);
@@ -1750,6 +1763,19 @@ impl Emitter {
                                 self.emit(Opcode::StoreProperty, vec![]);
                             }
                         }
+                    }
+                    Expr::PrivateMember(obj, name, _) => {
+                        // Desugar: obj.#name += rhs
+                        // Stack setup: [obj, priv_name_key, obj, priv_name_key]
+                        self.emit_expression(obj);
+                        let name_idx = self.intern_string(name) as i64;
+                        self.emit(Opcode::LoadStringConst, vec![name_idx]);
+                        self.emit_expression(obj);
+                        self.emit(Opcode::LoadStringConst, vec![name_idx]);
+                        self.emit(Opcode::LoadPrivateProperty, vec![]);
+                        self.emit_expression(rhs);
+                        self.emit(bin_opcode, vec![]);
+                        self.emit(Opcode::StorePrivateProperty, vec![]);
                     }
                     _ => {}
                 }
@@ -2086,6 +2112,7 @@ fn contains_inner_function_expr(expr: &Expr) -> bool {
         Expr::Member(obj, prop, _, _) => {
             contains_inner_function_expr(obj) || contains_inner_function_expr(prop)
         }
+        Expr::PrivateMember(obj, _, _) => contains_inner_function_expr(obj),
         Expr::Unary(_, arg, _) => contains_inner_function_expr(arg),
         Expr::Update(_, arg, _, _) => contains_inner_function_expr(arg),
         Expr::Binary(_, lhs, rhs, _) | Expr::CompoundAssign(_, lhs, rhs, _) => {
@@ -2263,6 +2290,7 @@ fn uses_arguments_expr(expr: &Expr) -> bool {
             uses_arguments_expr(callee) || args.iter().any(|a| uses_arguments_expr(&a.expr))
         }
         Expr::Member(obj, prop, _, _) => uses_arguments_expr(obj) || uses_arguments_expr(prop),
+        Expr::PrivateMember(obj, _, _) => uses_arguments_expr(obj),
         Expr::Assign(lhs, rhs, _) => uses_arguments_expr(lhs) || uses_arguments_expr(rhs),
         Expr::CompoundAssign(_, lhs, rhs, _) => {
             uses_arguments_expr(lhs) || uses_arguments_expr(rhs)

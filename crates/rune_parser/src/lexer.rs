@@ -109,6 +109,8 @@ pub enum TokenKind {
     QuestionQuestion, // ??
     NullishAssign,    // ??=
     Ellipsis,         // ...
+    // Private identifier prefix
+    Hash,
     // Misc
     Eof,
     Illegal,
@@ -856,6 +858,7 @@ impl Lexer {
                 }
             }
             '~' => Token::new(TokenKind::BitNot, self.start, self.pos, "~".into()),
+            '#' => Token::new(TokenKind::Hash, self.start, self.pos, "#".into()),
 
             _ => Token::new(TokenKind::Illegal, self.start, self.pos, ch.to_string()),
         }

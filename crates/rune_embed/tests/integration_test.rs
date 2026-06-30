@@ -5816,3 +5816,32 @@ fn test_class_super_compound_assign() {
          new Child().method();"
     ), 15);
 }
+
+#[test]
+fn test_private_member_access_error() {
+    let mut ctx = Context::new_small();
+    // Private member access throws a clear TypeError (not yet implemented)
+    let result = ctx.eval("class Foo { method() { return this.#x; } } new Foo().method();");
+    assert!(result.is_err(), "private member access should error");
+    let err = result.unwrap_err();
+    assert!(err.contains("not yet implemented"), "error should mention not implemented");
+}
+
+#[test]
+fn test_private_field_syntax_error() {
+    let mut ctx = Context::new_small();
+    // Private field declaration in class body is not yet supported by parser
+    // This should give a parse error
+    let result = ctx.eval("class Foo { #x = 1; }");
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_private_member_write_error() {
+    let mut ctx = Context::new_small();
+    // Private member write also throws TypeError
+    let result = ctx.eval("class Foo { method() { this.#x = 1; } } new Foo().method();");
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.contains("not yet implemented"));
+}

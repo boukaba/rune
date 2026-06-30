@@ -2357,7 +2357,27 @@ impl Vm {
                                 Value::undefined()
                             }
                         } else if tag == TAG_ARRAY || tag == TAG_OBJECT || tag == TAG_FUNC || tag == TAG_REGEXP || tag == TAG_PROMISE || tag == TAG_STRING_OBJ {
-                            load_property_recursive(obj, raw_key, Some(self.function_prototype), gc)
+                            if instr.ic_index >= 0 {
+                                self.ic_stats.lookups += 1;
+                                let hits_before = self.ic_stats.hits;
+                                let result = load_property_recursive_ic(
+                                    gc,
+                                    &mut self.ics,
+                                    &mut self.ic_entries,
+                                    &mut self.ic_hit_counts,
+                                    &mut self.ic_stats,
+                                    &instr,
+                                    obj,
+                                    raw_key,
+                                    Some(self.function_prototype),
+                                );
+                                if self.ic_stats.hits == hits_before {
+                                    self.ic_stats.misses += 1;
+                                }
+                                result
+                            } else {
+                                load_property_recursive(obj, raw_key, Some(self.function_prototype), gc)
+                            }
                         } else {
                             Value::undefined()
                         }
@@ -3975,6 +3995,7 @@ impl Vm {
                                                     self.jit_bailout.bc_pc = 0;
                                                     let mut bailout_locals =
                                                         self.jit_locals_buffer.clone();
+                                                    self.jit_locals_buffer.clear();
                                                     while bailout_locals.len() < local_count {
                                                         bailout_locals.push(Value::undefined());
                                                     }
@@ -4007,6 +4028,7 @@ impl Vm {
                                                     continue;
                                                 }
                                                 self.push(Value::from_raw(result_raw));
+                                                self.jit_locals_buffer.clear();
                                                 self.frames[fi].pc = pc + 1;
                                                 continue;
                                             }
@@ -4104,6 +4126,7 @@ impl Vm {
                                             self.jit_bailout.pending = false;
                                             self.jit_bailout.bc_pc = 0;
                                             let mut bailout_locals = self.jit_locals_buffer.clone();
+                                            self.jit_locals_buffer.clear();
                                             while bailout_locals.len() < local_count {
                                                 bailout_locals.push(Value::undefined());
                                             }
@@ -4136,6 +4159,7 @@ impl Vm {
                                             continue;
                                         }
                                         self.last_locals = self.jit_locals_buffer.clone();
+                                        self.jit_locals_buffer.clear();
                                         self.push(Value::from_raw(result_raw));
                                         self.frames[fi].pc = pc + 1;
                                         continue;
@@ -4972,6 +4996,17 @@ impl Vm {
                     *v = Value::from_heap_ptr(new_ptr);
                 }
             }
+            // Update frame's this and constructed_object fields too
+            if let Some(p) = frame.this.heap_ptr()
+                && p == old_ptr
+            {
+                frame.this = Value::from_heap_ptr(new_ptr);
+            }
+            if let Some(p) = frame.constructed_object.heap_ptr()
+                && p == old_ptr
+            {
+                frame.constructed_object = Value::from_heap_ptr(new_ptr);
+            }
             // Also update env object slots (the GC-managed EnvObject)
             if !frame.env.is_null() {
                 let env_ptr = frame.env;
@@ -4990,6 +5025,22 @@ impl Vm {
             }
         }
         for v in self.globals.values_mut() {
+            if let Some(p) = v.heap_ptr()
+                && p == old_ptr
+            {
+                *v = Value::from_heap_ptr(new_ptr);
+            }
+        }
+        // Also update jit_locals_buffer and last_locals (may hold stale array
+        // pointers between JIT calls).
+        for v in &mut self.jit_locals_buffer {
+            if let Some(p) = v.heap_ptr()
+                && p == old_ptr
+            {
+                *v = Value::from_heap_ptr(new_ptr);
+            }
+        }
+        for v in &mut self.last_locals {
             if let Some(p) = v.heap_ptr()
                 && p == old_ptr
             {
@@ -6662,6 +6713,9 @@ pub unsafe extern "C" fn rune_jit_call_helper(
                     // If callee bailed out, set the bailout flag for the
                     // caller.
                     if vm.jit_bailout.pending {
+                        if !needs_frame {
+                            vm.jit_locals_buffer.clear();
+                        }
                         unsafe {
                             let flag_ptr = vm_ptr.add(504) as *mut u64;
                             *flag_ptr = 1;
@@ -6669,6 +6723,9 @@ pub unsafe extern "C" fn rune_jit_call_helper(
                         return result_raw;
                     }
 
+                    if !needs_frame {
+                        vm.jit_locals_buffer.clear();
+                    }
                     return result_raw;
                 }
             }

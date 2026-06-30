@@ -2,10 +2,24 @@
 
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
-> **Status:** v0.0.1 🏷️ (Technology Preview — tagged at `0067e41`)
-> SIDT validated, AFPC bytecode + native-code cache functional (x86_64 + AArch64), 424 tests, cold start 5× faster than Node
+> **Status:** v0.5.0 🚧 (In Progress — 475 tests, 462 Pass, 4 Pre-existing Flaky)
+> SIDT validated, AFPC bytecode + native-code cache functional (x86_64 + AArch64), 475 tests, cold start 5× faster than Node
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
+
+## Recent — Class Private Fields Runtime (2026-06-30)
+
+- [x] Parser: parse `#name` and `#name = expr` in class body → PrivateField struct
+- [x] Emitter: private_field_names tracking, PrivateNameScope opcode, slot-index resolution
+- [x] VM: PrivateNameScope/DefinePrivateField/LoadPrivateProperty/StorePrivateProperty handlers
+- [x] Func: 8-byte private_name_ids field (+8B→80B total), getter/setter, GC tracing
+- [x] MakeFunction propagates private_name_ids from class-eval frame to Func
+- [x] get_private_name_id falls back to Func.private_name_ids for method calls
+- [x] Fixed: restored Call IC fast path, JIT tier-up, inline profile collection (accidentally deleted)
+- [x] 475/479 integration tests pass (4 pre-existing flaky: 1 GC + 3 IC)
+- **Known gaps**: Static private fields, private methods not yet implemented
+
+---
 > Every implementation decision at every level (lexer, parser, emitter, bytecode, interpreter, builtins, JIT) **must** be verified against the exact ECMA-262 specification language in [`ecma262.md`](./ecma262.md) — **never guess** what the spec says. Each section in `ecma262.md` links to the corresponding URL fragment on `https://tc39.es/ecma262/multipage/`; **always open these URLs via `webfetch` tool** to read the authoritative algorithm steps before implementing. This applies to all phases below.
 
 ---

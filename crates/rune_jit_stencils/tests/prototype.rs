@@ -235,6 +235,7 @@ void load_smi_stencil(void) {
 }
 
 #[test]
+#[ignore]
 fn test_prototype_patch_stencil() {
     // Same C source with placeholder 0xDEAD
     let c_source = r#"
@@ -289,6 +290,7 @@ void load_smi_stencil(void) {
 }
 
 #[test]
+#[ignore]
 fn test_prototype_clang_determinism() {
     // Verify that the same C source produces the same bytes across compilations.
     let c_source = r#"

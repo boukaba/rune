@@ -1445,7 +1445,12 @@ fn has_regexp_flag(regexp_ptr: *mut u8, flag: u8) -> bool {
     unsafe { RegExp::has_flag(regexp_ptr, flag) }
 }
 
-fn regexp_exec_internal(_gc: &mut SemiSpace, regexp_ptr: *mut u8, input: &str, start_pos: usize) -> Option<Vec<(usize, usize)>> {
+fn regexp_exec_internal(
+    _gc: &mut SemiSpace,
+    regexp_ptr: *mut u8,
+    input: &str,
+    start_pos: usize,
+) -> Option<Vec<(usize, usize)>> {
     let pattern = unsafe { HeapString::to_string(RegExp::pattern(regexp_ptr) as *mut HeapString) };
     match rune_regex::parse_regex(&pattern) {
         Ok(expr) => {
@@ -1457,7 +1462,12 @@ fn regexp_exec_internal(_gc: &mut SemiSpace, regexp_ptr: *mut u8, input: &str, s
     }
 }
 
-fn alloc_regexp_from_string(gc: &mut SemiSpace, pattern: &str, flags: u32, regexp_proto: Value) -> Value {
+fn alloc_regexp_from_string(
+    gc: &mut SemiSpace,
+    pattern: &str,
+    flags: u32,
+    regexp_proto: Value,
+) -> Value {
     let pattern_str = HeapString::allocate(gc, pattern);
     let ptr = rune_core::regexp::RegExp::allocate(gc, pattern_str as *mut u8, flags);
     if let Some(proto_ptr) = regexp_proto.heap_ptr() {
@@ -1468,7 +1478,13 @@ fn alloc_regexp_from_string(gc: &mut SemiSpace, pattern: &str, flags: u32, regex
     Value::from_heap_ptr(ptr)
 }
 
-fn make_match_result_array(gc: &mut SemiSpace, groups: &[(usize, usize)], input: &str, _match_index: usize, array_proto: Value) -> Value {
+fn make_match_result_array(
+    gc: &mut SemiSpace,
+    groups: &[(usize, usize)],
+    input: &str,
+    _match_index: usize,
+    array_proto: Value,
+) -> Value {
     let mut elements = Vec::with_capacity(groups.len());
     for (gs, ge) in groups.iter() {
         let s = HeapString::allocate(gc, &input[*gs..*ge]);
@@ -1641,9 +1657,7 @@ pub fn string_search(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
     };
 
     match regexp_exec_internal(gc, rx_ptr, &s, 0) {
-        Some(groups) => {
-            Value::smi(groups[0].0 as i32)
-        }
+        Some(groups) => Value::smi(groups[0].0 as i32),
         None => Value::smi(-1),
     }
 }

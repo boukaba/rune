@@ -6388,14 +6388,8 @@ fn test_private_member_write_error() {
 #[test]
 fn test_string_match_basic() {
     let mut ctx = Context::new_small();
-    assert_eq!(
-        eval_str(&mut ctx, r#""abc".match(/a/)[0]"#),
-        "a"
-    );
-    assert_eq!(
-        eval_str(&mut ctx, r#""abc".match(/b/)[0]"#),
-        "b"
-    );
+    assert_eq!(eval_str(&mut ctx, r#""abc".match(/a/)[0]"#), "a");
+    assert_eq!(eval_str(&mut ctx, r#""abc".match(/b/)[0]"#), "b");
     let result = ctx.eval(r#""abc".match(/x/)"#).unwrap();
     assert!(result.is_null());
 }
@@ -6403,35 +6397,17 @@ fn test_string_match_basic() {
 #[test]
 fn test_string_match_captures() {
     let mut ctx = Context::new_small();
-    assert_eq!(
-        eval_str(&mut ctx, r#""a1b2c3".match(/(\d)/)[1]"#),
-        "1"
-    );
-    assert_eq!(
-        eval_array_len(&mut ctx, r#""a1b2c3".match(/(\d)/)"#),
-        2
-    );
+    assert_eq!(eval_str(&mut ctx, r#""a1b2c3".match(/(\d)/)[1]"#), "1");
+    assert_eq!(eval_array_len(&mut ctx, r#""a1b2c3".match(/(\d)/)"#), 2);
 }
 
 #[test]
 fn test_string_match_global() {
     let mut ctx = Context::new_small();
-    assert_eq!(
-        eval_array_len(&mut ctx, r#""a1b2c3".match(/\d/g)"#),
-        3
-    );
-    assert_eq!(
-        eval_str(&mut ctx, r#""a1b2c3".match(/\d/g)[0]"#),
-        "1"
-    );
-    assert_eq!(
-        eval_str(&mut ctx, r#""a1b2c3".match(/\d/g)[1]"#),
-        "2"
-    );
-    assert_eq!(
-        eval_str(&mut ctx, r#""a1b2c3".match(/\d/g)[2]"#),
-        "3"
-    );
+    assert_eq!(eval_array_len(&mut ctx, r#""a1b2c3".match(/\d/g)"#), 3);
+    assert_eq!(eval_str(&mut ctx, r#""a1b2c3".match(/\d/g)[0]"#), "1");
+    assert_eq!(eval_str(&mut ctx, r#""a1b2c3".match(/\d/g)[1]"#), "2");
+    assert_eq!(eval_str(&mut ctx, r#""a1b2c3".match(/\d/g)[2]"#), "3");
     let result = ctx.eval(r#""abc".match(/\d/g)"#).unwrap();
     assert!(result.is_null());
 }
@@ -6439,16 +6415,12 @@ fn test_string_match_global() {
 #[test]
 fn test_string_search_basic() {
     let mut ctx = Context::new_small();
+    assert_eq!(ctx.eval(r#""abc".search(/b/)"#).unwrap().as_smi(), Some(1));
+    assert_eq!(ctx.eval(r#""abc".search(/x/)"#).unwrap().as_smi(), Some(-1));
     assert_eq!(
-        ctx.eval(r#""abc".search(/b/)"#).unwrap().as_smi(),
-        Some(1)
-    );
-    assert_eq!(
-        ctx.eval(r#""abc".search(/x/)"#).unwrap().as_smi(),
-        Some(-1)
-    );
-    assert_eq!(
-        ctx.eval(r#""hello world".search(/world/)"#).unwrap().as_smi(),
+        ctx.eval(r#""hello world".search(/world/)"#)
+            .unwrap()
+            .as_smi(),
         Some(6)
     );
 }
@@ -6464,72 +6436,36 @@ fn test_string_match_no_args() {
 #[test]
 fn test_string_search_no_args() {
     let mut ctx = Context::new_small();
-    assert_eq!(
-        ctx.eval(r#""abc".search()"#).unwrap().as_smi(),
-        Some(0)
-    );
+    assert_eq!(ctx.eval(r#""abc".search()"#).unwrap().as_smi(), Some(0));
 }
 
 #[test]
 fn test_string_split_regex() {
     let mut ctx = Context::new_small();
-    assert_eq!(
-        eval_array_len(&mut ctx, r#""a,b,c".split(/,/)"#),
-        3
-    );
-    assert_eq!(
-        eval_str(&mut ctx, r#""a,b,c".split(/,/)[0]"#),
-        "a"
-    );
-    assert_eq!(
-        eval_str(&mut ctx, r#""a,b,c".split(/,/)[1]"#),
-        "b"
-    );
-    assert_eq!(
-        eval_str(&mut ctx, r#""a,b,c".split(/,/)[2]"#),
-        "c"
-    );
+    assert_eq!(eval_array_len(&mut ctx, r#""a,b,c".split(/,/)"#), 3);
+    assert_eq!(eval_str(&mut ctx, r#""a,b,c".split(/,/)[0]"#), "a");
+    assert_eq!(eval_str(&mut ctx, r#""a,b,c".split(/,/)[1]"#), "b");
+    assert_eq!(eval_str(&mut ctx, r#""a,b,c".split(/,/)[2]"#), "c");
 }
 
 #[test]
 fn test_string_split_regex_limit() {
     let mut ctx = Context::new_small();
-    assert_eq!(
-        eval_array_len(&mut ctx, r#""a,b,c".split(/,/, 2)"#),
-        2
-    );
-    assert_eq!(
-        eval_str(&mut ctx, r#""a,b,c".split(/,/, 2)[0]"#),
-        "a"
-    );
-    assert_eq!(
-        eval_str(&mut ctx, r#""a,b,c".split(/,/, 2)[1]"#),
-        "b"
-    );
+    assert_eq!(eval_array_len(&mut ctx, r#""a,b,c".split(/,/, 2)"#), 2);
+    assert_eq!(eval_str(&mut ctx, r#""a,b,c".split(/,/, 2)[0]"#), "a");
+    assert_eq!(eval_str(&mut ctx, r#""a,b,c".split(/,/, 2)[1]"#), "b");
 }
 
 #[test]
 fn test_string_split_regex_no_match() {
     let mut ctx = Context::new_small();
-    assert_eq!(
-        eval_array_len(&mut ctx, r#""abc".split(/x/)"#),
-        1
-    );
-    assert_eq!(
-        eval_str(&mut ctx, r#""abc".split(/x/)[0]"#),
-        "abc"
-    );
+    assert_eq!(eval_array_len(&mut ctx, r#""abc".split(/x/)"#), 1);
+    assert_eq!(eval_str(&mut ctx, r#""abc".split(/x/)[0]"#), "abc");
 }
 
 #[test]
 fn test_string_split_regex_empty() {
     let mut ctx = Context::new_small();
-    assert_eq!(
-        eval_array_len(&mut ctx, r#""".split(/,/)"#),
-        1
-    );
-    assert_eq!(
-        eval_str(&mut ctx, r#""".split(/,/)[0]"#),
-        ""
-    );
+    assert_eq!(eval_array_len(&mut ctx, r#""".split(/,/)"#), 1);
+    assert_eq!(eval_str(&mut ctx, r#""".split(/,/)[0]"#), "");
 }

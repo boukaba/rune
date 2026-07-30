@@ -3343,6 +3343,7 @@ impl Vm {
                                     }
                                 };
                                 if rerecord_needed {
+                                    #[cfg(target_arch = "aarch64")]
                                     self.compile_trace_native(target);
                                 }
                                 let snapshot = std::mem::take(&mut self.jit_bailout.stack_snapshot);

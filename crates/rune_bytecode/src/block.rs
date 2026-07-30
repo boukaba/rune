@@ -88,6 +88,7 @@ pub fn build_cfg(instrs: &[Instruction]) -> ControlFlowGraph {
             }
         }
         // Jump targets are leaders
+        #[allow(clippy::collapsible_if)]
         if let Some(target) = jump_target(instr) {
             if target < n {
                 is_leader[target] = true;

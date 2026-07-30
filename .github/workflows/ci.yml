@@ -32,7 +32,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets -- -D warnings -A clippy::collapsible_if
 
   test-x86:
     name: cargo test (x86-64)

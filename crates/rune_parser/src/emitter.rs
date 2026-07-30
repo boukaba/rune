@@ -533,11 +533,11 @@ impl Emitter {
         // 7. Link: Constructor.__proto__ = SuperClass (for extends, static inheritance)
         if let Some(sslot) = heritage_super_slot {
             if let Some(ctor_slot) = save_slot {
-            self.emit(Opcode::LoadLocal, vec![ctor_slot as i64]);
-            self.emit(Opcode::LoadStringConst, vec![proto_proto_idx]);
-            self.emit(Opcode::LoadLocal, vec![sslot as i64]);
-            self.emit(Opcode::StoreProperty, vec![]);
-            self.emit(Opcode::Pop, vec![]);
+                self.emit(Opcode::LoadLocal, vec![ctor_slot as i64]);
+                self.emit(Opcode::LoadStringConst, vec![proto_proto_idx]);
+                self.emit(Opcode::LoadLocal, vec![sslot as i64]);
+                self.emit(Opcode::StoreProperty, vec![]);
+                self.emit(Opcode::Pop, vec![]);
             }
         }
 
@@ -2010,6 +2010,7 @@ impl Emitter {
     }
 
     /// Count the number of binding identifiers in a pattern (1 if None = simple identifier).
+    #[allow(clippy::only_used_in_recursion)]
     fn count_pattern_bindings(&self, pattern: &Option<Pattern>) -> usize {
         match pattern {
             None => 1,

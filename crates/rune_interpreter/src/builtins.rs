@@ -242,8 +242,8 @@ fn string_to_number(s: &str) -> f64 {
         return n;
     }
     let upper = trimmed.to_uppercase();
-    if upper.starts_with("0X") {
-        if let Ok(n) = u64::from_str_radix(&upper[2..], 16) {
+    if let Some(rest) = upper.strip_prefix("0X") {
+        if let Ok(n) = u64::from_str_radix(rest, 16) {
             return n as f64;
         }
     }

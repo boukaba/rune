@@ -5687,9 +5687,7 @@ fn test_regexp_exec_match() {
 #[test]
 fn test_regexp_exec_no_match() {
     let mut ctx = Context::new_small();
-    assert!(
-        ctx.eval(r#"/xyz/.exec("hello world")"#).unwrap().is_null(),
-    );
+    assert!(ctx.eval(r#"/xyz/.exec("hello world")"#).unwrap().is_null(),);
 }
 
 #[test]

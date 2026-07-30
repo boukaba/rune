@@ -1412,9 +1412,9 @@ impl Parser {
                 if self.tok.kind == TokenKind::Arrow {
                     if let Expr::Identifier(name, id_span) = &expr {
                         return self.parse_arrow_body(
-                        vec![Pattern::Identifier(name.clone(), *id_span, None)],
-                        None,
-                        start,
+                            vec![Pattern::Identifier(name.clone(), *id_span, None)],
+                            None,
+                            start,
                         );
                     }
                 }

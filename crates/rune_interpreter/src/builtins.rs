@@ -1718,6 +1718,7 @@ pub fn json_parse(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm)
                             'r' => s.push('\r'),
                             't' => s.push('\t'),
                             'u' => {
+                                #[allow(clippy::collapsible_match)]
                                 if *pos + 4 < chars.len() {
                                     let hex: String = chars[*pos + 1..*pos + 5].iter().collect();
                                     if let Ok(code) = u32::from_str_radix(&hex, 16) {
@@ -1873,12 +1874,9 @@ pub fn json_parse(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm)
                         }
                         *pos += 1;
                         skip_ws(chars, pos);
-                        if let Some(val) = parse_value(gc, chars, pos, array_proto, object_proto) {
-                            keys.push(key);
-                            values.push(val);
-                        } else {
-                            return None;
-                        }
+                        let val = parse_value(gc, chars, pos, array_proto, object_proto)?;
+                        keys.push(key);
+                        values.push(val);
                         skip_ws(chars, pos);
                         if *pos < chars.len() && chars[*pos] == ',' {
                             *pos += 1;

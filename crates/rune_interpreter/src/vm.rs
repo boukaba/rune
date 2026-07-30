@@ -4307,7 +4307,7 @@ impl Vm {
                                 }
 
                                 // --- JIT tier-up (if enabled) ---
-                                #[cfg(feature = "jit")]
+                                #[cfg(all(feature = "jit", target_arch = "aarch64"))]
                                 {
                                     unsafe { Func::increment_call_count(ptr as *mut Func) };
                                     let count = unsafe { Func::call_count(ptr as *mut Func) };

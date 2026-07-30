@@ -1720,7 +1720,7 @@ fn test_negate_undefined() {
 }
 
 #[test]
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(target_arch = "aarch64")]
 fn test_jit_tier_up() {
     // add(a, b) is JIT-compatible; tier-up at 50 calls, then bails on first
     // opcode (MakeArgumentsArray, §6.2 bail-on-entry). Verifies the JIT
@@ -1747,7 +1747,7 @@ fn test_jit_tier_up() {
 }
 
 #[test]
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(target_arch = "aarch64")]
 fn test_jit_bailout_on_float() {
     // add() tier-up at 50, then pass a float64 — JIT bails at MakeArgumentsArray
     // (§6.2 bail-on-entry), interpreter handles float via normal flow.
@@ -1779,7 +1779,7 @@ fn test_jit_bailout_on_float() {
 }
 
 #[test]
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(target_arch = "aarch64")]
 fn test_jit_non_smi_args_bail() {
     // Non-arrow function with float arg. JIT now promotes non-Smi Add operands
     // to float64 via helper instead of bailing. The function still produces the
@@ -1811,7 +1811,7 @@ fn test_jit_non_smi_args_bail() {
 }
 
 #[test]
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(target_arch = "aarch64")]
 fn test_jit_bailout_count() {
     // Verify the jit_bailout_count counter increments alongside jit_entry_count.
     let mut ctx = Context::new_small();
@@ -1839,7 +1839,7 @@ fn test_jit_bailout_count() {
 }
 
 #[test]
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(target_arch = "aarch64")]
 fn test_jit_no_bail_on_simple_fn() {
     // A function that doesn't use `arguments` no longer has MakeArgumentsArray.
     // The JIT should run end-to-end without bailing.
@@ -1947,7 +1947,7 @@ fn test_jit_inline_feature_flag() {
 }
 
 #[test]
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(target_arch = "aarch64")]
 fn test_jit_inline_skip_noneligible() {
     // Functions that need a frame (e.g., using 'let') should not be inlined.
     // With --inline enabled, the InlinePlan eligibility check should skip
@@ -1985,7 +1985,7 @@ fn test_jit_inline_skip_noneligible() {
 }
 
 #[test]
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(target_arch = "aarch64")]
 fn test_jit_inline_no_bail() {
     // Simple frame-less function (add(a,b)) should inline cleanly with
     // zero bailouts when --inline is enabled.
@@ -2018,7 +2018,7 @@ fn test_jit_inline_no_bail() {
 }
 
 #[test]
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(target_arch = "aarch64")]
 fn test_jit_inline_skip_unarith() {
     // Functions with Sub/Mul (not in the emit_inline_call whitelist)
     // must NOT be inlined.  Result should match --no-inline.
@@ -2061,7 +2061,7 @@ fn test_jit_inline_skip_unarith() {
 }
 
 #[test]
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(target_arch = "aarch64")]
 fn test_jit_inline_bail() {
     // Inlined Sub overflow triggers a bailout (F-3).  The JIT stack must be
     // restored to pre-call state so the interpreter can re-execute the Call
@@ -2103,7 +2103,7 @@ fn test_jit_inline_bail() {
 }
 
 #[test]
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(target_arch = "aarch64")]
 fn test_jit_inline_hot_function() {
     // F-4: verify jit_hot_function_1M with --inline produces the same result
     // as --no-inline.  add() called 1M times should tier up and inline.
@@ -2131,7 +2131,7 @@ fn test_jit_inline_hot_function() {
 }
 
 #[test]
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(target_arch = "aarch64")]
 fn test_jit_typeof_native() {
     // TypeOf is now native — the JIT calls typeof_helper instead of bailing.
     // This test verifies all typeof results and that the JIT enters + no bail.
@@ -2173,7 +2173,7 @@ fn test_jit_typeof_native() {
 }
 
 #[test]
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(target_arch = "aarch64")]
 fn test_jit_load_string_const() {
     // LoadStringConst is native — the JIT calls string_helper instead of bailing.
     // This test verifies that a function returning a bare string constant
@@ -2209,7 +2209,7 @@ fn test_jit_load_string_const() {
 }
 
 #[test]
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(target_arch = "aarch64")]
 fn test_jit_load_global() {
     let mut ctx = Context::new_small();
     let r = ctx
@@ -2243,7 +2243,7 @@ fn test_jit_load_global() {
 }
 
 #[test]
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(target_arch = "aarch64")]
 fn test_jit_store_global() {
     let mut ctx = Context::new_small();
     let r = ctx
@@ -2278,7 +2278,7 @@ fn test_jit_store_global() {
 }
 
 #[test]
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(target_arch = "aarch64")]
 fn test_jit_inc_global() {
     let mut ctx = Context::new_small();
     let r = ctx

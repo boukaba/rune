@@ -22,8 +22,6 @@ use rune_core::string_object::StringObject;
 use rune_core::value::Value;
 #[cfg(all(feature = "jit", target_arch = "aarch64"))]
 use rune_jit_baseline::Aarch64CodeGen;
-#[cfg(all(feature = "jit", target_arch = "x86_64"))]
-use rune_jit_baseline::CodeGen;
 #[cfg(feature = "jit")]
 use rune_jit_baseline::JitEntryFn;
 use std::cell::UnsafeCell;

@@ -1783,11 +1783,8 @@ pub fn json_parse(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm)
                 if *pos < chars.len() && chars[*pos] != ']' {
                     loop {
                         skip_ws(chars, pos);
-                        if let Some(val) = parse_value(gc, chars, pos, array_proto, object_proto) {
-                            elements.push(val);
-                        } else {
-                            return None;
-                        }
+                        let val = parse_value(gc, chars, pos, array_proto, object_proto)?;
+                        elements.push(val);
                         skip_ws(chars, pos);
                         if *pos < chars.len() && chars[*pos] == ',' {
                             *pos += 1;

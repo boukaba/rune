@@ -1162,7 +1162,7 @@ pub fn string_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
                 }
                 let s_val = Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8);
                 let arr = RuneArray::allocate(gc, &[]);
-                unsafe { set_array_proto(arr, vm) }
+                set_array_proto(arr, vm);
                 let result_ptr = unsafe { RuneArray::push(gc, arr, s_val) };
                 return Value::from_heap_ptr(result_ptr as *mut u8);
             }
@@ -1218,7 +1218,7 @@ pub fn string_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
     if separator.is_undefined() {
         let s_val = Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8);
         let arr = RuneArray::allocate(gc, &[]);
-        unsafe { set_array_proto(arr, vm) }
+        set_array_proto(arr, vm);
         let result_ptr = unsafe { RuneArray::push(gc, arr, s_val) };
         Value::from_heap_ptr(result_ptr as *mut u8)
     } else {
@@ -1469,11 +1469,9 @@ fn alloc_regexp_from_string(gc: &mut SemiSpace, pattern: &str, flags: u32, regex
 }
 
 fn make_match_result_array(gc: &mut SemiSpace, groups: &[(usize, usize)], input: &str, _match_index: usize, array_proto: Value) -> Value {
-    let group_count = groups.len();
-    let mut elements = Vec::with_capacity(group_count);
-    for i in 0..group_count {
-        let (gs, ge) = groups[i];
-        let s = HeapString::allocate(gc, &input[gs..ge]);
+    let mut elements = Vec::with_capacity(groups.len());
+    for (gs, ge) in groups.iter() {
+        let s = HeapString::allocate(gc, &input[*gs..*ge]);
         elements.push(Value::from_heap_ptr(s as *mut u8));
     }
     let arr = RuneArray::allocate(gc, &elements);
@@ -1488,18 +1486,20 @@ fn make_match_result_array(gc: &mut SemiSpace, groups: &[(usize, usize)], input:
     Value::from_heap_ptr(arr as *mut u8)
 }
 
-unsafe fn set_array_proto(arr: *mut RuneArray, vm: &Vm) {
-    let ptr = arr as *mut u8;
-    *(ptr.add(8) as *mut *const rune_core::shape::Shape) =
-        *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
-    if let Some(proto) = vm.array_prototype.heap_ptr() {
-        *(ptr.add(24) as *mut *mut u8) = proto;
+fn set_array_proto(arr: *mut RuneArray, vm: &Vm) {
+    unsafe {
+        let ptr = arr as *mut u8;
+        *(ptr.add(8) as *mut *const rune_core::shape::Shape) =
+            *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
+        if let Some(proto) = vm.array_prototype.heap_ptr() {
+            *(ptr.add(24) as *mut *mut u8) = proto;
+        }
     }
 }
 
 fn alloc_empty_array_with_proto(gc: &mut SemiSpace, vm: &Vm) -> Value {
     let arr = RuneArray::allocate(gc, &[]);
-    unsafe { set_array_proto(arr, vm) }
+    set_array_proto(arr, vm);
     Value::from_heap_ptr(arr as *mut u8)
 }
 
@@ -1583,7 +1583,7 @@ pub fn string_match(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
                     let match_str = &s[gs..ge];
                     matched_strings.push(match_str.to_string());
                     let next_start = if match_str.is_empty() {
-                        if gs + 1 <= s.len() { gs + 1 } else { s.len() }
+                        if gs < s.len() { gs + 1 } else { s.len() }
                     } else {
                         ge
                     };

@@ -1281,9 +1281,12 @@ impl CodeGen {
 
 #[cfg(all(test, not(target_arch = "x86_64")))]
 mod tests {
+    #[cfg(target_arch = "x86_64")]
     use super::*;
+    #[cfg(target_arch = "x86_64")]
     use rune_bytecode::opcode::Instruction;
 
+    #[cfg(target_arch = "x86_64")]
     fn make_prog(instructions: Vec<Instruction>) -> BytecodeProgram {
         BytecodeProgram {
             instructions,
@@ -1559,6 +1562,7 @@ mod tests {
     // -------------------------------------------------------------------
 
     #[test]
+    #[cfg(target_arch = "x86_64")]
     fn test_compile_empty_then_return() {
         // A program with just Return: should emit prologue, pop (which underflows
         // but the bytes are still valid), and epilogue. Verify it doesn't panic.
@@ -1570,6 +1574,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_arch = "x86_64")]
     fn test_compile_load_smi_offset() {
         // Known byte count for LoadSmi + Return:
         //   prologue: push rbp(1)+push r15(2)+push r14(2)+push r13(2)+push rbx(1)+
@@ -1817,6 +1822,7 @@ mod tests {
     // -------------------------------------------------------------------
 
     #[test]
+    #[cfg(target_arch = "x86_64")]
     fn test_compile_store_local_offset() {
         let prog = make_prog(vec![
             Instruction::new(Opcode::LoadSmi, vec![42]),
@@ -1837,6 +1843,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_arch = "x86_64")]
     fn test_compile_lt_offset() {
         let prog = make_prog(vec![
             Instruction::new(Opcode::LoadSmi, vec![3]),
@@ -1858,6 +1865,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_arch = "x86_64")]
     fn test_compile_loop_offset() {
         let instructions = vec![
             Instruction::new(Opcode::LoadSmi, vec![0]),

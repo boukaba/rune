@@ -650,6 +650,8 @@ impl Vm {
         let value_of_handle = find_handle(&self.builtins, "String_prototype_valueOf");
         let replace_handle = find_handle(&self.builtins, "String_prototype_replace");
         let replace_all_handle = find_handle(&self.builtins, "String_prototype_replaceAll");
+        let match_handle = find_handle(&self.builtins, "String_prototype_match");
+        let search_handle = find_handle(&self.builtins, "String_prototype_search");
         if let (Some(char_at), Some(slice)) = (char_at_handle, slice_handle) {
             let mut str_proto_entries: Vec<(&str, Value)> =
                 vec![("charAt", char_at), ("slice", slice)];
@@ -718,6 +720,12 @@ impl Vm {
             }
             if let Some(ra) = replace_all_handle {
                 str_proto_entries.push(("replaceAll", ra));
+            }
+            if let Some(mh) = match_handle {
+                str_proto_entries.push(("match", mh));
+            }
+            if let Some(sh) = search_handle {
+                str_proto_entries.push(("search", sh));
             }
             let str_proto = make_object(gc, &str_proto_entries);
             self.builtin_wrappers

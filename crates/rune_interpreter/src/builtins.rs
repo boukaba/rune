@@ -1150,19 +1150,77 @@ pub fn string_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
         return Value::from_heap_ptr(arr as *mut u8);
     }
     let separator = args.first().copied().unwrap_or(Value::undefined());
+
+    // ---- RegExp separator ----
+    if let Some(ptr) = separator.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_REGEXP {
+            if s.is_empty() {
+                let match_result = regexp_exec_internal(gc, ptr, &s, 0);
+                if match_result.is_some() {
+                    return alloc_empty_array_with_proto(gc, vm);
+                }
+                let s_val = Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8);
+                let arr = RuneArray::allocate(gc, &[]);
+                unsafe { set_array_proto(arr, vm) }
+                let result_ptr = unsafe { RuneArray::push(gc, arr, s_val) };
+                return Value::from_heap_ptr(result_ptr as *mut u8);
+            }
+
+            let size = s.len();
+            let mut pieces: Vec<String> = Vec::new();
+            let mut last_match_end = 0usize;
+            let mut search_index = last_match_end;
+
+            while search_index < size {
+                let match_result = regexp_exec_internal(gc, ptr, &s, search_index);
+                match match_result {
+                    Some(groups) => {
+                        let (match_start, match_end) = groups[0];
+                        if match_end == last_match_end {
+                            search_index += 1;
+                            if search_index > size {
+                                search_index = size;
+                            }
+                            continue;
+                        }
+                        let substring = s[last_match_end..match_start].to_string();
+                        pieces.push(substring);
+                        if pieces.len() as u32 >= lim {
+                            return alloc_split_array(gc, vm, &pieces, lim);
+                        }
+                        last_match_end = match_end;
+                        for g in &groups[1..] {
+                            let (gs, ge) = *g;
+                            let cap = s[gs..ge].to_string();
+                            pieces.push(cap);
+                            if pieces.len() as u32 >= lim {
+                                return alloc_split_array(gc, vm, &pieces, lim);
+                            }
+                        }
+                        search_index = last_match_end;
+                    }
+                    None => {
+                        search_index += 1;
+                        if search_index > size {
+                            search_index = size;
+                        }
+                    }
+                }
+            }
+            let trailing = s[last_match_end..].to_string();
+            pieces.push(trailing);
+            return alloc_split_array(gc, vm, &pieces, lim);
+        }
+    }
+
+    // ---- String separator ----
     if separator.is_undefined() {
         let s_val = Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8);
         let arr = RuneArray::allocate(gc, &[]);
-        unsafe {
-            let ptr = arr as *mut u8;
-            *(ptr.add(8) as *mut *const rune_core::shape::Shape) =
-                *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
-            if let Some(proto) = vm.array_prototype.heap_ptr() {
-                *(ptr.add(24) as *mut *mut u8) = proto;
-            }
-            let result_ptr = RuneArray::push(gc, arr, s_val);
-            Value::from_heap_ptr(result_ptr as *mut u8)
-        }
+        unsafe { set_array_proto(arr, vm) }
+        let result_ptr = unsafe { RuneArray::push(gc, arr, s_val) };
+        Value::from_heap_ptr(result_ptr as *mut u8)
     } else {
         let sep = arg_to_string(gc, Some(separator), vm);
         let pieces: Vec<String> = if sep.is_empty() {
@@ -1381,6 +1439,213 @@ pub fn string_replace_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
     }
     let result = s.replace(&search_str, &replacement);
     Value::from_heap_ptr(HeapString::allocate(gc, &result) as *mut u8)
+}
+
+fn has_regexp_flag(regexp_ptr: *mut u8, flag: u8) -> bool {
+    unsafe { RegExp::has_flag(regexp_ptr, flag) }
+}
+
+fn regexp_exec_internal(_gc: &mut SemiSpace, regexp_ptr: *mut u8, input: &str, start_pos: usize) -> Option<Vec<(usize, usize)>> {
+    let pattern = unsafe { HeapString::to_string(RegExp::pattern(regexp_ptr) as *mut HeapString) };
+    match rune_regex::parse_regex(&pattern) {
+        Ok(expr) => {
+            let nfa = rune_regex::nfa::compile(&expr);
+            let pike_vm = rune_regex::pikevm::PikeVm::new();
+            pike_vm.exec(&nfa, input, start_pos).map(|m| m.groups)
+        }
+        Err(_) => None,
+    }
+}
+
+fn alloc_regexp_from_string(gc: &mut SemiSpace, pattern: &str, flags: u32, regexp_proto: Value) -> Value {
+    let pattern_str = HeapString::allocate(gc, pattern);
+    let ptr = rune_core::regexp::RegExp::allocate(gc, pattern_str as *mut u8, flags);
+    if let Some(proto_ptr) = regexp_proto.heap_ptr() {
+        unsafe {
+            rune_core::regexp::RegExp::set_prototype(ptr, proto_ptr);
+        }
+    }
+    Value::from_heap_ptr(ptr)
+}
+
+fn make_match_result_array(gc: &mut SemiSpace, groups: &[(usize, usize)], input: &str, _match_index: usize, array_proto: Value) -> Value {
+    let group_count = groups.len();
+    let mut elements = Vec::with_capacity(group_count);
+    for i in 0..group_count {
+        let (gs, ge) = groups[i];
+        let s = HeapString::allocate(gc, &input[gs..ge]);
+        elements.push(Value::from_heap_ptr(s as *mut u8));
+    }
+    let arr = RuneArray::allocate(gc, &elements);
+    unsafe {
+        let ptr = arr as *mut u8;
+        *(ptr.add(8) as *mut *const rune_core::shape::Shape) =
+            *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
+        if let Some(proto) = array_proto.heap_ptr() {
+            *(ptr.add(24) as *mut *mut u8) = proto;
+        }
+    }
+    Value::from_heap_ptr(arr as *mut u8)
+}
+
+unsafe fn set_array_proto(arr: *mut RuneArray, vm: &Vm) {
+    let ptr = arr as *mut u8;
+    *(ptr.add(8) as *mut *const rune_core::shape::Shape) =
+        *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
+    if let Some(proto) = vm.array_prototype.heap_ptr() {
+        *(ptr.add(24) as *mut *mut u8) = proto;
+    }
+}
+
+fn alloc_empty_array_with_proto(gc: &mut SemiSpace, vm: &Vm) -> Value {
+    let arr = RuneArray::allocate(gc, &[]);
+    unsafe { set_array_proto(arr, vm) }
+    Value::from_heap_ptr(arr as *mut u8)
+}
+
+fn alloc_split_array(gc: &mut SemiSpace, vm: &Vm, pieces: &[String], lim: u32) -> Value {
+    let elem_count = (pieces.len() as u32).min(lim) as usize;
+    let arr = RuneArray::allocate(gc, &[]);
+    unsafe {
+        let mut arr_ptr = arr as *mut u8;
+        *(arr_ptr.add(8) as *mut *const rune_core::shape::Shape) =
+            *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
+        if let Some(proto) = vm.array_prototype.heap_ptr() {
+            *(arr_ptr.add(24) as *mut *mut u8) = proto;
+        }
+        for p in pieces.iter().take(elem_count) {
+            let heap_str = HeapString::allocate(gc, p);
+            let new_ptr = RuneArray::push(
+                gc,
+                arr_ptr as *mut RuneArray,
+                Value::from_heap_ptr(heap_str as *mut u8),
+            );
+            if new_ptr as *mut u8 != arr_ptr {
+                arr_ptr = new_ptr as *mut u8;
+            }
+        }
+        Value::from_heap_ptr(arr_ptr)
+    }
+}
+
+fn value_to_pattern_string(v: Option<Value>, gc: &mut SemiSpace, vm: &mut Vm) -> String {
+    match v {
+        Some(val) if !val.is_undefined() && !val.is_null() => arg_to_string(gc, v, vm),
+        _ => String::new(),
+    }
+}
+
+pub fn string_match(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let s = string_from_value(this);
+    let regexp_val = args.first().copied();
+
+    let regexp_ptr = regexp_val.and_then(|v| {
+        v.heap_ptr().and_then(|ptr| {
+            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+            if tag == TAG_REGEXP { Some(ptr) } else { None }
+        })
+    });
+
+    let (rx_ptr, _rx_owned) = if let Some(ptr) = regexp_ptr {
+        (ptr, false)
+    } else {
+        let pattern_str = value_to_pattern_string(regexp_val, gc, vm);
+        let rx = alloc_regexp_from_string(gc, &pattern_str, 0, vm.regexp_prototype);
+        match rx.heap_ptr() {
+            Some(p) => (p, true),
+            None => return Value::null(),
+        }
+    };
+
+    let is_global = has_regexp_flag(rx_ptr, 0u8);
+
+    if !is_global {
+        match regexp_exec_internal(gc, rx_ptr, &s, 0) {
+            Some(groups) => {
+                let match_index = groups[0].0;
+                make_match_result_array(gc, &groups, &s, match_index, vm.array_prototype)
+            }
+            None => Value::null(),
+        }
+    } else {
+        unsafe {
+            RegExp::set_last_index(rx_ptr, 0);
+        }
+        let mut matched_strings: Vec<String> = Vec::new();
+        loop {
+            let last_index = unsafe { RegExp::last_index(rx_ptr) } as usize;
+            match regexp_exec_internal(gc, rx_ptr, &s, last_index) {
+                Some(groups) => {
+                    let (gs, ge) = groups[0];
+                    let match_str = &s[gs..ge];
+                    matched_strings.push(match_str.to_string());
+                    let next_start = if match_str.is_empty() {
+                        if gs + 1 <= s.len() { gs + 1 } else { s.len() }
+                    } else {
+                        ge
+                    };
+                    unsafe {
+                        RegExp::set_last_index(rx_ptr, next_start as u32);
+                    }
+                }
+                None => break,
+            }
+        }
+        if matched_strings.is_empty() {
+            return Value::null();
+        }
+        let mut elements = Vec::with_capacity(matched_strings.len());
+        for ms in &matched_strings {
+            let heap_str = HeapString::allocate(gc, ms);
+            elements.push(Value::from_heap_ptr(heap_str as *mut u8));
+        }
+        let arr = RuneArray::allocate(gc, &elements);
+        unsafe {
+            let ptr = arr as *mut u8;
+            *(ptr.add(8) as *mut *const rune_core::shape::Shape) =
+                *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
+            if let Some(proto) = vm.array_prototype.heap_ptr() {
+                *(ptr.add(24) as *mut *mut u8) = proto;
+            }
+        }
+        Value::from_heap_ptr(arr as *mut u8)
+    }
+}
+
+pub fn string_search(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let s = string_from_value(this);
+    let regexp_val = args.first().copied();
+
+    let regexp_ptr = regexp_val.and_then(|v| {
+        v.heap_ptr().and_then(|ptr| {
+            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+            if tag == TAG_REGEXP { Some(ptr) } else { None }
+        })
+    });
+
+    let (rx_ptr, _rx_owned) = if let Some(ptr) = regexp_ptr {
+        (ptr, false)
+    } else {
+        let pattern_str = value_to_pattern_string(regexp_val, gc, vm);
+        let rx = alloc_regexp_from_string(gc, &pattern_str, 0, vm.regexp_prototype);
+        match rx.heap_ptr() {
+            Some(p) => (p, true),
+            None => return Value::smi(-1),
+        }
+    };
+
+    match regexp_exec_internal(gc, rx_ptr, &s, 0) {
+        Some(groups) => {
+            Value::smi(groups[0].0 as i32)
+        }
+        None => Value::smi(-1),
+    }
 }
 
 /// Math.floor(x) — rounds down.
@@ -3246,9 +3511,19 @@ pub fn default_builtins() -> Vec<Builtin> {
             func: regexp_last_index,
         },
         Builtin {
+            length: 2,
+            name: "String_prototype_replaceAll",
+            func: string_replace_all,
+        },
+        Builtin {
             length: 1,
-            name: "Object",
-            func: object_builtin,
+            name: "String_prototype_match",
+            func: string_match,
+        },
+        Builtin {
+            length: 1,
+            name: "String_prototype_search",
+            func: string_search,
         },
         Builtin {
             length: 1,

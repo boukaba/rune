@@ -7,7 +7,7 @@
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
 
-## Recent — Class Private Fields Runtime (2026-06-30)
+## Recent — String.prototype.match/search/split for RegExp (2026-07-30)
 
 - [x] Parser: parse `#name` and `#name = expr` in class body → PrivateField struct
 - [x] Emitter: private_field_names tracking, PrivateNameScope opcode, slot-index resolution

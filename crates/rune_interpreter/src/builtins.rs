@@ -1,9 +1,12 @@
 use crate::vm::Vm;
 use crate::vm::load_property_recursive;
 use rune_core::array::RuneArray;
-use rune_core::gc::{GcHeader, SemiSpace, TAG_ARRAY, TAG_FUNC, TAG_OBJECT, TAG_PROMISE, TAG_REGEXP, TAG_STRING, TAG_STRING_OBJ};
+use rune_core::gc::{
+    GcHeader, SemiSpace, TAG_ARRAY, TAG_FUNC, TAG_OBJECT, TAG_PROMISE, TAG_REGEXP, TAG_STRING,
+    TAG_STRING_OBJ,
+};
 use rune_core::object::JSObject;
-use rune_core::promise::{Promise, PROMISE_FULFILLED, PROMISE_PENDING, PROMISE_REJECTED};
+use rune_core::promise::{PROMISE_FULFILLED, PROMISE_PENDING, PROMISE_REJECTED, Promise};
 use rune_core::regexp::RegExp;
 use rune_core::shape::{DENSE_ARRAY_SHAPE, PropertyKey, Shape};
 use rune_core::string::HeapString;
@@ -19,8 +22,6 @@ pub struct Builtin {
 
 /// Signature for a built-in function: receives GC access, `this` value, args, and VM reference.
 pub type BuiltinFn = fn(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value;
-
-
 
 /// Format a Value into its JS string representation.
 pub fn value_to_js_string(v: Value) -> String {
@@ -64,11 +65,7 @@ pub fn print_builtin(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mu
 /// For objects with a user-defined toString function, sets up the pending_call
 /// callback pattern and returns None (the caller must return immediately).
 /// For all other values, returns Some(string).
-pub(crate) fn to_primitive_string(
-    gc: &mut SemiSpace,
-    val: Value,
-    vm: &mut Vm,
-) -> Option<String> {
+pub(crate) fn to_primitive_string(gc: &mut SemiSpace, val: Value, vm: &mut Vm) -> Option<String> {
     // Fast path: non-object values
     if !val.is_heap_object() {
         return Some(value_to_js_string(val));
@@ -129,8 +126,8 @@ pub(crate) fn to_primitive_string(
         let value_of_key = PropertyKey::from_string("valueOf");
         if let Some(slot) = shape.lookup(&value_of_key) {
             let value_of_val = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
-            if let Some(smi) = value_of_val.as_smi()
-                && smi < 0 {
+            if let Some(smi) = value_of_val.as_smi() {
+                if smi < 0 {
                     let id = ((-smi) as usize) - 1;
                     if id < vm.builtins.len() {
                         let result = (vm.builtins[id].func)(gc, val, &[], vm);
@@ -150,6 +147,7 @@ pub(crate) fn to_primitive_string(
                         }
                     }
                 }
+            }
         }
         // Neither toString nor valueOf returned a primitive
         return Some(value_to_js_string(val));
@@ -160,11 +158,7 @@ pub(crate) fn to_primitive_string(
 /// Synchronous version of to_primitive_string — never sets up callbacks.
 /// User-defined toString/valueOf are skipped (fall through to [object Object]).
 /// Use this for string method arguments where the callback pattern would leak.
-pub(crate) fn to_primitive_string_sync(
-    val: Value,
-    gc: &mut SemiSpace,
-    vm: &mut Vm,
-) -> String {
+pub(crate) fn to_primitive_string_sync(val: Value, gc: &mut SemiSpace, vm: &mut Vm) -> String {
     if !val.is_heap_object() {
         return value_to_js_string(val);
     }
@@ -182,8 +176,8 @@ pub(crate) fn to_primitive_string_sync(
         let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
         if let Some(slot) = shape.lookup(&key) {
             let to_string_val = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
-            if let Some(smi) = to_string_val.as_smi()
-                && smi < 0 {
+            if let Some(smi) = to_string_val.as_smi() {
+                if smi < 0 {
                     let id = ((-smi) as usize) - 1;
                     if id < vm.builtins.len() {
                         let result = (vm.builtins[id].func)(gc, val, &[], vm);
@@ -195,19 +189,22 @@ pub(crate) fn to_primitive_string_sync(
                             if let Some(rp) = result.heap_ptr() {
                                 let rt = unsafe { (*(rp as *const GcHeader)).tag() };
                                 rt == TAG_STRING
-                            } else { false }
+                            } else {
+                                false
+                            }
                         } {
                             return value_to_js_string(result);
                         }
                     }
                 }
+            }
             // User-defined or non-callable toString — skip
         }
         let value_of_key = PropertyKey::from_string("valueOf");
         if let Some(slot) = shape.lookup(&value_of_key) {
             let value_of_val = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
-            if let Some(smi) = value_of_val.as_smi()
-                && smi < 0 {
+            if let Some(smi) = value_of_val.as_smi() {
+                if smi < 0 {
                     let id = ((-smi) as usize) - 1;
                     if id < vm.builtins.len() {
                         let result = (vm.builtins[id].func)(gc, val, &[], vm);
@@ -219,12 +216,15 @@ pub(crate) fn to_primitive_string_sync(
                             if let Some(rp) = result.heap_ptr() {
                                 let rt = unsafe { (*(rp as *const GcHeader)).tag() };
                                 rt == TAG_STRING
-                            } else { false }
+                            } else {
+                                false
+                            }
                         } {
                             return value_to_js_string(result);
                         }
                     }
                 }
+            }
             // User-defined or non-callable valueOf — skip
         }
         return value_to_js_string(val);
@@ -242,12 +242,12 @@ fn string_to_number(s: &str) -> f64 {
         return n;
     }
     let upper = trimmed.to_uppercase();
-    if upper.starts_with("0X") && let Ok(n) = u64::from_str_radix(&upper[2..], 16) {
-        return n as f64;
+    if upper.starts_with("0X") {
+        if let Ok(n) = u64::from_str_radix(&upper[2..], 16) {
+            return n as f64;
+        }
     }
-    if trimmed.eq_ignore_ascii_case("infinity")
-        || trimmed == "+Infinity"
-    {
+    if trimmed.eq_ignore_ascii_case("infinity") || trimmed == "+Infinity" {
         return f64::INFINITY;
     }
     if trimmed == "-Infinity" {
@@ -284,7 +284,11 @@ pub fn number_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
         return Value::from_float64(f64::NAN);
     }
     if val.is_null() || val.is_boolean() {
-        let n = if val.is_null() || val.to_boolean() == Some(false) { 0.0 } else { 1.0 };
+        let n = if val.is_null() || val.to_boolean() == Some(false) {
+            0.0
+        } else {
+            1.0
+        };
         return Value::from_float64(n);
     }
     if let Some(n) = val.as_smi() {
@@ -441,21 +445,18 @@ fn object_own_entries(
                 let mut entries = Vec::with_capacity(s.len());
                 for (i, c) in s.chars().enumerate() {
                     let ch: String = c.to_string();
-                    let ch_val =
-                        Value::from_heap_ptr(HeapString::allocate(gc, &ch) as *mut u8);
+                    let ch_val = Value::from_heap_ptr(HeapString::allocate(gc, &ch) as *mut u8);
                     entries.push((i.to_string(), ch_val));
                 }
                 Ok(entries)
             }
             TAG_STRING_OBJ => {
-                let str_ptr =
-                    unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
+                let str_ptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
                 let s = unsafe { HeapString::to_string(str_ptr as *mut HeapString) };
                 let mut entries = Vec::with_capacity(s.len());
                 for (i, c) in s.chars().enumerate() {
                     let ch: String = c.to_string();
-                    let ch_val =
-                        Value::from_heap_ptr(HeapString::allocate(gc, &ch) as *mut u8);
+                    let ch_val = Value::from_heap_ptr(HeapString::allocate(gc, &ch) as *mut u8);
                     entries.push((i.to_string(), ch_val));
                 }
                 Ok(entries)
@@ -516,8 +517,7 @@ pub fn object_entries(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
     let pairs: Vec<Value> = entries
         .iter()
         .map(|(k, v)| {
-            let key_val =
-                Value::from_heap_ptr(HeapString::allocate(gc, k) as *mut u8);
+            let key_val = Value::from_heap_ptr(HeapString::allocate(gc, k) as *mut u8);
             let pair_elems = [key_val, *v];
             let pair_arr = RuneArray::allocate(gc, &pair_elems);
             unsafe {
@@ -687,7 +687,8 @@ pub fn string_slice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
         return Value::undefined();
     }
     fn to_number(v: Value) -> f64 {
-        v.as_smi().map(|n| n as f64)
+        v.as_smi()
+            .map(|n| n as f64)
             .or_else(|| v.as_float64())
             .unwrap_or(f64::NAN)
     }
@@ -702,9 +703,13 @@ pub fn string_slice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
         None => len,
     };
     let clamp = |v: f64| -> usize {
-        let v = if v.is_infinite() { if v.is_sign_negative() { 0.0 } else { len } }
-                else if v < 0.0 { (len + v).max(0.0) }
-                else { v.min(len) };
+        let v = if v.is_infinite() {
+            if v.is_sign_negative() { 0.0 } else { len }
+        } else if v < 0.0 {
+            (len + v).max(0.0)
+        } else {
+            v.min(len)
+        };
         v as usize
     };
     let start = clamp(int_start);
@@ -956,7 +961,12 @@ pub fn string_trim_end(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mu
 }
 
 /// String.prototype.toLowerCase() — returns lowercased string.
-pub fn string_to_lower_case(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+pub fn string_to_lower_case(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
@@ -966,7 +976,12 @@ pub fn string_to_lower_case(gc: &mut SemiSpace, this: Value, _args: &[Value], vm
 }
 
 /// String.prototype.toUpperCase() — returns uppercased string.
-pub fn string_to_upper_case(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+pub fn string_to_upper_case(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
@@ -1017,7 +1032,11 @@ pub fn string_pad_start(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
         Some(v) if !v.is_undefined() => arg_to_string(gc, Some(*v), vm),
         None | Some(_) => " ".to_string(),
     };
-    let fill = if fill.is_empty() { " ".to_string() } else { fill };
+    let fill = if fill.is_empty() {
+        " ".to_string()
+    } else {
+        fill
+    };
     let pad_len = target_len - s.len();
     let mut pad = String::with_capacity(pad_len);
     while pad.len() < pad_len {
@@ -1045,7 +1064,11 @@ pub fn string_pad_end(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
         Some(v) if !v.is_undefined() => arg_to_string(gc, Some(*v), vm),
         None | Some(_) => " ".to_string(),
     };
-    let fill = if fill.is_empty() { " ".to_string() } else { fill };
+    let fill = if fill.is_empty() {
+        " ".to_string()
+    } else {
+        fill
+    };
     let pad_len = target_len - s.len();
     let mut pad = String::with_capacity(pad_len);
     while pad.len() < pad_len {
@@ -1109,12 +1132,17 @@ pub fn string_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
     }
     let s = string_from_value(this);
     let limit = args.get(1).copied().unwrap_or(Value::undefined());
-    let lim = if limit.is_undefined() { u32::MAX } else { to_u32(limit) };
+    let lim = if limit.is_undefined() {
+        u32::MAX
+    } else {
+        to_u32(limit)
+    };
     if lim == 0 {
         let arr = RuneArray::allocate(gc, &[]);
         unsafe {
             let ptr = arr as *mut u8;
-            *(ptr.add(8) as *mut *const rune_core::shape::Shape) = *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
+            *(ptr.add(8) as *mut *const rune_core::shape::Shape) =
+                *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
             if let Some(proto) = vm.array_prototype.heap_ptr() {
                 *(ptr.add(24) as *mut *mut u8) = proto;
             }
@@ -1127,7 +1155,8 @@ pub fn string_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
         let arr = RuneArray::allocate(gc, &[]);
         unsafe {
             let ptr = arr as *mut u8;
-            *(ptr.add(8) as *mut *const rune_core::shape::Shape) = *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
+            *(ptr.add(8) as *mut *const rune_core::shape::Shape) =
+                *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
             if let Some(proto) = vm.array_prototype.heap_ptr() {
                 *(ptr.add(24) as *mut *mut u8) = proto;
             }
@@ -1145,13 +1174,18 @@ pub fn string_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
         let arr = RuneArray::allocate(gc, &[]);
         unsafe {
             let mut arr_ptr = arr as *mut u8;
-            *(arr_ptr.add(8) as *mut *const rune_core::shape::Shape) = *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
+            *(arr_ptr.add(8) as *mut *const rune_core::shape::Shape) =
+                *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
             if let Some(proto) = vm.array_prototype.heap_ptr() {
                 *(arr_ptr.add(24) as *mut *mut u8) = proto;
             }
             for p in pieces.iter().take(elem_count) {
                 let heap_str = HeapString::allocate(gc, p);
-                let new_ptr = RuneArray::push(gc, arr_ptr as *mut RuneArray, Value::from_heap_ptr(heap_str as *mut u8));
+                let new_ptr = RuneArray::push(
+                    gc,
+                    arr_ptr as *mut RuneArray,
+                    Value::from_heap_ptr(heap_str as *mut u8),
+                );
                 if new_ptr as *mut u8 != arr_ptr {
                     arr_ptr = new_ptr as *mut u8;
                 }
@@ -1171,7 +1205,8 @@ pub fn string_replace(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
     let search = args.first().copied().unwrap_or(Value::undefined());
     let replacement_fn = args.get(1).copied();
     let is_fn_replacement = replacement_fn.is_some_and(|v| {
-        v.heap_ptr().is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC })
+        v.heap_ptr()
+            .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC })
     });
 
     // Check if search is a RegExp
@@ -1256,12 +1291,14 @@ fn expand_replacement(s: &str, groups: &[(usize, usize)], replacement: &str) -> 
                 Some(d) if d.is_ascii_digit() => {
                     let mut n = (d as u8 - b'0') as usize;
                     // Check for two-digit
-                    if let Some(&d2) = chars.peek() && d2.is_ascii_digit() {
-                        let n2 = (d2 as u8 - b'0') as usize;
-                        let combined = n * 10 + n2;
-                        if combined < groups.len() {
-                            n = combined;
-                            chars.next();
+                    if let Some(&d2) = chars.peek() {
+                        if d2.is_ascii_digit() {
+                            let n2 = (d2 as u8 - b'0') as usize;
+                            let combined = n * 10 + n2;
+                            if combined < groups.len() {
+                                n = combined;
+                                chars.next();
+                            }
                         }
                     }
                     if n < groups.len() {
@@ -1272,7 +1309,10 @@ fn expand_replacement(s: &str, groups: &[(usize, usize)], replacement: &str) -> 
                         result.push(char::from_digit(n as u32, 10).unwrap());
                     }
                 }
-                Some(d) => { result.push('$'); result.push(d); }
+                Some(d) => {
+                    result.push('$');
+                    result.push(d);
+                }
                 None => result.push('$'),
             }
         } else {
@@ -1315,7 +1355,7 @@ pub fn string_replace_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
                         last_end = end;
                         if start == end {
                             // Avoid infinite loop for zero-length matches
-                            result.push_str(&s[last_end..last_end+1]);
+                            result.push_str(&s[last_end..last_end + 1]);
                             last_end += 1;
                         }
                     }
@@ -1332,7 +1372,11 @@ pub fn string_replace_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
     // String pattern (original logic)
     let search_str = arg_to_string(gc, args.first().copied(), vm);
     if search_str.is_empty() {
-        let result = s.chars().map(|c| replacement.clone() + &c.to_string()).collect::<String>() + &replacement;
+        let result = s
+            .chars()
+            .map(|c| replacement.clone() + &c.to_string())
+            .collect::<String>()
+            + &replacement;
         return Value::from_heap_ptr(HeapString::allocate(gc, &result) as *mut u8);
     }
     let result = s.replace(&search_str, &replacement);
@@ -1455,31 +1499,45 @@ pub fn parse_int_builtin(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm:
     let chars: Vec<char> = s.chars().collect();
     let mut i = 0;
     let mut sign = 1.0;
-    if chars[i] == '-' { sign = -1.0; i += 1; }
-    else if chars[i] == '+' { i += 1; }
+    if chars[i] == '-' {
+        sign = -1.0;
+        i += 1;
+    } else if chars[i] == '+' {
+        i += 1;
+    }
     if i >= chars.len() {
         return Value::from_float64(f64::NAN);
     }
     // Determine radix
     let radix = if args.len() > 1 {
         let r = args[1];
-        if r.is_undefined() { 0 } else {
+        if r.is_undefined() {
+            0
+        } else {
             r.as_smi()
                 .or_else(|| r.as_float64().map(|f| f as i32))
                 .unwrap_or(0)
         }
-    } else { 0 };
+    } else {
+        0
+    };
     let radix = if radix == 0 {
-        if i + 2 <= chars.len() && chars[i] == '0' && (chars[i+1] == 'x' || chars[i+1] == 'X') {
+        if i + 2 <= chars.len() && chars[i] == '0' && (chars[i + 1] == 'x' || chars[i + 1] == 'X') {
             16
         } else {
             10
         }
-    } else { radix };
+    } else {
+        radix
+    };
     if !(2..=36).contains(&radix) {
         return Value::from_float64(f64::NAN);
     }
-    if radix == 16 && i + 2 <= chars.len() && chars[i] == '0' && (chars[i+1] == 'x' || chars[i+1] == 'X') {
+    if radix == 16
+        && i + 2 <= chars.len()
+        && chars[i] == '0'
+        && (chars[i + 1] == 'x' || chars[i + 1] == 'X')
+    {
         i += 2;
     }
     let mut result = 0.0;
@@ -1491,7 +1549,9 @@ pub fn parse_int_builtin(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm:
             'A'..='Z' => chars[i] as i32 - 'A' as i32 + 10,
             _ => break,
         };
-        if d >= radix { break; }
+        if d >= radix {
+            break;
+        }
         result = result * (radix as f64) + d as f64;
         any_digit = true;
         i += 1;
@@ -1511,7 +1571,12 @@ pub fn parse_int_builtin(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm:
 
 /// parseFloat(string) — parses a string argument and returns a floating point number.
 /// Per §21.1.2.10.
-pub fn parse_float_builtin(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+pub fn parse_float_builtin(
+    _gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    _vm: &mut Vm,
+) -> Value {
     let s = match args.first() {
         Some(v) => value_to_js_string(*v).trim().to_string(),
         None => return Value::from_float64(f64::NAN),
@@ -1534,14 +1599,14 @@ pub fn parse_float_builtin(_gc: &mut SemiSpace, _this: Value, args: &[Value], _v
     }
     // Check for Infinity
     if s[end..].starts_with("Infinity") || s[end..].starts_with("infinity") {
-        let prefix = &s[end..end+8];
+        let prefix = &s[end..end + 8];
         if prefix == "Infinity" {
             return Value::from_float64(f64::INFINITY);
         }
     }
     // Check for NaN (case-insensitive)
     if end + 3 <= chars.len() {
-        let na: String = chars[end..end+3].iter().collect();
+        let na: String = chars[end..end + 3].iter().collect();
         if na.eq_ignore_ascii_case("nan") {
             return Value::from_float64(f64::NAN);
         }
@@ -1655,9 +1720,10 @@ pub fn json_parse(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm)
                             'u' => {
                                 if *pos + 4 < chars.len() {
                                     let hex: String = chars[*pos + 1..*pos + 5].iter().collect();
-                                    if let Ok(code) = u32::from_str_radix(&hex, 16)
-                                        && let Some(ch) = char::from_u32(code) {
+                                    if let Ok(code) = u32::from_str_radix(&hex, 16) {
+                                        if let Some(ch) = char::from_u32(code) {
                                             s.push(ch);
+                                        }
                                     }
                                     *pos += 4;
                                 } else {
@@ -1780,9 +1846,10 @@ pub fn json_parse(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm)
                                         if *pos + 4 < chars.len() {
                                             let hex: String =
                                                 chars[*pos + 1..*pos + 5].iter().collect();
-                                            if let Ok(code) = u32::from_str_radix(&hex, 16)
-                                                && let Some(ch) = char::from_u32(code) {
+                                            if let Ok(code) = u32::from_str_radix(&hex, 16) {
+                                                if let Some(ch) = char::from_u32(code) {
                                                     key.push(ch);
+                                                }
                                             }
                                             *pos += 4;
                                         } else {
@@ -1874,7 +1941,12 @@ pub fn json_stringify(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
         }
         out
     }
-    fn stringify_val(gc: &mut SemiSpace, val: Value, stack: &mut Vec<*mut u8>, vm: &mut Vm) -> Result<String, ()> {
+    fn stringify_val(
+        gc: &mut SemiSpace,
+        val: Value,
+        stack: &mut Vec<*mut u8>,
+        vm: &mut Vm,
+    ) -> Result<String, ()> {
         if val.is_undefined() {
             return Err(());
         }
@@ -1882,7 +1954,12 @@ pub fn json_stringify(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
             return Ok("null".to_string());
         }
         if val.is_boolean() {
-            return Ok(if val.to_boolean().unwrap() { "true" } else { "false" }.to_string());
+            return Ok(if val.to_boolean().unwrap() {
+                "true"
+            } else {
+                "false"
+            }
+            .to_string());
         }
         if let Some(n) = val.as_smi() {
             return Ok(n.to_string());
@@ -1911,14 +1988,19 @@ pub fn json_stringify(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
                 let mut parts: Vec<String> = Vec::with_capacity(len);
                 for i in 0..len {
                     let elem = unsafe { RuneArray::get_element(ptr as *mut RuneArray, i) };
-                    parts.push(stringify_val(gc, elem, stack, vm).unwrap_or_else(|_| "null".to_string()));
+                    parts.push(
+                        stringify_val(gc, elem, stack, vm).unwrap_or_else(|_| "null".to_string()),
+                    );
                 }
                 stack.pop();
                 return Ok(format!("[{}]", parts.join(",")));
             }
             if tag == TAG_OBJECT {
                 if stack.contains(&ptr) {
-                    let msg = HeapString::allocate(gc, "TypeError: Converting circular structure to JSON");
+                    let msg = HeapString::allocate(
+                        gc,
+                        "TypeError: Converting circular structure to JSON",
+                    );
                     vm.set_pending_exception(Value::from_heap_ptr(msg as *mut u8));
                     return Err(());
                 }
@@ -1969,13 +2051,14 @@ pub fn call_builtin(_gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
 
     // If target is a builtin, call it directly.
     // If it sets up pending_array_op (like array methods), that works naturally.
-    if let Some(smi) = target.as_smi()
-        && smi < 0 {
+    if let Some(smi) = target.as_smi() {
+        if smi < 0 {
             let id = ((-smi) as usize) - 1;
             if id < vm.builtins.len() {
                 return (vm.builtins[id].func)(_gc, new_this, &call_args, vm);
             }
         }
+    }
     // If target is a JS function, use the pending callback pattern.
     if let Some(ptr) = target.heap_ptr() {
         let tag = unsafe { (*(ptr as *const rune_core::gc::GcHeader)).tag() };
@@ -2020,7 +2103,8 @@ pub fn array_slice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
     let result_arr = RuneArray::allocate(gc, &[]);
     unsafe {
         let ptr = result_arr as *mut u8;
-        *(ptr.add(8) as *mut *const rune_core::shape::Shape) = *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
+        *(ptr.add(8) as *mut *const rune_core::shape::Shape) =
+            *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
         if let Some(proto) = vm.array_prototype.heap_ptr() {
             *(ptr.add(24) as *mut *mut u8) = proto;
         }
@@ -2046,7 +2130,11 @@ fn to_index(v: Value, length: u32) -> u32 {
     }
     if let Some(b) = v.to_boolean() {
         let n: i32 = if b { 1 } else { 0 };
-        return if n < 0 { length.saturating_sub(n.unsigned_abs()) } else { (n as u32).min(length) };
+        return if n < 0 {
+            length.saturating_sub(n.unsigned_abs())
+        } else {
+            (n as u32).min(length)
+        };
     }
     if let Some(smi) = v.as_smi() {
         if smi < 0 {
@@ -2072,7 +2160,11 @@ fn to_index(v: Value, length: u32) -> u32 {
                 unsafe { HeapString::to_string(str_ptr as *mut HeapString) }
             };
             let n: f64 = s.parse().unwrap_or(0.0);
-            if n.is_nan() || n < 0.0 { 0 } else { (n as u32).min(length) }
+            if n.is_nan() || n < 0.0 {
+                0
+            } else {
+                (n as u32).min(length)
+            }
         } else {
             0
         }
@@ -2083,11 +2175,15 @@ fn to_index(v: Value, length: u32) -> u32 {
 
 /// Array.prototype.indexOf(searchElement, fromIndex) — returns index of first match, -1 if not found.
 pub fn array_index_of(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    if !require_object_coercible(this, vm, gc) { return Value::undefined(); }
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
     let search = args.first().copied().unwrap_or(Value::undefined());
     let len = crate::vm::array_like_length(this).unwrap_or(0) as usize;
     let from = to_index(args.get(1).copied().unwrap_or(Value::smi(0)), len as u32) as usize;
-    if from >= len { return Value::smi(-1); }
+    if from >= len {
+        return Value::smi(-1);
+    }
     for i in from..len {
         if let Some(elem) = crate::vm::array_like_index(this, i as u32) {
             #[allow(unused_assignments)]
@@ -2109,9 +2205,13 @@ pub fn array_index_of(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
             } else {
                 eq = (elem.is_undefined() && search.is_undefined())
                     || (elem.is_null() && search.is_null())
-                    || (elem.is_boolean() && search.is_boolean() && elem.as_smi() == search.as_smi());
+                    || (elem.is_boolean()
+                        && search.is_boolean()
+                        && elem.as_smi() == search.as_smi());
             }
-            if eq { return Value::smi(i as i32); }
+            if eq {
+                return Value::smi(i as i32);
+            }
         }
     }
     Value::smi(-1)
@@ -2184,7 +2284,8 @@ pub fn array_filter(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
     let result_arr = RuneArray::allocate(gc, &[]);
     unsafe {
         let ptr = result_arr as *mut u8;
-        *(ptr.add(8) as *mut *const rune_core::shape::Shape) = *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
+        *(ptr.add(8) as *mut *const rune_core::shape::Shape) =
+            *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
         if let Some(proto) = vm.array_prototype.heap_ptr() {
             *(ptr.add(24) as *mut *mut u8) = proto;
         }
@@ -2221,7 +2322,8 @@ pub fn array_map(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -
     let result_arr = RuneArray::allocate(gc, &[]);
     unsafe {
         let ptr = result_arr as *mut u8;
-        *(ptr.add(8) as *mut *const rune_core::shape::Shape) = *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
+        *(ptr.add(8) as *mut *const rune_core::shape::Shape) =
+            *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
         if let Some(proto) = vm.array_prototype.heap_ptr() {
             *(ptr.add(24) as *mut *mut u8) = proto;
         }
@@ -2256,7 +2358,8 @@ pub fn array_reduce(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
     let has_initial = args.len() > 1;
     let initial = args.get(1).copied().unwrap_or(Value::undefined());
     if !has_initial && length == 0 {
-        let msg = HeapString::allocate(gc, "TypeError: reduce of empty array with no initial value");
+        let msg =
+            HeapString::allocate(gc, "TypeError: reduce of empty array with no initial value");
         vm.set_pending_exception(Value::from_heap_ptr(msg as *mut u8));
         return Value::undefined();
     }
@@ -2284,8 +2387,14 @@ pub fn array_reduce(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
         source_frame_depth: 0,
         accumulator: Some(accumulator),
     });
-    let element = crate::vm::array_like_index(this, start_index as u32).unwrap_or(Value::undefined());
-    vm.push_callback_call(gc, callback, Value::undefined(), vec![accumulator, element, Value::smi(start_index as i32), this]);
+    let element =
+        crate::vm::array_like_index(this, start_index as u32).unwrap_or(Value::undefined());
+    vm.push_callback_call(
+        gc,
+        callback,
+        Value::undefined(),
+        vec![accumulator, element, Value::smi(start_index as i32), this],
+    );
     Value::undefined()
 }
 
@@ -2372,7 +2481,11 @@ pub fn array_flat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
         to_integer_or_infinity(depth)
     };
     let effective_depth = if depth_num.is_infinite() || depth_num.is_nan() {
-        if depth_num.is_sign_negative() { 0 } else { u32::MAX }
+        if depth_num.is_sign_negative() {
+            0
+        } else {
+            u32::MAX
+        }
     } else {
         depth_num.max(0.0) as u32
     };
@@ -2380,7 +2493,8 @@ pub fn array_flat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
         let result_arr = RuneArray::allocate(gc, &[]);
         let mut result_ptr = result_arr as *mut u8;
         unsafe {
-            *(result_ptr.add(8) as *mut *const rune_core::shape::Shape) = *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
+            *(result_ptr.add(8) as *mut *const rune_core::shape::Shape) =
+                *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
             if let Some(proto) = vm.array_prototype.heap_ptr() {
                 *(result_ptr.add(24) as *mut *mut u8) = proto;
             }
@@ -2393,7 +2507,8 @@ pub fn array_flat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
                 unsafe {
                     let flat_len = RuneArray::length(flattened as *mut RuneArray);
                     for j in 0..flat_len {
-                        let flat_elem = RuneArray::get_element(flattened as *mut RuneArray, j as usize);
+                        let flat_elem =
+                            RuneArray::get_element(flattened as *mut RuneArray, j as usize);
                         let new_ptr = RuneArray::push(gc, result_ptr as *mut RuneArray, flat_elem);
                         result_ptr = new_ptr as *mut u8;
                     }
@@ -2475,7 +2590,8 @@ pub fn array_flat_map(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
     let result_arr = RuneArray::allocate(gc, &[]);
     unsafe {
         let ptr = result_arr as *mut u8;
-        *(ptr.add(8) as *mut *const rune_core::shape::Shape) = *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
+        *(ptr.add(8) as *mut *const rune_core::shape::Shape) =
+            *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
         if let Some(proto) = vm.array_prototype.heap_ptr() {
             *(ptr.add(24) as *mut *mut u8) = proto;
         }
@@ -2564,10 +2680,16 @@ pub fn promise_constructor(gc: &mut SemiSpace, _this: Value, args: &[Value], vm:
     let proto_ptr = vm.promise_prototype.heap_ptr();
     let promise_ptr = Promise::allocate(gc, proto_ptr);
     let promise_val = Value::from_heap_ptr(promise_ptr);
-    let resolve_handle = vm.get_builtin("_promise_resolve").unwrap_or(Value::undefined());
-    let reject_handle = vm.get_builtin("_promise_reject").unwrap_or(Value::undefined());
+    let resolve_handle = vm
+        .get_builtin("_promise_resolve")
+        .unwrap_or(Value::undefined());
+    let reject_handle = vm
+        .get_builtin("_promise_reject")
+        .unwrap_or(Value::undefined());
     let executor = args.first().copied().unwrap_or(Value::undefined());
-    if executor.is_undefined() { return promise_val; }
+    if executor.is_undefined() {
+        return promise_val;
+    }
     let resolve_func = vm.create_promise_bridge(gc, promise_val, resolve_handle);
     let reject_func = vm.create_promise_bridge(gc, promise_val, reject_handle);
     vm.pending_promise_ctor = Some(crate::vm::PendingPromiseCtor {
@@ -2577,17 +2699,30 @@ pub fn promise_constructor(gc: &mut SemiSpace, _this: Value, args: &[Value], vm:
         reject_handle,
         resolve_with_result: false,
     });
-    vm.push_callback_call(gc, executor, Value::undefined(), vec![resolve_func, reject_func]);
+    vm.push_callback_call(
+        gc,
+        executor,
+        Value::undefined(),
+        vec![resolve_func, reject_func],
+    );
     Value::undefined()
 }
 
 /// Internal: resolve a promise. Promise is `this`.
-pub fn promise_resolve_impl(_gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+pub fn promise_resolve_impl(
+    _gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
     if let Some(ptr) = this.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_PROMISE && unsafe { Promise::state(ptr) == PROMISE_PENDING } {
             let val = args.first().copied().unwrap_or(Value::undefined());
-            unsafe { Promise::set_state(ptr, PROMISE_FULFILLED); Promise::set_result(ptr, val); }
+            unsafe {
+                Promise::set_state(ptr, PROMISE_FULFILLED);
+                Promise::set_result(ptr, val);
+            }
             let reactions_ptr = unsafe { Promise::reactions(ptr) };
             if !reactions_ptr.is_null() {
                 let arr = reactions_ptr as *mut RuneArray;
@@ -2598,8 +2733,10 @@ pub fn promise_resolve_impl(_gc: &mut SemiSpace, this: Value, args: &[Value], vm
                     let chained = unsafe { RuneArray::get_element(arr, idx + 1) };
                     if cb.is_heap_object() {
                         let ppc = crate::vm::PendingPromiseCtor {
-                            source_frame_depth: 0, promise: chained,
-                            resolve_handle: Value::undefined(), reject_handle: Value::undefined(),
+                            source_frame_depth: 0,
+                            promise: chained,
+                            resolve_handle: Value::undefined(),
+                            reject_handle: Value::undefined(),
                             resolve_with_result: true,
                         };
                         vm.enqueue_microtask(cb, vec![val], Some(ppc));
@@ -2618,7 +2755,10 @@ pub fn promise_reject_impl(_gc: &mut SemiSpace, this: Value, args: &[Value], vm:
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_PROMISE && unsafe { Promise::state(ptr) == PROMISE_PENDING } {
             let reason = args.first().copied().unwrap_or(Value::undefined());
-            unsafe { Promise::set_state(ptr, PROMISE_REJECTED); Promise::set_result(ptr, reason); }
+            unsafe {
+                Promise::set_state(ptr, PROMISE_REJECTED);
+                Promise::set_result(ptr, reason);
+            }
             let reactions_ptr = unsafe { Promise::reactions(ptr) };
             if !reactions_ptr.is_null() {
                 let arr = reactions_ptr as *mut RuneArray;
@@ -2629,8 +2769,10 @@ pub fn promise_reject_impl(_gc: &mut SemiSpace, this: Value, args: &[Value], vm:
                     let chained = unsafe { RuneArray::get_element(arr, idx + 1) };
                     if cb.is_heap_object() {
                         let ppc = crate::vm::PendingPromiseCtor {
-                            source_frame_depth: 0, promise: chained,
-                            resolve_handle: Value::undefined(), reject_handle: Value::undefined(),
+                            source_frame_depth: 0,
+                            promise: chained,
+                            resolve_handle: Value::undefined(),
+                            reject_handle: Value::undefined(),
                             resolve_with_result: true,
                         };
                         vm.enqueue_microtask(cb, vec![reason], Some(ppc));
@@ -2644,10 +2786,20 @@ pub fn promise_reject_impl(_gc: &mut SemiSpace, this: Value, args: &[Value], vm:
 }
 
 /// Promise.prototype.then(onFulfilled, onRejected)
-pub fn promise_prototype_then(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let ptr = match this.heap_ptr() { Some(p) => p, None => return Value::undefined() };
+pub fn promise_prototype_then(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let ptr = match this.heap_ptr() {
+        Some(p) => p,
+        None => return Value::undefined(),
+    };
     let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-    if tag != TAG_PROMISE { return Value::undefined(); }
+    if tag != TAG_PROMISE {
+        return Value::undefined();
+    }
     let state = unsafe { Promise::state(ptr) };
     let result = unsafe { Promise::result(ptr) };
     let on_fulfilled = args.first().copied().unwrap_or(Value::undefined());
@@ -2656,51 +2808,92 @@ pub fn promise_prototype_then(gc: &mut SemiSpace, this: Value, args: &[Value], v
     let new_promise_ptr = Promise::allocate(gc, proto);
     let new_promise = Value::from_heap_ptr(new_promise_ptr);
     if state == PROMISE_FULFILLED {
-        if let Some(op) = on_fulfilled.heap_ptr() && unsafe { (*(op as *const GcHeader)).tag() == TAG_FUNC } {
-            let ppc = crate::vm::PendingPromiseCtor {
-                source_frame_depth: 0, promise: new_promise,
-                resolve_handle: Value::undefined(), reject_handle: Value::undefined(),
-                resolve_with_result: true,
-            };
-            vm.enqueue_microtask(on_fulfilled, vec![result], Some(ppc));
-            return new_promise;
+        if let Some(op) = on_fulfilled.heap_ptr() {
+            if unsafe { (*(op as *const GcHeader)).tag() == TAG_FUNC } {
+                let ppc = crate::vm::PendingPromiseCtor {
+                    source_frame_depth: 0,
+                    promise: new_promise,
+                    resolve_handle: Value::undefined(),
+                    reject_handle: Value::undefined(),
+                    resolve_with_result: true,
+                };
+                vm.enqueue_microtask(on_fulfilled, vec![result], Some(ppc));
+                return new_promise;
+            }
         }
-        unsafe { Promise::set_state(new_promise_ptr, PROMISE_FULFILLED); Promise::set_result(new_promise_ptr, result); }
+        unsafe {
+            Promise::set_state(new_promise_ptr, PROMISE_FULFILLED);
+            Promise::set_result(new_promise_ptr, result);
+        }
         return new_promise;
     }
     if state == PROMISE_REJECTED {
-        if let Some(op) = on_rejected.heap_ptr() && unsafe { (*(op as *const GcHeader)).tag() == TAG_FUNC } {
-            let ppc = crate::vm::PendingPromiseCtor {
-                source_frame_depth: 0, promise: new_promise,
-                resolve_handle: Value::undefined(), reject_handle: Value::undefined(),
-                resolve_with_result: true,
-            };
-            vm.enqueue_microtask(on_rejected, vec![result], Some(ppc));
-            return new_promise;
+        if let Some(op) = on_rejected.heap_ptr() {
+            if unsafe { (*(op as *const GcHeader)).tag() == TAG_FUNC } {
+                let ppc = crate::vm::PendingPromiseCtor {
+                    source_frame_depth: 0,
+                    promise: new_promise,
+                    resolve_handle: Value::undefined(),
+                    reject_handle: Value::undefined(),
+                    resolve_with_result: true,
+                };
+                vm.enqueue_microtask(on_rejected, vec![result], Some(ppc));
+                return new_promise;
+            }
         }
-        unsafe { Promise::set_state(new_promise_ptr, PROMISE_REJECTED); Promise::set_result(new_promise_ptr, result); }
+        unsafe {
+            Promise::set_state(new_promise_ptr, PROMISE_REJECTED);
+            Promise::set_result(new_promise_ptr, result);
+        }
         return new_promise;
     }
     // Pending — store reaction in the promise's reactions array
     let reactions_ptr = unsafe { Promise::reactions(ptr) };
     if !reactions_ptr.is_null() {
-        unsafe { RuneArray::push(gc, reactions_ptr as *mut RuneArray, on_fulfilled); }
-        unsafe { RuneArray::push(gc, reactions_ptr as *mut RuneArray, new_promise); }
+        unsafe {
+            RuneArray::push(gc, reactions_ptr as *mut RuneArray, on_fulfilled);
+        }
+        unsafe {
+            RuneArray::push(gc, reactions_ptr as *mut RuneArray, new_promise);
+        }
     }
     new_promise
 }
 
 /// Promise.prototype.catch(onRejected)
-pub fn promise_prototype_catch(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    promise_prototype_then(gc, this, &[Value::undefined(), args.first().copied().unwrap_or(Value::undefined())], vm)
+pub fn promise_prototype_catch(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    promise_prototype_then(
+        gc,
+        this,
+        &[
+            Value::undefined(),
+            args.first().copied().unwrap_or(Value::undefined()),
+        ],
+        vm,
+    )
 }
 
 /// Promise.prototype.finally(onFinally) — calls onFinally when settled, passes through original result.
-pub fn promise_prototype_finally(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+pub fn promise_prototype_finally(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
     let on_finally = args.first().copied().unwrap_or(Value::undefined());
-    let ptr = match this.heap_ptr() { Some(p) => p, None => return Value::undefined() };
+    let ptr = match this.heap_ptr() {
+        Some(p) => p,
+        None => return Value::undefined(),
+    };
     let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-    if tag != TAG_PROMISE { return Value::undefined(); }
+    if tag != TAG_PROMISE {
+        return Value::undefined();
+    }
     let state = unsafe { Promise::state(ptr) };
     let result = unsafe { Promise::result(ptr) };
     let proto = vm.promise_prototype.heap_ptr();
@@ -2708,9 +2901,14 @@ pub fn promise_prototype_finally(gc: &mut SemiSpace, this: Value, args: &[Value]
     let new_promise = Value::from_heap_ptr(new_promise_ptr);
 
     // If on_finally is not callable, propagate the original result directly
-    if !on_finally.is_heap_object() || unsafe { (*(on_finally.heap_ptr().unwrap() as *const GcHeader)).tag() != TAG_FUNC } {
+    if !on_finally.is_heap_object()
+        || unsafe { (*(on_finally.heap_ptr().unwrap() as *const GcHeader)).tag() != TAG_FUNC }
+    {
         if state == PROMISE_FULFILLED || state == PROMISE_REJECTED {
-            unsafe { Promise::set_state(new_promise_ptr, state); Promise::set_result(new_promise_ptr, result); }
+            unsafe {
+                Promise::set_state(new_promise_ptr, state);
+                Promise::set_result(new_promise_ptr, result);
+            }
         }
         return new_promise;
     }
@@ -2743,12 +2941,19 @@ pub fn promise_prototype_finally(gc: &mut SemiSpace, this: Value, args: &[Value]
 }
 
 /// Promise.resolve(value) — returns a fulfilled promise. If value is a promise, returns it.
-pub fn promise_static_resolve(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+pub fn promise_static_resolve(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
     let val = args.first().copied().unwrap_or(Value::undefined());
 
     // §27.2.4.1.2 Promise.resolve: if already a native Promise, return as-is
-    if let Some(ptr) = val.heap_ptr() && unsafe { (*(ptr as *const GcHeader)).tag() == TAG_PROMISE } {
-        return val;
+    if let Some(ptr) = val.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() == TAG_PROMISE } {
+            return val;
+        }
     }
 
     // §27.2.4.1.1 PromiseResolve: thenable unwrapping for objects with .then callable
@@ -2761,8 +2966,12 @@ pub fn promise_static_resolve(gc: &mut SemiSpace, _this: Value, args: &[Value], 
             if then_tag == TAG_FUNC {
                 let promise_ptr = Promise::allocate(gc, vm.promise_prototype.heap_ptr());
                 let promise_val = Value::from_heap_ptr(promise_ptr);
-                let resolve_h = vm.get_builtin("_promise_resolve").unwrap_or(Value::undefined());
-                let reject_h = vm.get_builtin("_promise_reject").unwrap_or(Value::undefined());
+                let resolve_h = vm
+                    .get_builtin("_promise_resolve")
+                    .unwrap_or(Value::undefined());
+                let reject_h = vm
+                    .get_builtin("_promise_reject")
+                    .unwrap_or(Value::undefined());
                 let resolve_bridge = vm.create_promise_bridge(gc, promise_val, resolve_h);
                 let reject_bridge = vm.create_promise_bridge(gc, promise_val, reject_h);
                 vm.pending_promise_ctor = Some(crate::vm::PendingPromiseCtor {
@@ -2779,15 +2988,26 @@ pub fn promise_static_resolve(gc: &mut SemiSpace, _this: Value, args: &[Value], 
     }
 
     let ptr = Promise::allocate(gc, vm.promise_prototype.heap_ptr());
-    unsafe { Promise::set_state(ptr, PROMISE_FULFILLED); Promise::set_result(ptr, val); }
+    unsafe {
+        Promise::set_state(ptr, PROMISE_FULFILLED);
+        Promise::set_result(ptr, val);
+    }
     Value::from_heap_ptr(ptr)
 }
 
 /// Promise.reject(reason) — returns a rejected promise.
-pub fn promise_static_reject(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+pub fn promise_static_reject(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
     let val = args.first().copied().unwrap_or(Value::undefined());
     let ptr = Promise::allocate(gc, vm.promise_prototype.heap_ptr());
-    unsafe { Promise::set_state(ptr, PROMISE_REJECTED); Promise::set_result(ptr, val); }
+    unsafe {
+        Promise::set_state(ptr, PROMISE_REJECTED);
+        Promise::set_result(ptr, val);
+    }
     Value::from_heap_ptr(ptr)
 }
 
@@ -2796,7 +3016,11 @@ pub fn promise_static_reject(gc: &mut SemiSpace, _this: Value, args: &[Value], v
 pub fn async_continue(_gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let gen_id = this.as_smi().unwrap_or(0) as usize;
     let value = args.first().copied().unwrap_or(Value::undefined());
-    vm.pending_async_gen = Some(crate::vm::PendingAsyncGen { gen_id, arg: value, is_throw: false });
+    vm.pending_async_gen = Some(crate::vm::PendingAsyncGen {
+        gen_id,
+        arg: value,
+        is_throw: false,
+    });
     Value::undefined()
 }
 
@@ -2805,7 +3029,11 @@ pub fn async_continue(_gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
 pub fn async_reject(_gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let gen_id = this.as_smi().unwrap_or(0) as usize;
     let reason = args.first().copied().unwrap_or(Value::undefined());
-    vm.pending_async_gen = Some(crate::vm::PendingAsyncGen { gen_id, arg: reason, is_throw: true });
+    vm.pending_async_gen = Some(crate::vm::PendingAsyncGen {
+        gen_id,
+        arg: reason,
+        is_throw: true,
+    });
     Value::undefined()
 }
 
@@ -2816,20 +3044,31 @@ pub fn promise_static_all(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: 
     let proto = vm.promise_prototype.heap_ptr();
     let result_ptr = Promise::allocate(gc, proto);
     let result_val = Value::from_heap_ptr(result_ptr);
-    let len = if let Some(l) = crate::vm::array_like_length(iterable) { l } else {
-        unsafe { Promise::set_state(result_ptr, PROMISE_FULFILLED); }
+    let len = if let Some(l) = crate::vm::array_like_length(iterable) {
+        l
+    } else {
+        unsafe {
+            Promise::set_state(result_ptr, PROMISE_FULFILLED);
+        }
         return result_val;
     };
     if len == 0 {
         let arr = RuneArray::allocate(gc, &[]);
-        unsafe { Promise::set_state(result_ptr, PROMISE_FULFILLED); Promise::set_result(result_ptr, Value::from_heap_ptr(arr as *mut u8)); }
+        unsafe {
+            Promise::set_state(result_ptr, PROMISE_FULFILLED);
+            Promise::set_result(result_ptr, Value::from_heap_ptr(arr as *mut u8));
+        }
         return result_val;
     }
     let mut arr_ptr = RuneArray::allocate(gc, &[]);
     let mut remaining: u32 = len;
     for i in 0..len {
         let item = crate::vm::array_like_index(iterable, i).unwrap_or(Value::undefined());
-        let is_promise = if let Some(ptr) = item.heap_ptr() { unsafe { (*(ptr as *const GcHeader)).tag() == TAG_PROMISE } } else { false };
+        let is_promise = if let Some(ptr) = item.heap_ptr() {
+            unsafe { (*(ptr as *const GcHeader)).tag() == TAG_PROMISE }
+        } else {
+            false
+        };
         if is_promise {
             let ptr = item.heap_ptr().unwrap();
             let state = unsafe { Promise::state(ptr) };
@@ -2839,7 +3078,10 @@ pub fn promise_static_all(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: 
                 remaining -= 1;
             } else if state == PROMISE_REJECTED {
                 let r = unsafe { Promise::result(ptr) };
-                unsafe { Promise::set_state(result_ptr, PROMISE_REJECTED); Promise::set_result(result_ptr, r); }
+                unsafe {
+                    Promise::set_state(result_ptr, PROMISE_REJECTED);
+                    Promise::set_result(result_ptr, r);
+                }
                 return result_val;
             }
         } else {
@@ -2848,7 +3090,10 @@ pub fn promise_static_all(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: 
         }
     }
     if remaining == 0 {
-        unsafe { Promise::set_state(result_ptr, PROMISE_FULFILLED); Promise::set_result(result_ptr, Value::from_heap_ptr(arr_ptr as *mut u8)); }
+        unsafe {
+            Promise::set_state(result_ptr, PROMISE_FULFILLED);
+            Promise::set_result(result_ptr, Value::from_heap_ptr(arr_ptr as *mut u8));
+        }
     }
     result_val
 }
@@ -2859,26 +3104,45 @@ pub fn promise_static_race(gc: &mut SemiSpace, _this: Value, args: &[Value], vm:
     let proto = vm.promise_prototype.heap_ptr();
     let result_ptr = Promise::allocate(gc, proto);
     let result_val = Value::from_heap_ptr(result_ptr);
-    let len = if let Some(l) = crate::vm::array_like_length(iterable) { l } else { return result_val; };
-    if len == 0 { return result_val; }
+    let len = if let Some(l) = crate::vm::array_like_length(iterable) {
+        l
+    } else {
+        return result_val;
+    };
+    if len == 0 {
+        return result_val;
+    }
     for i in 0..len {
         let item = crate::vm::array_like_index(iterable, i).unwrap_or(Value::undefined());
-        let is_promise = if let Some(ptr) = item.heap_ptr() { unsafe { (*(ptr as *const GcHeader)).tag() == TAG_PROMISE } } else { false };
+        let is_promise = if let Some(ptr) = item.heap_ptr() {
+            unsafe { (*(ptr as *const GcHeader)).tag() == TAG_PROMISE }
+        } else {
+            false
+        };
         if is_promise {
             let ptr = item.heap_ptr().unwrap();
             let state = unsafe { Promise::state(ptr) };
             if state == PROMISE_FULFILLED {
                 let r = unsafe { Promise::result(ptr) };
-                unsafe { Promise::set_state(result_ptr, PROMISE_FULFILLED); Promise::set_result(result_ptr, r); }
+                unsafe {
+                    Promise::set_state(result_ptr, PROMISE_FULFILLED);
+                    Promise::set_result(result_ptr, r);
+                }
                 return result_val;
             }
             if state == PROMISE_REJECTED {
                 let r = unsafe { Promise::result(ptr) };
-                unsafe { Promise::set_state(result_ptr, PROMISE_REJECTED); Promise::set_result(result_ptr, r); }
+                unsafe {
+                    Promise::set_state(result_ptr, PROMISE_REJECTED);
+                    Promise::set_result(result_ptr, r);
+                }
                 return result_val;
             }
         } else {
-            unsafe { Promise::set_state(result_ptr, PROMISE_FULFILLED); Promise::set_result(result_ptr, item); }
+            unsafe {
+                Promise::set_state(result_ptr, PROMISE_FULFILLED);
+                Promise::set_result(result_ptr, item);
+            }
             return result_val;
         }
     }
@@ -2927,18 +3191,66 @@ pub fn default_builtins() -> Vec<Builtin> {
             name: "Promise_prototype_catch",
             func: promise_prototype_catch,
         },
-        Builtin { length: 1, name: "Promise_prototype_finally", func: promise_prototype_finally },
-        Builtin { length: 1, name: "Promise_resolve", func: promise_static_resolve },
-        Builtin { length: 1, name: "Promise_reject", func: promise_static_reject },
-        Builtin { length: 1, name: "Promise_all", func: promise_static_all },
-        Builtin { length: 1, name: "Promise_race", func: promise_static_race },
-        Builtin { length: 1, name: "async_continue", func: async_continue },
-        Builtin { length: 1, name: "async_reject", func: async_reject },
-        Builtin { length: 1, name: "RegExp_prototype_exec", func: regexp_exec },
-        Builtin { length: 1, name: "RegExp_prototype_test", func: regexp_test },
-        Builtin { length: 0, name: "RegExp_prototype_source", func: regexp_source },
-        Builtin { length: 0, name: "RegExp_prototype_flags", func: regexp_flags },
-        Builtin { length: 0, name: "RegExp_prototype_lastIndex", func: regexp_last_index },
+        Builtin {
+            length: 1,
+            name: "Promise_prototype_finally",
+            func: promise_prototype_finally,
+        },
+        Builtin {
+            length: 1,
+            name: "Promise_resolve",
+            func: promise_static_resolve,
+        },
+        Builtin {
+            length: 1,
+            name: "Promise_reject",
+            func: promise_static_reject,
+        },
+        Builtin {
+            length: 1,
+            name: "Promise_all",
+            func: promise_static_all,
+        },
+        Builtin {
+            length: 1,
+            name: "Promise_race",
+            func: promise_static_race,
+        },
+        Builtin {
+            length: 1,
+            name: "async_continue",
+            func: async_continue,
+        },
+        Builtin {
+            length: 1,
+            name: "async_reject",
+            func: async_reject,
+        },
+        Builtin {
+            length: 1,
+            name: "RegExp_prototype_exec",
+            func: regexp_exec,
+        },
+        Builtin {
+            length: 1,
+            name: "RegExp_prototype_test",
+            func: regexp_test,
+        },
+        Builtin {
+            length: 0,
+            name: "RegExp_prototype_source",
+            func: regexp_source,
+        },
+        Builtin {
+            length: 0,
+            name: "RegExp_prototype_flags",
+            func: regexp_flags,
+        },
+        Builtin {
+            length: 0,
+            name: "RegExp_prototype_lastIndex",
+            func: regexp_last_index,
+        },
         Builtin {
             length: 1,
             name: "Object",
@@ -3292,8 +3604,12 @@ pub fn default_builtins() -> Vec<Builtin> {
 /// NaN === NaN, +0 !== -0.
 fn same_value(a: Value, b: Value) -> bool {
     // Both undefined or both null
-    if a.is_undefined() && b.is_undefined() { return true; }
-    if a.is_null() && b.is_null() { return true; }
+    if a.is_undefined() && b.is_undefined() {
+        return true;
+    }
+    if a.is_null() && b.is_null() {
+        return true;
+    }
     // Both booleans
     if let (Some(ab), Some(bb)) = (a.to_boolean(), b.to_boolean()) {
         return ab == bb;
@@ -3317,7 +3633,9 @@ fn same_value(a: Value, b: Value) -> bool {
     match (a_num, b_num) {
         (Some(av), Some(bv)) => {
             // SameValue: NaN === NaN
-            if av.is_nan() && bv.is_nan() { return true; }
+            if av.is_nan() && bv.is_nan() {
+                return true;
+            }
             // SameValue: +0 !== -0
             if av == 0.0 && bv == 0.0 {
                 return av.to_bits() == bv.to_bits();
@@ -3341,7 +3659,11 @@ fn value_to_debug(v: Value) -> String {
         if f.is_nan() {
             "NaN".to_string()
         } else if f.is_infinite() {
-            if f.is_sign_negative() { "-Infinity".to_string() } else { "Infinity".to_string() }
+            if f.is_sign_negative() {
+                "-Infinity".to_string()
+            } else {
+                "Infinity".to_string()
+            }
         } else if f.fract() == 0.0 && (-(1 << 30) as f64..(1 << 30) as f64).contains(&f) {
             format!("{}", f as i64)
         } else {
@@ -3353,7 +3675,9 @@ fn value_to_debug(v: Value) -> String {
             unsafe { HeapString::to_string(ptr as *mut HeapString) }
         } else if tag == TAG_STRING_OBJ {
             let str_ptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
-            format!("String {{ [[StringData]]: \"{}\" }}", unsafe { HeapString::to_string(str_ptr as *mut HeapString) })
+            format!("String {{ [[StringData]]: \"{}\" }}", unsafe {
+                HeapString::to_string(str_ptr as *mut HeapString)
+            })
         } else {
             format!("{:p}", ptr)
         }
@@ -3467,7 +3791,12 @@ pub fn assert_plain(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut 
 }
 
 /// assert._isSameValue(a, b) — internal helper for test262 assert.js.
-pub fn assert_is_same_value(_gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+pub fn assert_is_same_value(
+    _gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
     vm.assert_called = true;
     let a = args.first().copied().unwrap_or(Value::undefined());
     let b = args.get(1).copied().unwrap_or(Value::undefined());
@@ -3519,7 +3848,10 @@ pub fn regexp_exec(gc: &mut SemiSpace, this: Value, args: &[Value], _vm: &mut Vm
         None => return Value::null(),
     };
     let pattern = unsafe { HeapString::to_string(RegExp::pattern(regexp_ptr) as *mut HeapString) };
-    let input = args.first().map(|v| string_from_value(*v)).unwrap_or_default();
+    let input = args
+        .first()
+        .map(|v| string_from_value(*v))
+        .unwrap_or_default();
 
     match rune_regex::parse_regex(&pattern) {
         Ok(expr) => {
@@ -3537,7 +3869,8 @@ pub fn regexp_exec(gc: &mut SemiSpace, this: Value, args: &[Value], _vm: &mut Vm
                     let arr = RuneArray::allocate(gc, &elements);
                     unsafe {
                         let ptr = arr as *mut u8;
-                        *(ptr.add(8) as *mut *const rune_core::shape::Shape) = *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
+                        *(ptr.add(8) as *mut *const rune_core::shape::Shape) =
+                            *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
                         if _vm.array_prototype.heap_ptr().is_some() {
                             let proto = _vm.array_prototype.heap_ptr().unwrap();
                             *(ptr.add(24) as *mut *mut u8) = proto;
@@ -3590,13 +3923,27 @@ pub fn regexp_flags(gc: &mut SemiSpace, this: Value, _args: &[Value], _vm: &mut 
     };
     let flags = unsafe { RegExp::flags(regexp_ptr) };
     let mut s = String::new();
-    if flags & 1 != 0 { s.push('g'); }
-    if flags & 2 != 0 { s.push('i'); }
-    if flags & 4 != 0 { s.push('m'); }
-    if flags & 8 != 0 { s.push('s'); }
-    if flags & 16 != 0 { s.push('u'); }
-    if flags & 32 != 0 { s.push('y'); }
-    if flags & 64 != 0 { s.push('d'); }
+    if flags & 1 != 0 {
+        s.push('g');
+    }
+    if flags & 2 != 0 {
+        s.push('i');
+    }
+    if flags & 4 != 0 {
+        s.push('m');
+    }
+    if flags & 8 != 0 {
+        s.push('s');
+    }
+    if flags & 16 != 0 {
+        s.push('u');
+    }
+    if flags & 32 != 0 {
+        s.push('y');
+    }
+    if flags & 64 != 0 {
+        s.push('d');
+    }
     Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8)
 }
 

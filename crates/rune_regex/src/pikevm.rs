@@ -71,7 +71,11 @@ impl PikeVm {
                                     add_thread(&mut nlist, nfa, *target, &t.saves);
                                 }
                             }
-                            Edge::CharClass { negated, ranges, target } => {
+                            Edge::CharClass {
+                                negated,
+                                ranges,
+                                target,
+                            } => {
                                 let in_class = ranges.iter().any(|(lo, hi)| c >= *lo && c <= *hi);
                                 if *negated != in_class {
                                     add_thread(&mut nlist, nfa, *target, &t.saves);
@@ -131,7 +135,10 @@ fn follow_nonconsuming(threads: &[Thread], nfa: &Nfa, pos: usize) -> Vec<Thread>
                 }
                 Edge::Epsilon(target) => {
                     has_nonconsuming = true;
-                    let new_t = Thread { pc: *target, saves: t.saves.clone() };
+                    let new_t = Thread {
+                        pc: *target,
+                        saves: t.saves.clone(),
+                    };
                     if !in_sets(&new_t, &worklist, &result) {
                         worklist.push(new_t);
                     }
@@ -155,16 +162,18 @@ fn in_result(t: &Thread, result: &[Thread]) -> bool {
     result.iter().any(|r| r.pc == t.pc && r.saves == t.saves)
 }
 
-fn build_groups(saves: &[Option<usize>], match_start: usize, match_end: usize, num_captures: usize) -> Match {
+fn build_groups(
+    saves: &[Option<usize>],
+    match_start: usize,
+    match_end: usize,
+    num_captures: usize,
+) -> Match {
     let mut groups = vec![(0, 0); num_captures + 1];
     groups[0] = (saves[0].unwrap_or(match_start), match_end);
     for i in 0..num_captures {
         let s = i * 2 + 2;
         let e = i * 2 + 3;
-        groups[i + 1] = (
-            saves[s].unwrap_or(match_end),
-            saves[e].unwrap_or(match_end),
-        );
+        groups[i + 1] = (saves[s].unwrap_or(match_end), saves[e].unwrap_or(match_end));
     }
     Match { groups }
 }
@@ -176,7 +185,10 @@ fn add_thread(nlist: &mut Vec<Thread>, nfa: &Nfa, pc: usize, saves: &[Option<usi
             return;
         }
     }
-    nlist.push(Thread { pc, saves: saves.to_vec() });
+    nlist.push(Thread {
+        pc,
+        saves: saves.to_vec(),
+    });
     for edge in &nfa.states[pc].edges {
         if let Edge::Epsilon(target) = edge {
             add_thread(nlist, nfa, *target, saves);

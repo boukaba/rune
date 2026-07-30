@@ -10,8 +10,8 @@
 //! If this test passes, Path A is viable. If Clang output changes across
 //! versions and this test breaks, Path A has a maintenance cost.
 
-use std::process::Command;
 use std::io::Write;
+use std::process::Command;
 
 /// Mach-O constants for minimal parser.
 const MH_MAGIC_64: u32 = 0xFEEDFACF;
@@ -21,39 +21,60 @@ const SEG_NAME: &[u8; 16] = b"__TEXT\0\0\0\0\0\0\0\0\0\0";
 
 /// Parse a Mach-O object file and extract the __TEXT,__text section bytes.
 fn extract_text_section(o_bytes: &[u8]) -> Option<&[u8]> {
-    if o_bytes.len() < 32 { return None; }
+    if o_bytes.len() < 32 {
+        return None;
+    }
     let magic = u32::from_le_bytes(o_bytes[0..4].try_into().unwrap());
-    if magic != MH_MAGIC_64 { return None; }
+    if magic != MH_MAGIC_64 {
+        return None;
+    }
 
     let ncmds = u32::from_le_bytes(o_bytes[16..20].try_into().unwrap());
     let mut offset: usize = 32; // past mach_header_64
 
     for _ in 0..ncmds {
-        if offset + 8 > o_bytes.len() { return None; }
-        let cmd = u32::from_le_bytes(o_bytes[offset..offset+4].try_into().unwrap());
-        let cmdsize = u32::from_le_bytes(o_bytes[offset+4..offset+8].try_into().unwrap()) as usize;
+        if offset + 8 > o_bytes.len() {
+            return None;
+        }
+        let cmd = u32::from_le_bytes(o_bytes[offset..offset + 4].try_into().unwrap());
+        let cmdsize =
+            u32::from_le_bytes(o_bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
         if cmd == LC_SEGMENT_64 {
             let nsects_offset = offset + 64;
-            if nsects_offset + 4 > o_bytes.len() { return None; }
-            let nsects = u32::from_le_bytes(o_bytes[nsects_offset..nsects_offset+4].try_into().unwrap()) as usize;
+            if nsects_offset + 4 > o_bytes.len() {
+                return None;
+            }
+            let nsects = u32::from_le_bytes(
+                o_bytes[nsects_offset..nsects_offset + 4]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
 
             let sections_offset = offset + 72;
             for i in 0..nsects {
                 let sec_off = sections_offset + i * 80;
-                if sec_off + 80 > o_bytes.len() { return None; }
-                let sectname = &o_bytes[sec_off..sec_off+16];
-                let segname = &o_bytes[sec_off+16..sec_off+32];
+                if sec_off + 80 > o_bytes.len() {
+                    return None;
+                }
+                let sectname = &o_bytes[sec_off..sec_off + 16];
+                let segname = &o_bytes[sec_off + 16..sec_off + 32];
                 if sectname == SECT_NAME && segname == SEG_NAME {
-                    let foff = u32::from_le_bytes(o_bytes[sec_off+48..sec_off+52].try_into().unwrap()) as usize;
-                    let sz = u64::from_le_bytes(o_bytes[sec_off+40..sec_off+48].try_into().unwrap()) as usize;
+                    let foff =
+                        u32::from_le_bytes(o_bytes[sec_off + 48..sec_off + 52].try_into().unwrap())
+                            as usize;
+                    let sz =
+                        u64::from_le_bytes(o_bytes[sec_off + 40..sec_off + 48].try_into().unwrap())
+                            as usize;
                     if foff + sz <= o_bytes.len() {
-                        return Some(&o_bytes[foff..foff+sz]);
+                        return Some(&o_bytes[foff..foff + sz]);
                     }
                 }
             }
         }
         offset += cmdsize;
-        if offset >= o_bytes.len() { break; }
+        if offset >= o_bytes.len() {
+            break;
+        }
     }
     None
 }
@@ -84,7 +105,7 @@ fn verify_template(bytes: &[u8]) -> Result<[u32; 3], String> {
     let mut instrs = [0u32; 3];
     for (i, instr) in instrs.iter_mut().enumerate() {
         let start = i * 4;
-        *instr = u32::from_le_bytes(bytes[start..start+4].try_into().unwrap());
+        *instr = u32::from_le_bytes(bytes[start..start + 4].try_into().unwrap());
     }
 
     // Check MOVZ: var field is imm16 (bits 20:5), all other bits are fixed.
@@ -92,7 +113,8 @@ fn verify_template(bytes: &[u8]) -> Result<[u32; 3], String> {
     if (instrs[0] & MOVZ_MASK) != 0xD2800000u32 {
         return Err(format!(
             "instr 0: expected MOVZ pattern, got {:#010x} (full: {:#010x})",
-            instrs[0] & MOVZ_MASK, instrs[0]
+            instrs[0] & MOVZ_MASK,
+            instrs[0]
         ));
     }
 
@@ -131,7 +153,8 @@ fn compile_stencil_c(c_source: &str) -> Vec<u8> {
             "-O2",
             "-c",
             "-ffreestanding",
-            "-target", "arm64-apple-macos",
+            "-target",
+            "arm64-apple-macos",
             "-o",
         ])
         .arg(&obj_path)
@@ -139,10 +162,12 @@ fn compile_stencil_c(c_source: &str) -> Vec<u8> {
         .output()
         .expect("failed to execute clang");
 
-    assert!(output.status.success(),
+    assert!(
+        output.status.success(),
         "clang failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     std::fs::read(&obj_path).unwrap()
 }
@@ -177,21 +202,32 @@ void load_smi_stencil(void) {
 "#;
 
     let obj_bytes = compile_stencil_c(c_source);
-    assert!(obj_bytes.len() > 64, "object file too small: {} bytes", obj_bytes.len());
+    assert!(
+        obj_bytes.len() > 64,
+        "object file too small: {} bytes",
+        obj_bytes.len()
+    );
 
     // Extract function bytes from the object file
     let func_bytes = find_function_bytes(&obj_bytes, "load_smi_stencil")
         .expect("failed to find __TEXT,__text section in object file");
 
-    eprintln!("function bytes ({} total): {:02x?}", func_bytes.len(), func_bytes);
+    eprintln!(
+        "function bytes ({} total): {:02x?}",
+        func_bytes.len(),
+        func_bytes
+    );
 
     // Verify instruction template
     let instrs = verify_template(func_bytes).expect("instruction template mismatch");
 
     // Extract the placeholder immediate from MOVZ
     let placeholder = extract_movz_imm(instrs[0]);
-    assert_eq!(placeholder, 0xDEAD,
-        "expected placeholder 0xDEAD, got {:#06x}", placeholder);
+    assert_eq!(
+        placeholder, 0xDEAD,
+        "expected placeholder 0xDEAD, got {:#06x}",
+        placeholder
+    );
 
     eprintln!("placeholder MOVZ imm16: {:#06x}", placeholder);
     eprintln!("STR instruction: {:#010x}", instrs[1]);
@@ -236,9 +272,11 @@ void load_smi_stencil(void) {
     // Expected: 0xD2800000 | (0x55 << 5) = 0xD2800AA0
     let expected_movz: u32 = 0xD2800000 | (0x55_u32 << 5);
     let actual_movz = u32::from_le_bytes(patched[0..4].try_into().unwrap());
-    assert_eq!(actual_movz, expected_movz,
+    assert_eq!(
+        actual_movz, expected_movz,
         "patched MOVZ: expected {:#010x}, got {:#010x}",
-        expected_movz, actual_movz);
+        expected_movz, actual_movz
+    );
 
     // Verify the rest is unchanged
     let actual_str = u32::from_le_bytes(patched[4..8].try_into().unwrap());
@@ -276,9 +314,14 @@ void load_smi_stencil(void) {
     let func1 = find_function_bytes(&bytes1, "load_smi_stencil").unwrap();
     let func2 = find_function_bytes(&bytes2, "load_smi_stencil").unwrap();
 
-    assert_eq!(func1, func2,
+    assert_eq!(
+        func1, func2,
         "Clang produced different bytes on second compilation\nfirst:  {:02x?}\nsecond: {:02x?}",
-        func1, func2);
+        func1, func2
+    );
 
-    eprintln!("Clang determinism check: identical bytes ({} bytes)", func1.len());
+    eprintln!(
+        "Clang determinism check: identical bytes ({} bytes)",
+        func1.len()
+    );
 }

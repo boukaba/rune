@@ -123,10 +123,10 @@ pub enum Opcode {
     SetSuperclass,  // pop func, pop superclass → store superclass in func's struct
     LoadSuperclass, // push current func's superclass onto stack
     // Private field/method
-    PrivateNameScope,  // operands[0] = number of private names; creates PrivateEnvironment
+    PrivateNameScope, // operands[0] = number of private names; creates PrivateEnvironment
     LoadPrivateProperty, // pop obj, private slot index → PrivateGet
     StorePrivateProperty, // pop value, obj, private slot index → PrivateSet
-    DefinePrivateField,   // pop value, obj, private slot index → PrivateFieldAdd
+    DefinePrivateField, // pop value, obj, private slot index → PrivateFieldAdd
 }
 
 #[derive(Clone, Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -227,7 +227,8 @@ impl BytecodeProgram {
     /// Intern a regex into the pool and return its index.
     pub fn intern_regex(&mut self, pattern: &str, flags: &str) -> usize {
         let idx = self.regex_pool.len();
-        self.regex_pool.push((pattern.to_string(), flags.to_string()));
+        self.regex_pool
+            .push((pattern.to_string(), flags.to_string()));
         idx
     }
 

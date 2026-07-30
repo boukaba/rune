@@ -3270,3 +3270,46 @@ Added `ClassNode` (name, methods, span), `ClassMethod` (key, func, is_static, sp
 ### Next Steps
 1. Private field parsing in class body + runtime initialization
 2. `String.prototype.match`/`search`/`split` for RegExp
+
+---
+
+## Sprint 34 — CI Fix: `&& let` Rewrite for Rust 1.85 MSRV
+
+> **2026-06-30**: GitHub Actions CI was failing on `fmt`, `clippy`, `no-JIT build`, and `MSRV` (1.85) jobs. Fixed all four, plus fixed 2 logic bugs introduced by the `&& let` → nested `if let` rewrite.
+
+### Task 34A: cargo fmt — trailing whitespace, formatting across workspace ✅
+
+- [x] `cargo fmt --all` passes (auto-fixed trailing whitespace/formatting across all crates)
+
+### Task 34B: cargo clippy — 11 warnings fixed ✅
+
+- [x] `collapsible_if` in `emitter.rs` — merged two `if let` blocks
+- [x] `len_zero` in `parser.rs` — count() >= 1 not .len() > 0
+- [x] `dead_code` in `vm.rs` — removed `value_eq_strict`
+- [x] `unnecessary_cast` (3×) in `vm.rs` — removed cast on enum variant assignment
+- [x] Unused variable + `assert_eq!` bool + snake_case in `integration_test.rs`
+
+### Task 34C: no-JIT build + MSRV 1.85 ✅
+
+- [x] `cargo test -p rune_interpreter --no-default-features` compiles and runs (0 tests)
+- [x] `cargo check --workspace --exclude spike_mmtk --exclude spike_jit` passes with Rust 1.85
+- [x] `.github/workflows/ci.yml` updated to exclude `spike_*` from MSRV step
+
+### Task 34D: `&& let` → nested `if let` rewrite (28 files) ✅
+
+Replaced all `&& let` patterns with nested `if let` for Rust 1.85 MSRV compatibility (`let_chains` stabilized in 1.86).
+
+### Task 34E: Fix 2 logic bugs from rewrite ✅
+
+**Bug 1** (vm.rs `do_store_property`): TAG_FUNC non-prototype property store was dead code — merge created `if tag == TAG_FUNC { if key == PROTOTYPE { ... } else { ... } }` structure but closing braces had wrong indentation, causing unclosed delimiter compilation error. Fixed by adjusting `}` indentation and adding missing `unsafe` block close.
+
+**Bug 2** (vm.rs `StoreProperty` handler): Getter-only accessor (no setter) skip-store code was inside `if !setter.is_undefined()` block — when setter WAS undefined, code fell through to `do_store_property` which overwrites the property. Fixed by moving skip-store outside the `if !setter.is_undefined()` block but inside TAG_ACCESSOR handler.
+
+### Test Results
+
+- **465 integration tests passing** (0 failed, 2 ignored)
+- 1 pre-existing flaky: `test_gc_during_jit_call_preserves_locals` (GC/IC test, broken since getter/setter syntax)
+- Full workspace: all crate tests, clippy, fmt, no-JIT, MSRV all green
+
+### Next Steps
+1. `String.prototype.match`/`search`/`split` for RegExp

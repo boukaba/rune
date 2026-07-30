@@ -226,7 +226,7 @@ impl InstalledNativeCode {
             entries.insert(func.func_idx, unsafe { mem.ptr.add(offset) as *const u8 });
             offset += len;
             // Pad to 4-byte alignment for the next blob (ARM/Thumb friendly).
-            while !offset.is_multiple_of(4) && offset < mem.size {
+            while offset & 3 != 0 && offset < mem.size {
                 unsafe {
                     std::ptr::write(mem.ptr.add(offset), 0);
                 }

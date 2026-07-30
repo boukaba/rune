@@ -198,7 +198,7 @@ pub struct TraceOp {
 }
 
 /// A recorded trace of one hot-loop iteration.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct LoopTrace {
     pub target_pc: usize,
     pub ops: Vec<TraceOp>,
@@ -221,11 +221,33 @@ pub struct LoopTrace {
     /// Bailout table produced by trace compilation (metadata only).
     /// Mirrors the function JIT's bailout_tables pattern; not queried at
     /// runtime (bailout works through jit_bailout.pending).
+    #[cfg(feature = "jit")]
     pub bailout_table: Option<Box<rune_jit_baseline::BailoutTable>>,
     pub miss_count: u64,
     /// Per-call-site inlining profiles collected during trace recording.
     /// Populated by Phase F-1; consumed by Phase F-2 inlining engine.
+    #[cfg(feature = "jit")]
     pub inline_profiles: Vec<rune_jit_baseline::InlineProfile>,
+}
+
+impl Default for LoopTrace {
+    fn default() -> Self {
+        LoopTrace {
+            target_pc: Default::default(),
+            ops: Default::default(),
+            total_iterations: Default::default(),
+            shape_ids: Default::default(),
+            compiled_entry: std::ptr::null(),
+            exit_pc: Default::default(),
+            compiled_prog: std::ptr::null_mut(),
+            trace_to_original_pc: Default::default(),
+            #[cfg(feature = "jit")]
+            bailout_table: Default::default(),
+            miss_count: Default::default(),
+            #[cfg(feature = "jit")]
+            inline_profiles: Default::default(),
+        }
+    }
 }
 
 impl LoopTrace {

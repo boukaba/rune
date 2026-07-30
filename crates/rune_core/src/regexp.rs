@@ -46,7 +46,9 @@ impl RegExp {
     }
 
     pub unsafe fn set_prototype(ptr: *mut u8, proto: *mut u8) {
-        unsafe { (*(ptr as *mut RegExp)).prototype = proto; }
+        unsafe {
+            (*(ptr as *mut RegExp)).prototype = proto;
+        }
     }
 
     pub unsafe fn last_index(ptr: *mut u8) -> u32 {
@@ -54,6 +56,8 @@ impl RegExp {
     }
 
     pub unsafe fn set_last_index(ptr: *mut u8, val: u32) {
-        unsafe { (*(ptr as *mut RegExp)).last_index = val; }
+        unsafe {
+            (*(ptr as *mut RegExp)).last_index = val;
+        }
     }
 }

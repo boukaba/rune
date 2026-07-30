@@ -336,7 +336,16 @@ mod tests {
 
     #[test]
     fn test_float64_roundtrip() {
-        let cases = [0.0, -0.0, 1.0, -1.0, std::f64::consts::PI, f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        let cases = [
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            std::f64::consts::PI,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ];
         for &v in &cases {
             let val = Value::from_float64(v);
             assert!(val.is_float64(), "should be float64: {v}");
@@ -377,7 +386,10 @@ mod tests {
         let collision_val = f64::from_bits(QNAN_PREFIX);
         let val = Value::from_float64(collision_val);
         // Must still be detected as float64 (flipped a bit to avoid collision)
-        assert!(val.is_float64(), "collision avoidance should keep it as float64");
+        assert!(
+            val.is_float64(),
+            "collision avoidance should keep it as float64"
+        );
         let recovered = val.as_float64().unwrap();
         assert!(recovered.is_nan());
     }

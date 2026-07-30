@@ -1089,21 +1089,45 @@ fn test_string_length() {
 #[test]
 fn test_new_string_wrapper() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"var s = new String("hello"); typeof s"#).unwrap();
+    let r = ctx
+        .eval(r#"var s = new String("hello"); typeof s"#)
+        .unwrap();
     assert_eq!(r.as_smi(), None, "typeof result is a string, not smi");
-    let r = ctx.eval(r#"var s = new String("hello"); s.length"#).unwrap();
+    let r = ctx
+        .eval(r#"var s = new String("hello"); s.length"#)
+        .unwrap();
     assert_eq!(r.as_smi(), Some(5));
     let r = ctx.eval(r#"var s = new String("hello"); s[0]"#).unwrap();
-    let s = unsafe { rune_core::string::HeapString::to_string(r.heap_ptr().unwrap() as *mut rune_core::string::HeapString) };
+    let s = unsafe {
+        rune_core::string::HeapString::to_string(
+            r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+        )
+    };
     assert_eq!(s, "h");
-    let r = ctx.eval(r#"var s = new String("hello"); s.slice(1, 3)"#).unwrap();
-    let s = unsafe { rune_core::string::HeapString::to_string(r.heap_ptr().unwrap() as *mut rune_core::string::HeapString) };
+    let r = ctx
+        .eval(r#"var s = new String("hello"); s.slice(1, 3)"#)
+        .unwrap();
+    let s = unsafe {
+        rune_core::string::HeapString::to_string(
+            r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+        )
+    };
     assert_eq!(s, "el");
-    let r = ctx.eval(r#"var s = new String("hello"); s.charAt(0)"#).unwrap();
-    let s = unsafe { rune_core::string::HeapString::to_string(r.heap_ptr().unwrap() as *mut rune_core::string::HeapString) };
+    let r = ctx
+        .eval(r#"var s = new String("hello"); s.charAt(0)"#)
+        .unwrap();
+    let s = unsafe {
+        rune_core::string::HeapString::to_string(
+            r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+        )
+    };
     assert_eq!(s, "h");
     let r = ctx.eval(r#"String("hello")"#).unwrap();
-    let s = unsafe { rune_core::string::HeapString::to_string(r.heap_ptr().unwrap() as *mut rune_core::string::HeapString) };
+    let s = unsafe {
+        rune_core::string::HeapString::to_string(
+            r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+        )
+    };
     assert_eq!(s, "hello");
 }
 
@@ -2063,7 +2087,10 @@ fn test_jit_inline_bail() {
     );
     // 1100000000 exceeds Smi max (1073741823), so result should be a float
     if let Some(smi_val) = smi {
-        assert_eq!(smi_val, 1100000000, "overflow result should be correct or float");
+        assert_eq!(
+            smi_val, 1100000000,
+            "overflow result should be correct or float"
+        );
     }
     assert!(
         ctx.vm().jit_bailout_count > 0,
@@ -2088,9 +2115,15 @@ fn test_jit_inline_hot_function() {
         )
         .unwrap();
     let smi = r.as_smi();
-    assert_eq!(smi, None, "result 499999500000 exceeds Smi max, must be float");
+    assert_eq!(
+        smi, None,
+        "result 499999500000 exceeds Smi max, must be float"
+    );
     let val = r.as_float64().unwrap();
-    assert_eq!(val, 499_999_500_000.0, "inlined hot function must produce correct sum");
+    assert_eq!(
+        val, 499_999_500_000.0,
+        "inlined hot function must produce correct sum"
+    );
     assert!(
         ctx.vm().jit_entry_count > 0,
         "JIT must have entered for add()"
@@ -2289,43 +2322,64 @@ mod instanceof_tests {
     #[test]
     fn test_instanceof_array() {
         let mut ctx = Context::new_small();
-        assert_eq!(ctx.eval("[] instanceof Array").unwrap().to_boolean(), Some(true));
+        assert_eq!(
+            ctx.eval("[] instanceof Array").unwrap().to_boolean(),
+            Some(true)
+        );
     }
 
     #[test]
     fn test_instanceof_extends_class() {
         let mut ctx = Context::new_small();
-        assert_eq!(ctx.eval(
-            "class Parent {}
+        assert_eq!(
+            ctx.eval(
+                "class Parent {}
              class Child extends Parent {}
              new Child() instanceof Parent;"
-        ).unwrap().to_boolean(), Some(true));
+            )
+            .unwrap()
+            .to_boolean(),
+            Some(true)
+        );
     }
 
     #[test]
     fn test_instanceof_extends_class_false() {
         let mut ctx = Context::new_small();
-        assert_eq!(ctx.eval(
-            "class Parent {}
+        assert_eq!(
+            ctx.eval(
+                "class Parent {}
              class Child extends Parent {}
              new Child() instanceof Child;"
-        ).unwrap().to_boolean(), Some(true));
+            )
+            .unwrap()
+            .to_boolean(),
+            Some(true)
+        );
     }
 
     #[test]
     fn test_instanceof_array_false() {
         let mut ctx = Context::new_small();
-        assert_eq!(ctx.eval("({}) instanceof Array").unwrap().to_boolean(), Some(false));
+        assert_eq!(
+            ctx.eval("({}) instanceof Array").unwrap().to_boolean(),
+            Some(false)
+        );
     }
 
     #[test]
     fn test_instanceof_class_constructor() {
         let mut ctx = Context::new_small();
-        assert_eq!(ctx.eval(
-            "class Foo {}
+        assert_eq!(
+            ctx.eval(
+                "class Foo {}
              var f = new Foo();
              f instanceof Foo;"
-        ).unwrap().to_boolean(), Some(true));
+            )
+            .unwrap()
+            .to_boolean(),
+            Some(true)
+        );
     }
 
     #[test]
@@ -4335,8 +4389,11 @@ mod instanceof_tests {
             ctx_new.stencil_jit = true;
             let r_new = ctx_new.eval(source).unwrap();
 
-    assert_eq!(r_old, r_new,
-            "stencil vs old codegen: old={:?} new={:?}", r_old, r_new);
+            assert_eq!(
+                r_old, r_new,
+                "stencil vs old codegen: old={:?} new={:?}",
+                r_old, r_new
+            );
         }
     }
 } // close mod instanceof_tests
@@ -4384,7 +4441,9 @@ fn test_json_parse_string() {
     let mut ctx = Context::new_small();
     let r = ctx.eval("JSON.parse('\"hello\"')").unwrap();
     let ptr = r.heap_ptr().unwrap();
-    let s = unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) };
+    let s = unsafe {
+        rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString)
+    };
     assert_eq!(s, "hello");
 }
 
@@ -4394,21 +4453,27 @@ fn test_json_parse_array() {
     let r = ctx.eval("JSON.parse('[1,2,3]')").unwrap();
     assert!(r.is_heap_object());
     // Access elements after parsing
-    let r2 = ctx.eval("var a = JSON.parse('[10,20,30]'); a[0] + a[1] + a[2]").unwrap();
+    let r2 = ctx
+        .eval("var a = JSON.parse('[10,20,30]'); a[0] + a[1] + a[2]")
+        .unwrap();
     assert_eq!(r2.as_smi(), Some(60));
 }
 
 #[test]
 fn test_json_parse_nested() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval("var o = JSON.parse('{\"x\":{\"y\":[1,2]}}'); o.x.y[0] + o.x.y[1]").unwrap();
+    let r = ctx
+        .eval("var o = JSON.parse('{\"x\":{\"y\":[1,2]}}'); o.x.y[0] + o.x.y[1]")
+        .unwrap();
     assert_eq!(r.as_smi(), Some(3));
 }
 
 #[test]
 fn test_json_parse_object() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval("var o = JSON.parse('{\"a\":1,\"b\":2}'); o.a + o.b").unwrap();
+    let r = ctx
+        .eval("var o = JSON.parse('{\"a\":1,\"b\":2}'); o.a + o.b")
+        .unwrap();
     assert_eq!(r.as_smi(), Some(3));
 }
 
@@ -4417,45 +4482,61 @@ fn test_json_parse_object() {
 #[test]
 fn test_array_filter_basic() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let r = ctx
+        .eval(
+            r#"
         function isEven(x) { return x % 2 === 0; }
         var a = [1, 2, 3, 4, 5, 6];
         var result = a.filter(isEven);
         result[0] + result[1] + result[2]
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert_eq!(r.as_smi(), Some(2 + 4 + 6));
 }
 
 #[test]
 fn test_array_filter_arrow() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let r = ctx
+        .eval(
+            r#"
         var a = [1, 2, 3, 4, 5];
         var result = a.filter(n => n > 2);
         result[0] + result[1] + result[2]
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert_eq!(r.as_smi(), Some(3 + 4 + 5));
 }
 
 #[test]
 fn test_array_filter_empty() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let r = ctx
+        .eval(
+            r#"
         var a = [];
         var result = a.filter(n => true);
         result.length
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert_eq!(r.as_smi(), Some(0));
 }
 
 #[test]
 fn test_array_filter_all_match() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let r = ctx
+        .eval(
+            r#"
         var a = [1, 2, 3];
         var result = a.filter(n => n > 0);
         result[0] + result[1] + result[2]
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert_eq!(r.as_smi(), Some(6));
 }
 
@@ -4464,34 +4545,46 @@ fn test_array_filter_all_match() {
 #[test]
 fn test_array_map_basic() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let r = ctx
+        .eval(
+            r#"
         function double(x) { return x * 2; }
         var a = [1, 2, 3];
         var result = a.map(double);
         result[0] + result[1] + result[2]
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert_eq!(r.as_smi(), Some(2 + 4 + 6));
 }
 
 #[test]
 fn test_array_map_arrow() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let r = ctx
+        .eval(
+            r#"
         var a = [1, 2, 3];
         var result = a.map(n => n * 10);
         result[0] + result[1] + result[2]
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert_eq!(r.as_smi(), Some(10 + 20 + 30));
 }
 
 #[test]
 fn test_array_map_empty() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let r = ctx
+        .eval(
+            r#"
         var a = [];
         var result = a.map(n => n * 2);
         result.length
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert_eq!(r.as_smi(), Some(0));
 }
 
@@ -4500,42 +4593,58 @@ fn test_array_map_empty() {
 #[test]
 fn test_array_reduce_sum() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let r = ctx
+        .eval(
+            r#"
         function add(acc, x) { return acc + x; }
         var a = [1, 2, 3, 4, 5];
         a.reduce(add, 0)
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert_eq!(r.as_smi(), Some(15));
 }
 
 #[test]
 fn test_array_reduce_no_initial() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let r = ctx
+        .eval(
+            r#"
         function add(acc, x) { return acc + x; }
         var a = [1, 2, 3, 4, 5];
         a.reduce(add)
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert_eq!(r.as_smi(), Some(15));
 }
 
 #[test]
 fn test_array_reduce_arrow() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let r = ctx
+        .eval(
+            r#"
         var a = [1, 2, 3, 4];
         a.reduce((acc, x) => acc + x, 100)
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert_eq!(r.as_smi(), Some(110));
 }
 
 #[test]
 fn test_array_reduce_single_element_no_init() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let r = ctx
+        .eval(
+            r#"
         var a = [42];
         a.reduce((acc, x) => acc + x)
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert_eq!(r.as_smi(), Some(42));
 }
 
@@ -4544,23 +4653,31 @@ fn test_array_reduce_single_element_no_init() {
 #[test]
 fn test_array_filter_map_chain() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let r = ctx
+        .eval(
+            r#"
         function even(n) { return n % 2 === 0; }
         function times10(n) { return n * 10; }
         var a = [1, 2, 3, 4, 5, 6];
         var result = a.filter(even).map(times10);
         result[0] + result[1] + result[2]
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert_eq!(r.as_smi(), Some(20 + 40 + 60));
 }
 
 #[test]
 fn test_array_filter_then_reduce() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let r = ctx
+        .eval(
+            r#"
         var a = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
         a.filter(n => n % 2 === 0).reduce((acc, n) => acc + n, 0)
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert_eq!(r.as_smi(), Some(2 + 4 + 6 + 8 + 10));
 }
 
@@ -4569,24 +4686,32 @@ fn test_array_filter_then_reduce() {
 #[test]
 fn test_json_parse_then_filter() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let r = ctx
+        .eval(
+            r#"
         function gt3(x) { return x > 3; }
         var data = JSON.parse('[4,5,6]');
         var filtered = data.filter(gt3);
         filtered[0] + filtered[1] + filtered[2]
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert_eq!(r.as_smi(), Some(4 + 5 + 6));
 }
 
 #[test]
 fn test_json_parse_then_map() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let r = ctx
+        .eval(
+            r#"
         function div10(x) { return x / 10; }
         var data = JSON.parse('[10, 20, 30]');
         var mapped = data.map(div10);
         mapped[0] + mapped[1] + mapped[2]
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert_eq!(r.as_smi(), Some(1 + 2 + 3));
 }
 
@@ -4595,26 +4720,34 @@ fn test_json_parse_then_map() {
 #[test]
 fn test_array_filter_this_arg() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let r = ctx
+        .eval(
+            r#"
         var threshold = { limit: 3 };
         function checkLimit(x) { return x > this.limit; }
         var a = [1, 2, 3, 4, 5];
         var result = a.filter(checkLimit, threshold);
         result[0] + result[1]
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert_eq!(r.as_smi(), Some(4 + 5));
 }
 
 #[test]
 fn test_array_map_this_arg() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let r = ctx
+        .eval(
+            r#"
         var multiplier = { factor: 10 };
         function scale(x) { return x * this.factor; }
         var a = [1, 2, 3];
         var result = a.map(scale, multiplier);
         result[0] + result[1] + result[2]
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert_eq!(r.as_smi(), Some(10 + 20 + 30));
 }
 
@@ -4623,61 +4756,81 @@ fn test_array_map_this_arg() {
 #[test]
 fn test_array_foreach_basic() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let r = ctx
+        .eval(
+            r#"
         var sum = 0;
         var a = [1, 2, 3, 4];
         a.forEach(function(x) { sum = sum + x; });
         sum
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert_eq!(r.as_smi(), Some(10));
 }
 
 #[test]
 fn test_array_foreach_arrow() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let r = ctx
+        .eval(
+            r#"
         var sum = 0;
         var a = [1, 2, 3];
         a.forEach(x => { sum = sum + x; });
         sum
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert_eq!(r.as_smi(), Some(6));
 }
 
 #[test]
 fn test_array_foreach_empty() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let r = ctx
+        .eval(
+            r#"
         var sum = 0;
         [].forEach(function(x) { sum = sum + x; });
         sum
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert_eq!(r.as_smi(), Some(0));
 }
 
 #[test]
 fn test_array_foreach_this_arg() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let r = ctx
+        .eval(
+            r#"
         var accumulator = { total: 0 };
         function add(x) { this.total = this.total + x; }
         var a = [1, 2, 3, 4];
         a.forEach(add, accumulator);
         accumulator.total
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert_eq!(r.as_smi(), Some(10));
 }
 
 #[test]
 fn test_array_foreach_chain_filter() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let r = ctx
+        .eval(
+            r#"
         var sum = 0;
         var a = [1, 2, 3, 4, 5, 6];
         a.filter(function(x) { return x % 2 === 0; })
          .forEach(function(x) { sum = sum + x; });
         sum
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert_eq!(r.as_smi(), Some(2 + 4 + 6));
 }
 
@@ -4712,15 +4865,26 @@ fn e2e_json_workload() {
 #[test]
 fn e2e_gc_stress_reduce() {
     let mut ctx = Context::new();
-    let r = ctx.eval(r#"
+    let r = ctx
+        .eval(
+            r#"
         var arr = [];
         for (var i = 0; i < 200000; i = i + 1) { arr.push(i); }
         var sum = arr.reduce(function(a, b) { return a + b; }, 0);
         sum
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     let expected = 19999900000.0f64;
-    let val = r.as_float64().expect("GC stress test should produce float64");
-    assert!((val - expected).abs() < 1.0, "reduce sum mismatch: got {} expected {}", val, expected);
+    let val = r
+        .as_float64()
+        .expect("GC stress test should produce float64");
+    assert!(
+        (val - expected).abs() < 1.0,
+        "reduce sum mismatch: got {} expected {}",
+        val,
+        expected
+    );
 }
 
 // ---- Stdlib: Array.prototype.slice ----
@@ -4728,77 +4892,105 @@ fn e2e_gc_stress_reduce() {
 #[test]
 fn test_array_slice_basic() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let r = ctx
+        .eval(
+            r#"
         var a = [1, 2, 3, 4, 5];
         var b = a.slice(1, 3);
         b[0] + b[1]
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert_eq!(r.as_smi(), Some(2 + 3));
 }
 
 #[test]
 fn test_array_slice_no_end() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let r = ctx
+        .eval(
+            r#"
         var a = [1, 2, 3, 4, 5];
         var b = a.slice(2);
         b[0] + b[1] + b[2]
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert_eq!(r.as_smi(), Some(3 + 4 + 5));
 }
 
 #[test]
 fn test_array_slice_full() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let r = ctx
+        .eval(
+            r#"
         var a = [1, 2, 3];
         var b = a.slice();
         b[0] + b[1] + b[2]
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert_eq!(r.as_smi(), Some(1 + 2 + 3));
 }
 
 #[test]
 fn test_array_slice_negative_start() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let r = ctx
+        .eval(
+            r#"
         var a = [10, 20, 30, 40];
         var b = a.slice(-2);
         b[0] + b[1]
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert_eq!(r.as_smi(), Some(30 + 40));
 }
 
 #[test]
 fn test_array_slice_negative_end() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let r = ctx
+        .eval(
+            r#"
         var a = [10, 20, 30, 40];
         var b = a.slice(1, -1);
         b[0] + b[1]
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert_eq!(r.as_smi(), Some(20 + 30));
 }
 
 #[test]
 fn test_array_slice_empty() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let r = ctx
+        .eval(
+            r#"
         var a = [1, 2, 3];
         var b = a.slice(5);
         b.length
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert_eq!(r.as_smi(), Some(0));
 }
 
 #[test]
 fn test_array_slice_no_mutate_original() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let r = ctx
+        .eval(
+            r#"
         var a = [1, 2, 3];
         var b = a.slice(1, 2);
         a.length
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert_eq!(r.as_smi(), Some(3));
 }
 
@@ -4809,7 +5001,9 @@ fn test_json_stringify_number() {
     let mut ctx = Context::new_small();
     let r = ctx.eval("JSON.stringify(42)").unwrap();
     let ptr = r.heap_ptr().unwrap();
-    let s = unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) };
+    let s = unsafe {
+        rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString)
+    };
     assert_eq!(s, "42");
 }
 
@@ -4818,7 +5012,9 @@ fn test_json_stringify_string() {
     let mut ctx = Context::new_small();
     let r = ctx.eval("JSON.stringify('hello')").unwrap();
     let ptr = r.heap_ptr().unwrap();
-    let s = unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) };
+    let s = unsafe {
+        rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString)
+    };
     assert_eq!(s, "\"hello\"");
 }
 
@@ -4827,7 +5023,9 @@ fn test_json_stringify_boolean() {
     let mut ctx = Context::new_small();
     let r = ctx.eval("JSON.stringify(true)").unwrap();
     let ptr = r.heap_ptr().unwrap();
-    let s = unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) };
+    let s = unsafe {
+        rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString)
+    };
     assert_eq!(s, "true");
 }
 
@@ -4836,7 +5034,9 @@ fn test_json_stringify_null() {
     let mut ctx = Context::new_small();
     let r = ctx.eval("JSON.stringify(null)").unwrap();
     let ptr = r.heap_ptr().unwrap();
-    let s = unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) };
+    let s = unsafe {
+        rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString)
+    };
     assert_eq!(s, "null");
 }
 
@@ -4853,7 +5053,9 @@ fn test_json_stringify_nan_infinity() {
     let mut ctx = Context::new_small();
     let r = ctx.eval("JSON.stringify(NaN)").unwrap();
     let ptr = r.heap_ptr().unwrap();
-    let s = unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) };
+    let s = unsafe {
+        rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString)
+    };
     assert_eq!(s, "null");
 }
 
@@ -4862,7 +5064,9 @@ fn test_json_stringify_infinity() {
     let mut ctx = Context::new_small();
     let r = ctx.eval("JSON.stringify(Infinity)").unwrap();
     let ptr = r.heap_ptr().unwrap();
-    let s = unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) };
+    let s = unsafe {
+        rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString)
+    };
     assert_eq!(s, "null");
 }
 
@@ -4871,7 +5075,9 @@ fn test_json_stringify_array() {
     let mut ctx = Context::new_small();
     let r = ctx.eval("JSON.stringify([1, 2, 3])").unwrap();
     let ptr = r.heap_ptr().unwrap();
-    let s = unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) };
+    let s = unsafe {
+        rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString)
+    };
     assert_eq!(s, "[1,2,3]");
 }
 
@@ -4880,7 +5086,9 @@ fn test_json_stringify_object() {
     let mut ctx = Context::new_small();
     let r = ctx.eval("JSON.stringify({a:1,b:2})").unwrap();
     let ptr = r.heap_ptr().unwrap();
-    let s = unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) };
+    let s = unsafe {
+        rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString)
+    };
     assert_eq!(s, "{\"a\":1,\"b\":2}");
 }
 
@@ -4889,7 +5097,9 @@ fn test_json_stringify_nested() {
     let mut ctx = Context::new_small();
     let r = ctx.eval("JSON.stringify({a:[1,{b:2}]})").unwrap();
     let ptr = r.heap_ptr().unwrap();
-    let s = unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) };
+    let s = unsafe {
+        rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString)
+    };
     assert_eq!(s, "{\"a\":[1,{\"b\":2}]}");
 }
 
@@ -4897,11 +5107,13 @@ fn test_json_stringify_nested() {
 fn test_json_stringify_cycle() {
     let mut ctx = Context::new_small();
     // Without try/catch, cycle error propagates as eval error
-    let r = ctx.eval(r#"
+    let r = ctx.eval(
+        r#"
         var a = {};
         a.self = a;
         JSON.stringify(a)
-    "#);
+    "#,
+    );
     assert!(r.is_err());
 }
 
@@ -4910,7 +5122,9 @@ fn test_json_stringify_undefined_in_array() {
     let mut ctx = Context::new_small();
     let r = ctx.eval("JSON.stringify([1, undefined, 3])").unwrap();
     let ptr = r.heap_ptr().unwrap();
-    let s = unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) };
+    let s = unsafe {
+        rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString)
+    };
     assert_eq!(s, "[1,null,3]");
 }
 
@@ -4919,29 +5133,41 @@ fn test_json_stringify_omit_undefined_prop() {
     let mut ctx = Context::new_small();
     let r = ctx.eval("JSON.stringify({a:1,b:undefined,c:3})").unwrap();
     let ptr = r.heap_ptr().unwrap();
-    let s = unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) };
+    let s = unsafe {
+        rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString)
+    };
     assert_eq!(s, "{\"a\":1,\"c\":3}");
 }
 
 #[test]
 fn test_json_round_trip() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let r = ctx
+        .eval(
+            r#"
         var data = JSON.parse('{"name":"rune","values":[1,2,3],"nested":{"a":true,"b":null}}');
         var out = JSON.stringify(data);
         var round = JSON.parse(out);
         round.name
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     let ptr = r.heap_ptr().unwrap();
-    let s = unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) };
+    let s = unsafe {
+        rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString)
+    };
     assert_eq!(s, "rune");
     // Check boolean survived round-trip (can't use + which has a boolean→string bug)
-    let r2 = ctx.eval(r#"
+    let r2 = ctx
+        .eval(
+            r#"
         var data = JSON.parse('{"nested":{"a":true,"b":null}}');
         var out = JSON.stringify(data);
         var round = JSON.parse(out);
         round.nested.a
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert!(r2.to_boolean().unwrap());
 }
 
@@ -4950,7 +5176,9 @@ fn test_json_stringify_empty_object() {
     let mut ctx = Context::new_small();
     let r = ctx.eval("JSON.stringify({})").unwrap();
     let ptr = r.heap_ptr().unwrap();
-    let s = unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) };
+    let s = unsafe {
+        rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString)
+    };
     assert_eq!(s, "{}");
 }
 
@@ -4959,7 +5187,9 @@ fn test_json_stringify_empty_array() {
     let mut ctx = Context::new_small();
     let r = ctx.eval("JSON.stringify([])").unwrap();
     let ptr = r.heap_ptr().unwrap();
-    let s = unsafe { rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString) };
+    let s = unsafe {
+        rune_core::string::HeapString::to_string(ptr as *mut rune_core::string::HeapString)
+    };
     assert_eq!(s, "[]");
 }
 
@@ -5025,8 +5255,14 @@ fn test_string_split_empty_separator() {
 fn test_string_split_space() {
     let mut ctx = Context::new_small();
     assert_eq!(eval_array_len(&mut ctx, r#" "hello world".split(" ") "#), 2);
-    assert_eq!(eval_str(&mut ctx, r#" "hello world".split(" ")[0] "#), "hello");
-    assert_eq!(eval_str(&mut ctx, r#" "hello world".split(" ")[1] "#), "world");
+    assert_eq!(
+        eval_str(&mut ctx, r#" "hello world".split(" ")[0] "#),
+        "hello"
+    );
+    assert_eq!(
+        eval_str(&mut ctx, r#" "hello world".split(" ")[1] "#),
+        "world"
+    );
 }
 
 #[test]
@@ -5040,7 +5276,8 @@ fn test_string_split_consecutive_delimiters() {
 
 fn eval_num(ctx: &mut Context, code: &str) -> f64 {
     let r = ctx.eval(code).unwrap();
-    r.as_smi().map(|n| n as f64)
+    r.as_smi()
+        .map(|n| n as f64)
         .or_else(|| r.as_float64())
         .unwrap_or(f64::NAN)
 }
@@ -5099,11 +5336,13 @@ fn test_parse_float_edge_cases() {
 fn test_builtin_throw_catchable_by_try_catch() {
     let mut ctx = Context::new_small();
     let r = ctx
-        .eval(r#"
+        .eval(
+            r#"
             var caught = 0;
             try { JSON.parse("{invalid"); } catch(e) { caught = 1; }
             caught;
-        "#)
+        "#,
+        )
         .unwrap();
     assert_eq!(r.as_smi(), Some(1), "try/catch should catch builtin throw");
 }
@@ -5119,61 +5358,85 @@ fn test_builtin_throw_propagates_without_handler() {
 fn test_builtin_throw_does_not_infect_subsequent_code() {
     let mut ctx = Context::new_small();
     let r = ctx
-        .eval(r#"
+        .eval(
+            r#"
             try { JSON.parse("{invalid"); } catch (e) {}
             42;
-        "#)
+        "#,
+        )
         .unwrap();
-    assert_eq!(r.as_smi(), Some(42), "execution should resume after caught builtin throw");
+    assert_eq!(
+        r.as_smi(),
+        Some(42),
+        "execution should resume after caught builtin throw"
+    );
 }
 
 #[test]
 fn test_json_stringify_cycle_still_propagates() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let r = ctx.eval(
+        r#"
         var a = {};
         a.self = a;
         JSON.stringify(a)
-    "#);
-    assert!(r.is_err(), "cycle in JSON.stringify should still propagate without try/catch");
+    "#,
+    );
+    assert!(
+        r.is_err(),
+        "cycle in JSON.stringify should still propagate without try/catch"
+    );
 }
 
 #[test]
 fn test_json_stringify_cycle_catchable() {
     let mut ctx = Context::new_small();
     let r = ctx
-        .eval(r#"
+        .eval(
+            r#"
             var a = {};
             a.self = a;
             var caught = 0;
             try { JSON.stringify(a); } catch (e) { caught = 1; }
             caught;
-        "#)
+        "#,
+        )
         .unwrap();
-    assert_eq!(r.as_smi(), Some(1), "try/catch should catch cycle in JSON.stringify");
+    assert_eq!(
+        r.as_smi(),
+        Some(1),
+        "try/catch should catch cycle in JSON.stringify"
+    );
 }
 
 #[test]
 fn test_async_basic() {
     let mut ctx = Context::new_small();
     let r = ctx
-        .eval(r#"
+        .eval(
+            r#"
             var result = 0;
             async function f() {
                 result = 42;
             }
             var p = f();
             result;
-        "#)
+        "#,
+        )
         .unwrap();
-    assert_eq!(r.as_smi(), Some(42), "async function should execute body synchronously until first await");
+    assert_eq!(
+        r.as_smi(),
+        Some(42),
+        "async function should execute body synchronously until first await"
+    );
 }
 
 #[test]
 fn test_async_await_basic() {
     let mut ctx = Context::new_small();
     let r = ctx
-        .eval(r#"
+        .eval(
+            r#"
             var result = 0;
             async function f() {
                 result = 10;
@@ -5182,16 +5445,22 @@ fn test_async_await_basic() {
             }
             var p = f();
             result;
-        "#)
+        "#,
+        )
         .unwrap();
-    assert_eq!(r.as_smi(), Some(10), "await should suspend execution; result should be 10");
+    assert_eq!(
+        r.as_smi(),
+        Some(10),
+        "await should suspend execution; result should be 10"
+    );
 }
 
 #[test]
 fn test_async_await_chaining() {
     let mut ctx = Context::new_small();
     let r = ctx
-        .eval(r#"
+        .eval(
+            r#"
             var results = [];
             async function f() {
                 results.push(1);
@@ -5203,9 +5472,14 @@ fn test_async_await_chaining() {
             }
             var p = f();
             results.length;
-        "#)
+        "#,
+        )
         .unwrap();
-    assert_eq!(r.as_smi(), Some(1), "await chains: only first push before first await");
+    assert_eq!(
+        r.as_smi(),
+        Some(1),
+        "await chains: only first push before first await"
+    );
 }
 
 #[test]
@@ -5214,14 +5488,20 @@ fn test_promise_finally_fulfilled_passthrough() {
     // .finally on a fulfilled promise: the handler fires, and the original value
     // passes through (not the handler's return value).
     let r = ctx
-        .eval(r#"
+        .eval(
+            r#"
             var x = 0;
             var p = Promise.resolve(42);
             p.finally(function() { x = 1; return 999; });
             x;
-        "#)
+        "#,
+        )
         .unwrap();
-    assert_eq!(r.as_smi(), Some(1), "finally handler should fire on fulfilled promise");
+    assert_eq!(
+        r.as_smi(),
+        Some(1),
+        "finally handler should fire on fulfilled promise"
+    );
 }
 
 #[test]
@@ -5230,14 +5510,20 @@ fn test_promise_finally_rejected_passthrough() {
     // .finally on a rejected promise: the handler fires, and the original reason
     // passes through (the chained promise rejects with the original reason).
     let r = ctx
-        .eval(r#"
+        .eval(
+            r#"
             var x = 0;
             var p = Promise.reject(99);
             p.finally(function() { x = 1; });
             x;
-        "#)
+        "#,
+        )
         .unwrap();
-    assert_eq!(r.as_smi(), Some(1), "finally handler should fire on rejected promise");
+    assert_eq!(
+        r.as_smi(),
+        Some(1),
+        "finally handler should fire on rejected promise"
+    );
 }
 
 #[test]
@@ -5246,127 +5532,199 @@ fn test_promise_finally_non_callable() {
     // .finally with a non-callable argument: passthrough the original value
     // without calling any handler.
     let r = ctx
-        .eval(r#"
+        .eval(
+            r#"
             var x = 0;
             Promise.resolve(42).finally(undefined);
             x;
-        "#)
+        "#,
+        )
         .unwrap();
-    assert_eq!(r.as_smi(), Some(0), "non-callable finally should not fire handler");
+    assert_eq!(
+        r.as_smi(),
+        Some(0),
+        "non-callable finally should not fire handler"
+    );
 }
 
 #[test]
 fn test_regex_literal() {
     let mut ctx = Context::new_small();
     let r = ctx
-        .eval(r#"
+        .eval(
+            r#"
             var r = /abc/;
             typeof r;
-        "#)
+        "#,
+        )
         .unwrap();
-    assert!(r.heap_ptr().is_some(), "typeof regex literal should return a string");
+    assert!(
+        r.heap_ptr().is_some(),
+        "typeof regex literal should return a string"
+    );
 }
 
 #[test]
 fn test_regex_replace_simple() {
     let mut ctx = Context::new_small();
-    assert_eq!(eval_str(&mut ctx, r#""hello world".replace(/world/, "there")"#), "hello there");
+    assert_eq!(
+        eval_str(&mut ctx, r#""hello world".replace(/world/, "there")"#),
+        "hello there"
+    );
 }
 
 #[test]
 fn test_regex_replace_with_dollar() {
     let mut ctx = Context::new_small();
-    assert_eq!(eval_str(&mut ctx, r#""hello world".replace(/world/, "($&)")"#), "hello (world)");
+    assert_eq!(
+        eval_str(&mut ctx, r#""hello world".replace(/world/, "($&)")"#),
+        "hello (world)"
+    );
 }
 
 #[test]
 fn test_regex_replace_backtick() {
     let mut ctx = Context::new_small();
-    assert_eq!(eval_str(&mut ctx, r#""hello world".replace(/world/, "$`")"#), "hello hello ");
+    assert_eq!(
+        eval_str(&mut ctx, r#""hello world".replace(/world/, "$`")"#),
+        "hello hello "
+    );
 }
 
 #[test]
 fn test_regex_replace_dot() {
     let mut ctx = Context::new_small();
-    assert_eq!(eval_str(&mut ctx, r#""hello.world".replace(/\./, "-")"#), "hello-world");
+    assert_eq!(
+        eval_str(&mut ctx, r#""hello.world".replace(/\./, "-")"#),
+        "hello-world"
+    );
 }
 
 #[test]
 fn test_regex_replace_no_match() {
     let mut ctx = Context::new_small();
-    assert_eq!(eval_str(&mut ctx, r#""hello world".replace(/xyz/, "there")"#), "hello world");
+    assert_eq!(
+        eval_str(&mut ctx, r#""hello world".replace(/xyz/, "there")"#),
+        "hello world"
+    );
 }
 
 #[test]
 fn test_regex_replace_all_simple() {
     let mut ctx = Context::new_small();
-    assert_eq!(eval_str(&mut ctx, r#""a.b.c".replaceAll(/\./g, "-")"#), "a-b-c");
+    assert_eq!(
+        eval_str(&mut ctx, r#""a.b.c".replaceAll(/\./g, "-")"#),
+        "a-b-c"
+    );
 }
 
 #[test]
 fn test_regex_replace_all_with_dollar() {
     let mut ctx = Context::new_small();
-    assert_eq!(eval_str(&mut ctx, r#""hello world hello".replaceAll(/hello/g, "($&)")"#), "(hello) world (hello)");
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            r#""hello world hello".replaceAll(/hello/g, "($&)")"#
+        ),
+        "(hello) world (hello)"
+    );
 }
 
 #[test]
 fn test_regex_replace_capture_dollar_1() {
     let mut ctx = Context::new_small();
-    assert_eq!(eval_str(&mut ctx, r#""hello world".replace(/(\w+)/, "$1")"#), "hello world");
+    assert_eq!(
+        eval_str(&mut ctx, r#""hello world".replace(/(\w+)/, "$1")"#),
+        "hello world"
+    );
 }
 
 #[test]
 fn test_regex_replace_capture_swap() {
     let mut ctx = Context::new_small();
-    assert_eq!(eval_str(&mut ctx, r#""hello world".replace(/(\w+) (\w+)/, "$2 $1")"#), "world hello");
+    assert_eq!(
+        eval_str(&mut ctx, r#""hello world".replace(/(\w+) (\w+)/, "$2 $1")"#),
+        "world hello"
+    );
 }
 
 #[test]
 fn test_regex_replace_capture_nested() {
     let mut ctx = Context::new_small();
-    assert_eq!(eval_str(&mut ctx, r#""abc".replace(/(a(b)c)/, "[$1][$2]")"#), "[abc][b]");
+    assert_eq!(
+        eval_str(&mut ctx, r#""abc".replace(/(a(b)c)/, "[$1][$2]")"#),
+        "[abc][b]"
+    );
 }
 
 #[test]
 fn test_regex_replace_all_capture() {
     let mut ctx = Context::new_small();
-    assert_eq!(eval_str(&mut ctx, r#""a1 b2 c3".replaceAll(/(\w)(\d)/g, "$2$1")"#), "1a 2b 3c");
+    assert_eq!(
+        eval_str(&mut ctx, r#""a1 b2 c3".replaceAll(/(\w)(\d)/g, "$2$1")"#),
+        "1a 2b 3c"
+    );
 }
 
 #[test]
 fn test_regexp_exec_match() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval(r#"
+    let _r = ctx
+        .eval(
+            r#"
         var re = /world/;
         var m = re.exec("hello world");
         m[0];
-    "#).unwrap();
-    assert_eq!(eval_str(&mut ctx, r#"/world/.exec("hello world")[0]"#), "world");
+    "#,
+        )
+        .unwrap();
+    assert_eq!(
+        eval_str(&mut ctx, r#"/world/.exec("hello world")[0]"#),
+        "world"
+    );
 }
 
 #[test]
 fn test_regexp_exec_no_match() {
     let mut ctx = Context::new_small();
-    assert_eq!(ctx.eval(r#"/xyz/.exec("hello world")"#).unwrap().is_null(), true);
+    assert!(
+        ctx.eval(r#"/xyz/.exec("hello world")"#).unwrap().is_null(),
+    );
 }
 
 #[test]
 fn test_regexp_exec_capture() {
     let mut ctx = Context::new_small();
-    assert_eq!(eval_str(&mut ctx, r#"/(\w+) (\w+)/.exec("hello world")[1]"#), "hello");
-    assert_eq!(eval_str(&mut ctx, r#"/(\w+) (\w+)/.exec("hello world")[2]"#), "world");
+    assert_eq!(
+        eval_str(&mut ctx, r#"/(\w+) (\w+)/.exec("hello world")[1]"#),
+        "hello"
+    );
+    assert_eq!(
+        eval_str(&mut ctx, r#"/(\w+) (\w+)/.exec("hello world")[2]"#),
+        "world"
+    );
 }
 
 #[test]
 fn test_regexp_test_true() {
     let mut ctx = Context::new_small();
-    assert_eq!(ctx.eval(r#"/hello/.test("hello world")"#).unwrap().to_boolean(), Some(true));
+    assert_eq!(
+        ctx.eval(r#"/hello/.test("hello world")"#)
+            .unwrap()
+            .to_boolean(),
+        Some(true)
+    );
 }
 
 #[test]
 fn test_regexp_test_false() {
     let mut ctx = Context::new_small();
-    assert_eq!(ctx.eval(r#"/xyz/.test("hello world")"#).unwrap().to_boolean(), Some(false));
+    assert_eq!(
+        ctx.eval(r#"/xyz/.test("hello world")"#)
+            .unwrap()
+            .to_boolean(),
+        Some(false)
+    );
 }
 
 #[test]
@@ -5385,7 +5743,7 @@ fn test_regexp_prototype_flags() {
 }
 
 #[test]
-fn test_regexp_prototype_lastIndex() {
+fn test_regexp_prototype_last_index() {
     let mut ctx = Context::new_small();
     // lastIndex defaults to 0
     assert_eq!(ctx.eval(r#"/hello/.lastIndex"#).unwrap().as_smi(), Some(0));
@@ -5394,13 +5752,25 @@ fn test_regexp_prototype_lastIndex() {
 #[test]
 fn test_regex_replace_function() {
     let mut ctx = Context::new_small();
-    assert_eq!(eval_str(&mut ctx, r#""hello".replace(/l/, function(m) { return "X"; })"#), "heXlo");
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            r#""hello".replace(/l/, function(m) { return "X"; })"#
+        ),
+        "heXlo"
+    );
 }
 
 #[test]
 fn test_regex_replace_function_captures() {
     let mut ctx = Context::new_small();
-    assert_eq!(eval_str(&mut ctx, r#""a1b2c3".replace(/(\d)/, function(m, c1, off, s) { return c1 + c1; })"#), "a11b2c3");
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            r#""a1b2c3".replace(/(\d)/, function(m, c1, off, s) { return c1 + c1; })"#
+        ),
+        "a11b2c3"
+    );
 }
 
 // ---- Thenable Unwrapping Tests ----
@@ -5408,41 +5778,62 @@ fn test_regex_replace_function_captures() {
 #[test]
 fn test_thenable_unwrapping_sync() {
     let mut ctx = Context::new_small();
-    let val = ctx.eval(r#"
+    let val = ctx
+        .eval(
+            r#"
         var side_effect = 0;
         var thenable = { then: function(resolve) { side_effect = 1; resolve(42); } };
         var p = Promise.resolve(thenable);
         side_effect;
-    "#).unwrap();
-    assert_eq!(val.as_smi(), Some(1), ".then should have been called synchronously");
+    "#,
+        )
+        .unwrap();
+    assert_eq!(
+        val.as_smi(),
+        Some(1),
+        ".then should have been called synchronously"
+    );
 }
 
 #[test]
 fn test_thenable_unwrapping_resolve_value() {
     let mut ctx = Context::new_small();
     // First eval: set up thenable, resolve it, chain .then (microtask enqueued)
-    ctx.eval(r#"
+    ctx.eval(
+        r#"
         var thenable = { then: function(resolve) { resolve(42); } };
         var p = Promise.resolve(thenable);
         var resolvedValue;
         p.then(function(v) { resolvedValue = v; });
-    "#).unwrap();
+    "#,
+    )
+    .unwrap();
     // Microtasks are drained at end of execute(); resolvedValue is now 42
     let val = ctx.eval("resolvedValue;").unwrap();
-    assert_eq!(val.as_smi(), Some(42), "promise should be fulfilled with 42");
+    assert_eq!(
+        val.as_smi(),
+        Some(42),
+        "promise should be fulfilled with 42"
+    );
 }
 
 #[test]
 fn test_thenable_unwrapping_non_thenable() {
     let mut ctx = Context::new_small();
-    ctx.eval(r#"
+    ctx.eval(
+        r#"
         var obj = { foo: 'bar' };
         var p = Promise.resolve(obj);
         var result;
         p.then(function(v) { result = v; });
-    "#).unwrap();
+    "#,
+    )
+    .unwrap();
     let val = ctx.eval("result;").unwrap();
-    assert!(val.is_heap_object(), "plain object should be wrapped in promise");
+    assert!(
+        val.is_heap_object(),
+        "plain object should be wrapped in promise"
+    );
 }
 
 // ---- Class Syntax Tests ----
@@ -5455,207 +5846,299 @@ fn class_eval_num(ctx: &mut Context, code: &str) -> i32 {
 #[test]
 fn test_class_basic() {
     let mut ctx = Context::new_small();
-    assert_eq!(class_eval_num(&mut ctx,
-        "class Foo { constructor(x) { this.x = x; } getX() { return this.x; } } var f = new Foo(42); f.getX();"
-    ), 42);
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "class Foo { constructor(x) { this.x = x; } getX() { return this.x; } } var f = new Foo(42); f.getX();"
+        ),
+        42
+    );
 }
 
 #[test]
 fn test_class_no_constructor() {
     let mut ctx = Context::new_small();
-    assert_eq!(class_eval_num(&mut ctx,
-        "class Foo { method() { return 1; } } var f = new Foo(); f.method();"
-    ), 1);
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "class Foo { method() { return 1; } } var f = new Foo(); f.method();"
+        ),
+        1
+    );
 }
 
 #[test]
 fn test_class_multiple_methods() {
     let mut ctx = Context::new_small();
-    assert_eq!(class_eval_num(&mut ctx,
-        "class Calc { constructor(x) { this.val = x; } add(n) { this.val = this.val + n; return this; } get() { return this.val; } } var c = new Calc(10); c.add(5).add(3); c.get();"
-    ), 18);
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "class Calc { constructor(x) { this.val = x; } add(n) { this.val = this.val + n; return this; } get() { return this.val; } } var c = new Calc(10); c.add(5).add(3); c.get();"
+        ),
+        18
+    );
 }
 
 #[test]
 fn test_class_expression() {
     let mut ctx = Context::new_small();
-    assert_eq!(class_eval_num(&mut ctx,
-        "var Foo = class { constructor(x) { this.x = x; } getX() { return this.x; } }; var f = new Foo(99); f.getX();"
-    ), 99);
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "var Foo = class { constructor(x) { this.x = x; } getX() { return this.x; } }; var f = new Foo(99); f.getX();"
+        ),
+        99
+    );
 }
 
 #[test]
 fn test_class_expression_anonymous_direct() {
     let mut ctx = Context::new_small();
-    assert_eq!(class_eval_num(&mut ctx,
-        "var result = new (class { constructor(v) { this.val = v; } getVal() { return this.val; } })(7).getVal(); result;"
-    ), 7);
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "var result = new (class { constructor(v) { this.val = v; } getVal() { return this.val; } })(7).getVal(); result;"
+        ),
+        7
+    );
 }
 
 #[test]
 fn test_class_default_constructor() {
     let mut ctx = Context::new_small();
-    assert_eq!(class_eval_num(&mut ctx,
-        "class Foo { getVal() { return 42; } } new Foo().getVal();"
-    ), 42);
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "class Foo { getVal() { return 42; } } new Foo().getVal();"
+        ),
+        42
+    );
 }
 
 #[test]
 fn test_class_default_derived_constructor() {
     let mut ctx = Context::new_small();
     // Derived class with no explicit constructor should synthesize constructor(...args) { super(...args); }
-    assert_eq!(class_eval_num(&mut ctx,
-        "class Parent { constructor(x) { this.x = x; } getX() { return this.x; } }
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "class Parent { constructor(x) { this.x = x; } getX() { return this.x; } }
          class Child extends Parent { getDouble() { return this.x * 2; } }
          new Child(21).getX();"
-    ), 21);
+        ),
+        21
+    );
     // Multiple args
-    assert_eq!(class_eval_num(&mut ctx,
-        "class Parent { constructor(a, b) { this.sum = a + b; } }
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "class Parent { constructor(a, b) { this.sum = a + b; } }
          class Child extends Parent { }
          new Child(3, 4).sum;"
-    ), 7);
+        ),
+        7
+    );
     // Three-level chain with default constructors
-    assert_eq!(class_eval_num(&mut ctx,
-        "class GrandParent { constructor(x) { this.val = x; } }
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "class GrandParent { constructor(x) { this.val = x; } }
          class Parent extends GrandParent { }
          class Child extends Parent { }
          new Child(42).val;"
-    ), 42);
+        ),
+        42
+    );
 }
 
 #[test]
 fn test_class_method_this_context() {
     let mut ctx = Context::new_small();
-    assert_eq!(class_eval_num(&mut ctx,
-        "class Foo { constructor() { this.val = 1; } inc() { this.val = this.val + 1; return this; } get() { return this.val; } } var a = new Foo(); var b = new Foo(); a.inc(); a.get();"
-    ), 2);
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "class Foo { constructor() { this.val = 1; } inc() { this.val = this.val + 1; return this; } get() { return this.val; } } var a = new Foo(); var b = new Foo(); a.inc(); a.get();"
+        ),
+        2
+    );
 }
 
 #[test]
 fn test_class_extends_basic() {
     let mut ctx = Context::new_small();
-    assert_eq!(class_eval_num(&mut ctx,
-        "class Parent { parentMethod() { return 1; } } class Child extends Parent { } new Child().parentMethod();"
-    ), 1);
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "class Parent { parentMethod() { return 1; } } class Child extends Parent { } new Child().parentMethod();"
+        ),
+        1
+    );
 }
 
 #[test]
 fn test_class_extends_multiple_methods() {
     let mut ctx = Context::new_small();
-    assert_eq!(class_eval_num(&mut ctx,
-        "class Parent { getX() { return 42; } } class Child extends Parent { getY() { return 7; } } var c = new Child(); c.getX() + c.getY();"
-    ), 49);
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "class Parent { getX() { return 42; } } class Child extends Parent { getY() { return 7; } } var c = new Child(); c.getX() + c.getY();"
+        ),
+        49
+    );
 }
 
 #[test]
 fn test_class_extends_prototype_chain() {
     let mut ctx = Context::new_small();
-    assert_eq!(class_eval_num(&mut ctx,
-        "class GrandParent { gp() { return 10; } } class Parent extends GrandParent { p() { return 3; } } class Child extends Parent { c() { return 7; } } var c = new Child(); c.gp() * 10 + c.p() * 100 + c.c();"
-    ), 100 + 300 + 7);
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "class GrandParent { gp() { return 10; } } class Parent extends GrandParent { p() { return 3; } } class Child extends Parent { c() { return 7; } } var c = new Child(); c.gp() * 10 + c.p() * 100 + c.c();"
+        ),
+        100 + 300 + 7
+    );
 }
 
 #[test]
 fn test_class_super_call() {
     let mut ctx = Context::new_small();
-    assert_eq!(class_eval_num(&mut ctx,
-        "class Parent { constructor(x) { this.x = x; } } class Child extends Parent { constructor(x, y) { super(x); this.y = y; } } var c = new Child(10, 20); c.x;"
-    ), 10);
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "class Parent { constructor(x) { this.x = x; } } class Child extends Parent { constructor(x, y) { super(x); this.y = y; } } var c = new Child(10, 20); c.x;"
+        ),
+        10
+    );
 }
 
 #[test]
 fn test_class_super_call_property_setting() {
     let mut ctx = Context::new_small();
-    assert_eq!(class_eval_num(&mut ctx,
-        "class Parent { constructor(a, b) { this.a = a; this.b = b; } }
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "class Parent { constructor(a, b) { this.a = a; this.b = b; } }
          class Child extends Parent { constructor(a, b, c) { super(a, b); this.c = c; } }
          new Child(10, 20, 30).c;"
-    ), 30);
+        ),
+        30
+    );
 }
 
 #[test]
 fn test_class_super_call_no_args() {
     let mut ctx = Context::new_small();
-    assert_eq!(class_eval_num(&mut ctx,
-        "class Parent { constructor() { this.x = 5; } }
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "class Parent { constructor() { this.x = 5; } }
          class Child extends Parent { constructor() { super(); } }
          new Child().x;"
-    ), 5);
+        ),
+        5
+    );
 }
 
 #[test]
 fn test_class_super_multi_level() {
     let mut ctx = Context::new_small();
-    assert_eq!(class_eval_num(&mut ctx,
-        "class GrandParent { constructor(x) { this.gx = x; } }
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "class GrandParent { constructor(x) { this.gx = x; } }
          class Parent extends GrandParent { constructor(x, y) { super(x); this.py = y; } }
          class Child extends Parent { constructor(x, y, z) { super(x, y); this.cz = z; } }
          var c = new Child(1, 2, 3); c.gx + c.py + c.cz;"
-    ), 6);
+        ),
+        6
+    );
 }
 
 #[test]
 fn test_class_super_prop_read() {
     let mut ctx = Context::new_small();
-    assert_eq!(class_eval_num(&mut ctx,
-        "class Parent { getX() { return 42; } }
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "class Parent { getX() { return 42; } }
          class Child extends Parent { constructor() { super(); }
            method() { return this.getX(); } }
          new Child().method();"
-    ), 42);
+        ),
+        42
+    );
 }
 
 #[test]
 fn test_class_super_method_call() {
     let mut ctx = Context::new_small();
-    assert_eq!(class_eval_num(&mut ctx,
-        "class Parent { add(a, b) { return a + b; } }
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "class Parent { add(a, b) { return a + b; } }
          class Child extends Parent { sum(a, b) { return super.add(a, b); } }
          new Child().sum(3, 4);"
-    ), 7);
+        ),
+        7
+    );
 }
 
 #[test]
 fn test_class_super_method_multi_level() {
     let mut ctx = Context::new_small();
-    assert_eq!(class_eval_num(&mut ctx,
-        "class GrandParent { base() { return 1; } }
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "class GrandParent { base() { return 1; } }
          class Parent extends GrandParent { parent() { return super.base() + 10; } }
          class Child extends Parent { child() { return super.parent() + 100; } }
          new Child().child();"
-    ), 111);
+        ),
+        111
+    );
 }
 
 #[test]
 fn test_class_super_method() {
     let mut ctx = Context::new_small();
-    assert_eq!(class_eval_num(&mut ctx,
-        "class Parent { getX() { return 42; } }
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "class Parent { getX() { return 42; } }
          class Child extends Parent { constructor() { super(); }
            method() { return super.getX(); } }
          new Child().method();"
-    ), 42);
+        ),
+        42
+    );
 }
 
 #[test]
 fn test_class_super_method_with_args() {
     let mut ctx = Context::new_small();
-    assert_eq!(class_eval_num(&mut ctx,
-        "class Parent { add(a, b) { return a + b; } }
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "class Parent { add(a, b) { return a + b; } }
          class Child extends Parent { sum(a, b) { return super.add(a, b); } }
          new Child().sum(3, 4);"
-    ), 7);
+        ),
+        7
+    );
 }
 
 #[test]
 fn test_class_super_prop_read_data() {
     let mut ctx = Context::new_small();
-    assert_eq!(class_eval_num(&mut ctx,
-        "class Parent { constructor() { this.val = 99; } getVal() { return this.val; } }
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "class Parent { constructor() { this.val = 99; } getVal() { return this.val; } }
          class Child extends Parent { constructor() { super(); } read() { return super.getVal(); } }
          new Child().read();"
-    ), 99);
+        ),
+        99
+    );
 }
 
 #[test]
@@ -5664,9 +6147,13 @@ fn test_class_static_method() {
     let r = ctx.eval(
         "class Foo { static greet() { return 42; } }
          var r = Foo.greet();
-         r;"
+         r;",
     );
-    assert_eq!(r.unwrap().as_smi(), Some(42), "static method should return 42");
+    assert_eq!(
+        r.unwrap().as_smi(),
+        Some(42),
+        "static method should return 42"
+    );
 }
 
 #[test]
@@ -5676,7 +6163,7 @@ fn test_class_static_multiple_methods() {
         "class Calc { static add(a, b) { return a + b; } static mul(a, b) { return a * b; } }
          var r1 = Calc.add(3, 4);
          var r2 = Calc.mul(3, 4);
-         r1 + r2;"
+         r1 + r2;",
     );
     assert_eq!(r.unwrap().as_smi(), Some(19), "3+4 + 3*4 = 19");
 }
@@ -5688,9 +6175,13 @@ fn test_class_static_method_this() {
     let r = ctx.eval(
         "class Foo { static getThis() { return this; } }
          var t = Foo.getThis();
-         t === Foo;"
+         t === Foo;",
     );
-    assert_eq!(r.unwrap().to_boolean(), Some(true), "this should be the constructor");
+    assert_eq!(
+        r.unwrap().to_boolean(),
+        Some(true),
+        "this should be the constructor"
+    );
 }
 
 #[test]
@@ -5699,122 +6190,162 @@ fn test_class_static_with_instance() {
     // Test that static methods can create instances via new (in separate eval)
     let r = ctx.eval(
         "class Foo { constructor(x) { this.x = x; } static create(x) { return new Foo(x); } }
-         undefined;"
+         undefined;",
     );
     assert!(r.is_ok());
     let r = ctx.eval("Foo.create(42).x;");
-    assert_eq!(r.unwrap().as_smi(), Some(42), "static factory should return 42");
+    assert_eq!(
+        r.unwrap().as_smi(),
+        Some(42),
+        "static factory should return 42"
+    );
 }
 
 #[test]
 fn test_class_super_prop_assign() {
     let mut ctx = Context::new_small();
     // super.prop = val should write to this (child instance)
-    assert_eq!(class_eval_num(&mut ctx,
-        "class Parent { getX() { return 10; } }
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "class Parent { getX() { return 10; } }
          class Child extends Parent { constructor() { super(); }
            method() { super.x = 42; return this.x; } }
          new Child().method();"
-    ), 42);
+        ),
+        42
+    );
 }
 
 #[test]
 fn test_class_super_prop_assign_overrides_parent() {
     let mut ctx = Context::new_small();
     // super.prop = val on a parent property should shadow it on the child
-    assert_eq!(class_eval_num(&mut ctx,
-        "class Parent { constructor() { this.val = 1; } }
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "class Parent { constructor() { this.val = 1; } }
          class Child extends Parent { constructor() { super(); }
            method() { super.val = 99; return this.val; } }
          var c = new Child();
          c.method();"
-    ), 99);
+        ),
+        99
+    );
 }
 
 #[test]
 fn test_class_getter_simple() {
     let mut ctx = Context::new_small();
     // Simple getter: get prop() { return expr; }
-    assert_eq!(class_eval_num(&mut ctx,
-        "class Foo { get prop() { return 42; } }
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "class Foo { get prop() { return 42; } }
          var f = new Foo();
          f.prop;"
-    ), 42);
+        ),
+        42
+    );
 }
 
 #[test]
 fn test_class_getter_setter() {
     let mut ctx = Context::new_small();
     // Getter and setter for same property
-    assert_eq!(class_eval_num(&mut ctx,
-        "class Foo { constructor() { this._x = 0; }
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "class Foo { constructor() { this._x = 0; }
            get x() { return this._x; }
            set x(v) { this._x = v; } }
          var f = new Foo();
          f.x = 10;
          f.x;"
-    ), 10);
+        ),
+        10
+    );
 }
 
 #[test]
 fn test_class_getter_no_setter() {
     let mut ctx = Context::new_small();
     // Getter without setter — assignment does not shadow the accessor (per spec)
-    assert_eq!(class_eval_num(&mut ctx,
-        "class Foo { get x() { return 1; } }
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "class Foo { get x() { return 1; } }
          var f = new Foo();
          f.x = 2;
          f.x;"
-    ), 1);
+        ),
+        1
+    );
 }
 
 #[test]
 fn test_class_static_getter() {
     let mut ctx = Context::new_small();
     // Static getter
-    assert_eq!(class_eval_num(&mut ctx,
-        "class Foo { static get count() { return 42; } }
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "class Foo { static get count() { return 42; } }
          Foo.count;"
-    ), 42);
+        ),
+        42
+    );
 }
 
 #[test]
 fn test_class_getter_this() {
     let mut ctx = Context::new_small();
     // Getter `this` refers to the instance
-    assert_eq!(class_eval_num(&mut ctx,
-        "class Foo { constructor(v) { this.val = v; }
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "class Foo { constructor(v) { this.val = v; }
            get doubled() { return this.val * 2; } }
          var f = new Foo(21);
          f.doubled;"
-    ), 42);
+        ),
+        42
+    );
 }
 
 #[test]
 fn test_class_setter_this() {
     let mut ctx = Context::new_small();
     // Setter `this` refers to the instance
-    assert_eq!(class_eval_num(&mut ctx,
-        "class Foo { constructor() { this._x = 0; }
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "class Foo { constructor() { this._x = 0; }
            set x(v) { this._x = v + 1; }
            get x() { return this._x; } }
          var f = new Foo();
          f.x = 10;
          f.x;"
-    ), 11);
+        ),
+        11
+    );
 }
 
 #[test]
 fn test_class_super_compound_assign() {
     let mut ctx = Context::new_small();
     // super.prop += val reads from parent prototype, writes to this
-    assert_eq!(class_eval_num(&mut ctx,
-        "class Parent { }
+    assert_eq!(
+        class_eval_num(
+            &mut ctx,
+            "class Parent { }
          Parent.prototype.val = 5;
          class Child extends Parent { constructor() { super(); }
            method() { super.val += 10; return this.val; } }
          new Child().method();"
-    ), 15);
+        ),
+        15
+    );
 }
 
 #[test]
@@ -5824,14 +6355,19 @@ fn test_private_member_access_error() {
     let result = ctx.eval("class Foo { method() { return this.#x; } } new Foo().method();");
     assert!(result.is_err(), "private member access should error");
     let err = result.unwrap_err();
-    assert!(err.contains("class body"), "error should mention class body: {}", err);
+    assert!(
+        err.contains("class body"),
+        "error should mention class body: {}",
+        err
+    );
 }
 
 #[test]
 fn test_private_field_syntax_works() {
     let mut ctx = Context::new_small();
     // Private field declaration in class body is now supported
-    let result = ctx.eval("class Foo { #x = 1; get() { return this.#x; } } var f = new Foo(); f.get();");
+    let result =
+        ctx.eval("class Foo { #x = 1; get() { return this.#x; } } var f = new Foo(); f.get();");
     assert!(result.is_ok(), "private field should work: {:?}", result);
     assert_eq!(result.unwrap().as_smi(), Some(1));
 }
@@ -5843,5 +6379,9 @@ fn test_private_member_write_error() {
     let result = ctx.eval("class Foo { method() { this.#x = 1; } } new Foo().method();");
     assert!(result.is_err());
     let err = result.unwrap_err();
-    assert!(err.contains("class body"), "error should mention class body: {}", err);
+    assert!(
+        err.contains("class body"),
+        "error should mention class body: {}",
+        err
+    );
 }

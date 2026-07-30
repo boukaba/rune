@@ -13,8 +13,8 @@ pub mod object;
 pub mod promise;
 pub mod regexp;
 pub mod shape;
-pub mod string_object;
 pub mod string;
+pub mod string_object;
 pub mod value;
 
 pub mod prelude {

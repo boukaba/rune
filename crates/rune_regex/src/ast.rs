@@ -9,7 +9,10 @@ pub enum RegexExpr {
     Plus(Box<RegexExpr>),
     Optional(Box<RegexExpr>),
     Group(Box<RegexExpr>, Option<usize>),
-    CharClass { negated: bool, ranges: Vec<(char, char)> },
+    CharClass {
+        negated: bool,
+        ranges: Vec<(char, char)>,
+    },
     AnchorStart,
     AnchorEnd,
     Backref(usize),

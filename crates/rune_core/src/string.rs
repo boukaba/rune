@@ -65,10 +65,10 @@ impl HeapString {
                         continue;
                     }
                 }
-                if !(0xDC00..=0xDFFF).contains(&cp)
-                    && let Some(c) = char::from_u32(cp)
-                {
-                    s.push(c);
+                if !(0xDC00..=0xDFFF).contains(&cp) {
+                    if let Some(c) = char::from_u32(cp) {
+                        s.push(c);
+                    }
                 }
                 i += 1;
             }

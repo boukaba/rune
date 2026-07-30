@@ -9,7 +9,11 @@ pub struct State {
 #[derive(Clone, Debug)]
 pub enum Edge {
     Char(char, usize),
-    CharClass { negated: bool, ranges: Vec<(char, char)>, target: usize },
+    CharClass {
+        negated: bool,
+        ranges: Vec<(char, char)>,
+        target: usize,
+    },
     Epsilon(usize),
     Dot(usize),
     Save(usize, usize),
@@ -23,11 +27,18 @@ pub struct Nfa {
 
 fn alloc_state(states: &mut Vec<State>) -> usize {
     let id = states.len();
-    states.push(State { is_match: false, edges: Vec::new() });
+    states.push(State {
+        is_match: false,
+        edges: Vec::new(),
+    });
     id
 }
 
-fn compile_expr(expr: &RegexExpr, states: &mut Vec<State>, group_count: &mut usize) -> (usize, usize) {
+fn compile_expr(
+    expr: &RegexExpr,
+    states: &mut Vec<State>,
+    group_count: &mut usize,
+) -> (usize, usize) {
     match expr {
         RegexExpr::Empty => {
             let s = alloc_state(states);
@@ -120,7 +131,9 @@ fn compile_expr(expr: &RegexExpr, states: &mut Vec<State>, group_count: &mut usi
                 let (s_in, s_out) = compile_expr(inner, states, group_count);
                 let s_save_end = alloc_state(states);
                 states[s_save_end].is_match = true;
-                states[s_save_start].edges.push(Edge::Save(slot_start, s_in));
+                states[s_save_start]
+                    .edges
+                    .push(Edge::Save(slot_start, s_in));
                 states[s_out].edges.push(Edge::Save(slot_end, s_save_end));
                 states[s_out].is_match = false;
                 (s_save_start, s_save_end)
@@ -132,7 +145,11 @@ fn compile_expr(expr: &RegexExpr, states: &mut Vec<State>, group_count: &mut usi
             let s1 = alloc_state(states);
             let s2 = alloc_state(states);
             states[s2].is_match = true;
-            states[s1].edges.push(Edge::CharClass { negated: *negated, ranges: ranges.clone(), target: s2 });
+            states[s1].edges.push(Edge::CharClass {
+                negated: *negated,
+                ranges: ranges.clone(),
+                target: s2,
+            });
             (s1, s2)
         }
         RegexExpr::AnchorStart | RegexExpr::AnchorEnd | RegexExpr::Backref(_) => {
@@ -155,5 +172,9 @@ pub fn compile(expr: &RegexExpr) -> Nfa {
     states[s_inner_end].edges.push(Edge::Save(1, s_end));
     states[s_inner_end].is_match = false;
 
-    Nfa { start: s_start, states, num_captures: group_count }
+    Nfa {
+        start: s_start,
+        states,
+        num_captures: group_count,
+    }
 }

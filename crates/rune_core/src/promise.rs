@@ -30,13 +30,17 @@ impl Promise {
         let ptr = unsafe {
             if (*(ptr as *const GcHeader)).is_forwarded() {
                 (*(ptr as *const GcHeader)).forwarding_addr()
-            } else { ptr }
+            } else {
+                ptr
+            }
         };
         // Re-extract proto AFTER GC (it may have been moved)
         let proto_resolved = proto.map(|p| unsafe {
             if (*(p as *const GcHeader)).is_forwarded() {
                 (*(p as *const GcHeader)).forwarding_addr()
-            } else { p }
+            } else {
+                p
+            }
         });
         unsafe {
             let state_ptr = ptr.add(std::mem::size_of::<GcHeader>()) as *mut u32;
@@ -56,7 +60,9 @@ impl Promise {
     }
 
     pub unsafe fn set_state(ptr: *mut u8, s: u32) {
-        unsafe { *(ptr.add(std::mem::size_of::<GcHeader>()) as *mut u32) = s; }
+        unsafe {
+            *(ptr.add(std::mem::size_of::<GcHeader>()) as *mut u32) = s;
+        }
     }
 
     pub unsafe fn result(ptr: *mut u8) -> Value {
@@ -64,7 +70,9 @@ impl Promise {
     }
 
     pub unsafe fn set_result(ptr: *mut u8, v: Value) {
-        unsafe { *(ptr.add(std::mem::size_of::<GcHeader>() + 8) as *mut Value) = v; }
+        unsafe {
+            *(ptr.add(std::mem::size_of::<GcHeader>() + 8) as *mut Value) = v;
+        }
     }
 
     pub unsafe fn prototype(ptr: *mut u8) -> *mut u8 {
@@ -72,7 +80,9 @@ impl Promise {
     }
 
     pub unsafe fn set_prototype(ptr: *mut u8, proto: *mut u8) {
-        unsafe { *(ptr.add(std::mem::size_of::<GcHeader>() + 16) as *mut *mut u8) = proto; }
+        unsafe {
+            *(ptr.add(std::mem::size_of::<GcHeader>() + 16) as *mut *mut u8) = proto;
+        }
     }
 
     pub unsafe fn reactions(ptr: *mut u8) -> *mut u8 {

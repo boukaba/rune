@@ -338,11 +338,11 @@ impl Lexer {
                                 .chars
                                 .get(self.pos..self.pos + 2)
                                 .map(|s| s.iter().collect::<String>());
-                            if let Some(hex) = hex
-                                && let Ok(codepoint) = u32::from_str_radix(&hex, 16)
-                            {
-                                value.push(char::from_u32(codepoint).unwrap_or('\u{FFFD}'));
-                                self.pos += 2;
+                            if let Some(hex) = hex {
+                                if let Ok(codepoint) = u32::from_str_radix(&hex, 16) {
+                                    value.push(char::from_u32(codepoint).unwrap_or('\u{FFFD}'));
+                                    self.pos += 2;
+                                }
                             }
                         }
                         Some('u') => {
@@ -368,11 +368,11 @@ impl Lexer {
                                     .chars
                                     .get(self.pos..self.pos + 4)
                                     .map(|s| s.iter().collect::<String>());
-                                if let Some(hex) = hex
-                                    && let Ok(codepoint) = u32::from_str_radix(&hex, 16)
-                                {
-                                    value.push(char::from_u32(codepoint).unwrap_or('\u{FFFD}'));
-                                    self.pos += 4;
+                                if let Some(hex) = hex {
+                                    if let Ok(codepoint) = u32::from_str_radix(&hex, 16) {
+                                        value.push(char::from_u32(codepoint).unwrap_or('\u{FFFD}'));
+                                        self.pos += 4;
+                                    }
                                 }
                             }
                         }
@@ -422,11 +422,11 @@ impl Lexer {
                             .chars
                             .get(self.pos..self.pos + 2)
                             .map(|s| s.iter().collect::<String>());
-                        if let Some(hex) = hex
-                            && let Ok(codepoint) = u32::from_str_radix(&hex, 16)
-                        {
-                            value.push(char::from_u32(codepoint).unwrap_or('\u{FFFD}'));
-                            self.pos += 2;
+                        if let Some(hex) = hex {
+                            if let Ok(codepoint) = u32::from_str_radix(&hex, 16) {
+                                value.push(char::from_u32(codepoint).unwrap_or('\u{FFFD}'));
+                                self.pos += 2;
+                            }
                         }
                     }
                     Some('u') => {
@@ -451,11 +451,11 @@ impl Lexer {
                                 .chars
                                 .get(self.pos..self.pos + 4)
                                 .map(|s| s.iter().collect::<String>());
-                            if let Some(hex) = hex
-                                && let Ok(codepoint) = u32::from_str_radix(&hex, 16)
-                            {
-                                value.push(char::from_u32(codepoint).unwrap_or('\u{FFFD}'));
-                                self.pos += 4;
+                            if let Some(hex) = hex {
+                                if let Ok(codepoint) = u32::from_str_radix(&hex, 16) {
+                                    value.push(char::from_u32(codepoint).unwrap_or('\u{FFFD}'));
+                                    self.pos += 4;
+                                }
                             }
                         }
                     }
@@ -503,11 +503,11 @@ impl Lexer {
                             .chars
                             .get(self.pos..self.pos + 2)
                             .map(|s| s.iter().collect::<String>());
-                        if let Some(hex) = hex
-                            && let Ok(codepoint) = u32::from_str_radix(&hex, 16)
-                        {
-                            value.push(char::from_u32(codepoint).unwrap_or('\u{FFFD}'));
-                            self.pos += 2;
+                        if let Some(hex) = hex {
+                            if let Ok(codepoint) = u32::from_str_radix(&hex, 16) {
+                                value.push(char::from_u32(codepoint).unwrap_or('\u{FFFD}'));
+                                self.pos += 2;
+                            }
                         }
                     }
                     Some('u') => {
@@ -532,11 +532,11 @@ impl Lexer {
                                 .chars
                                 .get(self.pos..self.pos + 4)
                                 .map(|s| s.iter().collect::<String>());
-                            if let Some(hex) = hex
-                                && let Ok(codepoint) = u32::from_str_radix(&hex, 16)
-                            {
-                                value.push(char::from_u32(codepoint).unwrap_or('\u{FFFD}'));
-                                self.pos += 4;
+                            if let Some(hex) = hex {
+                                if let Ok(codepoint) = u32::from_str_radix(&hex, 16) {
+                                    value.push(char::from_u32(codepoint).unwrap_or('\u{FFFD}'));
+                                    self.pos += 4;
+                                }
                             }
                         }
                     }
@@ -941,20 +941,26 @@ impl Lexer {
                     loop {
                         match self.peek() {
                             None | Some('\n') | Some('\r') => {
-                                self.errors.push("Unterminated character class in regex".into());
+                                self.errors
+                                    .push("Unterminated character class in regex".into());
                                 break;
                             }
                             Some('\\') => {
                                 pattern.push('\\');
                                 self.advance();
-                                if let Some(c) = self.advance() { pattern.push(c); }
+                                if let Some(c) = self.advance() {
+                                    pattern.push(c);
+                                }
                             }
                             Some(']') => {
                                 pattern.push(']');
                                 self.advance();
                                 break;
                             }
-                            Some(c) => { pattern.push(c); self.advance(); }
+                            Some(c) => {
+                                pattern.push(c);
+                                self.advance();
+                            }
                         }
                     }
                 }

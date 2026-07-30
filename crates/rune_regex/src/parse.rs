@@ -34,9 +34,18 @@ fn parse_repetition(chars: &[char], i: &mut usize) -> Result<RegexExpr, String> 
     let node = parse_atom(chars, i)?;
     if *i < chars.len() {
         match chars[*i] {
-            '*' => { *i += 1; return Ok(RegexExpr::Star(Box::new(node))); }
-            '+' => { *i += 1; return Ok(RegexExpr::Plus(Box::new(node))); }
-            '?' => { *i += 1; return Ok(RegexExpr::Optional(Box::new(node))); }
+            '*' => {
+                *i += 1;
+                return Ok(RegexExpr::Star(Box::new(node)));
+            }
+            '+' => {
+                *i += 1;
+                return Ok(RegexExpr::Plus(Box::new(node)));
+            }
+            '?' => {
+                *i += 1;
+                return Ok(RegexExpr::Optional(Box::new(node)));
+            }
             _ => {}
         }
     }
@@ -48,9 +57,18 @@ fn parse_atom(chars: &[char], i: &mut usize) -> Result<RegexExpr, String> {
         return Err("Unexpected end of pattern".into());
     }
     match chars[*i] {
-        '.' => { *i += 1; Ok(RegexExpr::Dot) }
-        '^' => { *i += 1; Ok(RegexExpr::AnchorStart) }
-        '$' => { *i += 1; Ok(RegexExpr::AnchorEnd) }
+        '.' => {
+            *i += 1;
+            Ok(RegexExpr::Dot)
+        }
+        '^' => {
+            *i += 1;
+            Ok(RegexExpr::AnchorStart)
+        }
+        '$' => {
+            *i += 1;
+            Ok(RegexExpr::AnchorEnd)
+        }
         '\\' => {
             *i += 1;
             if *i >= chars.len() {
@@ -64,7 +82,13 @@ fn parse_atom(chars: &[char], i: &mut usize) -> Result<RegexExpr, String> {
                     let ranges = match c.to_ascii_lowercase() {
                         'd' => vec![('0', '9')],
                         'w' => vec![('0', '9'), ('A', 'Z'), ('a', 'z'), ('_', '_')],
-                        's' => vec![(' ', ' '), ('\t', '\t'), ('\n', '\n'), ('\r', '\r'), ('\x0C', '\x0C')],
+                        's' => vec![
+                            (' ', ' '),
+                            ('\t', '\t'),
+                            ('\n', '\n'),
+                            ('\r', '\r'),
+                            ('\x0C', '\x0C'),
+                        ],
                         _ => unreachable!(),
                     };
                     Ok(RegexExpr::CharClass { negated, ranges })
@@ -107,11 +131,12 @@ fn parse_atom(chars: &[char], i: &mut usize) -> Result<RegexExpr, String> {
                 return Err("Unclosed group".into());
             }
             *i += 1;
-            Ok(RegexExpr::Group(Box::new(expr), if capturing { Some(0) } else { None }))
+            Ok(RegexExpr::Group(
+                Box::new(expr),
+                if capturing { Some(0) } else { None },
+            ))
         }
-        ')' | '|' | '*' | '+' | '?' => {
-            Err(format!("Unexpected '{}'", chars[*i]))
-        }
+        ')' | '|' | '*' | '+' | '?' => Err(format!("Unexpected '{}'", chars[*i])),
         c => {
             *i += 1;
             Ok(RegexExpr::Literal(c))
@@ -121,7 +146,9 @@ fn parse_atom(chars: &[char], i: &mut usize) -> Result<RegexExpr, String> {
 
 fn parse_char_class(chars: &[char], i: &mut usize) -> Result<RegexExpr, String> {
     let negated = *i < chars.len() && chars[*i] == '^';
-    if negated { *i += 1; }
+    if negated {
+        *i += 1;
+    }
     let mut ranges = Vec::new();
     loop {
         if *i >= chars.len() {
@@ -157,20 +184,26 @@ mod tests {
     #[test]
     fn test_literal() {
         let r = parse_regex("abc").unwrap();
-        assert_eq!(r, RegexExpr::Concat(vec![
-            RegexExpr::Literal('a'),
-            RegexExpr::Literal('b'),
-            RegexExpr::Literal('c'),
-        ]));
+        assert_eq!(
+            r,
+            RegexExpr::Concat(vec![
+                RegexExpr::Literal('a'),
+                RegexExpr::Literal('b'),
+                RegexExpr::Literal('c'),
+            ])
+        );
     }
 
     #[test]
     fn test_alt() {
         let r = parse_regex("a|b").unwrap();
-        assert_eq!(r, RegexExpr::Alt(
-            Box::new(RegexExpr::Literal('a')),
-            Box::new(RegexExpr::Literal('b')),
-        ));
+        assert_eq!(
+            r,
+            RegexExpr::Alt(
+                Box::new(RegexExpr::Literal('a')),
+                Box::new(RegexExpr::Literal('b')),
+            )
+        );
     }
 
     #[test]

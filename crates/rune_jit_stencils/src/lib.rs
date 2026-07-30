@@ -16,8 +16,12 @@ mod tests {
     fn test_stencil_sizes() {
         for s in ALL_STENCILS {
             assert!(!s.bytes.is_empty(), "stencil {} has empty bytes", s.name);
-            assert!(s.bytes.len() % 4 == 0, "stencil {} bytes not aligned to 4: {}",
-                    s.name, s.bytes.len());
+            assert!(
+                s.bytes.len() % 4 == 0,
+                "stencil {} bytes not aligned to 4: {}",
+                s.name,
+                s.bytes.len()
+            );
         }
     }
 
@@ -28,12 +32,17 @@ mod tests {
                 assert!(
                     h.byte_offset < s.bytes.len(),
                     "stencil {} hole offset {} out of bounds (len {})",
-                    s.name, h.byte_offset, s.bytes.len()
+                    s.name,
+                    h.byte_offset,
+                    s.bytes.len()
                 );
                 assert!(
                     h.bit_offset + h.bit_width <= 32,
                     "stencil {} hole at offset {} bits {}+{} exceeds 32",
-                    s.name, h.byte_offset, h.bit_offset, h.bit_width
+                    s.name,
+                    h.byte_offset,
+                    h.bit_offset,
+                    h.bit_width
                 );
             }
         }
@@ -48,9 +57,11 @@ mod tests {
         // Real C stencil compiles to MOVZ W0 (32-bit, sf=0): 0x52800000 | (imm << 5)
         let expected_movz: u32 = 0x52800000 | (0x55_u32 << 5);
         let actual_movz = u32::from_le_bytes(buf[0..4].try_into().unwrap());
-        assert_eq!(actual_movz, expected_movz,
+        assert_eq!(
+            actual_movz, expected_movz,
             "load_smi_16 patched with 42: expected {:#010x}, got {:#010x}",
-            expected_movz, actual_movz);
+            expected_movz, actual_movz
+        );
     }
 
     #[test]
@@ -65,16 +76,20 @@ mod tests {
         // Real C stencil: MOVZ W0 (32-bit, sf=0): 0x52800000 | (imm << 5)
         let expected_movz_low: u32 = 0x52800000 | ((smi_val as u32 & 0xFFFF) << 5);
         let actual_instr0 = u32::from_le_bytes(buf[0..4].try_into().unwrap());
-        assert_eq!(actual_instr0, expected_movz_low,
+        assert_eq!(
+            actual_instr0, expected_movz_low,
             "load_smi_32 first MOVZ: expected {:#010x}, got {:#010x}",
-            expected_movz_low, actual_instr0);
+            expected_movz_low, actual_instr0
+        );
 
         // MOVK W0 (32-bit, sf=0, hw=1): 0x72A00000 | (imm << 5)
         let expected_movk_high: u32 = 0x72A00000 | ((smi_val as u32 >> 16) << 5);
         let actual_instr1 = u32::from_le_bytes(buf[4..8].try_into().unwrap());
-        assert_eq!(actual_instr1, expected_movk_high,
+        assert_eq!(
+            actual_instr1, expected_movk_high,
             "load_smi_32 MOVK upper: expected {:#010x}, got {:#010x}",
-            expected_movk_high, actual_instr1);
+            expected_movk_high, actual_instr1
+        );
     }
 
     #[test]
@@ -84,13 +99,17 @@ mod tests {
                 assert!(
                     lh.byte_offset < s.bytes.len(),
                     "stencil {} link hole offset {} out of bounds (len {})",
-                    s.name, lh.byte_offset, s.bytes.len()
+                    s.name,
+                    lh.byte_offset,
+                    s.bytes.len()
                 );
                 // Verify the referenced helper exists
                 let helper_found = ALL_HELPERS.iter().any(|h| h.name == lh.helper_name);
-                assert!(helper_found,
+                assert!(
+                    helper_found,
                     "stencil {} link hole references unknown helper '{}'",
-                    s.name, lh.helper_name);
+                    s.name, lh.helper_name
+                );
             }
         }
     }

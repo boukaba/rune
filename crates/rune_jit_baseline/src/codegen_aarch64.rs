@@ -17,7 +17,10 @@ use crate::ic::{InlineEntry, InlinePlan, InlineProfile, TraceIcTable};
 use crate::{BailoutPoint, BailoutReason, BailoutTable, CompiledFunction};
 use rune_bytecode::opcode::Opcode;
 use rune_core::value::Value;
-use rune_jit_stencils::{LOAD_CONST_BYTES, LOAD_LOCAL_BYTES, RUNE_LOAD_LOCAL_HELPER, RUNE_PUSH_HELPER, RUNE_STORE_LOCAL_HELPER, STORE_LOCAL_BYTES};
+use rune_jit_stencils::{
+    LOAD_CONST_BYTES, LOAD_LOCAL_BYTES, RUNE_LOAD_LOCAL_HELPER, RUNE_PUSH_HELPER,
+    RUNE_STORE_LOCAL_HELPER, STORE_LOCAL_BYTES,
+};
 
 /// NaN-encoding constants matching rune_core::value.
 const PAYLOAD_MASK: u64 = (1 << 45) - 1;
@@ -340,19 +343,28 @@ impl Aarch64CodeGen {
 
     fn emit_const_stencil(&mut self, val: u64) {
         let start = self.mem.current_offset();
-        for &b in &LOAD_CONST_BYTES[..4] { self.mem.emit_byte(b); }
+        for &b in &LOAD_CONST_BYTES[..4] {
+            self.mem.emit_byte(b);
+        }
         // 64-bit MOVZ (sf=1, opcode 0xD2800000) — patch from 32-bit sf=0 template
-        self.mem.patch_u32(start, 0xD2800000u32 | ((val as u32 & 0xFFFF) << 5));
-        for &b in RUNE_PUSH_HELPER.bytes { self.mem.emit_byte(b); }
+        self.mem
+            .patch_u32(start, 0xD2800000u32 | ((val as u32 & 0xFFFF) << 5));
+        for &b in RUNE_PUSH_HELPER.bytes {
+            self.mem.emit_byte(b);
+        }
         self.stack_depth += 1;
     }
 
     /// Emit LoadLocal stencil: MOVZ + LDR+STR+ADD (load from locals, push).
     fn emit_load_local_stencil(&mut self, offset: u32) {
         let start = self.mem.current_offset();
-        for &b in &LOAD_LOCAL_BYTES[..4] { self.mem.emit_byte(b); }
+        for &b in &LOAD_LOCAL_BYTES[..4] {
+            self.mem.emit_byte(b);
+        }
         self.mem.patch_u32(start, 0xD2800000u32 | (offset << 5));
-        for &b in RUNE_LOAD_LOCAL_HELPER.bytes { self.mem.emit_byte(b); }
+        for &b in RUNE_LOAD_LOCAL_HELPER.bytes {
+            self.mem.emit_byte(b);
+        }
         self.stack_depth += 1;
     }
 
@@ -361,9 +373,13 @@ impl Aarch64CodeGen {
     /// stack_depth unchanged (pop then push nets zero).
     fn emit_store_local_stencil(&mut self, offset: u32) {
         let start = self.mem.current_offset();
-        for &b in &STORE_LOCAL_BYTES[..4] { self.mem.emit_byte(b); }
+        for &b in &STORE_LOCAL_BYTES[..4] {
+            self.mem.emit_byte(b);
+        }
         self.mem.patch_u32(start, 0xD2800000u32 | (offset << 5));
-        for &b in RUNE_STORE_LOCAL_HELPER.bytes { self.mem.emit_byte(b); }
+        for &b in RUNE_STORE_LOCAL_HELPER.bytes {
+            self.mem.emit_byte(b);
+        }
     }
 
     fn push(&mut self) {
@@ -746,18 +762,23 @@ impl Aarch64CodeGen {
                     let bail_label = self.mem.current_offset();
                     {
                         let d_bns = ((bail_label as i64 - b_not_smi as i64) / 4) as u32;
-                        self.mem.patch_u32(b_not_smi, 0xB4000001 | ((d_bns & 0x7FFFF) << 5));
+                        self.mem
+                            .patch_u32(b_not_smi, 0xB4000001 | ((d_bns & 0x7FFFF) << 5));
                         let d_ans = ((bail_label as i64 - a_not_smi as i64) / 4) as u32;
-                        self.mem.patch_u32(a_not_smi, 0xB4000001 | ((d_ans & 0x7FFFF) << 5));
+                        self.mem
+                            .patch_u32(a_not_smi, 0xB4000001 | ((d_ans & 0x7FFFF) << 5));
                         let d_jg = ((bail_label as i64 - ov_jg as i64) / 4) as u32;
-                        self.mem.patch_u32(ov_jg, 0x5400000C | ((d_jg & 0x7FFFF) << 5));
+                        self.mem
+                            .patch_u32(ov_jg, 0x5400000C | ((d_jg & 0x7FFFF) << 5));
                         let d_jl = ((bail_label as i64 - ov_jl as i64) / 4) as u32;
-                        self.mem.patch_u32(ov_jl, 0x5400000B | ((d_jl & 0x7FFFF) << 5));
+                        self.mem
+                            .patch_u32(ov_jl, 0x5400000B | ((d_jl & 0x7FFFF) << 5));
                     }
                     self.emit_inline_bailout(call_bc_idx, BailoutReason::Overflow, pre_call_depth);
                     let done_label = self.mem.current_offset();
                     let d_done = ((done_label as i64 - smi_done as i64) / 4) as u32;
-                    self.mem.patch_u32(smi_done, 0x14000000 | (d_done & 0x03FF_FFFF));
+                    self.mem
+                        .patch_u32(smi_done, 0x14000000 | (d_done & 0x03FF_FFFF));
                     self.push();
                 }
                 _ => {
@@ -1376,7 +1397,8 @@ impl Aarch64CodeGen {
                     let truthy_label = self.mem.current_offset();
                     // Patch B.NE (not Smi → truthy)
                     let nd = ((truthy_label as i64 - patch_not_smi as i64) / 4) as u32;
-                    self.mem.patch_u32(patch_not_smi, 0x54000001 | ((nd & 0x7FFFF) << 5));
+                    self.mem
+                        .patch_u32(patch_not_smi, 0x54000001 | ((nd & 0x7FFFF) << 5));
                 }
                 Opcode::JumpIfTrue => {
                     let target = instr.operands[0] as usize;
@@ -1420,17 +1442,22 @@ impl Aarch64CodeGen {
                     let skip_label = self.mem.current_offset();
                     // Patch all B.EQ placeholders to skip_label
                     let d = ((skip_label as i64 - patch_undef as i64) / 4) as u32;
-                    self.mem.patch_u32(patch_undef, 0x54000000 | ((d & 0x7FFFF) << 5));
+                    self.mem
+                        .patch_u32(patch_undef, 0x54000000 | ((d & 0x7FFFF) << 5));
                     let d = ((skip_label as i64 - patch_null as i64) / 4) as u32;
-                    self.mem.patch_u32(patch_null, 0x54000000 | ((d & 0x7FFFF) << 5));
+                    self.mem
+                        .patch_u32(patch_null, 0x54000000 | ((d & 0x7FFFF) << 5));
                     let d = ((skip_label as i64 - patch_false as i64) / 4) as u32;
-                    self.mem.patch_u32(patch_false, 0x54000000 | ((d & 0x7FFFF) << 5));
+                    self.mem
+                        .patch_u32(patch_false, 0x54000000 | ((d & 0x7FFFF) << 5));
                     let d = ((skip_label as i64 - patch_smi_zero as i64) / 4) as u32;
-                    self.mem.patch_u32(patch_smi_zero, 0x54000000 | ((d & 0x7FFFF) << 5));
+                    self.mem
+                        .patch_u32(patch_smi_zero, 0x54000000 | ((d & 0x7FFFF) << 5));
                     // Patch B.NE (not Smi → truthy: emit_b target, which is before skip_label)
                     let truthy_b_target = skip_label - 4; // emit_b is 1 instruction before skip_label
                     let d = ((truthy_b_target as i64 - patch_not_smi as i64) / 4) as u32;
-                    self.mem.patch_u32(patch_not_smi, 0x54000001 | ((d & 0x7FFFF) << 5));
+                    self.mem
+                        .patch_u32(patch_not_smi, 0x54000001 | ((d & 0x7FFFF) << 5));
                 }
                 Opcode::LoadProperty => {
                     // Computed property access: `obj[key]`.

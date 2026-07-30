@@ -21,14 +21,23 @@ impl Parser {
     fn advance(&mut self) {
         // Update regex_allowed based on current token kind
         // After value-producing tokens, / is division; after operators/keywords, / is regex.
-        self.lexer.regex_allowed = !matches!(self.tok.kind,
-            TokenKind::Number | TokenKind::String | TokenKind::RegExp
-            | TokenKind::Identifier
-            | TokenKind::True | TokenKind::False | TokenKind::Null | TokenKind::This
-            | TokenKind::RParen | TokenKind::RBracket
-            | TokenKind::PlusPlus | TokenKind::MinusMinus
-            | TokenKind::Template | TokenKind::TemplateTail
-            | TokenKind::Hash
+        self.lexer.regex_allowed = !matches!(
+            self.tok.kind,
+            TokenKind::Number
+                | TokenKind::String
+                | TokenKind::RegExp
+                | TokenKind::Identifier
+                | TokenKind::True
+                | TokenKind::False
+                | TokenKind::Null
+                | TokenKind::This
+                | TokenKind::RParen
+                | TokenKind::RBracket
+                | TokenKind::PlusPlus
+                | TokenKind::MinusMinus
+                | TokenKind::Template
+                | TokenKind::TemplateTail
+                | TokenKind::Hash
         );
         self.tok = self.lexer.next_token();
     }
@@ -74,7 +83,9 @@ impl Parser {
     fn parse_statement(&mut self) -> Stmt {
         match self.tok.kind {
             TokenKind::Function => self.parse_function_decl(),
-            TokenKind::Async if self.lexer.peek_token().kind == TokenKind::Function => self.parse_async_function_decl(),
+            TokenKind::Async if self.lexer.peek_token().kind == TokenKind::Function => {
+                self.parse_async_function_decl()
+            }
             TokenKind::Class => self.parse_class_decl(),
             TokenKind::Var | TokenKind::Let | TokenKind::Const => self.parse_var_decl(),
             TokenKind::Return => self.parse_return(),
@@ -323,7 +334,7 @@ impl Parser {
                 };
                 let func = self.parse_function_body(name, false, false, mstart);
                 // Validate getter/setter param counts
-                if is_getter && func.params.len() != 0 {
+                if is_getter && !func.params.is_empty() {
                     self.error("Getter must have 0 parameters".to_string());
                 }
                 if is_setter && func.params.len() != 1 {
@@ -1398,14 +1409,14 @@ impl Parser {
                 let expr = self.parse_expr_comma();
                 self.expect(TokenKind::RParen);
                 // Single-param arrow: (expr) => body
-                if self.tok.kind == TokenKind::Arrow
-                    && let Expr::Identifier(name, id_span) = &expr
-                {
-                    return self.parse_arrow_body(
+                if self.tok.kind == TokenKind::Arrow {
+                    if let Expr::Identifier(name, id_span) = &expr {
+                        return self.parse_arrow_body(
                         vec![Pattern::Identifier(name.clone(), *id_span, None)],
                         None,
                         start,
-                    );
+                        );
+                    }
                 }
                 expr
             }
@@ -1897,20 +1908,43 @@ impl Parser {
                         lhs = Expr::PrivateMember(Box::new(lhs), name, span);
                     } else {
                         let name = if self.tok.kind == TokenKind::Identifier
-                            || matches!(self.tok.kind,
-                                TokenKind::Catch | TokenKind::Finally | TokenKind::Class
-                                | TokenKind::Const | TokenKind::Delete | TokenKind::Do
-                                | TokenKind::Else | TokenKind::Export | TokenKind::Extends
-                                | TokenKind::For | TokenKind::Function | TokenKind::If
-                                | TokenKind::Import | TokenKind::Let | TokenKind::New
-                                | TokenKind::Return | TokenKind::Switch | TokenKind::This
-                                | TokenKind::Throw | TokenKind::Try | TokenKind::Var
-                                | TokenKind::While | TokenKind::Yield | TokenKind::Await
-                                | TokenKind::Async | TokenKind::Default | TokenKind::Case
-                                | TokenKind::Instanceof | TokenKind::In | TokenKind::Void
-                                | TokenKind::Typeof | TokenKind::Break | TokenKind::Continue
-                                | TokenKind::Super)
-                        {
+                            || matches!(
+                                self.tok.kind,
+                                TokenKind::Catch
+                                    | TokenKind::Finally
+                                    | TokenKind::Class
+                                    | TokenKind::Const
+                                    | TokenKind::Delete
+                                    | TokenKind::Do
+                                    | TokenKind::Else
+                                    | TokenKind::Export
+                                    | TokenKind::Extends
+                                    | TokenKind::For
+                                    | TokenKind::Function
+                                    | TokenKind::If
+                                    | TokenKind::Import
+                                    | TokenKind::Let
+                                    | TokenKind::New
+                                    | TokenKind::Return
+                                    | TokenKind::Switch
+                                    | TokenKind::This
+                                    | TokenKind::Throw
+                                    | TokenKind::Try
+                                    | TokenKind::Var
+                                    | TokenKind::While
+                                    | TokenKind::Yield
+                                    | TokenKind::Await
+                                    | TokenKind::Async
+                                    | TokenKind::Default
+                                    | TokenKind::Case
+                                    | TokenKind::Instanceof
+                                    | TokenKind::In
+                                    | TokenKind::Void
+                                    | TokenKind::Typeof
+                                    | TokenKind::Break
+                                    | TokenKind::Continue
+                                    | TokenKind::Super
+                            ) {
                             let t = self.tok.clone();
                             self.advance();
                             Expr::String(t.value.into_boxed_str(), t.span)
@@ -1966,20 +2000,43 @@ impl Parser {
                         lhs = Expr::PrivateMember(Box::new(lhs), name, span);
                     } else {
                         let name = if self.tok.kind == TokenKind::Identifier
-                            || matches!(self.tok.kind,
-                                TokenKind::Catch | TokenKind::Finally | TokenKind::Class
-                                | TokenKind::Const | TokenKind::Delete | TokenKind::Do
-                                | TokenKind::Else | TokenKind::Export | TokenKind::Extends
-                                | TokenKind::For | TokenKind::Function | TokenKind::If
-                                | TokenKind::Import | TokenKind::Let | TokenKind::New
-                                | TokenKind::Return | TokenKind::Switch | TokenKind::This
-                                | TokenKind::Throw | TokenKind::Try | TokenKind::Var
-                                | TokenKind::While | TokenKind::Yield | TokenKind::Await
-                                | TokenKind::Async | TokenKind::Default | TokenKind::Case
-                                | TokenKind::Instanceof | TokenKind::In | TokenKind::Void
-                                | TokenKind::Typeof | TokenKind::Break | TokenKind::Continue
-                                | TokenKind::Super)
-                        {
+                            || matches!(
+                                self.tok.kind,
+                                TokenKind::Catch
+                                    | TokenKind::Finally
+                                    | TokenKind::Class
+                                    | TokenKind::Const
+                                    | TokenKind::Delete
+                                    | TokenKind::Do
+                                    | TokenKind::Else
+                                    | TokenKind::Export
+                                    | TokenKind::Extends
+                                    | TokenKind::For
+                                    | TokenKind::Function
+                                    | TokenKind::If
+                                    | TokenKind::Import
+                                    | TokenKind::Let
+                                    | TokenKind::New
+                                    | TokenKind::Return
+                                    | TokenKind::Switch
+                                    | TokenKind::This
+                                    | TokenKind::Throw
+                                    | TokenKind::Try
+                                    | TokenKind::Var
+                                    | TokenKind::While
+                                    | TokenKind::Yield
+                                    | TokenKind::Await
+                                    | TokenKind::Async
+                                    | TokenKind::Default
+                                    | TokenKind::Case
+                                    | TokenKind::Instanceof
+                                    | TokenKind::In
+                                    | TokenKind::Void
+                                    | TokenKind::Typeof
+                                    | TokenKind::Break
+                                    | TokenKind::Continue
+                                    | TokenKind::Super
+                            ) {
                             let t = self.tok.clone();
                             self.advance();
                             Expr::String(t.value.into_boxed_str(), t.span)

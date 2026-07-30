@@ -245,7 +245,11 @@ impl Emitter {
     fn emit_class(&mut self, class: &ClassNode, for_expr: bool) {
         // 0. Save and set private field names for method sub-emitters
         let _saved_private = self.private_field_names.clone();
-        self.private_field_names = class.private_fields.iter().map(|pf| pf.name.to_string()).collect();
+        self.private_field_names = class
+            .private_fields
+            .iter()
+            .map(|pf| pf.name.to_string())
+            .collect();
 
         // 1. Compile all methods, identify constructor
         let mut constructor_idx = None;
@@ -257,7 +261,8 @@ impl Emitter {
         let mut static_setter_funcs: Vec<(PropKey, usize)> = Vec::new();
 
         for method in &class.methods {
-            let is_constructor = matches!(&method.key, PropKey::Identifier(n) if n.as_ref() == "constructor");
+            let is_constructor =
+                matches!(&method.key, PropKey::Identifier(n) if n.as_ref() == "constructor");
             let func_name = if is_constructor {
                 class.name.clone()
             } else {
@@ -275,11 +280,17 @@ impl Emitter {
             if is_constructor {
                 constructor_idx = Some(idx);
             } else if method.is_getter {
-                if method.is_static { static_getter_funcs.push((method.key.clone(), idx)); }
-                else { getter_funcs.push((method.key.clone(), idx)); }
+                if method.is_static {
+                    static_getter_funcs.push((method.key.clone(), idx));
+                } else {
+                    getter_funcs.push((method.key.clone(), idx));
+                }
             } else if method.is_setter {
-                if method.is_static { static_setter_funcs.push((method.key.clone(), idx)); }
-                else { setter_funcs.push((method.key.clone(), idx)); }
+                if method.is_static {
+                    static_setter_funcs.push((method.key.clone(), idx));
+                } else {
+                    setter_funcs.push((method.key.clone(), idx));
+                }
             } else if method.is_static {
                 static_method_funcs.push((method.key.clone(), idx));
             } else {
@@ -353,10 +364,14 @@ impl Emitter {
         {
             let mut all_acc_names: Vec<PropKey> = Vec::new();
             for (key, _) in &getter_funcs {
-                if !all_acc_names.contains(key) { all_acc_names.push(key.clone()); }
+                if !all_acc_names.contains(key) {
+                    all_acc_names.push(key.clone());
+                }
             }
             for (key, _) in &setter_funcs {
-                if !all_acc_names.contains(key) { all_acc_names.push(key.clone()); }
+                if !all_acc_names.contains(key) {
+                    all_acc_names.push(key.clone());
+                }
             }
             for key in &all_acc_names {
                 let has_getter = getter_funcs.iter().any(|(k, _)| k == key);
@@ -389,20 +404,24 @@ impl Emitter {
         let ctor_idx = constructor_idx.unwrap_or_else(|| {
             let body = if has_heritage {
                 // Derived class default constructor: constructor(...args) { super(...args); }
-                Stmt::Block(vec![
-                    Stmt::Expr(
+                Stmt::Block(
+                    vec![Stmt::Expr(
                         Expr::Call(
                             Box::new(Expr::Super(Span { start: 0, end: 0 })),
                             vec![ArrayElement {
-                                expr: Expr::Identifier(Box::from("args"), Span { start: 0, end: 0 }),
+                                expr: Expr::Identifier(
+                                    Box::from("args"),
+                                    Span { start: 0, end: 0 },
+                                ),
                                 is_spread: true,
                                 span: Span { start: 0, end: 0 },
                             }],
                             Span { start: 0, end: 0 },
                         ),
                         Span { start: 0, end: 0 },
-                    ),
-                ], Span { start: 0, end: 0 })
+                    )],
+                    Span { start: 0, end: 0 },
+                )
             } else {
                 // Base class default constructor: empty body
                 Stmt::Block(vec![], Span { start: 0, end: 0 })
@@ -410,7 +429,11 @@ impl Emitter {
             let synth = FnNode {
                 name: class.name.clone(),
                 params: vec![],
-                rest_param: if has_heritage { Some(Box::from("args")) } else { None },
+                rest_param: if has_heritage {
+                    Some(Box::from("args"))
+                } else {
+                    None
+                },
                 body,
                 is_generator: false,
                 is_async: false,
@@ -428,7 +451,10 @@ impl Emitter {
         if !class.private_fields.is_empty() {
             let ctor_prog = &mut self.nested_funcs[ctor_idx];
             // Find the last Return instruction
-            let return_pos = ctor_prog.instructions.iter().rposition(|i| i.opcode == Opcode::Return);
+            let return_pos = ctor_prog
+                .instructions
+                .iter()
+                .rposition(|i| i.opcode == Opcode::Return);
             let mut inject = Vec::new();
             for (slot, field) in class.private_fields.iter().enumerate() {
                 if !field.is_static {
@@ -442,7 +468,10 @@ impl Emitter {
                     } else {
                         inject.push(Instruction::new(Opcode::LoadUndefined, vec![]));
                     }
-                    inject.push(Instruction::new(Opcode::DefinePrivateField, vec![slot as i64]));
+                    inject.push(Instruction::new(
+                        Opcode::DefinePrivateField,
+                        vec![slot as i64],
+                    ));
                 }
             }
             if let Some(pos) = return_pos {
@@ -453,8 +482,12 @@ impl Emitter {
             } else {
                 // No Return found; append at end
                 ctor_prog.instructions.extend(inject);
-                ctor_prog.instructions.push(Instruction::new(Opcode::LoadUndefined, vec![]));
-                ctor_prog.instructions.push(Instruction::new(Opcode::Return, vec![]));
+                ctor_prog
+                    .instructions
+                    .push(Instruction::new(Opcode::LoadUndefined, vec![]));
+                ctor_prog
+                    .instructions
+                    .push(Instruction::new(Opcode::Return, vec![]));
             }
         }
 
@@ -500,11 +533,11 @@ impl Emitter {
         // 7. Link: Constructor.__proto__ = SuperClass (for extends, static inheritance)
         if let Some(sslot) = heritage_super_slot {
             if let Some(ctor_slot) = save_slot {
-                self.emit(Opcode::LoadLocal, vec![ctor_slot as i64]);
-                self.emit(Opcode::LoadStringConst, vec![proto_proto_idx]);
-                self.emit(Opcode::LoadLocal, vec![sslot as i64]);
-                self.emit(Opcode::StoreProperty, vec![]);
-                self.emit(Opcode::Pop, vec![]);
+            self.emit(Opcode::LoadLocal, vec![ctor_slot as i64]);
+            self.emit(Opcode::LoadStringConst, vec![proto_proto_idx]);
+            self.emit(Opcode::LoadLocal, vec![sslot as i64]);
+            self.emit(Opcode::StoreProperty, vec![]);
+            self.emit(Opcode::Pop, vec![]);
             }
         }
 
@@ -527,23 +560,35 @@ impl Emitter {
             {
                 let mut all_acc_names: Vec<PropKey> = Vec::new();
                 for (key, _) in &static_getter_funcs {
-                    if !all_acc_names.contains(key) { all_acc_names.push(key.clone()); }
+                    if !all_acc_names.contains(key) {
+                        all_acc_names.push(key.clone());
+                    }
                 }
                 for (key, _) in &static_setter_funcs {
-                    if !all_acc_names.contains(key) { all_acc_names.push(key.clone()); }
+                    if !all_acc_names.contains(key) {
+                        all_acc_names.push(key.clone());
+                    }
                 }
                 for key in &all_acc_names {
                     self.emit(Opcode::LoadLocal, vec![ctor_slot as i64]);
                     let has_getter = static_getter_funcs.iter().any(|(k, _)| k == key);
                     let has_setter = static_setter_funcs.iter().any(|(k, _)| k == key);
                     if has_getter {
-                        let gi = static_getter_funcs.iter().find(|(k, _)| k == key).unwrap().1;
+                        let gi = static_getter_funcs
+                            .iter()
+                            .find(|(k, _)| k == key)
+                            .unwrap()
+                            .1;
                         self.emit(Opcode::MakeFunction, vec![gi as i64]);
                     } else {
                         self.emit(Opcode::LoadUndefined, vec![]);
                     }
                     if has_setter {
-                        let si = static_setter_funcs.iter().find(|(k, _)| k == key).unwrap().1;
+                        let si = static_setter_funcs
+                            .iter()
+                            .find(|(k, _)| k == key)
+                            .unwrap()
+                            .1;
                         self.emit(Opcode::MakeFunction, vec![si as i64]);
                     } else {
                         self.emit(Opcode::LoadUndefined, vec![]);
@@ -562,8 +607,10 @@ impl Emitter {
         }
 
         // 8. For expressions: restore constructor onto stack from the saved slot.
-        if for_expr && let Some(idx) = save_slot {
-            self.emit(Opcode::LoadLocal, vec![idx as i64]);
+        if for_expr {
+            if let Some(idx) = save_slot {
+                self.emit(Opcode::LoadLocal, vec![idx as i64]);
+            }
         }
 
         // 9. Restore parent's private field names (may be empty for top-level)
@@ -847,9 +894,11 @@ impl Emitter {
                 }
                 // Collect per-iteration let variable info
                 let mut per_iteration_vars: Vec<(String, usize)> = Vec::new();
-                if init_has_scope && let Some(scope) = self.lexical_scopes.last() {
-                    for b in scope {
-                        per_iteration_vars.push((b.name.clone(), b.slot));
+                if init_has_scope {
+                    if let Some(scope) = self.lexical_scopes.last() {
+                        for b in scope {
+                            per_iteration_vars.push((b.name.clone(), b.slot));
+                        }
                     }
                 }
                 let per_iteration_count = per_iteration_vars.len();
@@ -1004,11 +1053,11 @@ impl Emitter {
                             self.emit(op, vec![slot as i64]);
                             // If this lexical binding is captured in a block env,
                             // copy from lexical slot to env slot so closures see it
-                            if let Some((depth, env_slot)) = self.env_captured_slot(&decl.name)
-                                && depth == 0
-                            {
-                                self.emit(Opcode::LoadLexical, vec![slot as i64]);
-                                self.emit(Opcode::StoreCaptured, vec![0, env_slot as i64]);
+                            if let Some((depth, env_slot)) = self.env_captured_slot(&decl.name) {
+                                if depth == 0 {
+                                    self.emit(Opcode::LoadLexical, vec![slot as i64]);
+                                    self.emit(Opcode::StoreCaptured, vec![0, env_slot as i64]);
+                                }
                             }
                         }
                     }
@@ -1133,10 +1182,10 @@ impl Emitter {
             Stmt::ForIn(lhs, obj, body, _) => {
                 // for (var key in obj) { body }
                 // Register the loop variable as a local
-                if let Expr::Identifier(name, _) = lhs.as_ref()
-                    && !self.locals.contains(&name.to_string())
-                {
-                    self.locals.push(name.to_string());
+                if let Expr::Identifier(name, _) = lhs.as_ref() {
+                    if !self.locals.contains(&name.to_string()) {
+                        self.locals.push(name.to_string());
+                    }
                 }
                 self.emit_expression(obj);
                 self.emit(Opcode::ForInInit, vec![]);
@@ -1660,7 +1709,10 @@ impl Emitter {
             Expr::PrivateMember(obj, name, _) => {
                 self.emit_expression(obj);
                 // Resolve #name to slot index from private_field_names
-                let slot_idx = self.private_field_names.iter().position(|n| n.as_str() == name.as_ref())
+                let slot_idx = self
+                    .private_field_names
+                    .iter()
+                    .position(|n| n.as_str() == name.as_ref())
                     .unwrap_or(0);
                 self.emit(Opcode::LoadPrivateProperty, vec![slot_idx as i64]);
             }
@@ -1726,7 +1778,10 @@ impl Emitter {
                 Expr::PrivateMember(obj, name, _) => {
                     self.emit_expression(obj);
                     self.emit_expression(value);
-                    let slot_idx = self.private_field_names.iter().position(|n| n.as_str() == name.as_ref())
+                    let slot_idx = self
+                        .private_field_names
+                        .iter()
+                        .position(|n| n.as_str() == name.as_ref())
                         .unwrap_or(0);
                     self.emit(Opcode::StorePrivateProperty, vec![slot_idx as i64]);
                 }
@@ -1822,7 +1877,10 @@ impl Emitter {
                         }
                     }
                     Expr::PrivateMember(obj, name, _) => {
-                        let slot_idx = self.private_field_names.iter().position(|n| n.as_str() == name.as_ref())
+                        let slot_idx = self
+                            .private_field_names
+                            .iter()
+                            .position(|n| n.as_str() == name.as_ref())
                             .unwrap_or(0);
                         // Desugar: obj.#name += rhs
                         // Stack: [obj, obj] → LoadPrivateProperty → [obj, value] → binop → [obj, result] → StorePrivateProperty
@@ -1920,7 +1978,8 @@ impl Emitter {
             }
             Expr::RegExp(pattern, flags, _) => {
                 let idx = self.regex_pool.len();
-                self.regex_pool.push((pattern.to_string(), flags.to_string()));
+                self.regex_pool
+                    .push((pattern.to_string(), flags.to_string()));
                 self.emit(Opcode::LoadRegExp, vec![idx as i64]);
             }
             Expr::Super(_) => {
@@ -1982,11 +2041,11 @@ impl Emitter {
     fn enter_lexical_scope(&mut self, stmts: &[Stmt], _count: usize) {
         let mut bindings = Vec::new();
         for stmt in stmts {
-            if let Stmt::Var(kind, decls, _) = stmt
-                && matches!(kind, VarKind::Let | VarKind::Const)
-            {
-                for decl in decls {
-                    self.collect_lexical_bindings(&decl.pattern, &decl.name, &mut bindings);
+            if let Stmt::Var(kind, decls, _) = stmt {
+                if matches!(kind, VarKind::Let | VarKind::Const) {
+                    for decl in decls {
+                        self.collect_lexical_bindings(&decl.pattern, &decl.name, &mut bindings);
+                    }
                 }
             }
         }

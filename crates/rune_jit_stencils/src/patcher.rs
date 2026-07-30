@@ -5,14 +5,13 @@
 //! Link holes (B/BL relocations to runtime helpers) are resolved based on the
 //! emitted position of each helper in the JIT buffer.
 
+use crate::{HelperDef, HoleDef, StencilDef};
 use std::collections::HashMap;
-use crate::{HoleDef, StencilDef, HelperDef};
 
 /// Write a value into a bit field of a 32-bit word at the given byte offset.
 fn patch_bits(buf: &mut [u8], byte_offset: usize, bit_offset: u8, bit_width: u8, value: u64) {
     let range = &mut buf[byte_offset..byte_offset + 4];
-    let word = <&mut [u8; 4]>::try_from(range)
-        .expect("hole byte_offset out of bounds");
+    let word = <&mut [u8; 4]>::try_from(range).expect("hole byte_offset out of bounds");
     let mut val = u32::from_le_bytes(*word);
     let mask = (1u32 << bit_width) - 1;
     val &= !(mask << bit_offset);
@@ -26,12 +25,15 @@ fn patch_bits(buf: &mut [u8], byte_offset: usize, bit_offset: u8, bit_width: u8,
 /// The 26-bit signed offset is in instruction units (divided by 4).
 fn patch_link(buf: &mut [u8], byte_offset: usize, link_offset: i64) {
     let offset_in_instrs = (link_offset / 4) as i32;
-    assert!((-1 << 25..(1 << 25)).contains(&offset_in_instrs),
-        "branch offset {} out of 26-bit signed range at byte_offset {}", offset_in_instrs, byte_offset);
+    assert!(
+        (-1 << 25..(1 << 25)).contains(&offset_in_instrs),
+        "branch offset {} out of 26-bit signed range at byte_offset {}",
+        offset_in_instrs,
+        byte_offset
+    );
 
     let range = &mut buf[byte_offset..byte_offset + 4];
-    let word = <&mut [u8; 4]>::try_from(range)
-        .expect("link hole byte_offset out of bounds");
+    let word = <&mut [u8; 4]>::try_from(range).expect("link hole byte_offset out of bounds");
     let mut val = u32::from_le_bytes(*word);
     // Bits 25:0 = branch offset (26-bit signed, in instruction units)
     val &= !0x03FFFFFFu32;
@@ -48,21 +50,38 @@ pub fn patch_stencil_into(
     holes: &[HoleDef],
     hole_values: &[u64],
 ) {
-    assert_eq!(holes.len(), hole_values.len(),
-        "stencil patching: {} holes but {} values", holes.len(), hole_values.len());
+    assert_eq!(
+        holes.len(),
+        hole_values.len(),
+        "stencil patching: {} holes but {} values",
+        holes.len(),
+        hole_values.len()
+    );
 
     let dest = &mut buf[offset..offset + stencil_bytes.len()];
     dest.copy_from_slice(stencil_bytes);
 
     for (hole, value) in holes.iter().zip(hole_values.iter()) {
-        patch_bits(buf, offset + hole.byte_offset, hole.bit_offset, hole.bit_width, *value);
+        patch_bits(
+            buf,
+            offset + hole.byte_offset,
+            hole.bit_offset,
+            hole.bit_width,
+            *value,
+        );
     }
 }
 
 /// Patch a stencil in-place (modifies the byte slice directly).
 pub fn patch_stencil(buf: &mut [u8], holes: &[HoleDef], hole_values: &[u64]) {
     for (hole, value) in holes.iter().zip(hole_values.iter()) {
-        patch_bits(buf, hole.byte_offset, hole.bit_offset, hole.bit_width, *value);
+        patch_bits(
+            buf,
+            hole.byte_offset,
+            hole.bit_offset,
+            hole.bit_width,
+            *value,
+        );
     }
 }
 
@@ -95,7 +114,11 @@ pub struct StencilPatcher<'a> {
 
 impl<'a> StencilPatcher<'a> {
     pub fn new(buf: &'a mut [u8]) -> Self {
-        Self { buf, offset: 0, helper_offsets: HashMap::new() }
+        Self {
+            buf,
+            offset: 0,
+            helper_offsets: HashMap::new(),
+        }
     }
 
     /// Emit a helper's body bytes and record its position for link resolution.
@@ -111,14 +134,23 @@ impl<'a> StencilPatcher<'a> {
         self.write_raw(stencil.bytes);
 
         // Patch value holes (immediates in MOVZ/MOVK).
-        patch_stencil(&mut self.buf[stencil_start..stencil_start + stencil.bytes.len()],
-                      stencil.holes, hole_values);
+        patch_stencil(
+            &mut self.buf[stencil_start..stencil_start + stencil.bytes.len()],
+            stencil.holes,
+            hole_values,
+        );
 
         // Patch link holes (B/BL relocations to helpers).
         for link in stencil.link_holes {
-            let helper_offset = *self.helper_offsets.get(link.helper_name)
-                .unwrap_or_else(|| panic!("stencil '{}' references helper '{}' which was not emitted",
-                         stencil.name, link.helper_name));
+            let helper_offset = *self
+                .helper_offsets
+                .get(link.helper_name)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "stencil '{}' references helper '{}' which was not emitted",
+                        stencil.name, link.helper_name
+                    )
+                });
             let branch_pc = stencil_start + link.byte_offset;
             let displacement = helper_offset as i64 - branch_pc as i64;
             patch_link(self.buf, branch_pc, displacement);
@@ -168,7 +200,10 @@ mod tests {
         let mut buf = vec![0xFFu8; 4];
         patch_bits(&mut buf, 0, 4, 8, 0);
         let val = u32::from_le_bytes(buf[..4].try_into().unwrap());
-        assert_eq!(val, 0xFFFFF00F, "clearing middle 8 bits preserves outer ones");
+        assert_eq!(
+            val, 0xFFFFF00F,
+            "clearing middle 8 bits preserves outer ones"
+        );
     }
 
     #[test]
@@ -214,7 +249,9 @@ mod tests {
 
     #[test]
     fn test_emit_real_c_stencil_with_link_hole() {
-        use crate::{RUNE_PUSH_HELPER, LOAD_SMI_16_BYTES, LOAD_SMI_16_HOLES, LOAD_SMI_16_LINK_HOLES};
+        use crate::{
+            LOAD_SMI_16_BYTES, LOAD_SMI_16_HOLES, LOAD_SMI_16_LINK_HOLES, RUNE_PUSH_HELPER,
+        };
 
         let stencil = StencilDef {
             name: "load_smi_16",
@@ -239,12 +276,20 @@ mod tests {
 
         // Verify value hole: MOVZ W0, #42 (smi = 85 = 0x55)
         let expected_movz: u32 = 0x52800000 | (0x55u32 << 5);
-        let actual_movz = u32::from_le_bytes(buf[stencil_offset..stencil_offset+4].try_into().unwrap());
-        assert_eq!(actual_movz, expected_movz,
-            "MOVZ encoding: expected {:#010x}, got {:#010x}", expected_movz, actual_movz);
+        let actual_movz =
+            u32::from_le_bytes(buf[stencil_offset..stencil_offset + 4].try_into().unwrap());
+        assert_eq!(
+            actual_movz, expected_movz,
+            "MOVZ encoding: expected {:#010x}, got {:#010x}",
+            expected_movz, actual_movz
+        );
 
         // Verify link hole: B instruction targets helper
-        let branch_instr = u32::from_le_bytes(buf[stencil_offset+4..stencil_offset+8].try_into().unwrap());
+        let branch_instr = u32::from_le_bytes(
+            buf[stencil_offset + 4..stencil_offset + 8]
+                .try_into()
+                .unwrap(),
+        );
         let actual_offset = (branch_instr & 0x03FFFFFF) as i32;
         let actual_offset_se = if actual_offset & (1 << 25) != 0 {
             actual_offset | !0x3FFFFFFi32
@@ -252,7 +297,10 @@ mod tests {
             actual_offset
         };
         let expected_disp = (helper_offset as i64 - (stencil_offset + 4) as i64) / 4;
-        assert_eq!(actual_offset_se as i64, expected_disp,
-            "B offset: expected {}, got {}", expected_disp, actual_offset_se);
+        assert_eq!(
+            actual_offset_se as i64, expected_disp,
+            "B offset: expected {}, got {}",
+            expected_disp, actual_offset_se
+        );
     }
 }

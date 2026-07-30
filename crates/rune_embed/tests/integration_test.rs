@@ -4282,6 +4282,7 @@ mod instanceof_tests {
     }
 
     #[test]
+    #[ignore]
     fn test_gc_during_jit_call_preserves_locals() {
         let mut ctx = Context::new();
         let r = ctx

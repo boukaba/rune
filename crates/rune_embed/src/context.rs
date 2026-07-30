@@ -278,6 +278,7 @@ mod tests {
     /// Benchmark: parse+emit vs cache load for a realistic 128-line program.
     /// Run with: cargo test -p rune_embed bench_real_cache --release -- --nocapture
     #[test]
+    #[ignore]
     fn bench_real_cache() {
         let src = r#"
 function range(start, end) { var arr = []; for (var i = start; i < end; i = i + 1) { arr.push(i); } return arr; }

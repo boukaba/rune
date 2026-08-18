@@ -1,6 +1,6 @@
 # Phase F: Inlining for JIT-Compiled Traces — Design
 
-> **Status:** Approved — 5 concerns resolved (see below)
+> **Status:** SHIPPED (2026-08-18) — implemented in v0.2.0 at **~5% actual** (`jit_hot_function_1M` 129 ms → 124 ms), far below the 25–70 ms estimate below: measured call-dispatch overhead was ~6 ns/call, not the estimated ~90 ns. Inliner is correct (316 tests, AFPC round-trip verified) and found a pre-existing silent data-corruption bug (P26: Sub/Mul/Mod Smi-range overflow). Ships behind `--no-inline` (default off) for safety; enabled via `ctx.enable_inlining`. See README §Phase F.
 > **Scope:** v0.2 — inline hot callee JIT code into caller JIT code (traces + function JIT)
 > **Target:** `jit_hot_function_1M`: 129 ms → ~25–70 ms (gap 40× → ~10–22×, unverified — see §6)
 > **Pre-reqs:** `9b1a385` (N=16 IC table, 309 tests passing, clippy-clean)

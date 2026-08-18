@@ -171,13 +171,13 @@ Immutable, content-addressed shapes guarantee O(1) property access at any polymo
 
 ### AOT-First Persistent Compilation (AFPC)
 
-Rune is the only JavaScript engine that caches compiled code across restarts with **permanent validity**. Because shapes are immutable and content-addressed, cached native code never needs invalidation:
+Rune caches compiled code across restarts with **permanent validity by construction**: shapes are immutable and content-addressed, so cached native code never needs an invalidation pass (unlike V8/JSC, whose shape transitions invalidate cached dispatch). Cache format is versioned (`AFPC_VERSION = 2`); any format change requires a bump that invalidates old caches.
 
 1. **First run:** Parse → emit → JIT-compile → persist (bytecode + shapes + ICs + native code)
-2. **Subsequent runs:** mmap cache → begin native execution immediately
-3. **Delta JIT:** New shapes that were never cached before are compiled on-the-fly
+2. **Subsequent runs:** mmap cache → restore shapes/ICs, install native entries, execute immediately (cache load 26µs vs 355µs compile — 13.5×)
+3. **Delta JIT:** uncached code encountered at runtime is compiled on-the-fly by the interpreter's tier-up paths (function JIT + trace compiler). New-shape cache **append** is not yet persisted, and compiled traces are not yet part of the cache.
 
-This makes Rune uniquely suited for serverless: functions can be compiled once during cold start and cached globally, delivering near-zero warm latency.
+This makes Rune uniquely suited for serverless: functions can be compiled once during cold start and cached globally, delivering near-zero warm latency. Native execution currently runs on AArch64; x86-64 JIT codegen is disabled pending a correctness fix.
 
 ## Roadmap
 
@@ -189,7 +189,7 @@ This makes Rune uniquely suited for serverless: functions can be compiled once d
 | **v0.2.0** ✅ | Phase F inlining (5% gain), N=16 IC table, AFPC round-trip with JIT |
 | **v0.3.0** ✅ | Float self-tagging (NaN-boxing), stdlib (JSON round-trip, array methods, string split, parseInt/parseFloat), boolean coercion fix — 387 tests |
 | **v0.4.0** ✅ | 14 builtins: Object.keys/values/entries, Array find/some/every/sort/flat/flatMap/includes/indexOf, String replace/replaceAll, Number(), Function.prototype.call. 393 tests. |
-| **v0.5.0** 🚧 | **Promise**: constructor, `.then`/`.catch`/`.finally`, 3-level chaining, `resolve`/`reject`/`all`/`race`, **microtask queue** with reaction storage. **Async/await**: generator-based desugaring, `async function`/`async () =>`/`await`, synchronous until first await. Parser reserved-word fix. Array/String indexOf. **RegExp**: engine (parse→NFA→PikeVM), capture groups, `$1..$n` expansion, `RegExp.prototype.exec`/`.test`, prototype chain. **Class**: declarations, expressions, `extends`, `super()`, static methods, getter/setter, private fields (`#`). **String.prototype.match/search/split** for RegExp (no @@match/@@search/@@split yet, no RegExp constructor). test262 Promise 46%. 475 tests. |
+| **v0.5.0** 🚧 | **Promise**: constructor, `.then`/`.catch`/`.finally`, 3-level chaining, `resolve`/`reject`/`all`/`race`, **microtask queue** with reaction storage. **Async/await**: generator-based desugaring, `async function`/`async () =>`/`await`, synchronous until first await. Parser reserved-word fix. Array/String indexOf. **RegExp**: engine (parse→NFA→PikeVM), capture groups, `$1..$n` expansion, `RegExp.prototype.exec`/`.test`, prototype chain. **Class**: declarations, expressions, `extends`, `super()`, static methods, getter/setter, private fields (`#`). **String.prototype.match/search/split** for RegExp (no @@match/@@search/@@split yet, no RegExp constructor). test262 Promise 46%. 475/478 integration tests (3 ignored). |
 | **Sprint 18** ✅ | Non-TAG_ARRAY refactor, Function.prototype.call, P27 test262 harness (assert tracking + human-readable errors), P29 builtin throws catchable by try/catch, string same-value fix, boolean display fix, string_slice float edge cases, reduce mutation fix — 392 tests |
 | **v1.0.0** | Test262 >95%, production hardening, fuzzing |
 

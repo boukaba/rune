@@ -82,6 +82,7 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - CI: all 6 jobs green (aarch64 JIT + Clang determinism tests excluded as known issues).
 
 ### Known Gaps
+- **JIT `LoadPropertyIC` shape-miss silently pushes `undefined` instead of bailing** — codegen_aarch64.rs:744. The bailout mechanism (bailout_design.md) is designed but the guard-site emission was never wired; fixes a latent correctness bug. Highest-value JIT item.
 - `test_gc_during_jit_call_preserves_locals` — pre-existing flaky GC/IC test (broken since getter/setter syntax), not a regression from CI fix. Marked `#[ignore]`.
 - `bench_real_cache` — slow benchmark (500 iterations), not a correctness test, skipped on CI
 - aarch64 JIT execution tests — crash with SIGSEGV on both macOS and Linux arm64 (pre-existing, disabled with `#[cfg(any())]`)

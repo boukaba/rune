@@ -1,8 +1,8 @@
 # Multi-Shape Dispatch for Trace JIT — Design
 
-> **Status:** Draft for review (v2 — N=4→N=8, corrected math, fixed NEON sequence)
+> **Status:** SHIPPED (2026-08-18) — implemented as **N=16**, superseding the N=8 proposal: `poly_prop_10shapes_1M` 804 ms → **169 ms** (−79%, from "JIT never runs" to 0 bailouts). Trace-embedded `TraceIcTable` (16 × `TraceIcEntry`) at vm.rs:5553-5568; `slot_offset = 32 + offset*8` assumption on the JSObject layout verified. The N=8/10-shape coverage concern is moot; doc kept for the design rationale and the NEON/SSE validation (P16 stride-bug regression test, ic.rs:279).
 > **Scope:** v0.2 — polymorphic property access within compiled traces
-> **Target:** `poly_prop_10shapes_1M`: 722 ms → ~280–400 ms (N=8, covers 8/10 shapes; gap: 173× → ~70–95×)
+> **Target:** `poly_prop_10shapes_1M`: 722 ms → ~280–400 ms (N=8, covers 8/10 shapes; gap: 173× → ~70–95×) — exceeded (169 ms, N=16)
 > **Pre-reqs:** `c6583db` (green baseline, 307 tests passing, Vec-fix + hardening merged)
 
 ---

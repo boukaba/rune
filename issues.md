@@ -133,9 +133,11 @@
 
 ---
 
-## P11: JIT opcode coverage is Smi-only (47/61 opcodes) 🟡 In progress
+## P11: JIT opcode coverage is Smi-only (47/61 opcodes) 🟡 Superseded (2026-08-18)
 
 **Symptom:** 47/61 opcodes are JIT-compiled. Still missing: LoadStringConst, Call, all object/array/string ops, type conversions.
+
+**Status update (2026-08-18):** Whitelist is now 53 opcodes — `LoadStringConst`, `Call`, `LoadGlobal`/`StoreGlobal`/`IncGlobal`/`DecGlobal`, `TypeOf`, `Mod` all compile natively, but on **AArch64 only**; x86-64 codegen is disabled (known-bad output, SIGTRAP). See task 5b in progress.md.
 
 **Fix:** Baseline JIT supports Smi arithmetic, comparison, bitwise, unary, branches, locals, and property access (LoadPropertyIC). Remaining 32 opcodes are float, string, object, array, call, and type-conversion ops.
 

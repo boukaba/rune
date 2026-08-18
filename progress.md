@@ -2,8 +2,8 @@
 
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
-> **Status:** v0.5.0 🚧 (In Progress — 475 tests, 475 Pass, 5 Ignored, 0 Failed)
-> SIDT validated, AFPC bytecode + native-code cache functional (x86_64 + AArch64), 475 tests, cold start 5× faster than Node
+> **Status:** v0.5.0 🚧 (In Progress — 475/478 integration tests Pass, 3 Ignored; 621 workspace tests Pass, 6 Ignored)
+> SIDT validated, AFPC bytecode + native-code cache functional (AArch64); x86-64 runs bytecode/IC/shape caching only (JIT codegen disabled there). 475 integration tests, cold start 5× faster than Node
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
 
@@ -21,8 +21,17 @@
 - [x] MakeFunction propagates private_name_ids from class-eval frame to Func
 - [x] get_private_name_id falls back to Func.private_name_ids for method calls
 - [x] Fixed: restored Call IC fast path, JIT tier-up, inline profile collection (accidentally deleted)
-- [x] 475/479 integration tests pass (4 pre-existing flaky: 1 GC + 3 IC)
+- [x] 475/478 integration tests pass (3 ignored: 2 `arguments` + 1 flaky GC/IC); 621 workspace tests pass, 6 ignored total
 - **Known gaps**: Static private fields, private methods not yet implemented
+
+## Docs — audit pass (2026-08-18)
+
+- [x] Corrected workspace test counts (621 Pass / 6 Ignored) and integration counts (475/478, 3 Ignored) in header
+- [x] Corrected x86-64 AFPC claim: native-code cache functional on AArch64 only; x86-64 caches bytecode/ICs/shapes, its JIT codegen is disabled (bad output, SIGTRAP)
+- [x] Task 5b: whitelist is now 53 opcodes — floats (Smi-range `LoadFloat64`), `Call`, globals, `LoadStringConst` all covered, but on AArch64 only
+- [x] README AFPC "Delta JIT" claim softened: new-shape cache append (task 5e) not implemented; runtime tier-up compiles uncached code on-the-fly without persistence
+- [x] `bailout_design.md` / `multi_shape_dispatch_design.md` / `phase_f_inlining_design.md` statuses synced with shipped/superseded state
+- [x] AGENTS.md Known Gaps: added unshipped `LoadPropertyIC` shape-miss silent-undefined bug (codegen_aarch64.rs:744)
 
 ---
 > Every implementation decision at every level (lexer, parser, emitter, bytecode, interpreter, builtins, JIT) **must** be verified against the exact ECMA-262 specification language in [`ecma262.md`](./ecma262.md) — **never guess** what the spec says. Each section in `ecma262.md` links to the corresponding URL fragment on `https://tc39.es/ecma262/multipage/`; **always open these URLs via `webfetch` tool** to read the authoritative algorithm steps before implementing. This applies to all phases below.
@@ -1128,7 +1137,7 @@ append delta to cache → future runs use cached delta
 |---|---|---|---|---|
 | **5g** | rkyv bytecode snapshots (zero-copy, skip parse/emit) | 1d | 🟠 P1 | ✅ Done | Source-level cache: `--snapshot` saves to `.rune-cache`, load on next run. First run 340ms → cached 50ms (6.8× faster). rkyv dep added (Archive derive pending). |
 | **5a** | Fix trace compiler Add/Sub/Mul SIGBUS | 0.5d | 🔴 P0 | ✅ Done | Moved JIT value stack from `sp` to VM heap memory (`JitVmState::jit_stack`). All AArch64 trace tests pass. |
-| **5b** | Full function AOT compiler (bytecode→native for all opcodes) | 3d | 🔴 P0 | 🟡 In progress | AArch64 + x86-64 baseline JIT covers 47/61 opcodes (Smi arithmetic, comparison, bitwise, unary, branches, locals, property access, lexical scoping). Missing: floats, strings, calls, globals. `bench_real_cache` is 52s (500× compile+eval of fib/fact/class benchmarks). |
+| **5b** | Full function AOT compiler (bytecode→native for all opcodes) | 3d | 🔴 P0 | 🟡 In progress | Baseline JIT whitelist covers 53 opcodes — incl. `LoadFloat64` (Smi-range only), `Call`, `LoadGlobal`/`StoreGlobal`/`IncGlobal`/`DecGlobal`, `LoadStringConst` — active on AArch64 only; x86-64 codegen disabled (known-bad output, SIGTRAP). `bench_real_cache` is 52s (500× compile+eval of fib/fact/class benchmarks). |
 | **5c** | rkyv cache format: serialize shapes + compiled code + IC + strings | 2d | 🔴 P0 | ✅ Done | `AfpcCache` serializes bytecode, shape table, IC table, and native code blobs. Shape IDs made content-addressed/stable. |
 | **5d** | Cache loader: mmap → validate shape IDs → install entry points | 1d | 🔴 P0 | ✅ Done | `InstalledNativeCode::from_cache` mmap's function blobs into RX memory; `Context::install_native_code` maps func_idx → entry pointer; `MakeFunction` installs cached JIT entry on function creation. |
 | **5e** | Delta JIT: shape miss → record → compile delta → append cache | 2d | 🟠 P1 | ⬜ New |

@@ -1,9 +1,19 @@
 # Rune JIT Bailout Mechanism — Design
 
-> **Status:** Draft for review
+> **Status:** Draft for review — partially superseded, see §0. Core mechanism (PR1) not yet landed.
 > **Author:** Manager review
 > **Scope:** v1 bailout — covers Phases A–D. Phase E (native Call) deferred.
 > **Pre-reqs:** `e557218` (green baseline, 434 tests passing)
+
+---
+
+## 0. Status Update (2026-08-18)
+
+- **Phase E (native JIT Call) has shipped** since this draft was written (`rune_jit_call_helper`, vm.rs:6966) — the "Call always bails in v1" assumption no longer holds.
+- Several Phase B opcodes are now natively compiled: `TypeOf`, `LoadStringConst`, `LoadGlobal`/`StoreGlobal`/`IncGlobal`/`DecGlobal` — all AArch64 only; x86-64 codegen is disabled (known-bad output, SIGTRAP).
+- The `all_smi` entry guard referenced in §6 is now **dead code** (vm.rs:1014); bailout is handled via `JitBailoutState.pending`.
+- **Still open and unfixed — the highest-value item in this doc:** the `LoadPropertyIC` shape-miss path silently pushes `undefined` instead of bailing (codegen_aarch64.rs:744). The bailout side table exists (`BailoutPoint`/`BailoutTable`), but the guard-site emission and helper wiring (§4.3–§6) were never implemented.
+- Line numbers in this doc refer to the codebase at draft time (vm.rs ≈ 4500 lines); the file is now 7694 lines — re-verify before use.
 
 ---
 

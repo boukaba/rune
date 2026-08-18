@@ -89,7 +89,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 - **Modules:** No import/export (ESM)
 - **Classes:** Private fields work for instance fields (no static private fields, private methods yet). No computed property names.
 - **Async/await:** `async function`, `async () =>`, `await expr` — full support with generator-based desugaring, synchronous until first await. 396 tests.
-- **JIT:** 57 opcodes whitelisted (out of 93 total opcode variants). Float Self-Tagging (NaN-boxing) eliminates all float heap allocation — all interpreter float paths use inline `Value::from_float64`. JIT only has float64 Add promotion; Sub/Mul/Div/Mod/Exp bail to interpreter (which handles them via NaN-boxed Values). Phase F inlining shipped (5% on `jit_hot_function_1M`).
+- **JIT:** 57 opcodes whitelisted (out of 93 total opcode variants). Float Self-Tagging (NaN-boxing) eliminates all float heap allocation — all interpreter float paths use inline `Value::from_float64`. JIT has float64 Add promotion; Sub/Div/Mod/Exp bail to interpreter (which handles them via NaN-boxed Values). **Guarded Smi Mul/Mod run natively** with a compile-time `stack_depth` model + `push_raw` bail paths; every guard (shape-miss, Smi-check, overflow, call) bails to the interpreter with a validated pre-opcode snapshot. Phase F inlining shipped (5% on `jit_hot_function_1M`).
 - **Debugger:** No CDP/DevTools
 
 ## Performance (AArch64, M4 Pro)

@@ -3353,6 +3353,14 @@ impl Vm {
                                     self.compile_trace_native(target);
                                 }
                                 let snapshot = std::mem::take(&mut self.jit_bailout.stack_snapshot);
+                                validate_bailout_snapshot(
+                                    self.loop_traces
+                                        .get(&target)
+                                        .and_then(|t| t.bailout_table.as_deref()),
+                                    trace_idx,
+                                    snapshot.len(),
+                                    "trace",
+                                );
                                 self.frames[fi].pc = original_pc;
                                 self.stack.truncate(self.frames[fi].stack_base);
                                 for val in snapshot {
@@ -4298,6 +4306,14 @@ impl Vm {
                                                     let snapshot = std::mem::take(
                                                         &mut self.jit_bailout.stack_snapshot,
                                                     );
+                                                    validate_bailout_snapshot(
+                                                        self.bailout_tables
+                                                            .get(&(jit_entry as usize))
+                                                            .map(|b| b.as_ref()),
+                                                        bailout_bc_pc,
+                                                        snapshot.len(),
+                                                        "call-ic",
+                                                    );
                                                     for val in snapshot {
                                                         self.push(Value::from_raw(val));
                                                     }
@@ -4428,6 +4444,14 @@ impl Vm {
                                             });
                                             let snapshot = std::mem::take(
                                                 &mut self.jit_bailout.stack_snapshot,
+                                            );
+                                            validate_bailout_snapshot(
+                                                self.bailout_tables
+                                                    .get(&(jit_entry as usize))
+                                                    .map(|b| b.as_ref()),
+                                                bailout_bc_pc,
+                                                snapshot.len(),
+                                                "tier-up",
                                             );
                                             for val in snapshot {
                                                 self.push(Value::from_raw(val));
@@ -6873,6 +6897,30 @@ pub extern "C" fn rune_jit_lexical_helper(vm_ptr: *mut u8, op: u64, arg1: u64, a
         }
         LEX_LOAD_THIS => f.this.raw(),
         _ => 0,
+    }
+}
+
+/// Validate that a bailout snapshot matches the recorded stack depth for the
+/// bailout point at `bc_pc` (bailout_design.md §10.4).
+///
+/// Catches codegen off-by-ones loudly instead of silently corrupting the
+/// interpreter stack. Kept enabled in release builds — one lookup + compare
+/// per bailout.
+#[cfg(feature = "jit")]
+fn validate_bailout_snapshot(
+    tables: Option<&rune_jit_baseline::BailoutTable>,
+    bc_pc: usize,
+    snapshot_len: usize,
+    site: &str,
+) {
+    if let Some(table) = tables {
+        if let Some(point) = table.points.iter().find(|p| p.bc_pc == bc_pc) {
+            assert_eq!(
+                snapshot_len, point.stack_depth as usize,
+                "bailout stack-depth mismatch ({site}) at bc_pc {bc_pc}: snapshot {snapshot_len} != recorded {}\npoints: {:#?}",
+                point.stack_depth, table.points
+            );
+        }
     }
 }
 

@@ -2,10 +2,22 @@
 
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
-> **Status:** v0.5.0 🚧 (In Progress — 475/478 integration tests Pass, 3 Ignored; 621 workspace tests Pass, 6 Ignored)
-> SIDT validated, AFPC bytecode + native-code cache functional (AArch64); x86-64 runs bytecode/IC/shape caching only (JIT codegen disabled there). 475 integration tests, cold start 5× faster than Node
+> **Status:** v0.5.0 🚧 (In Progress — 482/482 integration tests Pass, 3 Ignored; workspace tests Pass)
+> SIDT validated, AFPC bytecode + native-code cache functional (AArch64); x86-64 runs bytecode/IC/shape caching only (JIT codegen disabled there). Cold start 2.8× faster than Node
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
+
+## Bailout PR1 — stack-depth validation, shape-miss round-trip, Mul/Mod untag fixes (2026-08-18)
+
+- [x] §10.4: `validate_bailout_snapshot(tables, bc_pc, snapshot_len, site)` asserts snapshot count == recorded `stack_depth` at call-ic, tier-up, and trace bailout sites
+- [x] §8.5: `test_jit_shape_miss_load_bails_to_interpreter` + `test_jit_shape_miss_store_bails_to_interpreter` (aarch64-gated)
+- [x] **Compile-time counter bug fixed**: bail-path pushes used `push()` (perturbs fast-path depth model; recorded depths drifted 2, 4, 8 vs correct 2, 2, 3). Added `push_raw()`; every guard records at **pre-opcode depth**; all terminal bail pushes converted (9 sites + smi-check + overflow + mod div-zero)
+- [x] **Latent StorePropertyIC SEGV fixed**: codegen never untagged the NaN-encoded object pointer before deref (worked only when garbage address happened to be mapped). Now `PAYLOAD_MASK` + `LSL #3` untag; miss path pushes obj/key/value. Caught by the new store shape-miss test
+- [x] **Mul/Mod Smi untag correctness**: Mul's bare `ASR #1` on NaN-encoded Smis kept the 0x3FFC prefix → guard tripped every iteration (correct-but-slow) or silently passed (wrong results). Mod's `AND PAYLOAD_MASK; ASR` mis-handled negative Smis (payload = 2^45+(2A+1)). Both now `AND PAYLOAD_MASK; LSL #19; ASR #20` (sign-extend + ÷2); Mul NaN-encodes after the overflow guard
+- [x] New tests: `test_jit_mul_overflow_bailout_preserves_loop_state` (trace bails at i=32768, interpreter resumes, Σ i² = 114,330,883,345,000 ✓), `test_jit_signed_mul_mod_untag` (negative operands, exact results)
+- [x] Discovery notes: `rune_jit_bailout_helper` hardcodes `reason: BailOnEntry` (cosmetic; real reason is in the bailout table); `let` loops emit CopyLexical/MakeEnv → not JIT-compatible → §10.1 lexical bailout unreachable until whitelist grows
+- [x] All debug instrumentation removed (TRACE depth prints, DEBUG dump blocks); cargo fmt + clippy clean; full suite green (482 integration tests, 3 ignored)
+- **Known gaps**: `let`-loop JIT (lexical state) not supported; trace bails per-iteration once acc is a float (perf, not correctness)
 
 ## CI — Ignored Clang determinism tests (2026-07-30)
 

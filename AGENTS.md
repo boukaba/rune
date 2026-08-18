@@ -79,10 +79,12 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - **CI fix 6 — x86-64 JIT unit tests** — Gated `rune_jit_baseline/src/codegen.rs` test module behind `not(x86_64)`. These 33 tests execute x86-64 JIT codegen and produce wrong results on CI (same root cause as SIGTRAP).
 - **CI fix 7 — bench_real_cache** — Marked as `#[ignore]`. This 500-iteration benchmark hangs on the aarch64 CI runner for >60s. CI now green across all 6 jobs.
 - **CI fix 8 — aarch64 CI test failures** — Fixed 3 issues: (a) codegen.rs test functions & imports gated `#[cfg(x86_64)]` so empty module on aarch64 compiles cleanly; `make_prog` helper gated `x86_64` to avoid unused-function warning. (b) All aarch64 JIT execution tests in `codegen_aarch64.rs` disabled with `#[cfg(any())]` — they crash SIGSEGV on both macOS and Linux arm64, not a regression from CI fix. (c) Pre-commit hook updated with `-A clippy::collapsible_if -A clippy::collapsible_match` to match CI flags.
+- **Bailout PR1 — stack-depth validation + shape-miss round-trip** — §10.4: `validate_bailout_snapshot` (vm.rs) asserts the interpreter-side snapshot count equals the recorded `stack_depth` at the bailout point; wired at call-ic, tier-up, and trace sites. §8.5: shape-miss round-trip tests (`test_jit_shape_miss_load_bails_to_interpreter`, `test_jit_shape_miss_store_bails_to_interpreter`). Fixed a **compile-time counter bug**: bail-path pushes used `self.push()` which perturbs the fast-path depth model — introduced `push_raw()` (pushes without touching the counter) and made every guard record its point at the **pre-opcode depth** (the interpreter's operand depth at that pc). New rule: recorded `stack_depth` must equal the pre-op depth, and the helper snapshot is pre-op because every guard restores exactly what it popped.
+- **Bailout PR1 — latent StorePropertyIC bug (SEGV)** — StorePropertyIC codegen never untagged the NaN-encoded object pointer before dereferencing; it "worked" only because the garbage address was mapped. Now saves the raw object, untags via `PAYLOAD_MASK`+`LSL #3`, and pushes the original on the miss path. Caught by the new store shape-miss test.
+- **Bailout PR1 — Mul/Mod Smi untag correctness** — Mul untagged NaN-encoded Smis with a bare `ASR #1`, which keeps the 0x3FFC prefix bits; the garbage result usually tripped the overflow guard (correct-but-slow, every iteration) but sometimes passed it (silently wrong results). Mod masked the payload but `ASR` mis-handled negative Smis (payload is 2^45+(2A+1)). Both now untag via `AND PAYLOAD_MASK; LSL #19; ASR #20` (sign-extends the 45-bit payload, divides by 2), Mul NaN-encodes the result after the overflow guard, and the trace bails at the Mul only when i·i truly exceeds i31 (verified at i=32768). New tests: `test_jit_mul_overflow_bailout_preserves_loop_state` (bailout mid-loop resumes to correct Σ i² = 114,330,883,345,000) and `test_jit_signed_mul_mod_untag` (negative operands, no arithmetic bailout).
 - CI: all 6 jobs green (aarch64 JIT + Clang determinism tests excluded as known issues).
 
 ### Known Gaps
-- **JIT `LoadPropertyIC` shape-miss silently pushes `undefined` instead of bailing** — codegen_aarch64.rs:744. The bailout mechanism (bailout_design.md) is designed but the guard-site emission was never wired; fixes a latent correctness bug. Highest-value JIT item.
 - `test_gc_during_jit_call_preserves_locals` — pre-existing flaky GC/IC test (broken since getter/setter syntax), not a regression from CI fix. Marked `#[ignore]`.
 - `bench_real_cache` — slow benchmark (500 iterations), not a correctness test, skipped on CI
 - aarch64 JIT execution tests — crash with SIGSEGV on both macOS and Linux arm64 (pre-existing, disabled with `#[cfg(any())]`)
@@ -96,6 +98,7 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - Static private fields and private methods not yet implemented
 
 ### Next Steps — v0.5 (ordered by leverage)
-1. ~~`String.prototype.match`/`search`/`split` for RegExp~~ ✅ DONE
-2. `RegExp()` constructor
-3. Match result array `.index`/`.input` properties
+1. Bailout PR2: `is_jit_compatible` whitelist gaps — `let`-loop closures (CopyLexical/MakeEnv) block JIT tier-up, so §10.1 lexical-state bailout is currently unreachable; also JIT keeps no lexical state (empty `lexical_slots` on the resume frame).
+2. Trace perf: bailout-per-iteration paths (e.g. float-promoted acc in a loop) should re-record or stay native with float ops.
+3. `RegExp()` constructor
+4. Match result array `.index`/`.input` properties

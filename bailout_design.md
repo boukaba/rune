@@ -12,7 +12,9 @@
 - **Phase E (native JIT Call) has shipped** since this draft was written (`rune_jit_call_helper`, vm.rs:6966) — the "Call always bails in v1" assumption no longer holds.
 - Several Phase B opcodes are now natively compiled: `TypeOf`, `LoadStringConst`, `LoadGlobal`/`StoreGlobal`/`IncGlobal`/`DecGlobal` — all AArch64 only; x86-64 codegen is disabled (known-bad output, SIGTRAP).
 - The `all_smi` entry guard referenced in §6 is now **dead code** (vm.rs:1014); bailout is handled via `JitBailoutState.pending`.
-- **Still open and unfixed — the highest-value item in this doc:** the `LoadPropertyIC` shape-miss path silently pushes `undefined` instead of bailing (codegen_aarch64.rs:744). The bailout side table exists (`BailoutPoint`/`BailoutTable`), but the guard-site emission and helper wiring (§4.3–§6) were never implemented.
+- **PR1 landed: stack-depth validation (§10.4) + shape-miss round-trip (§8.5).** The former `LoadPropertyIC` "silently pushes undefined" gap is FIXED — the guard-site emission and helper wiring (§4.3–§6) are implemented for the three property-IC sites, and the interpreter-side snapshot count is validated against the compile-time record at all three bailout sites (call-ic, tier-up, trace).
+- **Key §4.2 correction:** bail-path pushes must NOT use `push()` (they perturb the compile-time fast-path depth model). The codegen now uses `push_raw()` for every bail-path push, and every guard records its point at the **pre-opcode depth** (the interpreter's operand depth at that pc) — the helper snapshot is exactly pre-op because every guard restores what it popped.
+- **Mul/Mod Smi untag fix:** Mul untagged NaN-encoded Smis with a bare `ASR #1` (kept the 0x3FFC prefix → garbage → spurious guard trips and occasional silent wrong results). Fixed with `AND PAYLOAD_MASK; LSL #19; ASR #20` (sign-extends the 45-bit payload) + NaN re-encode after the overflow guard. Same fix applied to Mod for negative operands.
 - Line numbers in this doc refer to the codebase at draft time (vm.rs ≈ 4500 lines); the file is now 7694 lines — re-verify before use.
 
 ---

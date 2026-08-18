@@ -389,6 +389,17 @@ impl Aarch64CodeGen {
         self.stack_depth += 1;
     }
 
+    /// Emit a stack push WITHOUT updating `self.stack_depth`.
+    ///
+    /// Used by bailout paths: their pushes only execute at runtime when the
+    /// guard fails, so they must not perturb the compile-time depth counter
+    /// that models the fast-path (OK) stack.
+    fn push_raw(&mut self) {
+        // x0 -> [jit_stack]; jit_stack += 8
+        str_off(&mut self.mem, 0, JIT_STACK_REG, 0);
+        add_imm(&mut self.mem, JIT_STACK_REG, JIT_STACK_REG, 8);
+    }
+
     fn pop(&mut self) {
         // jit_stack -= 8; x0 <- [jit_stack]
         sub_imm(&mut self.mem, JIT_STACK_REG, JIT_STACK_REG, 8);
@@ -397,10 +408,26 @@ impl Aarch64CodeGen {
     }
 
     /// Record a bailout point at the current bytecode PC.
+    /// `stack_depth` is the JIT stack depth at the moment `bailout_helper`
+    /// will be called — the snapshot the helper captures must match it
+    /// exactly (validated in vm.rs). Guard sites must therefore record AFTER
+    /// restoring the JIT stack to its pre-opcode state.
     fn record_bailout_point(&mut self, bc_pc: usize, reason: BailoutReason) {
         self.bailout_table.push(BailoutPoint {
             bc_pc,
             stack_depth: self.stack_depth,
+            reason,
+        });
+    }
+
+    /// Like `record_bailout_point`, but with an explicit depth. Used when the
+    /// emitted code adjusts the JIT stack register without tracking it via
+    /// `self.stack_depth` (e.g. `emit_inline_bailout` restores the pre-call
+    /// depth by subtracting a delta directly from x22).
+    fn record_bailout_point_at(&mut self, bc_pc: usize, reason: BailoutReason, depth: u32) {
+        self.bailout_table.push(BailoutPoint {
+            bc_pc,
+            stack_depth: depth,
             reason,
         });
     }
@@ -431,22 +458,28 @@ impl Aarch64CodeGen {
 
         // Overflow: restore stack, record bailout, call helper, epilogue
         let ov_label = self.mem.current_offset();
+        let mut restores = 0;
         if let Some(reg) = saved_a {
             mov_reg(&mut self.mem, 0, reg);
-            self.push();
+            self.push_raw();
+            restores += 1;
         }
         if let Some(reg) = saved_b {
             mov_reg(&mut self.mem, 0, reg);
-            self.push();
+            self.push_raw();
+            restores += 1;
         }
-        self.record_bailout_point(bc_idx, BailoutReason::Overflow);
+        // Record the PRE-opcode depth: the restore above re-pushed exactly
+        // the values the opcode popped, so the runtime stack at the helper
+        // call holds pre-op state.
+        self.record_bailout_point_at(bc_idx, BailoutReason::Overflow, self.stack_depth + restores);
         mov_reg(&mut self.mem, 2, JIT_STACK_REG);
         mov_imm64(&mut self.mem, 1, bc_idx as u64);
         mov_reg(&mut self.mem, 0, VM_REG);
         ldr_off(&mut self.mem, 15, VM_REG, 520);
         emit(&mut self.mem, 0xD63F01E0); // BLR x15
         movz(&mut self.mem, 0, 0);
-        self.push();
+        self.push_raw();
         self.emit_epilogue();
 
         // Patch forward jumps
@@ -474,12 +507,17 @@ impl Aarch64CodeGen {
         emit(&mut self.mem, 0x14000000); // B ok (patched)
         let bail_label = self.mem.current_offset();
         // Restore JIT stack: push x0 (current), then saved values
-        self.push(); // push x0 (current failed check)
+        self.push_raw(); // push x0 (current failed check)
         for &reg in saved.iter() {
             mov_reg(&mut self.mem, 0, reg as u32);
-            self.push();
+            self.push_raw();
         }
-        self.record_bailout_point(bc_idx, BailoutReason::NonSmiInput);
+        // Record the PRE-opcode depth (see emit_smi_overflow_bailout_or_continue).
+        self.record_bailout_point_at(
+            bc_idx,
+            BailoutReason::NonSmiInput,
+            self.stack_depth + 1 + saved.len() as u32,
+        );
         // Call bailout_helper(x0=vm_ptr, x1=bc_idx, x2=jit_sp)
         mov_reg(&mut self.mem, 2, JIT_STACK_REG);
         mov_imm64(&mut self.mem, 1, bc_idx as u64);
@@ -487,7 +525,7 @@ impl Aarch64CodeGen {
         ldr_off(&mut self.mem, 15, VM_REG, 520);
         emit(&mut self.mem, 0xD63F01E0); // BLR x15
         movz(&mut self.mem, 0, 0);
-        self.push();
+        self.push_raw();
         self.emit_epilogue();
         let ok_label = self.mem.current_offset();
         // Patch TBZ X0, #0: d = (bail_label - patch_bail) / 4
@@ -791,7 +829,7 @@ impl Aarch64CodeGen {
                     ldr_off(&mut self.mem, 15, VM_REG, 520);
                     emit(&mut self.mem, 0xD63F01E0); // BLR x15
                     movz(&mut self.mem, 0, 0);
-                    self.push();
+                    self.push_raw();
                     self.emit_epilogue();
                     return;
                 }
@@ -805,7 +843,6 @@ impl Aarch64CodeGen {
     /// so the interpreter can re-execute the Call instruction correctly (F-3).
     fn emit_inline_bailout(&mut self, call_bc_idx: usize, reason: BailoutReason, pre_depth: u32) {
         let delta = self.stack_depth.saturating_sub(pre_depth);
-        self.record_bailout_point(call_bc_idx, reason);
         if delta > 0 {
             let bytes = delta * 8;
             if bytes <= 0xFFF {
@@ -815,13 +852,16 @@ impl Aarch64CodeGen {
                 sub_reg(&mut self.mem, 22, 22, 0);
             }
         }
+        // Record AFTER the restore: the helper snapshot will contain exactly
+        // `pre_depth` values (the pre-Call state: this + callee + args).
+        self.record_bailout_point_at(call_bc_idx, reason, pre_depth);
         mov_reg(&mut self.mem, 2, JIT_STACK_REG);
         mov_imm64(&mut self.mem, 1, call_bc_idx as u64);
         mov_reg(&mut self.mem, 0, VM_REG);
         ldr_off(&mut self.mem, 15, VM_REG, 520);
         emit(&mut self.mem, 0xD63F01E0);
         movz(&mut self.mem, 0, 0);
-        self.push();
+        self.push_raw();
         self.emit_epilogue();
     }
 
@@ -951,12 +991,27 @@ impl Aarch64CodeGen {
                     self.pop(); // x0 = a
                     mov_reg(&mut self.mem, 8, 0); // x8 = a
                     self.emit_smi_check(bc_idx, &[9]); // check a; saved=[x9(b)]
-                    emit(&mut self.mem, 0x9341FC00); // ASR x0, x0, #1
-                    emit(&mut self.mem, 0x9341FC21); // ASR x1, x1, #1
+                    // Untag the NaN-encoded Smis to plain signed 64-bit:
+                    // mask to the 45-bit payload, shift the payload's sign
+                    // bit (bit 44) up to bit 63, then arithmetic-shift back
+                    // down — this sign-extends the payload and divides by 2.
+                    // (A bare ASR on the NaN-encoded value keeps the 0x3FFC
+                    // prefix bits and corrupts the result.)
+                    mov_imm64(&mut self.mem, 2, PAYLOAD_MASK);
+                    and_reg(&mut self.mem, 0, 0, 2); // x0 = payload(b)
+                    emit(&mut self.mem, 0xD36DB000); // LSL x0, x0, #19 (UBFM #45,#44)
+                    emit(&mut self.mem, 0x9354FC00); // ASR x0, x0, #20 (SBFM #20,#63)
+                    and_reg(&mut self.mem, 1, 1, 2); // x1 = payload(a)
+                    emit(&mut self.mem, 0xD36DB021); // LSL x1, x1, #19
+                    emit(&mut self.mem, 0x9354FC21); // ASR x1, x1, #20
                     emit(&mut self.mem, 0x9B017C00); // MUL x0, x0, x1
                     emit(&mut self.mem, 0xD37FF800); // LSL x0, x0, #1
                     add_imm(&mut self.mem, 0, 0, 1);
                     self.emit_smi_overflow_bailout_or_continue(bc_idx, Some(8), Some(9));
+                    // NaN-encode the raw Smi result (the guard above compared
+                    // the raw form; the VM requires the QNAN prefix).
+                    mov_imm64(&mut self.mem, 1, QNAN_PREFIX);
+                    orr_reg(&mut self.mem, 0, 0, 1);
                     self.push();
                 }
                 Opcode::Mod => {
@@ -967,12 +1022,18 @@ impl Aarch64CodeGen {
                     self.pop();
                     mov_reg(&mut self.mem, 8, 0);
                     self.emit_smi_check(bc_idx, &[9]);
-                    // Extract real Smi value from NaN-encoded operands
+                    // Extract real Smi values from NaN-encoded operands.
+                    // Mask to the 45-bit payload, shift the payload's sign
+                    // bit (bit 44) to bit 63, then arithmetic-shift back:
+                    // sign-extends the payload and divides by 2 (a bare ASR
+                    // on the masked payload mis-handles negative Smis).
                     mov_imm64(&mut self.mem, 2, PAYLOAD_MASK);
-                    and_reg(&mut self.mem, 0, 0, 2); // x0 = a & PAYLOAD_MASK
-                    and_reg(&mut self.mem, 1, 1, 2); // x1 = b & PAYLOAD_MASK
-                    emit(&mut self.mem, 0x9341FC00); // ASR x0, x0, #1 (untag a)
-                    emit(&mut self.mem, 0x9341FC21); // ASR x1, x1, #1 (untag b)
+                    and_reg(&mut self.mem, 0, 0, 2); // x0 = payload(a)
+                    emit(&mut self.mem, 0xD36DB000); // LSL x0, x0, #19 (UBFM #45,#44)
+                    emit(&mut self.mem, 0x9354FC00); // ASR x0, x0, #20 (SBFM #20,#63)
+                    and_reg(&mut self.mem, 1, 1, 2); // x1 = payload(b)
+                    emit(&mut self.mem, 0xD36DB021); // LSL x1, x1, #19
+                    emit(&mut self.mem, 0x9354FC21); // ASR x1, x1, #20
                     let div_by_zero = self.mem.current_offset();
                     emit(&mut self.mem, 0xB4000001); // CBZ x1, +0
                     emit(&mut self.mem, 0x9AC10C02); // SDIV x2, x0, x1
@@ -986,17 +1047,21 @@ impl Aarch64CodeGen {
                     emit(&mut self.mem, 0x14000000); // B push
                     let div_by_zero_label = self.mem.current_offset();
                     mov_reg(&mut self.mem, 0, 8);
-                    self.push();
+                    self.push_raw();
                     mov_reg(&mut self.mem, 0, 9);
-                    self.push();
-                    self.record_bailout_point(bc_idx, BailoutReason::NonSmiInput);
+                    self.push_raw();
+                    self.record_bailout_point_at(
+                        bc_idx,
+                        BailoutReason::NonSmiInput,
+                        self.stack_depth + 2,
+                    );
                     mov_reg(&mut self.mem, 2, JIT_STACK_REG);
                     mov_imm64(&mut self.mem, 1, bc_idx as u64);
                     mov_reg(&mut self.mem, 0, VM_REG);
                     ldr_off(&mut self.mem, 15, VM_REG, 520);
                     emit(&mut self.mem, 0xD63F01E0); // BLR x15
                     movz(&mut self.mem, 0, 0);
-                    self.push();
+                    self.push_raw();
                     self.emit_epilogue();
                     let push_label = self.mem.current_offset();
                     let d = ((div_by_zero_label as i64 - div_by_zero as i64) / 4) as u32;
@@ -1463,6 +1528,7 @@ impl Aarch64CodeGen {
                     // Computed property access: `obj[key]`.
                     // Fast path: dense array + Smi key → direct element load.
                     // Miss: restore JIT stack, bail to interpreter.
+                    let pre_op_depth = self.stack_depth;
                     self.pop(); // x0 = key
                     mov_reg(&mut self.mem, 7, 0); // x7 = key
                     self.pop(); // x0 = obj
@@ -1521,17 +1587,19 @@ impl Aarch64CodeGen {
                     // === Miss: restore stack, bail to interpreter ===
                     let miss_offset = self.mem.current_offset();
                     mov_reg(&mut self.mem, 0, 8); // x0 = original NaN-encoded obj Value
-                    self.push();
+                    self.push_raw();
                     mov_reg(&mut self.mem, 0, 7);
-                    self.push();
-                    self.record_bailout_point(bc_idx, BailoutReason::ShapeMiss);
+                    self.push_raw();
+                    // Record the PRE-opcode depth: the restore above re-pushed
+                    // the two operands the LoadProperty popped.
+                    self.record_bailout_point_at(bc_idx, BailoutReason::ShapeMiss, pre_op_depth);
                     mov_reg(&mut self.mem, 2, JIT_STACK_REG);
                     mov_imm64(&mut self.mem, 1, bc_idx as u64);
                     mov_reg(&mut self.mem, 0, VM_REG);
                     ldr_off(&mut self.mem, 15, VM_REG, 520);
                     emit(&mut self.mem, 0xD63F01E0); // BLR x15
                     movz(&mut self.mem, 0, 0);
-                    self.push();
+                    self.push_raw();
                     self.emit_epilogue();
                     // done: push result (from fast path or bailout) and continue
                     let done_offset = self.mem.current_offset();
@@ -1563,6 +1631,10 @@ impl Aarch64CodeGen {
                     let offset = instr.operands[1] as u32;
                     let proto_depth = instr.operands.get(2).copied().unwrap_or(0) as u32;
                     let ic_table = self.ic_tables.get(bc_idx).filter(|t| t.count > 1).cloned();
+                    // Capture the pre-opcode depth NOW (before the pops): the
+                    // OK-path push below (and any other emission before the
+                    // miss handler) would otherwise pollute the bailout record.
+                    let pre_op_depth = self.stack_depth;
                     self.pop(); // x0 = key
                     mov_reg(&mut self.mem, 7, 0); // x7 = key (saved for miss path)
                     self.pop(); // x0 = object
@@ -1662,18 +1734,19 @@ impl Aarch64CodeGen {
                                 .patch_u32(patch, (orig & !0x00FF_FFE0) | ((d & 0x7FFFF) << 5));
                         }
                     }
-                    self.record_bailout_point(bc_idx, BailoutReason::ShapeMiss);
+                    // Record the PRE-opcode depth — the restore below re-pushes obj + key.
+                    self.record_bailout_point_at(bc_idx, BailoutReason::ShapeMiss, pre_op_depth);
                     mov_reg(&mut self.mem, 0, 8); // x0 = saved original NaN-encoded Value
-                    self.push(); // push object (original Value)
+                    self.push_raw(); // push object (original Value)
                     mov_reg(&mut self.mem, 0, 7);
-                    self.push();
+                    self.push_raw();
                     mov_reg(&mut self.mem, 2, JIT_STACK_REG);
                     mov_imm64(&mut self.mem, 1, bc_idx as u64);
                     mov_reg(&mut self.mem, 0, VM_REG);
                     ldr_off(&mut self.mem, 15, VM_REG, 520);
                     emit(&mut self.mem, 0xD63F01E0);
                     movz(&mut self.mem, 0, 0);
-                    self.push();
+                    self.push_raw();
                     self.emit_epilogue();
                     let done_offset = self.mem.current_offset();
                     for &patch in &done_patches {
@@ -1695,12 +1768,17 @@ impl Aarch64CodeGen {
                     let offset = instr.operands[1] as u32;
                     let _proto_depth = instr.operands.get(2).copied().unwrap_or(0) as u32;
                     let ic_table = self.ic_tables.get(bc_idx).filter(|t| t.count > 1).cloned();
+                    // Capture the pre-opcode depth NOW (before the pops): the
+                    // OK-path push below (and any other emission before the
+                    // miss handler) would otherwise pollute the bailout record.
+                    let pre_op_depth = self.stack_depth;
                     self.pop(); // x0 = value
                     mov_reg(&mut self.mem, 1, 0); // x1 = value
                     self.pop(); // x0 = key
                     mov_reg(&mut self.mem, 7, 0); // x7 = key (saved for miss path)
                     self.pop(); // x0 = object
-                    mov_reg(&mut self.mem, 2, 0); // x2 = object
+                    mov_reg(&mut self.mem, 2, 0); // x2 = object (NaN-encoded, for guards)
+                    mov_reg(&mut self.mem, 8, 0); // x8 = original object Value (saved for miss)
                     movz(&mut self.mem, 3, 1);
                     emit(&mut self.mem, 0xEA03005F); // TST x2, x3
                     let patch_smi = self.mem.current_offset();
@@ -1708,6 +1786,11 @@ impl Aarch64CodeGen {
                     emit(&mut self.mem, 0xF100185F); // CMP x2, #6
                     let patch_sentinel = self.mem.current_offset();
                     emit(&mut self.mem, 0x54000009); // B.LS +0
+                    // Extract the real heap pointer from the NaN payload.
+                    mov_imm64(&mut self.mem, 3, PAYLOAD_MASK);
+                    and_reg(&mut self.mem, 2, 2, 3); // x2 = x2 & PAYLOAD_MASK
+                    movz(&mut self.mem, 3, 3);
+                    lsl_reg(&mut self.mem, 2, 2, 3); // x2 = x2 << 3
                     ldr_off(&mut self.mem, 4, 2, 8); // x4 = [x2 + 8] (shape ptr)
                     ldr_off(&mut self.mem, 3, 4, 0); // x3 = [x4] (shape.id)
                     let mut miss_patches: Vec<(usize, u32)> = Vec::new();
@@ -1766,20 +1849,21 @@ impl Aarch64CodeGen {
                                 .patch_u32(patch, (orig & !0x00FF_FFE0) | ((d & 0x7FFFF) << 5));
                         }
                     }
-                    self.record_bailout_point(bc_idx, BailoutReason::ShapeMiss);
-                    mov_reg(&mut self.mem, 0, 2);
-                    self.push();
+                    // Record the PRE-opcode depth — the restore below re-pushes obj + key + value.
+                    self.record_bailout_point_at(bc_idx, BailoutReason::ShapeMiss, pre_op_depth);
+                    mov_reg(&mut self.mem, 0, 8); // x0 = saved original object Value
+                    self.push_raw();
                     mov_reg(&mut self.mem, 0, 7);
-                    self.push();
+                    self.push_raw();
                     mov_reg(&mut self.mem, 0, 1);
-                    self.push();
+                    self.push_raw();
                     mov_reg(&mut self.mem, 2, JIT_STACK_REG);
                     mov_imm64(&mut self.mem, 1, bc_idx as u64);
                     mov_reg(&mut self.mem, 0, VM_REG);
                     ldr_off(&mut self.mem, 15, VM_REG, 520);
                     emit(&mut self.mem, 0xD63F01E0);
                     movz(&mut self.mem, 0, 0);
-                    self.push();
+                    self.push_raw();
                     self.emit_epilogue();
                     let done_offset = self.mem.current_offset();
                     for &patch in &done_patches {
@@ -1926,7 +2010,7 @@ impl Aarch64CodeGen {
                     ldr_off(&mut self.mem, 15, VM_REG, 520);
                     emit(&mut self.mem, 0xD63F01E0);
                     movz(&mut self.mem, 0, 0);
-                    self.push();
+                    self.push_raw();
                     self.emit_epilogue();
                 }
                 Opcode::Call => {
@@ -1967,7 +2051,7 @@ impl Aarch64CodeGen {
                     ldr_off(&mut self.mem, 15, VM_REG, 520); // bailout_helper
                     emit(&mut self.mem, 0xD63F01E0); // BLR x15
                     movz(&mut self.mem, 0, 0);
-                    self.push();
+                    self.push_raw();
                     self.emit_epilogue();
                     // Normal path: pop argc+2 (args+callee+this) and push result
                     let done_path = self.mem.current_offset();

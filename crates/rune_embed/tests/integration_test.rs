@@ -2316,6 +2316,151 @@ fn test_jit_inc_global() {
     );
 }
 
+/// Regression test for the LoadPropertyIC shape-miss bailout path
+/// (bailout_design.md §8.5): a JIT-compiled function with a monomorphic
+/// LoadPropertyIC must bail to the interpreter on a shape miss and return
+/// the correct value — not undefined (the pre-bailout silent-corruption bug).
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn test_jit_shape_miss_load_bails_to_interpreter() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            function f(o, n) {
+                var s = 0;
+                for (var i = 0; i < n; i++) { s += o.x; }
+                return s;
+            }
+            var a = {x: 1};
+            var b = {x: 2, y: 3};
+            var r;
+            for (var k = 0; k < 100; k++) { r = f(a, 10); }
+            r = f(b, 10);
+            r
+        "#,
+        )
+        .unwrap();
+    assert_eq!(
+        r.as_smi(),
+        Some(20),
+        "shape-miss bailout: f(b, 10) should be 20, got {:?}",
+        r.as_smi()
+    );
+    assert!(ctx.vm().jit_entry_count > 0, "JIT must have executed f");
+    assert!(
+        ctx.vm().jit_bailout_count > 0,
+        "shape miss must have bailed to the interpreter"
+    );
+}
+
+/// StorePropertyIC variant: a shape miss on the store path must bail and
+/// write to the correct property, with a correct subsequent read.
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn test_jit_shape_miss_store_bails_to_interpreter() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            function f(o, v) { o.x = v; return o.x; }
+            var a = {x: 1};
+            var b = {x: 2, y: 3};
+            var r;
+            for (var k = 0; k < 100; k++) { r = f(a, 7); }
+            r = f(b, 5);
+            r
+        "#,
+        )
+        .unwrap();
+    assert_eq!(
+        r.as_smi(),
+        Some(5),
+        "store shape-miss: f(b, 5) should return 5, got {:?}",
+        r.as_smi()
+    );
+    assert!(ctx.vm().jit_entry_count > 0, "JIT must have executed f");
+    assert!(
+        ctx.vm().jit_bailout_count > 0,
+        "store shape miss must have bailed to the interpreter"
+    );
+}
+
+/// §10.1 bailout mid-loop: the Smi-overflow Mul guard fires at i=46341
+/// (i·i exceeds i31) while the JIT runs the loop natively; the interpreter
+/// must resume at the overflow PC and continue to the correct result.
+/// (Note: `let` loops are not JIT-compatible — the emitter gives them
+/// CopyLexical/MakeEnv — so this uses `var` locals, which are maintained
+/// in the JIT locals buffer and restored from it on bailout.)
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn test_jit_mul_overflow_bailout_preserves_loop_state() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            function f(n) {
+                var acc = 0;
+                for (var i = 0; i < n; i++) {
+                    acc += i * i;
+                }
+                return acc;
+            }
+            var r;
+            for (var k = 0; k < 100; k++) { r = f(10); }
+            r = f(70000);
+            r
+        "#,
+        )
+        .unwrap();
+    let v = r.as_float64().or_else(|| r.as_smi().map(|s| s as f64));
+    assert!(
+        matches!(v, Some(x) if (x - 114_330_883_345_000.0).abs() < 1.0),
+        "mul-overflow bailout: expected 114330883345000, got {:?}",
+        v
+    );
+    assert!(ctx.vm().jit_entry_count > 0, "JIT must have executed f");
+    assert!(
+        ctx.vm().jit_bailout_count > 0,
+        "overflow guard must have bailed"
+    );
+}
+
+/// JIT Smi untagging must sign-extend the NaN-encoded payload:
+/// Mul/Mod with negative operands must produce exact results while
+/// executing natively (no bailout on the arithmetic itself).
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn test_jit_signed_mul_mod_untag() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            function f(n) {
+                var acc = 0;
+                for (var i = 0; i < n; i++) {
+                    acc += i * -3;
+                    acc += (i * 7) % 5;
+                }
+                return acc;
+            }
+            var r;
+            for (var k = 0; k < 100; k++) { r = f(10); }
+            r = f(200);
+            r
+        "#,
+        )
+        .unwrap();
+    let v = r.as_float64().or_else(|| r.as_smi().map(|s| s as f64));
+    // Σ (i·-3) for i in [0,199] = -59700; Σ ((7i mod 5)) = 40 cycles × 10 = 400
+    assert!(
+        matches!(v, Some(x) if (x - (-59_300.0)).abs() < 1.0),
+        "signed mul/mod: expected -59300, got {:?}",
+        v
+    );
+    assert!(ctx.vm().jit_entry_count > 0, "JIT must have executed f");
+}
+
 mod instanceof_tests {
     use rune_embed::Context;
 

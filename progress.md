@@ -7,6 +7,17 @@
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
 
+## Bailout PR2 — `let`-loop JIT (lexical state) + trace-key collision fix (2026-08-19)
+
+- [x] **`let` loops are now JIT-compatible**: CopyLexical/MakeEnv/RestoreEnv/LoadCaptured/StoreCaptured whitelisted in `is_jit_compatible`; `rune_jit_lexical_helper` (opcode-dispatched: BLOCK_ENTER/BLOCK_LEAVE/DECLARE_LET/DECLARE_CONST/LOAD/STORE/LOAD_THIS/COPY_LEXICAL/MAKE_ENV/RESTORE_ENV/LOAD_CAPTURED/STORE_CAPTURED) serves lexical ops from JIT-compiled code; DeclareLet codegen passes the initializer value through
+- [x] **Emitter stack-net corrections**: `StoreProperty` pops 3 then pushes the value back (net −2); `StoreCaptured` pops 1 with no push (net −1). Reverted all speculative obj-Dup additions; only 2 value-Dup fixes remain (Assign-captured, CompoundAssign-captured)
+- [x] **Trace recording fix (pending_rerecord)**: close-time validation requires a Jump targeting `target_pc` in the trace, else discard + re-record on the next back-edge
+- [x] **Trace-key collision fixed (the hang)**: `loop_traces`/`loop_counts`/`loop_patched`/`pending_rerecord` were keyed by bare target pc. The top-level warmup loop and the `let`-loop function both target **pc 6**, so the top-level's back-edge executed the function's trace on the top-level frame (`fi=0`): LEX_LOAD(1) read a wrong frame's slot → undefined → Lt smi-check bailed → resume landed mid-loop-body (skipping the loop condition) → infinite bailout/resume cycle (with MakeEnv GC churn). Fixed by keying all loop maps on `TraceKey = (prog_ptr, target_pc)` plus a **cross-program recording guard** (recording stops + discards if an instruction executes in a different program than the recorded loop — prevents traces mixing two programs' pcs across a Call/Return boundary). Diagnosed via temporary DBG instrumentation: `EXEC_TRACE fi=0 frames=1`, `LEX_LOAD slot=1 frames=1`, CALL pc=13 loop
+- [x] New regression test: `test_jit_same_pc_loops_across_functions` (f and g both loop at pc 6, plus the top-level warmup loop; correct 45090 result)
+- [x] `test_jit_let_loop_bailout_preserves_lexicals` (previously hanging) now passes: warmup `for k<100 { f(10) }` + `f(70000)` → Σ i² = 114,330,883,345,000, `jit_entry_count > 0`, `jit_bailout_count > 0`
+- [x] All debug instrumentation removed; cargo fmt + clippy clean (74 warnings vs 76 baseline — all pre-existing); full suite green: **482 integration tests pass, 3 ignored**
+- **Known gaps**: trace bails per-iteration once acc is a float (perf, not correctness); `RegExp()` constructor, match `.index`/`.input` still open
+
 ## Bailout PR1 — stack-depth validation, shape-miss round-trip, Mul/Mod untag fixes (2026-08-18)
 
 - [x] §10.4: `validate_bailout_snapshot(tables, bc_pc, snapshot_len, site)` asserts snapshot count == recorded `stack_depth` at call-ic, tier-up, and trace bailout sites

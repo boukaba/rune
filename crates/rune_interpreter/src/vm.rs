@@ -28,6 +28,11 @@ use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
+/// Identity of a hot loop: (program pointer as usize, back-edge target pc).
+/// Distinct programs can share target pcs, so the pc alone is not a unique
+/// key for trace recording/lookup.
+type TraceKey = (usize, usize);
+
 /// Create a minimal Error object with `name` and `message` properties.
 fn make_error_object(gc: &mut SemiSpace, name: &str, msg: &str) -> Value {
     let name_str: *mut u8 = HeapString::allocate(gc, name) as *mut u8;
@@ -343,15 +348,22 @@ pub struct Vm {
     /// Cache of allocated HeapString pointers for each program's constant pool.
     /// Key: program pointer as usize, Value: Vec of string Value handles.
     string_cache: HashMap<usize, Vec<Value>>,
-    /// Loop back-edge hotness: target_pc → execution count.
+    /// Loop back-edge hotness: (prog_ptr, target_pc) → execution count.
     /// Back-edges are Jump targets where target < current_pc.
-    loop_counts: HashMap<usize, u64>,
-    /// Recorded traces for hot loops (target_pc → LoopTrace).
-    loop_traces: HashMap<usize, LoopTrace>,
-    /// If Some(target_pc), we're currently recording a trace for that loop.
-    recording_trace: Option<usize>,
+    /// Keyed by program pointer + pc because different functions can share
+    /// the same target pc (e.g. two loops starting at pc 6 in different
+    /// programs); a bare pc key would collide across programs and execute
+    /// the wrong trace with the wrong frame.
+    loop_counts: HashMap<TraceKey, u64>,
+    /// Recorded traces for hot loops (TraceKey → LoopTrace).
+    loop_traces: HashMap<TraceKey, LoopTrace>,
+    /// If Some(TraceKey), we're currently recording a trace for that loop.
+    recording_trace: Option<TraceKey>,
     /// Whether the current hot loop has already been patched.
-    loop_patched: HashSet<usize>,
+    loop_patched: HashSet<TraceKey>,
+    /// Loops whose trace was recorded but discarded (no back-edge); retry the
+    /// recording on the next back-edge.
+    pending_rerecord: HashSet<TraceKey>,
     /// Executable memory for compiled loop traces. Kept alive so entry points
     /// remain valid.
     #[cfg(feature = "jit")]
@@ -475,6 +487,7 @@ impl Vm {
             loop_traces: HashMap::new(),
             recording_trace: None,
             loop_patched: HashSet::new(),
+            pending_rerecord: HashSet::new(),
             #[cfg(feature = "jit")]
             _compiled_trace_mem: Vec::new(),
             builtin_wrappers: HashMap::new(),
@@ -1549,8 +1562,19 @@ impl Vm {
             let instr = prog.instructions[pc].clone();
 
             // Trace recording: capture opcodes while recording a hot loop
-            if let Some(target_pc) = self.recording_trace {
-                if let Some(trace) = self.loop_traces.get_mut(&target_pc) {
+            if let Some(key @ (rec_prog, target_pc)) = self.recording_trace {
+                // Cross-program guard: if this instruction belongs to a
+                // different program than the loop being recorded (a Call
+                // descended into a callee, or a Return popped back to the
+                // caller), the trace would mix opcodes from two programs
+                // whose pcs collide.  Discard the partial trace.
+                if prog_ptr as usize != rec_prog {
+                    self.recording_trace = None;
+                    self.loop_traces.remove(&key);
+                    self.frames[fi].pc = pc;
+                    continue;
+                }
+                if let Some(trace) = self.loop_traces.get_mut(&key) {
                     // Cross-loop guard: if this instruction is a Jump whose target
                     // is a different loop (present in loop_counts), the trace would
                     // cross loop boundaries.  The subsequent compile_trace_native
@@ -1562,9 +1586,11 @@ impl Vm {
                         Opcode::Jump | Opcode::JumpIfTrue | Opcode::JumpIfFalse
                     ) {
                         let jump_target = instr.operands.first().copied().unwrap_or(0) as usize;
-                        if jump_target != target_pc && self.loop_counts.contains_key(&jump_target) {
+                        if jump_target != target_pc
+                            && self.loop_counts.contains_key(&(rec_prog, jump_target))
+                        {
                             self.recording_trace = None;
-                            self.loop_traces.remove(&target_pc);
+                            self.loop_traces.remove(&key);
                             self.frames[fi].pc = pc;
                             continue;
                         }
@@ -1604,10 +1630,33 @@ impl Vm {
                             if has_callee_return {
                                 // Trace crosses a function-call boundary; inlining
                                 // not yet supported — prevent compilation of buggy trace.
-                                self.loop_traces.remove(&target_pc);
-                                self.loop_counts.remove(&target_pc);
+                                self.loop_traces.remove(&key);
+                                self.loop_counts.remove(&key);
                             } else {
-                                self.compile_trace_native(target_pc);
+                                // Validate the trace actually contains the loop's
+                                // back-edge Jump (target == target_pc). If recording
+                                // started on the loop's FINAL iteration, the trace
+                                // holds only the exit path + prologue of the next
+                                // call and no back-edge — compiling it produces a
+                                // straight-line trace that exits immediately and
+                                // returns a premature result. Discard and re-record
+                                // on the next back-edge instead.
+                                let mut has_back_edge = false;
+                                for op in &trace.ops {
+                                    if op.opcode == Opcode::Jump as u8 {
+                                        let t = op.operands.first().copied().unwrap_or(0) as usize;
+                                        if t == target_pc {
+                                            has_back_edge = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if has_back_edge {
+                                    self.compile_trace_native(prog_ptr, target_pc);
+                                } else {
+                                    self.loop_traces.remove(&key);
+                                    self.pending_rerecord.insert(key);
+                                }
                             }
                         }
                     }
@@ -2600,8 +2649,8 @@ impl Vm {
                                 let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
                                 if shape.id == cached_shape_id {
                                     // Record shape_id for trace analysis (fast path)
-                                    if let Some(target) = self.recording_trace {
-                                        if let Some(trace) = self.loop_traces.get_mut(&target) {
+                                    if let Some(key) = self.recording_trace {
+                                        if let Some(trace) = self.loop_traces.get_mut(&key) {
                                             if !trace.shape_ids.contains(&cached_shape_id) {
                                                 trace.shape_ids.push(cached_shape_id);
                                             }
@@ -3250,13 +3299,15 @@ impl Vm {
                     let target = instr.operands[0] as usize;
                     if target < pc {
                         // Back-edge: loop iteration
-                        let entry = self.loop_counts.entry(target).or_insert(0);
+                        let key: TraceKey = (prog_ptr as usize, target);
+                        let entry = self.loop_counts.entry(key).or_insert(0);
                         *entry += 1;
-                        // Start recording a trace at threshold
-                        if *entry == 50 {
-                            self.recording_trace = Some(target);
+                        // Start recording a trace at threshold, or when a
+                        // previous recording was discarded (pending_rerecord)
+                        if *entry == 50 || self.pending_rerecord.remove(&key) {
+                            self.recording_trace = Some(key);
                             self.loop_traces.insert(
-                                target,
+                                key,
                                 LoopTrace {
                                     target_pc: target,
                                     ops: Vec::new(),
@@ -3278,7 +3329,7 @@ impl Vm {
                         if *entry > 60
                             && self
                                 .loop_traces
-                                .get(&target)
+                                .get(&key)
                                 .is_some_and(|t| t.is_monomorphic())
                         {
                             unsafe {
@@ -3289,7 +3340,7 @@ impl Vm {
                         #[allow(unused_variables)]
                         let compiled = self
                             .loop_traces
-                            .get(&target)
+                            .get(&key)
                             .map(|t| t.compiled_entry)
                             .unwrap_or(std::ptr::null());
                         #[cfg(feature = "jit")]
@@ -3312,7 +3363,7 @@ impl Vm {
                                 let trace_idx = self.jit_bailout.bc_pc;
                                 let original_pc = self
                                     .loop_traces
-                                    .get(&target)
+                                    .get(&key)
                                     .and_then(|t| t.trace_to_original_pc.get(trace_idx).copied())
                                     .unwrap_or(trace_idx);
                                 self.jit_bailout.pending = false;
@@ -3320,7 +3371,7 @@ impl Vm {
                                 // Re-record: if bailout was ShapeMiss, increment
                                 // per-trace miss counter and re-record at threshold.
                                 let rerecord_needed = {
-                                    let trace = self.loop_traces.get_mut(&target);
+                                    let trace = self.loop_traces.get_mut(&key);
                                     match trace {
                                         Some(t) => {
                                             let is_shape_miss = t
@@ -3350,12 +3401,12 @@ impl Vm {
                                 };
                                 if rerecord_needed {
                                     #[cfg(target_arch = "aarch64")]
-                                    self.compile_trace_native(target);
+                                    self.compile_trace_native(prog_ptr, target);
                                 }
                                 let snapshot = std::mem::take(&mut self.jit_bailout.stack_snapshot);
                                 validate_bailout_snapshot(
                                     self.loop_traces
-                                        .get(&target)
+                                        .get(&key)
                                         .and_then(|t| t.bailout_table.as_deref()),
                                     trace_idx,
                                     snapshot.len(),
@@ -3370,7 +3421,7 @@ impl Vm {
                                 // Trace completed normally (loop condition false).
                                 self.frames[fi].pc = self
                                     .loop_traces
-                                    .get(&target)
+                                    .get(&key)
                                     .map(|t| t.exit_pc)
                                     .unwrap_or(pc + 1);
                             }
@@ -4214,8 +4265,8 @@ impl Vm {
                                 // After the callee Func and bytecode are resolved, record
                                 // the callee's JIT status, needs_frame, and size for F-2.
                                 #[cfg(feature = "jit")]
-                                if let Some(target_pc) = self.recording_trace {
-                                    if let Some(trace) = self.loop_traces.get_mut(&target_pc) {
+                                if let Some(key) = self.recording_trace {
+                                    if let Some(trace) = self.loop_traces.get_mut(&key) {
                                         let jit_entry =
                                             unsafe { Func::jit_entry(ptr as *mut Func) };
                                         trace.inline_profiles.push(
@@ -4259,24 +4310,73 @@ impl Vm {
                                                 while self.jit_locals_buffer.len() < local_count {
                                                     self.jit_locals_buffer.push(Value::undefined());
                                                 }
+                                                // Same needs_frame handling as the
+                                                // tier-up path: push a callee Frame
+                                                // so lexical helpers target the
+                                                // correct frame; keep it on bailout
+                                                // so the interpreter resumes with
+                                                // live lexical state.
+                                                let needs_frame = func_prog.needs_frame();
+                                                let locals_ptr: *mut u64 = if needs_frame {
+                                                    let func_env =
+                                                        unsafe { Func::env_ptr(ptr as *mut Func) };
+                                                    let callee_locals =
+                                                        std::mem::take(&mut self.jit_locals_buffer);
+                                                    let frame_fi = self.frames.len();
+                                                    self.frames.push(Frame {
+                                                        locals: callee_locals,
+                                                        lexical_slots: Vec::new(),
+                                                        lexical_tdz: Vec::new(),
+                                                        lexical_const: Vec::new(),
+                                                        scope_boundaries: Vec::new(),
+                                                        passed_argc: argc,
+                                                        pc: 0,
+                                                        stack_base: self.stack.len(),
+                                                        prog: func_prog as *const BytecodeProgram,
+                                                        generator_id: None,
+                                                        this,
+                                                        is_constructor_call: false,
+                                                        constructed_object: Value::undefined(),
+                                                        env: func_env,
+                                                        func_ptr: ptr,
+                                                        private_name_ids: std::ptr::null_mut(),
+                                                    });
+                                                    self.frames[frame_fi].locals.as_mut_ptr()
+                                                        as *mut u64
+                                                } else {
+                                                    self.jit_locals_buffer.as_mut_ptr() as *mut u64
+                                                };
                                                 self.jit_entry_count += 1;
                                                 let func: JitEntryFn =
                                                     unsafe { std::mem::transmute(jit_entry) };
                                                 let vm_ptr = self as *mut Vm as *mut u8;
                                                 let gc_ptr = gc as *mut SemiSpace as *mut u8;
                                                 self.jit_bailout.pending = false;
-                                                let result_raw = unsafe {
-                                                    func(
-                                                        vm_ptr,
-                                                        gc_ptr,
-                                                        self.jit_locals_buffer.as_mut_ptr()
-                                                            as *mut u64,
-                                                    )
-                                                };
+                                                let result_raw =
+                                                    unsafe { func(vm_ptr, gc_ptr, locals_ptr) };
                                                 if self.jit_bailout.pending {
                                                     let bailout_bc_pc = self.jit_bailout.bc_pc;
                                                     self.jit_bailout.pending = false;
                                                     self.jit_bailout.bc_pc = 0;
+                                                    let snapshot = std::mem::take(
+                                                        &mut self.jit_bailout.stack_snapshot,
+                                                    );
+                                                    validate_bailout_snapshot(
+                                                        self.bailout_tables
+                                                            .get(&(jit_entry as usize))
+                                                            .map(|b| b.as_ref()),
+                                                        bailout_bc_pc,
+                                                        snapshot.len(),
+                                                        "call-ic",
+                                                    );
+                                                    if needs_frame {
+                                                        let cf = self.frames.len() - 1;
+                                                        self.frames[cf].pc = bailout_bc_pc;
+                                                        for val in snapshot {
+                                                            self.push(Value::from_raw(val));
+                                                        }
+                                                        continue;
+                                                    }
                                                     let mut bailout_locals =
                                                         self.jit_locals_buffer.clone();
                                                     self.jit_locals_buffer.clear();
@@ -4303,24 +4403,23 @@ impl Vm {
                                                         func_ptr: ptr,
                                                         private_name_ids: std::ptr::null_mut(),
                                                     });
-                                                    let snapshot = std::mem::take(
-                                                        &mut self.jit_bailout.stack_snapshot,
-                                                    );
-                                                    validate_bailout_snapshot(
-                                                        self.bailout_tables
-                                                            .get(&(jit_entry as usize))
-                                                            .map(|b| b.as_ref()),
-                                                        bailout_bc_pc,
-                                                        snapshot.len(),
-                                                        "call-ic",
-                                                    );
                                                     for val in snapshot {
                                                         self.push(Value::from_raw(val));
                                                     }
                                                     continue;
                                                 }
+                                                if needs_frame {
+                                                    let top = self.frames.len() - 1;
+                                                    self.last_locals = std::mem::take(
+                                                        &mut self.frames[top].locals,
+                                                    );
+                                                    self.frames.pop();
+                                                } else {
+                                                    self.last_locals =
+                                                        self.jit_locals_buffer.clone();
+                                                    self.jit_locals_buffer.clear();
+                                                }
                                                 self.push(Value::from_raw(result_raw));
-                                                self.jit_locals_buffer.clear();
                                                 self.frames[fi].pc = pc + 1;
                                                 continue;
                                             }
@@ -4400,23 +4499,79 @@ impl Vm {
                                         while self.jit_locals_buffer.len() < local_count {
                                             self.jit_locals_buffer.push(Value::undefined());
                                         }
+                                        // Push a callee Frame when the function
+                                        // needs lexical state (BlockEnter,
+                                        // DeclareLet, closure-env ops, LoadThis,
+                                        // ...). The lexical helper targets the
+                                        // top frame, so without this the JIT's
+                                        // lexical ops would corrupt the caller's
+                                        // frame. On bailout the frame is kept
+                                        // (pc reset) so the interpreter resumes
+                                        // with the JIT-maintained lexical state
+                                        // (§10.1).
+                                        let needs_frame = func_prog.needs_frame();
+                                        let locals_ptr: *mut u64 = if needs_frame {
+                                            let func_env =
+                                                unsafe { Func::env_ptr(ptr as *mut Func) };
+                                            let callee_locals =
+                                                std::mem::take(&mut self.jit_locals_buffer);
+                                            let frame_fi = self.frames.len();
+                                            self.frames.push(Frame {
+                                                locals: callee_locals,
+                                                lexical_slots: Vec::new(),
+                                                lexical_tdz: Vec::new(),
+                                                lexical_const: Vec::new(),
+                                                scope_boundaries: Vec::new(),
+                                                passed_argc: args.len(),
+                                                pc: 0,
+                                                stack_base: self.stack.len(),
+                                                prog: func_prog as *const BytecodeProgram,
+                                                generator_id: None,
+                                                this,
+                                                is_constructor_call: false,
+                                                constructed_object: Value::undefined(),
+                                                env: func_env,
+                                                func_ptr: ptr,
+                                                private_name_ids: std::ptr::null_mut(),
+                                            });
+                                            self.frames[frame_fi].locals.as_mut_ptr() as *mut u64
+                                        } else {
+                                            self.jit_locals_buffer.as_mut_ptr() as *mut u64
+                                        };
                                         self.jit_entry_count += 1;
                                         let func: JitEntryFn =
                                             unsafe { std::mem::transmute(jit_entry) };
                                         let vm_ptr = self as *mut Vm as *mut u8;
                                         let gc_ptr = gc as *mut SemiSpace as *mut u8;
                                         self.jit_bailout.pending = false;
-                                        let result_raw = unsafe {
-                                            func(
-                                                vm_ptr,
-                                                gc_ptr,
-                                                self.jit_locals_buffer.as_mut_ptr() as *mut u64,
-                                            )
-                                        };
+                                        let result_raw =
+                                            unsafe { func(vm_ptr, gc_ptr, locals_ptr) };
                                         if self.jit_bailout.pending {
                                             let bailout_bc_pc = self.jit_bailout.bc_pc;
                                             self.jit_bailout.pending = false;
                                             self.jit_bailout.bc_pc = 0;
+                                            let snapshot = std::mem::take(
+                                                &mut self.jit_bailout.stack_snapshot,
+                                            );
+                                            validate_bailout_snapshot(
+                                                self.bailout_tables
+                                                    .get(&(jit_entry as usize))
+                                                    .map(|b| b.as_ref()),
+                                                bailout_bc_pc,
+                                                snapshot.len(),
+                                                "tier-up",
+                                            );
+                                            if needs_frame {
+                                                // Callee Frame is still on top
+                                                // with live lexical/env state;
+                                                // resume it at the bailout PC.
+                                                let cf = self.frames.len() - 1;
+                                                self.frames[cf].pc = bailout_bc_pc;
+                                                for val in snapshot {
+                                                    self.push(Value::from_raw(val));
+                                                }
+                                                continue;
+                                            }
                                             let mut bailout_locals = self.jit_locals_buffer.clone();
                                             self.jit_locals_buffer.clear();
                                             while bailout_locals.len() < local_count {
@@ -4442,24 +4597,20 @@ impl Vm {
                                                 func_ptr: ptr,
                                                 private_name_ids: std::ptr::null_mut(),
                                             });
-                                            let snapshot = std::mem::take(
-                                                &mut self.jit_bailout.stack_snapshot,
-                                            );
-                                            validate_bailout_snapshot(
-                                                self.bailout_tables
-                                                    .get(&(jit_entry as usize))
-                                                    .map(|b| b.as_ref()),
-                                                bailout_bc_pc,
-                                                snapshot.len(),
-                                                "tier-up",
-                                            );
                                             for val in snapshot {
                                                 self.push(Value::from_raw(val));
                                             }
                                             continue;
                                         }
-                                        self.last_locals = self.jit_locals_buffer.clone();
-                                        self.jit_locals_buffer.clear();
+                                        if needs_frame {
+                                            let top = self.frames.len() - 1;
+                                            self.last_locals =
+                                                std::mem::take(&mut self.frames[top].locals);
+                                            self.frames.pop();
+                                        } else {
+                                            self.last_locals = self.jit_locals_buffer.clone();
+                                            self.jit_locals_buffer.clear();
+                                        }
                                         self.push(Value::from_raw(result_raw));
                                         self.frames[fi].pc = pc + 1;
                                         continue;
@@ -5477,13 +5628,13 @@ impl Vm {
             "Trace stats: {} loop(s) detected",
             self.loop_counts.len()
         )];
-        for (target, count) in self.loop_counts.iter() {
+        for ((prog, target), count) in self.loop_counts.iter() {
             let label = if *count >= 50 { "HOT" } else { "warm" };
             lines.push(format!(
-                "  pc={} → {} iterations ({})",
-                target, count, label
+                "  prog={:#x} pc={} → {} iterations ({})",
+                prog, target, count, label
             ));
-            if let Some(trace) = self.loop_traces.get(target) {
+            if let Some(trace) = self.loop_traces.get(&(*prog, *target)) {
                 let mono = if trace.is_monomorphic() {
                     "MONO (1 shape)"
                 } else {
@@ -5534,18 +5685,18 @@ impl Vm {
     /// remapped to exit the trace.  The interpreter never enters the compiled
     /// code — it runs until the loop condition is false, then returns.
     #[cfg(all(feature = "jit", target_arch = "aarch64"))]
-    fn compile_trace_native(&mut self, target_pc: usize) {
+    fn compile_trace_native(&mut self, prog_ptr: *const BytecodeProgram, target_pc: usize) {
         use rune_bytecode::opcode::{BytecodeProgram, Instruction};
 
-        let trace = match self.loop_traces.get_mut(&target_pc) {
+        let key: TraceKey = (prog_ptr as usize, target_pc);
+        let trace = match self.loop_traces.get_mut(&key) {
             Some(t) => t,
             None => return,
         };
         // The original program whose string/float pools the recorded
         // name/float indices reference.  Must be the one currently
         // executing (top frame's prog).
-        let fi = self.frames.len() - 1;
-        let original_prog = unsafe { &*self.frames[fi].prog };
+        let original_prog = unsafe { &*prog_ptr };
 
         let mut instrs: Vec<Instruction> = Vec::with_capacity(trace.ops.len() + 2);
         // Build mapping: trace instruction index → original program PC.
@@ -5751,10 +5902,11 @@ impl Vm {
         target_pc: usize,
         back_edge_pc: usize,
     ) {
-        if self.loop_patched.contains(&target_pc) {
+        let key: TraceKey = (prog_ptr as usize, target_pc);
+        if self.loop_patched.contains(&key) {
             return;
         }
-        let trace = match self.loop_traces.get(&target_pc) {
+        let trace = match self.loop_traces.get(&key) {
             Some(t) if t.is_monomorphic() => t,
             _ => return,
         };
@@ -5795,7 +5947,7 @@ impl Vm {
         } else {
             // Trace: already LoadPropertyIC
         }
-        self.loop_patched.insert(target_pc);
+        self.loop_patched.insert(key);
     }
 }
 
@@ -6827,6 +6979,8 @@ pub(crate) fn array_like_index(this: Value, i: u32) -> Option<Value> {
 }
 
 /// Lexical operation codes for the JIT callout helper.
+/// Must stay in sync with the LEX_* constants in
+/// crates/rune_jit_baseline/src/codegen_aarch64.rs.
 const LEX_BLOCK_ENTER: u64 = 0;
 const LEX_BLOCK_LEAVE: u64 = 1;
 const LEX_DECLARE_LET: u64 = 2;
@@ -6834,25 +6988,45 @@ const LEX_DECLARE_CONST: u64 = 3;
 const LEX_LOAD: u64 = 4;
 const LEX_STORE: u64 = 5;
 const LEX_LOAD_THIS: u64 = 6;
+const LEX_COPY_LEXICAL: u64 = 7;
+const LEX_MAKE_ENV: u64 = 8;
+const LEX_RESTORE_ENV: u64 = 9;
+const LEX_LOAD_CAPTURED: u64 = 10;
+const LEX_STORE_CAPTURED: u64 = 11;
 
 /// JIT callout for all lexical-scope operations.
 /// Called from JIT-compiled code via the `lexical_helper` function pointer
 /// stored in `Vm::jit_helpers`.
-/// Returns 0 for most ops; returns the loaded Value for LEX_LOAD.
+/// Operates on the top frame — the JIT entry paths (tier-up, call-IC) push a
+/// callee Frame whenever `func_prog.needs_frame()` is true, so the top frame
+/// here is the executing function's frame.
+/// Returns 0 for most ops; returns the loaded Value for LEX_LOAD and
+/// LEX_LOAD_CAPTURED.
+/// # Safety
+/// `vm_ptr` must be a valid pointer to a `Vm`. `gc_ptr` must be a valid
+/// pointer to a `SemiSpace` (used only by LEX_MAKE_ENV).
 #[unsafe(no_mangle)]
-pub extern "C" fn rune_jit_lexical_helper(vm_ptr: *mut u8, op: u64, arg1: u64, arg2: u64) -> u64 {
+pub extern "C" fn rune_jit_lexical_helper(
+    vm_ptr: *mut u8,
+    op: u64,
+    arg1: u64,
+    arg2: u64,
+    arg3: u64,
+    gc_ptr: *mut u8,
+) -> u64 {
     let vm = unsafe { &mut *(vm_ptr as *mut Vm) };
     let fi = vm.frames.len() - 1;
     let f = &mut vm.frames[fi];
     match op {
         LEX_BLOCK_ENTER => {
             let count = arg1 as usize;
-            for _ in 0..count {
-                f.lexical_slots.push(Value::undefined());
-            }
+            // Record the boundary BEFORE extending, so BlockLeave truncates
+            // exactly this block's slots (mirrors the interpreter handler).
+            f.scope_boundaries.push(f.lexical_slots.len());
+            f.lexical_slots
+                .extend(std::iter::repeat_n(Value::undefined(), count));
             f.lexical_tdz.extend(std::iter::repeat_n(true, count));
             f.lexical_const.extend(std::iter::repeat_n(false, count));
-            f.scope_boundaries.push(f.lexical_slots.len());
             0
         }
         LEX_BLOCK_LEAVE => {
@@ -6864,14 +7038,18 @@ pub extern "C" fn rune_jit_lexical_helper(vm_ptr: *mut u8, op: u64, arg1: u64, a
         }
         LEX_DECLARE_LET => {
             let slot = arg1 as usize;
-            if slot < f.lexical_tdz.len() {
+            let val = Value::from_raw(arg2);
+            if slot < f.lexical_slots.len() {
+                f.lexical_slots[slot] = val;
                 f.lexical_tdz[slot] = false;
             }
             0
         }
         LEX_DECLARE_CONST => {
             let slot = arg1 as usize;
-            if slot < f.lexical_tdz.len() {
+            let val = Value::from_raw(arg2);
+            if slot < f.lexical_slots.len() {
+                f.lexical_slots[slot] = val;
                 f.lexical_tdz[slot] = false;
                 f.lexical_const[slot] = true;
             }
@@ -6896,6 +7074,70 @@ pub extern "C" fn rune_jit_lexical_helper(vm_ptr: *mut u8, op: u64, arg1: u64, a
             val.raw()
         }
         LEX_LOAD_THIS => f.this.raw(),
+        LEX_COPY_LEXICAL => {
+            let src_slot = arg1 as usize;
+            let dst_slot = arg2 as usize;
+            let val = if src_slot < f.lexical_slots.len() {
+                f.lexical_slots[src_slot]
+            } else {
+                Value::undefined()
+            };
+            if dst_slot >= f.lexical_slots.len() {
+                f.lexical_slots.resize(dst_slot + 1, Value::undefined());
+                f.lexical_tdz.resize(dst_slot + 1, false);
+                f.lexical_const.resize(dst_slot + 1, false);
+            }
+            f.lexical_slots[dst_slot] = val;
+            f.lexical_tdz[dst_slot] = false;
+            0
+        }
+        LEX_MAKE_ENV => {
+            let count = arg1 as usize;
+            let parent = f.env as *mut EnvObject;
+            let gc = unsafe { &mut *(gc_ptr as *mut SemiSpace) };
+            let new_env = EnvObject::allocate(gc, count, parent);
+            // The allocation may have triggered a GC; resolve forwarding and
+            // re-read the parent from the (possibly updated) root.
+            unsafe {
+                let resolved = if (*(new_env as *const GcHeader)).is_forwarded() {
+                    (*(new_env as *const GcHeader)).forwarding_addr() as *mut EnvObject
+                } else {
+                    new_env
+                };
+                EnvObject::set_parent(resolved, f.env as *mut EnvObject);
+                f.env = resolved as *mut u8;
+            }
+            0
+        }
+        LEX_RESTORE_ENV => {
+            let env = f.env as *mut EnvObject;
+            if !env.is_null() {
+                let parent = unsafe { EnvObject::parent(env) };
+                f.env = parent as *mut u8;
+            }
+            0
+        }
+        LEX_LOAD_CAPTURED => {
+            let depth = arg1 as usize;
+            let slot = arg2 as usize;
+            let env = f.env as *mut EnvObject;
+            let target = unsafe { EnvObject::ancestor(env, depth) };
+            if target.is_null() {
+                return Value::undefined().raw();
+            }
+            unsafe { EnvObject::get_slot(target, slot).raw() }
+        }
+        LEX_STORE_CAPTURED => {
+            let depth = arg1 as usize;
+            let slot = arg2 as usize;
+            let val = Value::from_raw(arg3);
+            let env = f.env as *mut EnvObject;
+            let target = unsafe { EnvObject::ancestor(env, depth) };
+            if !target.is_null() {
+                unsafe { EnvObject::set_slot(target, slot, val) };
+            }
+            0
+        }
         _ => 0,
     }
 }
@@ -7069,21 +7311,12 @@ pub unsafe extern "C" fn rune_jit_call_helper(
 
                     // Determine whether the callee needs a Frame for
                     // lexical-scope access (BlockEnter/Leave, DeclareLet/Const,
-                    // LoadLexical/StoreLexical, LoadThis).  Most JIT-compiled
-                    // leaf functions (e.g. `add(a,b){return a+b;}`) do not;
-                    // skip the Frame setup to avoid per-call overhead.
-                    let needs_frame = func_prog.instructions.iter().any(|instr| {
-                        matches!(
-                            instr.opcode,
-                            Opcode::BlockEnter
-                                | Opcode::BlockLeave
-                                | Opcode::DeclareLet
-                                | Opcode::DeclareConst
-                                | Opcode::LoadLexical
-                                | Opcode::StoreLexical
-                                | Opcode::LoadThis
-                        )
-                    });
+                    // LoadLexical/StoreLexical, LoadThis, and closure-env ops
+                    // CopyLexical/MakeEnv/RestoreEnv/LoadCaptured/StoreCaptured
+                    // per `needs_frame()`). Most JIT-compiled leaf functions
+                    // (e.g. `add(a,b){return a+b;}`) do not; skip the Frame
+                    // setup to avoid per-call overhead.
+                    let needs_frame = func_prog.needs_frame();
 
                     let locals_ptr: *mut u64 = if needs_frame {
                         // Push a Frame for the callee so that lexical-scope

@@ -34,6 +34,11 @@ const LEX_DECLARE_CONST: u64 = 3;
 const LEX_LOAD: u64 = 4;
 const LEX_STORE: u64 = 5;
 const LEX_LOAD_THIS: u64 = 6;
+const LEX_COPY_LEXICAL: u64 = 7;
+const LEX_MAKE_ENV: u64 = 8;
+const LEX_RESTORE_ENV: u64 = 9;
+const LEX_LOAD_CAPTURED: u64 = 10;
+const LEX_STORE_CAPTURED: u64 = 11;
 
 /// Number of u64 slots reserved for the trace value stack.
 pub const JIT_STACK_SIZE: usize = 64;
@@ -1961,11 +1966,72 @@ impl Aarch64CodeGen {
                 }
                 Opcode::DeclareLet => {
                     let slot = *instr.operands.first().unwrap_or(&0) as u64;
-                    self.emit_lexical_call(LEX_DECLARE_LET, slot, 0);
+                    // DeclareLet consumes the initializer value: pop it and
+                    // pass as arg2 so the helper stores it into the slot.
+                    self.pop(); // x0 = initializer value
+                    mov_reg(&mut self.mem, 3, 0); // x3 = value (arg2)
+                    mov_imm64(&mut self.mem, 2, slot); // x2 = slot (arg1)
+                    mov_imm64(&mut self.mem, 1, LEX_DECLARE_LET); // x1 = op
+                    ldr_off(&mut self.mem, 15, VM_REG, 512); // x15 = helper addr
+                    mov_reg(&mut self.mem, 0, VM_REG); // x0 = vm_ptr
+                    movz(&mut self.mem, 4, 0); // x4 = arg3 = 0
+                    mov_reg(&mut self.mem, 5, GC_REG); // x5 = gc_ptr
+                    emit(&mut self.mem, 0xD63F01E0); // BLR x15
+                    // No push: the initializer value is consumed by the store.
                 }
                 Opcode::DeclareConst => {
                     let slot = *instr.operands.first().unwrap_or(&0) as u64;
-                    self.emit_lexical_call(LEX_DECLARE_CONST, slot, 0);
+                    self.pop(); // x0 = initializer value
+                    mov_reg(&mut self.mem, 3, 0); // x3 = value (arg2)
+                    mov_imm64(&mut self.mem, 2, slot); // x2 = slot (arg1)
+                    mov_imm64(&mut self.mem, 1, LEX_DECLARE_CONST); // x1 = op
+                    ldr_off(&mut self.mem, 15, VM_REG, 512); // x15 = helper addr
+                    mov_reg(&mut self.mem, 0, VM_REG); // x0 = vm_ptr
+                    movz(&mut self.mem, 4, 0); // x4 = arg3 = 0
+                    mov_reg(&mut self.mem, 5, GC_REG); // x5 = gc_ptr
+                    emit(&mut self.mem, 0xD63F01E0); // BLR x15
+                }
+                // Closure-env operations — state lives in the top frame's
+                // `env` chain (EnvObject) and lexical slots; all handled by
+                // the lexical helper.
+                Opcode::CopyLexical => {
+                    let src = *instr.operands.first().unwrap_or(&0) as u64;
+                    let dst = instr.operands.get(1).copied().unwrap_or(0) as u64;
+                    self.emit_lexical_call(LEX_COPY_LEXICAL, src, dst);
+                }
+                Opcode::MakeEnv => {
+                    let count = *instr.operands.first().unwrap_or(&0) as u64;
+                    self.emit_lexical_call(LEX_MAKE_ENV, count, 0);
+                }
+                Opcode::RestoreEnv => {
+                    self.emit_lexical_call(LEX_RESTORE_ENV, 0, 0);
+                }
+                Opcode::LoadCaptured => {
+                    let depth = *instr.operands.first().unwrap_or(&0) as u64;
+                    let slot = instr.operands.get(1).copied().unwrap_or(0) as u64;
+                    mov_imm64(&mut self.mem, 2, depth); // x2 = depth (arg1)
+                    mov_imm64(&mut self.mem, 3, slot); // x3 = slot (arg2)
+                    mov_imm64(&mut self.mem, 1, LEX_LOAD_CAPTURED); // x1 = op
+                    ldr_off(&mut self.mem, 15, VM_REG, 512);
+                    mov_reg(&mut self.mem, 0, VM_REG);
+                    movz(&mut self.mem, 4, 0);
+                    mov_reg(&mut self.mem, 5, GC_REG);
+                    emit(&mut self.mem, 0xD63F01E0); // BLR x15
+                    self.push(); // push the loaded value (in x0)
+                }
+                Opcode::StoreCaptured => {
+                    let depth = *instr.operands.first().unwrap_or(&0) as u64;
+                    let slot = instr.operands.get(1).copied().unwrap_or(0) as u64;
+                    self.pop(); // x0 = value to store
+                    mov_reg(&mut self.mem, 4, 0); // x4 = value (arg3)
+                    mov_imm64(&mut self.mem, 2, depth); // x2 = depth (arg1)
+                    mov_imm64(&mut self.mem, 3, slot); // x3 = slot (arg2)
+                    mov_imm64(&mut self.mem, 1, LEX_STORE_CAPTURED); // x1 = op
+                    ldr_off(&mut self.mem, 15, VM_REG, 512);
+                    mov_reg(&mut self.mem, 0, VM_REG);
+                    mov_reg(&mut self.mem, 5, GC_REG);
+                    emit(&mut self.mem, 0xD63F01E0); // BLR x15
+                    // No push: the value is consumed by the store.
                 }
                 Opcode::LoadLexical => {
                     let slot = *instr.operands.first().unwrap_or(&0) as u64;
@@ -2166,6 +2232,7 @@ impl Aarch64CodeGen {
     }
 
     /// Call the lexical helper function (loaded from JitVmState::jit_helpers).
+    /// Registers: x0=vm_ptr, x1=op, x2=arg1, x3=arg2, x4=arg3(0), x5=gc_ptr.
     fn emit_lexical_call(&mut self, op: u64, arg1: u64, arg2: u64) {
         // Load helper address from [x19 + 512] (offset of JitHelpers in Vm)
         ldr_off(&mut self.mem, 15, VM_REG, 512);
@@ -2174,6 +2241,8 @@ impl Aarch64CodeGen {
         mov_imm64(&mut self.mem, 1, op);
         mov_imm64(&mut self.mem, 2, arg1);
         mov_imm64(&mut self.mem, 3, arg2);
+        movz(&mut self.mem, 4, 0); // arg3 = 0
+        mov_reg(&mut self.mem, 5, GC_REG); // gc_ptr (used by LEX_MAKE_ENV)
         // BLR x15
         emit(&mut self.mem, 0xD63F01E0);
     }

@@ -83,6 +83,8 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - **Bailout PR1 — latent StorePropertyIC bug (SEGV)** — StorePropertyIC codegen never untagged the NaN-encoded object pointer before dereferencing; it "worked" only because the garbage address was mapped. Now saves the raw object, untags via `PAYLOAD_MASK`+`LSL #3`, and pushes the original on the miss path. Caught by the new store shape-miss test.
 - **Bailout PR1 — Mul/Mod Smi untag correctness** — Mul untagged NaN-encoded Smis with a bare `ASR #1`, which keeps the 0x3FFC prefix bits; the garbage result usually tripped the overflow guard (correct-but-slow, every iteration) but sometimes passed it (silently wrong results). Mod masked the payload but `ASR` mis-handled negative Smis (payload is 2^45+(2A+1)). Both now untag via `AND PAYLOAD_MASK; LSL #19; ASR #20` (sign-extends the 45-bit payload, divides by 2), Mul NaN-encodes the result after the overflow guard, and the trace bails at the Mul only when i·i truly exceeds i31 (verified at i=32768). New tests: `test_jit_mul_overflow_bailout_preserves_loop_state` (bailout mid-loop resumes to correct Σ i² = 114,330,883,345,000) and `test_jit_signed_mul_mod_untag` (negative operands, no arithmetic bailout).
 - CI: all 6 jobs green (aarch64 JIT + Clang determinism tests excluded as known issues).
+- **Bailout PR2 — `let`-loop JIT with lexical state** — CopyLexical/MakeEnv/RestoreEnv/LoadCaptured/StoreCaptured whitelisted in `is_jit_compatible`; JIT code calls `rune_jit_lexical_helper` (opcode-dispatched) for all lexical ops (BLOCK_ENTER/BLOCK_LEAVE/DECLARE_LET/DECLARE_CONST/LOAD/STORE/LOAD_THIS/COPY_LEXICAL/MAKE_ENV/RESTORE_ENV/LOAD_CAPTURED/STORE_CAPTURED); DeclareLet codegen passes the initializer value; `StoreProperty` stack-net corrected (pops 3, pushes value back); recording-close validation discards traces lacking the back-edge Jump and re-records (`pending_rerecord`). `test_jit_let_loop_bailout_preserves_lexicals` (previously hanging) passes.
+- **Bailout PR2 — trace-key collision fix (root cause of the hang)** — `loop_traces`/`loop_counts`/`loop_patched`/`pending_rerecord` were keyed by bare target pc; the top-level warmup loop and the `let`-loop function both target pc 6, so the top-level back-edge executed the function's trace on the top-level frame (`fi=0`): LEX_LOAD(1) read a wrong frame's slot (undefined) → Lt smi-check bail → resume landed mid-loop-body (loop condition skipped) → infinite bailout/resume cycle. All loop maps now keyed by `TraceKey = (prog_ptr, target_pc)`; recording also stops + discards when an instruction executes in a different program than the recorded loop (prevents traces mixing two programs' pcs across a Call/Return). Regression test `test_jit_same_pc_loops_across_functions` (f + g + top-level all loop at pc 6). 482/482 integration tests pass, 3 ignored.
 
 ### Known Gaps
 - `test_gc_during_jit_call_preserves_locals` — pre-existing flaky GC/IC test (broken since getter/setter syntax), not a regression from CI fix. Marked `#[ignore]`.
@@ -96,9 +98,9 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - `this.prop++` not supported (Update only handles Identifier targets)
 - `let` + `new` in function body has a scoping bug
 - Static private fields and private methods not yet implemented
+- Trace perf: bailout-per-iteration paths (e.g. float-promoted acc in a loop) still bail each iteration — re-record or stay native with float ops (correctness fine)
 
 ### Next Steps — v0.5 (ordered by leverage)
-1. Bailout PR2: `is_jit_compatible` whitelist gaps — `let`-loop closures (CopyLexical/MakeEnv) block JIT tier-up, so §10.1 lexical-state bailout is currently unreachable; also JIT keeps no lexical state (empty `lexical_slots` on the resume frame).
-2. Trace perf: bailout-per-iteration paths (e.g. float-promoted acc in a loop) should re-record or stay native with float ops.
-3. `RegExp()` constructor
-4. Match result array `.index`/`.input` properties
+1. Trace perf: float-promoted accumulator loops bail per-iteration — re-record or emit float ops natively.
+2. `RegExp()` constructor
+3. Match result array `.index`/`.input` properties

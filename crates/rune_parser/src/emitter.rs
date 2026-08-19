@@ -1744,6 +1744,9 @@ impl Emitter {
                 Expr::Identifier(name, _) => {
                     self.emit_expression(value);
                     if let Some((depth, slot)) = self.env_captured_slot(name) {
+                        // StoreCaptured pops the value; Dup keeps it for the
+                        // statement's cleanup Pop (net 0).
+                        self.emit(Opcode::Dup, vec![]);
                         self.emit(Opcode::StoreCaptured, vec![depth as i64, slot as i64]);
                     } else if let Some(slot) = self.lexical_slot(name) {
                         self.emit(Opcode::StoreLexical, vec![slot as i64]);
@@ -1797,6 +1800,9 @@ impl Emitter {
                             self.emit(Opcode::LoadCaptured, vec![depth as i64, slot as i64]);
                             self.emit_expression(rhs);
                             self.emit(bin_opcode, vec![]);
+                            // StoreCaptured pops the result; Dup keeps it for the
+                            // statement's cleanup Pop (net 0).
+                            self.emit(Opcode::Dup, vec![]);
                             self.emit(Opcode::StoreCaptured, vec![depth as i64, slot as i64]);
                         } else if let Some(slot) = self.lexical_slot(name) {
                             self.emit(Opcode::LoadLexical, vec![slot as i64]);

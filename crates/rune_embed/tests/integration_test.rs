@@ -2386,7 +2386,7 @@ fn test_jit_shape_miss_store_bails_to_interpreter() {
     );
 }
 
-/// §10.1 bailout mid-loop: the Smi-overflow Mul guard fires at i=46341
+/// §10.1 bailout mid-loop: the Smi-overflow Mul guard fires at i=32768
 /// (i·i exceeds i31) while the JIT runs the loop natively; the interpreter
 /// must resume at the overflow PC and continue to the correct result.
 /// (Note: `let` loops are not JIT-compatible — the emitter gives them
@@ -2424,6 +2424,123 @@ fn test_jit_mul_overflow_bailout_preserves_loop_state() {
         ctx.vm().jit_bailout_count > 0,
         "overflow guard must have bailed"
     );
+}
+
+/// §10.1 lexical state across bailout: a `let`-loop function IS now
+/// JIT-compatible (CopyLexical/MakeEnv/RestoreEnv/LoadCaptured/StoreCaptured
+/// whitelisted + helper calls). The Mul-overflow guard bails at i=32768 with
+/// `acc`/`i` living in lexical slots and an EnvObject chain; the interpreter
+/// must resume with that state intact and finish the loop correctly.
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn test_jit_let_loop_bailout_preserves_lexicals() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            function f(n) {
+                let acc = 0;
+                for (let i = 0; i < n; i++) {
+                    acc += i * i;
+                }
+                return acc;
+            }
+            var r;
+            for (var k = 0; k < 100; k++) { r = f(10); }
+            r = f(70000);
+            r
+        "#,
+        )
+        .unwrap();
+    let v = r.as_float64().or_else(|| r.as_smi().map(|s| s as f64));
+    assert!(
+        matches!(v, Some(x) if (x - 114_330_883_345_000.0).abs() < 1.0),
+        "let-loop bailout: expected 114330883345000, got {:?}",
+        v
+    );
+    assert!(ctx.vm().jit_entry_count > 0, "JIT must have executed f");
+    assert!(
+        ctx.vm().jit_bailout_count > 0,
+        "overflow guard must have bailed"
+    );
+}
+
+/// Trace-key collision regression: two functions whose loops share the same
+/// back-edge target pc (here both target pc 6, same as the top-level warmup
+/// loop). Traces must be keyed by (program, pc) — otherwise the top-level
+/// back-edge executes f's trace on the top-level frame (LEX_LOAD reads a
+/// wrong frame's slots → bailout → resume inside the loop body → infinite
+/// hang) and the two functions' traces corrupt each other.
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn test_jit_same_pc_loops_across_functions() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            function f(n) {
+                let acc = 0;
+                for (let i = 0; i < n; i++) { acc += i; }
+                return acc;
+            }
+            function g(n) {
+                let acc = 0;
+                for (let i = 0; i < n; i++) { acc += i * 2; }
+                return acc;
+            }
+            var a = 0, b = 0;
+            for (var k = 0; k < 100; k++) { a = f(10); b = g(10); }
+            a * 1000 + b
+        "#,
+        )
+        .unwrap();
+    let v = r.as_float64().or_else(|| r.as_smi().map(|s| s as f64));
+    // f(10) = 45, g(10) = 90 → 45*1000 + 90 = 45090
+    assert!(
+        matches!(v, Some(x) if (x - 45_090.0).abs() < 1.0),
+        "same-pc loops: expected 45090, got {:?}",
+        v
+    );
+    assert!(
+        ctx.vm().jit_entry_count > 0,
+        "JIT must have executed f and g"
+    );
+}
+
+/// Closure capture through the JIT: the outer function's `let` variable lives
+/// in an EnvObject; the nested arrow reads it via LoadCaptured and mutates it
+/// via StoreCaptured, both natively compiled. Also verifies MakeEnv/RestoreEnv
+/// keep the env chain balanced across the loop (one env per iteration).
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn test_jit_closure_capture_lexical_env() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            function f(n) {
+                let total = 0;
+                const inc = (v) => { total += v; };
+                for (let i = 0; i < n; i++) {
+                    inc(i * 2);
+                }
+                return total;
+            }
+            var r;
+            for (var k = 0; k < 100; k++) { r = f(10); }
+            r = f(2000);
+            r
+        "#,
+        )
+        .unwrap();
+    let v = r.as_float64().or_else(|| r.as_smi().map(|s| s as f64));
+    // Σ 2i for i in [0,1999] = 2 * 1999*2000/2 = 3,998,000
+    assert!(
+        matches!(v, Some(x) if (x - 3_998_000.0).abs() < 1.0),
+        "closure capture: expected 3998000, got {:?}",
+        v
+    );
+    assert!(ctx.vm().jit_entry_count > 0, "JIT must have executed f");
 }
 
 /// JIT Smi untagging must sign-extend the NaN-encoded payload:

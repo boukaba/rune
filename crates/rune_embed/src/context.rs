@@ -157,6 +157,26 @@ impl Context {
         self.vm.ics = ics;
     }
 
+    #[doc(hidden)]
+    pub fn debug_keep_alive_addr(&self) -> *const () {
+        std::ptr::addr_of!(self._keep_alive) as *const ()
+    }
+
+    #[doc(hidden)]
+    pub fn debug_vm_addr(&self) -> *const () {
+        std::ptr::addr_of!(self.vm) as *const ()
+    }
+
+    #[doc(hidden)]
+    pub fn debug_gc_addr(&self) -> *const () {
+        std::ptr::addr_of!(self.gc) as *const ()
+    }
+
+    #[doc(hidden)]
+    pub fn debug_keep_alive_len(&self) -> usize {
+        self._keep_alive.len()
+    }
+
     /// Install cached native code entry points into the VM.
     /// The `InstalledNativeCode` object must be kept alive; storing it in the
     /// context guarantees the executable mapping outlives any calls.

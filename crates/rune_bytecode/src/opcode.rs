@@ -239,7 +239,9 @@ impl BytecodeProgram {
     }
 
     /// Returns true if this function needs a Frame for lexical-scope access
-    /// (BlockEnter/Leave, DeclareLet/Const, LoadLexical/StoreLexical, LoadThis).
+    /// (BlockEnter/Leave, DeclareLet/Const, LoadLexical/StoreLexical, LoadThis,
+    /// and closure-env ops CopyLexical/MakeEnv/RestoreEnv/LoadCaptured/
+    /// StoreCaptured).
     /// Most JIT-compiled leaf functions (e.g. add(a,b){return a+b;}) do not.
     pub fn needs_frame(&self) -> bool {
         self.instructions.iter().any(|instr| {
@@ -252,6 +254,11 @@ impl BytecodeProgram {
                     | Opcode::LoadLexical
                     | Opcode::StoreLexical
                     | Opcode::LoadThis
+                    | Opcode::CopyLexical
+                    | Opcode::MakeEnv
+                    | Opcode::RestoreEnv
+                    | Opcode::LoadCaptured
+                    | Opcode::StoreCaptured
             )
         })
     }

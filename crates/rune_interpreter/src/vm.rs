@@ -9,10 +9,11 @@ use rune_core::array::RuneArray;
 use rune_core::env::EnvObject;
 
 use rune_core::accessor::AccessorPair;
+use rune_core::date::{self, RuneDate};
 use rune_core::function::Func;
 use rune_core::gc::{
-    GcHeader, RootProvider, SemiSpace, TAG_ACCESSOR, TAG_ARRAY, TAG_FLOAT64, TAG_FUNC, TAG_MAP,
-    TAG_OBJECT, TAG_PROMISE, TAG_REGEXP, TAG_SET, TAG_STRING, TAG_STRING_OBJ,
+    GcHeader, RootProvider, SemiSpace, TAG_ACCESSOR, TAG_ARRAY, TAG_DATE, TAG_FLOAT64, TAG_FUNC,
+    TAG_MAP, TAG_OBJECT, TAG_PROMISE, TAG_REGEXP, TAG_SET, TAG_STRING, TAG_STRING_OBJ,
 };
 use rune_core::map::{RuneMap, RuneSet};
 use rune_core::object::JSObject;
@@ -537,6 +538,8 @@ pub struct Vm {
     pub set_constructor: Value,
     pub map_prototype: Value,
     pub set_prototype: Value,
+    pub date_constructor: Value,
+    pub date_prototype: Value,
     /// Symbol.prototype — where Symbol.prototype.toString/[@@toPrimitive] live.
     pub symbol_prototype: Value,
     /// Pending well-known-symbol @@method dispatch (set by String.prototype
@@ -671,6 +674,8 @@ impl Vm {
             set_constructor: Value::undefined(),
             map_prototype: Value::undefined(),
             set_prototype: Value::undefined(),
+            date_constructor: Value::undefined(),
+            date_prototype: Value::undefined(),
             symbol_prototype: Value::undefined(),
             pending_symbol_dispatch: None,
             pending_symbol_coercion: None,
@@ -1114,6 +1119,78 @@ impl Vm {
             self.builtin_wrappers.insert("Set".to_string(), set_ctor);
             self.set_constructor = set_ctor;
             self.set_prototype = set_proto;
+        }
+
+        // Date constructor and prototype
+        if find_handle(&self.builtins, "Date").is_some() {
+            let mut date_proto_entries: Vec<(&str, Value)> = Vec::new();
+            for (name, handle) in [
+                ("getDate", "Date_prototype_getDate"),
+                ("getDay", "Date_prototype_getDay"),
+                ("getFullYear", "Date_prototype_getFullYear"),
+                ("getHours", "Date_prototype_getHours"),
+                ("getMilliseconds", "Date_prototype_getMilliseconds"),
+                ("getMinutes", "Date_prototype_getMinutes"),
+                ("getMonth", "Date_prototype_getMonth"),
+                ("getSeconds", "Date_prototype_getSeconds"),
+                ("getTime", "Date_prototype_getTime"),
+                ("getTimezoneOffset", "Date_prototype_getTimezoneOffset"),
+                ("getUTCDate", "Date_prototype_getUTCDate"),
+                ("getUTCDay", "Date_prototype_getUTCDay"),
+                ("getUTCFullYear", "Date_prototype_getUTCFullYear"),
+                ("getUTCHours", "Date_prototype_getUTCHours"),
+                ("getUTCMilliseconds", "Date_prototype_getUTCMilliseconds"),
+                ("getUTCMinutes", "Date_prototype_getUTCMinutes"),
+                ("getUTCMonth", "Date_prototype_getUTCMonth"),
+                ("getUTCSeconds", "Date_prototype_getUTCSeconds"),
+                ("setDate", "Date_prototype_setDate"),
+                ("setFullYear", "Date_prototype_setFullYear"),
+                ("setHours", "Date_prototype_setHours"),
+                ("setMilliseconds", "Date_prototype_setMilliseconds"),
+                ("setMinutes", "Date_prototype_setMinutes"),
+                ("setMonth", "Date_prototype_setMonth"),
+                ("setSeconds", "Date_prototype_setSeconds"),
+                ("setTime", "Date_prototype_setTime"),
+                ("setUTCDate", "Date_prototype_setUTCDate"),
+                ("setUTCFullYear", "Date_prototype_setUTCFullYear"),
+                ("setUTCHours", "Date_prototype_setUTCHours"),
+                ("setUTCMilliseconds", "Date_prototype_setUTCMilliseconds"),
+                ("setUTCMinutes", "Date_prototype_setUTCMinutes"),
+                ("setUTCMonth", "Date_prototype_setUTCMonth"),
+                ("setUTCSeconds", "Date_prototype_setUTCSeconds"),
+                ("toDateString", "Date_prototype_toDateString"),
+                ("toISOString", "Date_prototype_toISOString"),
+                ("toJSON", "Date_prototype_toJSON"),
+                ("toLocaleDateString", "Date_prototype_toLocaleDateString"),
+                ("toLocaleString", "Date_prototype_toLocaleString"),
+                ("toLocaleTimeString", "Date_prototype_toLocaleTimeString"),
+                ("toString", "Date_prototype_toString"),
+                ("toTimeString", "Date_prototype_toTimeString"),
+                ("toUTCString", "Date_prototype_toUTCString"),
+                ("valueOf", "Date_prototype_valueOf"),
+            ] {
+                if let Some(h) = find_handle(&self.builtins, handle) {
+                    date_proto_entries.push((name, h));
+                }
+            }
+            let date_ctor_handle =
+                find_handle(&self.builtins, "Date").unwrap_or(Value::undefined());
+            date_proto_entries.push(("constructor", date_ctor_handle));
+            let date_proto = make_object(gc, &date_proto_entries);
+            let mut date_ctor_entries: Vec<(&str, Value)> = vec![("prototype", date_proto)];
+            for (name, handle) in [
+                ("now", "Date_now"),
+                ("parse", "Date_parse"),
+                ("UTC", "Date_UTC"),
+            ] {
+                if let Some(h) = find_handle(&self.builtins, handle) {
+                    date_ctor_entries.push((name, h));
+                }
+            }
+            let date_ctor = make_object(gc, &date_ctor_entries);
+            self.builtin_wrappers.insert("Date".to_string(), date_ctor);
+            self.date_constructor = date_ctor;
+            self.date_prototype = date_proto;
         }
 
         // Iteration protocol — Array.prototype.values/keys/entries/[Symbol.iterator]
@@ -1699,6 +1776,8 @@ impl Vm {
         gc.push_root(&self.set_constructor as *const Value as *mut u64);
         gc.push_root(&self.map_prototype as *const Value as *mut u64);
         gc.push_root(&self.set_prototype as *const Value as *mut u64);
+        gc.push_root(&self.date_constructor as *const Value as *mut u64);
+        gc.push_root(&self.date_prototype as *const Value as *mut u64);
         gc.push_root(&self.promise_prototype as *const Value as *mut u64);
         gc.push_root(&self.function_prototype as *const Value as *mut u64);
         gc.push_root(&self.regexp_prototype as *const Value as *mut u64);
@@ -3286,6 +3365,7 @@ impl Vm {
                             || tag == TAG_STRING_OBJ
                             || tag == TAG_MAP
                             || tag == TAG_SET
+                            || tag == TAG_DATE
                         {
                             if instr.ic_index >= 0 {
                                 self.ic_stats.lookups += 1;
@@ -4734,6 +4814,24 @@ impl Vm {
                         self.frames[fi].pc = pc + 1;
                         continue;
                     }
+                    // Date constructor [[Construct]]: allocate the tagged
+                    // RuneDate and compute its time value from the arguments.
+                    if constructor == self.date_constructor {
+                        let proto_ptr = self.date_prototype.heap_ptr();
+                        let obj_ptr =
+                            RuneDate::allocate(gc, proto_ptr.unwrap_or(std::ptr::null_mut()));
+                        let obj_val = Value::from_heap_ptr(obj_ptr);
+                        let result = crate::builtins::date_constructor(gc, obj_val, &args, self);
+                        if let Some(exc) = self.pending_exception.take() {
+                            if let Some(exit) = self.handle_throw(gc, exc) {
+                                return exit;
+                            }
+                            continue;
+                        }
+                        self.push(result);
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    }
                     // Create a new empty object
                     let shape = Shape::empty();
                     let obj = JSObject::allocate(gc, shape, &[]);
@@ -5048,6 +5146,16 @@ impl Vm {
                         if let Some(exit) = self.handle_throw(gc, exc) {
                             return exit;
                         }
+                        continue;
+                    }
+
+                    // §21.4.2.1: Date() called without `new` returns the
+                    // string ToDateString(now).
+                    if callee == self.date_constructor {
+                        let tv = date::now_ms();
+                        let s = date::to_date_string(tv);
+                        self.push(Value::from_heap_ptr(crate::vm::heap_string(gc, &s)));
+                        self.frames[fi].pc = pc + 1;
                         continue;
                     }
 
@@ -7336,6 +7444,12 @@ fn try_convert_object_to_string(val: Value, gc: &mut SemiSpace, vm: &mut Vm) -> 
         None => return Ok(val),
     };
     let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+    if tag == TAG_DATE {
+        // §7.1.1.1 ToPrimitive(Date, string): Date's default hint is string.
+        let s = date::to_date_string(unsafe { date::RuneDate::tv(ptr) });
+        let heap_ptr = HeapString::allocate(gc, &s);
+        return Ok(Value::from_heap_ptr(heap_ptr as *mut u8));
+    }
     if tag != TAG_OBJECT {
         return Ok(val);
     }
@@ -7855,6 +7969,14 @@ pub(crate) fn load_property_recursive(
                     continue;
                 }
                 return Value::undefined();
+            } else if tag == TAG_DATE {
+                // RuneDate has no own properties; walk to Date.prototype
+                let proto_ptr = unsafe { date::RuneDate::prototype(ptr) };
+                if !proto_ptr.is_null() {
+                    current = Value::from_heap_ptr(proto_ptr);
+                    continue;
+                }
+                return Value::undefined();
             }
         }
         return Value::undefined();
@@ -8107,7 +8229,7 @@ fn do_store_property(obj: Value, raw_key: Value, value: Value, gc: &mut SemiSpac
 
 /// Convert a Value to an f64 for numeric operations.
 /// Returns NaN for non-numeric types (undefined, null, objects, strings).
-fn to_number(v: Value) -> f64 {
+pub(crate) fn to_number(v: Value) -> f64 {
     if let Some(n) = v.as_smi() {
         n as f64
     } else if let Some(n) = v.as_float64() {
@@ -8160,6 +8282,10 @@ fn to_number(v: Value) -> f64 {
             f64::NAN
         } else if tag == TAG_FLOAT64 {
             unsafe { *(ptr.add(std::mem::size_of::<GcHeader>()) as *const f64) }
+        } else if tag == TAG_DATE {
+            // §7.1.4 + §7.1.1.1 ToPrimitive(Date, number): Date's default hint is
+            // string, but Number(x) uses the number hint → [[DateValue]]
+            unsafe { date::RuneDate::tv(ptr) }
         } else {
             f64::NAN
         }
@@ -8347,6 +8473,8 @@ fn ordinary_has_instance(lhs: Value, rhs_proto_ptr: *mut u8) -> bool {
                 unsafe { RuneMap::prototype(ptr) }
             } else if tag == TAG_SET {
                 unsafe { RuneSet::prototype(ptr) }
+            } else if tag == TAG_DATE {
+                unsafe { date::RuneDate::prototype(ptr) }
             } else {
                 return false;
             };

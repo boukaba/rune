@@ -15,6 +15,7 @@ pub const TAG_REGEXP: u64 = 9;
 pub const TAG_ACCESSOR: u64 = 10;
 pub const TAG_MAP: u64 = 11;
 pub const TAG_SET: u64 = 12;
+pub const TAG_DATE: u64 = 13;
 
 /// Tag bits mask for GC header tag.
 pub const GC_TAG_MASK: u64 = 0b1111;
@@ -299,6 +300,11 @@ impl SemiSpace {
                         let proto_ptr = scan_ptr.add(24) as *mut u64;
                         self.forward_value(proto_ptr);
                     }
+                    TAG_DATE => {
+                        // RuneDate has no interior pointers except the prototype.
+                        let proto_ptr = scan_ptr.add(24) as *mut u64;
+                        self.forward_value(proto_ptr);
+                    }
                     _ => {}
                 }
 
@@ -348,6 +354,7 @@ impl SemiSpace {
                 TAG_ACCESSOR => obj_start.add(crate::accessor::ACCESSOR_SIZE),
                 TAG_MAP => obj_start.add(crate::map::MAP_SIZE),
                 TAG_SET => obj_start.add(crate::map::SET_SIZE),
+                TAG_DATE => obj_start.add(crate::date::DATE_SIZE),
                 _ => obj_start.add(8),
             }
         }

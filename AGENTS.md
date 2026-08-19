@@ -47,7 +47,7 @@ breadth to run real workloads correctly, with the cold-start wedge intact.
 - [x] **Iteration protocol + `for..of`** — iterable/iterator/IteratorResult,
       Array iterator, String iterator, `next`/`done`/`value`, spread uses iterator
 - [x] **Map / Set** — ctor, get/set/has/delete/size, iteration, WeakRef later
-- [ ] **Date** — ctor, now/parse/UTC, getters/setters, toISOString, toString
+- [x] **Date** — ctor, now/parse/UTC, getters/setters, toISOString, toString
 - [ ] **TypedArray family** — at least Uint8Array/Int32Array/Float64Array +
       ArrayBuffer, typed indexing + basic methods
 - [ ] **String methods** — trim/trimStart/trimEnd, toUpperCase/toLowerCase,
@@ -143,6 +143,7 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - **Bailout PR2 — trace-key collision fix (root cause of the hang)** — `loop_traces`/`loop_counts`/`loop_patched`/`pending_rerecord` were keyed by bare target pc; the top-level warmup loop and the `let`-loop function both target pc 6, so the top-level back-edge executed the function's trace on the top-level frame (`fi=0`): LEX_LOAD(1) read a wrong frame's slot (undefined) → Lt smi-check bail → resume landed mid-loop-body (loop condition skipped) → infinite bailout/resume cycle. All loop maps now keyed by `TraceKey = (prog_ptr, target_pc)`; recording also stops + discards when an instruction executes in a different program than the recorded loop (prevents traces mixing two programs' pcs across a Call/Return). Regression test `test_jit_same_pc_loops_across_functions` (f + g + top-level all loop at pc 6). 482/482 integration tests pass, 3 ignored.
 
 ### Done — v0.6 (cont.)
+- **Date (v1.0 item 1)** — `RuneDate` GC type (TAG_DATE=13, 32B `[GcHeader|tv:f64|pad|prototype@24]`); `rune_core::date` with all §21.4.1 abstract ops (day/time_within_day/year_from_time binary search/month/date/week_day/make_*/time_clip/now_ms), formatting (to_date_string "Invalid Date", to_iso_string ±6-digit expanded years), parsing (full ISO + legacy `toString`-format fallback, `GMT+0000` = one token); ctor all arg forms (now/string parse/Date copy/ms/2+ arg MakeTime+MakeFullYear 0–99→1900+y), **UTC-only timezone** (spec-conformant §21.4.1.6, `getTimezoneOffset`=0, LocalTime=identity); 16 getters (`date_getter!` macro, NaN for invalid), 15 setters (undefined→current component, setFullYear/setUTCFullYear apply MakeFullYear — caught 26→1926 via test), toString family (`"Wed Aug 19 2026 12:34:56 GMT+0000"` — single space), toISOString (RangeError on invalid), toJSON (1-arg Date receivers), toLocale*=toString family; `Date()` plain call → ToDateString(now) string; vm.rs: `date_constructor`/`date_prototype` fields+roots, init_builtin_wrappers block (44 proto methods + now/parse/UTC statics), Opcode::New/Call arms, instanceof TAG_DATE arm, LoadProperty tag list + TAG_DATE, load_property_recursive arm, `to_number` → [[DateValue]], ToPrimitive TAG_DATE arms in try_convert_object_to_string/to_primitive_string(_sync)/value_to_js_string (default hint = string, matches V8); 10 integration tests. 535/535 integration tests, 684 workspace. Fixed pre-existing weak `to_number` in builtins.rs (delegates to vm version now). 3 clippy/1 fmt fixes.
 - **Map / Set** — `RuneMap`/`RuneSet` GC types (TAG_MAP=11/TAG_SET=12, flat RuneArray entries: map `[k0,v0,…]`, set flat values, `Value::empty_sentinel()` tag 7 marks deleted); ctors from iterables (AddEntriesFromIterable, SameValueZero via `map_key_equal`, entries must be Objects for Map, Sets add raw values, `undefined`/`null` → empty); get/set/has/delete/clear/forEach/entries/keys/values + computed `size` (LoadProperty TAG_MAP/TAG_SET arm); JS `@@iterator`/`next` state machine (`PendingCollectionCtor` AwaitFactory/AwaitNext, `root_base` truncation discipline — the state machine truncates to the caller's stack depth whenever it resumes control); `forEach` snapshots KEYS + live-presence re-check at dispatch (§23.1.3.25 deletion-skipping); iterators skip deleted entries; `instanceof` arms; plain `Map()`/`Set()` call → catchable TypeError (handle_throw, not Exit::Throw); `Map.prototype.get.call({},…)` receiver TypeError. 9 integration tests. 528/528 integration tests, 677 workspace.
 - **Bug fixes found wiring Map/Set** — (a) LoadProperty tag list lacked TAG_MAP/TAG_SET (`m.set` → undefined); (b) Call opcode "skip result push when pending callback" list lacked `pending_collection_foreach`/`pending_collection_ctor` → callback junk leaked onto the caller stack (forEach chain calls corrupted); (c) `map_constructor`/`set_constructor` truncated the stack unconditionally, stealing the `[this]` root under a pending @@iterator frame (Return underflow) — Pending outcomes no longer truncate, continuations truncate to `root_base`; (d) `process_collection_result` required Map-style Object entries for Sets (`new Set([10,20,30])` threw); (e) plain-call TypeError used `throw_type_error` (uncatchable Exit::Throw) instead of `handle_throw`.
 
@@ -153,6 +154,7 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - `test_prototype_clang_determinism` — Clang produces empty output on first compilation in CI. Marked `#[ignore]`.
 - `test_prototype_patch_stencil` — same Clang availability issue in CI. Marked `#[ignore]`.
 - `RegExp()` constructor not yet implemented
+- Date is UTC-only (getTimezoneOffset always 0, no local tz); `toLocaleString` family = `toString` family (no ECMA-402); `toJSON` handles Date receivers only; no `setYear`/`getYear`/`toGMTString` (Annex B); no `Date.prototype[Symbol.toStringTag]` (not in 2027 edition); ToPrimitive doesn't dispatch `@@toPrimitive` (Date special-cased)
 - Match result arrays don't set `.index`/`.input` properties (no named-property support on TAG_ARRAY)
 - `replaceAll` function replacement not yet implemented
 - `Number(sym)`/arithmetic beyond `+` treat symbols as NaN (ToNumber(symbol) should throw TypeError — needs exception plumbing through to_number's call sites; deferred to conformance pass)
@@ -166,7 +168,7 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - Trace perf: bailout-per-iteration paths (e.g. float-promoted acc in a loop) still bail each iteration — re-record or stay native with float ops (correctness fine)
 
 ### Next Steps — v1.0 (ordered by leverage)
-1. **Date** — ctor, now/parse/UTC, getters/setters, toISOString, toString
+1. **TypedArray family** — at least Uint8Array/Int32Array/Float64Array + ArrayBuffer, typed indexing + basic methods
 2. Trace perf: float-promoted accumulator loops bail per-iteration — re-record or emit float ops natively.
 3. `RegExp()` constructor
 4. Match result array `.index`/`.input` properties

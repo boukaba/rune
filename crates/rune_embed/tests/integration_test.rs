@@ -8270,3 +8270,255 @@ fn test_map_set_errors() {
         "1a1"
     );
 }
+
+#[test]
+fn test_date_basic() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("Date.now() > 1e12;").unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+    // Date.UTC with components
+    let r = ctx
+        .eval(
+            "var d = new Date(Date.UTC(2026, 7, 19, 12, 34, 56, 789));
+             d.getUTCFullYear() + '-' + d.getUTCMonth() + '-' + d.getUTCDate()
+             + ' ' + d.getUTCHours() + ':' + d.getUTCMinutes() + ':' + d.getUTCSeconds()
+             + ':' + d.getUTCMilliseconds();",
+        )
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "2026-7-19 12:34:56:789"
+    );
+    // valueOf returns the time value
+    let r = ctx
+        .eval("new Date(Date.UTC(2026, 7, 19)).valueOf();")
+        .unwrap();
+    assert_eq!(r.as_float64(), Some(1787097600000.0));
+    // getTime matches valueOf
+    let r = ctx
+        .eval("new Date(Date.UTC(2026, 7, 19)).getTime();")
+        .unwrap();
+    assert_eq!(r.as_float64(), Some(1787097600000.0));
+}
+
+#[test]
+fn test_date_parse_iso() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("Date.parse('2026-08-19T12:34:56.789Z');").unwrap();
+    assert_eq!(r.as_float64(), Some(1787142896789.0));
+    let r = ctx.eval("Date.parse('2026-08-19T12:34:56Z');").unwrap();
+    assert_eq!(r.as_float64(), Some(1787142896000.0));
+    // local (no offset) forms parse as UTC in this implementation
+    let r = ctx.eval("Date.parse('2026-08-19T12:34:56');").unwrap();
+    assert_eq!(r.as_float64(), Some(1787142896000.0));
+    // invalid
+    let r = ctx.eval("Date.parse('not a date');").unwrap();
+    assert!(r.as_float64().unwrap().is_nan());
+}
+
+#[test]
+fn test_date_strings() {
+    let mut ctx = Context::new_small();
+    // toISOString
+    let r = ctx
+        .eval("new Date(Date.UTC(2026, 7, 19, 12, 34, 56, 789)).toISOString();")
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "2026-08-19T12:34:56.789Z"
+    );
+    // toUTCString
+    let r = ctx
+        .eval("new Date(Date.UTC(2026, 7, 19, 12, 34, 56)).toUTCString();")
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "Wed, 19 Aug 2026 12:34:56 GMT"
+    );
+    // toString (UTC-only: date + time, space separator, +0000 offset)
+    let r = ctx
+        .eval("new Date(Date.UTC(2026, 7, 19, 12, 34, 56)).toString();")
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "Wed Aug 19 2026 12:34:56 GMT+0000"
+    );
+    // invalid date string form
+    let r = ctx.eval("new Date('bad').toString();").unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "Invalid Date"
+    );
+}
+
+#[test]
+fn test_date_setters() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var d = new Date(Date.UTC(2026, 0, 31));
+             d.setUTCDate(1); d.setUTCMonth(1); d.setUTCHours(3);
+             d.setUTCMinutes(5); d.setUTCSeconds(7); d.setUTCMilliseconds(9);
+             d.toISOString();",
+        )
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "2026-02-01T03:05:07.009Z"
+    );
+    // setFullYear with 0-99 mapping
+    let r = ctx
+        .eval(
+            "var d = new Date(Date.UTC(2000, 0, 1));
+             d.setUTCFullYear(26);
+             d.getUTCFullYear();",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(1926));
+    // setTime resets
+    let r = ctx
+        .eval(
+            "var d = new Date(Date.UTC(2020, 0, 1));
+             d.setTime(0);
+             d.getTime();",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(0));
+    // non-UTC setters mirror UTC (UTC-only implementation)
+    let r = ctx
+        .eval(
+            "var d = new Date(Date.UTC(2026, 7, 19, 12, 34, 56));
+             d.setHours(1); d.getUTCHours();",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(1));
+}
+
+#[test]
+fn test_date_edge_cases() {
+    let mut ctx = Context::new_small();
+    // constructor with numeric args (1-based date)
+    let r = ctx.eval("new Date(2026, 7, 19).toISOString();").unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "2026-08-19T00:00:00.000Z"
+    );
+    // single numeric arg = milliseconds since epoch
+    let r = ctx.eval("new Date(0).toISOString();").unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "1970-01-01T00:00:00.000Z"
+    );
+    // Date copy constructor
+    let r = ctx
+        .eval(
+            "var a = new Date(Date.UTC(2026, 0, 1)); var b = new Date(a);
+             a === b ? 'same' : b.getTime();",
+        )
+        .unwrap();
+    assert_eq!(r.as_float64(), Some(1767225600000.0));
+    // plain call returns a string
+    let r = ctx.eval("typeof Date();").unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "string"
+    );
+    // instanceof
+    let r = ctx.eval("new Date() instanceof Date;").unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+    // invalid → NaN everywhere
+    let r = ctx.eval("new Date('bad').getTime();").unwrap();
+    assert!(r.as_float64().unwrap().is_nan());
+    // toISOString on invalid throws
+    let r = ctx
+        .eval("var x; try { new Date('bad').toISOString(); } catch (e) { x = e; } x")
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "RangeError: Invalid time value"
+    );
+    // coercion: Date is a value in comparisons/arithmetic via [[DateValue]]
+    let r = ctx.eval("new Date(0) - new Date(0);").unwrap();
+    assert_eq!(r.as_smi(), Some(0));
+    // String(d) uses the toString representation
+    let r = ctx.eval("'x' + new Date(0);").unwrap();
+    let v = unsafe {
+        rune_core::string::HeapString::to_string(
+            r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+        )
+    };
+    assert!(v.starts_with("xThu Jan 01 1970"));
+}
+
+#[test]
+fn test_date_legacy_parse() {
+    let mut ctx = Context::new_small();
+    // legacy toString format round-trips
+    let r = ctx
+        .eval("Date.parse('Sat Feb 04 1995 23:59:59 GMT+0000');")
+        .unwrap();
+    assert_eq!(r.as_float64(), Some(791942399000.0));
+    let r = ctx
+        .eval("Date.parse('Sat Feb 04 1995 23:59:59 GMT');")
+        .unwrap();
+    assert_eq!(r.as_float64(), Some(791942399000.0));
+}
+
+#[test]
+fn test_date_to_json() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var d = new Date(Date.UTC(2026, 7, 19, 12, 34, 56, 789));
+             d.toJSON();",
+        )
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "2026-08-19T12:34:56.789Z"
+    );
+}

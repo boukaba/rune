@@ -3,11 +3,13 @@ use crate::vm::Vm;
 use crate::vm::get_iter_method;
 use crate::vm::get_symbol_method;
 use crate::vm::load_property_recursive;
+use crate::vm::to_number;
 use crate::vm::{CollectionCtorState, PendingCollectionCtor, PendingCollectionForEach};
 use rune_core::array::RuneArray;
+use rune_core::date;
 use rune_core::gc::{
-    GcHeader, SemiSpace, TAG_ARRAY, TAG_FLOAT64, TAG_FORWARDED, TAG_FUNC, TAG_MAP, TAG_OBJECT,
-    TAG_PROMISE, TAG_REGEXP, TAG_SET, TAG_STRING, TAG_STRING_OBJ,
+    GcHeader, SemiSpace, TAG_ARRAY, TAG_DATE, TAG_FLOAT64, TAG_FORWARDED, TAG_FUNC, TAG_MAP,
+    TAG_OBJECT, TAG_PROMISE, TAG_REGEXP, TAG_SET, TAG_STRING, TAG_STRING_OBJ,
 };
 use rune_core::map::{RuneMap, RuneSet};
 use rune_core::object::JSObject;
@@ -53,6 +55,8 @@ pub fn value_to_js_string(v: Value) -> String {
         } else if tag == TAG_STRING_OBJ {
             let str_ptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
             unsafe { HeapString::to_string(str_ptr as *mut HeapString) }
+        } else if tag == TAG_DATE {
+            date::to_date_string(unsafe { date::RuneDate::tv(ptr) })
         } else {
             "[object Object]".to_string()
         }
@@ -90,6 +94,10 @@ pub(crate) fn to_primitive_string(gc: &mut SemiSpace, val: Value, vm: &mut Vm) -
     if tag == TAG_STRING_OBJ {
         let str_ptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
         return Some(unsafe { HeapString::to_string(str_ptr as *mut HeapString) });
+    }
+    if tag == TAG_DATE {
+        // §7.1.1.1: Date's default hint is string → ToDateString
+        return Some(date::to_date_string(unsafe { date::RuneDate::tv(ptr) }));
     }
     if tag == TAG_OBJECT {
         // §7.1.1 ToPrimitive with string hint: call toString(), then valueOf()
@@ -181,6 +189,9 @@ pub(crate) fn to_primitive_string_sync(val: Value, gc: &mut SemiSpace, vm: &mut 
     if tag == TAG_STRING_OBJ {
         let str_ptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
         return unsafe { HeapString::to_string(str_ptr as *mut HeapString) };
+    }
+    if tag == TAG_DATE {
+        return date::to_date_string(unsafe { date::RuneDate::tv(ptr) });
     }
     if tag == TAG_OBJECT {
         let key = PropertyKey::from_string("toString");
@@ -1268,6 +1279,921 @@ pub fn set_iterator_next(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &
     make_iter_result(gc, Value::undefined(), true)
 }
 
+// ---------------------------------------------------------------------------
+// Date — §21.4. UTC-only time zone (spec-conformant default: local time
+// equals UTC). The engine's ToPrimitive does not dispatch @@toPrimitive, so
+// Date "default" hint → string is handled by special-casing TAG_DATE in
+// to_primitive_string / to_number / value_to_js_string.
+// ---------------------------------------------------------------------------
+
+/// §21.4.2.1 Date ( ...values ) — constructor called with `new`.
+/// The freshly allocated RuneDate is passed as `this`; computes the time value
+/// and stores it. Synchronous only (no pending state machine): object args
+/// use the sync ToPrimitive path, matching the engine's existing simplifications.
+pub fn date_constructor(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let tv = match args.len() {
+        0 => date::now_ms(),
+        1 => {
+            let v = args[0];
+            if let Some(ptr) = v.heap_ptr() {
+                let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+                if tag == TAG_DATE {
+                    // Copy the [[DateValue]] of another Date.
+                    unsafe { date::RuneDate::tv(ptr) }
+                } else if tag == TAG_STRING {
+                    let s = unsafe { HeapString::to_string(ptr as *mut HeapString) };
+                    date::time_clip(date::parse_date_string(&s))
+                } else if tag == TAG_STRING_OBJ {
+                    let str_ptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
+                    let s = unsafe { HeapString::to_string(str_ptr as *mut HeapString) };
+                    date::time_clip(date::parse_date_string(&s))
+                } else if tag == TAG_ARRAY {
+                    let s = array_to_string(ptr as *mut RuneArray);
+                    date::time_clip(date::parse_date_string(&s))
+                } else if tag == TAG_OBJECT {
+                    // ToPrimitive (default hint) via the sync path, then parse.
+                    let s = to_primitive_string_sync(v, gc, vm);
+                    date::time_clip(date::parse_date_string(&s))
+                } else {
+                    date::time_clip(to_number(v))
+                }
+            } else if v.is_symbol() {
+                // ToNumber(symbol) should throw TypeError; known gap (NaN).
+                f64::NAN
+            } else {
+                date::time_clip(to_number(v))
+            }
+        }
+        _ => {
+            let y = to_number(args[0]);
+            let m = to_number(args.get(1).copied().unwrap_or(Value::smi(0)));
+            let dt = match args.get(2) {
+                Some(x) => to_number(*x),
+                None => 1.0,
+            };
+            let h = match args.get(3) {
+                Some(x) => to_number(*x),
+                None => 0.0,
+            };
+            let min = match args.get(4) {
+                Some(x) => to_number(*x),
+                None => 0.0,
+            };
+            let sec = match args.get(5) {
+                Some(x) => to_number(*x),
+                None => 0.0,
+            };
+            let ms = match args.get(6) {
+                Some(x) => to_number(*x),
+                None => 0.0,
+            };
+            let yr = date::make_full_year(y);
+            let final_date =
+                date::make_date(date::make_day(yr, m, dt), date::make_time(h, min, sec, ms));
+            // UTC(t) = t in the UTC-only implementation.
+            date::time_clip(final_date)
+        }
+    };
+    if let Some(ptr) = this.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_DATE {
+            unsafe { date::RuneDate::set_tv(ptr, tv) };
+        }
+    }
+    this
+}
+
+/// §21.4.3.1 Date.now ( )
+pub fn date_now_builtin(_gc: &mut SemiSpace, _this: Value, _args: &[Value], _vm: &mut Vm) -> Value {
+    date_number(date::now_ms())
+}
+
+/// §21.4.3.2 Date.parse ( string )
+pub fn date_parse_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let s = match args.first().copied() {
+        Some(v) => to_primitive_string_sync(v, gc, _vm),
+        None => String::new(),
+    };
+    date_number(date::parse_date_string(&s))
+}
+
+/// §21.4.3.4 Date.UTC ( year [ , month [ , date [ , hours [ , minutes [ , seconds [ , ms ] ] ] ] ] ] )
+pub fn date_utc_builtin(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    if args.is_empty() {
+        return date_number(f64::NAN);
+    }
+    let y = to_number(args[0]);
+    let m = args.get(1).map_or(0.0, |x| to_number(*x));
+    let dt = args.get(2).map_or(1.0, |x| to_number(*x));
+    let h = args.get(3).map_or(0.0, |x| to_number(*x));
+    let min = args.get(4).map_or(0.0, |x| to_number(*x));
+    let sec = args.get(5).map_or(0.0, |x| to_number(*x));
+    let ms = args.get(6).map_or(0.0, |x| to_number(*x));
+    let yr = date::make_full_year(y);
+    date_number(date::time_clip(date::make_date(
+        date::make_day(yr, m, dt),
+        date::make_time(h, min, sec, ms),
+    )))
+}
+
+fn date_receiver(gc: &mut SemiSpace, this: Value, vm: &mut Vm) -> Option<*mut u8> {
+    if let Some(ptr) = this.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_DATE {
+            return Some(ptr);
+        }
+    }
+    vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        gc,
+        "TypeError: Date.prototype method called on incompatible receiver",
+    )));
+    None
+}
+
+/// Number result helper: Smi when integral and in range, else NaN-boxed f64.
+fn date_number(v: f64) -> Value {
+    if v.is_nan() || v.is_infinite() {
+        return Value::from_float64(v);
+    }
+    if v.fract() == 0.0 {
+        if v == 0.0 && v.is_sign_negative() {
+            return Value::from_float64(v);
+        }
+        let i = v as i64;
+        if i32::try_from(i).is_ok() {
+            return Value::smi(i as i32);
+        }
+    }
+    Value::from_float64(v)
+}
+
+macro_rules! date_getter {
+    ($name:ident, $doc:expr, $expr:expr) => {
+        /// $doc
+        pub fn $name(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+            let Some(ptr) = date_receiver(gc, this, vm) else {
+                return Value::undefined();
+            };
+            let tv = unsafe { date::RuneDate::tv(ptr) };
+            if tv.is_nan() {
+                return Value::from_float64(f64::NAN);
+            }
+            date_number($expr(tv) as f64)
+        }
+    };
+}
+
+date_getter!(
+    date_get_date_builtin,
+    "§21.4.4.2 Date.prototype.getDate",
+    date::date_from_time
+);
+date_getter!(
+    date_get_day_builtin,
+    "§21.4.4.3 Date.prototype.getDay",
+    date::week_day
+);
+date_getter!(
+    date_get_full_year_builtin,
+    "§21.4.4.4 Date.prototype.getFullYear",
+    |tv| date::year_from_time(tv) as f64
+);
+date_getter!(
+    date_get_hours_builtin,
+    "§21.4.4.5 Date.prototype.getHours",
+    |tv| date::hour_from_time(tv) as f64
+);
+date_getter!(
+    date_get_milliseconds_builtin,
+    "§21.4.4.6 Date.prototype.getMilliseconds",
+    |tv| date::millisec_from_time(tv) as f64
+);
+date_getter!(
+    date_get_minutes_builtin,
+    "§21.4.4.7 Date.prototype.getMinutes",
+    |tv| date::min_from_time(tv) as f64
+);
+date_getter!(
+    date_get_month_builtin,
+    "§21.4.4.8 Date.prototype.getMonth",
+    |tv| date::month_from_time(tv) as f64
+);
+date_getter!(
+    date_get_seconds_builtin,
+    "§21.4.4.9 Date.prototype.getSeconds",
+    |tv| date::sec_from_time(tv) as f64
+);
+date_getter!(
+    date_get_utc_date_builtin,
+    "§21.4.4.12 Date.prototype.getUTCDate",
+    date::date_from_time
+);
+date_getter!(
+    date_get_utc_day_builtin,
+    "§21.4.4.13 Date.prototype.getUTCDay",
+    date::week_day
+);
+date_getter!(
+    date_get_utc_full_year_builtin,
+    "§21.4.4.14 Date.prototype.getUTCFullYear",
+    |tv| date::year_from_time(tv) as f64
+);
+date_getter!(
+    date_get_utc_hours_builtin,
+    "§21.4.4.15 Date.prototype.getUTCHours",
+    |tv| date::hour_from_time(tv) as f64
+);
+date_getter!(
+    date_get_utc_milliseconds_builtin,
+    "§21.4.4.16 Date.prototype.getUTCMilliseconds",
+    |tv| date::millisec_from_time(tv) as f64
+);
+date_getter!(
+    date_get_utc_minutes_builtin,
+    "§21.4.4.17 Date.prototype.getUTCMinutes",
+    |tv| date::min_from_time(tv) as f64
+);
+date_getter!(
+    date_get_utc_month_builtin,
+    "§21.4.4.18 Date.prototype.getUTCMonth",
+    |tv| date::month_from_time(tv) as f64
+);
+date_getter!(
+    date_get_utc_seconds_builtin,
+    "§21.4.4.19 Date.prototype.getUTCSeconds",
+    |tv| date::sec_from_time(tv) as f64
+);
+
+/// §21.4.4.10 Date.prototype.getTime
+pub fn date_get_time_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = date_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    date_number(unsafe { date::RuneDate::tv(ptr) })
+}
+
+/// §21.4.4.11 Date.prototype.getTimezoneOffset — 0 in the UTC-only implementation.
+pub fn date_get_timezone_offset_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = date_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let tv = unsafe { date::RuneDate::tv(ptr) };
+    if tv.is_nan() {
+        return Value::from_float64(f64::NAN);
+    }
+    Value::smi(0)
+}
+
+/// §21.4.4.44 Date.prototype.valueOf
+pub fn date_value_of_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = date_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    date_number(unsafe { date::RuneDate::tv(ptr) })
+}
+
+/// §21.4.4.41 Date.prototype.toString
+pub fn date_to_string_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = date_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let s = date::to_date_string(unsafe { date::RuneDate::tv(ptr) });
+    Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8)
+}
+
+/// §21.4.4.35 Date.prototype.toDateString
+pub fn date_to_date_string_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = date_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let tv = unsafe { date::RuneDate::tv(ptr) };
+    if tv.is_nan() {
+        return Value::from_heap_ptr(HeapString::allocate(gc, "Invalid Date") as *mut u8);
+    }
+    let s = date::date_string(tv);
+    Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8)
+}
+
+/// §21.4.4.42 Date.prototype.toTimeString
+pub fn date_to_time_string_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = date_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let tv = unsafe { date::RuneDate::tv(ptr) };
+    if tv.is_nan() {
+        return Value::from_heap_ptr(HeapString::allocate(gc, "Invalid Date") as *mut u8);
+    }
+    let s = format!("{}{}", date::time_string(tv), date::time_zone_string(tv));
+    Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8)
+}
+
+/// §21.4.4.43 Date.prototype.toUTCString
+pub fn date_to_utc_string_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = date_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let tv = unsafe { date::RuneDate::tv(ptr) };
+    if tv.is_nan() {
+        return Value::from_heap_ptr(HeapString::allocate(gc, "Invalid Date") as *mut u8);
+    }
+    let yv = date::year_from_time(tv);
+    let year_sign = if yv >= 0 { "" } else { "-" };
+    let s = format!(
+        "{}, {} {} {}{} {}",
+        date::weekday_name(date::week_day(tv)),
+        date::zero_padded(date::date_from_time(tv), 2),
+        date::month_name(date::month_from_time(tv)),
+        year_sign,
+        date::zero_padded(yv, 4),
+        date::time_string(tv)
+    );
+    Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8)
+}
+
+/// §21.4.4.36 Date.prototype.toISOString
+pub fn date_to_iso_string_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = date_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let tv = unsafe { date::RuneDate::tv(ptr) };
+    match date::to_iso_string(tv) {
+        Some(s) => Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8),
+        None => {
+            // §21.4.4.36: throw a RangeError for NaN or unrepresentable years.
+            vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+                gc,
+                "RangeError: Invalid time value",
+            )));
+            Value::undefined()
+        }
+    }
+}
+
+/// §21.4.4.37 Date.prototype.toJSON ( key )
+pub fn date_to_json_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    // Generic per spec; this implementation handles Date receivers and
+    // non-finite primitive coercions (objects without a toISOString are a gap).
+    if let Some(ptr) = this.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_DATE {
+            let tv = unsafe { date::RuneDate::tv(ptr) };
+            if tv.is_nan() || tv.is_infinite() {
+                return Value::null();
+            }
+            return date_to_iso_string_builtin(gc, this, _args, vm);
+        }
+    }
+    Value::null()
+}
+
+/// §21.4.4.38-40 locale methods — implementation-defined without ECMA-402.
+pub fn date_to_locale_string_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    date_to_string_builtin(gc, this, _args, vm)
+}
+
+pub fn date_to_locale_date_string_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    date_to_date_string_builtin(gc, this, _args, vm)
+}
+
+pub fn date_to_locale_time_string_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    date_to_time_string_builtin(gc, this, _args, vm)
+}
+
+/// §21.4.4.20 Date.prototype.setDate ( date )
+pub fn date_set_date_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = date_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let tv = unsafe { date::RuneDate::tv(ptr) };
+    let dt = to_number(
+        args.first()
+            .copied()
+            .unwrap_or(Value::from_float64(f64::NAN)),
+    );
+    if tv.is_nan() {
+        return Value::from_float64(f64::NAN);
+    }
+    let new_date = date::make_date(
+        date::make_day(
+            date::year_from_time(tv) as f64,
+            date::month_from_time(tv) as f64,
+            dt,
+        ),
+        date::time_within_day(tv),
+    );
+    let u = date::time_clip(new_date);
+    unsafe { date::RuneDate::set_tv(ptr, u) };
+    date_number(u)
+}
+
+/// §21.4.4.21 Date.prototype.setFullYear ( year [ , month [ , date ] ] )
+pub fn date_set_full_year_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = date_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let tv = unsafe { date::RuneDate::tv(ptr) };
+    let y = to_number(
+        args.first()
+            .copied()
+            .unwrap_or(Value::from_float64(f64::NAN)),
+    );
+    let base = if tv.is_nan() { 0.0 } else { tv };
+    let m = args
+        .get(1)
+        .map_or(date::month_from_time(base) as f64, |x| to_number(*x));
+    let dt = args
+        .get(2)
+        .map_or(date::date_from_time(base) as f64, |x| to_number(*x));
+    let yr = date::make_full_year(y);
+    let new_date = date::make_date(date::make_day(yr, m, dt), date::time_within_day(base));
+    let u = date::time_clip(new_date);
+    unsafe { date::RuneDate::set_tv(ptr, u) };
+    date_number(u)
+}
+
+/// §21.4.4.22 Date.prototype.setHours ( hour [ , min [ , sec [ , ms ] ] ] )
+pub fn date_set_hours_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = date_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let tv = unsafe { date::RuneDate::tv(ptr) };
+    let h = to_number(
+        args.first()
+            .copied()
+            .unwrap_or(Value::from_float64(f64::NAN)),
+    );
+    if tv.is_nan() {
+        return Value::from_float64(f64::NAN);
+    }
+    let m = args
+        .get(1)
+        .map_or(date::min_from_time(tv) as f64, |x| to_number(*x));
+    let s = args
+        .get(2)
+        .map_or(date::sec_from_time(tv) as f64, |x| to_number(*x));
+    let ms = args
+        .get(3)
+        .map_or(date::millisec_from_time(tv) as f64, |x| to_number(*x));
+    let u = date::time_clip(date::make_date(
+        date::day(tv) as f64,
+        date::make_time(h, m, s, ms),
+    ));
+    unsafe { date::RuneDate::set_tv(ptr, u) };
+    date_number(u)
+}
+
+/// §21.4.4.23 Date.prototype.setMilliseconds ( ms )
+pub fn date_set_milliseconds_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = date_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let tv = unsafe { date::RuneDate::tv(ptr) };
+    let ms = to_number(
+        args.first()
+            .copied()
+            .unwrap_or(Value::from_float64(f64::NAN)),
+    );
+    if tv.is_nan() {
+        return Value::from_float64(f64::NAN);
+    }
+    let u = date::time_clip(date::make_date(
+        date::day(tv) as f64,
+        date::make_time(
+            date::hour_from_time(tv) as f64,
+            date::min_from_time(tv) as f64,
+            date::sec_from_time(tv) as f64,
+            ms,
+        ),
+    ));
+    unsafe { date::RuneDate::set_tv(ptr, u) };
+    date_number(u)
+}
+
+/// §21.4.4.24 Date.prototype.setMinutes ( min [ , sec [ , ms ] ] )
+pub fn date_set_minutes_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = date_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let tv = unsafe { date::RuneDate::tv(ptr) };
+    let m = to_number(
+        args.first()
+            .copied()
+            .unwrap_or(Value::from_float64(f64::NAN)),
+    );
+    if tv.is_nan() {
+        return Value::from_float64(f64::NAN);
+    }
+    let s = args
+        .get(1)
+        .map_or(date::sec_from_time(tv) as f64, |x| to_number(*x));
+    let ms = args
+        .get(2)
+        .map_or(date::millisec_from_time(tv) as f64, |x| to_number(*x));
+    let u = date::time_clip(date::make_date(
+        date::day(tv) as f64,
+        date::make_time(date::hour_from_time(tv) as f64, m, s, ms),
+    ));
+    unsafe { date::RuneDate::set_tv(ptr, u) };
+    date_number(u)
+}
+
+/// §21.4.4.25 Date.prototype.setMonth ( month [ , date ] )
+pub fn date_set_month_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = date_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let tv = unsafe { date::RuneDate::tv(ptr) };
+    let m = to_number(
+        args.first()
+            .copied()
+            .unwrap_or(Value::from_float64(f64::NAN)),
+    );
+    if tv.is_nan() {
+        return Value::from_float64(f64::NAN);
+    }
+    let dt = args
+        .get(1)
+        .map_or(date::date_from_time(tv) as f64, |x| to_number(*x));
+    let new_date = date::make_date(
+        date::make_day(date::year_from_time(tv) as f64, m, dt),
+        date::time_within_day(tv),
+    );
+    let u = date::time_clip(new_date);
+    unsafe { date::RuneDate::set_tv(ptr, u) };
+    date_number(u)
+}
+
+/// §21.4.4.26 Date.prototype.setSeconds ( sec [ , ms ] )
+pub fn date_set_seconds_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = date_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let tv = unsafe { date::RuneDate::tv(ptr) };
+    let s = to_number(
+        args.first()
+            .copied()
+            .unwrap_or(Value::from_float64(f64::NAN)),
+    );
+    if tv.is_nan() {
+        return Value::from_float64(f64::NAN);
+    }
+    let ms = args
+        .get(1)
+        .map_or(date::millisec_from_time(tv) as f64, |x| to_number(*x));
+    let u = date::time_clip(date::make_date(
+        date::day(tv) as f64,
+        date::make_time(
+            date::hour_from_time(tv) as f64,
+            date::min_from_time(tv) as f64,
+            s,
+            ms,
+        ),
+    ));
+    unsafe { date::RuneDate::set_tv(ptr, u) };
+    date_number(u)
+}
+
+/// §21.4.4.27 Date.prototype.setTime ( time )
+pub fn date_set_time_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = date_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let t = to_number(
+        args.first()
+            .copied()
+            .unwrap_or(Value::from_float64(f64::NAN)),
+    );
+    let v = date::time_clip(t);
+    unsafe { date::RuneDate::set_tv(ptr, v) };
+    date_number(v)
+}
+
+/// §21.4.4.28 Date.prototype.setUTCDate ( date )
+pub fn date_set_utc_date_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = date_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let tv = unsafe { date::RuneDate::tv(ptr) };
+    let dt = to_number(
+        args.first()
+            .copied()
+            .unwrap_or(Value::from_float64(f64::NAN)),
+    );
+    if tv.is_nan() {
+        return Value::from_float64(f64::NAN);
+    }
+    let v = date::time_clip(date::make_date(
+        date::make_day(
+            date::year_from_time(tv) as f64,
+            date::month_from_time(tv) as f64,
+            dt,
+        ),
+        date::time_within_day(tv),
+    ));
+    unsafe { date::RuneDate::set_tv(ptr, v) };
+    date_number(v)
+}
+
+/// §21.4.4.29 Date.prototype.setUTCFullYear ( year [ , month [ , date ] ] )
+pub fn date_set_utc_full_year_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = date_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let tv = unsafe { date::RuneDate::tv(ptr) };
+    let base = if tv.is_nan() { 0.0 } else { tv };
+    let y = to_number(
+        args.first()
+            .copied()
+            .unwrap_or(Value::from_float64(f64::NAN)),
+    );
+    let m = args
+        .get(1)
+        .map_or(date::month_from_time(base) as f64, |x| to_number(*x));
+    let dt = args
+        .get(2)
+        .map_or(date::date_from_time(base) as f64, |x| to_number(*x));
+    let yr = date::make_full_year(y);
+    let v = date::time_clip(date::make_date(
+        date::make_day(yr, m, dt),
+        date::time_within_day(base),
+    ));
+    unsafe { date::RuneDate::set_tv(ptr, v) };
+    date_number(v)
+}
+
+/// §21.4.4.30 Date.prototype.setUTCHours ( hour [ , min [ , sec [ , ms ] ] ] )
+pub fn date_set_utc_hours_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = date_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let tv = unsafe { date::RuneDate::tv(ptr) };
+    let h = to_number(
+        args.first()
+            .copied()
+            .unwrap_or(Value::from_float64(f64::NAN)),
+    );
+    if tv.is_nan() {
+        return Value::from_float64(f64::NAN);
+    }
+    let m = args
+        .get(1)
+        .map_or(date::min_from_time(tv) as f64, |x| to_number(*x));
+    let s = args
+        .get(2)
+        .map_or(date::sec_from_time(tv) as f64, |x| to_number(*x));
+    let ms = args
+        .get(3)
+        .map_or(date::millisec_from_time(tv) as f64, |x| to_number(*x));
+    let v = date::time_clip(date::make_date(
+        date::day(tv) as f64,
+        date::make_time(h, m, s, ms),
+    ));
+    unsafe { date::RuneDate::set_tv(ptr, v) };
+    date_number(v)
+}
+
+/// §21.4.4.31 Date.prototype.setUTCMilliseconds ( ms )
+pub fn date_set_utc_milliseconds_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = date_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let tv = unsafe { date::RuneDate::tv(ptr) };
+    let ms = to_number(
+        args.first()
+            .copied()
+            .unwrap_or(Value::from_float64(f64::NAN)),
+    );
+    if tv.is_nan() {
+        return Value::from_float64(f64::NAN);
+    }
+    let v = date::time_clip(date::make_date(
+        date::day(tv) as f64,
+        date::make_time(
+            date::hour_from_time(tv) as f64,
+            date::min_from_time(tv) as f64,
+            date::sec_from_time(tv) as f64,
+            ms,
+        ),
+    ));
+    unsafe { date::RuneDate::set_tv(ptr, v) };
+    date_number(v)
+}
+
+/// §21.4.4.32 Date.prototype.setUTCMinutes ( min [ , sec [ , ms ] ] )
+pub fn date_set_utc_minutes_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = date_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let tv = unsafe { date::RuneDate::tv(ptr) };
+    let m = to_number(
+        args.first()
+            .copied()
+            .unwrap_or(Value::from_float64(f64::NAN)),
+    );
+    if tv.is_nan() {
+        return Value::from_float64(f64::NAN);
+    }
+    let s = args
+        .get(1)
+        .map_or(date::sec_from_time(tv) as f64, |x| to_number(*x));
+    let ms = args
+        .get(2)
+        .map_or(date::millisec_from_time(tv) as f64, |x| to_number(*x));
+    let v = date::time_clip(date::make_date(
+        date::day(tv) as f64,
+        date::make_time(date::hour_from_time(tv) as f64, m, s, ms),
+    ));
+    unsafe { date::RuneDate::set_tv(ptr, v) };
+    date_number(v)
+}
+
+/// §21.4.4.33 Date.prototype.setUTCMonth ( month [ , date ] )
+pub fn date_set_utc_month_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = date_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let tv = unsafe { date::RuneDate::tv(ptr) };
+    let m = to_number(
+        args.first()
+            .copied()
+            .unwrap_or(Value::from_float64(f64::NAN)),
+    );
+    if tv.is_nan() {
+        return Value::from_float64(f64::NAN);
+    }
+    let dt = args
+        .get(1)
+        .map_or(date::date_from_time(tv) as f64, |x| to_number(*x));
+    let v = date::time_clip(date::make_date(
+        date::make_day(date::year_from_time(tv) as f64, m, dt),
+        date::time_within_day(tv),
+    ));
+    unsafe { date::RuneDate::set_tv(ptr, v) };
+    date_number(v)
+}
+
+/// §21.4.4.34 Date.prototype.setUTCSeconds ( sec [ , ms ] )
+pub fn date_set_utc_seconds_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = date_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let tv = unsafe { date::RuneDate::tv(ptr) };
+    let s = to_number(
+        args.first()
+            .copied()
+            .unwrap_or(Value::from_float64(f64::NAN)),
+    );
+    if tv.is_nan() {
+        return Value::from_float64(f64::NAN);
+    }
+    let ms = args
+        .get(1)
+        .map_or(date::millisec_from_time(tv) as f64, |x| to_number(*x));
+    let v = date::time_clip(date::make_date(
+        date::day(tv) as f64,
+        date::make_time(
+            date::hour_from_time(tv) as f64,
+            date::min_from_time(tv) as f64,
+            s,
+            ms,
+        ),
+    ));
+    unsafe { date::RuneDate::set_tv(ptr, v) };
+    date_number(v)
+}
+
 /// §27.1.3.6 Map.prototype.forEach(callback, thisArg)
 pub fn map_foreach_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let Some(map_ptr) = map_receiver(gc, this, vm) else {
@@ -2073,10 +2999,7 @@ pub fn string_slice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
         return Value::undefined();
     }
     fn to_number(v: Value) -> f64 {
-        v.as_smi()
-            .map(|n| n as f64)
-            .or_else(|| v.as_float64())
-            .unwrap_or(f64::NAN)
+        crate::vm::to_number(v)
     }
     let s = string_from_value(this);
     let len = s.len() as f64;
@@ -5038,6 +5961,241 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 0,
             name: "Set_iterator_next",
             func: set_iterator_next,
+        },
+        Builtin {
+            length: 7,
+            name: "Date",
+            func: date_constructor,
+        },
+        Builtin {
+            length: 0,
+            name: "Date_now",
+            func: date_now_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "Date_parse",
+            func: date_parse_builtin,
+        },
+        Builtin {
+            length: 7,
+            name: "Date_UTC",
+            func: date_utc_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Date_prototype_getDate",
+            func: date_get_date_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Date_prototype_getDay",
+            func: date_get_day_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Date_prototype_getFullYear",
+            func: date_get_full_year_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Date_prototype_getHours",
+            func: date_get_hours_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Date_prototype_getMilliseconds",
+            func: date_get_milliseconds_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Date_prototype_getMinutes",
+            func: date_get_minutes_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Date_prototype_getMonth",
+            func: date_get_month_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Date_prototype_getSeconds",
+            func: date_get_seconds_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Date_prototype_getTime",
+            func: date_get_time_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Date_prototype_getTimezoneOffset",
+            func: date_get_timezone_offset_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Date_prototype_getUTCDate",
+            func: date_get_utc_date_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Date_prototype_getUTCDay",
+            func: date_get_utc_day_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Date_prototype_getUTCFullYear",
+            func: date_get_utc_full_year_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Date_prototype_getUTCHours",
+            func: date_get_utc_hours_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Date_prototype_getUTCMilliseconds",
+            func: date_get_utc_milliseconds_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Date_prototype_getUTCMinutes",
+            func: date_get_utc_minutes_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Date_prototype_getUTCMonth",
+            func: date_get_utc_month_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Date_prototype_getUTCSeconds",
+            func: date_get_utc_seconds_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "Date_prototype_setDate",
+            func: date_set_date_builtin,
+        },
+        Builtin {
+            length: 3,
+            name: "Date_prototype_setFullYear",
+            func: date_set_full_year_builtin,
+        },
+        Builtin {
+            length: 4,
+            name: "Date_prototype_setHours",
+            func: date_set_hours_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "Date_prototype_setMilliseconds",
+            func: date_set_milliseconds_builtin,
+        },
+        Builtin {
+            length: 3,
+            name: "Date_prototype_setMinutes",
+            func: date_set_minutes_builtin,
+        },
+        Builtin {
+            length: 2,
+            name: "Date_prototype_setMonth",
+            func: date_set_month_builtin,
+        },
+        Builtin {
+            length: 2,
+            name: "Date_prototype_setSeconds",
+            func: date_set_seconds_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "Date_prototype_setTime",
+            func: date_set_time_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "Date_prototype_setUTCDate",
+            func: date_set_utc_date_builtin,
+        },
+        Builtin {
+            length: 3,
+            name: "Date_prototype_setUTCFullYear",
+            func: date_set_utc_full_year_builtin,
+        },
+        Builtin {
+            length: 4,
+            name: "Date_prototype_setUTCHours",
+            func: date_set_utc_hours_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "Date_prototype_setUTCMilliseconds",
+            func: date_set_utc_milliseconds_builtin,
+        },
+        Builtin {
+            length: 3,
+            name: "Date_prototype_setUTCMinutes",
+            func: date_set_utc_minutes_builtin,
+        },
+        Builtin {
+            length: 2,
+            name: "Date_prototype_setUTCMonth",
+            func: date_set_utc_month_builtin,
+        },
+        Builtin {
+            length: 2,
+            name: "Date_prototype_setUTCSeconds",
+            func: date_set_utc_seconds_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Date_prototype_toDateString",
+            func: date_to_date_string_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Date_prototype_toISOString",
+            func: date_to_iso_string_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "Date_prototype_toJSON",
+            func: date_to_json_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Date_prototype_toLocaleDateString",
+            func: date_to_locale_date_string_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Date_prototype_toLocaleString",
+            func: date_to_locale_string_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Date_prototype_toLocaleTimeString",
+            func: date_to_locale_time_string_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Date_prototype_toString",
+            func: date_to_string_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Date_prototype_toTimeString",
+            func: date_to_time_string_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Date_prototype_toUTCString",
+            func: date_to_utc_string_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Date_prototype_valueOf",
+            func: date_value_of_builtin,
         },
         Builtin {
             length: 1,

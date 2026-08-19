@@ -4,6 +4,7 @@
 pub mod accessor;
 pub mod array;
 pub mod barrier;
+pub mod date;
 pub mod env;
 pub mod float;
 pub mod function;

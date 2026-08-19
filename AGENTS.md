@@ -50,6 +50,18 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - `json_round_trip` benchmark: Rune cold-start 7.6ms vs Node 21ms → **2.8× faster**. Warm: Rune 0.79ms vs Node 0.146ms → 5.4× slower.
 
 ### Done — v0.5
+- **Correctness batch — silent-miscompile elimination** — 10 features/regressions fixed and verified end-to-end (491/491 integration tests, 637 workspace tests):
+  - `assert.throws` type mismatch now throws (test262 negative-path behavior)
+  - `for` loop `continue` runs the update (was infinite loop); `do-while` break/continue fixed
+  - `**` right-associativity (`2 ** 3 ** 2 == 512`)
+  - `??` nullish coalescing (`0 ?? 5 == 0`, `null ?? 5 == 5`); `&&=`/`||=`/`??=` short-circuit assignment
+  - `obj.prop++` member update
+  - Destructuring assignment `[a, b] = [b, a]` (ast `Expr::DestructureAssign`, parser `expr_to_pattern` restricted to Array/Object LHS, emitter `DestructureStore` + `emit_assign_store`)
+  - Computed class keys (`class K { static [1+1]() {} get ["g"]() {} }` — key pushed before MakeFunction, VM pops when operand == `usize::MAX as i64`)
+  - Accessor getter/setter double-advance bug: `resolve_accessor_for_read` returns `(Value, bool)`; pending only set when getter frame pushed; Return handler matches after pop
+  - Private-field compound (`__cmp_` temp), update (`__upd_` two-temp), short-circuit (`__sc_` obj+res slots) emission fixes
+  - Stash recovery: `git fsck --unreachable` → `e8a3b92` restored lost parser work; missing pieces (computed keys, destructure-assign, private fixes) re-implemented
+  - Stack facts: `JumpIfNullOrUndefined` POPS; `StoreLocal`/`StoreGlobal`/`StoreProperty`/`DefineProperty` push back; `StoreLexical`/`StoreCaptured`/`StorePrivateProperty` do not
 - `async`/`await` — parser desugaring + generator reuse. 396/396 tests pass.
 - `Promise` constructor + resolve/reject + `.then`/`.catch`/`.finally` + `Promise.resolve`/`.reject`/`.all`/`.race`
 - Microtask queue — `.then` callbacks deferred via `drain_microtask_queue()`.
@@ -95,6 +107,8 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - `RegExp()` constructor not yet implemented
 - Match result arrays don't set `.index`/`.input` properties (no named-property support on TAG_ARRAY)
 - `replaceAll` function replacement not yet implemented
+- Optional chaining (`?.`) not yet implemented (lexer maps `?.` → Dot)
+- Nested accessors (getter inside getter) unsupported (single pending slot)
 - `this.prop++` not supported (Update only handles Identifier targets)
 - `let` + `new` in function body has a scoping bug
 - Static private fields and private methods not yet implemented
@@ -104,3 +118,4 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 1. Trace perf: float-promoted accumulator loops bail per-iteration — re-record or emit float ops natively.
 2. `RegExp()` constructor
 3. Match result array `.index`/`.input` properties
+4. Optional chaining (`?.`) — currently maps to Dot in the lexer

@@ -32,6 +32,7 @@ pub enum Expr {
     Member(Box<Expr>, Box<Expr>, bool, Span), // computed = true for a[b]
     PrivateMember(Box<Expr>, Box<str>, Span), // a.#name
     Assign(Box<Expr>, Box<Expr>, Span),
+    DestructureAssign(Box<Pattern>, Box<Expr>, Span),
     CompoundAssign(BinaryOp, Box<Expr>, Box<Expr>, Span),
     Function(Box<FnNode>, Span),
     Template {
@@ -91,6 +92,7 @@ pub enum BinaryOp {
     // Logical
     LogicalOr,
     LogicalAnd,
+    NullishCoalescing,
     // Bitwise
     BitOr,
     BitXor,

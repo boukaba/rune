@@ -7,6 +7,19 @@ struct LexicalBinding {
     slot: usize,
 }
 
+/// Kind of a pending do-while loop jump, resolved when the loop ends.
+enum DestructureStore {
+    /// Declaration context: `var`/`let`/`const` declare the binding.
+    Decl(VarKind),
+    /// Assignment context: store into an existing binding.
+    Assign,
+}
+
+enum LoopJumpKind {
+    Break,
+    Continue,
+}
+
 /// Bytecode emitter. Walks an AST and produces instructions.
 pub struct Emitter {
     pub instructions: Vec<Instruction>,
@@ -32,6 +45,11 @@ pub struct Emitter {
     env_scope_stack: Vec<Vec<String>>,
     loop_exit_stack: Vec<usize>,
     loop_cont_stack: Vec<usize>,
+    /// Pending `break`/`continue` jump positions of the innermost do-while loop,
+    /// patched at the loop end (do-while uses `usize::MAX` sentinels in
+    /// `loop_exit_stack`/`loop_cont_stack` because its cond position is only
+    /// known after the body is emitted).
+    pending_loop_jumps: Vec<Vec<(usize, LoopJumpKind)>>,
     switch_exit_stack: Vec<usize>,
     switch_break_jumps: Vec<usize>,
     /// Private field names declared by the enclosing class (for #name → slot index resolution).
@@ -63,6 +81,7 @@ impl Emitter {
             env_scope_stack: Vec::new(),
             loop_exit_stack: Vec::new(),
             loop_cont_stack: Vec::new(),
+            pending_loop_jumps: Vec::new(),
             switch_exit_stack: Vec::new(),
             switch_break_jumps: Vec::new(),
             private_field_names: Vec::new(),
@@ -168,12 +187,16 @@ impl Emitter {
                 Pattern::Identifier(name, _, default) => {
                     if default.is_some() {
                         sub.emit(Opcode::LoadLocal, vec![param_idx as i64]);
-                        sub.emit_store_with_default(name.as_ref(), &VarKind::Var, default);
+                        sub.emit_store_with_default(
+                            name.as_ref(),
+                            &DestructureStore::Decl(VarKind::Var),
+                            default,
+                        );
                     }
                 }
                 _ => {
                     sub.emit(Opcode::LoadLocal, vec![param_idx as i64]);
-                    sub.emit_destructuring_binding(param, &VarKind::Var);
+                    sub.emit_destructuring_binding(param, &DestructureStore::Decl(VarKind::Var));
                 }
             }
         }
@@ -349,12 +372,19 @@ impl Emitter {
 
         // 3. Add non-constructor, non-static methods to prototype
         for (key, func_idx) in &method_funcs {
+            if let PropKey::Computed(expr) = key {
+                // Computed key: [proto, key] then MakeFunction → [proto, key, fn]
+                self.emit_expression(expr);
+                self.emit(Opcode::MakeFunction, vec![*func_idx as i64]);
+                self.emit(Opcode::DefineProperty, vec![usize::MAX as i64]);
+                continue;
+            }
             self.emit(Opcode::MakeFunction, vec![*func_idx as i64]);
             let key_str = match key {
                 PropKey::String(s) => s.to_string(),
                 PropKey::Identifier(s) => s.to_string(),
                 PropKey::Number(n) => n.to_string(),
-                PropKey::Computed(_) => continue,
+                PropKey::Computed(_) => unreachable!(),
             };
             let key_idx = self.intern_string(&key_str) as i64;
             self.emit(Opcode::DefineProperty, vec![key_idx]);
@@ -376,6 +406,10 @@ impl Emitter {
             for key in &all_acc_names {
                 let has_getter = getter_funcs.iter().any(|(k, _)| k == key);
                 let has_setter = setter_funcs.iter().any(|(k, _)| k == key);
+                if let PropKey::Computed(expr) = key {
+                    // Computed accessor: [proto, key] then getter+setter funcs
+                    self.emit_expression(expr);
+                }
                 if has_getter {
                     let gi = getter_funcs.iter().find(|(k, _)| k == key).unwrap().1;
                     self.emit(Opcode::MakeFunction, vec![gi as i64]);
@@ -392,7 +426,10 @@ impl Emitter {
                     PropKey::String(s) => s.to_string(),
                     PropKey::Identifier(s) => s.to_string(),
                     PropKey::Number(n) => n.to_string(),
-                    PropKey::Computed(_) => continue,
+                    PropKey::Computed(_) => {
+                        self.emit(Opcode::DefineAccessor, vec![usize::MAX as i64]);
+                        continue;
+                    }
                 };
                 let key_idx = self.intern_string(&key_str) as i64;
                 self.emit(Opcode::DefineAccessor, vec![key_idx]);
@@ -545,12 +582,19 @@ impl Emitter {
         if let Some(ctor_slot) = save_slot {
             for (key, func_idx) in &static_method_funcs {
                 self.emit(Opcode::LoadLocal, vec![ctor_slot as i64]);
+                if let PropKey::Computed(expr) = key {
+                    self.emit_expression(expr);
+                    self.emit(Opcode::MakeFunction, vec![*func_idx as i64]);
+                    self.emit(Opcode::DefineProperty, vec![usize::MAX as i64]);
+                    self.emit(Opcode::Pop, vec![]);
+                    continue;
+                }
                 self.emit(Opcode::MakeFunction, vec![*func_idx as i64]);
                 let key_str = match key {
                     PropKey::String(s) => s.to_string(),
                     PropKey::Identifier(s) => s.to_string(),
                     PropKey::Number(n) => n.to_string(),
-                    PropKey::Computed(_) => continue,
+                    PropKey::Computed(_) => unreachable!(),
                 };
                 let key_idx = self.intern_string(&key_str) as i64;
                 self.emit(Opcode::DefineProperty, vec![key_idx]);
@@ -573,6 +617,9 @@ impl Emitter {
                     self.emit(Opcode::LoadLocal, vec![ctor_slot as i64]);
                     let has_getter = static_getter_funcs.iter().any(|(k, _)| k == key);
                     let has_setter = static_setter_funcs.iter().any(|(k, _)| k == key);
+                    if let PropKey::Computed(expr) = key {
+                        self.emit_expression(expr);
+                    }
                     if has_getter {
                         let gi = static_getter_funcs
                             .iter()
@@ -597,7 +644,11 @@ impl Emitter {
                         PropKey::String(s) => s.to_string(),
                         PropKey::Identifier(s) => s.to_string(),
                         PropKey::Number(n) => n.to_string(),
-                        PropKey::Computed(_) => continue,
+                        PropKey::Computed(_) => {
+                            self.emit(Opcode::DefineAccessor, vec![usize::MAX as i64]);
+                            self.emit(Opcode::Pop, vec![]);
+                            continue;
+                        }
                     };
                     let key_idx = self.intern_string(&key_str) as i64;
                     self.emit(Opcode::DefineAccessor, vec![key_idx]);
@@ -618,7 +669,7 @@ impl Emitter {
     }
 
     /// Emit bytecode for destructuring a value according to the pattern.
-    fn emit_destructuring(&mut self, pattern: &Pattern, kind: &VarKind) {
+    fn emit_destructuring(&mut self, pattern: &Pattern, kind: &DestructureStore) {
         // §14.5.1 step 4: throw TypeError if value is null or undefined
         self.emit(Opcode::ThrowIfNullish, vec![]);
         match pattern {
@@ -701,7 +752,7 @@ impl Emitter {
 
     /// Emit a store operation for a single binding in a destructuring pattern.
     /// Recurses into nested patterns.
-    fn emit_destructuring_binding(&mut self, pattern: &Pattern, kind: &VarKind) {
+    fn emit_destructuring_binding(&mut self, pattern: &Pattern, kind: &DestructureStore) {
         match pattern {
             Pattern::Identifier(name, _, default) => {
                 self.emit_store_with_default(name, kind, default);
@@ -730,7 +781,12 @@ impl Emitter {
 
     /// Store a value to a binding (var → StoreLocal+Pop, let/const → DeclareLet/DeclareConst).
     /// With an optional default: if the value is undefined, evaluate the default instead.
-    fn emit_store_with_default(&mut self, name: &str, kind: &VarKind, default: &Option<Box<Expr>>) {
+    fn emit_store_with_default(
+        &mut self,
+        name: &str,
+        kind: &DestructureStore,
+        default: &Option<Box<Expr>>,
+    ) {
         if let Some(expr) = default {
             self.emit(Opcode::Dup, vec![]);
             self.emit(Opcode::LoadUndefined, vec![]);
@@ -745,9 +801,12 @@ impl Emitter {
     }
 
     /// Store a value to a binding (var → StoreLocal/StoreCaptured+Pop, let/const → DeclareLet/DeclareConst).
-    fn emit_store_binding(&mut self, name: &str, kind: &VarKind) {
+    fn emit_store_binding(&mut self, name: &str, kind: &DestructureStore) {
         match kind {
-            VarKind::Var => {
+            DestructureStore::Assign => {
+                self.emit_assign_store(name);
+            }
+            DestructureStore::Decl(VarKind::Var) => {
                 let is_top_level =
                     self.env_scope_stack.is_empty() && self.captured_names.is_empty();
                 if !is_top_level && !self.locals.contains(&name.to_string()) {
@@ -765,9 +824,9 @@ impl Emitter {
                     self.emit(Opcode::Pop, vec![]);
                 }
             }
-            VarKind::Let | VarKind::Const => {
+            DestructureStore::Decl(VarKind::Let | VarKind::Const) => {
                 if let Some(slot) = self.lexical_slot(name) {
-                    let op = if *kind == VarKind::Const {
+                    let op = if matches!(kind, DestructureStore::Decl(VarKind::Const)) {
                         Opcode::DeclareConst
                     } else {
                         Opcode::DeclareLet
@@ -858,15 +917,27 @@ impl Emitter {
             }
             Stmt::DoWhile(cond, body, _) => {
                 let loop_start = self.current();
-                self.loop_cont_stack.push(loop_start);
-                self.loop_exit_stack.push(0);
+                // Sentinels: `break`/`continue` in a do-while emit patchable
+                // Jumps instead of jumping to a placeholder (a placeholder at
+                // the loop top would execute on first entry and skip the body;
+                // the cond position is not known until after the body).
+                self.loop_exit_stack.push(usize::MAX);
+                self.loop_cont_stack.push(usize::MAX);
+                self.pending_loop_jumps.push(Vec::new());
                 self.emit_statement(body);
-                let exit_jump = self.loop_exit_stack.pop().unwrap();
+                self.loop_exit_stack.pop();
                 self.loop_cont_stack.pop();
+                // `continue` re-checks the condition.
+                let cond_pos = self.current();
                 self.emit_expression(cond);
                 self.emit(Opcode::JumpIfTrue, vec![loop_start as i64]);
-                if exit_jump != 0 {
-                    self.patch(exit_jump, self.current());
+                let exit = self.current();
+                for (pos, kind) in self.pending_loop_jumps.pop().unwrap_or_default() {
+                    let target = match kind {
+                        LoopJumpKind::Break => exit,
+                        LoopJumpKind::Continue => cond_pos,
+                    };
+                    self.patch(pos, target);
                 }
             }
             Stmt::For(init, cond, update, body, _) => {
@@ -945,10 +1016,16 @@ impl Emitter {
                     self.current()
                 };
                 self.loop_exit_stack.push(exit_jump);
-                self.loop_cont_stack.push(loop_start);
+                // `continue` must jump to the update expression, not the
+                // condition (which would skip the update and loop forever).
+                // The update is emitted after the body, so use a sentinel and
+                // patch the continues to the update tail.
+                self.loop_cont_stack.push(usize::MAX);
+                self.pending_loop_jumps.push(Vec::new());
                 self.emit_statement(body);
                 self.loop_cont_stack.pop();
                 self.loop_exit_stack.pop();
+                let continue_target = self.current();
                 // ── Restore env after body ──
                 if per_iteration_count > 0 {
                     self.emit(Opcode::RestoreEnv, vec![]);
@@ -979,6 +1056,12 @@ impl Emitter {
                 } else {
                     self.patch(exit_jump, self.current());
                 }
+                // Patch `continue` jumps to the update tail
+                for (pos, kind) in self.pending_loop_jumps.pop().unwrap_or_default() {
+                    if let LoopJumpKind::Continue = kind {
+                        self.patch(pos, continue_target);
+                    }
+                }
                 // Leave for-init lexical scope
                 if init_has_scope {
                     self.emit(Opcode::BlockLeave, vec![]);
@@ -1003,7 +1086,10 @@ impl Emitter {
                         if let Some(pattern) = &decl.pattern {
                             if let Some(init) = &decl.init {
                                 self.emit_expression(init);
-                                self.emit_destructuring(pattern, kind);
+                                self.emit_destructuring(
+                                    pattern,
+                                    &DestructureStore::Decl(kind.clone()),
+                                );
                             }
                         } else {
                             let is_top_level =
@@ -1037,7 +1123,10 @@ impl Emitter {
                         if let Some(pattern) = &decl.pattern {
                             if let Some(init) = &decl.init {
                                 self.emit_expression(init);
-                                self.emit_destructuring(pattern, kind);
+                                self.emit_destructuring(
+                                    pattern,
+                                    &DestructureStore::Decl(kind.clone()),
+                                );
                             }
                         } else if let Some(slot) = self.lexical_slot(&decl.name) {
                             if let Some(init) = &decl.init {
@@ -1070,12 +1159,28 @@ impl Emitter {
                     self.emit(Opcode::Jump, vec![0]);
                     self.switch_break_jumps.push(pos);
                 } else if let Some(exit) = self.loop_exit_stack.last() {
-                    self.emit(Opcode::Jump, vec![*exit as i64]);
+                    if *exit == usize::MAX {
+                        let pos = self.current();
+                        self.emit(Opcode::Jump, vec![0]);
+                        if let Some(p) = self.pending_loop_jumps.last_mut() {
+                            p.push((pos, LoopJumpKind::Break));
+                        }
+                    } else {
+                        self.emit(Opcode::Jump, vec![*exit as i64]);
+                    }
                 }
             }
             Stmt::Continue(_label, _) => {
                 if let Some(cont) = self.loop_cont_stack.last() {
-                    self.emit(Opcode::Jump, vec![*cont as i64]);
+                    if *cont == usize::MAX {
+                        let pos = self.current();
+                        self.emit(Opcode::Jump, vec![0]);
+                        if let Some(p) = self.pending_loop_jumps.last_mut() {
+                            p.push((pos, LoopJumpKind::Continue));
+                        }
+                    } else {
+                        self.emit(Opcode::Jump, vec![*cont as i64]);
+                    }
                 }
             }
             Stmt::Function(fnode, _) => {
@@ -1447,12 +1552,104 @@ impl Emitter {
                         self.emit(opcode, vec![name_idx, is_pre as i64]);
                     }
                 }
+                Expr::Member(obj, prop, computed, _) => {
+                    let is_pre = *prefix;
+                    let temp_slot = if is_pre {
+                        None
+                    } else {
+                        let name = format!("__upd_{}", self.locals.len());
+                        self.locals.push(name);
+                        Some(self.locals.len() - 1)
+                    };
+                    match obj.as_ref() {
+                        Expr::Super(_) => {
+                            // super.x++ → write to this[key], read this.__proto__.__proto__.x
+                            self.emit(Opcode::LoadThis, vec![]);
+                            self.emit_property_key(prop, *computed);
+                            self.emit(Opcode::LoadThis, vec![]);
+                            let proto_key = self.intern_string("__proto__") as i64;
+                            self.emit(Opcode::LoadStringConst, vec![proto_key]);
+                            self.emit(Opcode::LoadProperty, vec![]);
+                            self.emit(Opcode::LoadStringConst, vec![proto_key]);
+                            self.emit(Opcode::LoadProperty, vec![]);
+                            self.emit_property_key(prop, *computed);
+                            self.emit(Opcode::LoadProperty, vec![]);
+                        }
+                        _ => {
+                            self.emit_expression(obj);
+                            self.emit_property_key(prop, *computed);
+                            self.emit(Opcode::Dup2, vec![]);
+                            self.emit(Opcode::LoadProperty, vec![]);
+                        }
+                    }
+                    if !is_pre {
+                        self.emit(Opcode::Dup, vec![]);
+                        self.emit(Opcode::StoreLocal, vec![temp_slot.unwrap() as i64]);
+                        self.emit(Opcode::Pop, vec![]);
+                    }
+                    self.emit(Opcode::LoadSmi, vec![1]);
+                    let opcode = match op {
+                        UpdateOp::PlusPlus => Opcode::Add,
+                        UpdateOp::MinusMinus => Opcode::Sub,
+                    };
+                    self.emit(opcode, vec![]);
+                    self.emit(Opcode::StoreProperty, vec![]);
+                    if !is_pre {
+                        self.emit(Opcode::LoadLocal, vec![temp_slot.unwrap() as i64]);
+                        self.emit(Opcode::Swap, vec![]);
+                        self.emit(Opcode::Pop, vec![]);
+                    }
+                }
+                Expr::PrivateMember(obj, name, _) => {
+                    // StorePrivateProperty pops obj+value and pushes nothing,
+                    // so the object is Dup'd and results parked in temps.
+                    let is_pre = *prefix;
+                    let old_name = format!("__upd_{}", self.locals.len());
+                    self.locals.push(old_name);
+                    let old_slot = self.locals.len() - 1;
+                    let new_name = format!("__upd_{}", self.locals.len());
+                    self.locals.push(new_name);
+                    let new_slot = self.locals.len() - 1;
+                    let slot_idx = self
+                        .private_field_names
+                        .iter()
+                        .position(|n| n.as_str() == name.as_ref())
+                        .unwrap_or(0);
+                    self.emit_expression(obj);
+                    self.emit(Opcode::Dup, vec![]);
+                    self.emit(Opcode::LoadPrivateProperty, vec![slot_idx as i64]);
+                    if !is_pre {
+                        // Park the old value for the postfix result.
+                        self.emit(Opcode::Dup, vec![]);
+                        self.emit(Opcode::StoreLocal, vec![old_slot as i64]);
+                        self.emit(Opcode::Pop, vec![]);
+                    }
+                    self.emit(Opcode::LoadSmi, vec![1]);
+                    let opcode = match op {
+                        UpdateOp::PlusPlus => Opcode::Add,
+                        UpdateOp::MinusMinus => Opcode::Sub,
+                    };
+                    self.emit(opcode, vec![]);
+                    self.emit(Opcode::StoreLocal, vec![new_slot as i64]);
+                    self.emit(Opcode::StorePrivateProperty, vec![slot_idx as i64]);
+                    self.emit(Opcode::Pop, vec![]);
+                    self.emit(
+                        Opcode::LoadLocal,
+                        vec![if is_pre { new_slot } else { old_slot } as i64],
+                    );
+                }
                 _ => {
                     self.emit_expression(arg);
                     self.emit(Opcode::Pop, vec![]);
                     self.emit(Opcode::LoadUndefined, vec![]);
                 }
             },
+            Expr::DestructureAssign(pattern, rhs, _) => {
+                // Evaluate RHS, destructure into the pattern, and leave
+                // the RHS value as the expression result.
+                self.emit_expression(rhs);
+                self.emit_destructuring(pattern, &DestructureStore::Assign);
+            }
             Expr::Binary(op, lhs, rhs, _) => {
                 if *op == BinaryOp::Assign {
                     match lhs.as_ref() {
@@ -1518,6 +1715,21 @@ impl Emitter {
                     self.patch(end, self.current());
                     return;
                 }
+                if *op == BinaryOp::NullishCoalescing {
+                    // a ?? b: lhs, Dup, JumpIfNullOrUndefined→drop,
+                    // Jump→end (skip rhs; lhs stays), drop: Pop, rhs, end:
+                    self.emit_expression(lhs);
+                    self.emit(Opcode::Dup, vec![]);
+                    let drop = self.current();
+                    self.emit(Opcode::JumpIfNullOrUndefined, vec![0]);
+                    let end = self.current();
+                    self.emit(Opcode::Jump, vec![0]);
+                    self.patch(drop, self.current());
+                    self.emit(Opcode::Pop, vec![]);
+                    self.emit_expression(rhs);
+                    self.patch(end, self.current());
+                    return;
+                }
                 self.emit_expression(lhs);
                 self.emit_expression(rhs);
                 let opcode = match op {
@@ -1545,6 +1757,7 @@ impl Emitter {
                     BinaryOp::Instanceof => Opcode::Instanceof,
                     BinaryOp::LogicalAnd
                     | BinaryOp::LogicalOr
+                    | BinaryOp::NullishCoalescing
                     | BinaryOp::Comma
                     | BinaryOp::Assign => unreachable!(),
                 };
@@ -1793,6 +2006,13 @@ impl Emitter {
                 }
             },
             Expr::CompoundAssign(op, target, rhs, _) => {
+                if matches!(
+                    op,
+                    BinaryOp::LogicalAnd | BinaryOp::LogicalOr | BinaryOp::NullishCoalescing
+                ) {
+                    self.emit_short_circuit_assign(op, target, rhs);
+                    return;
+                }
                 let bin_opcode = compound_binary_opcode(*op);
                 match target.as_ref() {
                     Expr::Identifier(name, _) => {
@@ -1889,13 +2109,20 @@ impl Emitter {
                             .position(|n| n.as_str() == name.as_ref())
                             .unwrap_or(0);
                         // Desugar: obj.#name += rhs
-                        // Stack: [obj, obj] → LoadPrivateProperty → [obj, value] → binop → [obj, result] → StorePrivateProperty
+                        // [obj, obj] → LoadPrivateProperty → [obj, value] → binop
+                        // → park result → StorePrivateProperty → restore result
+                        let temp_name = format!("__cmp_{}", self.locals.len());
+                        self.locals.push(temp_name);
+                        let temp_slot = self.locals.len() - 1;
                         self.emit_expression(obj);
                         self.emit_expression(obj);
                         self.emit(Opcode::LoadPrivateProperty, vec![slot_idx as i64]);
                         self.emit_expression(rhs);
                         self.emit(bin_opcode, vec![]);
+                        self.emit(Opcode::StoreLocal, vec![temp_slot as i64]);
                         self.emit(Opcode::StorePrivateProperty, vec![slot_idx as i64]);
+                        self.emit(Opcode::Pop, vec![]);
+                        self.emit(Opcode::LoadLocal, vec![temp_slot as i64]);
                     }
                     _ => {}
                 }
@@ -1994,6 +2221,177 @@ impl Emitter {
             Expr::Class(class, _) => {
                 self.emit_class(class, true);
             }
+        }
+    }
+
+    /// Emit a short-circuit compound assignment: `a &&= b`, `a ||= b`, `a ??= b`.
+    /// Desugar: `a &&= b` ≡ `a ? (a = b) : a`, `a ||= b` ≡ `a ? a : (a = b)`,
+    /// `a ??= b` ≡ `a ?? nullish ? (a = b) : a`.
+    /// The target read keeps the store-setup off the stack until the assign
+    /// path, so the short-circuit path leaves exactly the current value.
+    fn emit_short_circuit_assign(&mut self, op: &BinaryOp, target: &Expr, rhs: &Expr) {
+        let check_opcode = match op {
+            BinaryOp::LogicalAnd => Opcode::JumpIfFalse,
+            BinaryOp::LogicalOr => Opcode::JumpIfTrue,
+            BinaryOp::NullishCoalescing => Opcode::JumpIfNullOrUndefined,
+            _ => return,
+        };
+        let is_nullish = *op == BinaryOp::NullishCoalescing;
+
+        match target {
+            Expr::Identifier(name, _) => {
+                self.emit_target_read(name);
+                self.emit(Opcode::Dup, vec![]);
+                if is_nullish {
+                    let assign = self.current();
+                    self.emit(check_opcode, vec![0]);
+                    let end = self.current();
+                    self.emit(Opcode::Jump, vec![0]);
+                    self.patch(assign, self.current());
+                    self.emit(Opcode::Pop, vec![]);
+                    self.emit_expression(rhs);
+                    self.emit_target_store(name);
+                    self.patch(end, self.current());
+                } else {
+                    let end = self.current();
+                    self.emit(check_opcode, vec![0]);
+                    self.emit(Opcode::Pop, vec![]);
+                    self.emit_expression(rhs);
+                    self.emit_target_store(name);
+                    self.patch(end, self.current());
+                }
+            }
+            Expr::Member(obj, prop, computed, _) => {
+                self.emit_expression(obj);
+                self.emit_property_key(prop, *computed);
+                self.emit(Opcode::LoadProperty, vec![]);
+                self.emit(Opcode::Dup, vec![]);
+                if is_nullish {
+                    let assign = self.current();
+                    self.emit(check_opcode, vec![0]);
+                    let end = self.current();
+                    self.emit(Opcode::Jump, vec![0]);
+                    self.patch(assign, self.current());
+                    self.emit(Opcode::Pop, vec![]);
+                    self.emit_expression(obj);
+                    self.emit_property_key(prop, *computed);
+                    self.emit_expression(rhs);
+                    self.emit(Opcode::StoreProperty, vec![]);
+                    self.patch(end, self.current());
+                } else {
+                    let end = self.current();
+                    self.emit(check_opcode, vec![0]);
+                    self.emit(Opcode::Pop, vec![]);
+                    self.emit_expression(obj);
+                    self.emit_property_key(prop, *computed);
+                    self.emit_expression(rhs);
+                    self.emit(Opcode::StoreProperty, vec![]);
+                    self.patch(end, self.current());
+                }
+            }
+            Expr::PrivateMember(obj, name, _) => {
+                // Park the object and the read value; StorePrivateProperty
+                // pops obj+value and pushes nothing.
+                let slot_idx = self
+                    .private_field_names
+                    .iter()
+                    .position(|n| n.as_str() == name.as_ref())
+                    .unwrap_or(0);
+                let obj_name = format!("__sc_{}", self.locals.len());
+                self.locals.push(obj_name);
+                let obj_slot = self.locals.len() - 1;
+                let res_name = format!("__sc_{}", self.locals.len());
+                self.locals.push(res_name);
+                let res_slot = self.locals.len() - 1;
+                self.emit_expression(obj);
+                self.emit(Opcode::Dup, vec![]);
+                self.emit(Opcode::StoreLocal, vec![obj_slot as i64]);
+                self.emit(Opcode::LoadPrivateProperty, vec![slot_idx as i64]);
+                self.emit(Opcode::Dup, vec![]);
+                self.emit(Opcode::StoreLocal, vec![res_slot as i64]);
+                let assign = self.current();
+                self.emit(check_opcode, vec![0]);
+                let end = self.current();
+                self.emit(Opcode::Jump, vec![0]);
+                // Assign path: [o, o, v]
+                self.patch(assign, self.current());
+                self.emit(Opcode::Pop, vec![]);
+                self.emit(Opcode::Pop, vec![]);
+                self.emit(Opcode::Pop, vec![]);
+                self.emit(Opcode::LoadLocal, vec![obj_slot as i64]);
+                self.emit_expression(rhs);
+                self.emit(Opcode::StoreLocal, vec![res_slot as i64]);
+                self.emit(Opcode::StorePrivateProperty, vec![slot_idx as i64]);
+                // Shared epilogue: both paths leave one result.
+                self.patch(end, self.current());
+                self.emit(Opcode::LoadLocal, vec![res_slot as i64]);
+            }
+            _ => {
+                self.emit_expression(rhs);
+            }
+        }
+    }
+
+    /// Read the current value of an identifier target (assignment LHS).
+    fn emit_target_read(&mut self, name: &str) {
+        if let Some(env_slot) = self.captured_slot(name) {
+            self.emit(Opcode::LoadCaptured, vec![0, env_slot as i64]);
+        } else if let Some((depth, slot)) = self.env_captured_slot(name) {
+            self.emit(Opcode::LoadCaptured, vec![depth as i64, slot as i64]);
+        } else if let Some(slot) = self.lexical_slot(name) {
+            self.emit(Opcode::LoadLexical, vec![slot as i64]);
+        } else if let Some(idx) = self.local_index(name) {
+            self.emit(Opcode::LoadLocal, vec![idx as i64]);
+        } else {
+            let name_idx = self.intern_string(name) as i64;
+            self.emit(Opcode::LoadGlobal, vec![name_idx]);
+        }
+    }
+
+    /// Store a value to an identifier target (assignment LHS).
+    /// Store a destructuring-assignment binding, consuming the value.
+    /// (StoreLocal/StoreGlobal push the value back; StoreCaptured/StoreLexical
+    /// pop it, so only the net-0 stores need a trailing Pop.)
+    fn emit_assign_store(&mut self, name: &str) {
+        if let Some(env_slot) = self.captured_slot(name) {
+            self.emit(Opcode::StoreCaptured, vec![0, env_slot as i64]);
+        } else if let Some((depth, slot)) = self.env_captured_slot(name) {
+            self.emit(Opcode::StoreCaptured, vec![depth as i64, slot as i64]);
+        } else if let Some(slot) = self.lexical_slot(name) {
+            self.emit(Opcode::StoreLexical, vec![slot as i64]);
+        } else if let Some(idx) = self.local_index(name) {
+            self.emit(Opcode::StoreLocal, vec![idx as i64]);
+            self.emit(Opcode::Pop, vec![]);
+        } else {
+            let name_idx = self.intern_string(name) as i64;
+            self.emit(Opcode::StoreGlobal, vec![name_idx]);
+            self.emit(Opcode::Pop, vec![]);
+        }
+    }
+
+    fn emit_target_store(&mut self, name: &str) {
+        if let Some(env_slot) = self.captured_slot(name) {
+            self.emit(Opcode::StoreCaptured, vec![0, env_slot as i64]);
+        } else if let Some((depth, slot)) = self.env_captured_slot(name) {
+            self.emit(Opcode::StoreCaptured, vec![depth as i64, slot as i64]);
+        } else if let Some(slot) = self.lexical_slot(name) {
+            self.emit(Opcode::StoreLexical, vec![slot as i64]);
+        } else if let Some(idx) = self.local_index(name) {
+            self.emit(Opcode::StoreLocal, vec![idx as i64]);
+        } else {
+            let name_idx = self.intern_string(name) as i64;
+            self.emit(Opcode::StoreGlobal, vec![name_idx]);
+        }
+    }
+
+    /// Push the property key for a member access target.
+    fn emit_property_key(&mut self, prop: &Expr, computed: bool) {
+        if computed {
+            self.emit_expression(prop);
+        } else {
+            let name = prop_name_as_string(prop);
+            let idx = self.intern_string(&name) as i64;
+            self.emit(Opcode::LoadStringConst, vec![idx]);
         }
     }
 
@@ -2240,6 +2638,7 @@ fn contains_inner_function_expr(expr: &Expr) -> bool {
         Expr::Binary(_, lhs, rhs, _) | Expr::CompoundAssign(_, lhs, rhs, _) => {
             contains_inner_function_expr(lhs) || contains_inner_function_expr(rhs)
         }
+        Expr::DestructureAssign(_, rhs, _) => contains_inner_function_expr(rhs),
         Expr::Conditional(cond, then, else_, _) => {
             contains_inner_function_expr(cond)
                 || contains_inner_function_expr(then)
@@ -2417,6 +2816,7 @@ fn uses_arguments_expr(expr: &Expr) -> bool {
         Expr::CompoundAssign(_, lhs, rhs, _) => {
             uses_arguments_expr(lhs) || uses_arguments_expr(rhs)
         }
+        Expr::DestructureAssign(_, rhs, _) => uses_arguments_expr(rhs),
         Expr::Function(fn_node, _) => {
             // Non-arrow function expressions have their own `arguments`.
             // Arrow function expressions inherit `arguments` from enclosing scope.

@@ -33,6 +33,37 @@ use std::collections::HashSet;
 /// key for trace recording/lookup.
 type TraceKey = (usize, usize);
 
+/// Convert a computed property key value to its string form (ToPropertyKey-lite).
+fn property_key_string(val: Value) -> String {
+    if val.is_undefined() {
+        return "undefined".to_string();
+    }
+    if val.is_null() {
+        return "null".to_string();
+    }
+    if val.is_boolean() {
+        return if val.to_boolean().unwrap_or(false) {
+            "true"
+        } else {
+            "false"
+        }
+        .to_string();
+    }
+    if let Some(n) = val.as_smi() {
+        return n.to_string();
+    }
+    if val.is_float64() {
+        return val.as_float64().unwrap_or(f64::NAN).to_string();
+    }
+    if let Some(ptr) = val.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_STRING {
+            return unsafe { HeapString::to_string(ptr as *mut HeapString) };
+        }
+    }
+    "[object Object]".to_string()
+}
+
 /// Create a minimal Error object with `name` and `message` properties.
 fn make_error_object(gc: &mut SemiSpace, name: &str, msg: &str) -> Value {
     let name_str: *mut u8 = HeapString::allocate(gc, name) as *mut u8;
@@ -1080,6 +1111,49 @@ impl Vm {
         Exit::Throw(self.pop())
     }
 
+    /// Whether the thrown value satisfies an `assert.throws(expected, fn)`
+    /// expectation. String expectations compare against the error name;
+    /// builtin constructor handles compare against the builtin's name.
+    /// Unknown constructor shapes are accepted (no way to verify them yet).
+    fn assert_error_matches(&self, expected: Value, thrown: Value) -> bool {
+        if let Some(ptr) = expected.heap_ptr() {
+            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+            if tag == TAG_STRING {
+                let s = unsafe { HeapString::to_string(ptr as *mut HeapString) };
+                return crate::builtins::read_error_name(thrown).as_deref() == Some(s.as_str());
+            }
+            return true;
+        }
+        if let Some(smi) = expected.as_smi() {
+            if smi < 0 {
+                let id = (-smi - 1) as usize;
+                if let Some(b) = self.builtins.get(id) {
+                    return crate::builtins::read_error_name(thrown).as_deref() == Some(b.name);
+                }
+            }
+        }
+        true
+    }
+
+    /// Human-readable name for an `assert.throws` expectation value.
+    fn describe_expected_error(&self, expected: Value) -> String {
+        if let Some(ptr) = expected.heap_ptr() {
+            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+            if tag == TAG_STRING {
+                return unsafe { HeapString::to_string(ptr as *mut HeapString) };
+            }
+        }
+        if let Some(smi) = expected.as_smi() {
+            if smi < 0 {
+                let id = (-smi - 1) as usize;
+                if let Some(b) = self.builtins.get(id) {
+                    return b.name.to_string();
+                }
+            }
+        }
+        "an error".to_string()
+    }
+
     /// Unwind stack for a thrown value, routing to try/catch/finally handlers.
     /// This implements the same logic as the Opcode::Throw handler so that
     /// builtins can route exceptions through the JS try/catch mechanism
@@ -1088,7 +1162,7 @@ impl Vm {
     /// Returns `None` if the exception was handled (caught, finally, or
     /// assert.throws consumed it). Returns `Some(Exit)` if the exception
     /// must propagate up (no handler anywhere).
-    fn handle_throw(&mut self, _gc: &mut SemiSpace, val: Value) -> Option<Exit> {
+    fn handle_throw(&mut self, gc: &mut SemiSpace, val: Value) -> Option<Exit> {
         // Find in-frame handler
         let handler_idx = self
             .try_stack
@@ -1134,7 +1208,26 @@ impl Vm {
         let assert_depth = self.pending_assert.as_ref().map(|pa| pa.source_frame_depth);
         if let Some(source_depth) = assert_depth {
             if self.frames.len() - 1 == source_depth {
-                self.pending_assert.take();
+                let pa = self.pending_assert.take().unwrap();
+                if !self.assert_error_matches(pa.expected_error, val) {
+                    // Wrong error type — report a mismatch and propagate it.
+                    let expected = self.describe_expected_error(pa.expected_error);
+                    let actual = crate::builtins::read_error_name(val)
+                        .unwrap_or_else(|| "a non-error value".to_string());
+                    let detail = crate::builtins::read_error_message(val);
+                    let msg = format!(
+                        "assert.throws: expected {} but got {}: {}",
+                        expected,
+                        actual,
+                        detail.unwrap_or_default()
+                    );
+                    let err = crate::builtins::make_error(gc, &msg);
+                    self.frames.pop();
+                    self.try_stack
+                        .retain(|tf| tf.frame_depth != popped_frame + 1);
+                    self.stack.truncate(callee_base);
+                    return self.handle_throw(gc, err);
+                }
                 self.frames.pop();
                 self.try_stack
                     .retain(|tf| tf.frame_depth != popped_frame + 1);
@@ -1359,7 +1452,12 @@ impl Vm {
     /// can route the getter's return value back to the LoadProperty caller.
     /// Returns the original value if not an accessor, or undefined if getter undefined.
     /// When a getter frame is pushed, the caller MUST `continue` the VM loop.
-    fn resolve_accessor_for_read(&mut self, val: Value, this: Value, _gc: &mut SemiSpace) -> Value {
+    fn resolve_accessor_for_read(
+        &mut self,
+        val: Value,
+        this: Value,
+        _gc: &mut SemiSpace,
+    ) -> (Value, bool) {
         if let Some(ptr) = val.heap_ptr() {
             if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_ACCESSOR {
                 let getter = unsafe { AccessorPair::getter(ptr) };
@@ -1402,15 +1500,15 @@ impl Vm {
                                     func_ptr,
                                     private_name_ids: std::ptr::null_mut(),
                                 });
-                                return Value::undefined();
+                                return (Value::undefined(), true);
                             }
                         }
                     }
                 }
-                return Value::undefined();
+                return (Value::undefined(), false);
             }
         }
-        val
+        (val, false)
     }
 
     pub fn execute(
@@ -1805,6 +1903,16 @@ impl Vm {
                 Opcode::Dup => {
                     let val = self.peek();
                     self.push(val);
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::Dup2 => {
+                    let n = self.stack.len();
+                    if n >= 2 {
+                        let a = self.stack[n - 2];
+                        let b = self.stack[n - 1];
+                        self.push(a);
+                        self.push(b);
+                    }
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::Swap => {
@@ -2624,11 +2732,11 @@ impl Vm {
                     } else {
                         Value::undefined()
                     };
-                    let result = self.resolve_accessor_for_read(result, obj, gc);
-                    if let Some(ref acc) = self.pending_accessor_call {
-                        if self.frames.len() == acc.source_frame_depth {
-                            continue;
-                        }
+                    let (result, pushed_getter) = self.resolve_accessor_for_read(result, obj, gc);
+                    if pushed_getter {
+                        // Getter frame pushed; the Return handler resumes this
+                        // opcode with the getter's result.
+                        continue;
                     }
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
@@ -2676,11 +2784,10 @@ impl Vm {
                                         }
                                         unsafe { JSObject::get_slot(p as *mut JSObject, offset) }
                                     };
-                                    let val = self.resolve_accessor_for_read(val, obj, gc);
-                                    if let Some(ref acc) = self.pending_accessor_call {
-                                        if self.frames.len() == acc.source_frame_depth {
-                                            continue;
-                                        }
+                                    let (val, pushed_getter) =
+                                        self.resolve_accessor_for_read(val, obj, gc);
+                                    if pushed_getter {
+                                        continue;
                                     }
                                     self.push(val);
                                     self.frames[fi].pc = pc + 1;
@@ -2703,11 +2810,9 @@ impl Vm {
                         raw_key,
                         Some(self.function_prototype),
                     );
-                    let result = self.resolve_accessor_for_read(result, obj, gc);
-                    if let Some(ref acc) = self.pending_accessor_call {
-                        if self.frames.len() == acc.source_frame_depth {
-                            continue;
-                        }
+                    let (result, pushed_getter) = self.resolve_accessor_for_read(result, obj, gc);
+                    if pushed_getter {
+                        continue;
                     }
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
@@ -2907,9 +3012,21 @@ impl Vm {
                 }
                 Opcode::DefineProperty => {
                     let value = self.pop();
+                    let key_val = if instr.operands[0] == usize::MAX as i64 {
+                        Some(self.pop())
+                    } else {
+                        None
+                    };
                     let obj = self.pop();
-                    let key_idx = instr.operands[0] as usize;
-                    if let Some(key_str) = self.frames[fi].prog_str(key_idx) {
+                    let key_str = if let Some(kv) = key_val {
+                        // Computed key: popped from the stack
+                        Some(property_key_string(kv))
+                    } else {
+                        self.frames[fi]
+                            .prog_str(instr.operands[0] as usize)
+                            .map(|s| s.to_string())
+                    };
+                    if let Some(key_str) = key_str {
                         if let Some(ptr) = obj.heap_ptr() {
                             let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
                             if tag == TAG_OBJECT {
@@ -2945,9 +3062,21 @@ impl Vm {
                 Opcode::DefineAccessor => {
                     let setter = self.pop();
                     let getter = self.pop();
+                    let key_val = if instr.operands[0] == usize::MAX as i64 {
+                        Some(self.pop())
+                    } else {
+                        None
+                    };
                     let obj = self.pop();
-                    let key_idx = instr.operands[0] as usize;
-                    if let Some(key_str) = self.frames[fi].prog_str(key_idx) {
+                    let key_str = if let Some(kv) = key_val {
+                        // Computed key: popped from the stack
+                        Some(property_key_string(kv))
+                    } else {
+                        self.frames[fi]
+                            .prog_str(instr.operands[0] as usize)
+                            .map(|s| s.to_string())
+                    };
+                    if let Some(key_str) = key_str {
                         if let Some(ptr) = obj.heap_ptr() {
                             let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
                             if tag == TAG_OBJECT || tag == TAG_FUNC {
@@ -3443,6 +3572,15 @@ impl Vm {
                     let val = self.pop();
                     let target = instr.operands[0] as usize;
                     if !val.to_bool() {
+                        self.frames[fi].pc = target
+                    } else {
+                        self.frames[fi].pc = pc + 1
+                    }
+                }
+                Opcode::JumpIfNullOrUndefined => {
+                    let val = self.pop();
+                    let target = instr.operands[0] as usize;
+                    if val.is_null() || val.is_undefined() {
                         self.frames[fi].pc = target
                     } else {
                         self.frames[fi].pc = pc + 1
@@ -4929,15 +5067,8 @@ impl Vm {
                     if let Some(pa) = self.pending_assert.take() {
                         if self.frames.len() == pa.source_frame_depth {
                             // Function returned without throwing — assert.throws failed.
-                            let msg = if let Some(ptr) = pa.expected_error.heap_ptr() {
-                                format!("Expected {} to throw an exception", unsafe {
-                                    rune_core::string::HeapString::to_string(
-                                        ptr as *mut rune_core::string::HeapString,
-                                    )
-                                })
-                            } else {
-                                "Expected an exception but none was thrown".to_string()
-                            };
+                            let expected = self.describe_expected_error(pa.expected_error);
+                            let msg = format!("Expected {} to throw an exception", expected);
                             let err = make_error(gc, &msg);
                             self.stack.truncate(callee_base);
                             if let Some(exit) = self.handle_throw(gc, err) {
@@ -5066,9 +5197,9 @@ impl Vm {
                     // Check if this return completes an accessor (getter/setter) call.
                     if let Some(acc) = self.pending_accessor_call.take() {
                         if self.frames.len() == acc.source_frame_depth {
+                            let caller_idx = self.frames.len() - 1;
                             self.stack.truncate(callee_base);
                             self.push(result);
-                            let caller_idx = self.frames.len() - 1;
                             self.frames[caller_idx].pc += 1;
                             continue;
                         }

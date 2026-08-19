@@ -6731,3 +6731,239 @@ fn test_string_split_regex_empty() {
     assert_eq!(eval_array_len(&mut ctx, r#""".split(/,/)"#), 1);
     assert_eq!(eval_str(&mut ctx, r#""".split(/,/)[0]"#), "");
 }
+
+// ── Correctness batch: silent miscompile fixes ──────────────────────────
+
+#[test]
+fn test_assert_throws_type_mismatch() {
+    let mut ctx = Context::new_small();
+    // Wrong error type must fail the assert (mismatch error surfaces).
+    let r = ctx
+        .eval(
+            "var caught = false;
+             try { assert.throws(Test262Error, function(){ throw new Error('boom'); }); }
+             catch (e) { caught = true; }
+             caught;",
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+    // Correct type passes.
+    let r2 = ctx
+        .eval("assert.throws(Test262Error, function(){ throw new Test262Error('x'); }); 1")
+        .unwrap();
+    assert_eq!(r2.as_smi(), Some(1));
+}
+
+#[test]
+fn test_do_while_break_and_continue() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var i = 0, out = 0;
+             do { i++; if (i === 3) break; out += i; } while (true);
+             out;",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(3));
+    let r2 = ctx
+        .eval(
+            "var i = 0, n = 0;
+             do { i++; if (i % 2 === 0) continue; n += i; } while (i < 6);
+             n;",
+        )
+        .unwrap();
+    assert_eq!(r2.as_smi(), Some(9));
+    let r3 = ctx
+        .eval(
+            "var i = 0;
+             do { i++; if (i >= 10) break; } while (true);
+             i;",
+        )
+        .unwrap();
+    assert_eq!(r3.as_smi(), Some(10));
+}
+
+#[test]
+fn test_for_continue_runs_update() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var s = 0, n = 0;
+             for (var j = 0; j < 10; j++) { n++; if (j % 2 === 0) continue; s += j; }
+             s * 100 + n;",
+        )
+        .unwrap();
+    // s = 1+3+5+7+9 = 25, n = 10 (continue must not skip the update)
+    assert_eq!(r.as_smi(), Some(2510));
+}
+
+#[test]
+fn test_exponent_right_assoc() {
+    let mut ctx = Context::new_small();
+    assert_eq!(ctx.eval("2 ** 3 ** 2").unwrap().as_smi(), Some(512));
+    assert_eq!(ctx.eval("2 ** (3 ** 2)").unwrap().as_smi(), Some(512));
+    assert_eq!(ctx.eval("(2 ** 3) ** 2").unwrap().as_smi(), Some(64));
+}
+
+#[test]
+fn test_nullish_coalescing_and_short_circuit_assign() {
+    let mut ctx = Context::new_small();
+    assert_eq!(
+        ctx.eval("var a = null; a ??= 5; a").unwrap().as_smi(),
+        Some(5)
+    );
+    assert_eq!(ctx.eval("var a = 0; a ??= 5; a").unwrap().as_smi(), Some(0));
+    assert_eq!(ctx.eval("var b = 1; b ||= 9; b").unwrap().as_smi(), Some(1));
+    assert_eq!(ctx.eval("var b = 0; b ||= 9; b").unwrap().as_smi(), Some(9));
+    assert_eq!(ctx.eval("var c = 2; c &&= 7; c").unwrap().as_smi(), Some(7));
+    assert_eq!(ctx.eval("var c = 0; c &&= 7; c").unwrap().as_smi(), Some(0));
+    assert_eq!(
+        ctx.eval("null ?? 5;").unwrap().as_smi(),
+        Some(5),
+        "?? is not || (null ?? 5 == 5)"
+    );
+    assert_eq!(
+        ctx.eval("0 ?? 5;").unwrap().as_smi(),
+        Some(0),
+        "?? only falls through on null/undefined"
+    );
+}
+
+#[test]
+fn test_member_and_private_update() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval("var o = { x: 5 }; var old = o.x++; old * 100 + o.x;")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(506));
+    assert_eq!(
+        ctx.eval("var o = { x: 5 }; ++o.x; o.x").unwrap().as_smi(),
+        Some(6)
+    );
+    assert_eq!(
+        ctx.eval(
+            "class A { constructor() { this.v = 7; } }
+             var a = new A(); a.v++; a.v;"
+        )
+        .unwrap()
+        .as_smi(),
+        Some(8)
+    );
+    assert_eq!(
+        ctx.eval(
+            "class A { #v = 5; get() { return this.#v; } bump() { this.#v++; } }
+             var a = new A(); a.bump(); a.bump(); a.get();"
+        )
+        .unwrap()
+        .as_smi(),
+        Some(7)
+    );
+    assert_eq!(
+        ctx.eval(
+            "class P { constructor() { this.inh = 7; } }
+             class C extends P {}
+             var c = new C();
+             c.inh++;
+             var before = c.inh;
+             c.inh++;
+             c.inh;"
+        )
+        .unwrap()
+        .as_smi(),
+        Some(9)
+    );
+}
+
+#[test]
+fn test_destructuring_assignment() {
+    let mut ctx = Context::new_small();
+    assert_eq!(
+        ctx.eval("var [a, b] = [1, 2]; a * 10 + b;")
+            .unwrap()
+            .as_smi(),
+        Some(12)
+    );
+    assert_eq!(
+        ctx.eval("var [p, q] = [1, 2]; [p, q] = [q, p]; p * 10 + q;")
+            .unwrap()
+            .as_smi(),
+        Some(21)
+    );
+    assert_eq!(
+        ctx.eval("var { m, n } = { m: 10, n: 20 }; m + n;")
+            .unwrap()
+            .as_smi(),
+        Some(30)
+    );
+    assert_eq!(
+        ctx.eval("var [h, ...tail] = [1, 2, 3, 4]; h * 10 + tail.length;")
+            .unwrap()
+            .as_smi(),
+        Some(13)
+    );
+    assert_eq!(
+        ctx.eval("var [d = 99] = []; d;").unwrap().as_smi(),
+        Some(99),
+        "destructuring default"
+    );
+    let r = ctx
+        .eval("var arr; var x = (arr = [7, 8]); arr[0] + x.length;")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(9), "destructure assign yields RHS value");
+}
+
+#[test]
+fn test_computed_class_keys() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var k = 'dyn';
+             class A {
+               [k]() { return 1; }
+               ['other' + '2']() { return 2; }
+               static [k + 'Static']() { return 3; }
+               get [k + 'Getter']() { return 4; }
+               set [k + 'Setter'](v) { this.vv = v; }
+             }
+             var a = new A();
+             var acc = a.dyn() + a.other2() + A.dynStatic() + a.dynGetter;
+             a.dynSetter = 77;
+             acc * 100 + a.vv;",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(1077));
+    assert_eq!(
+        ctx.eval("class B { [42]() { return 99; } } var b = new B(); b['42']();")
+            .unwrap()
+            .as_smi(),
+        Some(99)
+    );
+}
+
+#[test]
+fn test_accessor_getter_result_flows() {
+    let mut ctx = Context::new_small();
+    // Regression: getter result was lost (and pc double-advanced) when the
+    // accessor was used in a non-final statement.
+    let r = ctx
+        .eval(
+            "class Foo { constructor() { this._x = 0; }
+               get x() { return this._x; }
+               set x(v) { this._x = v; } }
+             var f = new Foo();
+             f.x = 10;
+             var got = f.x;
+             got;",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(10));
+    let r2 = ctx
+        .eval(
+            "class A { constructor() { this.stored = 0; } get g() { return this.stored; } }
+             var a = new A();
+             var y = a.g;
+             y;",
+        )
+        .unwrap();
+    assert_eq!(r2.as_smi(), Some(0));
+}

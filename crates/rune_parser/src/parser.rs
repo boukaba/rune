@@ -857,6 +857,10 @@ impl Parser {
                     self.advance();
                     BinaryOp::LogicalOr
                 }
+                TokenKind::QuestionQuestion => {
+                    self.advance();
+                    BinaryOp::NullishCoalescing
+                }
                 TokenKind::LogicalAnd => {
                     self.advance();
                     BinaryOp::LogicalAnd
@@ -973,7 +977,18 @@ impl Parser {
                         end: self.span().end,
                     };
                     if op == BinaryOp::Assign {
-                        lhs = Expr::Assign(Box::new(lhs), Box::new(rhs), span);
+                        // Destructuring assignment only applies when the LHS is an
+                        // array or object literal; plain identifiers stay Assign.
+                        if matches!(lhs, Expr::Array(..) | Expr::Object(..)) {
+                            if let Some(pattern) = self.expr_to_pattern(&lhs) {
+                                lhs =
+                                    Expr::DestructureAssign(Box::new(pattern), Box::new(rhs), span);
+                            } else {
+                                lhs = Expr::Assign(Box::new(lhs), Box::new(rhs), span);
+                            }
+                        } else {
+                            lhs = Expr::Assign(Box::new(lhs), Box::new(rhs), span);
+                        }
                     } else {
                         lhs = Expr::CompoundAssign(op, Box::new(lhs), Box::new(rhs), span);
                     }
@@ -981,7 +996,12 @@ impl Parser {
                 }
                 _ => break,
             };
-            let rhs = self.parse_expr(prec + 1);
+            let rhs = if op == BinaryOp::Exp {
+                // Exponentiation is right-associative: 2**3**2 = 2**(3**2)
+                self.parse_expr(prec)
+            } else {
+                self.parse_expr(prec + 1)
+            };
             let span = Span {
                 start: self.span().start,
                 end: self.span().end,
@@ -1718,6 +1738,88 @@ impl Parser {
         }
     }
 
+    /// Convert an expression (Array/Object literal) into a binding pattern for
+    /// destructuring assignment. Returns None for non-literal expressions.
+    /// Handles nesting, `= default` (Assign) and `...rest` (spread) elements.
+    fn expr_to_pattern(&mut self, expr: &Expr) -> Option<Pattern> {
+        match expr {
+            Expr::Array(elems, span) => {
+                let mut items = Vec::new();
+                for elem in elems {
+                    if elem.is_spread {
+                        let inner = self.expr_to_pattern(&elem.expr).unwrap_or_else(|| {
+                            Pattern::Identifier(
+                                Box::from("_error"),
+                                Span { start: 0, end: 0 },
+                                None,
+                            )
+                        });
+                        items.push(Some(Pattern::Rest(Box::new(inner), *span)));
+                    } else {
+                        items.push(Some(self.binding_from_value(&elem.expr)));
+                    }
+                }
+                Some(Pattern::Array(items, *span))
+            }
+            Expr::Object(props, span) => {
+                let mut out = Vec::new();
+                let mut rest = None;
+                for prop in props {
+                    if prop.is_spread {
+                        let inner = self.expr_to_pattern(&prop.value).unwrap_or_else(|| {
+                            Pattern::Identifier(
+                                Box::from("_error"),
+                                Span { start: 0, end: 0 },
+                                None,
+                            )
+                        });
+                        rest = Some(Box::new(inner));
+                    } else {
+                        out.push(ObjectPatternProp {
+                            key: prop.key.clone(),
+                            pattern: self.binding_from_value(&prop.value),
+                            span: prop.span,
+                        });
+                    }
+                }
+                Some(Pattern::Object(out, rest, *span))
+            }
+            Expr::Assign(target, default, _) => {
+                // [a = 1] / {a = 1}: shorthand default
+                if let Expr::Identifier(name, ispan) = target.as_ref() {
+                    return Some(Pattern::Default(
+                        Box::new(Pattern::Identifier(name.clone(), *ispan, None)),
+                        default.clone(),
+                    ));
+                }
+                let inner = self.expr_to_pattern(target)?;
+                Some(Pattern::Default(Box::new(inner), default.clone()))
+            }
+            _ => None,
+        }
+    }
+
+    /// Convert a value expression inside a destructuring literal into a
+    /// binding pattern (identifier, nested literal, or `= default`).
+    fn binding_from_value(&mut self, expr: &Expr) -> Pattern {
+        let fallback = || Pattern::Identifier(Box::from("_error"), Span { start: 0, end: 0 }, None);
+        match expr {
+            Expr::Identifier(name, ispan) => Pattern::Identifier(name.clone(), *ispan, None),
+            Expr::Assign(target, default, _) => {
+                if let Expr::Identifier(name, ispan) = target.as_ref() {
+                    Pattern::Default(
+                        Box::new(Pattern::Identifier(name.clone(), *ispan, None)),
+                        default.clone(),
+                    )
+                } else {
+                    let inner = self.expr_to_pattern(target).unwrap_or_else(fallback);
+                    Pattern::Default(Box::new(inner), default.clone())
+                }
+            }
+            _ => self.expr_to_pattern(expr).unwrap_or_else(fallback),
+        }
+    }
+
     fn parse_binding_pattern(&mut self) -> Pattern {
         match self.tok.kind {
             TokenKind::LBrace => {
@@ -2152,6 +2254,18 @@ impl Parser {
                 self.advance();
                 BinaryOp::BitXor
             }
+            TokenKind::AndAssign => {
+                self.advance();
+                BinaryOp::LogicalAnd
+            }
+            TokenKind::OrAssign => {
+                self.advance();
+                BinaryOp::LogicalOr
+            }
+            TokenKind::NullishAssign => {
+                self.advance();
+                BinaryOp::NullishCoalescing
+            }
             _ => BinaryOp::Assign,
         }
     }
@@ -2159,6 +2273,7 @@ impl Parser {
     fn binary_precedence(&self) -> u32 {
         match self.tok.kind {
             TokenKind::LogicalOr => 1,
+            TokenKind::QuestionQuestion => 1,
             TokenKind::LogicalAnd => 2,
             TokenKind::BitOr => 3,
             TokenKind::BitXor => 4,

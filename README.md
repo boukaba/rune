@@ -59,16 +59,16 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 
 ## What Works
 
-- **Language core:** arithmetic, comparisons, logical operators (loose + strict)
+- **Language core:** arithmetic (incl. `**` right-assoc), comparisons, logical operators (loose + strict), `??` nullish coalescing, `&&=`/`||=`/`??=` short-circuit assignment
 - **Scoping:** var, let, const with block scope and TDZ
 - **Functions:** declarations, expressions, arrows, closures, rest/default params, destructuring
-- **Objects:** literals, shorthand, methods, computed keys, spread, destructuring
-- **Arrays:** dense arrays, spread, destructuring, rest, push/pop/length
-- **Control flow:** if/else, while, do/while, for, for-in, switch, try/catch/finally
+- **Objects:** literals, shorthand, methods, computed keys, spread, destructuring, member `obj.prop++` update
+- **Arrays:** dense arrays, spread, destructuring (declarations + assignment), rest, push/pop/length
+- **Control flow:** if/else, while, do/while (break/continue), for (continue runs the update), for-in, switch, try/catch/finally
 - **Generators:** function*, yield, next() (basic)
 - **Async/await:** `async function`, `async () =>`, `await expr` — generator-based, synchronous until first await, Promise-based continuation
 - **Promise:** constructor, resolve/reject, `.then`/`.catch`/`.finally`, `Promise.resolve`/`.reject`/`.all`/`.race`, microtask queue, **thenable unwrapping**
-- **Classes:** declarations, expressions (named & anonymous), default constructor, prototype methods, `extends` (heritage), `super()` calls, `super.prop` access, `super.prop = val` assignment, compound assignment `super.prop += val`, `static` methods, getter/setter syntax (`get`/`set`), **private fields (`#`)** with runtime storage
+- **Classes:** declarations, expressions (named & anonymous), default constructor, prototype methods, `extends` (heritage), `super()` calls, `super.prop` access, `super.prop = val` assignment, compound assignment `super.prop += val`, `static` methods, getter/setter syntax (`get`/`set`), **computed property names**, **private fields (`#`)** with runtime storage
 - **Template literals:** substitutions, nested, escapes
 - **Error objects:** TypeError, ReferenceError with `.name`/`.message`
 - **Prototype chains:** `__proto__`, Object.create, instanceof
@@ -87,7 +87,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 - **String methods:** `replace` (string + regex pattern), `replaceAll`, `indexOf`, `charAt`, `slice`, `split`. No `trim`, `toUpperCase`, `toLowerCase`, `charCodeAt`.
 - **Array methods:** `filter`, `map`, `reduce`, `forEach`, `slice`, `find`, `some`, `every`, `sort`, `flat`, `flatMap`, `includes`, `push`, `pop`, `indexOf`.
 - **Modules:** No import/export (ESM)
-- **Classes:** Private fields work for instance fields (no static private fields, private methods yet). No computed property names.
+- **Classes:** Private fields work for instance fields (no static private fields, private methods yet). No optional chaining (`?.`).
 - **Async/await:** `async function`, `async () =>`, `await expr` — full support with generator-based desugaring, synchronous until first await. 396 tests.
 - **JIT:** 57 opcodes whitelisted (out of 93 total opcode variants). Float Self-Tagging (NaN-boxing) eliminates all float heap allocation — all interpreter float paths use inline `Value::from_float64`. JIT has float64 Add promotion; Sub/Div/Mod/Exp bail to interpreter (which handles them via NaN-boxed Values). **Guarded Smi Mul/Mod run natively** with a compile-time `stack_depth` model + `push_raw` bail paths; every guard (shape-miss, Smi-check, overflow, call) bails to the interpreter with a validated pre-opcode snapshot. Phase F inlining shipped (5% on `jit_hot_function_1M`).
 - **Debugger:** No CDP/DevTools

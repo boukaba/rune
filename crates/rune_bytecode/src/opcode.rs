@@ -18,6 +18,7 @@ pub enum Opcode {
     // Stack
     Pop,
     Dup,
+    Dup2,
     // Unary
     Neg,
     Not,
@@ -74,6 +75,7 @@ pub enum Opcode {
     Jump,
     JumpIfTrue,
     JumpIfFalse,
+    JumpIfNullOrUndefined,
     Throw,
     ThrowIfNullish,
     TryBegin,

@@ -364,16 +364,9 @@ fn make_simple_object(gc: &mut SemiSpace, key: &str, val: Value) -> Value {
     Value::from_heap_ptr(obj as *mut u8)
 }
 
-/// Error(message) — creates a minimal error object with a `message` property.
+/// Error(message) — creates a minimal error object with `name` and `message` properties.
 pub fn error_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
-    let msg = if let Some(arg) = args.first() {
-        value_to_js_string(*arg)
-    } else {
-        String::new()
-    };
-    let msg_str = HeapString::allocate(gc, &msg);
-    let msg_val = Value::from_heap_ptr(msg_str as *mut u8);
-    make_simple_object(gc, "message", msg_val)
+    error_with_name(gc, args, "Error")
 }
 
 /// Test262Error(message) — built-in replacement for sta.js Test262Error constructor.
@@ -381,9 +374,35 @@ pub fn test262_error_builtin(
     gc: &mut SemiSpace,
     _this: Value,
     args: &[Value],
-    vm: &mut Vm,
+    _vm: &mut Vm,
 ) -> Value {
-    error_builtin(gc, _this, args, vm)
+    error_with_name(gc, args, "Test262Error")
+}
+
+/// Create an Error-shaped object with `name` and `message` properties.
+fn error_with_name(gc: &mut SemiSpace, args: &[Value], name: &str) -> Value {
+    let msg = if let Some(arg) = args.first() {
+        value_to_js_string(*arg)
+    } else {
+        String::new()
+    };
+    let name_str: *mut u8 = HeapString::allocate(gc, name) as *mut u8;
+    let msg_str: *mut u8 = HeapString::allocate(gc, &msg) as *mut u8;
+    let entries = vec![
+        (PropertyKey::from_string("name"), 0usize),
+        (PropertyKey::from_string("message"), 1usize),
+    ];
+    let key_names = vec!["name".to_string(), "message".to_string()];
+    let shape = Shape::intern(entries, key_names);
+    let obj = JSObject::allocate(
+        gc,
+        shape,
+        &[
+            Value::from_heap_ptr(name_str),
+            Value::from_heap_ptr(msg_str),
+        ],
+    );
+    Value::from_heap_ptr(obj as *mut u8)
 }
 
 /// $DONOTEVALUATE() — throws an error (should be optimized away by runner).
@@ -3996,6 +4015,41 @@ pub fn read_error_message(val: Value) -> Option<String> {
             return None;
         }
         Some(HeapString::to_string(msg_ptr as *mut HeapString))
+    }
+}
+
+/// Extract the error type name from an exception Value.
+/// Order: own `name` property → "TypeError: " message prefix (internal
+/// `make_error` objects) → "Error" for message-only objects.
+pub fn read_error_name(val: Value) -> Option<String> {
+    let ptr = val.heap_ptr()?;
+    unsafe {
+        let tag = (*(ptr as *const GcHeader)).tag();
+        if tag == TAG_STRING {
+            return Some(HeapString::to_string(ptr as *mut HeapString));
+        }
+        if tag != TAG_OBJECT {
+            return None;
+        }
+        let shape = JSObject::shape_ptr(ptr as *mut JSObject);
+        let key = PropertyKey::from_string("name");
+        if let Some(slot) = shape.lookup(&key) {
+            let name_val = JSObject::get_slot(ptr as *mut JSObject, slot);
+            if let Some(nptr) = name_val.heap_ptr() {
+                let t2 = (*(nptr as *const GcHeader)).tag();
+                if t2 == TAG_STRING {
+                    return Some(HeapString::to_string(nptr as *mut HeapString));
+                }
+            }
+        }
+        if let Some(msg) = read_error_message(val) {
+            if let Some(idx) = msg.find(": ") {
+                if idx < 64 && !msg[..idx].is_empty() {
+                    return Some(msg[..idx].to_string());
+                }
+            }
+        }
+        Some("Error".to_string())
     }
 }
 

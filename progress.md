@@ -2,10 +2,28 @@
 
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
-> **Status:** v0.5.0 🚧 (In Progress — 482/482 integration tests Pass, 3 Ignored; workspace tests Pass)
+> **Status:** v0.5.0 🚧 (In Progress — 491/491 integration tests Pass, 3 Ignored; workspace tests Pass)
 > SIDT validated, AFPC bytecode + native-code cache functional (AArch64); x86-64 runs bytecode/IC/shape caching only (JIT codegen disabled there). Cold start 2.8× faster than Node
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
+
+## Correctness batch — silent-miscompile elimination (2026-08-19)
+
+- [x] **`assert.throws` type mismatch check**: throws "assert.throws: expected ... but got ..." when the thrown error's constructor doesn't match the expected one (test262 negative-path behavior). Verified with `Test262Error` (real builtin): mismatch throws and is catchable, matching type passes. Note: `TypeError` is not a global in Rune — test262 probes must use builtins Rune actually registers.
+- [x] **`for` loop `continue` now runs the update** (was: infinite loop — `continue` jumped to the condition, skipping `j++`). Fix: `loop_cont_stack.push(usize::MAX)` sentinel + `pending_loop_jumps` (already used by `break`), `continue_target = current()` captured right after the body, patched after the exit path. 10-iteration loop with `continue` on evens now terminates: `s=25, n=10`. (This fix was re-applied after the stash recovery — the recovered emitter had the pre-fix loop.)
+- [x] **`do-while` `break`/`continue`**: `break`/`continue` inside `do-while` body use the same sentinel mechanism; `test_do_while_break_and_continue` passes (t=4: continue at 2, break at 4).
+- [x] **`**` right-associativity**: `2 ** 3 ** 2 == 512` (parser now recurses `parse_pow` for the RHS instead of left-assoc loop).
+- [x] **`??` nullish coalescing**: plain binary `a ?? b` — `lhs, Dup, JumpIfNullOrUndefined→drop, Jump→end, drop: Pop, rhs, end` — `0 ?? 5 == 0`, `null ?? 5 == 5`, `false ?? 5 == false`, `"" ?? 5 == ""`, `undefined ?? 42 == 42`. (The stash-recovered emitter had this arm inverted — non-nullish popped the lhs AND evaluated rhs; fixed and re-verified.) `JumpIfNullOrUndefined` POPS its operand.
+- [x] **`&&=`/`||=`/`??=` short-circuit assignment** for identifiers: `a ??= 5` assigns only when `a` is null/undefined (embed Context persists globals across evals — the test suite's own evaluation order matters).
+- [x] **`obj.prop++` member update**: `Update` handler now handles `Expr::Member` targets (load + store path) — `o.x++` → 2.
+- [x] **Destructuring assignment**: `[a, b] = [b, a]` swaps correctly (swapped `d1,d2` = 4,3 after `[3,4]` init). `Expr::DestructureAssign(Box<Pattern>, Box<Expr>, Span)` in ast.rs; parser converts `Expr::Array`/`Object` literal LHS via `expr_to_pattern` (plain identifiers stay `Expr::Assign` — converting them broke JIT tier-up and globals); emitter `DestructureStore::{Decl(VarKind), Assign}` + `emit_assign_store` (captured/lexical net −1, local/global + Pop) + `emit_store_with_default`/`emit_store_binding` for the Assign variant; `contains_inner_function_expr`/`uses_arguments_expr` arms added.
+- [x] **Computed class keys**: `class K { static [1+1]() {...} get ["g"]() {...} }` — key expression emitted before MakeFunction; `DefineProperty`/`DefineAccessor` pop the key when the operand is `usize::MAX as i64` (vm.rs:3015/3065). `K[2]() == 42`, `new K().g == 7`.
+- [x] **Accessor getter/setter bug (double-advance)**: `resolve_accessor_for_read` compared `frames.len() == acc.source_frame_depth`, which never matched when the getter frame was pushed (it's `source+1`) → fall-through pushed `undefined` AND advanced `pc`, then the Return handler advanced again (skipped the StoreGlobal/next instruction — the `f.x = 10` → `x = undefined` bug). Fixed by returning `(Value, bool)` (bool = getter frame pushed); the 3 load sites `if pushed_getter { continue; }`; `pending_accessor_call` set only when a getter frame is pushed; Return handler matches `frames.len() == acc.source_frame_depth` after the frame pop. An intermediate `>`-comparison fix caused infinite loops (stale pending while the getter body executes — a getter that loads a property re-enters the stale check) and 8 collateral failures (test_for_in_object, test_jit_inc_global, test_jit_store_global, test_global_scope_*, test_spread_call_print, stencil_jit); all resolved by the `(Value, bool)` rework. Nested accessors remain unsupported (single pending slot).
+- [x] **Private-field compound/update/short-circuit emission fixes** (emitter): compound `#f += v` uses a `__cmp_` temp + Pop then reload; update `#f++` uses two `__upd_` temps (old for postfix, new for the store); short-circuit `#f ??= v` uses `__sc_` obj + result slots with a shared epilogue. All verified via integration tests.
+- [x] **Stash recovery incident**: `git stash drop` destroyed the parser work; recovered from unreachable commit `e8a3b92` via `git fsck --unreachable` + `git checkout e8a3b92 -- crates/rune_parser/src/{emitter,parser,ast}.rs`. The recovered emitter.rs was missing computed-class-key emission (4 sites), DestructureAssign, and the private-field fixes — all re-implemented on top (see above).
+- [x] 10 regression tests appended to integration_test.rs (assert.throws mismatch, do-while, for-continue, `**`, `??`, member update, destructuring, computed keys, accessor flow).
+- [x] Full suite green: **491 integration tests pass, 3 ignored** (workspace total 637 tests); cargo fmt + clippy clean with CI flags; `--no-default-features` (no-JIT) build probe clean.
+- **Known gaps**: optional chaining (`?.`) still not implemented (lexer maps `?.` → Dot); nested accessors (getter inside getter) unsupported.
 
 ## Bailout PR2 — `let`-loop JIT (lexical state) + trace-key collision fix (2026-08-19)
 

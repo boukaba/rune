@@ -1,12 +1,15 @@
 use crate::vm::SymbolMethodResult;
 use crate::vm::Vm;
+use crate::vm::get_iter_method;
 use crate::vm::get_symbol_method;
 use crate::vm::load_property_recursive;
+use crate::vm::{CollectionCtorState, PendingCollectionCtor, PendingCollectionForEach};
 use rune_core::array::RuneArray;
 use rune_core::gc::{
-    GcHeader, SemiSpace, TAG_ARRAY, TAG_FUNC, TAG_OBJECT, TAG_PROMISE, TAG_REGEXP, TAG_STRING,
-    TAG_STRING_OBJ,
+    GcHeader, SemiSpace, TAG_ARRAY, TAG_FLOAT64, TAG_FORWARDED, TAG_FUNC, TAG_MAP, TAG_OBJECT,
+    TAG_PROMISE, TAG_REGEXP, TAG_SET, TAG_STRING, TAG_STRING_OBJ,
 };
+use rune_core::map::{RuneMap, RuneSet};
 use rune_core::object::JSObject;
 use rune_core::promise::{PROMISE_FULFILLED, PROMISE_PENDING, PROMISE_REJECTED, Promise};
 use rune_core::regexp::RegExp;
@@ -789,6 +792,857 @@ pub fn string_iterator_next(
         }
     }
     make_iter_result(gc, Value::undefined(), true)
+}
+
+// ── Map / Set builtins ────────────────────────────────────────────────
+
+/// SameValueZero comparison used for Map/Set keys (§7.2.12 SameValueZero):
+/// - NaN matches NaN; +0 and -0 are equal
+/// - Smi and float64 encodings of the same number are equal
+/// - Heap strings compare by content, not pointer identity
+/// - Symbols and objects compare by identity
+pub(crate) fn map_key_equal(a: Value, b: Value) -> bool {
+    let a_num = a.is_smi() || a.is_float64();
+    let b_num = b.is_smi() || b.is_float64();
+    if a_num || b_num {
+        if !(a_num && b_num) {
+            return false;
+        }
+        let fa = if a.is_smi() {
+            a.as_smi().unwrap() as f64
+        } else {
+            f64::from_bits(a.raw())
+        };
+        let fb = if b.is_smi() {
+            b.as_smi().unwrap() as f64
+        } else {
+            f64::from_bits(b.raw())
+        };
+        if fa.is_nan() || fb.is_nan() {
+            return fa.is_nan() && fb.is_nan();
+        }
+        return fa == fb;
+    }
+    if a.raw() == b.raw() {
+        return true;
+    }
+    if let (Some(pa), Some(pb)) = (a.heap_ptr(), b.heap_ptr()) {
+        let ta = unsafe { (*(pa as *const GcHeader)).tag() };
+        let tb = unsafe { (*(pb as *const GcHeader)).tag() };
+        if ta == TAG_STRING && tb == TAG_STRING {
+            return unsafe { HeapString::to_string(pa as *mut HeapString) }
+                == unsafe { HeapString::to_string(pb as *mut HeapString) };
+        }
+    }
+    false
+}
+
+/// §7.2.14 IsObject: true for everything except primitives. The GC-tagged
+/// string and legacy float64 boxes are primitives, not Objects.
+pub(crate) fn is_object_value(v: Value) -> bool {
+    if let Some(ptr) = v.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        tag != TAG_STRING && tag != TAG_FLOAT64 && tag != TAG_FORWARDED
+    } else {
+        false
+    }
+}
+
+/// Index of the entry whose key equals `key`, or None. Non-allocating.
+/// Map entry lists are flat [k0, v0, k1, v1, ...]; a deleted entry has its
+/// key slot set to `Value::empty_sentinel()`. Set lists are flat values with
+/// the same sentinel marking deletion.
+pub(crate) fn key_index(entries_ptr: *mut u8, key: Value, is_map: bool) -> Option<usize> {
+    if entries_ptr.is_null() {
+        return None;
+    }
+    let entries = entries_ptr as *mut RuneArray;
+    let len = unsafe { RuneArray::length(entries) } as usize;
+    let empty = Value::empty_sentinel().raw();
+    if is_map {
+        let mut i = 0;
+        while i < len {
+            let k = unsafe { RuneArray::get_element(entries, i) };
+            if k.raw() != empty && map_key_equal(k, key) {
+                return Some(i);
+            }
+            i += 2;
+        }
+    } else {
+        for i in 0..len {
+            let k = unsafe { RuneArray::get_element(entries, i) };
+            if k.raw() != empty && map_key_equal(k, key) {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+/// Set `map[key] = value` (§27.1.3.15 Map.prototype.set).
+/// `map_slot` must reference a GC-rooted slot (the VM stack or a pending
+/// state field) — the map pointer is re-read after every allocation.
+/// Returns true if a new entry was appended (size grew).
+pub(crate) fn map_set_internal(
+    gc: &mut SemiSpace,
+    map_slot: &mut Value,
+    key: Value,
+    value: Value,
+) -> bool {
+    let mut map_ptr = map_slot.heap_ptr().unwrap();
+    if let Some(i) = key_index(unsafe { RuneMap::entries(map_ptr) }, key, true) {
+        let entries = unsafe { RuneMap::entries(map_ptr) } as *mut RuneArray;
+        unsafe { RuneArray::set_element(entries, i + 1, value) };
+        return false;
+    }
+    let mut entries_ptr = unsafe { RuneMap::entries(map_ptr) };
+    if entries_ptr.is_null() {
+        entries_ptr = RuneArray::allocate(gc, &[]) as *mut u8;
+        map_ptr = map_slot.heap_ptr().unwrap();
+        unsafe { RuneMap::set_entries(map_ptr, entries_ptr) };
+    }
+    let entries = unsafe { RuneArray::push(gc, entries_ptr as *mut RuneArray, key) };
+    let entries = unsafe { RuneArray::push(gc, entries, value) };
+    map_ptr = map_slot.heap_ptr().unwrap();
+    unsafe { RuneMap::set_entries(map_ptr, entries as *mut u8) };
+    unsafe { RuneMap::set_size(map_ptr, RuneMap::size(map_ptr) + 1) };
+    true
+}
+
+/// Add `value` to a Set (§27.2.3.1 Set.prototype.add). Slot rules as above.
+/// Returns true if a new element was appended (size grew).
+pub(crate) fn set_add_internal(gc: &mut SemiSpace, set_slot: &mut Value, value: Value) -> bool {
+    let mut set_ptr = set_slot.heap_ptr().unwrap();
+    if key_index(unsafe { RuneSet::entries(set_ptr) }, value, false).is_some() {
+        return false;
+    }
+    let mut entries_ptr = unsafe { RuneSet::entries(set_ptr) };
+    if entries_ptr.is_null() {
+        entries_ptr = RuneArray::allocate(gc, &[]) as *mut u8;
+        set_ptr = set_slot.heap_ptr().unwrap();
+        unsafe { RuneSet::set_entries(set_ptr, entries_ptr) };
+    }
+    let entries = unsafe { RuneArray::push(gc, entries_ptr as *mut RuneArray, value) };
+    set_ptr = set_slot.heap_ptr().unwrap();
+    unsafe { RuneSet::set_entries(set_ptr, entries as *mut u8) };
+    unsafe { RuneSet::set_size(set_ptr, RuneSet::size(set_ptr) + 1) };
+    true
+}
+
+fn map_receiver(gc: &mut SemiSpace, this: Value, vm: &mut Vm) -> Option<*mut u8> {
+    if let Some(ptr) = this.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_MAP {
+            return Some(ptr);
+        }
+    }
+    vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        gc,
+        "TypeError: Map.prototype method called on incompatible receiver",
+    )));
+    None
+}
+
+fn set_receiver(gc: &mut SemiSpace, this: Value, vm: &mut Vm) -> Option<*mut u8> {
+    if let Some(ptr) = this.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_SET {
+            return Some(ptr);
+        }
+    }
+    vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        gc,
+        "TypeError: Set.prototype method called on incompatible receiver",
+    )));
+    None
+}
+
+fn is_callable_value(v: Value) -> bool {
+    v.as_smi().is_some_and(|s| s < 0)
+        || v.heap_ptr()
+            .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC })
+}
+
+/// §27.1.3.15 Map.prototype.set
+pub fn map_set_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some(_map_ptr) = map_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let key = args.first().copied().unwrap_or(Value::undefined());
+    let value = args.get(1).copied().unwrap_or(Value::undefined());
+    let mut slot = this;
+    map_set_internal(gc, &mut slot, key, value);
+    this
+}
+
+/// §27.1.3.8 Map.prototype.get
+pub fn map_get_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some(map_ptr) = map_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let key = args.first().copied().unwrap_or(Value::undefined());
+    if let Some(i) = key_index(unsafe { RuneMap::entries(map_ptr) }, key, true) {
+        let entries = unsafe { RuneMap::entries(map_ptr) } as *mut RuneArray;
+        return unsafe { RuneArray::get_element(entries, i + 1) };
+    }
+    Value::undefined()
+}
+
+/// §27.1.3.10 Map.prototype.has
+pub fn map_has_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some(map_ptr) = map_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let key = args.first().copied().unwrap_or(Value::undefined());
+    Value::boolean(key_index(unsafe { RuneMap::entries(map_ptr) }, key, true).is_some())
+}
+
+/// §27.1.3.4 Map.prototype.delete — removes the entry, returns true if present.
+pub fn map_delete_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some(map_ptr) = map_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let key = args.first().copied().unwrap_or(Value::undefined());
+    let entries_ptr = unsafe { RuneMap::entries(map_ptr) };
+    if let Some(i) = key_index(entries_ptr, key, true) {
+        let entries = entries_ptr as *mut RuneArray;
+        unsafe {
+            RuneArray::set_element(entries, i, Value::empty_sentinel());
+            RuneArray::set_element(entries, i + 1, Value::undefined());
+        }
+        unsafe { RuneMap::set_size(map_ptr, RuneMap::size(map_ptr) - 1) };
+        return Value::boolean(true);
+    }
+    Value::boolean(false)
+}
+
+/// §27.1.3.2 Map.prototype.clear — empties the map (the entry list itself is
+/// retained so suspended iterators keep their snapshot semantics).
+pub fn map_clear_builtin(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    let Some(map_ptr) = map_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let entries_ptr = unsafe { RuneMap::entries(map_ptr) };
+    if !entries_ptr.is_null() {
+        let entries = entries_ptr as *mut RuneArray;
+        let len = unsafe { RuneArray::length(entries) } as usize;
+        for i in 0..len {
+            unsafe { RuneArray::set_element(entries, i, Value::empty_sentinel()) };
+        }
+    }
+    unsafe { RuneMap::set_size(map_ptr, 0) };
+    Value::undefined()
+}
+
+/// §27.2.3.1 Set.prototype.add
+pub fn set_add_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some(_set_ptr) = set_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let value = args.first().copied().unwrap_or(Value::undefined());
+    let mut slot = this;
+    set_add_internal(gc, &mut slot, value);
+    this
+}
+
+/// §27.2.3.9 Set.prototype.has
+pub fn set_has_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some(set_ptr) = set_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let value = args.first().copied().unwrap_or(Value::undefined());
+    Value::boolean(key_index(unsafe { RuneSet::entries(set_ptr) }, value, false).is_some())
+}
+
+/// §27.2.3.3 Set.prototype.delete — removes the element, returns true if present.
+pub fn set_delete_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some(set_ptr) = set_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let value = args.first().copied().unwrap_or(Value::undefined());
+    let entries_ptr = unsafe { RuneSet::entries(set_ptr) };
+    if let Some(i) = key_index(entries_ptr, value, false) {
+        let entries = entries_ptr as *mut RuneArray;
+        unsafe { RuneArray::set_element(entries, i, Value::empty_sentinel()) };
+        unsafe { RuneSet::set_size(set_ptr, RuneSet::size(set_ptr) - 1) };
+        return Value::boolean(true);
+    }
+    Value::boolean(false)
+}
+
+/// §27.2.3.2 Set.prototype.clear
+pub fn set_clear_builtin(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    let Some(set_ptr) = set_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let entries_ptr = unsafe { RuneSet::entries(set_ptr) };
+    if !entries_ptr.is_null() {
+        let entries = entries_ptr as *mut RuneArray;
+        let len = unsafe { RuneArray::length(entries) } as usize;
+        for i in 0..len {
+            unsafe { RuneArray::set_element(entries, i, Value::empty_sentinel()) };
+        }
+    }
+    unsafe { RuneSet::set_size(set_ptr, 0) };
+    Value::undefined()
+}
+
+/// Create a [key, value] (kind 0), key (kind 1) or value (kind 2) iterator.
+fn make_collection_iterator(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    collection: Value,
+    kind: i32,
+    next_handle: &str,
+    tag: &str,
+) -> Value {
+    make_iterator_object(
+        gc,
+        vm,
+        next_handle,
+        &[collection, Value::smi(0), Value::smi(kind)],
+        tag,
+    )
+}
+
+/// §27.1.3.5 Map.prototype.entries / keys / values
+pub fn map_entries_builtin(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    let Some(_map_ptr) = map_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    make_collection_iterator(gc, vm, this, 0, "Map_iterator_next", "Map Iterator")
+}
+
+pub fn map_keys_builtin(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    let Some(_map_ptr) = map_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    make_collection_iterator(gc, vm, this, 1, "Map_iterator_next", "Map Iterator")
+}
+
+pub fn map_values_builtin(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    let Some(_map_ptr) = map_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    make_collection_iterator(gc, vm, this, 2, "Map_iterator_next", "Map Iterator")
+}
+
+/// §27.2.3.5 Set.prototype.entries (yields [v, v]) / keys / values
+pub fn set_entries_builtin(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    let Some(_set_ptr) = set_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    make_collection_iterator(gc, vm, this, 0, "Set_iterator_next", "Set Iterator")
+}
+
+pub fn set_keys_builtin(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    let Some(_set_ptr) = set_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    make_collection_iterator(gc, vm, this, 1, "Set_iterator_next", "Set Iterator")
+}
+
+pub fn set_values_builtin(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    let Some(_set_ptr) = set_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    make_collection_iterator(gc, vm, this, 2, "Set_iterator_next", "Set Iterator")
+}
+
+/// Shared next() for map iterators — state [map, raw index, kind].
+/// Skips deleted (sentinel) entries; done once the raw list is exhausted.
+pub fn map_iterator_next(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    if let Some(ptr) = this.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_OBJECT {
+            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+            if let Some(slot) = shape.lookup(&PropertyKey::from_symbol(vm.iter_state_symbol)) {
+                let state_val = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+                if let Some(state_ptr) = state_val.heap_ptr() {
+                    let state = state_ptr as *mut RuneArray;
+                    let map_val = unsafe { RuneArray::get_element(state, 0) };
+                    let index = unsafe { RuneArray::get_element(state, 1) }
+                        .as_smi()
+                        .unwrap_or(0) as usize;
+                    let kind = unsafe { RuneArray::get_element(state, 2) }
+                        .as_smi()
+                        .unwrap_or(0) as usize;
+                    if let Some(map_ptr) = map_val.heap_ptr() {
+                        if unsafe { (*(map_ptr as *const GcHeader)).tag() } == TAG_MAP {
+                            let entries_ptr = unsafe { RuneMap::entries(map_ptr) };
+                            let len = if entries_ptr.is_null() {
+                                0
+                            } else {
+                                (unsafe { RuneArray::length(entries_ptr as *mut RuneArray) })
+                                    as usize
+                            };
+                            let mut i = index;
+                            while i < len {
+                                let entries = entries_ptr as *mut RuneArray;
+                                let k = unsafe { RuneArray::get_element(entries, i) };
+                                if k.raw() != Value::empty_sentinel().raw() {
+                                    let v = unsafe { RuneArray::get_element(entries, i + 1) };
+                                    unsafe {
+                                        RuneArray::set_element(state, 1, Value::smi((i + 2) as i32))
+                                    };
+                                    let out = match kind {
+                                        1 => k,
+                                        2 => v,
+                                        _ => {
+                                            let pair = crate::vm::new_dense_array(vm, gc);
+                                            let pair2 = unsafe {
+                                                RuneArray::push(gc, pair as *mut RuneArray, k)
+                                            };
+                                            let pair3 = unsafe { RuneArray::push(gc, pair2, v) };
+                                            Value::from_heap_ptr(pair3 as *mut u8)
+                                        }
+                                    };
+                                    return make_iter_result(gc, out, false);
+                                }
+                                i += 2;
+                            }
+                            unsafe { RuneArray::set_element(state, 0, Value::undefined()) };
+                            return make_iter_result(gc, Value::undefined(), true);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    make_iter_result(gc, Value::undefined(), true)
+}
+
+/// Shared next() for set iterators — state [set, raw index, kind].
+pub fn set_iterator_next(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    if let Some(ptr) = this.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_OBJECT {
+            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+            if let Some(slot) = shape.lookup(&PropertyKey::from_symbol(vm.iter_state_symbol)) {
+                let state_val = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+                if let Some(state_ptr) = state_val.heap_ptr() {
+                    let state = state_ptr as *mut RuneArray;
+                    let set_val = unsafe { RuneArray::get_element(state, 0) };
+                    let index = unsafe { RuneArray::get_element(state, 1) }
+                        .as_smi()
+                        .unwrap_or(0) as usize;
+                    let kind = unsafe { RuneArray::get_element(state, 2) }
+                        .as_smi()
+                        .unwrap_or(0) as usize;
+                    if let Some(set_ptr) = set_val.heap_ptr() {
+                        if unsafe { (*(set_ptr as *const GcHeader)).tag() } == TAG_SET {
+                            let entries_ptr = unsafe { RuneSet::entries(set_ptr) };
+                            let len = if entries_ptr.is_null() {
+                                0
+                            } else {
+                                (unsafe { RuneArray::length(entries_ptr as *mut RuneArray) })
+                                    as usize
+                            };
+                            let mut i = index;
+                            while i < len {
+                                let entries = entries_ptr as *mut RuneArray;
+                                let v = unsafe { RuneArray::get_element(entries, i) };
+                                if v.raw() != Value::empty_sentinel().raw() {
+                                    unsafe {
+                                        RuneArray::set_element(state, 1, Value::smi((i + 1) as i32))
+                                    };
+                                    let out = match kind {
+                                        0 => {
+                                            let pair = crate::vm::new_dense_array(vm, gc);
+                                            let pair2 = unsafe {
+                                                RuneArray::push(gc, pair as *mut RuneArray, v)
+                                            };
+                                            let pair3 = unsafe { RuneArray::push(gc, pair2, v) };
+                                            Value::from_heap_ptr(pair3 as *mut u8)
+                                        }
+                                        _ => v,
+                                    };
+                                    return make_iter_result(gc, out, false);
+                                }
+                                i += 1;
+                            }
+                            unsafe { RuneArray::set_element(state, 0, Value::undefined()) };
+                            return make_iter_result(gc, Value::undefined(), true);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    make_iter_result(gc, Value::undefined(), true)
+}
+
+/// §27.1.3.6 Map.prototype.forEach(callback, thisArg)
+pub fn map_foreach_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some(map_ptr) = map_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let callback = args.first().copied().unwrap_or(Value::undefined());
+    if !is_callable_value(callback) {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "TypeError: callback is not a function",
+        )));
+        return Value::undefined();
+    }
+    let this_arg = args.get(1).copied().unwrap_or(Value::undefined());
+    let entries_ptr = unsafe { RuneMap::entries(map_ptr) };
+    let len = if entries_ptr.is_null() {
+        0
+    } else {
+        (unsafe { RuneArray::length(entries_ptr as *mut RuneArray) }) as usize
+    };
+    let size = unsafe { RuneMap::size(map_ptr) } as usize;
+    // §23.1.3.25: entries deleted before being visited are not visited, so
+    // snapshot the KEYS only and re-check liveness (and re-read the value)
+    // at dispatch time. Mutations during callbacks don't reorder.
+    let mut elems: Vec<Value> = Vec::with_capacity(len / 2);
+    if !entries_ptr.is_null() {
+        let entries = entries_ptr as *mut RuneArray;
+        for i in (0..len).step_by(2) {
+            let k = unsafe { RuneArray::get_element(entries, i) };
+            if k.raw() != Value::empty_sentinel().raw() {
+                elems.push(k);
+            }
+        }
+    }
+    let snapshot = RuneArray::allocate(gc, &elems) as *mut u8;
+    let mut idx = 0usize;
+    let mut found = 0usize;
+    while idx < elems.len() && found < size {
+        let k = unsafe { RuneArray::get_element(snapshot as *mut RuneArray, idx) };
+        let live_entries = unsafe { RuneMap::entries(map_ptr) };
+        if let Some(live) = key_index(live_entries, k, true) {
+            found += 1;
+            let v = unsafe { RuneArray::get_element(live_entries as *mut RuneArray, live + 1) };
+            if callback.as_smi().is_some_and(|s| s < 0) {
+                let id = (-callback.as_smi().unwrap() as usize) - 1;
+                if id < vm.builtins.len() {
+                    (vm.builtins[id].func)(gc, this_arg, &[v, k, this], vm);
+                    if vm.pending_exception.is_some() {
+                        return Value::undefined();
+                    }
+                }
+            } else {
+                vm.pending_collection_foreach = Some(PendingCollectionForEach {
+                    source_frame_depth: vm.frame_depth() - 1,
+                    snapshot,
+                    idx: idx + 1,
+                    found,
+                    size,
+                    is_map: true,
+                    callback,
+                    this_arg,
+                    collection: this,
+                });
+                vm.push_callback_call(gc, callback, this_arg, vec![v, k, this]);
+                return Value::undefined();
+            }
+        }
+        idx += 1;
+    }
+    Value::undefined()
+}
+
+/// §27.2.3.8 Set.prototype.forEach(callback, thisArg)
+pub fn set_foreach_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some(set_ptr) = set_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let callback = args.first().copied().unwrap_or(Value::undefined());
+    if !is_callable_value(callback) {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "TypeError: callback is not a function",
+        )));
+        return Value::undefined();
+    }
+    let this_arg = args.get(1).copied().unwrap_or(Value::undefined());
+    let entries_ptr = unsafe { RuneSet::entries(set_ptr) };
+    let len = if entries_ptr.is_null() {
+        0
+    } else {
+        (unsafe { RuneArray::length(entries_ptr as *mut RuneArray) }) as usize
+    };
+    let size = unsafe { RuneSet::size(set_ptr) } as usize;
+    // §23.2.3.11: elements deleted before being visited are not visited.
+    let mut elems: Vec<Value> = Vec::with_capacity(len);
+    if !entries_ptr.is_null() {
+        let entries = entries_ptr as *mut RuneArray;
+        for i in 0..len {
+            let v = unsafe { RuneArray::get_element(entries, i) };
+            if v.raw() != Value::empty_sentinel().raw() {
+                elems.push(v);
+            }
+        }
+    }
+    let snapshot = RuneArray::allocate(gc, &elems) as *mut u8;
+    let mut idx = 0usize;
+    let mut found = 0usize;
+    while idx < elems.len() && found < size {
+        let v = unsafe { RuneArray::get_element(snapshot as *mut RuneArray, idx) };
+        let live_entries = unsafe { RuneSet::entries(set_ptr) };
+        if key_index(live_entries, v, false).is_some() {
+            found += 1;
+            if callback.as_smi().is_some_and(|s| s < 0) {
+                let id = (-callback.as_smi().unwrap() as usize) - 1;
+                if id < vm.builtins.len() {
+                    (vm.builtins[id].func)(gc, this_arg, &[v, v, this], vm);
+                    if vm.pending_exception.is_some() {
+                        return Value::undefined();
+                    }
+                }
+            } else {
+                vm.pending_collection_foreach = Some(PendingCollectionForEach {
+                    source_frame_depth: vm.frame_depth() - 1,
+                    snapshot,
+                    idx: idx + 1,
+                    found,
+                    size,
+                    is_map: false,
+                    callback,
+                    this_arg,
+                    collection: this,
+                });
+                vm.push_callback_call(gc, callback, this_arg, vec![v, v, this]);
+                return Value::undefined();
+            }
+        }
+        idx += 1;
+    }
+    Value::undefined()
+}
+
+/// Outcome of filling a collection from an iterable.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FillOutcome {
+    Done,
+    /// A callback was pushed; the caller must not advance pc.
+    Pending,
+    /// An exception is set on `vm.pending_exception`.
+    Threw,
+}
+
+/// Process one iterator result during collection construction.
+/// Ok(true) = iterator done; Ok(false) = entry added, continue; Err = threw.
+fn process_collection_result(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    collection: &mut Value,
+    is_map: bool,
+    result: Value,
+) -> Result<bool, ()> {
+    if !result.is_heap_object() {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "TypeError: Iterator result is not an object",
+        )));
+        return Err(());
+    }
+    let done = load_property_recursive(result, vm.done_key, None, gc).to_bool();
+    if done {
+        return Ok(true);
+    }
+    let value = load_property_recursive(result, vm.value_key, None, gc);
+    if is_map {
+        // §27.1.1.1 step 10.b: each iterator value must be an Object (the
+        // [key, value] pair); a Set adds the raw value instead.
+        if !is_object_value(value) {
+            vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+                gc,
+                "TypeError: Iterator value is not an object",
+            )));
+            return Err(());
+        }
+        let k = load_property_recursive(value, Value::smi(0), None, gc);
+        let v = load_property_recursive(value, Value::smi(1), None, gc);
+        map_set_internal(gc, collection, k, v);
+    } else {
+        set_add_internal(gc, collection, value);
+    }
+    Ok(false)
+}
+
+/// Fill `collection` from `iterator` (obtained from the @@iterator factory).
+/// `collection` and `iterator` must be rooted by the caller (VM stack or
+/// pending state fields); they are re-read from the rooted slots via the
+/// provided slot indices whenever an allocation may run the GC.
+pub(crate) fn fill_collection_from_iterator(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    collection_idx: usize,
+    iterator_idx: usize,
+    is_map: bool,
+) -> FillOutcome {
+    let mut collection = vm.stack[collection_idx];
+    let mut iterator = vm.stack[iterator_idx];
+    if !iterator.is_heap_object() {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "TypeError: value is not iterable",
+        )));
+        return FillOutcome::Threw;
+    }
+    let next = load_property_recursive(iterator, vm.next_key, Some(vm.function_prototype), gc);
+    if next.as_smi().is_some_and(|s| s < 0) {
+        loop {
+            let id = (-next.as_smi().unwrap() as usize) - 1;
+            let result = if id < vm.builtins.len() {
+                let r = (vm.builtins[id].func)(gc, iterator, &[], vm);
+                if vm.pending_exception.is_some() {
+                    return FillOutcome::Threw;
+                }
+                r
+            } else {
+                vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+                    gc,
+                    "TypeError: iterator.next is not a function",
+                )));
+                return FillOutcome::Threw;
+            };
+            collection = vm.stack[collection_idx];
+            iterator = vm.stack[iterator_idx];
+            match process_collection_result(vm, gc, &mut collection, is_map, result) {
+                Ok(true) => return FillOutcome::Done,
+                Ok(false) => continue,
+                Err(()) => return FillOutcome::Threw,
+            }
+        }
+    } else if next.is_heap_object()
+        && unsafe { (*(next.heap_ptr().unwrap() as *const GcHeader)).tag() } == TAG_FUNC
+    {
+        vm.pending_collection_ctor = Some(PendingCollectionCtor {
+            source_frame_depth: vm.frame_depth() - 1,
+            root_base: collection_idx,
+            state: CollectionCtorState::AwaitNext,
+            iter: iterator,
+            next,
+            collection,
+            is_map,
+        });
+        vm.push_callback_call(gc, next, iterator, vec![]);
+        FillOutcome::Pending
+    } else {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "TypeError: iterator.next is not a function",
+        )));
+        FillOutcome::Threw
+    }
+}
+
+/// §27.1.1.1 Map constructor — AddEntriesFromIterable.
+/// The map must be rooted on the VM stack at `collection_idx`.
+pub fn map_constructor(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let root_base = vm.stack.len();
+    vm.push(this);
+    let iterable = args.first().copied().unwrap_or(Value::undefined());
+    let outcome = if iterable.is_undefined() || iterable.is_null() {
+        FillOutcome::Done
+    } else {
+        fill_collection_from_iterable(vm, gc, root_base, iterable, true)
+    };
+    match outcome {
+        FillOutcome::Done => {
+            vm.stack.truncate(root_base);
+            this
+        }
+        // Pending: a callback frame sits on the stack (rooted at root_base);
+        // truncating would steal the root below its base.
+        FillOutcome::Pending => Value::undefined(),
+        FillOutcome::Threw => {
+            vm.stack.truncate(root_base);
+            Value::undefined()
+        }
+    }
+}
+
+/// §27.2.1.1 Set constructor.
+pub fn set_constructor(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let root_base = vm.stack.len();
+    vm.push(this);
+    let iterable = args.first().copied().unwrap_or(Value::undefined());
+    let outcome = if iterable.is_undefined() || iterable.is_null() {
+        FillOutcome::Done
+    } else {
+        fill_collection_from_iterable(vm, gc, root_base, iterable, false)
+    };
+    match outcome {
+        FillOutcome::Done => {
+            vm.stack.truncate(root_base);
+            this
+        }
+        FillOutcome::Pending => Value::undefined(),
+        FillOutcome::Threw => {
+            vm.stack.truncate(root_base);
+            Value::undefined()
+        }
+    }
+}
+
+/// Resolve the @@iterator method for `iterable` and fill `collection`
+/// (rooted at `collection_idx` on the VM stack) from it.
+fn fill_collection_from_iterable(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    collection_idx: usize,
+    iterable: Value,
+    is_map: bool,
+) -> FillOutcome {
+    let method = match get_iter_method(vm, gc, iterable) {
+        SymbolMethodResult::Found(m) => m,
+        SymbolMethodResult::NotCallable => {
+            vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+                gc,
+                "TypeError: value[Symbol.iterator] is not callable",
+            )));
+            return FillOutcome::Threw;
+        }
+        SymbolMethodResult::NotFound => {
+            vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+                gc,
+                "TypeError: value is not iterable",
+            )));
+            return FillOutcome::Threw;
+        }
+    };
+    if method.as_smi().is_some_and(|s| s < 0) {
+        let id = (-method.as_smi().unwrap() as usize) - 1;
+        let iterator = if id < vm.builtins.len() {
+            let r = (vm.builtins[id].func)(gc, iterable, &[], vm);
+            if vm.pending_exception.is_some() {
+                return FillOutcome::Threw;
+            }
+            r
+        } else {
+            vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+                gc,
+                "TypeError: value is not iterable",
+            )));
+            return FillOutcome::Threw;
+        };
+        vm.stack.push(iterator);
+        let outcome =
+            fill_collection_from_iterator(vm, gc, collection_idx, vm.stack.len() - 1, is_map);
+        vm.stack.truncate(vm.stack.len() - 1);
+        outcome
+    } else if method.is_heap_object()
+        && unsafe { (*(method.heap_ptr().unwrap() as *const GcHeader)).tag() } == TAG_FUNC
+    {
+        vm.pending_collection_ctor = Some(PendingCollectionCtor {
+            source_frame_depth: vm.frame_depth() - 1,
+            root_base: collection_idx,
+            state: CollectionCtorState::AwaitFactory,
+            iter: Value::undefined(),
+            next: Value::undefined(),
+            collection: vm.stack[collection_idx],
+            is_map,
+        });
+        vm.push_callback_call(gc, method, iterable, vec![]);
+        FillOutcome::Pending
+    } else {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "TypeError: value[Symbol.iterator] is not callable",
+        )));
+        FillOutcome::Threw
+    }
 }
 
 /// §7.3.11 GetMethod + dispatch of a well-known-symbol method from the
@@ -4079,6 +4933,111 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 0,
             name: "Iterator_prototype_symbol_iterator",
             func: iterator_prototype_symbol_iterator,
+        },
+        Builtin {
+            length: 1,
+            name: "Map",
+            func: map_constructor,
+        },
+        Builtin {
+            length: 1,
+            name: "Map_prototype_set",
+            func: map_set_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "Map_prototype_get",
+            func: map_get_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "Map_prototype_has",
+            func: map_has_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "Map_prototype_delete",
+            func: map_delete_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Map_prototype_clear",
+            func: map_clear_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "Map_prototype_forEach",
+            func: map_foreach_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Map_prototype_entries",
+            func: map_entries_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Map_prototype_keys",
+            func: map_keys_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Map_prototype_values",
+            func: map_values_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Map_iterator_next",
+            func: map_iterator_next,
+        },
+        Builtin {
+            length: 1,
+            name: "Set",
+            func: set_constructor,
+        },
+        Builtin {
+            length: 1,
+            name: "Set_prototype_add",
+            func: set_add_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "Set_prototype_has",
+            func: set_has_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "Set_prototype_delete",
+            func: set_delete_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Set_prototype_clear",
+            func: set_clear_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "Set_prototype_forEach",
+            func: set_foreach_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Set_prototype_entries",
+            func: set_entries_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Set_prototype_keys",
+            func: set_keys_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Set_prototype_values",
+            func: set_values_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Set_iterator_next",
+            func: set_iterator_next,
         },
         Builtin {
             length: 1,

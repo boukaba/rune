@@ -123,6 +123,16 @@ impl Value {
         Value(QNAN_PREFIX | (SYMBOL_TAG << TAG_SHIFT) | (id as u64 & PAYLOAD_MASK))
     }
 
+    /// Internal sentinel for "empty/deleted slot" in Map/Set entry lists.
+    /// Uses the free Value-tag 7 (bits 45-47). Never produced by user code:
+    /// `from_float64` collision-remaps raw NaNs whose top bits equal QNAN_PREFIX,
+    /// so no real f64 can produce these bits, and tag 7 is not Smi/heap/undefined/
+    /// null/false/true/symbol. Deleted Map/Set entries are skipped by iterators
+    /// and key lookups, so it never reaches user-visible positions.
+    pub const fn empty_sentinel() -> Self {
+        Value(QNAN_PREFIX | (7 << TAG_SHIFT))
+    }
+
     pub fn is_symbol(&self) -> bool {
         self.is_non_float() && self.tag() == SYMBOL_TAG
     }

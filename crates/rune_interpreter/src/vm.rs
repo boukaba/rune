@@ -11,9 +11,10 @@ use rune_core::env::EnvObject;
 use rune_core::accessor::AccessorPair;
 use rune_core::function::Func;
 use rune_core::gc::{
-    GcHeader, RootProvider, SemiSpace, TAG_ACCESSOR, TAG_ARRAY, TAG_FLOAT64, TAG_FUNC, TAG_OBJECT,
-    TAG_PROMISE, TAG_REGEXP, TAG_STRING, TAG_STRING_OBJ,
+    GcHeader, RootProvider, SemiSpace, TAG_ACCESSOR, TAG_ARRAY, TAG_FLOAT64, TAG_FUNC, TAG_MAP,
+    TAG_OBJECT, TAG_PROMISE, TAG_REGEXP, TAG_SET, TAG_STRING, TAG_STRING_OBJ,
 };
+use rune_core::map::{RuneMap, RuneSet};
 use rune_core::object::JSObject;
 use rune_core::promise::{PROMISE_FULFILLED, PROMISE_PENDING, PROMISE_REJECTED, Promise};
 use rune_core::shape::{DENSE_ARRAY_SHAPE, PROTOTYPE_KEY, PropertyKey, Shape};
@@ -371,6 +372,43 @@ pub(crate) struct PendingIterDrain {
     /// The original iterable value (the factory's `this`).
     pub(crate) receiver: Value,
 }
+
+/// State machine for the Map/Set constructor filling from a user iterable
+/// (the @@iterator factory and/or the `next` method are JS functions).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum CollectionCtorState {
+    /// Waiting for the @@iterator factory call to return.
+    AwaitFactory,
+    /// Waiting for an iterator `next()` call to return.
+    AwaitNext,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PendingCollectionCtor {
+    pub(crate) source_frame_depth: usize,
+    /// Stack depth of the `new Map()/Set()` caller — the state machine
+    /// truncates to this depth whenever it resumes control.
+    pub(crate) root_base: usize,
+    pub(crate) state: CollectionCtorState,
+    pub(crate) iter: Value,
+    pub(crate) next: Value,
+    pub(crate) collection: Value,
+    pub(crate) is_map: bool,
+}
+
+/// State machine for Map/Set.prototype.forEach with a JS callback.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PendingCollectionForEach {
+    pub(crate) source_frame_depth: usize,
+    pub(crate) snapshot: *mut u8,
+    pub(crate) idx: usize,
+    pub(crate) found: usize,
+    pub(crate) size: usize,
+    pub(crate) is_map: bool,
+    pub(crate) callback: Value,
+    pub(crate) this_arg: Value,
+    pub(crate) collection: Value,
+}
 /// Set by the builtin function, consumed/updated by the Return handler.
 pub(crate) struct ArrayOpState {
     pub(crate) kind: ArrayOpKind,
@@ -495,6 +533,10 @@ pub struct Vm {
     pub regexp_prototype: Value,
     /// Symbol constructor object (`Symbol` global) with well-known symbol statics.
     pub symbol_ctor: Value,
+    pub map_constructor: Value,
+    pub set_constructor: Value,
+    pub map_prototype: Value,
+    pub set_prototype: Value,
     /// Symbol.prototype — where Symbol.prototype.toString/[@@toPrimitive] live.
     pub symbol_prototype: Value,
     /// Pending well-known-symbol @@method dispatch (set by String.prototype
@@ -507,6 +549,8 @@ pub struct Vm {
     pub(crate) pending_for_of_next: Option<PendingForOfNext>,
     /// Pending spread drain (ToArrayFromIterable with JS callbacks).
     pub(crate) pending_iter_drain: Option<PendingIterDrain>,
+    pub(crate) pending_collection_ctor: Option<PendingCollectionCtor>,
+    pub(crate) pending_collection_foreach: Option<PendingCollectionForEach>,
     /// Registry id of the hidden symbol used to store iterator state on
     /// iterator objects (not exposed to JS code).
     pub(crate) iter_state_symbol: u32,
@@ -623,12 +667,18 @@ impl Vm {
             function_prototype: Value::undefined(),
             regexp_prototype: Value::undefined(),
             symbol_ctor: Value::undefined(),
+            map_constructor: Value::undefined(),
+            set_constructor: Value::undefined(),
+            map_prototype: Value::undefined(),
+            set_prototype: Value::undefined(),
             symbol_prototype: Value::undefined(),
             pending_symbol_dispatch: None,
             pending_symbol_coercion: None,
             pending_for_of_init: None,
             pending_for_of_next: None,
             pending_iter_drain: None,
+            pending_collection_ctor: None,
+            pending_collection_foreach: None,
             iter_state_symbol: rune_core::symbol::symbol_for("__rune_iter_state"),
             done_key: Value::undefined(),
             value_key: Value::undefined(),
@@ -982,6 +1032,88 @@ impl Vm {
             let sym_ctor = make_object(gc, &ctor_entries);
             self.symbol_ctor = sym_ctor;
             self.builtin_wrappers.insert("Symbol".to_string(), sym_ctor);
+        }
+
+        // Map / Set constructors and prototypes
+        {
+            let mut map_proto_entries: Vec<(&str, Value)> = Vec::new();
+            for (name, handle) in [
+                ("set", "Map_prototype_set"),
+                ("get", "Map_prototype_get"),
+                ("has", "Map_prototype_has"),
+                ("delete", "Map_prototype_delete"),
+                ("clear", "Map_prototype_clear"),
+                ("forEach", "Map_prototype_forEach"),
+                ("entries", "Map_prototype_entries"),
+                ("keys", "Map_prototype_keys"),
+                ("values", "Map_prototype_values"),
+            ] {
+                if let Some(h) = find_handle(&self.builtins, handle) {
+                    map_proto_entries.push((name, h));
+                }
+            }
+            let map_proto = make_object(gc, &map_proto_entries);
+            unsafe {
+                let proto_ptr = map_proto.heap_ptr().unwrap() as *mut JSObject;
+                if let Some(h) = find_handle(&self.builtins, "Map_prototype_entries") {
+                    JSObject::add_property(
+                        proto_ptr,
+                        PropertyKey::from_symbol(rune_core::symbol::SYM_ITERATOR),
+                        "\u{0}".to_string(),
+                        h,
+                    );
+                }
+                let tag_str = HeapString::allocate(gc, "Map") as *mut u8;
+                JSObject::add_property(
+                    proto_ptr,
+                    PropertyKey::from_symbol(rune_core::symbol::SYM_TO_STRING_TAG),
+                    "\u{0}".to_string(),
+                    Value::from_heap_ptr(tag_str),
+                );
+            }
+            let map_ctor = make_object(gc, &[("prototype", map_proto)]);
+            self.builtin_wrappers.insert("Map".to_string(), map_ctor);
+            self.map_constructor = map_ctor;
+            self.map_prototype = map_proto;
+
+            let mut set_proto_entries: Vec<(&str, Value)> = Vec::new();
+            for (name, handle) in [
+                ("add", "Set_prototype_add"),
+                ("has", "Set_prototype_has"),
+                ("delete", "Set_prototype_delete"),
+                ("clear", "Set_prototype_clear"),
+                ("forEach", "Set_prototype_forEach"),
+                ("entries", "Set_prototype_entries"),
+                ("keys", "Set_prototype_keys"),
+                ("values", "Set_prototype_values"),
+            ] {
+                if let Some(h) = find_handle(&self.builtins, handle) {
+                    set_proto_entries.push((name, h));
+                }
+            }
+            let set_proto = make_object(gc, &set_proto_entries);
+            unsafe {
+                let proto_ptr = set_proto.heap_ptr().unwrap() as *mut JSObject;
+                if let Some(h) = find_handle(&self.builtins, "Set_prototype_values") {
+                    JSObject::add_property(
+                        proto_ptr,
+                        PropertyKey::from_symbol(rune_core::symbol::SYM_ITERATOR),
+                        "\u{0}".to_string(),
+                        h,
+                    );
+                }
+                let tag_str = HeapString::allocate(gc, "Set") as *mut u8;
+                JSObject::add_property(
+                    proto_ptr,
+                    PropertyKey::from_symbol(rune_core::symbol::SYM_TO_STRING_TAG),
+                    "\u{0}".to_string(),
+                    Value::from_heap_ptr(tag_str),
+                );
+            }
+            let set_ctor = make_object(gc, &[("prototype", set_proto)]);
+            self.builtin_wrappers.insert("Set".to_string(), set_ctor);
+            self.set_constructor = set_ctor;
+            self.set_prototype = set_proto;
         }
 
         // Iteration protocol — Array.prototype.values/keys/entries/[Symbol.iterator]
@@ -1563,6 +1695,10 @@ impl Vm {
         gc.push_root(&self.string_constructor as *const Value as *mut u64);
         gc.push_root(&self.number_constructor as *const Value as *mut u64);
         gc.push_root(&self.promise_constructor as *const Value as *mut u64);
+        gc.push_root(&self.map_constructor as *const Value as *mut u64);
+        gc.push_root(&self.set_constructor as *const Value as *mut u64);
+        gc.push_root(&self.map_prototype as *const Value as *mut u64);
+        gc.push_root(&self.set_prototype as *const Value as *mut u64);
         gc.push_root(&self.promise_prototype as *const Value as *mut u64);
         gc.push_root(&self.function_prototype as *const Value as *mut u64);
         gc.push_root(&self.regexp_prototype as *const Value as *mut u64);
@@ -1620,6 +1756,20 @@ impl Vm {
             gc.push_root(&pid.next as *const Value as *mut u64);
             gc.push_root(&pid.receiver as *const Value as *mut u64);
             gc.push_root(&pid.result as *const *mut u8 as *mut u64);
+        }
+        // Root pending Map/Set ctor state (collection/iter/next may be forwarded
+        // during user callbacks)
+        if let Some(ref pcc) = self.pending_collection_ctor {
+            gc.push_root(&pcc.collection as *const Value as *mut u64);
+            gc.push_root(&pcc.iter as *const Value as *mut u64);
+            gc.push_root(&pcc.next as *const Value as *mut u64);
+        }
+        // Root pending Map/Set forEach state (snapshot array + callback args)
+        if let Some(ref pfe) = self.pending_collection_foreach {
+            gc.push_root(&pfe.snapshot as *const *mut u8 as *mut u64);
+            gc.push_root(&pfe.callback as *const Value as *mut u64);
+            gc.push_root(&pfe.this_arg as *const Value as *mut u64);
+            gc.push_root(&pfe.collection as *const Value as *mut u64);
         }
     }
 
@@ -1705,6 +1855,14 @@ impl Vm {
             state.source_frame_depth = self.frames.len() - 1;
         }
         if let Some(ref mut state) = self.pending_iter_drain {
+            state.source_frame_depth = self.frames.len() - 1;
+        }
+        // Update source_frame_depth if pending collection ctor is active
+        if let Some(ref mut state) = self.pending_collection_ctor {
+            state.source_frame_depth = self.frames.len() - 1;
+        }
+        // Update source_frame_depth if pending collection forEach is active
+        if let Some(ref mut state) = self.pending_collection_foreach {
             state.source_frame_depth = self.frames.len() - 1;
         }
     }
@@ -3126,6 +3284,8 @@ impl Vm {
                             || tag == TAG_REGEXP
                             || tag == TAG_PROMISE
                             || tag == TAG_STRING_OBJ
+                            || tag == TAG_MAP
+                            || tag == TAG_SET
                         {
                             if instr.ic_index >= 0 {
                                 self.ic_stats.lookups += 1;
@@ -4541,6 +4701,39 @@ impl Vm {
                         self.frames[fi].pc = pc + 1;
                         continue;
                     }
+                    // Map/Set constructor [[Construct]]: allocate the tagged
+                    // collection object and fill it from the iterable argument.
+                    if constructor == self.map_constructor || constructor == self.set_constructor {
+                        let is_map = constructor == self.map_constructor;
+                        let proto_ptr = if is_map {
+                            self.map_prototype.heap_ptr()
+                        } else {
+                            self.set_prototype.heap_ptr()
+                        };
+                        let obj_ptr = if is_map {
+                            RuneMap::allocate(gc, proto_ptr.unwrap_or(std::ptr::null_mut()))
+                        } else {
+                            RuneSet::allocate(gc, proto_ptr.unwrap_or(std::ptr::null_mut()))
+                        };
+                        let obj_val = Value::from_heap_ptr(obj_ptr);
+                        let result = if is_map {
+                            crate::builtins::map_constructor(gc, obj_val, &args, self)
+                        } else {
+                            crate::builtins::set_constructor(gc, obj_val, &args, self)
+                        };
+                        if let Some(exc) = self.pending_exception.take() {
+                            if let Some(exit) = self.handle_throw(gc, exc) {
+                                return exit;
+                            }
+                            continue;
+                        }
+                        if self.pending_collection_ctor.is_some() {
+                            continue;
+                        }
+                        self.push(result);
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    }
                     // Create a new empty object
                     let shape = Shape::empty();
                     let obj = JSObject::allocate(gc, shape, &[]);
@@ -4757,6 +4950,8 @@ impl Vm {
                                     || self.pending_finally_op.is_some()
                                     || self.pending_replace_op.is_some()
                                     || self.pending_symbol_dispatch.is_some()
+                                    || self.pending_collection_foreach.is_some()
+                                    || self.pending_collection_ctor.is_some()
                                 {
                                     // Array method builtin or .call() or assert.throws
                                     // set up a callback. Don't push result or advance pc —
@@ -4841,6 +5036,18 @@ impl Vm {
                         }
                         self.push(result);
                         self.frames[fi].pc = pc + 1;
+                        continue;
+                    }
+                    // §27.1.1.1 / §27.2.1.1: Map/Set are constructors only — a
+                    // plain call throws a TypeError.
+                    if callee == self.map_constructor || callee == self.set_constructor {
+                        let exc = Value::from_heap_ptr(crate::vm::heap_string(
+                            gc,
+                            "TypeError: Constructor Map requires 'new'",
+                        ));
+                        if let Some(exit) = self.handle_throw(gc, exc) {
+                            return exit;
+                        }
                         continue;
                     }
 
@@ -5688,6 +5895,211 @@ impl Vm {
                             }
                         }
                         self.pending_iter_drain = Some(pid);
+                    }
+                    // Check if this return completes a pending Map/Set constructor
+                    // fill (user-defined @@iterator factory or `next` method).
+                    if let Some(pcc) = self.pending_collection_ctor.take() {
+                        if self.frames.len() == pcc.source_frame_depth {
+                            match pcc.state {
+                                CollectionCtorState::AwaitFactory => {
+                                    if !result.is_heap_object() {
+                                        self.stack.truncate(pcc.root_base);
+                                        return self.throw_type_error(gc, "value is not iterable");
+                                    }
+                                    self.stack.truncate(pcc.root_base);
+                                    let base = self.stack.len();
+                                    self.stack.push(pcc.collection);
+                                    self.stack.push(result);
+                                    let outcome = crate::builtins::fill_collection_from_iterator(
+                                        self,
+                                        gc,
+                                        base,
+                                        base + 1,
+                                        pcc.is_map,
+                                    );
+                                    if outcome == crate::builtins::FillOutcome::Done {
+                                        let collection = self.stack[base];
+                                        self.stack.truncate(pcc.root_base);
+                                        self.push(collection);
+                                        let frames_len = self.frames.len();
+                                        self.frames[frames_len - 1].pc += 1;
+                                    } else if outcome == crate::builtins::FillOutcome::Threw {
+                                        self.stack.truncate(pcc.root_base);
+                                        if let Some(exc) = self.pending_exception.take() {
+                                            if let Some(exit) = self.handle_throw(gc, exc) {
+                                                return exit;
+                                            }
+                                        }
+                                    }
+                                    continue;
+                                }
+                                CollectionCtorState::AwaitNext => {
+                                    if !result.is_heap_object() {
+                                        self.stack.truncate(pcc.root_base);
+                                        return self.throw_type_error(
+                                            gc,
+                                            "Iterator result is not an object",
+                                        );
+                                    }
+                                    let done =
+                                        load_property_recursive(result, self.done_key, None, gc)
+                                            .to_bool();
+                                    if done {
+                                        self.stack.truncate(pcc.root_base);
+                                        self.push(pcc.collection);
+                                        let frames_len = self.frames.len();
+                                        self.frames[frames_len - 1].pc += 1;
+                                        continue;
+                                    }
+                                    let value =
+                                        load_property_recursive(result, self.value_key, None, gc);
+                                    if pcc.is_map && !crate::builtins::is_object_value(value) {
+                                        self.stack.truncate(pcc.root_base);
+                                        return self.throw_type_error(
+                                            gc,
+                                            "Iterator value is not an object",
+                                        );
+                                    }
+                                    self.stack.truncate(pcc.root_base);
+                                    let base = self.stack.len();
+                                    if pcc.is_map {
+                                        let k =
+                                            load_property_recursive(value, Value::smi(0), None, gc);
+                                        let v =
+                                            load_property_recursive(value, Value::smi(1), None, gc);
+                                        self.stack.push(pcc.collection);
+                                        self.stack.push(pcc.iter);
+                                        self.stack.push(pcc.next);
+                                        {
+                                            let collection_slot = &mut self.stack[base];
+                                            crate::builtins::map_set_internal(
+                                                gc,
+                                                collection_slot,
+                                                k,
+                                                v,
+                                            );
+                                        }
+                                    } else {
+                                        self.stack.push(pcc.collection);
+                                        self.stack.push(pcc.iter);
+                                        self.stack.push(pcc.next);
+                                        {
+                                            let collection_slot = &mut self.stack[base];
+                                            crate::builtins::set_add_internal(
+                                                gc,
+                                                collection_slot,
+                                                value,
+                                            );
+                                        }
+                                    }
+                                    // Re-read from the rooted stack slots — the GC
+                                    // may have forwarded the collection/iter/next.
+                                    let collection = self.stack[base];
+                                    let iter = self.stack[base + 1];
+                                    let next = self.stack[base + 2];
+                                    self.pending_collection_ctor = Some(PendingCollectionCtor {
+                                        source_frame_depth: self.frames.len() - 1,
+                                        root_base: pcc.root_base,
+                                        state: CollectionCtorState::AwaitNext,
+                                        iter,
+                                        next,
+                                        collection,
+                                        is_map: pcc.is_map,
+                                    });
+                                    self.stack.truncate(base);
+                                    self.push_callback_call(gc, next, iter, vec![]);
+                                    continue;
+                                }
+                            }
+                        }
+                        self.pending_collection_ctor = Some(pcc);
+                    }
+                    // Check if this return completes a pending Map/Set forEach
+                    // dispatch (a JS callback returned).
+                    if let Some(pfe) = self.pending_collection_foreach.take() {
+                        if self.frames.len() == pfe.source_frame_depth {
+                            let snapshot = pfe.snapshot as *mut RuneArray;
+                            let mut idx = pfe.idx;
+                            let mut found = pfe.found;
+                            let len = unsafe { RuneArray::length(snapshot) } as usize;
+                            let mut pushed = false;
+                            while idx < len && found < pfe.size {
+                                let k = unsafe { RuneArray::get_element(snapshot, idx) };
+                                // Entries deleted before being visited are skipped.
+                                let live_ptr = if pfe.is_map {
+                                    let map_ptr = pfe.collection.heap_ptr().unwrap();
+                                    unsafe { RuneMap::entries(map_ptr) }
+                                } else {
+                                    let set_ptr = pfe.collection.heap_ptr().unwrap();
+                                    unsafe { RuneSet::entries(set_ptr) }
+                                };
+                                if let Some(live) =
+                                    crate::builtins::key_index(live_ptr, k, pfe.is_map)
+                                {
+                                    found += 1;
+                                    let v = if pfe.is_map {
+                                        unsafe {
+                                            RuneArray::get_element(
+                                                live_ptr as *mut RuneArray,
+                                                live + 1,
+                                            )
+                                        }
+                                    } else {
+                                        k
+                                    };
+                                    if pfe.callback.as_smi().is_some_and(|s| s < 0) {
+                                        let id = (-pfe.callback.as_smi().unwrap() as usize) - 1;
+                                        if id < self.builtins.len() {
+                                            (self.builtins[id].func)(
+                                                gc,
+                                                pfe.this_arg,
+                                                &[v, k, pfe.collection],
+                                                self,
+                                            );
+                                            if self.pending_exception.is_some() {
+                                                break;
+                                            }
+                                        }
+                                    } else {
+                                        self.pending_collection_foreach =
+                                            Some(PendingCollectionForEach {
+                                                source_frame_depth: self.frames.len() - 1,
+                                                snapshot: pfe.snapshot,
+                                                idx: idx + 1,
+                                                found,
+                                                size: pfe.size,
+                                                is_map: pfe.is_map,
+                                                callback: pfe.callback,
+                                                this_arg: pfe.this_arg,
+                                                collection: pfe.collection,
+                                            });
+                                        self.push_callback_call(
+                                            gc,
+                                            pfe.callback,
+                                            pfe.this_arg,
+                                            vec![v, k, pfe.collection],
+                                        );
+                                        pushed = true;
+                                        break;
+                                    }
+                                }
+                                idx += 1;
+                            }
+                            if pushed {
+                                continue;
+                            }
+                            self.stack.truncate(callee_base);
+                            if let Some(exc) = self.pending_exception.take() {
+                                if let Some(exit) = self.handle_throw(gc, exc) {
+                                    return exit;
+                                }
+                            }
+                            self.push(Value::undefined());
+                            let frames_len = self.frames.len();
+                            self.frames[frames_len - 1].pc += 1;
+                            continue;
+                        }
+                        self.pending_collection_foreach = Some(pfe);
                     }
                     // Check if this return completes a pending Promise constructor (executor).
                     if self.pending_promise_ctor.is_some() {
@@ -7012,7 +7424,7 @@ pub(crate) fn get_symbol_method(
 /// GetMethod(value, @@iterator): resolve the iteration method for a value.
 /// Primitive strings route directly to String.prototype (which holds the
 /// symbol-keyed @@iterator property); other objects walk the prototype chain.
-fn get_iter_method(vm: &mut Vm, gc: &mut SemiSpace, value: Value) -> SymbolMethodResult {
+pub(crate) fn get_iter_method(vm: &mut Vm, gc: &mut SemiSpace, value: Value) -> SymbolMethodResult {
     if let Some(ptr) = value.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_STRING {
@@ -7044,6 +7456,8 @@ fn get_iter_method(vm: &mut Vm, gc: &mut SemiSpace, value: Value) -> SymbolMetho
             || tag == TAG_REGEXP
             || tag == TAG_PROMISE
             || tag == TAG_STRING_OBJ
+            || tag == TAG_MAP
+            || tag == TAG_SET
         {
             get_symbol_method(
                 gc,
@@ -7404,6 +7818,38 @@ pub(crate) fn load_property_recursive(
                 }
                 // Walk RegExp.prototype for exec/test and other properties
                 let proto_ptr = unsafe { rune_core::regexp::RegExp::prototype(ptr) };
+                if !proto_ptr.is_null() {
+                    current = Value::from_heap_ptr(proto_ptr);
+                    continue;
+                }
+                return Value::undefined();
+            } else if tag == TAG_MAP {
+                // Own "size" property (§27.1.3.11) — the live entry count.
+                if let Some(key_ptr) = raw_key.heap_ptr() {
+                    if unsafe { (*(key_ptr as *const GcHeader)).tag() == TAG_STRING } {
+                        let key_str = unsafe { HeapString::to_string(key_ptr as *mut HeapString) };
+                        if key_str == "size" {
+                            return Value::smi(unsafe { RuneMap::size(ptr) } as i32);
+                        }
+                    }
+                }
+                let proto_ptr = unsafe { RuneMap::prototype(ptr) };
+                if !proto_ptr.is_null() {
+                    current = Value::from_heap_ptr(proto_ptr);
+                    continue;
+                }
+                return Value::undefined();
+            } else if tag == TAG_SET {
+                // Own "size" property (§27.2.3.10)
+                if let Some(key_ptr) = raw_key.heap_ptr() {
+                    if unsafe { (*(key_ptr as *const GcHeader)).tag() == TAG_STRING } {
+                        let key_str = unsafe { HeapString::to_string(key_ptr as *mut HeapString) };
+                        if key_str == "size" {
+                            return Value::smi(unsafe { RuneSet::size(ptr) } as i32);
+                        }
+                    }
+                }
+                let proto_ptr = unsafe { RuneSet::prototype(ptr) };
                 if !proto_ptr.is_null() {
                     current = Value::from_heap_ptr(proto_ptr);
                     continue;
@@ -7897,6 +8343,10 @@ fn ordinary_has_instance(lhs: Value, rhs_proto_ptr: *mut u8) -> bool {
             let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
             let proto = if tag == TAG_OBJECT || tag == TAG_ARRAY {
                 unsafe { JSObject::prototype(ptr as *mut JSObject) }
+            } else if tag == TAG_MAP {
+                unsafe { RuneMap::prototype(ptr) }
+            } else if tag == TAG_SET {
+                unsafe { RuneSet::prototype(ptr) }
             } else {
                 return false;
             };

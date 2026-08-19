@@ -9,6 +9,7 @@ pub mod float;
 pub mod function;
 pub mod gc;
 pub mod heap;
+pub mod map;
 pub mod object;
 pub mod promise;
 pub mod regexp;

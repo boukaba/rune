@@ -7770,3 +7770,503 @@ fn test_string_symbol_iterator_direct() {
         "01"
     );
 }
+
+#[test]
+fn test_map_basic() {
+    let mut ctx = Context::new_small();
+    // size, set/get/has/delete/clear
+    let r = ctx
+        .eval(
+            "var m = new Map();
+             m.set('a', 1).set('b', 2);
+             m.size;",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(2));
+    let r = ctx.eval("m.get('a');").unwrap();
+    assert_eq!(r.as_smi(), Some(1));
+    let r = ctx.eval("m.has('b');").unwrap();
+    assert_eq!(r, rune_core::value::Value::boolean(true));
+    let r = ctx.eval("m.has('c');").unwrap();
+    assert_eq!(r, rune_core::value::Value::boolean(false));
+    let r = ctx.eval("m.get('nope');").unwrap();
+    assert!(r.is_undefined());
+    let r = ctx.eval("m.delete('a'); m.size;").unwrap();
+    assert_eq!(r.as_smi(), Some(1));
+    let r = ctx.eval("m.delete('a');").unwrap();
+    assert_eq!(r, rune_core::value::Value::boolean(false));
+    let r = ctx.eval("m.clear(); m.size;").unwrap();
+    assert_eq!(r.as_smi(), Some(0));
+    // set returns the map (chaining)
+    let r = ctx
+        .eval("var m2 = new Map(); m2.set('x', 1) === m2;")
+        .unwrap();
+    assert_eq!(r, rune_core::value::Value::boolean(true));
+    // set overwrites and preserves insertion order semantics for update
+    let r = ctx
+        .eval(
+            "var m3 = new Map();
+             m3.set('a', 1).set('b', 2).set('a', 3);
+             m3.size + m3.get('a');",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(5));
+}
+
+#[test]
+fn test_map_keys() {
+    let mut ctx = Context::new_small();
+    // object identity keys
+    let r = ctx
+        .eval(
+            "var o = {x: 1};
+             var m = new Map();
+             m.set(o, 'first');
+             m.set({x: 1}, 'second');
+             m.get(o) + '|' + m.size;",
+        )
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "first|2"
+    );
+    // string keys compare by content
+    let r = ctx
+        .eval(
+            "var m = new Map();
+             m.set('ab', 1);
+             m.get('a' + 'b');",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(1));
+    // NaN keys: NaN === NaN for map keys
+    let r = ctx
+        .eval(
+            "var m = new Map();
+             m.set(NaN, 42);
+             m.get(NaN);",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(42));
+    // 1 and 1.0 are the same key
+    let r = ctx
+        .eval(
+            "var m = new Map();
+             m.set(1, 'one');
+             m.set(1.0, 'also one');
+             m.size + m.get(1);",
+        )
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "1also one"
+    );
+    // -0 and +0 are the same key
+    let r = ctx
+        .eval(
+            "var m = new Map();
+             m.set(-0, 'zero');
+             m.get(0);",
+        )
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "zero"
+    );
+}
+
+#[test]
+fn test_map_iteration() {
+    let mut ctx = Context::new_small();
+    // entries yields [k, v] pairs
+    let r = ctx
+        .eval(
+            "var m = new Map();
+             m.set('a', 1).set('b', 2);
+             var ks = ''; var vs = 0;
+             for (var e of m) { ks += e[0]; vs += e[1]; }
+             ks + vs;",
+        )
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "ab3"
+    );
+    // keys / values iterators
+    let r = ctx
+        .eval(
+            "var m = new Map();
+             m.set('a', 1).set('b', 2);
+             var k = ''; for (var x of m.keys()) { k += x; }
+             var v = 0; for (var x of m.values()) { v += x; }
+             k + v;",
+        )
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "ab3"
+    );
+    // map iterator protocol: next() objects
+    let r = ctx
+        .eval(
+            "var m = new Map();
+             m.set('a', 1);
+             var it = m.entries();
+             var n = it.next();
+             n.value[0] + n.value[1] + (n.done ? 'Y' : 'N');",
+        )
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "a1N"
+    );
+    let r = ctx
+        .eval("var it = m.entries(); it.next(); it.next().done;")
+        .unwrap();
+    assert_eq!(r, rune_core::value::Value::boolean(true));
+    // deletion during iteration is skipped
+    let r = ctx
+        .eval(
+            "var m = new Map();
+             m.set('a', 1).set('b', 2).set('c', 3);
+             var it = m.keys();
+             var first = it.next().value;
+             m.delete('b');
+             var second = it.next().value;
+             first + second;",
+        )
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "ac"
+    );
+    // iterator is itself iterable (returns itself)
+    let r = ctx
+        .eval("var it = new Map().entries(); it[Symbol.iterator]() === it;")
+        .unwrap();
+    assert_eq!(r, rune_core::value::Value::boolean(true));
+}
+
+#[test]
+fn test_map_constructor_iterable() {
+    let mut ctx = Context::new_small();
+    // from array of pairs
+    let r = ctx
+        .eval(
+            "var m = new Map([['a', 1], ['b', 2]]);
+             m.size + m.get('a') + m.get('b');",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(5));
+    // from another map
+    let r = ctx
+        .eval(
+            "var m1 = new Map([['x', 10]]);
+             var m2 = new Map(m1);
+             m2.get('x');",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(10));
+    // from a generator-style user iterable with a JS @@iterator
+    let r = ctx
+        .eval(
+            "var iter = {
+               i: 0,
+               [Symbol.iterator]: function() {
+                 var self = this;
+                 return {
+                   next: function() {
+                     self.i += 1;
+                     if (self.i > 2) { return {done: true}; }
+                     return {done: false, value: [self.i, self.i * 10]};
+                   }
+                 };
+               }
+             };
+             var m = new Map(iter);
+             m.size + m.get(1) + m.get(2);",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(32));
+    // undefined/null iterable → empty map
+    let r = ctx
+        .eval(
+            "var m1 = new Map(undefined); var m2 = new Map(null);
+             m1.size + m2.size;",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(0));
+    // primitive non-iterable → TypeError
+    let r = ctx
+        .eval("var threw = false; try { new Map(5); } catch (e) { threw = true; } threw;")
+        .unwrap();
+    assert_eq!(r, rune_core::value::Value::boolean(true));
+    // string iterable → entries are strings, not objects → TypeError
+    let r = ctx
+        .eval("var threw = false; try { new Map('ab'); } catch (e) { threw = true; } threw;")
+        .unwrap();
+    assert_eq!(r, rune_core::value::Value::boolean(true));
+    // Map() without new → TypeError
+    let r = ctx
+        .eval("var threw = false; try { Map(); } catch (e) { threw = true; } threw;")
+        .unwrap();
+    assert_eq!(r, rune_core::value::Value::boolean(true));
+}
+
+#[test]
+fn test_map_foreach() {
+    let mut ctx = Context::new_small();
+    // JS callback
+    let r = ctx
+        .eval(
+            "var m = new Map([['a', 1], ['b', 2], ['c', 3]]);
+             var ks = ''; var vs = 0;
+             m.forEach(function(v, k, map) {
+               ks += k; vs += v;
+               if (map !== m) { vs += 100; }
+             });
+             ks + vs;",
+        )
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "abc6"
+    );
+    // thisArg
+    let r = ctx
+        .eval(
+            "var m = new Map([['a', 1]]);
+             var obj = {x: 10};
+             var got;
+             m.forEach(function(v, k) { got = this.x + v; }, obj);
+             got;",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(11));
+    // mutation during iteration (delete ahead)
+    let r = ctx
+        .eval(
+            "var m = new Map([['a', 1], ['b', 2], ['c', 3]]);
+             var ks = '';
+             m.forEach(function(v, k) {
+               ks += k;
+               if (k === 'a') { m.delete('b'); }
+             });
+             ks;",
+        )
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "ac"
+    );
+    // non-callable callback → TypeError
+    let r = ctx
+        .eval("var m = new Map(); var t = false; try { m.forEach(5); } catch (e) { t = true; } t;")
+        .unwrap();
+    assert_eq!(r, rune_core::value::Value::boolean(true));
+}
+
+#[test]
+fn test_set_basic() {
+    let mut ctx = Context::new_small();
+    // add/has/delete/size/clear
+    let r = ctx
+        .eval(
+            "var s = new Set();
+             s.add('a').add('b').add('a');
+             s.size;",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(2));
+    let r = ctx.eval("s.has('a');").unwrap();
+    assert_eq!(r, rune_core::value::Value::boolean(true));
+    let r = ctx.eval("s.has('c');").unwrap();
+    assert_eq!(r, rune_core::value::Value::boolean(false));
+    let r = ctx.eval("s.delete('a'); s.size;").unwrap();
+    assert_eq!(r.as_smi(), Some(1));
+    let r = ctx.eval("s.delete('a');").unwrap();
+    assert_eq!(r, rune_core::value::Value::boolean(false));
+    let r = ctx.eval("s.clear(); s.size;").unwrap();
+    assert_eq!(r.as_smi(), Some(0));
+    // add returns the set
+    let r = ctx.eval("var s2 = new Set(); s2.add(1) === s2;").unwrap();
+    assert_eq!(r, rune_core::value::Value::boolean(true));
+    // NaN and number encodings
+    let r = ctx
+        .eval(
+            "var s = new Set();
+             s.add(NaN).add(NaN).add(1).add(1.0);
+             s.size;",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(2));
+}
+
+#[test]
+fn test_set_iteration() {
+    let mut ctx = Context::new_small();
+    // for..of yields values; entries yields [v, v]
+    let r = ctx
+        .eval(
+            "var s = new Set();
+             s.add('a').add('b');
+             var out = '';
+             for (var v of s) { out += v; }
+             for (var e of s.entries()) { out += e[0] + e[1]; }
+             var ks = ''; for (var k of s.keys()) { ks += k; }
+             out + ks;",
+        )
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "abaabbab"
+    );
+    // constructor from iterable + string TypeError + instanceof
+    let r = ctx
+        .eval(
+            "var s = new Set([1, 2, 3, 2]);
+             s.size + (s instanceof Set ? 'Y' : 'N');",
+        )
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "3Y"
+    );
+    let r = ctx
+        .eval("var t = false; try { new Set(5); } catch (e) { t = true; } t;")
+        .unwrap();
+    assert_eq!(r, rune_core::value::Value::boolean(true));
+    // Set() without new → TypeError
+    let r = ctx
+        .eval("var t = false; try { Set(); } catch (e) { t = true; } t;")
+        .unwrap();
+    assert_eq!(r, rune_core::value::Value::boolean(true));
+}
+
+#[test]
+fn test_set_foreach() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var s = new Set([10, 20, 30]);
+             var sum = 0;
+             s.forEach(function(v, v2, set) {
+               sum += v;
+               if (v !== v2) { sum += 100; }
+               if (set !== s) { sum += 100; }
+             });
+             sum;",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(60));
+    // constructor from user iterable (JS next)
+    let r = ctx
+        .eval(
+            "var iter = {
+               i: 0,
+               [Symbol.iterator]: function() {
+                 var self = this;
+                 return {
+                   next: function() {
+                     self.i += 1;
+                     if (self.i > 3) { return {done: true}; }
+                     return {done: false, value: self.i * 5};
+                   }
+                 };
+               }
+             };
+             var s = new Set(iter);
+             s.size;",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(3));
+}
+
+#[test]
+fn test_map_set_errors() {
+    let mut ctx = Context::new_small();
+    // incompatible receivers
+    let r = ctx
+        .eval("var t = false; try { Map.prototype.get.call({}, 1); } catch (e) { t = true; } t;")
+        .unwrap();
+    assert_eq!(r, rune_core::value::Value::boolean(true));
+    let r = ctx
+        .eval("var t = false; try { Set.prototype.add.call([], 1); } catch (e) { t = true; } t;")
+        .unwrap();
+    assert_eq!(r, rune_core::value::Value::boolean(true));
+    // instanceof across both
+    let r = ctx
+        .eval(
+            "var m = new Map(); var s = new Set();
+             (m instanceof Map) + '|' + (s instanceof Set) + '|' + (m instanceof Set);",
+        )
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "true|true|false"
+    );
+    // maps are iterable via spread
+    let r = ctx
+        .eval(
+            "var m = new Map([['a', 1]]);
+             var arr = [...m];
+             arr.length + arr[0][0] + arr[0][1];",
+        )
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "1a1"
+    );
+}

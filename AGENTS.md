@@ -23,6 +23,46 @@ After **every** task or meaningful progress, update these files before committin
 
 Committing without updating docs hides progress from the project history. Always sync docs with code.
 
+## v1.0.0 Loop (run until the v1.0 checklist below is all `[x]`)
+
+**Goal:** minimal viable JS engine for edge/serverless — enough language + stdlib
+breadth to run real workloads correctly, with the cold-start wedge intact.
+
+**Each loop iteration** (one feature or one fix, no matter how small):
+1. Pick the top **open** item from the v1.0 checklist below.
+2. Follow **Spec discipline** (read spec, fetch linked tc39 URLs, get the full
+   algorithm before writing code).
+3. Implement in the smallest coherent slice (parser → emitter → VM → builtin).
+   New opcodes stay OUT of the JIT whitelist unless the item explicitly requires
+   JIT work (bail-to-interpreter is correct).
+4. Add regression/integration tests; run `cargo test --workspace`, clippy with
+   CI flags, `cargo fmt --all -- --check`, and a `--no-default-features` build.
+5. Sync docs (progress.md / README.md / AGENTS.md) and `git add -A && commit && push`.
+6. Update this checklist (mark `[x]`, add known gaps), then go back to step 1
+   until everything is `[x]`.
+
+**v1.0 checklist (tick these off as they land):**
+- [ ] **Symbols + well-known symbols** — `Symbol()` ctor, `@@iterator`,
+      `@@match`/`@@search`/`@@split`/`@@replace` dispatch in match/search/split/replace
+- [ ] **Iteration protocol + `for..of`** — iterable/iterator/IteratorResult,
+      Array iterator, String iterator, `next`/`done`/`value`, spread uses iterator
+- [ ] **Map / Set** — ctor, get/set/has/delete/size, iteration, WeakRef later
+- [ ] **Date** — ctor, now/parse/UTC, getters/setters, toISOString, toString
+- [ ] **TypedArray family** — at least Uint8Array/Int32Array/Float64Array +
+      ArrayBuffer, typed indexing + basic methods
+- [ ] **String methods** — trim/trimStart/trimEnd, toUpperCase/toLowerCase,
+      charCodeAt/fromCharCode, startsWith/endsWith/includes, padStart/padEnd,
+      repeat, split with regex
+- [ ] **RegExp completion** — `RegExp()` constructor, exec `.index`/`.input`,
+      replaceAll function replacement, global search, lookahead
+- [ ] **Classes completion** — static private fields, private methods,
+      `this.prop++`, `let`+`new` scoping bug, nested accessors
+- [ ] **ESM** — `import`/`export`, module namespace, hoisting, circular deps
+- [ ] **Conformance pass** — lift test262 suites into the 80%+ band; fix silent
+      miscompiles; register full Error type set (TypeError as a real global)
+- [ ] **JIT gap** — float-promoted accumulators stay native, optional chaining +
+      newer opcodes in the whitelist, x86-64 codegen verified
+
 ## Spec discipline
 Before implementing ANY feature, always:
 1. Read the relevant section in `ecma262.md` for the overview and spec links

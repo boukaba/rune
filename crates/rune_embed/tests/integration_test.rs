@@ -7364,3 +7364,409 @@ fn test_symbol_legacy_fallback_untouched() {
     assert_eq!(r2.as_smi(), Some(2));
     assert_eq!(js_str(&mut ctx, "\"abc\".replace('b', 'X');"), "aXc");
 }
+
+fn js_str(ctx: &mut Context, src: &str) -> String {
+    let r = ctx.eval(src).unwrap();
+    unsafe {
+        rune_core::string::HeapString::to_string(
+            r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+        )
+    }
+}
+
+#[test]
+fn test_for_of_array() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var sum = 0;
+             for (var x of [1, 2, 3, 4]) { sum += x; }
+             sum;",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(10));
+    // `let` loop variable
+    let r2 = ctx
+        .eval(
+            "var out = '';
+             for (let c of ['a', 'b', 'c']) { out += c; }
+             out;",
+        )
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r2.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "abc"
+    );
+    // Empty array: body never runs
+    let r3 = ctx
+        .eval(
+            "var ran = false;
+             for (var x of []) { ran = true; }
+             ran;",
+        )
+        .unwrap();
+    assert_eq!(r3, rune_core::value::Value::boolean(false));
+}
+
+#[test]
+fn test_for_of_string() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var out = '';
+             for (var ch of 'abc') { out += ch; }
+             out;",
+        )
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "abc"
+    );
+    // Astral code point (surrogate pair) is a single iteration step
+    let r2 = ctx
+        .eval(
+            "var n = 0;
+             for (var ch of 'a\u{1D11E}b') { n += 1; }
+             n;",
+        )
+        .unwrap();
+    assert_eq!(r2.as_smi(), Some(3));
+    // The yielded value is the full code point
+    let r3 = ctx
+        .eval("var s = ''; for (var ch of 'x\u{1D11E}') { s += ch; } s;")
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r3.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "x\u{1D11E}"
+    );
+}
+
+#[test]
+fn test_for_of_break_continue() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var sum = 0;
+             for (var x of [1, 2, 3, 4, 5]) {
+               if (x === 3) { break; }
+               sum += x;
+             }
+             sum;",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(3));
+    let r2 = ctx
+        .eval(
+            "var out = '';
+             for (var x of [1, 2, 3, 4]) {
+               if (x === 2) { continue; }
+               out += x;
+             }
+             out;",
+        )
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r2.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "134"
+    );
+    // break inside a nested loop still exits the outer for-of
+    let r3 = ctx
+        .eval(
+            "var count = 0;
+             for (var x of [1, 2, 3]) {
+               var i = 0;
+               while (i < 5) {
+                 if (i === 1) { break; }
+                 i += 1;
+               }
+               count += i;
+             }
+             count;",
+        )
+        .unwrap();
+    assert_eq!(r3.as_smi(), Some(3));
+    // continue re-runs the next() step (skipped values don't repeat)
+    let r4 = ctx
+        .eval(
+            "var seen = '';
+             var it = ['a', 'b', 'c'].values();
+             for (var v of it) {
+               if (v === 'b') { continue; }
+               seen += v;
+             }
+             seen;",
+        )
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r4.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "ac"
+    );
+}
+
+#[test]
+fn test_array_keys_values_entries() {
+    let mut ctx = Context::new_small();
+    // values() — manual next() stepping with done/value
+    let r = ctx
+        .eval(
+            "var it = [10, 20].values();
+             var a = it.next();
+             var b = it.next();
+             var c = it.next();
+             (a.value === 10) && (a.done === false) &&
+             (b.value === 20) && (b.done === false) &&
+             (c.done === true) && (c.value === undefined);",
+        )
+        .unwrap();
+    assert_eq!(r, rune_core::value::Value::boolean(true));
+    // keys()
+    let r2 = ctx
+        .eval(
+            "var ks = '';
+             for (var k of ['a', 'b'].keys()) { ks += k; }
+             ks;",
+        )
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r2.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "01"
+    );
+    // entries() — [index, value] pairs
+    let r3 = ctx
+        .eval(
+            "var it = [7, 8].entries();
+             var p = it.next().value;
+             var q = it.next().value;
+             (p[0] === 0) && (p[1] === 7) && (q[0] === 1) && (q[1] === 8);",
+        )
+        .unwrap();
+    assert_eq!(r3, rune_core::value::Value::boolean(true));
+    // [Symbol.iterator]() aliases values
+    let r4 = ctx
+        .eval("[1, 2, 3][Symbol.iterator]().next().value;")
+        .unwrap();
+    assert_eq!(r4.as_smi(), Some(1));
+    // Iterators are themselves iterable: [Symbol.iterator]() returns this
+    let r5 = ctx
+        .eval(
+            "var it = [5, 6].values();
+             it[Symbol.iterator]() === it;",
+        )
+        .unwrap();
+    assert_eq!(r5, rune_core::value::Value::boolean(true));
+    // for..of over an iterator object works
+    let r6 = ctx
+        .eval(
+            "var sum = 0;
+             for (var x of [5, 6].values()) { sum += x; }
+             sum;",
+        )
+        .unwrap();
+    assert_eq!(r6.as_smi(), Some(11));
+}
+
+#[test]
+fn test_for_of_user_iterator() {
+    let mut ctx = Context::new_small();
+    // User-defined iterable: JS @@iterator factory + JS next()
+    let r = ctx
+        .eval(
+            "var obj = {
+               [Symbol.iterator]: function() {
+                 var i = 0;
+                 return {
+                   next: function() {
+                     i += 1;
+                     if (i <= 3) { return { value: i * 10, done: false }; }
+                     return { value: undefined, done: true };
+                   }
+                 };
+               }
+             };
+             var sum = 0;
+             for (var x of obj) { sum += x; }
+             sum;",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(60));
+}
+
+#[test]
+fn test_for_of_spread() {
+    let mut ctx = Context::new_small();
+    // Spread of a string → code point array
+    let r = ctx
+        .eval(
+            "var a = [...'ab'];
+             (a.length === 2) && (a[0] === 'a') && (a[1] === 'b');",
+        )
+        .unwrap();
+    assert_eq!(r, rune_core::value::Value::boolean(true));
+    // Spread of a user iterable
+    let r2 = ctx
+        .eval(
+            "var obj = { [Symbol.iterator]: function() {
+                 var i = 0;
+                 return { next: function() {
+                   i += 1;
+                   if (i <= 2) { return { value: i * 7, done: false }; }
+                   return { done: true, value: 0 };
+                 }};
+               }};
+             var a = [...obj];
+             (a.length === 2) && (a[0] === 7) && (a[1] === 14);",
+        )
+        .unwrap();
+    assert_eq!(r2, rune_core::value::Value::boolean(true));
+    // Spread of an array still works (mixed literal)
+    let r3 = ctx.eval("var a = [0, ...[1, 2], 3]; a.length;").unwrap();
+    assert_eq!(r3.as_smi(), Some(4));
+    // Call-arg spread of a string
+    let r4 = ctx
+        .eval(
+            "function f(a, b, c) { return a + b + c; }
+             f(...'xyz');",
+        )
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r4.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "xyz"
+    );
+    // Spread of a non-iterable throws
+    let r5 = ctx.eval("var a = [...5];");
+    assert!(r5.is_err(), "spread of a non-iterable should throw");
+    let r6 = ctx.eval("var a = [...null];");
+    assert!(r6.is_err(), "spread of null should throw");
+}
+
+#[test]
+fn test_for_of_member_lhs() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var o = { p: 0 };
+             for (o.p of [3, 4]) {}
+             o.p;",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(4));
+    // member LHS with computed key
+    let r2 = ctx
+        .eval(
+            "var o = {}; var k = 'q';
+             for (o[k] of ['x']) {}
+             o.q;",
+        )
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r2.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "x"
+    );
+}
+
+#[test]
+fn test_for_of_errors() {
+    let mut ctx = Context::new_small();
+    assert!(ctx.eval("for (var x of null) {}").is_err());
+    assert!(ctx.eval("for (var x of undefined) {}").is_err());
+    assert!(ctx.eval("for (var x of 42) {}").is_err());
+    assert!(ctx.eval("for (var x of {}) {}").is_err());
+    // Object whose @@iterator is present but not callable
+    assert!(
+        ctx.eval("for (var x of { [Symbol.iterator]: 5 }) {}")
+            .is_err()
+    );
+    // Iterator without a callable next
+    assert!(
+        ctx.eval(
+            "var bad = { [Symbol.iterator]: function() { return { next: 5 }; } };
+             for (var x of bad) {}"
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn test_string_symbol_iterator_direct() {
+    let mut ctx = Context::new_small();
+    assert_eq!(
+        js_str(&mut ctx, "'ab'[Symbol.iterator]().next().value;"),
+        "a"
+    );
+    let r2 = ctx
+        .eval(
+            "var it = 'x'[Symbol.iterator]();
+             it.next();
+             it.next().done;",
+        )
+        .unwrap();
+    assert_eq!(r2, rune_core::value::Value::boolean(true));
+    // String iterators are iterable
+    let r3 = ctx
+        .eval(
+            "var it = 'hi'[Symbol.iterator]();
+             it[Symbol.iterator]() === it;",
+        )
+        .unwrap();
+    assert_eq!(r3, rune_core::value::Value::boolean(true));
+    // Surrogate pair handled as one code point
+    let r4 = ctx
+        .eval("'a\u{1D11E}'[Symbol.iterator]().next().value;")
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r4.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "a"
+    );
+    // for..of over an array iterator created from keys()
+    let r5 = ctx
+        .eval(
+            "var ks = '';
+             for (var k of [10, 20].keys()) { ks += k; }
+             ks;",
+        )
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r5.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "01"
+    );
+}

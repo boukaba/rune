@@ -490,6 +490,307 @@ pub fn symbol_prototype_to_primitive(
     }
 }
 
+// ── Iteration protocol builtins ──────────────────────────────────────────
+
+/// Resolve a builtin handle by name (linear scan of the registry).
+fn find_handle(builtins: &[Builtin], name: &str) -> Option<Value> {
+    builtins
+        .iter()
+        .position(|b| b.name == name)
+        .map(|id| Value::smi(-(id as i32) - 1))
+}
+
+/// Create an iterator object: own `next` property, hidden per-instance state
+/// stored under the rune-internal state symbol (excluded from enumeration),
+/// plus @@toStringTag and @@iterator (returns the iterator itself).
+fn make_iterator_object(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    next_handle_name: &str,
+    state_elems: &[Value],
+    tag: &str,
+) -> Value {
+    let next_h = find_handle(&vm.builtins, next_handle_name).unwrap();
+    let iter_h = find_handle(&vm.builtins, "Iterator_prototype_symbol_iterator").unwrap();
+    let state = RuneArray::allocate(gc, state_elems);
+    let keys = vec![
+        (PropertyKey::from_string("next"), 0),
+        (PropertyKey::from_symbol(vm.iter_state_symbol), 1),
+        (
+            PropertyKey::from_symbol(rune_core::symbol::SYM_TO_STRING_TAG),
+            2,
+        ),
+        (PropertyKey::from_symbol(rune_core::symbol::SYM_ITERATOR), 3),
+    ];
+    let key_names = vec![
+        "next".to_string(),
+        "\u{0}".to_string(),
+        tag.to_string(),
+        "\u{0}".to_string(),
+    ];
+    let shape = Shape::intern(keys, key_names);
+    let tag_str = HeapString::allocate(gc, tag) as *mut u8;
+    let vals = vec![
+        next_h,
+        Value::from_heap_ptr(state as *mut u8),
+        Value::from_heap_ptr(tag_str),
+        iter_h,
+    ];
+    let obj_ptr = JSObject::allocate(gc, shape, &vals);
+    if vm.object_prototype.is_heap_object() {
+        if let Some(pp) = vm.object_prototype.heap_ptr() {
+            unsafe { JSObject::set_prototype(obj_ptr, pp) };
+        }
+    }
+    Value::from_heap_ptr(obj_ptr as *mut u8)
+}
+
+/// Iterator result object: `{ value, done }` (§7.4.7 CreateIterResultObject).
+fn make_iter_result(gc: &mut SemiSpace, value: Value, done: bool) -> Value {
+    let keys = vec![
+        (PropertyKey::from_string("value"), 0),
+        (PropertyKey::from_string("done"), 1),
+    ];
+    let key_names = vec!["value".to_string(), "done".to_string()];
+    let shape = Shape::intern(keys, key_names);
+    let vals = vec![value, Value::boolean(done)];
+    Value::from_heap_ptr(JSObject::allocate(gc, shape, &vals) as *mut u8)
+}
+
+/// %IteratorPrototype%[@@iterator] — returns the iterator itself (§7.4.1.2.1).
+pub fn iterator_prototype_symbol_iterator(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    _vm: &mut Vm,
+) -> Value {
+    let _ = gc;
+    this
+}
+
+/// Array.prototype.values — iterator over element values (kind 2).
+pub fn array_values_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let ok = this
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_ARRAY });
+    if !ok {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "TypeError: Array.prototype.values requires an array receiver",
+        )));
+        return Value::undefined();
+    }
+    make_iterator_object(
+        gc,
+        vm,
+        "Array_iterator_next",
+        &[this, Value::smi(0), Value::smi(2)],
+        "Array Iterator",
+    )
+}
+
+/// Array.prototype.keys — iterator over indices (kind 1).
+pub fn array_keys_builtin(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    let ok = this
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_ARRAY });
+    if !ok {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "TypeError: Array.prototype.keys requires an array receiver",
+        )));
+        return Value::undefined();
+    }
+    make_iterator_object(
+        gc,
+        vm,
+        "Array_iterator_next",
+        &[this, Value::smi(0), Value::smi(1)],
+        "Array Iterator",
+    )
+}
+
+/// Array.prototype.entries — iterator over [index, value] pairs (kind 0).
+pub fn array_entries_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let ok = this
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_ARRAY });
+    if !ok {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "TypeError: Array.prototype.entries requires an array receiver",
+        )));
+        return Value::undefined();
+    }
+    make_iterator_object(
+        gc,
+        vm,
+        "Array_iterator_next",
+        &[this, Value::smi(0), Value::smi(0)],
+        "Array Iterator",
+    )
+}
+
+/// The shared next() for array iterators — reads the hidden state
+/// [iterated array, index, kind] stored on the iterator object.
+pub fn array_iterator_next(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    if let Some(ptr) = this.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_OBJECT {
+            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+            if let Some(slot) = shape.lookup(&PropertyKey::from_symbol(vm.iter_state_symbol)) {
+                let state_val = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+                if let Some(state_ptr) = state_val.heap_ptr() {
+                    let state = state_ptr as *mut RuneArray;
+                    let arr_val = unsafe { RuneArray::get_element(state, 0) };
+                    let index = unsafe { RuneArray::get_element(state, 1) }
+                        .as_smi()
+                        .unwrap_or(0) as usize;
+                    let kind = unsafe { RuneArray::get_element(state, 2) }
+                        .as_smi()
+                        .unwrap_or(2) as usize;
+                    if let Some(arr_ptr) = arr_val.heap_ptr() {
+                        if unsafe { (*(arr_ptr as *const GcHeader)).tag() } == TAG_ARRAY {
+                            let len =
+                                unsafe { RuneArray::length(arr_ptr as *mut RuneArray) } as usize;
+                            if index >= len {
+                                unsafe {
+                                    RuneArray::set_element(state, 0, Value::undefined());
+                                }
+                                return make_iter_result(gc, Value::undefined(), true);
+                            }
+                            let value =
+                                unsafe { RuneArray::get_element(arr_ptr as *mut RuneArray, index) };
+                            unsafe {
+                                RuneArray::set_element(state, 1, Value::smi((index + 1) as i32));
+                            }
+                            let out = match kind {
+                                0 => {
+                                    let pair = crate::vm::new_dense_array(vm, gc);
+                                    let pair2 = unsafe {
+                                        RuneArray::push(
+                                            gc,
+                                            pair as *mut RuneArray,
+                                            Value::smi(index as i32),
+                                        )
+                                    };
+                                    let pair3 = unsafe { RuneArray::push(gc, pair2, value) };
+                                    Value::from_heap_ptr(pair3 as *mut u8)
+                                }
+                                1 => Value::smi(index as i32),
+                                _ => value,
+                            };
+                            return make_iter_result(gc, out, false);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    make_iter_result(gc, Value::undefined(), true)
+}
+
+/// String.prototype[Symbol.iterator] — code point iterator over `this`.
+pub fn string_iterator_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let str_ptr = if let Some(ptr) = this.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_STRING {
+            ptr
+        } else if tag == TAG_STRING_OBJ {
+            unsafe { StringObject::string_ptr(ptr as *mut StringObject) }
+        } else {
+            vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+                gc,
+                "TypeError: String.prototype[Symbol.iterator] requires a string receiver",
+            )));
+            return Value::undefined();
+        }
+    } else {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "TypeError: String.prototype[Symbol.iterator] requires a string receiver",
+        )));
+        return Value::undefined();
+    };
+    make_iterator_object(
+        gc,
+        vm,
+        "String_iterator_next",
+        &[Value::from_heap_ptr(str_ptr), Value::smi(0)],
+        "String Iterator",
+    )
+}
+
+/// The next() for string iterators — yields one code point per step,
+/// advancing by UTF-16 code units (surrogate pairs count as 2).
+pub fn string_iterator_next(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    if let Some(ptr) = this.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_OBJECT {
+            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+            if let Some(slot) = shape.lookup(&PropertyKey::from_symbol(vm.iter_state_symbol)) {
+                let state_val = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+                if let Some(state_ptr) = state_val.heap_ptr() {
+                    let state = state_ptr as *mut RuneArray;
+                    let str_val = unsafe { RuneArray::get_element(state, 0) };
+                    let index = unsafe { RuneArray::get_element(state, 1) }
+                        .as_smi()
+                        .unwrap_or(0) as usize;
+                    if let Some(str_ptr) = str_val.heap_ptr() {
+                        if unsafe { (*(str_ptr as *const GcHeader)).tag() } == TAG_STRING {
+                            let s = unsafe { HeapString::to_string(str_ptr as *mut HeapString) };
+                            let mut pos = 0usize;
+                            for ch in s.chars() {
+                                let width = if (ch as u32) > 0xFFFF { 2 } else { 1 };
+                                if pos == index {
+                                    let sp = HeapString::allocate(gc, &ch.to_string());
+                                    unsafe {
+                                        RuneArray::set_element(
+                                            state,
+                                            1,
+                                            Value::smi((index + width) as i32),
+                                        );
+                                    }
+                                    return make_iter_result(
+                                        gc,
+                                        Value::from_heap_ptr(sp as *mut u8),
+                                        false,
+                                    );
+                                }
+                                pos += width;
+                            }
+                            // Past the end — mark the iterator done.
+                            unsafe {
+                                RuneArray::set_element(state, 0, Value::undefined());
+                            }
+                            return make_iter_result(gc, Value::undefined(), true);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    make_iter_result(gc, Value::undefined(), true)
+}
+
 /// §7.3.11 GetMethod + dispatch of a well-known-symbol method from the
 /// String.prototype match/search/split/replace family.
 ///
@@ -3738,6 +4039,46 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 1,
             name: "Symbol_prototype_toPrimitive",
             func: symbol_prototype_to_primitive,
+        },
+        Builtin {
+            length: 0,
+            name: "Array_prototype_values",
+            func: array_values_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Array_prototype_keys",
+            func: array_keys_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Array_prototype_entries",
+            func: array_entries_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Array_prototype_iterator",
+            func: array_values_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Array_iterator_next",
+            func: array_iterator_next,
+        },
+        Builtin {
+            length: 0,
+            name: "String_prototype_iterator",
+            func: string_iterator_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "String_iterator_next",
+            func: string_iterator_next,
+        },
+        Builtin {
+            length: 0,
+            name: "Iterator_prototype_symbol_iterator",
+            func: iterator_prototype_symbol_iterator,
         },
         Builtin {
             length: 1,

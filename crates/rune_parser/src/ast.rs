@@ -195,6 +195,7 @@ pub enum Stmt {
         Span,
     ),
     ForIn(Box<Expr>, Box<Expr>, Box<Stmt>, Span),
+    ForOf(Box<Expr>, Box<Expr>, Box<Stmt>, Span),
     Var(VarKind, Vec<Decl>, Span),
     Return(Option<Box<Expr>>, Span),
     Throw(Box<Expr>, Span),

@@ -907,13 +907,25 @@ impl Emitter {
                 self.emit_expression(cond);
                 let exit_jump = self.current();
                 self.emit(Opcode::JumpIfFalse, vec![0]);
-                self.loop_exit_stack.push(exit_jump);
+                // Sentinels: `break` jumps to the exit target, not to the
+                // JumpIfFalse instruction (which would resume mid-condition
+                // with a corrupted stack).
+                self.loop_exit_stack.push(usize::MAX);
                 self.loop_cont_stack.push(loop_start);
+                self.pending_loop_jumps.push(Vec::new());
                 self.emit_statement(body);
                 self.loop_cont_stack.pop();
                 self.loop_exit_stack.pop();
                 self.emit(Opcode::Jump, vec![loop_start as i64]);
-                self.patch(exit_jump, self.current());
+                let exit = self.current();
+                self.patch(exit_jump, exit);
+                for (pos, kind) in self.pending_loop_jumps.pop().unwrap_or_default() {
+                    let target = match kind {
+                        LoopJumpKind::Break => exit,
+                        LoopJumpKind::Continue => loop_start,
+                    };
+                    self.patch(pos, target);
+                }
             }
             Stmt::DoWhile(cond, body, _) => {
                 let loop_start = self.current();
@@ -1312,6 +1324,83 @@ impl Emitter {
                 self.emit_statement(body);
                 self.emit(Opcode::Jump, vec![loop_start as i64]);
                 self.patch(exit_jump, self.current());
+            }
+            Stmt::ForOf(lhs, iterable, body, _) => {
+                // for (x of iterable) { body }
+                // Register the loop variable as a local
+                if let Expr::Identifier(name, _) = lhs.as_ref() {
+                    if !self.locals.contains(&name.to_string()) {
+                        self.locals.push(name.to_string());
+                    }
+                }
+                self.emit_expression(iterable);
+                self.emit(Opcode::ForOfInit, vec![]);
+                let loop_start = self.current();
+                // break/continue use patchable jumps (loop end position is only
+                // known after the body, like do-while).
+                self.loop_exit_stack.push(usize::MAX);
+                self.loop_cont_stack.push(usize::MAX);
+                self.pending_loop_jumps.push(Vec::new());
+                // Member LHS: push obj + key BELOW the loop state so the value
+                // lands on top for StoreProperty ([.., obj, key, value]).
+                let lhs_prefix = match lhs.as_ref() {
+                    Expr::Member(obj, prop, computed, _) => {
+                        self.emit_expression(obj);
+                        if *computed {
+                            self.emit_expression(prop);
+                        } else {
+                            let name = prop_name_as_string(prop);
+                            let idx = self.intern_string(&name) as i64;
+                            self.emit(Opcode::LoadStringConst, vec![idx]);
+                        }
+                        2
+                    }
+                    _ => 0,
+                };
+                let next_jump = self.current();
+                self.emit(Opcode::ForOfNext, vec![0, lhs_prefix]); // patched below
+                // Store the value into the loop variable
+                match lhs.as_ref() {
+                    Expr::Identifier(name, _) => {
+                        if let Some(idx) = self.local_index(name) {
+                            self.emit(Opcode::StoreLocal, vec![idx as i64]);
+                        } else {
+                            let name_idx = self.intern_string(name) as i64;
+                            self.emit(Opcode::StoreGlobal, vec![name_idx]);
+                        }
+                        // StoreLocal pushes the value back — discard it
+                        self.emit(Opcode::Pop, vec![]);
+                    }
+                    Expr::Member(_, _, _, _) => {
+                        self.emit(Opcode::StoreProperty, vec![]);
+                        self.emit(Opcode::Pop, vec![]);
+                    }
+                    _ => {
+                        // Destructuring LHS not yet supported — discard the value
+                        self.emit(Opcode::Pop, vec![]);
+                    }
+                }
+                self.emit_statement(body);
+                self.loop_cont_stack.pop();
+                self.loop_exit_stack.pop();
+                self.emit(Opcode::Jump, vec![loop_start as i64]);
+                // Done case: drop the leftover obj+key prefix, then fall into
+                // the shared exit which discards [iterator, nextMethod].
+                let done_cleanup = self.current();
+                for _ in 0..lhs_prefix {
+                    self.emit(Opcode::Pop, vec![]);
+                }
+                let exit = self.current();
+                self.emit(Opcode::Pop, vec![]);
+                self.emit(Opcode::Pop, vec![]);
+                self.patch(next_jump, done_cleanup);
+                for (pos, kind) in self.pending_loop_jumps.pop().unwrap_or_default() {
+                    let target = match kind {
+                        LoopJumpKind::Break => exit,
+                        LoopJumpKind::Continue => loop_start,
+                    };
+                    self.patch(pos, target);
+                }
             }
             Stmt::Switch(discriminant, cases, default_body, _) => {
                 self.emit_expression(discriminant);
@@ -1817,6 +1906,7 @@ impl Emitter {
                             for arg in args {
                                 self.emit_expression(&arg.expr);
                                 if arg.is_spread {
+                                    self.emit(Opcode::ToArrayFromIterable, vec![]);
                                     self.emit(Opcode::ArrayExtend, vec![]);
                                 } else {
                                     self.emit(Opcode::ArrayPush, vec![]);
@@ -1832,6 +1922,7 @@ impl Emitter {
                             for arg in args {
                                 self.emit_expression(&arg.expr);
                                 if arg.is_spread {
+                                    self.emit(Opcode::ToArrayFromIterable, vec![]);
                                     self.emit(Opcode::ArrayExtend, vec![]);
                                 } else {
                                     self.emit(Opcode::ArrayPush, vec![]);
@@ -1847,6 +1938,7 @@ impl Emitter {
                             for arg in args {
                                 self.emit_expression(&arg.expr);
                                 if arg.is_spread {
+                                    self.emit(Opcode::ToArrayFromIterable, vec![]);
                                     self.emit(Opcode::ArrayExtend, vec![]);
                                 } else {
                                     self.emit(Opcode::ArrayPush, vec![]);
@@ -2004,6 +2096,7 @@ impl Emitter {
                                 for arg in args {
                                     self.emit_expression(&arg.expr);
                                     if arg.is_spread {
+                                        self.emit(Opcode::ToArrayFromIterable, vec![]);
                                         self.emit(Opcode::ArrayExtend, vec![]);
                                     } else {
                                         self.emit(Opcode::ArrayPush, vec![]);
@@ -2243,6 +2336,7 @@ impl Emitter {
                 for elem in elems {
                     if elem.is_spread {
                         self.emit_expression(&elem.expr);
+                        self.emit(Opcode::ToArrayFromIterable, vec![]);
                         self.emit(Opcode::ArrayExtend, vec![]);
                     } else {
                         self.emit_expression(&elem.expr);
@@ -2703,6 +2797,7 @@ fn contains_inner_function_stmt(stmt: &Stmt) -> bool {
                 || contains_inner_function_stmt(body)
         }
         Stmt::ForIn(_, _, body, _) => contains_inner_function_stmt(body),
+        Stmt::ForOf(_, _, body, _) => contains_inner_function_stmt(body),
         Stmt::Switch(target, cases, default_body, _) => {
             contains_inner_function_expr(target)
                 || cases.iter().any(|c| {
@@ -2816,6 +2911,7 @@ fn collect_var_names_stmt(stmt: &Stmt, names: &mut Vec<String>) {
             collect_var_names_stmt(body, names);
         }
         Stmt::ForIn(_, _, body, _) => collect_var_names_stmt(body, names),
+        Stmt::ForOf(_, _, body, _) => collect_var_names_stmt(body, names),
         Stmt::Switch(_, cases, default, _) => {
             for c in cases {
                 c.body.iter().for_each(|s| collect_var_names_stmt(s, names));
@@ -2865,6 +2961,9 @@ fn uses_arguments_stmt(stmt: &Stmt) -> bool {
                 || uses_arguments_stmt(body)
         }
         Stmt::ForIn(lhs, rhs, body, _) => {
+            uses_arguments_expr(lhs) || uses_arguments_expr(rhs) || uses_arguments_stmt(body)
+        }
+        Stmt::ForOf(lhs, rhs, body, _) => {
             uses_arguments_expr(lhs) || uses_arguments_expr(rhs) || uses_arguments_stmt(body)
         }
         Stmt::Var(_, decls, _) => decls

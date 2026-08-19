@@ -107,6 +107,10 @@ pub enum Opcode {
     // for-in
     ForInInit,
     ForInNext,
+    // for-of (iteration protocol)
+    ForOfInit,           // pop iterable → push [iterator, nextMethod]
+    ForOfNext,           // operands[0] = end target; call next → done ? jump end : push value
+    ToArrayFromIterable, // pop value → push array (via @@iterator)
     // Environment (closure capture)
     MakeEnv,
     RestoreEnv,

@@ -331,6 +331,46 @@ pub(crate) struct PendingSymbolCoercion {
     /// false for Symbol() (result becomes the symbol's description).
     pub(crate) is_for: bool,
 }
+
+/// State for a pending for..of iterator acquisition: the @@iterator method was
+/// a JS function whose call returned. The Return handler validates the result,
+/// loads the `next` method, and pushes [iterator, nextMethod] onto the stack.
+pub(crate) struct PendingForOfInit {
+    pub(crate) source_frame_depth: usize,
+}
+
+/// State for a pending for..of iteration step: the iterator's JS `next` method
+/// returned. The Return handler checks done/value and either jumps to the loop
+/// end (discarding [iterator, nextMethod]) or pushes the value and advances.
+pub(crate) struct PendingForOfNext {
+    pub(crate) source_frame_depth: usize,
+    pub(crate) end_target: usize,
+}
+
+/// Phase of a pending spread-drain (ToArrayFromIterable with JS callbacks).
+#[derive(PartialEq, Clone, Copy)]
+pub(crate) enum IterDrainState {
+    /// Waiting for the user-defined @@iterator factory call to return.
+    AwaitFactory,
+    /// Waiting for the user-defined `next` call to return.
+    AwaitNext,
+}
+
+/// State for a pending spread conversion (`[...x]`, `f(...x)`): the iterable's
+/// @@iterator factory and/or `next` method are JS functions whose calls must be
+/// resumed by the Return handler. The drained values accumulate into `result`.
+pub(crate) struct PendingIterDrain {
+    pub(crate) source_frame_depth: usize,
+    pub(crate) state: IterDrainState,
+    /// The iterator object (set once the factory returns).
+    pub(crate) iter: Value,
+    /// The `next` method (builtin handle or JS function).
+    pub(crate) next: Value,
+    /// Heap pointer to the result RuneArray being filled.
+    pub(crate) result: *mut u8,
+    /// The original iterable value (the factory's `this`).
+    pub(crate) receiver: Value,
+}
 /// Set by the builtin function, consumed/updated by the Return handler.
 pub(crate) struct ArrayOpState {
     pub(crate) kind: ArrayOpKind,
@@ -461,6 +501,20 @@ pub struct Vm {
     /// match/search/split/replace builtins, consumed by the Return handler).
     pub(crate) pending_symbol_dispatch: Option<PendingSymbolDispatch>,
     pub(crate) pending_symbol_coercion: Option<PendingSymbolCoercion>,
+    /// Pending for..of iterator acquisition/iteration (JS @@iterator factory or
+    /// JS `next` method called — resumed by the Return handler).
+    pub(crate) pending_for_of_init: Option<PendingForOfInit>,
+    pub(crate) pending_for_of_next: Option<PendingForOfNext>,
+    /// Pending spread drain (ToArrayFromIterable with JS callbacks).
+    pub(crate) pending_iter_drain: Option<PendingIterDrain>,
+    /// Registry id of the hidden symbol used to store iterator state on
+    /// iterator objects (not exposed to JS code).
+    pub(crate) iter_state_symbol: u32,
+    /// Pre-allocated property keys used by the iteration protocol ("done",
+    /// "value", "next").
+    pub(crate) done_key: Value,
+    pub(crate) value_key: Value,
+    pub(crate) next_key: Value,
     /// Pending exception set by a builtin (checked after builtin dispatch).
     pub pending_exception: Option<Value>,
     /// Pending array operation (filter/map/reduce) with callback state machine.
@@ -572,6 +626,13 @@ impl Vm {
             symbol_prototype: Value::undefined(),
             pending_symbol_dispatch: None,
             pending_symbol_coercion: None,
+            pending_for_of_init: None,
+            pending_for_of_next: None,
+            pending_iter_drain: None,
+            iter_state_symbol: rune_core::symbol::symbol_for("__rune_iter_state"),
+            done_key: Value::undefined(),
+            value_key: Value::undefined(),
+            next_key: Value::undefined(),
             pending_exception: None,
             pending_array_op: None,
             pending_call: None,
@@ -921,6 +982,66 @@ impl Vm {
             let sym_ctor = make_object(gc, &ctor_entries);
             self.symbol_ctor = sym_ctor;
             self.builtin_wrappers.insert("Symbol".to_string(), sym_ctor);
+        }
+
+        // Iteration protocol — Array.prototype.values/keys/entries/[Symbol.iterator]
+        // and String.prototype[Symbol.iterator]. Iterator state is stored under a
+        // hidden symbol (excluded from enumeration) on each iterator object.
+        {
+            self.iter_state_symbol = rune_core::symbol::symbol_for("__rune_iter_state");
+            self.done_key = Value::from_heap_ptr(HeapString::allocate(gc, "done") as *mut u8);
+            self.value_key = Value::from_heap_ptr(HeapString::allocate(gc, "value") as *mut u8);
+            self.next_key = Value::from_heap_ptr(HeapString::allocate(gc, "next") as *mut u8);
+            if self.array_prototype.is_heap_object() {
+                unsafe {
+                    let proto_ptr = self.array_prototype.heap_ptr().unwrap() as *mut JSObject;
+                    if let Some(h) = find_handle(&self.builtins, "Array_prototype_values") {
+                        JSObject::add_property(
+                            proto_ptr,
+                            PropertyKey::from_string("values"),
+                            "values".to_string(),
+                            h,
+                        );
+                    }
+                    if let Some(h) = find_handle(&self.builtins, "Array_prototype_keys") {
+                        JSObject::add_property(
+                            proto_ptr,
+                            PropertyKey::from_string("keys"),
+                            "keys".to_string(),
+                            h,
+                        );
+                    }
+                    if let Some(h) = find_handle(&self.builtins, "Array_prototype_entries") {
+                        JSObject::add_property(
+                            proto_ptr,
+                            PropertyKey::from_string("entries"),
+                            "entries".to_string(),
+                            h,
+                        );
+                    }
+                    if let Some(h) = find_handle(&self.builtins, "Array_prototype_iterator") {
+                        JSObject::add_property(
+                            proto_ptr,
+                            PropertyKey::from_symbol(rune_core::symbol::SYM_ITERATOR),
+                            "\u{0}".to_string(),
+                            h,
+                        );
+                    }
+                }
+            }
+            if self.string_prototype.is_heap_object() {
+                unsafe {
+                    let proto_ptr = self.string_prototype.heap_ptr().unwrap() as *mut JSObject;
+                    if let Some(h) = find_handle(&self.builtins, "String_prototype_iterator") {
+                        JSObject::add_property(
+                            proto_ptr,
+                            PropertyKey::from_symbol(rune_core::symbol::SYM_ITERATOR),
+                            "\u{0}".to_string(),
+                            h,
+                        );
+                    }
+                }
+            }
         }
 
         // Promise constructor — resolve/reject bridge program (lazy init)
@@ -1447,6 +1568,10 @@ impl Vm {
         gc.push_root(&self.regexp_prototype as *const Value as *mut u64);
         gc.push_root(&self.symbol_ctor as *const Value as *mut u64);
         gc.push_root(&self.symbol_prototype as *const Value as *mut u64);
+        // Root pre-allocated iteration protocol keys ("done"/"value"/"next")
+        gc.push_root(&self.done_key as *const Value as *mut u64);
+        gc.push_root(&self.value_key as *const Value as *mut u64);
+        gc.push_root(&self.next_key as *const Value as *mut u64);
         // Root pre-allocated typeof result strings (JIT typeof_helper reads these)
         for v in &self.typeof_strings {
             gc.push_root(v as *const Value as *mut u64);
@@ -1487,6 +1612,14 @@ impl Vm {
         // Root pending assert.throws expected error value
         if let Some(ref pa) = self.pending_assert {
             gc.push_root(&pa.expected_error as *const Value as *mut u64);
+        }
+        // Root pending spread drain state (iterator/next/receiver values + the
+        // result array, which may be forwarded by GC during JS callbacks)
+        if let Some(ref pid) = self.pending_iter_drain {
+            gc.push_root(&pid.iter as *const Value as *mut u64);
+            gc.push_root(&pid.next as *const Value as *mut u64);
+            gc.push_root(&pid.receiver as *const Value as *mut u64);
+            gc.push_root(&pid.result as *const *mut u8 as *mut u64);
         }
     }
 
@@ -1563,6 +1696,15 @@ impl Vm {
             state.source_frame_depth = self.frames.len() - 1;
         }
         if let Some(ref mut state) = self.pending_symbol_coercion {
+            state.source_frame_depth = self.frames.len() - 1;
+        }
+        if let Some(ref mut state) = self.pending_for_of_init {
+            state.source_frame_depth = self.frames.len() - 1;
+        }
+        if let Some(ref mut state) = self.pending_for_of_next {
+            state.source_frame_depth = self.frames.len() - 1;
+        }
+        if let Some(ref mut state) = self.pending_iter_drain {
             state.source_frame_depth = self.frames.len() - 1;
         }
     }
@@ -2740,6 +2882,150 @@ impl Vm {
                         self.frames[fi].pc = pc + 1;
                     }
                 }
+                Opcode::ForOfInit => {
+                    // pop iterable → push [iterator, nextMethod]
+
+                    let expr_val = self.pop();
+                    match get_iter_method(self, gc, expr_val) {
+                        SymbolMethodResult::NotFound => {
+                            return self.throw_type_error(gc, "value is not iterable");
+                        }
+                        SymbolMethodResult::NotCallable => {
+                            return self
+                                .throw_type_error(gc, "value[Symbol.iterator] is not a function");
+                        }
+                        SymbolMethodResult::Found(method) => {
+                            if method.as_smi().is_some_and(|s| s < 0) {
+                                let result =
+                                    match call_builtin_sync(self, gc, method, expr_val, &[]) {
+                                        Ok(v) => v,
+                                        Err(Some(exit)) => return exit,
+                                        Err(None) => continue,
+                                    };
+                                match complete_for_of_init(self, gc, result) {
+                                    Ok(()) => {
+                                        self.frames[fi].pc = pc + 1;
+                                    }
+                                    Err(exit) => return exit,
+                                }
+                            } else if method.is_heap_object() {
+                                // User-defined @@iterator — call it via a callback.
+                                self.pending_for_of_init = Some(PendingForOfInit {
+                                    source_frame_depth: self.frames.len() - 1,
+                                });
+                                self.push_callback_call(gc, method, expr_val, vec![]);
+                                // pc NOT advanced — the Return handler resumes.
+                            } else {
+                                return self.throw_type_error(
+                                    gc,
+                                    "value[Symbol.iterator] is not a function",
+                                );
+                            }
+                        }
+                    }
+                }
+                Opcode::ForOfNext => {
+                    let end_target = instr.operands[0] as usize;
+                    let prefix = instr.operands[1] as usize;
+                    let len = self.stack.len();
+                    let next = self.stack[len - 1 - prefix];
+                    let iter = self.stack[len - 2 - prefix];
+                    if next.as_smi().is_some_and(|s| s < 0) {
+                        let result = match call_builtin_sync(self, gc, next, iter, &[]) {
+                            Ok(v) => v,
+                            Err(Some(exit)) => return exit,
+                            Err(None) => continue,
+                        };
+                        match process_for_of_next_result(self, gc, result, end_target) {
+                            Ok(()) => continue,
+                            Err(exit) => return exit,
+                        }
+                    } else if next.is_heap_object()
+                        && unsafe { (*(next.heap_ptr().unwrap() as *const GcHeader)).tag() }
+                            == TAG_FUNC
+                    {
+                        self.pending_for_of_next = Some(PendingForOfNext {
+                            source_frame_depth: self.frames.len() - 1,
+                            end_target,
+                        });
+                        self.push_callback_call(gc, next, iter, vec![]);
+                        // pc NOT advanced — the Return handler resumes.
+                    } else {
+                        return self.throw_type_error(gc, "iterator.next is not a function");
+                    }
+                }
+                Opcode::ToArrayFromIterable => {
+                    let x = self.pop();
+                    if let Some(ptr) = x.heap_ptr() {
+                        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+                        if tag == TAG_ARRAY {
+                            self.push(x);
+                            self.frames[fi].pc = pc + 1;
+                            continue;
+                        }
+                        if tag == TAG_STRING {
+                            // String spread: array of code point strings.
+                            let s = unsafe { HeapString::to_string(ptr as *mut HeapString) };
+                            let mut arr = new_dense_array(self, gc);
+                            for ch in s.chars() {
+                                let sp = HeapString::allocate(gc, &ch.to_string());
+                                arr = unsafe {
+                                    RuneArray::push(
+                                        gc,
+                                        arr as *mut RuneArray,
+                                        Value::from_heap_ptr(sp as *mut u8),
+                                    )
+                                } as *mut u8;
+                            }
+                            self.push(Value::from_heap_ptr(arr));
+                            self.frames[fi].pc = pc + 1;
+                            continue;
+                        }
+                    }
+                    // Generic iterable: @@iterator → drain.
+                    match get_iter_method(self, gc, x) {
+                        SymbolMethodResult::NotFound => {
+                            return self.throw_type_error(gc, "value is not iterable");
+                        }
+                        SymbolMethodResult::NotCallable => {
+                            return self
+                                .throw_type_error(gc, "value[Symbol.iterator] is not a function");
+                        }
+                        SymbolMethodResult::Found(method) => {
+                            if method.as_smi().is_some_and(|s| s < 0) {
+                                let result = match call_builtin_sync(self, gc, method, x, &[]) {
+                                    Ok(v) => v,
+                                    Err(Some(exit)) => return exit,
+                                    Err(None) => continue,
+                                };
+                                let fresh_arr = new_dense_array(self, gc);
+                                let arr = match drain_iterator(self, gc, result, x, fresh_arr) {
+                                    Ok(v) => v,
+                                    Err(Some(exit)) => return exit,
+                                    Err(None) => continue,
+                                };
+                                self.push(Value::from_heap_ptr(arr));
+                                self.frames[fi].pc = pc + 1;
+                            } else if method.is_heap_object() {
+                                self.pending_iter_drain = Some(PendingIterDrain {
+                                    source_frame_depth: self.frames.len() - 1,
+                                    state: IterDrainState::AwaitFactory,
+                                    iter: Value::undefined(),
+                                    next: Value::undefined(),
+                                    result: new_dense_array(self, gc),
+                                    receiver: x,
+                                });
+                                self.push_callback_call(gc, method, x, vec![]);
+                                // pc NOT advanced — the Return handler resumes.
+                            } else {
+                                return self.throw_type_error(
+                                    gc,
+                                    "value[Symbol.iterator] is not a function",
+                                );
+                            }
+                        }
+                    }
+                }
                 Opcode::LoadProperty => {
                     let raw_key = self.pop();
                     let obj = self.pop();
@@ -2799,6 +3085,28 @@ impl Vm {
                                                 }
                                             } else {
                                                 Value::undefined()
+                                            }
+                                        } else {
+                                            Value::undefined()
+                                        }
+                                    } else {
+                                        Value::undefined()
+                                    }
+                                } else {
+                                    Value::undefined()
+                                }
+                            } else if let Some(sym_id) = raw_key.as_symbol_id() {
+                                // Symbol key on a string receiver → String.prototype
+                                // (e.g. `'abc'[Symbol.iterator]`).
+                                if self.string_prototype.is_heap_object() {
+                                    if let Some(proto_ptr) = self.string_prototype.heap_ptr() {
+                                        let proto_key = PropertyKey::from_symbol(sym_id);
+                                        let shape = unsafe {
+                                            JSObject::shape_ptr(proto_ptr as *mut JSObject)
+                                        };
+                                        if let Some(slot) = shape.lookup(&proto_key) {
+                                            unsafe {
+                                                JSObject::get_slot(proto_ptr as *mut JSObject, slot)
                                             }
                                         } else {
                                             Value::undefined()
@@ -5291,6 +5599,96 @@ impl Vm {
                         }
                         self.pending_symbol_dispatch = Some(sd);
                     }
+                    // Check if this return completes a pending for..of iterator
+                    // acquisition (user-defined @@iterator factory call).
+                    if let Some(pfoi) = self.pending_for_of_init.take() {
+                        if self.frames.len() == pfoi.source_frame_depth {
+                            if let Err(exit) = complete_for_of_init(self, gc, result) {
+                                return exit;
+                            }
+                            let frames_len = self.frames.len();
+                            self.frames[frames_len - 1].pc += 1;
+                            continue;
+                        }
+                        self.pending_for_of_init = Some(pfoi);
+                    }
+                    // Check if this return completes a pending for..of iteration
+                    // step (the iterator's JS `next` method returned).
+                    if let Some(pfon) = self.pending_for_of_next.take() {
+                        if self.frames.len() == pfon.source_frame_depth {
+                            match process_for_of_next_result(self, gc, result, pfon.end_target) {
+                                Ok(()) => continue,
+                                Err(exit) => return exit,
+                            }
+                        }
+                        self.pending_for_of_next = Some(pfon);
+                    }
+                    // Check if this return completes a pending spread drain
+                    // (ToArrayFromIterable with user-defined callbacks).
+                    if let Some(pid) = self.pending_iter_drain.take() {
+                        if self.frames.len() == pid.source_frame_depth {
+                            match pid.state {
+                                IterDrainState::AwaitFactory => {
+                                    let arr = match drain_iterator(
+                                        self,
+                                        gc,
+                                        result,
+                                        pid.receiver,
+                                        pid.result,
+                                    ) {
+                                        Ok(v) => v,
+                                        Err(Some(exit)) => return exit,
+                                        Err(None) => continue,
+                                    };
+                                    self.stack.truncate(callee_base);
+                                    self.push(Value::from_heap_ptr(arr));
+                                    let frames_len = self.frames.len();
+                                    self.frames[frames_len - 1].pc += 1;
+                                    continue;
+                                }
+                                IterDrainState::AwaitNext => {
+                                    if !result.is_heap_object() {
+                                        self.stack.truncate(callee_base);
+                                        return self.throw_type_error(
+                                            gc,
+                                            "Iterator result is not an object",
+                                        );
+                                    }
+                                    let done =
+                                        load_property_recursive(result, self.done_key, None, gc)
+                                            .to_bool();
+                                    if done {
+                                        let arr = Value::from_heap_ptr(pid.result);
+                                        self.stack.truncate(callee_base);
+                                        self.push(arr);
+                                        let frames_len = self.frames.len();
+                                        self.frames[frames_len - 1].pc += 1;
+                                    } else {
+                                        let value = load_property_recursive(
+                                            result,
+                                            self.value_key,
+                                            None,
+                                            gc,
+                                        );
+                                        let new_arr = unsafe {
+                                            RuneArray::push(gc, pid.result as *mut RuneArray, value)
+                                        };
+                                        self.pending_iter_drain = Some(PendingIterDrain {
+                                            source_frame_depth: self.frames.len() - 1,
+                                            state: IterDrainState::AwaitNext,
+                                            iter: pid.iter,
+                                            next: pid.next,
+                                            result: new_arr as *mut u8,
+                                            receiver: pid.receiver,
+                                        });
+                                        self.push_callback_call(gc, pid.next, pid.iter, vec![]);
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
+                        self.pending_iter_drain = Some(pid);
+                    }
                     // Check if this return completes a pending Promise constructor (executor).
                     if self.pending_promise_ctor.is_some() {
                         if let Some(ref ppc) = self.pending_promise_ctor {
@@ -6608,6 +7006,203 @@ pub(crate) fn get_symbol_method(
         SymbolMethodResult::Found(method)
     } else {
         SymbolMethodResult::NotCallable
+    }
+}
+
+/// GetMethod(value, @@iterator): resolve the iteration method for a value.
+/// Primitive strings route directly to String.prototype (which holds the
+/// symbol-keyed @@iterator property); other objects walk the prototype chain.
+fn get_iter_method(vm: &mut Vm, gc: &mut SemiSpace, value: Value) -> SymbolMethodResult {
+    if let Some(ptr) = value.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_STRING {
+            if vm.string_prototype.is_heap_object() {
+                if let Some(proto_ptr) = vm.string_prototype.heap_ptr() {
+                    let shape = unsafe { JSObject::shape_ptr(proto_ptr as *mut JSObject) };
+                    if let Some(slot) =
+                        shape.lookup(&PropertyKey::from_symbol(rune_core::symbol::SYM_ITERATOR))
+                    {
+                        let m = unsafe { JSObject::get_slot(proto_ptr as *mut JSObject, slot) };
+                        if m.is_undefined() || m.is_null() {
+                            return SymbolMethodResult::NotFound;
+                        }
+                        let callable = m.heap_ptr().is_some_and(|p| unsafe {
+                            (*(p as *const GcHeader)).tag() == TAG_FUNC
+                        }) || m.as_smi().is_some_and(|s| s < 0);
+                        return if callable {
+                            SymbolMethodResult::Found(m)
+                        } else {
+                            SymbolMethodResult::NotCallable
+                        };
+                    }
+                }
+            }
+            SymbolMethodResult::NotFound
+        } else if tag == TAG_OBJECT
+            || tag == TAG_ARRAY
+            || tag == TAG_FUNC
+            || tag == TAG_REGEXP
+            || tag == TAG_PROMISE
+            || tag == TAG_STRING_OBJ
+        {
+            get_symbol_method(
+                gc,
+                value,
+                rune_core::symbol::SYM_ITERATOR,
+                Some(vm.function_prototype),
+            )
+        } else {
+            SymbolMethodResult::NotFound
+        }
+    } else {
+        SymbolMethodResult::NotFound
+    }
+}
+
+/// Call a builtin by its negative-smi handle. Returns Ok(Value) on success.
+/// If the builtin raised an exception: Err(Some(exit)) means it must propagate;
+/// Err(None) means the exception was consumed internally (continue the loop).
+fn call_builtin_sync(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    handle: Value,
+    this: Value,
+    args: &[Value],
+) -> Result<Value, Option<Exit>> {
+    if let Some(smi) = handle.as_smi() {
+        if smi < 0 {
+            let id = ((-smi) as usize) - 1;
+            if id < vm.builtins.len() {
+                let result = (vm.builtins[id].func)(gc, this, args, vm);
+                if let Some(exc) = vm.pending_exception.take() {
+                    return Err(vm.handle_throw(gc, exc));
+                }
+                return Ok(result);
+            }
+        }
+    }
+    Err(Some(vm.throw_type_error(gc, "not a function")))
+}
+
+/// Allocate a dense array with DENSE_ARRAY_SHAPE and Array.prototype
+/// (mirrors the NewArray opcode setup).
+pub(crate) fn new_dense_array(vm: &mut Vm, gc: &mut SemiSpace) -> *mut u8 {
+    let arr = RuneArray::allocate(gc, &[]);
+    unsafe {
+        let ptr = arr as *mut u8;
+        let shape_ptr = ptr.add(8) as *mut *const Shape;
+        *shape_ptr = *DENSE_ARRAY_SHAPE as *const Shape;
+        let proto_ptr = ptr.add(24) as *mut *mut u8;
+        if vm.array_prototype.is_heap_object() {
+            if let Some(proto) = vm.array_prototype.heap_ptr() {
+                *proto_ptr = proto;
+            }
+        }
+    }
+    arr as *mut u8
+}
+
+/// Validate an iterator factory result and push [iterator, nextMethod] onto the
+/// stack (for..of loop head).
+fn complete_for_of_init(vm: &mut Vm, gc: &mut SemiSpace, iterator: Value) -> Result<(), Exit> {
+    if !iterator.is_heap_object() {
+        return Err(vm.throw_type_error(gc, "value is not iterable"));
+    }
+    let next = load_property_recursive(iterator, vm.next_key, Some(vm.function_prototype), gc);
+    let callable = next.as_smi().is_some_and(|s| s < 0)
+        || next
+            .heap_ptr()
+            .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC });
+    if !callable {
+        return Err(vm.throw_type_error(gc, "iterator.next is not a function"));
+    }
+    vm.push(iterator);
+    vm.push(next);
+    Ok(())
+}
+
+/// Process an iterator `next()` result: done → jump to the loop end (dropping
+/// [iterator, nextMethod]); otherwise push the value and advance pc.
+/// The stack must be [..., iterator, nextMethod] when called.
+fn process_for_of_next_result(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    result: Value,
+    end_target: usize,
+) -> Result<(), Exit> {
+    if !result.is_heap_object() {
+        return Err(vm.throw_type_error(gc, "Iterator result is not an object"));
+    }
+    let done = load_property_recursive(result, vm.done_key, None, gc).to_bool();
+    if done {
+        // Leave [iterator, nextMethod] on the stack — the loop-end Pop Pop
+        // (emitted at the exit target) discards them on this path.
+        let frames_len = vm.frames.len();
+        vm.frames[frames_len - 1].pc = end_target;
+    } else {
+        let value = load_property_recursive(result, vm.value_key, None, gc);
+        // Push the value ON TOP of [iterator, nextMethod] — the LHS store
+        // sequence pops it, leaving [iterator, nextMethod] for the next round.
+        vm.push(value);
+        let frames_len = vm.frames.len();
+        vm.frames[frames_len - 1].pc += 1;
+    }
+    Ok(())
+}
+
+/// Start draining an iterator into `arr` (spread conversion). If `next` is a
+/// builtin handle the drain is fully synchronous. If `next` is a JS function,
+/// sets `pending_iter_drain` and pushes the callback — the caller must
+/// `continue` without advancing pc (Err(None) signals this).
+fn drain_iterator(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    iterator: Value,
+    receiver: Value,
+    arr: *mut u8,
+) -> Result<*mut u8, Option<Exit>> {
+    if !iterator.is_heap_object() {
+        return Err(Some(vm.throw_type_error(gc, "value is not iterable")));
+    }
+    let next = load_property_recursive(iterator, vm.next_key, Some(vm.function_prototype), gc);
+    if next.as_smi().is_some_and(|s| s < 0) {
+        // Builtin next — drain synchronously.
+        let mut cur = arr;
+        loop {
+            let result = match call_builtin_sync(vm, gc, next, iterator, &[]) {
+                Ok(v) => v,
+                Err(Some(exit)) => return Err(Some(exit)),
+                Err(None) => return Err(None),
+            };
+            if !result.is_heap_object() {
+                return Err(Some(
+                    vm.throw_type_error(gc, "Iterator result is not an object"),
+                ));
+            }
+            let done = load_property_recursive(result, vm.done_key, None, gc).to_bool();
+            if done {
+                return Ok(cur);
+            }
+            let value = load_property_recursive(result, vm.value_key, None, gc);
+            cur = unsafe { RuneArray::push(gc, cur as *mut RuneArray, value) } as *mut u8;
+        }
+    } else if next.is_heap_object()
+        && unsafe { (*(next.heap_ptr().unwrap() as *const GcHeader)).tag() } == TAG_FUNC
+    {
+        vm.pending_iter_drain = Some(PendingIterDrain {
+            source_frame_depth: vm.frames.len() - 1,
+            state: IterDrainState::AwaitNext,
+            iter: iterator,
+            next,
+            result: arr,
+            receiver,
+        });
+        vm.push_callback_call(gc, next, iterator, vec![]);
+        Err(None)
+    } else {
+        Err(Some(
+            vm.throw_type_error(gc, "iterator.next is not a function"),
+        ))
     }
 }
 

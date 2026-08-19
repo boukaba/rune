@@ -514,7 +514,15 @@ impl Parser {
     fn parse_return(&mut self) -> Stmt {
         let start = self.span();
         self.advance();
-        let value = if self.has_semicolon_or_asi() {
+        // ASI for `return` is a restricted production: only a LineTerminator
+        // between `return` and the next token triggers it. The peek-ahead
+        // variant (has_semicolon_or_asi) would wrongly treat a newline INSIDE
+        // a following object/array literal (e.g. `return {\n a: 1\n };`) as ASI.
+        let value = if self.tok.kind == TokenKind::Semicolon
+            || self.tok.kind == TokenKind::RBrace
+            || self.tok.kind == TokenKind::Eof
+            || self.lexer.had_newline
+        {
             None
         } else {
             Some(Box::new(self.parse_expr_comma()))
@@ -756,6 +764,29 @@ impl Parser {
                     },
                 );
             }
+            if self.tok.kind == TokenKind::Of {
+                // for (var x of iterable)
+                self.advance();
+                let obj = self.parse_expr(0);
+                self.expect(TokenKind::RParen);
+                let body = Box::new(self.parse_statement());
+                let name = match &var_stmt {
+                    Stmt::Var(_, decls, _) if decls.len() == 1 && decls[0].pattern.is_none() => {
+                        decls[0].name.clone()
+                    }
+                    _ => panic!("for-of must have exactly one loop variable"),
+                };
+                let lhs = Box::new(Expr::Identifier(name, Span::default()));
+                return Stmt::ForOf(
+                    lhs,
+                    Box::new(obj),
+                    body,
+                    Span {
+                        start: start.start,
+                        end: self.span().end,
+                    },
+                );
+            }
             // C-style for with var: cond and update follow
             return self.parse_for_c_style(Some(Box::new(var_stmt)), start);
         }
@@ -767,6 +798,22 @@ impl Parser {
             self.expect(TokenKind::RParen);
             let body = Box::new(self.parse_statement());
             return Stmt::ForIn(
+                Box::new(lhs),
+                Box::new(obj),
+                body,
+                Span {
+                    start: start.start,
+                    end: self.span().end,
+                },
+            );
+        }
+        if self.tok.kind == TokenKind::Of {
+            // for (lhs of iterable)
+            self.advance();
+            let obj = self.parse_expr(0);
+            self.expect(TokenKind::RParen);
+            let body = Box::new(self.parse_statement());
+            return Stmt::ForOf(
                 Box::new(lhs),
                 Box::new(obj),
                 body,
@@ -2620,13 +2667,6 @@ impl Parser {
         } else if self.lexer.has_semicolon_or_asi() {
             // ASI is automatic — just proceed
         }
-    }
-
-    fn has_semicolon_or_asi(&mut self) -> bool {
-        self.tok.kind == TokenKind::Semicolon
-            || self.tok.kind == TokenKind::RBrace
-            || self.tok.kind == TokenKind::Eof
-            || self.lexer.has_semicolon_or_asi()
     }
 
     fn tok_can_start_expr(&self) -> bool {

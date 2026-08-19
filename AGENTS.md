@@ -44,7 +44,7 @@ breadth to run real workloads correctly, with the cold-start wedge intact.
 **v1.0 checklist (tick these off as they land):**
 - [x] **Symbols + well-known symbols** — `Symbol()` ctor, `@@iterator`,
       `@@match`/`@@search`/`@@split`/`@@replace` dispatch in match/search/split/replace
-- [ ] **Iteration protocol + `for..of`** — iterable/iterator/IteratorResult,
+- [x] **Iteration protocol + `for..of`** — iterable/iterator/IteratorResult,
       Array iterator, String iterator, `next`/`done`/`value`, spread uses iterator
 - [ ] **Map / Set** — ctor, get/set/has/delete/size, iteration, WeakRef later
 - [ ] **Date** — ctor, now/parse/UTC, getters/setters, toISOString, toString
@@ -90,6 +90,8 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - `json_round_trip` benchmark: Rune cold-start 7.6ms vs Node 21ms → **2.8× faster**. Warm: Rune 0.79ms vs Node 0.146ms → 5.4× slower.
 
 ### Done — v0.6
+- **Iteration protocol + `for..of`** — `Stmt::ForOf` (parser both for-head forms, member LHS `o.p`/`o[k]` via a `lhs_prefix` operand so ForOfNext reads `stack[len-1-prefix]` and the value lands on top of `[.., obj, key]` for StoreProperty); new opcodes ForOfInit/ForOfNext/ToArrayFromIterable (kept OUT of the JIT whitelist — for..of bails to interpreter); iterator state under hidden symbol `symbol_for("__rune_iter_state")` (id 13 at init); iterator objects = TAG_OBJECT with builtin-handle `"next"` prop, proto = Object.prototype (no separate %IteratorPrototype%); `Array.prototype.values/keys/entries` + `@@iterator`, `String.prototype[Symbol.iterator]` (UTF-16 code units, surrogate pairs = 2), `@@iterator` on iterator objects returns `this`; spread via iteration at all 5 sites (TAG_ARRAY pass-through, TAG_STRING → char array, else drain — sync for builtin next, `PendingIterDrain` AwaitFactory/AwaitNext for JS fns); break/continue via do-while sentinel scheme (done-cleanup pops lhs prefix then shared exit pops [iterator, nextMethod]); JS-fn factories/next via `PendingForOfInit`/`PendingForOfNext` state machines (Return-handler continuations, source_frame_depth, register_roots). 9 integration tests. 519/519 integration tests, 668 workspace.
+- **Iteration bug fixes (pre-existing silent miscompiles found by the new tests)** — (a) ForOfNext value case truncated the whole `[iterator, nextMethod]` (underflow on iteration 2) — now pushes the value on top; (b) `return` ASI: parse_return used the peek-ahead `has_semicolon_or_asi`, which scans raw source after the current token — `return {\n a: 1 }` wrongly ASI'd (newline inside braces) and parsed the literal as a block; `return` ASI is a restricted production governed only by `lexer.had_newline`; dead wrapper removed; (c) `while` break jumped to the JumpIfFalse instruction (mid-condition, corrupted stack) instead of its patched exit — while now uses the sentinel `pending_loop_jumps` scheme.
 - **Symbols + well-known symbols** — `Value::symbol(id)` tag 6 (inline NaN-boxed, no GC changes); thread_local symbol registry (descriptions + Symbol.for, 13 well-known symbols with stable ids); `PropertyKey::from_symbol` (high-bit encoding, from_string masks it) with symbol-keyed props excluded from for-in/Object.keys/values/entries/JSON.stringify; `Symbol()` ctor (ToString description, `new Symbol()` throws, `PendingSymbolCoercion` state machine for object descriptions), `Symbol.for`/`keyFor`; `Symbol.prototype` toString/valueOf/[@@toPrimitive]/[@@toStringTag]/description (per-receiver); `typeof` → "symbol" (interpreter + JIT helper, typeof_strings [Value; 7]); **@@match/@@search/@@split/@@replace GetMethod dispatch** in String.prototype methods (`PendingSymbolDispatch` state machine, TypeError on non-callable, legacy fallback untouched); TypeError guards for `String(sym)`/`"a"+sym`/`sym+1`/`Symbol(sym)`. 12 integration tests. 510/510 integration tests, 659 workspace.
 - **Ternary precedence fix (silent miscompile)** — `a === b ? x : y` parsed as `a === (b ? x : y)` because the ternary check ran regardless of `min_prec`; now gated on `min_prec == 0`. `1 === 1 ? 7 : 8` → 7. 498/498 integration tests, 644 workspace.
 - **Correctness batch — silent-miscompile elimination** — 10 features/regressions fixed and verified end-to-end (491/491 integration tests, 637 workspace tests):
@@ -151,6 +153,7 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - `replaceAll` function replacement not yet implemented
 - `Number(sym)`/arithmetic beyond `+` treat symbols as NaN (ToNumber(symbol) should throw TypeError — needs exception plumbing through to_number's call sites; deferred to conformance pass)
 - `Symbol.prototype.description` is computed in LoadProperty, not a real getter (getOwnPropertyDescriptor unavailable)
+- for..of gaps: no IteratorClose on break/return (observable only for user iterators with `return()`); `let`/`const` loop vars are plain locals (no per-iteration fresh binding); `Array.prototype.values/keys/entries` require TAG_ARRAY receivers (no array-likes); destructuring LHS in for..of discards the value; `done`/`value` read via load_property_recursive (accessors unresolved); iterator objects have no separate %IteratorPrototype%
 - `?.` in JIT: JumpIfNullOrUndefined not in the whitelist — optional chains bail to the interpreter (correct, slower in hot loops)
 - Nested accessors (getter inside getter) unsupported (single pending slot)
 - `this.prop++` not supported (Update only handles Identifier targets)
@@ -159,7 +162,7 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - Trace perf: bailout-per-iteration paths (e.g. float-promoted acc in a loop) still bail each iteration — re-record or stay native with float ops (correctness fine)
 
 ### Next Steps — v1.0 (ordered by leverage)
-1. Iteration protocol + `for..of` (wires up `@@iterator` — the next checklist item)
+1. **Map / Set** — ctor, get/set/has/delete/size, iteration, WeakRef later
 2. Trace perf: float-promoted accumulator loops bail per-iteration — re-record or emit float ops natively.
 3. `RegExp()` constructor
 4. Match result array `.index`/`.input` properties

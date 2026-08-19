@@ -59,6 +59,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 
 ## What Works
 
+- **Iteration:** `for..of` over arrays, strings (UTF-16 code points, surrogate pairs), user iterables (JS `@@iterator` factories + JS `next`), array iterators from `.values()`/`.keys()`/`.entries()`; `Symbol.iterator` lookup on arrays/strings; spread via iteration (`[...x]`, `f(...x)`); iterator objects are iterable (`it[Symbol.iterator]() === it`)
 - **Symbols:** `Symbol()` constructor (unique symbols, `new Symbol()` throws), descriptions + `toString()`/"Symbol(desc)", `Symbol.for`/`Symbol.keyFor`, 13 well-known symbols (`Symbol.iterator`, `Symbol.match`, `Symbol.replace`, `Symbol.search`, `Symbol.split`, `Symbol.toPrimitive`, `Symbol.hasInstance`, `Symbol.toStringTag`, `Symbol.species`, `Symbol.isConcatSpreadable`, `Symbol.unscopables`, `Symbol.matchAll`, `Symbol.asyncIterator`), symbol-keyed properties (`o[sym] = v` — excluded from for-in/Object.keys/JSON), `typeof sym === "symbol"`, **@@match/@@search/@@split/@@replace dispatch** in String.prototype.match/search/split/replace (GetMethod + callable check, TypeError on non-callable), `String(sym)`/`"a"+sym` throw TypeError
 - **Language core:** arithmetic (incl. `**` right-assoc), comparisons, logical operators (loose + strict), `??` nullish coalescing, `&&=`/`||=`/`??=` short-circuit assignment
 - **Scoping:** var, let, const with block scope and TDZ
@@ -66,7 +67,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 - **Objects:** literals, shorthand, methods, computed keys, spread, destructuring, member `obj.prop++` update
 - **Optional chaining:** `a?.b`, `a?.[b]`, `a?.b()`, `a?.()`, `?.#priv`, mixed chains (`a?.b.c?.[d]`) — whole chain short-circuits to undefined; syntax errors for `a?.b = c`, `new a?.b`
 - **Arrays:** dense arrays, spread, destructuring (declarations + assignment), rest, push/pop/length
-- **Control flow:** if/else, while, do/while (break/continue), for (continue runs the update), for-in, switch, try/catch/finally
+- **Control flow:** if/else, while, do/while (break/continue), for (continue runs the update), for-in, for..of (break/continue, member LHS), switch, try/catch/finally
 - **Generators:** function*, yield, next() (basic)
 - **Async/await:** `async function`, `async () =>`, `await expr` — generator-based, synchronous until first await, Promise-based continuation
 - **Promise:** constructor, resolve/reject, `.then`/`.catch`/`.finally`, `Promise.resolve`/`.reject`/`.all`/`.race`, microtask queue, **thenable unwrapping**
@@ -85,7 +86,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 
 ## What Doesn't Work (Yet)
 
-- **Standard library:** No Map, Set, Date, TypedArray, WeakRef. RegExp: no `RegExp()` constructor, match results lack `.index`/`.input`. Symbols: iteration protocol (`@@iterator`) not wired to for..of yet; `Number(sym)` returns NaN instead of throwing (ToNumber plumbing deferred).
+- **Standard library:** No Map, Set, Date, TypedArray, WeakRef. RegExp: no `RegExp()` constructor, match results lack `.index`/`.input`. Iteration: no IteratorClose on break/return, no `let`-per-iteration freshness in for..of, `.values()/.keys()/.entries()` need array receivers (no array-likes), destructuring LHS in for..of unsupported. Symbols: `Number(sym)` returns NaN instead of throwing (ToNumber plumbing deferred).
 - **String methods:** `replace` (string + regex pattern), `replaceAll`, `indexOf`, `charAt`, `slice`, `split`. No `trim`, `toUpperCase`, `toLowerCase`, `charCodeAt`.
 - **Array methods:** `filter`, `map`, `reduce`, `forEach`, `slice`, `find`, `some`, `every`, `sort`, `flat`, `flatMap`, `includes`, `push`, `pop`, `indexOf`.
 - **Modules:** No import/export (ESM)
@@ -192,6 +193,7 @@ This makes Rune uniquely suited for serverless: functions can be compiled once d
 | **v0.3.0** ✅ | Float self-tagging (NaN-boxing), stdlib (JSON round-trip, array methods, string split, parseInt/parseFloat), boolean coercion fix — 387 tests |
 | **v0.4.0** ✅ | 14 builtins: Object.keys/values/entries, Array find/some/every/sort/flat/flatMap/includes/indexOf, String replace/replaceAll, Number(), Function.prototype.call. 393 tests. |
 | **v0.5.0** 🚧 | **Promise**: constructor, `.then`/`.catch`/`.finally`, 3-level chaining, `resolve`/`reject`/`all`/`race`, **microtask queue** with reaction storage. **Async/await**: generator-based desugaring, `async function`/`async () =>`/`await`, synchronous until first await. Parser reserved-word fix. Array/String indexOf. **RegExp**: engine (parse→NFA→PikeVM), capture groups, `$1..$n` expansion, `RegExp.prototype.exec`/`.test`, prototype chain. **Class**: declarations, expressions, `extends`, `super()`, static methods, getter/setter, private fields (`#`). **String.prototype.match/search/split** for RegExp (no @@match/@@search/@@split yet, no RegExp constructor). **JIT lexical state**: `let`-loop traces run natively via lexical helper + bailout with preserved lexical envs (Mul-overflow bailout round-trip verified, Σ i² = 114,330,883,345,000). test262 Promise 46%. 482/482 integration tests (3 ignored). |
+| **v0.6.0** 🚧 | **Symbols**: `Symbol()` ctor, `Symbol.for`/`keyFor`, 13 well-known symbols, symbol-keyed props (excluded from for-in/keys/JSON), `typeof`, **@@match/@@search/@@split/@@replace GetMethod dispatch** in String methods, coercion TypeErrors. Ternary precedence fix. **Iteration protocol + `for..of`**: `Array.prototype.values/keys/entries` + `@@iterator`, `String.prototype[Symbol.iterator]`, user iterables (JS `@@iterator` factories + JS `next` via pending state machines), spread via iteration at all 5 sites (`[...x]`, `f(...x)`), break/continue, member LHS (`for (o.p of …)`), error paths. Fixed `return`-ASI peek-ahead bug and `while` break-target bug (both pre-existing silent miscompiles). 519/519 integration tests (3 ignored). |
 | **Sprint 18** ✅ | Non-TAG_ARRAY refactor, Function.prototype.call, P27 test262 harness (assert tracking + human-readable errors), P29 builtin throws catchable by try/catch, string same-value fix, boolean display fix, string_slice float edge cases, reduce mutation fix — 392 tests |
 | **v1.0.0** | Test262 >95%, production hardening, fuzzing |
 

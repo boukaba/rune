@@ -8522,3 +8522,316 @@ fn test_date_to_json() {
         "2026-08-19T12:34:56.789Z"
     );
 }
+
+#[test]
+fn test_typed_array_ctor_length() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("new Uint8Array(5).length").unwrap();
+    assert_eq!(r.as_smi(), Some(5));
+}
+
+#[test]
+fn test_typed_array_indexing() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var a = new Int32Array(3);
+             a[0] = 42;
+             a[1] = -7;
+             a[2] = 1.9;
+             a[0] + a[1] + a[2];",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(36));
+}
+
+#[test]
+fn test_typed_array_conversions() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var a = new Uint8Array(3);
+             a[0] = -1;       // wraps to 255
+             a[1] = 256;      // wraps to 0
+             a[2] = 3.7;      // truncates to 3
+             a[0] + a[1] + a[2];",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(258));
+}
+
+#[test]
+fn test_typed_array_from_array() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var a = new Float64Array([1, 2, 3.5]);
+             a[0] + a[1] + a[2];",
+        )
+        .unwrap();
+    assert_eq!(r.as_float64(), Some(6.5));
+}
+
+#[test]
+fn test_typed_array_out_of_range_noop() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var a = new Uint8Array(2);
+             a[5] = 99;
+             a[0] + a[1];",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(0));
+}
+
+#[test]
+fn test_array_buffer_basics() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var b = new ArrayBuffer(16);
+             b.byteLength;",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(16));
+}
+
+#[test]
+fn test_array_buffer_slice() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var b = new ArrayBuffer(16);
+             var c = b.slice(4, 10);
+             c.byteLength;",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(6));
+}
+
+#[test]
+fn test_typed_array_over_buffer() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var b = new ArrayBuffer(16);
+             var a = new Uint8Array(b, 4, 6);
+             a.length + a.byteOffset + a.byteLength;",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(16));
+}
+
+#[test]
+fn test_typed_array_buffer_share() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var b = new ArrayBuffer(8);
+             var a = new Uint8Array(b);
+             var c = new Uint8Array(b, 4);
+             a[0] = 7;
+             a[7] = 9;
+             c[0] + c[3];",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(9));
+}
+
+#[test]
+fn test_typed_array_set() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var a = new Int32Array(4);
+             a.set([1, 2, 3], 1);
+             a[0] + a[1] + a[2] + a[3];",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(6));
+}
+
+#[test]
+fn test_typed_array_subarray() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var a = new Uint8Array([1, 2, 3, 4, 5]);
+             var s = a.subarray(1, 4);
+             s.length + s[0] + s[2];",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(9));
+}
+
+#[test]
+fn test_typed_array_fill() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var a = new Uint8Array(4);
+             a.fill(9, 1, 3);
+             a[0] + a[1] + a[2] + a[3];",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(18));
+}
+
+#[test]
+fn test_typed_array_at_index_of_includes() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var a = new Int32Array([5, 10, 15]);
+             a.at(-1) + a.indexOf(10) + (a.includes(15) ? 100 : 0);",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(116));
+}
+
+#[test]
+fn test_typed_array_slice() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var a = new Uint8Array([1, 2, 3, 4]);
+             var s = a.slice(1, 3);
+             s.length + s[0] + s[1];",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(7));
+}
+
+#[test]
+fn test_typed_array_iteration() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var sum = 0;
+             for (var v of new Int32Array([4, 5, 6])) { sum += v; }
+             sum;",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(15));
+}
+
+#[test]
+fn test_typed_array_spread() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("[...new Uint8Array([1, 2, 3])].length").unwrap();
+    assert_eq!(r.as_smi(), Some(3));
+}
+
+#[test]
+fn test_typed_array_instanceof() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var a = new Uint8Array(2);
+             (a instanceof Uint8Array ? 1 : 0) + (a instanceof Int32Array ? 10 : 0) +
+             (a instanceof Array ? 100 : 0) + (new Float64Array(1) instanceof Float64Array ? 1000 : 0);",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(1001));
+}
+
+#[test]
+fn test_typed_array_plain_call_throws() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var x;
+             try { Uint8Array(3); x = 'no'; } catch (e) { x = 'yes'; }
+             x;",
+        )
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "yes"
+    );
+}
+
+#[test]
+fn test_array_buffer_plain_call_throws() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var x;
+             try { ArrayBuffer(4); x = 'no'; } catch (e) { x = 'yes'; }
+             x;",
+        )
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "yes"
+    );
+}
+
+#[test]
+fn test_typed_array_from_string() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("new Uint16Array('abc').length").unwrap();
+    assert_eq!(r.as_smi(), Some(3));
+}
+
+#[test]
+fn test_typed_array_from_typed_array() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var a = new Uint8Array([1, 2, 3]);
+             var b = new Int16Array(a);
+             b.length + b[1];",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(5));
+}
+
+#[test]
+fn test_typed_array_constructor_props() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "Uint8Array.BYTES_PER_ELEMENT + Float64Array.BYTES_PER_ELEMENT +
+             new Uint8Array(1).BYTES_PER_ELEMENT;",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(10));
+}
+
+#[test]
+fn test_typed_array_u8clamped() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var a = new Uint8ClampedArray(3);
+             a[0] = -5;   // clamps to 0
+             a[1] = 300;  // clamps to 255
+             a[2] = 2.5;  // rounds to 2 (half-to-even)
+             a[0] + a[1] + a[2];",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(257));
+}
+
+#[test]
+fn test_typed_array_overlapping_set() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var a = new Uint8Array([1, 2, 3, 4]);
+             a.set(a.subarray(0, 3), 1);
+             a[0] + a[1] + a[2] + a[3];",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(7));
+}

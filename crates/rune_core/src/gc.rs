@@ -16,6 +16,8 @@ pub const TAG_ACCESSOR: u64 = 10;
 pub const TAG_MAP: u64 = 11;
 pub const TAG_SET: u64 = 12;
 pub const TAG_DATE: u64 = 13;
+pub const TAG_ARRAY_BUFFER: u64 = 14;
+pub const TAG_TYPED_ARRAY: u64 = 15;
 
 /// Tag bits mask for GC header tag.
 pub const GC_TAG_MASK: u64 = 0b1111;
@@ -305,6 +307,15 @@ impl SemiSpace {
                         let proto_ptr = scan_ptr.add(24) as *mut u64;
                         self.forward_value(proto_ptr);
                     }
+                    TAG_ARRAY_BUFFER => {
+                        // Byte block is Box'd outside the semi-space — no children.
+                    }
+                    TAG_TYPED_ARRAY => {
+                        let buf_ptr = scan_ptr.add(8) as *mut u64;
+                        self.forward_value(buf_ptr);
+                        let proto_ptr = scan_ptr.add(32) as *mut u64;
+                        self.forward_value(proto_ptr);
+                    }
                     _ => {}
                 }
 
@@ -355,6 +366,8 @@ impl SemiSpace {
                 TAG_MAP => obj_start.add(crate::map::MAP_SIZE),
                 TAG_SET => obj_start.add(crate::map::SET_SIZE),
                 TAG_DATE => obj_start.add(crate::date::DATE_SIZE),
+                TAG_ARRAY_BUFFER => obj_start.add(crate::typedarray::ARRAY_BUFFER_SIZE),
+                TAG_TYPED_ARRAY => obj_start.add(crate::typedarray::TYPED_ARRAY_SIZE),
                 _ => obj_start.add(8),
             }
         }

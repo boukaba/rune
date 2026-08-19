@@ -8,8 +8,9 @@ use crate::vm::{CollectionCtorState, PendingCollectionCtor, PendingCollectionFor
 use rune_core::array::RuneArray;
 use rune_core::date;
 use rune_core::gc::{
-    GcHeader, SemiSpace, TAG_ARRAY, TAG_DATE, TAG_FLOAT64, TAG_FORWARDED, TAG_FUNC, TAG_MAP,
-    TAG_OBJECT, TAG_PROMISE, TAG_REGEXP, TAG_SET, TAG_STRING, TAG_STRING_OBJ,
+    GcHeader, SemiSpace, TAG_ARRAY, TAG_ARRAY_BUFFER, TAG_DATE, TAG_FLOAT64, TAG_FORWARDED,
+    TAG_FUNC, TAG_MAP, TAG_OBJECT, TAG_PROMISE, TAG_REGEXP, TAG_SET, TAG_STRING, TAG_STRING_OBJ,
+    TAG_TYPED_ARRAY,
 };
 use rune_core::map::{RuneMap, RuneSet};
 use rune_core::object::JSObject;
@@ -22,6 +23,7 @@ use rune_core::symbol::{
     SYM_MATCH, SYM_REPLACE, SYM_SEARCH, SYM_SPLIT, register_symbol, symbol_display, symbol_for,
     symbol_key_for,
 };
+use rune_core::typedarray;
 use rune_core::value::Value;
 
 /// A registered built-in function.
@@ -673,17 +675,24 @@ pub fn array_iterator_next(gc: &mut SemiSpace, this: Value, _args: &[Value], vm:
                         .as_smi()
                         .unwrap_or(2) as usize;
                     if let Some(arr_ptr) = arr_val.heap_ptr() {
-                        if unsafe { (*(arr_ptr as *const GcHeader)).tag() } == TAG_ARRAY {
-                            let len =
-                                unsafe { RuneArray::length(arr_ptr as *mut RuneArray) } as usize;
+                        let arr_tag = unsafe { (*(arr_ptr as *const GcHeader)).tag() };
+                        if arr_tag == TAG_ARRAY || arr_tag == TAG_TYPED_ARRAY {
+                            let len = if arr_tag == TAG_ARRAY {
+                                (unsafe { RuneArray::length(arr_ptr as *mut RuneArray) }) as usize
+                            } else {
+                                unsafe { typedarray::RuneTypedArray::length(arr_ptr) }
+                            };
                             if index >= len {
                                 unsafe {
                                     RuneArray::set_element(state, 0, Value::undefined());
                                 }
                                 return make_iter_result(gc, Value::undefined(), true);
                             }
-                            let value =
-                                unsafe { RuneArray::get_element(arr_ptr as *mut RuneArray, index) };
+                            let value = if arr_tag == TAG_ARRAY {
+                                unsafe { RuneArray::get_element(arr_ptr as *mut RuneArray, index) }
+                            } else {
+                                unsafe { typedarray::read_element(arr_ptr, index) }
+                            };
                             unsafe {
                                 RuneArray::set_element(state, 1, Value::smi((index + 1) as i32));
                             }
@@ -2192,6 +2201,778 @@ pub fn date_set_utc_seconds_builtin(
     ));
     unsafe { date::RuneDate::set_tv(ptr, v) };
     date_number(v)
+}
+
+/// §7.1.23 ToIndex — non-negative integer in [0, 2^53-1] or RangeError.
+fn to_index_typed(gc: &mut SemiSpace, vm: &mut Vm, v: Value) -> Result<usize, ()> {
+    let n = to_number(v);
+    let i = if n.is_nan() || n == 0.0 {
+        0.0
+    } else if n.is_infinite() {
+        f64::INFINITY
+    } else {
+        n.trunc()
+    };
+    if !(0.0..=9007199254740991.0).contains(&i) {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "RangeError: Invalid typed array length",
+        )));
+        return Err(());
+    }
+    Ok(i as usize)
+}
+
+/// §7.1.25 ToClampedIndex — negative relative to length, clamped to [0, length].
+fn to_clamped_index(v: Value, length: usize) -> usize {
+    let n = to_number(v);
+    let i = if n.is_nan() || n == 0.0 {
+        0
+    } else if n.is_infinite() {
+        if n > 0.0 { i64::MAX } else { i64::MIN }
+    } else {
+        n.trunc() as i64
+    };
+    let idx = if i < 0 { length as i64 + i } else { i };
+    if idx < 0 {
+        0
+    } else if idx as usize > length {
+        length
+    } else {
+        idx as usize
+    }
+}
+
+/// §7.1.24 ToAbsoluteIndex — negative relative to length, unclamped.
+fn to_absolute_index(v: Value, length: usize) -> i64 {
+    let n = to_number(v);
+    let i = if n.is_nan() || n == 0.0 {
+        0
+    } else if n.is_infinite() {
+        if n > 0.0 { i64::MAX } else { i64::MIN }
+    } else {
+        n.trunc() as i64
+    };
+    if i < 0 { length as i64 + i } else { i }
+}
+
+/// Receiver check for TypedArray builtins — returns the RuneTypedArray ptr.
+fn typed_array_receiver(gc: &mut SemiSpace, this: Value, vm: &mut Vm) -> Option<*mut u8> {
+    if let Some(ptr) = this.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_TYPED_ARRAY {
+            return Some(ptr);
+        }
+    }
+    vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        gc,
+        "TypeError: Method called on incompatible receiver",
+    )));
+    None
+}
+
+/// Receiver check for ArrayBuffer builtins.
+fn array_buffer_receiver(gc: &mut SemiSpace, this: Value, vm: &mut Vm) -> Option<*mut u8> {
+    if let Some(ptr) = this.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_ARRAY_BUFFER {
+            return Some(ptr);
+        }
+    }
+    vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        gc,
+        "TypeError: Method called on incompatible receiver",
+    )));
+    None
+}
+
+/// Allocate a fresh ArrayBuffer for a typed array of `length` elements.
+fn typed_alloc_buffer(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    kind: typedarray::TypedArrayKind,
+    length: usize,
+) -> Option<*mut u8> {
+    let byte_len = length * kind.element_size();
+    let proto = vm
+        .array_buffer_prototype
+        .heap_ptr()
+        .unwrap_or(std::ptr::null_mut());
+    Some(typedarray::RuneArrayBuffer::allocate(gc, byte_len, proto))
+}
+
+/// §23.2.5.1 TypedArray ( ...args ) — shared ctor body; `this` is the
+/// pre-allocated RuneTypedArray (proto already set by the New arm).
+fn typed_array_ctor_impl(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+    kind: typedarray::TypedArrayKind,
+) -> Value {
+    let ptr = match this.heap_ptr() {
+        Some(p) => p,
+        None => return Value::undefined(),
+    };
+    let argc = args.len();
+    if argc == 0 {
+        // AllocateTypedArrayBuffer(obj, 0)
+        if let Some(buf) = typed_alloc_buffer(gc, vm, kind, 0) {
+            unsafe {
+                typedarray::RuneTypedArray::set_buffer(ptr, buf);
+                typedarray::RuneTypedArray::set_kind(ptr, kind);
+                typedarray::RuneTypedArray::set_length(ptr, 0);
+                typedarray::RuneTypedArray::set_byte_offset(ptr, 0);
+            }
+        }
+        return this;
+    }
+    let first = args[0];
+    // Object argument?
+    if let Some(fp) = first.heap_ptr() {
+        let ftag = unsafe { (*(fp as *const GcHeader)).tag() };
+        if ftag == TAG_ARRAY_BUFFER {
+            // §23.2.5.1.3 InitializeTypedArrayFromArrayBuffer
+            let byte_offset = if argc > 1 {
+                args[1]
+            } else {
+                Value::undefined()
+            };
+            let length_arg = if argc > 2 {
+                args[2]
+            } else {
+                Value::undefined()
+            };
+            let size = kind.element_size();
+            let offset = match to_index_typed(gc, vm, byte_offset) {
+                Ok(o) => o,
+                Err(()) => return Value::undefined(),
+            };
+            if offset % size != 0 {
+                vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+                    gc,
+                    "RangeError: Start offset of Uint8Array should be a multiple of 1",
+                )));
+                return Value::undefined();
+            }
+            let buf_len = unsafe { typedarray::RuneArrayBuffer::byte_length(fp) };
+            let (new_byte_len, new_len) = if length_arg.is_undefined() {
+                if buf_len % size != 0 {
+                    vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+                        gc,
+                        "RangeError: Attempting to construct an invalid TypedArray",
+                    )));
+                    return Value::undefined();
+                }
+                if buf_len < offset {
+                    vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+                        gc,
+                        "RangeError: Start offset is outside the bounds of the buffer",
+                    )));
+                    return Value::undefined();
+                }
+                (buf_len - offset, (buf_len - offset) / size)
+            } else {
+                let new_len = match to_index_typed(gc, vm, length_arg) {
+                    Ok(l) => l,
+                    Err(()) => return Value::undefined(),
+                };
+                let nb = new_len * size;
+                if offset + nb > buf_len {
+                    vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+                        gc,
+                        "RangeError: Invalid typed array length",
+                    )));
+                    return Value::undefined();
+                }
+                (nb, new_len)
+            };
+            unsafe {
+                typedarray::RuneTypedArray::set_buffer(ptr, fp);
+                typedarray::RuneTypedArray::set_kind(ptr, kind);
+                typedarray::RuneTypedArray::set_byte_offset(ptr, offset);
+                typedarray::RuneTypedArray::set_length(ptr, new_len);
+            }
+            let _ = new_byte_len;
+            return this;
+        }
+        if ftag == TAG_TYPED_ARRAY {
+            // §23.2.5.1.2 InitializeTypedArrayFromTypedArray — elementwise
+            // (snapshots the source so overlapping conversion is safe).
+            let src_len = unsafe { typedarray::RuneTypedArray::length(fp) };
+            let mut vals = Vec::with_capacity(src_len);
+            for i in 0..src_len {
+                vals.push(to_number(unsafe { typedarray::read_element(fp, i) }));
+            }
+            if let Some(buf) = typed_alloc_buffer(gc, vm, kind, src_len) {
+                unsafe {
+                    typedarray::RuneTypedArray::set_buffer(ptr, buf);
+                    typedarray::RuneTypedArray::set_kind(ptr, kind);
+                    typedarray::RuneTypedArray::set_length(ptr, src_len);
+                    typedarray::RuneTypedArray::set_byte_offset(ptr, 0);
+                    for (i, v) in vals.iter().enumerate() {
+                        typedarray::write_element(ptr, i, typedarray::convert_number(kind, *v));
+                    }
+                }
+            }
+            return this;
+        }
+        if ftag == TAG_ARRAY || ftag == TAG_STRING {
+            // §23.2.5.1.5 InitializeTypedArrayFromArrayLike
+            let len = if ftag == TAG_ARRAY {
+                unsafe { rune_core::array::RuneArray::length(fp as *mut RuneArray) as usize }
+            } else {
+                unsafe { rune_core::string::HeapString::to_string(fp as *mut HeapString) }
+                    .encode_utf16()
+                    .count()
+            };
+            if let Some(buf) = typed_alloc_buffer(gc, vm, kind, len) {
+                unsafe {
+                    typedarray::RuneTypedArray::set_buffer(ptr, buf);
+                    typedarray::RuneTypedArray::set_kind(ptr, kind);
+                    typedarray::RuneTypedArray::set_length(ptr, len);
+                    typedarray::RuneTypedArray::set_byte_offset(ptr, 0);
+                }
+            }
+            for i in 0..len {
+                let v = if ftag == TAG_ARRAY {
+                    unsafe { rune_core::array::RuneArray::get_element(fp as *mut RuneArray, i) }
+                } else {
+                    let s =
+                        unsafe { rune_core::string::HeapString::to_string(fp as *mut HeapString) };
+                    Value::smi(s.encode_utf16().nth(i).unwrap_or(0) as i32)
+                };
+                let n = to_number(v);
+                unsafe {
+                    typedarray::write_element(ptr, i, typedarray::convert_number(kind, n));
+                }
+            }
+            return this;
+        }
+        // Generic array-like object (plain objects): length + index gets.
+        let len_val = load_property_recursive(
+            first,
+            Value::from_heap_ptr(crate::vm::heap_string(gc, "length")),
+            Some(vm.function_prototype),
+            gc,
+        );
+        let len = to_number(len_val);
+        let len = if len.is_nan() || len <= 0.0 {
+            0
+        } else {
+            len.trunc() as usize
+        };
+        if let Some(buf) = typed_alloc_buffer(gc, vm, kind, len) {
+            unsafe {
+                typedarray::RuneTypedArray::set_buffer(ptr, buf);
+                typedarray::RuneTypedArray::set_kind(ptr, kind);
+                typedarray::RuneTypedArray::set_length(ptr, len);
+                typedarray::RuneTypedArray::set_byte_offset(ptr, 0);
+            }
+        }
+        for i in 0..len {
+            let v = load_property_recursive(
+                first,
+                Value::smi(i as i32),
+                Some(vm.function_prototype),
+                gc,
+            );
+            let n = to_number(v);
+            unsafe {
+                typedarray::write_element(ptr, i, typedarray::convert_number(kind, n));
+            }
+        }
+        return this;
+    }
+    // §23.2.5.1 step 9: ToIndex(firstArg) → AllocateTypedArrayBuffer
+    let element_length = match to_index_typed(gc, vm, first) {
+        Ok(l) => l,
+        Err(()) => return Value::undefined(),
+    };
+    if let Some(buf) = typed_alloc_buffer(gc, vm, kind, element_length) {
+        unsafe {
+            typedarray::RuneTypedArray::set_buffer(ptr, buf);
+            typedarray::RuneTypedArray::set_kind(ptr, kind);
+            typedarray::RuneTypedArray::set_length(ptr, element_length);
+            typedarray::RuneTypedArray::set_byte_offset(ptr, 0);
+        }
+    }
+    this
+}
+
+macro_rules! typed_array_ctor {
+    ($name:ident, $kind:expr) => {
+        pub fn $name(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+            typed_array_ctor_impl(gc, this, args, vm, $kind)
+        }
+    };
+}
+
+typed_array_ctor!(int8array_constructor, typedarray::TypedArrayKind::Int8);
+typed_array_ctor!(uint8array_constructor, typedarray::TypedArrayKind::Uint8);
+typed_array_ctor!(
+    uint8clampedarray_constructor,
+    typedarray::TypedArrayKind::Uint8Clamped
+);
+typed_array_ctor!(int16array_constructor, typedarray::TypedArrayKind::Int16);
+typed_array_ctor!(uint16array_constructor, typedarray::TypedArrayKind::Uint16);
+typed_array_ctor!(int32array_constructor, typedarray::TypedArrayKind::Int32);
+typed_array_ctor!(uint32array_constructor, typedarray::TypedArrayKind::Uint32);
+typed_array_ctor!(
+    float32array_constructor,
+    typedarray::TypedArrayKind::Float32
+);
+typed_array_ctor!(
+    float64array_constructor,
+    typedarray::TypedArrayKind::Float64
+);
+
+/// §25.1.4.1 ArrayBuffer ( length [ , options ] ) — `this` is a pre-allocated
+/// zero-length RuneArrayBuffer; sets the real byte length.
+pub fn array_buffer_constructor(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = this.heap_ptr() else {
+        return Value::undefined();
+    };
+    let byte_length =
+        match to_index_typed(gc, vm, args.first().copied().unwrap_or(Value::undefined())) {
+            Ok(l) => l,
+            Err(()) => return Value::undefined(),
+        };
+    if byte_length > 0 {
+        let data = vec![0u8; byte_length].into_boxed_slice();
+        unsafe {
+            typedarray::RuneArrayBuffer::set_data_and_length(
+                ptr,
+                Box::into_raw(data) as *mut u8,
+                byte_length,
+            );
+        }
+    }
+    this
+}
+
+/// §25.1.5.1 ArrayBuffer.isView ( arg )
+pub fn array_buffer_is_view_builtin(
+    _gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    _vm: &mut Vm,
+) -> Value {
+    let _ = this;
+    let ok = args
+        .first()
+        .and_then(|v| v.heap_ptr())
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_TYPED_ARRAY });
+    Value::boolean(ok)
+}
+
+/// §25.1.6.7 ArrayBuffer.prototype.slice ( start, end )
+pub fn array_buffer_slice_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = array_buffer_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let len = unsafe { typedarray::RuneArrayBuffer::byte_length(ptr) };
+    let first = to_clamped_index(args.first().copied().unwrap_or(Value::smi(0)), len);
+    let final_ = if args.get(1).is_none_or(|v| v.is_undefined()) {
+        len
+    } else {
+        to_clamped_index(args[1], len)
+    };
+    let new_len = final_.saturating_sub(first);
+    let proto = vm
+        .array_buffer_prototype
+        .heap_ptr()
+        .unwrap_or(std::ptr::null_mut());
+    let new_ptr = typedarray::RuneArrayBuffer::allocate(gc, new_len, proto);
+    if new_len > 0 {
+        unsafe {
+            typedarray::RuneArrayBuffer::copy_from(
+                new_ptr,
+                0,
+                typedarray::RuneArrayBuffer::data(ptr),
+                first,
+                new_len,
+            );
+        }
+    }
+    Value::from_heap_ptr(new_ptr)
+}
+
+/// §23.2.3.30 TypedArray.prototype.subarray ( start, end ) — shares the buffer.
+pub fn typed_array_subarray_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = typed_array_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let kind = unsafe { typedarray::RuneTypedArray::kind(ptr) };
+    let length = unsafe { typedarray::RuneTypedArray::length(ptr) };
+    let start = to_clamped_index(args.first().copied().unwrap_or(Value::smi(0)), length);
+    let end = if args.get(1).is_none_or(|v| v.is_undefined()) {
+        length
+    } else {
+        to_clamped_index(args[1], length)
+    };
+    let new_len = end.saturating_sub(start);
+    let size = kind.element_size();
+    let new_off = unsafe { typedarray::RuneTypedArray::byte_offset(ptr) } + start * size;
+    let proto = vm
+        .typed_array_protos
+        .get(kind as usize)
+        .and_then(|v| v.heap_ptr())
+        .unwrap_or(std::ptr::null_mut());
+    let new_ptr = typedarray::RuneTypedArray::allocate(gc, proto);
+    unsafe {
+        typedarray::RuneTypedArray::set_buffer(new_ptr, typedarray::RuneTypedArray::buffer(ptr));
+        typedarray::RuneTypedArray::set_kind(new_ptr, kind);
+        typedarray::RuneTypedArray::set_byte_offset(new_ptr, new_off);
+        typedarray::RuneTypedArray::set_length(new_ptr, new_len);
+    }
+    Value::from_heap_ptr(new_ptr)
+}
+
+/// §23.2.3.9 TypedArray.prototype.fill ( value [ , start [ , end ] ] )
+pub fn typed_array_fill_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = typed_array_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let kind = unsafe { typedarray::RuneTypedArray::kind(ptr) };
+    let length = unsafe { typedarray::RuneTypedArray::length(ptr) };
+    let value = typedarray::convert_number(
+        kind,
+        to_number(args.first().copied().unwrap_or(Value::undefined())),
+    );
+    let start = to_clamped_index(args.get(1).copied().unwrap_or(Value::smi(0)), length);
+    let end = if args.get(2).is_none_or(|v| v.is_undefined()) {
+        length
+    } else {
+        to_clamped_index(args[2], length)
+    };
+    for i in start..end.min(length) {
+        unsafe {
+            typedarray::write_element(ptr, i, value);
+        }
+    }
+    this
+}
+
+/// §23.2.3.1 TypedArray.prototype.at ( index )
+pub fn typed_array_at_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = typed_array_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let length = unsafe { typedarray::RuneTypedArray::length(ptr) };
+    let k = to_absolute_index(args.first().copied().unwrap_or(Value::smi(0)), length);
+    if k < 0 || k as usize >= length {
+        return Value::undefined();
+    }
+    unsafe { typedarray::read_element(ptr, k as usize) }
+}
+
+/// §23.2.3.17 TypedArray.prototype.indexOf ( searchElement [ , fromIndex ] )
+pub fn typed_array_index_of_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = typed_array_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let length = unsafe { typedarray::RuneTypedArray::length(ptr) };
+    let search = args.first().copied().unwrap_or(Value::undefined());
+    let k = if length == 0 {
+        0
+    } else {
+        to_clamped_index(args.get(1).copied().unwrap_or(Value::smi(0)), length)
+    };
+    let mut i = k;
+    while i < length {
+        let el = unsafe { typedarray::read_element(ptr, i) };
+        if el == search {
+            return Value::smi(i as i32);
+        }
+        i += 1;
+    }
+    Value::smi(-1)
+}
+
+/// §23.2.3.16 TypedArray.prototype.includes ( searchElement [ , fromIndex ] )
+pub fn typed_array_includes_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = typed_array_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let length = unsafe { typedarray::RuneTypedArray::length(ptr) };
+    if length == 0 {
+        return Value::boolean(false);
+    }
+    let search = args.first().copied().unwrap_or(Value::undefined());
+    let k = to_clamped_index(args.get(1).copied().unwrap_or(Value::smi(0)), length);
+    let mut i = k;
+    while i < length {
+        let el = unsafe { typedarray::read_element(ptr, i) };
+        if same_value_zero(el, search) {
+            return Value::boolean(true);
+        }
+        i += 1;
+    }
+    Value::boolean(false)
+}
+
+/// §23.2.3.26 TypedArray.prototype.set ( source [ , offset ] )
+pub fn typed_array_set_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(target) = typed_array_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let Some(source) = args.first().copied() else {
+        return Value::undefined();
+    };
+    let target_offset = {
+        let n = to_number(args.get(1).copied().unwrap_or(Value::smi(0)));
+        if n.is_nan() || n == 0.0 {
+            0.0
+        } else {
+            n.trunc()
+        }
+    };
+    if target_offset < 0.0 {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "RangeError: Offset is out of bounds",
+        )));
+        return Value::undefined();
+    }
+    let target_offset = target_offset as usize;
+    let target_len = unsafe { typedarray::RuneTypedArray::length(target) };
+    let target_kind = unsafe { typedarray::RuneTypedArray::kind(target) };
+
+    enum ReadSource {
+        Typed(*mut u8),
+        Array(*mut u8),
+        Object,
+    }
+    let (src_len, read_src) = if let Some(sp) = source.heap_ptr() {
+        let stag = unsafe { (*(sp as *const GcHeader)).tag() };
+        if stag == TAG_TYPED_ARRAY {
+            (
+                unsafe { typedarray::RuneTypedArray::length(sp) },
+                ReadSource::Typed(sp),
+            )
+        } else if stag == TAG_ARRAY {
+            (
+                unsafe { rune_core::array::RuneArray::length(sp as *mut RuneArray) as usize },
+                ReadSource::Array(sp),
+            )
+        } else {
+            // Array-like: length + indexed gets via the load path.
+            let len_val = load_property_recursive(
+                source,
+                Value::from_heap_ptr(crate::vm::heap_string(gc, "length")),
+                Some(vm.function_prototype),
+                gc,
+            );
+            let ln = to_number(len_val);
+            let ln = if ln.is_nan() || ln <= 0.0 {
+                0
+            } else {
+                ln.trunc() as usize
+            };
+            (ln, ReadSource::Object)
+        }
+    } else {
+        // Primitives are not array-like.
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "TypeError: Cannot convert undefined or null to object",
+        )));
+        return Value::undefined();
+    };
+
+    if src_len + target_offset > target_len {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "RangeError: Offset is out of bounds",
+        )));
+        return Value::undefined();
+    }
+    // Snapshot the source values first (spec §23.2.3.26.2 clones the buffer
+    // when source and target share one — a value snapshot is equivalent).
+    let mut vals = Vec::with_capacity(src_len);
+    for i in 0..src_len {
+        let v = match read_src {
+            ReadSource::Typed(sp) => unsafe { typedarray::read_element(sp, i) },
+            ReadSource::Array(sp) => unsafe {
+                rune_core::array::RuneArray::get_element(sp as *mut RuneArray, i)
+            },
+            ReadSource::Object => load_property_recursive(
+                source,
+                Value::smi(i as i32),
+                Some(vm.function_prototype),
+                gc,
+            ),
+        };
+        vals.push(to_number(v));
+    }
+    for (i, v) in vals.iter().enumerate() {
+        unsafe {
+            typedarray::write_element(
+                target,
+                target_offset + i,
+                typedarray::convert_number(target_kind, *v),
+            );
+        }
+    }
+    Value::undefined()
+}
+
+/// §23.2.3.32 TypedArray.prototype.slice ( start, end )
+pub fn typed_array_slice_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = typed_array_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let kind = unsafe { typedarray::RuneTypedArray::kind(ptr) };
+    let length = unsafe { typedarray::RuneTypedArray::length(ptr) };
+    let start = to_clamped_index(args.first().copied().unwrap_or(Value::smi(0)), length);
+    let end = if args.get(1).is_none_or(|v| v.is_undefined()) {
+        length
+    } else {
+        to_clamped_index(args[1], length)
+    };
+    let new_len = end.saturating_sub(start);
+    let proto = vm
+        .typed_array_protos
+        .get(kind as usize)
+        .and_then(|v| v.heap_ptr())
+        .unwrap_or(std::ptr::null_mut());
+    let new_ptr = typedarray::RuneTypedArray::allocate(gc, proto);
+    if let Some(buf) = typed_alloc_buffer(gc, vm, kind, new_len) {
+        unsafe {
+            typedarray::RuneTypedArray::set_buffer(new_ptr, buf);
+            typedarray::RuneTypedArray::set_kind(new_ptr, kind);
+            typedarray::RuneTypedArray::set_length(new_ptr, new_len);
+            typedarray::RuneTypedArray::set_byte_offset(new_ptr, 0);
+            for i in 0..new_len {
+                let v = typedarray::read_element(ptr, start + i);
+                let n = to_number(v);
+                typedarray::write_element(new_ptr, i, typedarray::convert_number(kind, n));
+            }
+        }
+    }
+    Value::from_heap_ptr(new_ptr)
+}
+
+/// TypedArray.prototype.values — iterator over element values (kind 2).
+pub fn typed_array_values_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let ok = this
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_TYPED_ARRAY });
+    if !ok {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "TypeError: requires a typed array receiver",
+        )));
+        return Value::undefined();
+    }
+    make_iterator_object(
+        gc,
+        vm,
+        "Array_iterator_next",
+        &[this, Value::smi(0), Value::smi(2)],
+        "Array Iterator",
+    )
+}
+
+/// TypedArray.prototype.keys — iterator over indices (kind 1).
+pub fn typed_array_keys_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let ok = this
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_TYPED_ARRAY });
+    if !ok {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "TypeError: requires a typed array receiver",
+        )));
+        return Value::undefined();
+    }
+    make_iterator_object(
+        gc,
+        vm,
+        "Array_iterator_next",
+        &[this, Value::smi(0), Value::smi(1)],
+        "Array Iterator",
+    )
+}
+
+/// TypedArray.prototype.entries — iterator over [index, value] pairs (kind 0).
+pub fn typed_array_entries_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let ok = this
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_TYPED_ARRAY });
+    if !ok {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "TypeError: requires a typed array receiver",
+        )));
+        return Value::undefined();
+    }
+    make_iterator_object(
+        gc,
+        vm,
+        "Array_iterator_next",
+        &[this, Value::smi(0), Value::smi(0)],
+        "Array Iterator",
+    )
 }
 
 /// §27.1.3.6 Map.prototype.forEach(callback, thisArg)
@@ -5856,6 +6637,116 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 0,
             name: "Iterator_prototype_symbol_iterator",
             func: iterator_prototype_symbol_iterator,
+        },
+        Builtin {
+            length: 1,
+            name: "ArrayBuffer",
+            func: array_buffer_constructor,
+        },
+        Builtin {
+            length: 1,
+            name: "ArrayBuffer_isView",
+            func: array_buffer_is_view_builtin,
+        },
+        Builtin {
+            length: 2,
+            name: "ArrayBuffer_prototype_slice",
+            func: array_buffer_slice_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "Int8Array",
+            func: int8array_constructor,
+        },
+        Builtin {
+            length: 3,
+            name: "Uint8Array",
+            func: uint8array_constructor,
+        },
+        Builtin {
+            length: 3,
+            name: "Uint8ClampedArray",
+            func: uint8clampedarray_constructor,
+        },
+        Builtin {
+            length: 3,
+            name: "Int16Array",
+            func: int16array_constructor,
+        },
+        Builtin {
+            length: 3,
+            name: "Uint16Array",
+            func: uint16array_constructor,
+        },
+        Builtin {
+            length: 3,
+            name: "Int32Array",
+            func: int32array_constructor,
+        },
+        Builtin {
+            length: 3,
+            name: "Uint32Array",
+            func: uint32array_constructor,
+        },
+        Builtin {
+            length: 3,
+            name: "Float32Array",
+            func: float32array_constructor,
+        },
+        Builtin {
+            length: 3,
+            name: "Float64Array",
+            func: float64array_constructor,
+        },
+        Builtin {
+            length: 2,
+            name: "TypedArray_prototype_set",
+            func: typed_array_set_builtin,
+        },
+        Builtin {
+            length: 2,
+            name: "TypedArray_prototype_subarray",
+            func: typed_array_subarray_builtin,
+        },
+        Builtin {
+            length: 3,
+            name: "TypedArray_prototype_fill",
+            func: typed_array_fill_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "TypedArray_prototype_at",
+            func: typed_array_at_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "TypedArray_prototype_indexOf",
+            func: typed_array_index_of_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "TypedArray_prototype_includes",
+            func: typed_array_includes_builtin,
+        },
+        Builtin {
+            length: 2,
+            name: "TypedArray_prototype_slice",
+            func: typed_array_slice_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "TypedArray_prototype_values",
+            func: typed_array_values_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "TypedArray_prototype_keys",
+            func: typed_array_keys_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "TypedArray_prototype_entries",
+            func: typed_array_entries_builtin,
         },
         Builtin {
             length: 1,

@@ -12,8 +12,9 @@ use rune_core::accessor::AccessorPair;
 use rune_core::date::{self, RuneDate};
 use rune_core::function::Func;
 use rune_core::gc::{
-    GcHeader, RootProvider, SemiSpace, TAG_ACCESSOR, TAG_ARRAY, TAG_DATE, TAG_FLOAT64, TAG_FUNC,
-    TAG_MAP, TAG_OBJECT, TAG_PROMISE, TAG_REGEXP, TAG_SET, TAG_STRING, TAG_STRING_OBJ,
+    GcHeader, RootProvider, SemiSpace, TAG_ACCESSOR, TAG_ARRAY, TAG_ARRAY_BUFFER, TAG_DATE,
+    TAG_FLOAT64, TAG_FUNC, TAG_MAP, TAG_OBJECT, TAG_PROMISE, TAG_REGEXP, TAG_SET, TAG_STRING,
+    TAG_STRING_OBJ, TAG_TYPED_ARRAY,
 };
 use rune_core::map::{RuneMap, RuneSet};
 use rune_core::object::JSObject;
@@ -22,6 +23,7 @@ use rune_core::shape::{DENSE_ARRAY_SHAPE, PROTOTYPE_KEY, PropertyKey, Shape};
 use rune_core::string::HeapString;
 use rune_core::string_object::StringObject;
 use rune_core::symbol::{register_symbol, symbol_description, symbol_display, symbol_for};
+use rune_core::typedarray;
 use rune_core::value::Value;
 #[cfg(all(feature = "jit", target_arch = "aarch64"))]
 use rune_jit_baseline::Aarch64CodeGen;
@@ -540,6 +542,13 @@ pub struct Vm {
     pub set_prototype: Value,
     pub date_constructor: Value,
     pub date_prototype: Value,
+    pub array_buffer_constructor: Value,
+    pub array_buffer_prototype: Value,
+    /// TypedArray ctor wrappers / prototypes / ctor builtin handles, indexed by
+    /// `typedarray::TypedArrayKind as usize` (order matches `from_index`).
+    pub typed_array_ctors: Vec<Value>,
+    pub typed_array_protos: Vec<Value>,
+    pub typed_array_ctor_handles: Vec<Value>,
     /// Symbol.prototype — where Symbol.prototype.toString/[@@toPrimitive] live.
     pub symbol_prototype: Value,
     /// Pending well-known-symbol @@method dispatch (set by String.prototype
@@ -676,6 +685,11 @@ impl Vm {
             set_prototype: Value::undefined(),
             date_constructor: Value::undefined(),
             date_prototype: Value::undefined(),
+            array_buffer_constructor: Value::undefined(),
+            array_buffer_prototype: Value::undefined(),
+            typed_array_ctors: Vec::new(),
+            typed_array_protos: Vec::new(),
+            typed_array_ctor_handles: Vec::new(),
             symbol_prototype: Value::undefined(),
             pending_symbol_dispatch: None,
             pending_symbol_coercion: None,
@@ -1191,6 +1205,120 @@ impl Vm {
             self.builtin_wrappers.insert("Date".to_string(), date_ctor);
             self.date_constructor = date_ctor;
             self.date_prototype = date_proto;
+        }
+
+        // ArrayBuffer constructor and prototype
+        if find_handle(&self.builtins, "ArrayBuffer").is_some() {
+            let mut ab_proto_entries: Vec<(&str, Value)> = Vec::new();
+            if let Some(h) = find_handle(&self.builtins, "ArrayBuffer_prototype_slice") {
+                ab_proto_entries.push(("slice", h));
+            }
+            let tag_str = HeapString::allocate(gc, "ArrayBuffer") as *mut u8;
+            let ab_proto = make_object(gc, &ab_proto_entries);
+            unsafe {
+                let proto_ptr = ab_proto.heap_ptr().unwrap() as *mut JSObject;
+                JSObject::add_property(
+                    proto_ptr,
+                    PropertyKey::from_symbol(rune_core::symbol::SYM_TO_STRING_TAG),
+                    "\u{0}".to_string(),
+                    Value::from_heap_ptr(tag_str),
+                );
+            }
+            let ab_ctor = make_object(gc, &[("prototype", ab_proto)]);
+            self.builtin_wrappers
+                .insert("ArrayBuffer".to_string(), ab_ctor);
+            self.array_buffer_constructor = ab_ctor;
+            self.array_buffer_prototype = ab_proto;
+            if let Some(h) = find_handle(&self.builtins, "ArrayBuffer_isView") {
+                unsafe {
+                    let ctor_ptr = ab_ctor.heap_ptr().unwrap() as *mut JSObject;
+                    let shape = JSObject::shape_ptr(ctor_ptr);
+                    if let Some(slot) = shape.lookup(&PropertyKey::from_string("isView")) {
+                        JSObject::set_slot(ctor_ptr, slot, h);
+                    }
+                }
+            }
+        }
+
+        // TypedArray constructors (one per element type) + %TypedArray.prototype%
+        if find_handle(&self.builtins, "Uint8Array").is_some() {
+            // Shared %TypedArray.prototype% — all methods live here.
+            let mut ta_base_entries: Vec<(&str, Value)> = Vec::new();
+            for (name, handle) in [
+                ("set", "TypedArray_prototype_set"),
+                ("subarray", "TypedArray_prototype_subarray"),
+                ("fill", "TypedArray_prototype_fill"),
+                ("at", "TypedArray_prototype_at"),
+                ("indexOf", "TypedArray_prototype_indexOf"),
+                ("includes", "TypedArray_prototype_includes"),
+                ("slice", "TypedArray_prototype_slice"),
+                ("values", "TypedArray_prototype_values"),
+                ("keys", "TypedArray_prototype_keys"),
+                ("entries", "TypedArray_prototype_entries"),
+            ] {
+                if let Some(h) = find_handle(&self.builtins, handle) {
+                    ta_base_entries.push((name, h));
+                }
+            }
+            let ta_base = make_object(gc, &ta_base_entries);
+            unsafe {
+                let base_ptr = ta_base.heap_ptr().unwrap() as *mut JSObject;
+                if let Some(h) = find_handle(&self.builtins, "TypedArray_prototype_values") {
+                    JSObject::add_property(
+                        base_ptr,
+                        PropertyKey::from_symbol(rune_core::symbol::SYM_ITERATOR),
+                        "\u{0}".to_string(),
+                        h,
+                    );
+                }
+                // toString → Array.prototype.toString (join with commas).
+                if let Some(h) = find_handle(&self.builtins, "Array_prototype_toString") {
+                    JSObject::add_property(
+                        base_ptr,
+                        PropertyKey::from_string("toString"),
+                        "toString".to_string(),
+                        h,
+                    );
+                }
+            }
+            let base_ptr = ta_base.heap_ptr().unwrap();
+            let base_obj = base_ptr as *mut JSObject;
+            for i in 0..typedarray::NUM_KINDS {
+                let kind = typedarray::TypedArrayKind::from_index(i);
+                let ctor_handle = find_handle(&self.builtins, kind.name());
+                let Some(ctor_handle) = ctor_handle else {
+                    continue;
+                };
+                // Per-type prototype: BYTES_PER_ELEMENT + constructor + toStringTag.
+                let tag_str = HeapString::allocate(gc, kind.name()) as *mut u8;
+                let mut proto_entries: Vec<(&str, Value)> =
+                    vec![("BYTES_PER_ELEMENT", Value::smi(kind.element_size() as i32))];
+                proto_entries.push(("constructor", ctor_handle));
+                let proto = make_object(gc, &proto_entries);
+                unsafe {
+                    let proto_ptr = proto.heap_ptr().unwrap() as *mut JSObject;
+                    JSObject::add_property(
+                        proto_ptr,
+                        PropertyKey::from_symbol(rune_core::symbol::SYM_TO_STRING_TAG),
+                        "\u{0}".to_string(),
+                        Value::from_heap_ptr(tag_str),
+                    );
+                    JSObject::set_prototype(proto_ptr, base_ptr);
+                }
+                let ctor_obj = make_object(
+                    gc,
+                    &[
+                        ("prototype", proto),
+                        ("BYTES_PER_ELEMENT", Value::smi(kind.element_size() as i32)),
+                    ],
+                );
+                self.builtin_wrappers
+                    .insert(kind.name().to_string(), ctor_obj);
+                self.typed_array_ctors.push(ctor_obj);
+                self.typed_array_protos.push(proto);
+                self.typed_array_ctor_handles.push(ctor_handle);
+            }
+            let _ = base_obj;
         }
 
         // Iteration protocol — Array.prototype.values/keys/entries/[Symbol.iterator]
@@ -1778,6 +1906,17 @@ impl Vm {
         gc.push_root(&self.set_prototype as *const Value as *mut u64);
         gc.push_root(&self.date_constructor as *const Value as *mut u64);
         gc.push_root(&self.date_prototype as *const Value as *mut u64);
+        gc.push_root(&self.array_buffer_constructor as *const Value as *mut u64);
+        gc.push_root(&self.array_buffer_prototype as *const Value as *mut u64);
+        for v in self.typed_array_ctors.iter_mut() {
+            gc.push_root(v as *mut Value as *mut u64);
+        }
+        for v in self.typed_array_protos.iter_mut() {
+            gc.push_root(v as *mut Value as *mut u64);
+        }
+        for v in self.typed_array_ctor_handles.iter_mut() {
+            gc.push_root(v as *mut Value as *mut u64);
+        }
         gc.push_root(&self.promise_prototype as *const Value as *mut u64);
         gc.push_root(&self.function_prototype as *const Value as *mut u64);
         gc.push_root(&self.regexp_prototype as *const Value as *mut u64);
@@ -3366,6 +3505,8 @@ impl Vm {
                             || tag == TAG_MAP
                             || tag == TAG_SET
                             || tag == TAG_DATE
+                            || tag == TAG_TYPED_ARRAY
+                            || tag == TAG_ARRAY_BUFFER
                         {
                             if instr.ic_index >= 0 {
                                 self.ic_stats.lookups += 1;
@@ -4832,6 +4973,65 @@ impl Vm {
                         self.frames[fi].pc = pc + 1;
                         continue;
                     }
+                    // ArrayBuffer constructor [[Construct]]: allocate the tagged
+                    // RuneArrayBuffer (zero-length) and let the builtin set the
+                    // real backing block and byte length.
+                    if constructor == self.array_buffer_constructor {
+                        let proto_ptr = self.array_buffer_prototype.heap_ptr();
+                        let obj_ptr = typedarray::RuneArrayBuffer::allocate(
+                            gc,
+                            0,
+                            proto_ptr.unwrap_or(std::ptr::null_mut()),
+                        );
+                        let obj_val = Value::from_heap_ptr(obj_ptr);
+                        let result =
+                            crate::builtins::array_buffer_constructor(gc, obj_val, &args, self);
+                        if let Some(exc) = self.pending_exception.take() {
+                            if let Some(exit) = self.handle_throw(gc, exc) {
+                                return exit;
+                            }
+                            continue;
+                        }
+                        self.push(result);
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    }
+                    // TypedArray constructor [[Construct]]: find which element
+                    // type this ctor wrapper corresponds to, allocate the tagged
+                    // RuneTypedArray and run the per-kind builtin.
+                    if !self.typed_array_ctors.is_empty() {
+                        let mut kind_idx = None;
+                        if let Some(ptr) = constructor.heap_ptr() {
+                            for (i, c) in self.typed_array_ctors.iter().enumerate() {
+                                if let Some(cp) = c.heap_ptr() {
+                                    if cp == ptr {
+                                        kind_idx = Some(i);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(i) = kind_idx {
+                            let proto_ptr = self.typed_array_protos[i].heap_ptr();
+                            let obj_ptr = typedarray::RuneTypedArray::allocate(
+                                gc,
+                                proto_ptr.unwrap_or(std::ptr::null_mut()),
+                            );
+                            let obj_val = Value::from_heap_ptr(obj_ptr);
+                            let handle = self.typed_array_ctor_handles[i];
+                            let id = ((-handle.as_smi().unwrap()) as usize) - 1;
+                            let result = (self.builtins[id].func)(gc, obj_val, &args, &mut *self);
+                            if let Some(exc) = self.pending_exception.take() {
+                                if let Some(exit) = self.handle_throw(gc, exc) {
+                                    return exit;
+                                }
+                                continue;
+                            }
+                            self.push(result);
+                            self.frames[fi].pc = pc + 1;
+                            continue;
+                        }
+                    }
                     // Create a new empty object
                     let shape = Shape::empty();
                     let obj = JSObject::allocate(gc, shape, &[]);
@@ -5142,6 +5342,22 @@ impl Vm {
                         let exc = Value::from_heap_ptr(crate::vm::heap_string(
                             gc,
                             "TypeError: Constructor Map requires 'new'",
+                        ));
+                        if let Some(exit) = self.handle_throw(gc, exc) {
+                            return exit;
+                        }
+                        continue;
+                    }
+
+                    // §25.1.2.1 / §23.2.2: ArrayBuffer and the typed array
+                    // constructors are constructors only — a plain call
+                    // throws a TypeError.
+                    if callee == self.array_buffer_constructor
+                        || self.typed_array_ctors.contains(&callee)
+                    {
+                        let exc = Value::from_heap_ptr(crate::vm::heap_string(
+                            gc,
+                            "TypeError: Constructor requires 'new'",
                         ));
                         if let Some(exit) = self.handle_throw(gc, exc) {
                             return exit;
@@ -7572,6 +7788,7 @@ pub(crate) fn get_iter_method(vm: &mut Vm, gc: &mut SemiSpace, value: Value) -> 
             || tag == TAG_STRING_OBJ
             || tag == TAG_MAP
             || tag == TAG_SET
+            || tag == TAG_TYPED_ARRAY
         {
             get_symbol_method(
                 gc,
@@ -7969,6 +8186,73 @@ pub(crate) fn load_property_recursive(
                     continue;
                 }
                 return Value::undefined();
+            } else if tag == TAG_TYPED_ARRAY {
+                // Integer-indexed exotic object (§10.4.5.1): canonical numeric
+                // keys read elements directly (out of bounds → undefined, no
+                // prototype consult); own computed keys; else walk proto.
+                if let Some(index) = value_to_array_index(raw_key) {
+                    let len = unsafe { typedarray::RuneTypedArray::length(ptr) };
+                    if index < len {
+                        return unsafe { typedarray::read_element(ptr, index) };
+                    }
+                    return Value::undefined();
+                }
+                if let Some(key_ptr) = raw_key.heap_ptr() {
+                    if unsafe { (*(key_ptr as *const GcHeader)).tag() == TAG_STRING } {
+                        let key_str = unsafe { HeapString::to_string(key_ptr as *mut HeapString) };
+                        match key_str.as_str() {
+                            "length" => {
+                                let len = unsafe { typedarray::RuneTypedArray::length(ptr) };
+                                return Value::smi(len as i32);
+                            }
+                            "byteLength" => {
+                                let bl = unsafe { typedarray::RuneTypedArray::byte_length(ptr) };
+                                return if bl <= i32::MAX as usize {
+                                    Value::smi(bl as i32)
+                                } else {
+                                    Value::from_float64(bl as f64)
+                                };
+                            }
+                            "byteOffset" => {
+                                let off = unsafe { typedarray::RuneTypedArray::byte_offset(ptr) };
+                                return Value::smi(off as i32);
+                            }
+                            "buffer" => {
+                                let buf = unsafe { typedarray::RuneTypedArray::buffer(ptr) };
+                                return Value::from_heap_ptr(buf);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                // Walk %TypedArray.prototype% (per-type prototype stored at 32)
+                let proto_ptr = unsafe { typedarray::RuneTypedArray::prototype(ptr) };
+                if !proto_ptr.is_null() {
+                    current = Value::from_heap_ptr(proto_ptr);
+                    continue;
+                }
+                return Value::undefined();
+            } else if tag == TAG_ARRAY_BUFFER {
+                // Own "byteLength" (§25.1.5.3); else walk ArrayBuffer.prototype
+                if let Some(key_ptr) = raw_key.heap_ptr() {
+                    if unsafe { (*(key_ptr as *const GcHeader)).tag() == TAG_STRING } {
+                        let key_str = unsafe { HeapString::to_string(key_ptr as *mut HeapString) };
+                        if key_str == "byteLength" {
+                            let bl = unsafe { typedarray::RuneArrayBuffer::byte_length(ptr) };
+                            return if bl <= i32::MAX as usize {
+                                Value::smi(bl as i32)
+                            } else {
+                                Value::from_float64(bl as f64)
+                            };
+                        }
+                    }
+                }
+                let proto_ptr = unsafe { typedarray::RuneArrayBuffer::prototype(ptr) };
+                if !proto_ptr.is_null() {
+                    current = Value::from_heap_ptr(proto_ptr);
+                    continue;
+                }
+                return Value::undefined();
             } else if tag == TAG_DATE {
                 // RuneDate has no own properties; walk to Date.prototype
                 let proto_ptr = unsafe { date::RuneDate::prototype(ptr) };
@@ -8189,6 +8473,19 @@ fn do_store_property(obj: Value, raw_key: Value, value: Value, gc: &mut SemiSpac
                             }
                         }
                         unsafe { RuneArray::set_length(arr, new_len) };
+                    }
+                }
+            }
+        } else if tag == TAG_TYPED_ARRAY {
+            // Integer-indexed exotic object (§10.4.5.2): numeric canonical
+            // keys write elements (out of range / non-canonical → no-op).
+            if let Some(index) = value_to_array_index(raw_key) {
+                let len = unsafe { typedarray::RuneTypedArray::length(ptr) };
+                if index < len {
+                    let kind = unsafe { typedarray::RuneTypedArray::kind(ptr) };
+                    let n = to_number(value);
+                    unsafe {
+                        typedarray::write_element(ptr, index, typedarray::convert_number(kind, n));
                     }
                 }
             }
@@ -8428,6 +8725,18 @@ fn has_property(obj: Value, raw_key: Value, function_prototype: Option<Value>) -
                 raw_key,
                 function_prototype,
             )
+        } else if tag == TAG_TYPED_ARRAY {
+            // Integer-indexed exotic object: in-bounds numeric index exists;
+            // other keys walk the prototype chain.
+            if let Some(index) = value_to_array_index(raw_key) {
+                let len = unsafe { typedarray::RuneTypedArray::length(ptr) };
+                return index < len;
+            }
+            let proto_ptr = unsafe { typedarray::RuneTypedArray::prototype(ptr) };
+            if !proto_ptr.is_null() {
+                return has_property(Value::from_heap_ptr(proto_ptr), raw_key, function_prototype);
+            }
+            false
         } else if tag == TAG_FUNC {
             if let Some(key) = value_to_prop_key(raw_key) {
                 if key == *PROTOTYPE_KEY {
@@ -8475,6 +8784,8 @@ fn ordinary_has_instance(lhs: Value, rhs_proto_ptr: *mut u8) -> bool {
                 unsafe { RuneSet::prototype(ptr) }
             } else if tag == TAG_DATE {
                 unsafe { date::RuneDate::prototype(ptr) }
+            } else if tag == TAG_TYPED_ARRAY {
+                unsafe { typedarray::RuneTypedArray::prototype(ptr) }
             } else {
                 return false;
             };

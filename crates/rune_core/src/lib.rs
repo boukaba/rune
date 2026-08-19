@@ -18,6 +18,7 @@ pub mod shape;
 pub mod string;
 pub mod string_object;
 pub mod symbol;
+pub mod typedarray;
 pub mod value;
 
 pub mod prelude {

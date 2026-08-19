@@ -42,7 +42,7 @@ breadth to run real workloads correctly, with the cold-start wedge intact.
    until everything is `[x]`.
 
 **v1.0 checklist (tick these off as they land):**
-- [ ] **Symbols + well-known symbols** — `Symbol()` ctor, `@@iterator`,
+- [x] **Symbols + well-known symbols** — `Symbol()` ctor, `@@iterator`,
       `@@match`/`@@search`/`@@split`/`@@replace` dispatch in match/search/split/replace
 - [ ] **Iteration protocol + `for..of`** — iterable/iterator/IteratorResult,
       Array iterator, String iterator, `next`/`done`/`value`, spread uses iterator
@@ -89,8 +89,8 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - `Number()` — ToNumber via ToPrimitive. test262: 132/340 (38.8%).
 - `json_round_trip` benchmark: Rune cold-start 7.6ms vs Node 21ms → **2.8× faster**. Warm: Rune 0.79ms vs Node 0.146ms → 5.4× slower.
 
-### Done — v0.5
-- **Optional chaining `?.`** — lexer `QuestionDot` token (digit lookahead), `Expr::OptionalChain` + `OptionalLinkKind::{Prop,Computed,Call,Private}`, flat-chain parser with `absorb_member_base` (receiver survives `a.b?.()`), emitter uses only existing opcodes (`Dup`/`JumpIfNullOrUndefined`/`Swap` — stays out of the JIT whitelist, bails to interpreter); whole chain collapses to undefined when any guard trips; parse errors for `a?.b = c`, `a?.b++`, `new a?.b`, `super?.b`, trailing `a?.`. 7 integration tests.
+### Done — v0.6
+- **Symbols + well-known symbols** — `Value::symbol(id)` tag 6 (inline NaN-boxed, no GC changes); thread_local symbol registry (descriptions + Symbol.for, 13 well-known symbols with stable ids); `PropertyKey::from_symbol` (high-bit encoding, from_string masks it) with symbol-keyed props excluded from for-in/Object.keys/values/entries/JSON.stringify; `Symbol()` ctor (ToString description, `new Symbol()` throws, `PendingSymbolCoercion` state machine for object descriptions), `Symbol.for`/`keyFor`; `Symbol.prototype` toString/valueOf/[@@toPrimitive]/[@@toStringTag]/description (per-receiver); `typeof` → "symbol" (interpreter + JIT helper, typeof_strings [Value; 7]); **@@match/@@search/@@split/@@replace GetMethod dispatch** in String.prototype methods (`PendingSymbolDispatch` state machine, TypeError on non-callable, legacy fallback untouched); TypeError guards for `String(sym)`/`"a"+sym`/`sym+1`/`Symbol(sym)`. 12 integration tests. 510/510 integration tests, 659 workspace.
 - **Ternary precedence fix (silent miscompile)** — `a === b ? x : y` parsed as `a === (b ? x : y)` because the ternary check ran regardless of `min_prec`; now gated on `min_prec == 0`. `1 === 1 ? 7 : 8` → 7. 498/498 integration tests, 644 workspace.
 - **Correctness batch — silent-miscompile elimination** — 10 features/regressions fixed and verified end-to-end (491/491 integration tests, 637 workspace tests):
   - `assert.throws` type mismatch now throws (test262 negative-path behavior)
@@ -149,6 +149,8 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - `RegExp()` constructor not yet implemented
 - Match result arrays don't set `.index`/`.input` properties (no named-property support on TAG_ARRAY)
 - `replaceAll` function replacement not yet implemented
+- `Number(sym)`/arithmetic beyond `+` treat symbols as NaN (ToNumber(symbol) should throw TypeError — needs exception plumbing through to_number's call sites; deferred to conformance pass)
+- `Symbol.prototype.description` is computed in LoadProperty, not a real getter (getOwnPropertyDescriptor unavailable)
 - `?.` in JIT: JumpIfNullOrUndefined not in the whitelist — optional chains bail to the interpreter (correct, slower in hot loops)
 - Nested accessors (getter inside getter) unsupported (single pending slot)
 - `this.prop++` not supported (Update only handles Identifier targets)
@@ -156,8 +158,8 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - Static private fields and private methods not yet implemented
 - Trace perf: bailout-per-iteration paths (e.g. float-promoted acc in a loop) still bail each iteration — re-record or stay native with float ops (correctness fine)
 
-### Next Steps — v0.5 (ordered by leverage)
-1. Trace perf: float-promoted accumulator loops bail per-iteration — re-record or emit float ops natively.
-2. `RegExp()` constructor
-3. Match result array `.index`/`.input` properties
-4. Optional chaining (`?.`) — currently maps to Dot in the lexer
+### Next Steps — v1.0 (ordered by leverage)
+1. Iteration protocol + `for..of` (wires up `@@iterator` — the next checklist item)
+2. Trace perf: float-promoted accumulator loops bail per-iteration — re-record or emit float ops natively.
+3. `RegExp()` constructor
+4. Match result array `.index`/`.input` properties

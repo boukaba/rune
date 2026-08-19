@@ -15,6 +15,7 @@ pub mod regexp;
 pub mod shape;
 pub mod string;
 pub mod string_object;
+pub mod symbol;
 pub mod value;
 
 pub mod prelude {

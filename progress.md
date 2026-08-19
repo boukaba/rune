@@ -2,10 +2,25 @@
 
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
-> **Status:** v0.5.0 🚧 (In Progress — 498/498 integration tests Pass, 3 Ignored; workspace tests Pass)
+> **Status:** v0.6.0 🚧 (In Progress — 510/510 integration tests Pass, 3 Ignored; workspace 659 tests Pass)
 > SIDT validated, AFPC bytecode + native-code cache functional (AArch64); x86-64 runs bytecode/IC/shape caching only (JIT codegen disabled there). Cold start 2.8× faster than Node
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
+
+## Symbols + well-known symbols (2026-08-19)
+
+- [x] **`Value::symbol(id)` (tag 6)** — inline NaN-boxed representation, no heap/GC changes: `QNAN_PREFIX | (6 << 45) | id` (tags 0-5 were SMI/HEAP/UNDEFINED/NULL/FALSE/TRUE, 6 was free); `is_symbol`/`as_symbol_id`; symbol Values are not heap objects so GC tracing is untouched
+- [x] **Symbol registry (rune_core::symbol)** — thread_local description table (`descriptions: Vec<Option<String>>`) + `Symbol.for` registry; 13 well-known symbols pre-registered with stable ids (`SYM_ITERATOR=0` … `SYM_ASYNC_ITERATOR=12`, ids stable because the vec is initialized at thread_local init); `register_symbol`/`symbol_description`/`symbol_display` ("Symbol(desc)")/`symbol_for`/`symbol_key_for`
+- [x] **PropertyKey symbol encoding** — high bit (0x8000…) marks a symbol key, id carried directly (no hashing → zero collisions); `from_string` now masks the high bit so string keys can never collide with symbol keys; `is_symbol()`/`symbol_id()`; symbol-keyed entries store `"\u{0}"` as their key_names marker
+- [x] **Symbol() constructor** — `Symbol(description)`: ToString of the description via `to_primitive_string` (object descriptions with user-defined toString use a new `PendingSymbolCoercion` state machine — the Return handler wraps the toString result into the symbol; also used by `Symbol.for`); `new Symbol()` → TypeError (Opcode::New); `Symbol.for(key)`/`Symbol.keyFor(sym)` (keyFor throws TypeError on non-symbols); 13 well-known statics on the ctor (`Symbol.iterator`, `Symbol.match`, …); ctor/prototype rooted for GC
+- [x] **Symbol.prototype** — `toString()` → "Symbol(desc)", `valueOf()`, `[@@toPrimitive]` (symbol-keyed prop on the prototype object, returns the symbol), `[@@toStringTag]` = "Symbol", `description` computed per-receiver in the LoadProperty symbol branch (reads the registry)
+- [x] **`typeof`** — "symbol" in both the interpreter TypeOf opcode and `rune_jit_typeof_helper`; `typeof_strings` grew to `[Value; 7]` with `TYPEOF_SYMBOL` (context.rs seed updated)
+- [x] **Symbol-keyed properties** — `o[sym] = v` / `o[sym]` work via `value_to_prop_key` → `PropertyKey::from_symbol`; symbol keys EXCLUDED from `for-in` (ForInNext skips via `shape.entries[idx].0.is_symbol()`), `Object.keys/values/entries` (`object_own_entries` skip), and `JSON.stringify` (skip) per spec; `do_store_property` appends the marker name for symbol keys
+- [x] **@@dispatch (GetMethod, §7.3.11)** — `String.prototype.match/search/split/replace` check objects with a callable `@@match/@@search/@@split/@@replace` and dispatch `(this)` — `@@split` also passes the limit — via a new `PendingSymbolDispatch` state machine (builtin sets it, pushes the method frame, returns; the Return handler routes the method's result back to the builtin's caller); non-callable @@method → TypeError; undefined/null → legacy path unchanged (TAG_REGEXP patterns have no @@methods registered so regex behavior is identical)
+- [x] **Coercion guards (TypeError)** — `String(sym)`, `"a" + sym`, `sym + 1` (Add opcode guard), `Symbol(sym)`, `Symbol.for(sym)` all throw "Cannot convert a Symbol value to a string"; `Symbol.keyFor(non-symbol)` throws; symbol truthiness is true (`s ? 7 : 8`); `===`/`==` compare symbols by id (raw bits — same id equal, different ids not)
+- [x] 12 new integration tests (basic/typeof, uniqueness, for/keyFor, toString/description, well-known statics, property keys + enumeration exclusion, `new` throws, coercion throws, truthiness, @@match/@@search/@@split/@@replace dispatch, non-callable throws, legacy fallback untouched); 3 rune_core registry unit tests
+- [x] Full suite green: **510 integration tests pass, 3 ignored** (workspace 659); cargo fmt + clippy clean (CI flags); `--no-default-features` build probe clean
+- **Known gaps**: `Number(sym)` and arithmetic beyond `+` treat symbols as NaN (ToNumber(symbol) should throw — needs exception plumbing through `to_number`'s 33 call sites; deferred to the conformance pass); `Symbol.prototype.description` is a computed property in LoadProperty rather than a real getter (callable `.description` extraction via `Object.getOwnPropertyDescriptor` unavailable); @@iterator/@@toPrimitive are registered but iteration protocol is the next checklist item
 
 ## Optional chaining `?.` + ternary precedence fix (2026-08-19)
 

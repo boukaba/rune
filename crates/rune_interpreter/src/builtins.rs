@@ -1,4 +1,6 @@
+use crate::vm::SymbolMethodResult;
 use crate::vm::Vm;
+use crate::vm::get_symbol_method;
 use crate::vm::load_property_recursive;
 use rune_core::array::RuneArray;
 use rune_core::gc::{
@@ -11,6 +13,10 @@ use rune_core::regexp::RegExp;
 use rune_core::shape::{DENSE_ARRAY_SHAPE, PropertyKey, Shape};
 use rune_core::string::HeapString;
 use rune_core::string_object::StringObject;
+use rune_core::symbol::{
+    SYM_MATCH, SYM_REPLACE, SYM_SEARCH, SYM_SPLIT, register_symbol, symbol_display, symbol_for,
+    symbol_key_for,
+};
 use rune_core::value::Value;
 
 /// A registered built-in function.
@@ -29,6 +35,8 @@ pub fn value_to_js_string(v: Value) -> String {
         "undefined".to_string()
     } else if v.is_null() {
         "null".to_string()
+    } else if let Some(id) = v.as_symbol_id() {
+        symbol_display(id)
     } else if let Some(b) = v.to_boolean() {
         b.to_string()
     } else if let Some(n) = v.as_smi() {
@@ -324,6 +332,14 @@ pub fn number_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
 /// Per §21.1.2.1: calls ToString via ToPrimitive with string hint.
 pub fn string_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let arg = args.first().copied().unwrap_or(Value::undefined());
+    // §7.1.12.1 ToString(Symbol) throws TypeError.
+    if arg.is_symbol() {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "TypeError: Cannot convert a Symbol value to a string",
+        )));
+        return Value::undefined();
+    }
     match to_primitive_string(gc, arg, vm) {
         Some(s) => {
             let ptr = HeapString::allocate(gc, &s);
@@ -334,6 +350,197 @@ pub fn string_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
             // pending_call machinery handle the result.
             Value::undefined()
         }
+    }
+}
+
+/// §20.4.1.1 Symbol(description) — returns a new unique symbol. Throws if
+/// called with `new` (see Opcode::New).
+pub fn symbol_ctor_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let desc = args.first().copied();
+    match desc {
+        None => Value::symbol(register_symbol(None)),
+        Some(v) if v.is_undefined() => Value::symbol(register_symbol(None)),
+        Some(v) if v.is_symbol() => {
+            // §7.1.12.1 ToString(Symbol) throws TypeError.
+            vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+                gc,
+                "TypeError: Cannot convert a Symbol value to a string",
+            )));
+            Value::undefined()
+        }
+        Some(v) => match to_primitive_string(gc, v, vm) {
+            Some(s) => Value::symbol(register_symbol(Some(s))),
+            None => {
+                // Pending ToString callback — the Return handler wraps the
+                // toString result into the symbol (see PendingSymbolCoercion).
+                vm.pending_symbol_coercion = Some(crate::vm::PendingSymbolCoercion {
+                    source_frame_depth: vm.frame_depth(),
+                    is_for: false,
+                });
+                Value::undefined()
+            }
+        },
+    }
+}
+
+/// §20.4.2.2 Symbol.for(key) — returns the registered symbol for `key`.
+pub fn symbol_for_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let key = args.first().copied().unwrap_or(Value::undefined());
+    if key.is_symbol() {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "TypeError: Cannot convert a Symbol value to a string",
+        )));
+        return Value::undefined();
+    }
+    match to_primitive_string(gc, key, vm) {
+        Some(s) => Value::symbol(symbol_for(&s)),
+        None => {
+            vm.pending_symbol_coercion = Some(crate::vm::PendingSymbolCoercion {
+                source_frame_depth: vm.frame_depth(),
+                is_for: true,
+            });
+            Value::undefined()
+        }
+    }
+}
+
+/// §20.4.2.3 Symbol.keyFor(sym) — the registry key for `sym`, or undefined.
+pub fn symbol_key_for_builtin(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let arg = args.first().copied().unwrap_or(Value::undefined());
+    match arg.as_symbol_id() {
+        Some(id) => match symbol_key_for(id) {
+            Some(k) => {
+                let ptr = HeapString::allocate(gc, &k);
+                Value::from_heap_ptr(ptr as *mut u8)
+            }
+            None => Value::undefined(),
+        },
+        None => {
+            vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+                gc,
+                "TypeError: Symbol.keyFor requires that the argument be a symbol",
+            )));
+            Value::undefined()
+        }
+    }
+}
+
+/// §20.4.3.2 Symbol.prototype.toString() — "Symbol(desc)".
+pub fn symbol_prototype_to_string(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    match this.as_symbol_id() {
+        Some(id) => {
+            let s = symbol_display(id);
+            let ptr = HeapString::allocate(gc, &s);
+            Value::from_heap_ptr(ptr as *mut u8)
+        }
+        None => {
+            vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+                gc,
+                "TypeError: Symbol.prototype.toString requires that 'this' be a Symbol",
+            )));
+            Value::undefined()
+        }
+    }
+}
+
+/// §20.4.3.4 Symbol.prototype.valueOf() — the symbol itself.
+pub fn symbol_prototype_value_of(
+    _gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    if this.is_symbol() {
+        this
+    } else {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            _gc,
+            "TypeError: Symbol.prototype.valueOf requires that 'this' be a Symbol",
+        )));
+        Value::undefined()
+    }
+}
+
+/// §20.4.3.5 Symbol.prototype[@@toPrimitive](hint) — returns the symbol.
+pub fn symbol_prototype_to_primitive(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    if this.is_symbol() {
+        this
+    } else {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "TypeError: Symbol.prototype[Symbol.toPrimitive] requires that 'this' be a Symbol",
+        )));
+        Value::undefined()
+    }
+}
+
+/// §7.3.11 GetMethod + dispatch of a well-known-symbol method from the
+/// String.prototype match/search/split/replace family.
+///
+/// When `pattern` is an object with a callable @@method, pushes a callback
+/// frame and returns Ok(None) — the builtin must return undefined immediately
+/// and the Return handler routes the method's result back to the caller.
+/// Err(()) means the caller should throw (non-callable @@method).
+/// Ok(Some(())) means fall back to the legacy algorithm.
+fn dispatch_symbol_method(
+    gc: &mut SemiSpace,
+    pattern: Value,
+    symbol_id: u32,
+    this: Value,
+    extra_args: &[Value],
+    vm: &mut Vm,
+) -> Result<Option<()>, ()> {
+    if let Some(ptr) = pattern.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_OBJECT {
+            match get_symbol_method(gc, pattern, symbol_id, Some(vm.function_prototype)) {
+                SymbolMethodResult::Found(m) => {
+                    let mut args = Vec::with_capacity(1 + extra_args.len());
+                    args.push(this);
+                    args.extend_from_slice(extra_args);
+                    vm.pending_symbol_dispatch = Some(crate::vm::PendingSymbolDispatch {
+                        source_frame_depth: vm.frame_depth(),
+                    });
+                    vm.push_callback_call(gc, m, pattern, args);
+                    Ok(None)
+                }
+                SymbolMethodResult::NotCallable => {
+                    let name = match symbol_id {
+                        SYM_MATCH => "@@match",
+                        SYM_REPLACE => "@@replace",
+                        SYM_SEARCH => "@@search",
+                        SYM_SPLIT => "@@split",
+                        _ => "@@method",
+                    };
+                    vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+                        gc,
+                        &format!("TypeError: {name} method called on an object with a non-callable @@method property"),
+                    )));
+                    Err(())
+                }
+                SymbolMethodResult::NotFound => Ok(Some(())),
+            }
+        } else {
+            Ok(Some(()))
+        }
+    } else {
+        Ok(Some(()))
     }
 }
 
@@ -444,6 +651,11 @@ fn object_own_entries(
                 let count = unsafe { JSObject::slot_count(ptr as *mut JSObject) };
                 let mut entries = Vec::with_capacity(count);
                 for i in 0..count {
+                    // §20.1.2.3: symbol-keyed properties are excluded from
+                    // Object.keys/values/entries enumeration.
+                    if shape.entries[i].0.is_symbol() {
+                        continue;
+                    }
                     let key = shape.key_name_at(i).unwrap_or("").to_string();
                     let value = unsafe { JSObject::get_slot(ptr as *mut JSObject, i) };
                     entries.push((key, value));
@@ -1150,7 +1362,17 @@ pub fn string_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
         return Value::undefined();
     }
     let s = string_from_value(this);
+    let separator = args.first().copied().unwrap_or(Value::undefined());
     let limit = args.get(1).copied().unwrap_or(Value::undefined());
+
+    // §22.1.3.17 step 3: if separator is an object with a callable @@split,
+    // dispatch to it with (this, limit).
+    if let Ok(Some(())) = dispatch_symbol_method(gc, separator, SYM_SPLIT, this, &[limit], vm) {
+        // fall through to legacy
+    } else {
+        return Value::undefined();
+    }
+
     let lim = if limit.is_undefined() {
         u32::MAX
     } else {
@@ -1168,7 +1390,6 @@ pub fn string_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
         }
         return Value::from_heap_ptr(arr as *mut u8);
     }
-    let separator = args.first().copied().unwrap_or(Value::undefined());
 
     // ---- RegExp separator ----
     if let Some(ptr) = separator.heap_ptr() {
@@ -1285,6 +1506,13 @@ pub fn string_replace(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
         v.heap_ptr()
             .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC })
     });
+
+    // §21.1.3.18 step 4: @@replace dispatch on the searchValue.
+    if let Ok(Some(())) = dispatch_symbol_method(gc, search, SYM_REPLACE, this, &[], vm) {
+        // fall through to legacy
+    } else {
+        return Value::undefined();
+    }
 
     // Check if search is a RegExp
     if let Some(ptr) = search.heap_ptr() {
@@ -1577,6 +1805,16 @@ pub fn string_match(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
     let s = string_from_value(this);
     let regexp_val = args.first().copied();
 
+    // §21.1.3.39 step 2: if regexp is an object with a callable @@match,
+    // dispatch to it and return its result.
+    if let Some(v) = regexp_val {
+        if let Ok(Some(())) = dispatch_symbol_method(gc, v, SYM_MATCH, this, &[], vm) {
+            // fall through to legacy
+        } else {
+            return Value::undefined();
+        }
+    }
+
     let regexp_ptr = regexp_val.and_then(|v| {
         v.heap_ptr().and_then(|ptr| {
             let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
@@ -1656,6 +1894,15 @@ pub fn string_search(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
     }
     let s = string_from_value(this);
     let regexp_val = args.first().copied();
+
+    // §21.1.3.22 step 2: @@search dispatch.
+    if let Some(v) = regexp_val {
+        if let Ok(Some(())) = dispatch_symbol_method(gc, v, SYM_SEARCH, this, &[], vm) {
+            // fall through to legacy
+        } else {
+            return Value::undefined();
+        }
+    }
 
     let regexp_ptr = regexp_val.and_then(|v| {
         v.heap_ptr().and_then(|ptr| {
@@ -2301,6 +2548,10 @@ pub fn json_stringify(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
                 let count = unsafe { JSObject::slot_count(ptr as *mut JSObject) };
                 let mut pairs: Vec<String> = Vec::new();
                 for i in 0..count {
+                    // §25.5: symbol-keyed properties are not serialized.
+                    if shape.entries[i].0.is_symbol() {
+                        continue;
+                    }
                     let key_name = shape.key_name_at(i).unwrap_or("");
                     let val = unsafe { JSObject::get_slot(ptr as *mut JSObject, i) };
                     if val.is_undefined() {
@@ -3457,6 +3708,36 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 1,
             name: "Number",
             func: number_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "Symbol",
+            func: symbol_ctor_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "Symbol_for",
+            func: symbol_for_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "Symbol_keyFor",
+            func: symbol_key_for_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Symbol_prototype_toString",
+            func: symbol_prototype_to_string,
+        },
+        Builtin {
+            length: 0,
+            name: "Symbol_prototype_valueOf",
+            func: symbol_prototype_value_of,
+        },
+        Builtin {
+            length: 1,
+            name: "Symbol_prototype_toPrimitive",
+            func: symbol_prototype_to_primitive,
         },
         Builtin {
             length: 1,

@@ -59,6 +59,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 
 ## What Works
 
+- **Symbols:** `Symbol()` constructor (unique symbols, `new Symbol()` throws), descriptions + `toString()`/"Symbol(desc)", `Symbol.for`/`Symbol.keyFor`, 13 well-known symbols (`Symbol.iterator`, `Symbol.match`, `Symbol.replace`, `Symbol.search`, `Symbol.split`, `Symbol.toPrimitive`, `Symbol.hasInstance`, `Symbol.toStringTag`, `Symbol.species`, `Symbol.isConcatSpreadable`, `Symbol.unscopables`, `Symbol.matchAll`, `Symbol.asyncIterator`), symbol-keyed properties (`o[sym] = v` — excluded from for-in/Object.keys/JSON), `typeof sym === "symbol"`, **@@match/@@search/@@split/@@replace dispatch** in String.prototype.match/search/split/replace (GetMethod + callable check, TypeError on non-callable), `String(sym)`/`"a"+sym` throw TypeError
 - **Language core:** arithmetic (incl. `**` right-assoc), comparisons, logical operators (loose + strict), `??` nullish coalescing, `&&=`/`||=`/`??=` short-circuit assignment
 - **Scoping:** var, let, const with block scope and TDZ
 - **Functions:** declarations, expressions, arrows, closures, rest/default params, destructuring
@@ -84,7 +85,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 
 ## What Doesn't Work (Yet)
 
-- **Standard library:** No Map, Set, Date, TypedArray, WeakRef. RegExp: exec, test, replace with `$&`/``$` ``/`$'`/`$1..$n` expansion. Promise: full async support with microtask queue.
+- **Standard library:** No Map, Set, Date, TypedArray, WeakRef. RegExp: no `RegExp()` constructor, match results lack `.index`/`.input`. Symbols: iteration protocol (`@@iterator`) not wired to for..of yet; `Number(sym)` returns NaN instead of throwing (ToNumber plumbing deferred).
 - **String methods:** `replace` (string + regex pattern), `replaceAll`, `indexOf`, `charAt`, `slice`, `split`. No `trim`, `toUpperCase`, `toLowerCase`, `charCodeAt`.
 - **Array methods:** `filter`, `map`, `reduce`, `forEach`, `slice`, `find`, `some`, `every`, `sort`, `flat`, `flatMap`, `includes`, `push`, `pop`, `indexOf`.
 - **Modules:** No import/export (ESM)

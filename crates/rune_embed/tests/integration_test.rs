@@ -7096,3 +7096,271 @@ fn test_ternary_binds_looser_than_binary_ops() {
         Some(3)
     );
 }
+
+#[test]
+fn test_symbol_basic() {
+    fn js_str(ctx: &mut Context, src: &str) -> String {
+        let r = ctx.eval(src).unwrap();
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        }
+    }
+    let mut ctx = Context::new_small();
+    let r2 = ctx.eval("var s2 = Symbol('desc'); s2;").unwrap();
+    assert!(r2.is_symbol());
+    assert_eq!(js_str(&mut ctx, "typeof Symbol('x');"), "symbol");
+    assert_eq!(js_str(&mut ctx, "typeof Symbol.for('k');"), "symbol");
+}
+
+#[test]
+fn test_symbol_uniqueness() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var a = Symbol('x');
+             var b = Symbol('x');
+             a === b;",
+        )
+        .unwrap();
+    assert_eq!(r, rune_core::value::Value::boolean(false));
+    let r2 = ctx
+        .eval(
+            "var a = Symbol('x');
+             a === a;",
+        )
+        .unwrap();
+    assert_eq!(r2, rune_core::value::Value::boolean(true));
+    let r3 = ctx.eval("Symbol('x') === Symbol('x');").unwrap();
+    assert_eq!(r3, rune_core::value::Value::boolean(false));
+}
+
+#[test]
+fn test_symbol_for_keyfor() {
+    fn js_str(ctx: &mut Context, src: &str) -> String {
+        let r = ctx.eval(src).unwrap();
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        }
+    }
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var a = Symbol.for('k');
+             var b = Symbol.for('k');
+             a === b;",
+        )
+        .unwrap();
+    assert_eq!(r, rune_core::value::Value::boolean(true));
+    assert_eq!(
+        js_str(&mut ctx, "var a = Symbol.for('k'); Symbol.keyFor(a);"),
+        "k"
+    );
+    let r3 = ctx.eval("Symbol.keyFor(Symbol('fresh'));").unwrap();
+    assert!(r3.is_undefined());
+}
+
+#[test]
+fn test_symbol_to_string_and_description() {
+    fn js_str(ctx: &mut Context, src: &str) -> String {
+        let r = ctx.eval(src).unwrap();
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        }
+    }
+    let mut ctx = Context::new_small();
+    assert_eq!(
+        js_str(&mut ctx, "Symbol('desc').toString();"),
+        "Symbol(desc)"
+    );
+    assert_eq!(js_str(&mut ctx, "Symbol().toString();"), "Symbol()");
+    assert_eq!(js_str(&mut ctx, "Symbol('desc').description;"), "desc");
+    let r4 = ctx.eval("Symbol().description;").unwrap();
+    assert!(r4.is_undefined());
+}
+
+#[test]
+fn test_symbol_well_known_statics() {
+    fn js_str(ctx: &mut Context, src: &str) -> String {
+        let r = ctx.eval(src).unwrap();
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        }
+    }
+    let mut ctx = Context::new_small();
+    assert_eq!(js_str(&mut ctx, "typeof Symbol.iterator;"), "symbol");
+    let r2 = ctx
+        .eval(
+            "var a = Symbol.iterator;
+             var b = Symbol.iterator;
+             a === b;",
+        )
+        .unwrap();
+    assert_eq!(r2, rune_core::value::Value::boolean(true));
+    assert_eq!(
+        js_str(
+            &mut ctx,
+            "typeof Symbol.match; typeof Symbol.replace; typeof Symbol.search; typeof Symbol.split;"
+        ),
+        "symbol"
+    );
+}
+
+#[test]
+fn test_symbol_property_keys() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var s = Symbol('key');
+             var o = {};
+             o[s] = 42;
+             o[s];",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(42));
+    let r2 = ctx
+        .eval(
+            "var s = Symbol('k');
+             var o = {};
+             o[s] = 1;
+             var keys = [];
+             for (var k in o) { keys.push(k); }
+             keys.length;",
+        )
+        .unwrap();
+    assert_eq!(r2.as_smi(), Some(0));
+    let r3 = ctx
+        .eval(
+            "var s = Symbol('k');
+             var o = { a: 1 };
+             o[s] = 2;
+             Object.keys(o).length;",
+        )
+        .unwrap();
+    assert_eq!(r3.as_smi(), Some(1));
+}
+
+#[test]
+fn test_symbol_new_throws() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("new Symbol('x');");
+    assert!(r.is_err(), "new Symbol should throw");
+}
+
+#[test]
+fn test_symbol_coercion_throws() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("String(Symbol('x'));");
+    assert!(r.is_err(), "String(Symbol) should throw TypeError");
+    let r2 = ctx.eval("\"a\" + Symbol('x');");
+    assert!(r2.is_err(), "string + Symbol should throw TypeError");
+    let r3 = ctx.eval("Symbol('x') + 1;");
+    assert!(r3.is_err(), "Symbol + number should throw TypeError");
+}
+
+#[test]
+fn test_symbol_truthiness() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("Symbol('x') ? 1 : 2;").unwrap();
+    assert_eq!(r.as_smi(), Some(1));
+    let r2 = ctx
+        .eval(
+            "var s = Symbol('x');
+             s ? 7 : 8;",
+        )
+        .unwrap();
+    assert_eq!(r2.as_smi(), Some(7));
+}
+
+#[test]
+fn test_symbol_match_dispatch() {
+    fn js_str(ctx: &mut Context, src: &str) -> String {
+        let r = ctx.eval(src).unwrap();
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        }
+    }
+    let mut ctx = Context::new_small();
+    assert_eq!(
+        js_str(
+            &mut ctx,
+            "var custom = {
+                 [Symbol.match](str) { return 'matched:' + str; }
+             };
+             'hello'.match(custom);",
+        ),
+        "matched:hello"
+    );
+    let r2 = ctx
+        .eval(
+            "var custom = {
+                 [Symbol.search](str) { return 42; }
+             };
+             'hello'.search(custom);",
+        )
+        .unwrap();
+    assert_eq!(r2.as_smi(), Some(42));
+    let r3 = ctx
+        .eval(
+            "var custom = {
+                 [Symbol.split](str, limit) { return [str, limit]; }
+             };
+             'a,b'.split(custom, 3).length;",
+        )
+        .unwrap();
+    assert_eq!(r3.as_smi(), Some(2));
+    assert_eq!(
+        js_str(
+            &mut ctx,
+            "var custom = {
+                 [Symbol.replace](str) { return 'replaced:' + str; }
+             };
+             'x'.replace(custom, 'y');",
+        ),
+        "replaced:x"
+    );
+}
+
+#[test]
+fn test_symbol_match_dispatch_noncallable_throws() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(
+        "var bad = { [Symbol.match]: 5 };
+         'x'.match(bad);",
+    );
+    assert!(r.is_err(), "non-callable @@match should throw TypeError");
+}
+
+#[test]
+fn test_symbol_legacy_fallback_untouched() {
+    fn js_str(ctx: &mut Context, src: &str) -> String {
+        let r = ctx.eval(src).unwrap();
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        }
+    }
+    let mut ctx = Context::new_small();
+    // Plain objects without @@match still fall back to the legacy algorithm.
+    let r = ctx
+        .eval(
+            "var plain = {};
+             'abc'.match(plain);",
+        )
+        .unwrap();
+    assert!(r.is_null() || r.is_heap_object());
+    // String patterns unaffected.
+    let r2 = ctx.eval("\"a,b\".split(',').length;").unwrap();
+    assert_eq!(r2.as_smi(), Some(2));
+    assert_eq!(js_str(&mut ctx, "\"abc\".replace('b', 'X');"), "aXc");
+}

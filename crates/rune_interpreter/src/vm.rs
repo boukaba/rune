@@ -19,6 +19,7 @@ use rune_core::promise::{PROMISE_FULFILLED, PROMISE_PENDING, PROMISE_REJECTED, P
 use rune_core::shape::{DENSE_ARRAY_SHAPE, PROTOTYPE_KEY, PropertyKey, Shape};
 use rune_core::string::HeapString;
 use rune_core::string_object::StringObject;
+use rune_core::symbol::{register_symbol, symbol_description, symbol_display, symbol_for};
 use rune_core::value::Value;
 #[cfg(all(feature = "jit", target_arch = "aarch64"))]
 use rune_jit_baseline::Aarch64CodeGen;
@@ -311,6 +312,25 @@ pub(crate) struct PendingAccessorCall {
     #[allow(dead_code)]
     pub(crate) is_getter: bool,
 }
+
+/// State for a pending well-known-symbol method dispatch (e.g. @@match, @@search,
+/// @@split, @@replace from String.prototype methods). Set by the builtin when the
+/// pattern argument is an object with a callable @@method; consumed by the Return
+/// handler, which routes the method's return value back to the builtin's caller.
+pub(crate) struct PendingSymbolDispatch {
+    pub(crate) source_frame_depth: usize,
+}
+
+/// State for a pending Symbol(description)/Symbol.for(key) description coercion.
+/// Set when the description/key is an object with a user-defined toString
+/// (to_primitive_string set up a pending_call callback); consumed by the Return
+/// handler, which wraps the toString result into a symbol value.
+pub(crate) struct PendingSymbolCoercion {
+    pub(crate) source_frame_depth: usize,
+    /// true for Symbol.for (result is registered under the registry key),
+    /// false for Symbol() (result becomes the symbol's description).
+    pub(crate) is_for: bool,
+}
 /// Set by the builtin function, consumed/updated by the Return handler.
 pub(crate) struct ArrayOpState {
     pub(crate) kind: ArrayOpKind,
@@ -418,7 +438,7 @@ pub struct Vm {
     /// Use stencil-based code emission for JIT compilation (v0.3 copy-and-patch).
     pub stencil_jit: bool,
     /// Pre-allocated string Values for typeof results (indexed by TYPEOF_* constants).
-    pub typeof_strings: [Value; 6],
+    pub typeof_strings: [Value; 7],
     last_locals: Vec<Value>,
     pub eval_fn: UnsafeCell<Option<EvalFn>>,
     /// Reference to Array.prototype for setting on newly created arrays.
@@ -433,6 +453,14 @@ pub struct Vm {
     pub object_prototype: Value,
     pub function_prototype: Value,
     pub regexp_prototype: Value,
+    /// Symbol constructor object (`Symbol` global) with well-known symbol statics.
+    pub symbol_ctor: Value,
+    /// Symbol.prototype — where Symbol.prototype.toString/[@@toPrimitive] live.
+    pub symbol_prototype: Value,
+    /// Pending well-known-symbol @@method dispatch (set by String.prototype
+    /// match/search/split/replace builtins, consumed by the Return handler).
+    pub(crate) pending_symbol_dispatch: Option<PendingSymbolDispatch>,
+    pub(crate) pending_symbol_coercion: Option<PendingSymbolCoercion>,
     /// Pending exception set by a builtin (checked after builtin dispatch).
     pub pending_exception: Option<Value>,
     /// Pending array operation (filter/map/reduce) with callback state machine.
@@ -527,7 +555,7 @@ impl Vm {
             jit_bailout_count: 0,
             enable_inlining: false,
             stencil_jit: false,
-            typeof_strings: [Value::undefined(); 6],
+            typeof_strings: [Value::undefined(); 7],
             last_locals: Vec::new(),
             eval_fn: UnsafeCell::new(None),
             array_prototype: Value::undefined(),
@@ -540,6 +568,10 @@ impl Vm {
             object_prototype: Value::undefined(),
             function_prototype: Value::undefined(),
             regexp_prototype: Value::undefined(),
+            symbol_ctor: Value::undefined(),
+            symbol_prototype: Value::undefined(),
+            pending_symbol_dispatch: None,
+            pending_symbol_coercion: None,
             pending_exception: None,
             pending_array_op: None,
             pending_call: None,
@@ -808,6 +840,87 @@ impl Vm {
             let num_ctor = make_object(gc, &[("prototype", Value::undefined())]);
             self.number_constructor = num_ctor;
             self.builtin_wrappers.insert("Number".to_string(), num_ctor);
+        }
+
+        // Symbol constructor — well-known symbol statics + Symbol.prototype.
+        // `Symbol(x)` is dispatched from Opcode::Call via self.symbol_ctor;
+        // `new Symbol(x)` throws a TypeError (see Opcode::New).
+        if find_handle(&self.builtins, "Symbol").is_some() {
+            let sym_ctor_handle =
+                find_handle(&self.builtins, "Symbol").unwrap_or(Value::undefined());
+            let mut proto_entries: Vec<(&str, Value)> = Vec::new();
+            if let Some(h) = find_handle(&self.builtins, "Symbol_prototype_toString") {
+                proto_entries.push(("toString", h));
+            }
+            if let Some(h) = find_handle(&self.builtins, "Symbol_prototype_valueOf") {
+                proto_entries.push(("valueOf", h));
+            }
+            proto_entries.push(("description", Value::undefined()));
+            proto_entries.push(("constructor", sym_ctor_handle));
+            let sym_proto = make_object(gc, &proto_entries);
+            // Symbol.prototype[@@toPrimitive] and Symbol.prototype[@@toStringTag]
+            unsafe {
+                let proto_ptr = sym_proto.heap_ptr().unwrap() as *mut JSObject;
+                if let Some(h) = find_handle(&self.builtins, "Symbol_prototype_toPrimitive") {
+                    JSObject::add_property(
+                        proto_ptr,
+                        PropertyKey::from_symbol(rune_core::symbol::SYM_TO_PRIMITIVE),
+                        "\u{0}".to_string(),
+                        h,
+                    );
+                }
+                let tag_str = HeapString::allocate(gc, "Symbol") as *mut u8;
+                JSObject::add_property(
+                    proto_ptr,
+                    PropertyKey::from_symbol(rune_core::symbol::SYM_TO_STRING_TAG),
+                    "\u{0}".to_string(),
+                    Value::from_heap_ptr(tag_str),
+                );
+            }
+            self.symbol_prototype = sym_proto;
+            let mut ctor_entries: Vec<(&str, Value)> = vec![
+                ("prototype", sym_proto),
+                ("iterator", Value::symbol(rune_core::symbol::SYM_ITERATOR)),
+                ("match", Value::symbol(rune_core::symbol::SYM_MATCH)),
+                ("replace", Value::symbol(rune_core::symbol::SYM_REPLACE)),
+                ("search", Value::symbol(rune_core::symbol::SYM_SEARCH)),
+                ("split", Value::symbol(rune_core::symbol::SYM_SPLIT)),
+                (
+                    "toPrimitive",
+                    Value::symbol(rune_core::symbol::SYM_TO_PRIMITIVE),
+                ),
+                (
+                    "hasInstance",
+                    Value::symbol(rune_core::symbol::SYM_HAS_INSTANCE),
+                ),
+                (
+                    "toStringTag",
+                    Value::symbol(rune_core::symbol::SYM_TO_STRING_TAG),
+                ),
+                ("species", Value::symbol(rune_core::symbol::SYM_SPECIES)),
+                (
+                    "isConcatSpreadable",
+                    Value::symbol(rune_core::symbol::SYM_IS_CONCAT_SPREADABLE),
+                ),
+                (
+                    "unscopables",
+                    Value::symbol(rune_core::symbol::SYM_UNSCOPABLES),
+                ),
+                ("matchAll", Value::symbol(rune_core::symbol::SYM_MATCH_ALL)),
+                (
+                    "asyncIterator",
+                    Value::symbol(rune_core::symbol::SYM_ASYNC_ITERATOR),
+                ),
+            ];
+            if let Some(h) = find_handle(&self.builtins, "Symbol_for") {
+                ctor_entries.push(("for", h));
+            }
+            if let Some(h) = find_handle(&self.builtins, "Symbol_keyFor") {
+                ctor_entries.push(("keyFor", h));
+            }
+            let sym_ctor = make_object(gc, &ctor_entries);
+            self.symbol_ctor = sym_ctor;
+            self.builtin_wrappers.insert("Symbol".to_string(), sym_ctor);
         }
 
         // Promise constructor — resolve/reject bridge program (lazy init)
@@ -1332,6 +1445,8 @@ impl Vm {
         gc.push_root(&self.promise_prototype as *const Value as *mut u64);
         gc.push_root(&self.function_prototype as *const Value as *mut u64);
         gc.push_root(&self.regexp_prototype as *const Value as *mut u64);
+        gc.push_root(&self.symbol_ctor as *const Value as *mut u64);
+        gc.push_root(&self.symbol_prototype as *const Value as *mut u64);
         // Root pre-allocated typeof result strings (JIT typeof_helper reads these)
         for v in &self.typeof_strings {
             gc.push_root(v as *const Value as *mut u64);
@@ -1442,6 +1557,12 @@ impl Vm {
             state.source_frame_depth = self.frames.len() - 1;
         }
         if let Some(ref mut state) = self.pending_replace_op {
+            state.source_frame_depth = self.frames.len() - 1;
+        }
+        if let Some(ref mut state) = self.pending_symbol_dispatch {
+            state.source_frame_depth = self.frames.len() - 1;
+        }
+        if let Some(ref mut state) = self.pending_symbol_coercion {
             state.source_frame_depth = self.frames.len() - 1;
         }
     }
@@ -2006,6 +2127,13 @@ impl Vm {
                     };
                     let a_is_str = value_is_string(a);
                     let b_is_str = value_is_string(b);
+                    // §7.1.12.1 ToString(Symbol) throws TypeError (§7.1.1 ToPrimitive
+                    // leaves symbols unchanged, so a symbol operand can never be
+                    // string-concatenated).
+                    if a.is_symbol() || b.is_symbol() {
+                        return self
+                            .throw_type_error(gc, "Cannot convert a Symbol value to a string");
+                    }
                     let result = if a_is_str || b_is_str {
                         let sa = value_to_debug_string(a);
                         let sb = value_to_debug_string(b);
@@ -2583,10 +2711,17 @@ impl Vm {
                             }
                             TAG_OBJECT => {
                                 let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
-                                if index < shape.property_count {
-                                    let key_name = shape.key_name_at(index).unwrap_or("");
+                                // §14.7.5.9: symbol-keyed properties are excluded
+                                // from for-in enumeration.
+                                let mut idx = index;
+                                while idx < shape.property_count && shape.entries[idx].0.is_symbol()
+                                {
+                                    idx += 1;
+                                }
+                                if idx < shape.property_count {
+                                    let key_name = shape.key_name_at(idx).unwrap_or("");
                                     let key = HeapString::allocate(gc, key_name);
-                                    self.push(Value::smi((index + 1) as i32));
+                                    self.push(Value::smi((idx + 1) as i32));
                                     self.push(Value::from_heap_ptr(key as *mut u8));
                                     false
                                 } else {
@@ -2723,6 +2858,47 @@ impl Vm {
                                     Some(self.function_prototype),
                                     gc,
                                 )
+                            } else {
+                                Value::undefined()
+                            }
+                        } else {
+                            Value::undefined()
+                        }
+                    } else if obj.is_symbol() {
+                        // Symbol property access — Symbol.prototype plus the
+                        // per-symbol `description` (computed from the registry).
+                        if let Some(ptr) = raw_key.heap_ptr() {
+                            let key_tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+                            if key_tag == TAG_STRING {
+                                let key_str =
+                                    unsafe { HeapString::to_string(ptr as *mut HeapString) };
+                                if key_str == "description" {
+                                    match obj.as_symbol_id().and_then(symbol_description) {
+                                        Some(d) => {
+                                            let hs = HeapString::allocate(gc, &d) as *mut u8;
+                                            Value::from_heap_ptr(hs)
+                                        }
+                                        None => Value::undefined(),
+                                    }
+                                } else if self.symbol_prototype.is_heap_object() {
+                                    if let Some(proto_ptr) = self.symbol_prototype.heap_ptr() {
+                                        let proto_key = PropertyKey::from_string(&key_str);
+                                        let shape = unsafe {
+                                            JSObject::shape_ptr(proto_ptr as *mut JSObject)
+                                        };
+                                        if let Some(slot) = shape.lookup(&proto_key) {
+                                            unsafe {
+                                                JSObject::get_slot(proto_ptr as *mut JSObject, slot)
+                                            }
+                                        } else {
+                                            Value::undefined()
+                                        }
+                                    } else {
+                                        Value::undefined()
+                                    }
+                                } else {
+                                    Value::undefined()
+                                }
                             } else {
                                 Value::undefined()
                             }
@@ -3403,6 +3579,8 @@ impl Vm {
                         "object"
                     } else if val.is_boolean() {
                         "boolean"
+                    } else if val.is_symbol() {
+                        "symbol"
                     } else if val.is_smi() {
                         "number"
                     } else if let Some(ptr) = val.heap_ptr() {
@@ -4027,6 +4205,10 @@ impl Vm {
                         self.frames[fi].pc = pc + 1;
                         continue;
                     }
+                    // §20.4.1.1: `new Symbol()` throws a TypeError — Symbol is not a constructor.
+                    if constructor == self.symbol_ctor {
+                        return self.throw_type_error(gc, "Symbol is not a constructor");
+                    }
                     // Promise constructor [[Construct]] / [[Call]]
                     if constructor == self.promise_constructor {
                         let result = crate::builtins::promise_constructor(
@@ -4266,6 +4448,7 @@ impl Vm {
                                     || self.pending_promise_ctor.is_some()
                                     || self.pending_finally_op.is_some()
                                     || self.pending_replace_op.is_some()
+                                    || self.pending_symbol_dispatch.is_some()
                                 {
                                     // Array method builtin or .call() or assert.throws
                                     // set up a callback. Don't push result or advance pc —
@@ -4309,6 +4492,23 @@ impl Vm {
                             if let Some(exit) = self.handle_throw(gc, exc) {
                                 return exit;
                             }
+                            continue;
+                        }
+                        self.push(result);
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    }
+
+                    // Symbol constructor called as a function: Symbol(description)
+                    if callee == self.symbol_ctor {
+                        let result = crate::builtins::symbol_ctor_builtin(gc, this, &args, self);
+                        if let Some(exc) = self.pending_exception.take() {
+                            if let Some(exit) = self.handle_throw(gc, exc) {
+                                return exit;
+                            }
+                            continue;
+                        }
+                        if self.pending_call.is_some() {
                             continue;
                         }
                         self.push(result);
@@ -5077,6 +5277,20 @@ impl Vm {
                             continue;
                         }
                     }
+                    // Check if this return completes a pending @@method dispatch
+                    // (String.prototype.match/search/split/replace with an object
+                    // whose @@match/@@search/@@split/@@replace is callable). The
+                    // method's return value is the builtin's final result.
+                    if let Some(sd) = self.pending_symbol_dispatch.take() {
+                        if self.frames.len() == sd.source_frame_depth {
+                            self.stack.truncate(callee_base);
+                            self.push(result);
+                            let frames_len = self.frames.len();
+                            self.frames[frames_len - 1].pc += 1;
+                            continue;
+                        }
+                        self.pending_symbol_dispatch = Some(sd);
+                    }
                     // Check if this return completes a pending Promise constructor (executor).
                     if self.pending_promise_ctor.is_some() {
                         if let Some(ref ppc) = self.pending_promise_ctor {
@@ -5133,6 +5347,34 @@ impl Vm {
                                 continue;
                             }
                         }
+                    }
+                    // Check if this return completes a pending Symbol(desc)/Symbol.for(key)
+                    // description coercion (the toString callback returned).
+                    // MUST run before the pending_call resume below — the same
+                    // return satisfies both, and only we wrap the result into a symbol.
+                    if let Some(psc) = self.pending_symbol_coercion.take() {
+                        if self.frames.len() == psc.source_frame_depth {
+                            // The to_primitive_string callback (pending_call) is the
+                            // same frame that just returned — retire it as well.
+                            self.pending_call = None;
+                            let sym = if psc.is_for {
+                                let key = to_primitive_string_sync(result, gc, self);
+                                Value::symbol(symbol_for(&key))
+                            } else {
+                                let desc = if result.is_symbol() {
+                                    None
+                                } else {
+                                    Some(to_primitive_string_sync(result, gc, self))
+                                };
+                                Value::symbol(register_symbol(desc))
+                            };
+                            self.stack.truncate(callee_base);
+                            self.push(sym);
+                            let frames_len = self.frames.len();
+                            self.frames[frames_len - 1].pc += 1;
+                            continue;
+                        }
+                        self.pending_symbol_coercion = Some(psc);
                     }
                     // Check if this return completes a pending .call() invocation.
                     if let Some(pc) = self.pending_call.take() {
@@ -6251,6 +6493,10 @@ fn value_to_debug_string(val: Value) -> String {
         "undefined".to_string()
     } else if val.is_null() {
         "null".to_string()
+    } else if val.is_symbol() {
+        val.as_symbol_id()
+            .map(symbol_display)
+            .unwrap_or_else(|| "Symbol".to_string())
     } else if let Some(b) = val.to_boolean() {
         b.to_string()
     } else if let Some(v) = val.as_smi() {
@@ -6304,6 +6550,10 @@ fn arg_to_js_string_for_ctor(val: Value, gc: &mut SemiSpace, vm: &mut Vm) -> Str
 }
 
 fn value_to_prop_key(val: Value) -> Option<PropertyKey> {
+    // Symbols are valid property keys (stored under their registry id).
+    if let Some(id) = val.as_symbol_id() {
+        return Some(PropertyKey::from_symbol(id));
+    }
     if let Some(ptr) = val.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_STRING {
@@ -6327,6 +6577,38 @@ fn is_proto_key(val: Value) -> bool {
         }
     }
     false
+}
+
+/// Result of GetMethod-style well-known-symbol lookup (§7.3.11 GetMethod).
+pub(crate) enum SymbolMethodResult {
+    /// No @@method (undefined or null) — fall back to the legacy algorithm.
+    NotFound,
+    /// The @@method property exists but is not callable — TypeError per spec.
+    NotCallable,
+    Found(Value),
+}
+
+/// §7.3.11 GetMethod: look up a well-known-symbol method on an object.
+/// Walks the prototype chain; returns NotFound for undefined/null values.
+pub(crate) fn get_symbol_method(
+    gc: &mut SemiSpace,
+    obj: Value,
+    symbol_id: u32,
+    function_prototype: Option<Value>,
+) -> SymbolMethodResult {
+    let method = load_property_recursive(obj, Value::symbol(symbol_id), function_prototype, gc);
+    if method.is_undefined() || method.is_null() {
+        return SymbolMethodResult::NotFound;
+    }
+    let callable = method
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC })
+        || method.as_smi().is_some_and(|s| s < 0);
+    if callable {
+        SymbolMethodResult::Found(method)
+    } else {
+        SymbolMethodResult::NotCallable
+    }
 }
 
 /// Maximum depth to walk the prototype chain before giving up (cycle guard).
@@ -6715,7 +6997,13 @@ fn do_store_property(obj: Value, raw_key: Value, value: Value, gc: &mut SemiSpac
                 if let Some(slot) = shape.lookup(&key) {
                     unsafe { JSObject::set_slot(ptr as *mut JSObject, slot, value) };
                 } else {
-                    let key_name = value_to_debug_string(raw_key);
+                    let key_name = if key.is_symbol() {
+                        // Marker name for symbol-keyed entries (never enumerated —
+                        // for-in/Object.keys/JSON.stringify all skip symbol keys).
+                        "\u{0}".to_string()
+                    } else {
+                        value_to_debug_string(raw_key)
+                    };
                     unsafe { JSObject::add_property(ptr as *mut JSObject, key, key_name, value) };
                 }
             }
@@ -7549,6 +7837,7 @@ const TYPEOF_BOOLEAN: usize = 2;
 const TYPEOF_UNDEFINED: usize = 3;
 const TYPEOF_OBJECT: usize = 4;
 const TYPEOF_FUNCTION: usize = 5;
+const TYPEOF_SYMBOL: usize = 6;
 
 /// JIT callout for `typeof` operator.
 ///
@@ -7569,6 +7858,8 @@ pub extern "C" fn rune_jit_typeof_helper(vm_ptr: *mut u8, value_raw: u64) -> u64
         TYPEOF_BOOLEAN
     } else if val.is_smi() {
         TYPEOF_NUMBER
+    } else if val.is_symbol() {
+        TYPEOF_SYMBOL
     } else if let Some(ptr) = val.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         match tag {

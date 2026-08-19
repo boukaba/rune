@@ -134,14 +134,36 @@ pub fn snapshot_shapes() -> Vec<&'static Shape> {
 
 impl PropertyKey {
     pub fn from_string(s: &str) -> Self {
-        let hash = fxhash::hash64(s.as_bytes());
-        PropertyKey(hash)
+        // Clear the symbol-flag bit so string keys can never collide with symbol keys.
+        PropertyKey(fxhash::hash64(s.as_bytes()) & !SYMBOL_KEY_FLAG)
+    }
+
+    /// Property key for a symbol with the given registry id. The high bit marks
+    /// the key as a symbol; the id is carried directly (no hashing, no collisions).
+    pub fn from_symbol(id: u32) -> Self {
+        PropertyKey(SYMBOL_KEY_FLAG | (id as u64))
+    }
+
+    /// True if this key names a symbol property (excluded from for-in/Object.keys).
+    pub fn is_symbol(&self) -> bool {
+        self.0 & SYMBOL_KEY_FLAG != 0
+    }
+
+    pub fn symbol_id(&self) -> Option<u32> {
+        if self.is_symbol() {
+            Some((self.0 & !SYMBOL_KEY_FLAG) as u32)
+        } else {
+            None
+        }
     }
 
     pub fn as_u64(&self) -> u64 {
         self.0
     }
 }
+
+/// High bit of a PropertyKey marks symbol keys (see PropertyKey::from_symbol).
+const SYMBOL_KEY_FLAG: u64 = 1 << 63;
 
 impl std::fmt::Debug for Shape {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

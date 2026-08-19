@@ -41,6 +41,7 @@ const UNDEFINED_TAG: u64 = 2;
 const NULL_TAG: u64 = 3;
 const FALSE_TAG: u64 = 4;
 const TRUE_TAG: u64 = 5;
+const SYMBOL_TAG: u64 = 6;
 
 // Payload mask: bits 0-44 (45 bits)
 const PAYLOAD_MASK: u64 = (1 << 45) - 1;
@@ -115,6 +116,23 @@ impl Value {
 
     pub const fn boolean(b: bool) -> Self {
         Value(QNAN_PREFIX | ((if b { TRUE_TAG } else { FALSE_TAG }) << TAG_SHIFT))
+    }
+
+    /// Create a Symbol value referencing the registry id (see `rune_core::symbol`).
+    pub fn symbol(id: u32) -> Self {
+        Value(QNAN_PREFIX | (SYMBOL_TAG << TAG_SHIFT) | (id as u64 & PAYLOAD_MASK))
+    }
+
+    pub fn is_symbol(&self) -> bool {
+        self.is_non_float() && self.tag() == SYMBOL_TAG
+    }
+
+    pub fn as_symbol_id(&self) -> Option<u32> {
+        if self.is_symbol() {
+            Some((self.0 & PAYLOAD_MASK) as u32)
+        } else {
+            None
+        }
     }
 
     pub fn is_boolean(&self) -> bool {

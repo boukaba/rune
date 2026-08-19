@@ -61,6 +61,7 @@ impl Context {
             ctx.allocate_string("undefined"),
             ctx.allocate_string("object"),
             ctx.allocate_string("function"),
+            ctx.allocate_string("symbol"),
         ];
         ctx
     }

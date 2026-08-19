@@ -50,6 +50,8 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - `json_round_trip` benchmark: Rune cold-start 7.6ms vs Node 21ms → **2.8× faster**. Warm: Rune 0.79ms vs Node 0.146ms → 5.4× slower.
 
 ### Done — v0.5
+- **Optional chaining `?.`** — lexer `QuestionDot` token (digit lookahead), `Expr::OptionalChain` + `OptionalLinkKind::{Prop,Computed,Call,Private}`, flat-chain parser with `absorb_member_base` (receiver survives `a.b?.()`), emitter uses only existing opcodes (`Dup`/`JumpIfNullOrUndefined`/`Swap` — stays out of the JIT whitelist, bails to interpreter); whole chain collapses to undefined when any guard trips; parse errors for `a?.b = c`, `a?.b++`, `new a?.b`, `super?.b`, trailing `a?.`. 7 integration tests.
+- **Ternary precedence fix (silent miscompile)** — `a === b ? x : y` parsed as `a === (b ? x : y)` because the ternary check ran regardless of `min_prec`; now gated on `min_prec == 0`. `1 === 1 ? 7 : 8` → 7. 498/498 integration tests, 644 workspace.
 - **Correctness batch — silent-miscompile elimination** — 10 features/regressions fixed and verified end-to-end (491/491 integration tests, 637 workspace tests):
   - `assert.throws` type mismatch now throws (test262 negative-path behavior)
   - `for` loop `continue` runs the update (was infinite loop); `do-while` break/continue fixed
@@ -107,7 +109,7 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - `RegExp()` constructor not yet implemented
 - Match result arrays don't set `.index`/`.input` properties (no named-property support on TAG_ARRAY)
 - `replaceAll` function replacement not yet implemented
-- Optional chaining (`?.`) not yet implemented (lexer maps `?.` → Dot)
+- `?.` in JIT: JumpIfNullOrUndefined not in the whitelist — optional chains bail to the interpreter (correct, slower in hot loops)
 - Nested accessors (getter inside getter) unsupported (single pending slot)
 - `this.prop++` not supported (Update only handles Identifier targets)
 - `let` + `new` in function body has a scoping bug

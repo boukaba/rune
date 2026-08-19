@@ -976,6 +976,9 @@ impl Parser {
                         start: self.span().start,
                         end: self.span().end,
                     };
+                    if matches!(lhs, Expr::OptionalChain(..)) {
+                        self.error("Invalid assignment target: optional chaining".to_string());
+                    }
                     if op == BinaryOp::Assign {
                         // Destructuring assignment only applies when the LHS is an
                         // array or object literal; plain identifiers stay Assign.
@@ -1009,8 +1012,11 @@ impl Parser {
             lhs = Expr::Binary(op, Box::new(lhs), Box::new(rhs), span);
         }
 
-        // Ternary
-        if self.tok.kind == TokenKind::Question {
+        // Ternary — binds LOOSER than every binary operator, so it may only be
+        // consumed at the top of an expression (min_prec == 0). Otherwise a
+        // binary RHS like `a === b ? x : y` would swallow the ternary into the
+        // RHS, silently miscompiling `(a === b) ? x : y` as `a === (b ? x : y)`.
+        if min_prec == 0 && self.tok.kind == TokenKind::Question {
             self.advance();
             let then = self.parse_expr(0);
             self.expect(TokenKind::Colon);
@@ -1964,34 +1970,321 @@ impl Parser {
     }
 
     /// Parse postfix operations: calls, member access, etc.
+    /// Parse the argument list of a call: consumes `(` ... `)`.
+    fn parse_call_args(&mut self) -> Vec<ArrayElement> {
+        self.advance(); // consume '('
+        let mut args = Vec::new();
+        while self.tok.kind != TokenKind::RParen && self.tok.kind != TokenKind::Eof {
+            let arg_start = self.span();
+            let is_spread = self.tok.kind == TokenKind::Ellipsis;
+            if is_spread {
+                self.advance();
+            }
+            let expr = self.parse_expr(0);
+            args.push(ArrayElement {
+                expr,
+                is_spread,
+                span: Span {
+                    start: arg_start.start,
+                    end: self.span().end,
+                },
+            });
+            if self.tok.kind == TokenKind::Comma {
+                self.advance();
+            }
+        }
+        self.expect(TokenKind::RParen);
+        args
+    }
+
+    /// Property name after `.` / `?.` (identifiers and reserved words are valid).
+    fn parse_prop_name(&mut self) -> Box<str> {
+        if self.tok.kind == TokenKind::Identifier
+            || matches!(
+                self.tok.kind,
+                TokenKind::Catch
+                    | TokenKind::Finally
+                    | TokenKind::Class
+                    | TokenKind::Const
+                    | TokenKind::Delete
+                    | TokenKind::Do
+                    | TokenKind::Else
+                    | TokenKind::Export
+                    | TokenKind::Extends
+                    | TokenKind::For
+                    | TokenKind::Function
+                    | TokenKind::If
+                    | TokenKind::Import
+                    | TokenKind::Let
+                    | TokenKind::New
+                    | TokenKind::Return
+                    | TokenKind::Switch
+                    | TokenKind::This
+                    | TokenKind::Throw
+                    | TokenKind::Try
+                    | TokenKind::Var
+                    | TokenKind::While
+                    | TokenKind::Yield
+                    | TokenKind::Await
+                    | TokenKind::Async
+                    | TokenKind::Default
+                    | TokenKind::Case
+                    | TokenKind::Instanceof
+                    | TokenKind::In
+                    | TokenKind::Void
+                    | TokenKind::Typeof
+                    | TokenKind::Break
+                    | TokenKind::Continue
+                    | TokenKind::Super
+            )
+        {
+            let t = self.tok.clone();
+            self.advance();
+            t.value.into_boxed_str()
+        } else {
+            Box::from("")
+        }
+    }
+
+    /// Private name after `.#` / `?.#`: consumes `#` and the identifier.
+    fn parse_private_name(&mut self) -> Box<str> {
+        self.advance(); // consume '#'
+        if self.tok.kind == TokenKind::Identifier {
+            let t = self.tok.clone();
+            self.advance();
+            t.value.into_boxed_str()
+        } else {
+            self.error("Expected identifier after #".to_string());
+            Box::from("")
+        }
+    }
+
+    /// Collect the remaining links of an optional chain after the first `?.`.
+    /// Regular `.`/`[`/`(` postfix ops join the SAME chain (they must not
+    /// short-circuit on their own; the whole chain collapses to undefined if
+    /// any optional guard trips).
+    /// Absorb trailing `obj.prop` / `obj.#name` levels of the base into the
+    /// chain as regular links. A chain like `a.b?.()` must call with
+    /// this = a; if the base stayed `Member(a, b)`, the receiver would be
+    /// lost once the member is evaluated. Recursing keeps the object value
+    /// live so the method-call link can preserve it below the loaded method.
+    fn absorb_member_base(base: Expr) -> (Expr, Vec<OptionalLink>) {
+        match base {
+            Expr::Member(obj, prop, computed, span) => {
+                let (obj, mut links) = Self::absorb_member_base(*obj);
+                let kind = if computed {
+                    OptionalLinkKind::Computed(prop)
+                } else {
+                    match prop.as_ref() {
+                        Expr::String(name, _) | Expr::Identifier(name, _) => {
+                            OptionalLinkKind::Prop(name.clone())
+                        }
+                        Expr::Undefined(_) => OptionalLinkKind::Prop(Box::from("")),
+                        other => OptionalLinkKind::Computed(Box::new(other.clone())),
+                    }
+                };
+                links.push(OptionalLink {
+                    kind,
+                    optional: false,
+                    span,
+                });
+                (obj, links)
+            }
+            Expr::PrivateMember(obj, name, span) => {
+                let (obj, mut links) = Self::absorb_member_base(*obj);
+                links.push(OptionalLink {
+                    kind: OptionalLinkKind::Private(name),
+                    optional: false,
+                    span,
+                });
+                (obj, links)
+            }
+            other => (other, Vec::new()),
+        }
+    }
+
+    fn parse_optional_chain(&mut self, base: Expr) -> Expr {
+        if matches!(base, Expr::Super(_)) {
+            self.error("super cannot be used with optional chaining".to_string());
+        }
+        let chain_start = self.span().start;
+        let (base, mut links) = Self::absorb_member_base(base);
+        loop {
+            let link_start = self.span().start;
+            match self.tok.kind {
+                TokenKind::QuestionDot => {
+                    self.advance();
+                    match self.tok.kind {
+                        TokenKind::LParen => {
+                            let args = self.parse_call_args();
+                            let span = Span {
+                                start: link_start,
+                                end: self.span().end,
+                            };
+                            links.push(OptionalLink {
+                                kind: OptionalLinkKind::Call(args),
+                                optional: true,
+                                span,
+                            });
+                        }
+                        TokenKind::LBracket => {
+                            self.advance();
+                            let index = self.parse_expr(0);
+                            self.expect(TokenKind::RBracket);
+                            let span = Span {
+                                start: link_start,
+                                end: self.span().end,
+                            };
+                            links.push(OptionalLink {
+                                kind: OptionalLinkKind::Computed(Box::new(index)),
+                                optional: true,
+                                span,
+                            });
+                        }
+                        TokenKind::Hash => {
+                            let name = self.parse_private_name();
+                            let span = Span {
+                                start: link_start,
+                                end: self.span().end,
+                            };
+                            links.push(OptionalLink {
+                                kind: OptionalLinkKind::Private(name),
+                                optional: true,
+                                span,
+                            });
+                        }
+                        _ => {
+                            let valid_start = self.tok.kind == TokenKind::Identifier
+                                || matches!(
+                                    self.tok.kind,
+                                    TokenKind::Catch
+                                        | TokenKind::Finally
+                                        | TokenKind::Class
+                                        | TokenKind::Const
+                                        | TokenKind::Delete
+                                        | TokenKind::Do
+                                        | TokenKind::Else
+                                        | TokenKind::Export
+                                        | TokenKind::Extends
+                                        | TokenKind::For
+                                        | TokenKind::Function
+                                        | TokenKind::If
+                                        | TokenKind::Import
+                                        | TokenKind::Let
+                                        | TokenKind::New
+                                        | TokenKind::Return
+                                        | TokenKind::Switch
+                                        | TokenKind::This
+                                        | TokenKind::Throw
+                                        | TokenKind::Try
+                                        | TokenKind::Var
+                                        | TokenKind::While
+                                        | TokenKind::Yield
+                                        | TokenKind::Await
+                                        | TokenKind::Async
+                                        | TokenKind::Default
+                                        | TokenKind::Case
+                                        | TokenKind::Instanceof
+                                        | TokenKind::In
+                                        | TokenKind::Void
+                                        | TokenKind::Typeof
+                                        | TokenKind::Break
+                                        | TokenKind::Continue
+                                        | TokenKind::Super
+                                );
+                            if !valid_start {
+                                self.error(
+                                    "Expected a property name, '[', '(', or '#' after '?.'"
+                                        .to_string(),
+                                );
+                            }
+                            let name = self.parse_prop_name();
+                            let span = Span {
+                                start: link_start,
+                                end: self.span().end,
+                            };
+                            links.push(OptionalLink {
+                                kind: OptionalLinkKind::Prop(name),
+                                optional: true,
+                                span,
+                            });
+                        }
+                    }
+                }
+                TokenKind::Dot => {
+                    self.advance();
+                    if self.tok.kind == TokenKind::Hash {
+                        let name = self.parse_private_name();
+                        let span = Span {
+                            start: link_start,
+                            end: self.span().end,
+                        };
+                        links.push(OptionalLink {
+                            kind: OptionalLinkKind::Private(name),
+                            optional: false,
+                            span,
+                        });
+                    } else {
+                        let name = self.parse_prop_name();
+                        let span = Span {
+                            start: link_start,
+                            end: self.span().end,
+                        };
+                        links.push(OptionalLink {
+                            kind: OptionalLinkKind::Prop(name),
+                            optional: false,
+                            span,
+                        });
+                    }
+                }
+                TokenKind::LBracket => {
+                    self.advance();
+                    let index = self.parse_expr(0);
+                    self.expect(TokenKind::RBracket);
+                    let span = Span {
+                        start: link_start,
+                        end: self.span().end,
+                    };
+                    links.push(OptionalLink {
+                        kind: OptionalLinkKind::Computed(Box::new(index)),
+                        optional: false,
+                        span,
+                    });
+                }
+                TokenKind::LParen => {
+                    let args = self.parse_call_args();
+                    let span = Span {
+                        start: link_start,
+                        end: self.span().end,
+                    };
+                    links.push(OptionalLink {
+                        kind: OptionalLinkKind::Call(args),
+                        optional: false,
+                        span,
+                    });
+                }
+                _ => break,
+            }
+        }
+        let span = Span {
+            start: chain_start,
+            end: self.span().end,
+        };
+        Expr::OptionalChain(Box::new(base), links, span)
+    }
+
     fn parse_postfix(&mut self, mut lhs: Expr) -> Expr {
         loop {
             match self.tok.kind {
                 TokenKind::LParen => {
-                    self.advance();
-                    let mut args = Vec::new();
-                    while self.tok.kind != TokenKind::RParen && self.tok.kind != TokenKind::Eof {
-                        let arg_start = self.span();
-                        let is_spread = self.tok.kind == TokenKind::Ellipsis;
-                        if is_spread {
-                            self.advance();
-                        }
-                        let expr = self.parse_expr(0);
-                        args.push(ArrayElement {
-                            expr,
-                            is_spread,
-                            span: Span {
-                                start: arg_start.start,
-                                end: self.span().end,
-                            },
-                        });
-                        if self.tok.kind == TokenKind::Comma {
-                            self.advance();
-                        }
-                    }
-                    self.expect(TokenKind::RParen);
+                    let args = self.parse_call_args();
                     let span = self.span();
                     lhs = Expr::Call(Box::new(lhs), args, span);
+                }
+                TokenKind::QuestionDot => {
+                    // Optional chain: collect ALL following postfix ops
+                    // (regular and optional) into one flat chain.
+                    return self.parse_optional_chain(lhs);
                 }
                 TokenKind::Dot => {
                     self.advance();
@@ -2064,15 +2357,23 @@ impl Parser {
                     let span = self.span();
                     lhs = Expr::Member(Box::new(lhs), Box::new(index), true, span);
                 }
-                TokenKind::PlusPlus => {
+                TokenKind::PlusPlus | TokenKind::MinusMinus => {
+                    let is_plus = self.tok.kind == TokenKind::PlusPlus;
                     self.advance();
+                    if matches!(lhs, Expr::OptionalChain(..)) {
+                        self.error("Invalid update target: optional chaining".to_string());
+                    }
                     let span = self.span();
-                    lhs = Expr::Update(UpdateOp::PlusPlus, Box::new(lhs), false, span);
-                }
-                TokenKind::MinusMinus => {
-                    self.advance();
-                    let span = self.span();
-                    lhs = Expr::Update(UpdateOp::MinusMinus, Box::new(lhs), false, span);
+                    lhs = Expr::Update(
+                        if is_plus {
+                            UpdateOp::PlusPlus
+                        } else {
+                            UpdateOp::MinusMinus
+                        },
+                        Box::new(lhs),
+                        false,
+                        span,
+                    );
                 }
                 _ => break,
             }
@@ -2085,6 +2386,10 @@ impl Parser {
     fn parse_member_tail(&mut self, mut lhs: Expr) -> Expr {
         loop {
             match self.tok.kind {
+                TokenKind::QuestionDot => {
+                    self.error("Optional chaining is not valid in a new expression".to_string());
+                    break;
+                }
                 TokenKind::Dot => {
                     self.advance();
                     if self.tok.kind == TokenKind::Hash {

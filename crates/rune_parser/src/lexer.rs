@@ -63,6 +63,7 @@ pub enum TokenKind {
     Semicolon,
     Colon,
     Question,
+    QuestionDot, // ?. (optional chaining)
     Arrow,
     // Operators
     Plus,
@@ -658,9 +659,9 @@ impl Lexer {
                 } else if self.peek() == Some('.')
                     && self.peek_next().is_none_or(|c| !c.is_ascii_digit())
                 {
-                    // ?. optional chaining — treat as .
+                    // ?. optional chaining (a?.3:0 stays a ? .3 : 0)
                     self.advance();
-                    Token::new(TokenKind::Dot, self.start, self.pos, "?.".into())
+                    Token::new(TokenKind::QuestionDot, self.start, self.pos, "?.".into())
                 } else {
                     Token::new(TokenKind::Question, self.start, self.pos, "?".into())
                 }

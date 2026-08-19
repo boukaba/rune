@@ -31,6 +31,7 @@ pub enum Expr {
     New(Box<Expr>, Vec<ArrayElement>, Span),
     Member(Box<Expr>, Box<Expr>, bool, Span), // computed = true for a[b]
     PrivateMember(Box<Expr>, Box<str>, Span), // a.#name
+    OptionalChain(Box<Expr>, Vec<OptionalLink>, Span), // a?.b.c?.[d]?.()
     Assign(Box<Expr>, Box<Expr>, Span),
     DestructureAssign(Box<Pattern>, Box<Expr>, Span),
     CompoundAssign(BinaryOp, Box<Expr>, Box<Expr>, Span),
@@ -74,6 +75,23 @@ pub enum UnaryOp {
     Typeof,
     Void,
     Delete,
+}
+
+/// One link of an optional chain: a?.b.c?.[d]?.(x)
+#[derive(Clone, Debug, PartialEq)]
+pub struct OptionalLink {
+    pub kind: OptionalLinkKind,
+    /// True if this link begins with `?.` (has its own nullish guard).
+    pub optional: bool,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum OptionalLinkKind {
+    Prop(Box<str>),          // .name or ?.name
+    Computed(Box<Expr>),     // [expr] or ?.[expr]
+    Call(Vec<ArrayElement>), // (args) or ?(args)
+    Private(Box<str>),       // .#name or ?.#name
 }
 
 /// Increment/decrement update expression.

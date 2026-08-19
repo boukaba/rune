@@ -2,10 +2,20 @@
 
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
-> **Status:** v0.5.0 🚧 (In Progress — 491/491 integration tests Pass, 3 Ignored; workspace tests Pass)
+> **Status:** v0.5.0 🚧 (In Progress — 498/498 integration tests Pass, 3 Ignored; workspace tests Pass)
 > SIDT validated, AFPC bytecode + native-code cache functional (AArch64); x86-64 runs bytecode/IC/shape caching only (JIT codegen disabled there). Cold start 2.8× faster than Node
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
+
+## Optional chaining `?.` + ternary precedence fix (2026-08-19)
+
+- [x] **`?.` optional chaining** — lexer `TokenKind::QuestionDot` (`?.` with digit lookahead so `a?.3:0` stays `a ? .3 : 0`); AST `Expr::OptionalChain(Box<Expr>, Vec<OptionalLink>)` with `OptionalLinkKind::{Prop, Computed, Call, Private}` and a per-link `optional` flag; parser `parse_optional_chain` collects ALL postfix ops (regular `.`/`[`/`(` AND `?.`/`?.[`/`?(`/`?.#`) into one flat chain; `absorb_member_base` folds trailing `obj.prop`/`obj.#name` levels of the base into the chain so the receiver survives method calls (`a.b?.()` calls with this=a, not undefined)
+- [x] **Emitter** (no new opcodes — Dup/JumpIfNullOrUndefined/Pop/LoadUndefined/Swap only; stays out of the JIT whitelist): each `?.` link emits `Dup; JumpIfNullOrUndefined → nullish-tail`; when any guard trips, the WHOLE chain collapses to undefined (later links never evaluate — verified side-effect short-circuit `t()?.x.y.z` with count==1); method-call links keep the receiver via a Dup before LoadProperty when the next link is a call; `?.()` on a plain value calls with this=undefined via `LoadUndefined; Swap`; spread args via NewArray/ArrayPush/ArrayExtend + CallFromArray; nullish tails pop the running value (+ receiver for the `?.()` method case, pops=2) then push undefined; per-tail jumps to the shared end
+- [x] **Parse errors per spec**: `a?.b = 1`, `a?.b++`, `a?.b--` (invalid assignment/update target), `new a?.b` (invalid in new), `super?.b` (super can't chain), `a?.` (trailing)
+- [x] **Ternary precedence bug fixed (silent miscompile)**: `a === b ? x : y` previously parsed as `a === (b ? x : y)` — the ternary check ran at the end of `parse_expr` regardless of `min_prec`, so ANY binary operator's RHS swallowed a following ternary. Gated the ternary consumption on `min_prec == 0` (ternary binds looser than every binary op). `1 === 1 ? 7 : 8` → 7, `1 + 2 === 3 ? 100 : 200` → 100, nested right-assoc chains work
+- [x] 7 new integration tests: basic chains (42/undefined), method receiver (`g?.m(5)` → 15, `g2.m?.()` → 7), optional call (`fn?.(21)` → 42, `f2?.()` → 99), computed + short-circuit (count stays 1, `??` fallback), syntax errors (6 cases), chains in loops (`rows[i]?.v ?? 0` → 4), ternary regression
+- [x] Full suite green: **498 integration tests pass, 3 ignored** (workspace 644); cargo fmt + clippy clean (CI flags); `--no-default-features` build probe clean
+- **Known gaps**: `?.` not yet supported in the JIT (JumpIfNullOrUndefined bails to interpreter — correct but slower in loops); `.5`-style numeric literals not lexed (pre-existing)
 
 ## Correctness batch — silent-miscompile elimination (2026-08-19)
 

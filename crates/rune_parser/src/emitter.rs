@@ -1929,6 +1929,117 @@ impl Emitter {
                     .unwrap_or(0);
                 self.emit(Opcode::LoadPrivateProperty, vec![slot_idx as i64]);
             }
+            Expr::OptionalChain(base, links, _) => {
+                // a?.b.c?.[d]?.(x)
+                // Every `?.` link gets its own nullish guard; when any guard
+                // trips, the WHOLE chain yields undefined (later links never
+                // evaluate). Guards jump to per-label tails that pop the
+                // running value (+ receiver in the `?.()` method case) and
+                // push undefined.
+                self.emit_expression(base);
+                let mut pending_nullish: Vec<(usize, usize)> = Vec::new();
+                for (i, link) in links.iter().enumerate() {
+                    let next_is_call = links
+                        .get(i + 1)
+                        .is_some_and(|l| matches!(l.kind, OptionalLinkKind::Call(..)));
+                    let prev_is_load = i > 0
+                        && matches!(
+                            links[i - 1].kind,
+                            OptionalLinkKind::Prop(..)
+                                | OptionalLinkKind::Computed(..)
+                                | OptionalLinkKind::Private(..)
+                        );
+                    if link.optional {
+                        // [v] -> Dup -> [v,v] -> JumpIfNullOrUndefined (POPS) -> [v]
+                        self.emit(Opcode::Dup, vec![]);
+                        let guard = self.current();
+                        self.emit(Opcode::JumpIfNullOrUndefined, vec![0]);
+                        let pops =
+                            if matches!(link.kind, OptionalLinkKind::Call(..)) && prev_is_load {
+                                2 // [receiver, method] both dropped
+                            } else {
+                                1
+                            };
+                        pending_nullish.push((guard, pops));
+                    }
+                    match &link.kind {
+                        OptionalLinkKind::Prop(name) => {
+                            if next_is_call {
+                                // keep the receiver below the loaded method
+                                self.emit(Opcode::Dup, vec![]);
+                            }
+                            let idx = self.intern_string(name) as i64;
+                            self.emit(Opcode::LoadStringConst, vec![idx]);
+                            self.emit(Opcode::LoadProperty, vec![]);
+                        }
+                        OptionalLinkKind::Computed(expr) => {
+                            if next_is_call {
+                                self.emit(Opcode::Dup, vec![]);
+                            }
+                            self.emit_expression(expr);
+                            self.emit(Opcode::LoadProperty, vec![]);
+                        }
+                        OptionalLinkKind::Private(name) => {
+                            if next_is_call {
+                                self.emit(Opcode::Dup, vec![]);
+                            }
+                            let slot_idx = self
+                                .private_field_names
+                                .iter()
+                                .position(|n| n.as_str() == name.as_ref())
+                                .unwrap_or(0);
+                            self.emit(Opcode::LoadPrivateProperty, vec![slot_idx as i64]);
+                        }
+                        OptionalLinkKind::Call(args) => {
+                            if !prev_is_load {
+                                // plain function value: call with this = undefined
+                                // [fn] -> LoadUndefined -> [fn, undefined]
+                                //      -> Swap -> [undefined, fn]
+                                self.emit(Opcode::LoadUndefined, vec![]);
+                                self.emit(Opcode::Swap, vec![]);
+                            }
+                            let has_spread = args.iter().any(|a| a.is_spread);
+                            if has_spread {
+                                self.emit(Opcode::NewArray, vec![0]);
+                                for arg in args {
+                                    self.emit_expression(&arg.expr);
+                                    if arg.is_spread {
+                                        self.emit(Opcode::ArrayExtend, vec![]);
+                                    } else {
+                                        self.emit(Opcode::ArrayPush, vec![]);
+                                    }
+                                }
+                                // [this, callee, args_array] for CallFromArray
+                                self.emit(Opcode::CallFromArray, vec![]);
+                            } else {
+                                for arg in args {
+                                    self.emit_expression(&arg.expr);
+                                }
+                                self.emit(Opcode::Call, vec![args.len() as i64]);
+                            }
+                        }
+                    }
+                }
+                if !pending_nullish.is_empty() {
+                    let end = self.current();
+                    self.emit(Opcode::Jump, vec![0]);
+                    let mut tails = Vec::new();
+                    for (guard, pops) in pending_nullish {
+                        self.patch(guard, self.current());
+                        for _ in 0..pops {
+                            self.emit(Opcode::Pop, vec![]);
+                        }
+                        self.emit(Opcode::LoadUndefined, vec![]);
+                        let tail = self.current();
+                        self.emit(Opcode::Jump, vec![0]);
+                        tails.push(tail);
+                    }
+                    self.patch(end, self.current());
+                    for t in tails {
+                        self.patch(t, self.current());
+                    }
+                }
+            }
             Expr::Member(obj, prop, computed, _) => {
                 match obj.as_ref() {
                     Expr::Super(_) => {
@@ -2633,6 +2744,16 @@ fn contains_inner_function_expr(expr: &Expr) -> bool {
             contains_inner_function_expr(obj) || contains_inner_function_expr(prop)
         }
         Expr::PrivateMember(obj, _, _) => contains_inner_function_expr(obj),
+        Expr::OptionalChain(base, links, _) => {
+            contains_inner_function_expr(base)
+                || links.iter().any(|l| match &l.kind {
+                    OptionalLinkKind::Computed(e) => contains_inner_function_expr(e),
+                    OptionalLinkKind::Call(args) => {
+                        args.iter().any(|a| contains_inner_function_expr(&a.expr))
+                    }
+                    _ => false,
+                })
+        }
         Expr::Unary(_, arg, _) => contains_inner_function_expr(arg),
         Expr::Update(_, arg, _, _) => contains_inner_function_expr(arg),
         Expr::Binary(_, lhs, rhs, _) | Expr::CompoundAssign(_, lhs, rhs, _) => {
@@ -2812,6 +2933,16 @@ fn uses_arguments_expr(expr: &Expr) -> bool {
         }
         Expr::Member(obj, prop, _, _) => uses_arguments_expr(obj) || uses_arguments_expr(prop),
         Expr::PrivateMember(obj, _, _) => uses_arguments_expr(obj),
+        Expr::OptionalChain(base, links, _) => {
+            uses_arguments_expr(base)
+                || links.iter().any(|l| match &l.kind {
+                    OptionalLinkKind::Computed(e) => uses_arguments_expr(e),
+                    OptionalLinkKind::Call(args) => {
+                        args.iter().any(|a| uses_arguments_expr(&a.expr))
+                    }
+                    _ => false,
+                })
+        }
         Expr::Assign(lhs, rhs, _) => uses_arguments_expr(lhs) || uses_arguments_expr(rhs),
         Expr::CompoundAssign(_, lhs, rhs, _) => {
             uses_arguments_expr(lhs) || uses_arguments_expr(rhs)

@@ -63,6 +63,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 - **Scoping:** var, let, const with block scope and TDZ
 - **Functions:** declarations, expressions, arrows, closures, rest/default params, destructuring
 - **Objects:** literals, shorthand, methods, computed keys, spread, destructuring, member `obj.prop++` update
+- **Optional chaining:** `a?.b`, `a?.[b]`, `a?.b()`, `a?.()`, `?.#priv`, mixed chains (`a?.b.c?.[d]`) — whole chain short-circuits to undefined; syntax errors for `a?.b = c`, `new a?.b`
 - **Arrays:** dense arrays, spread, destructuring (declarations + assignment), rest, push/pop/length
 - **Control flow:** if/else, while, do/while (break/continue), for (continue runs the update), for-in, switch, try/catch/finally
 - **Generators:** function*, yield, next() (basic)

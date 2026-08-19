@@ -6967,3 +6967,132 @@ fn test_accessor_getter_result_flows() {
         .unwrap();
     assert_eq!(r2.as_smi(), Some(0));
 }
+
+#[test]
+fn test_optional_chaining_basic() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var o = { a: { b: { c: 42 } } };
+             o?.a?.b?.c;",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(42));
+    assert!(ctx.eval("o?.x?.y").unwrap().is_undefined());
+    assert!(ctx.eval("null?.a").unwrap().is_undefined());
+    assert!(ctx.eval("undefined?.b").unwrap().is_undefined());
+    // undeclared global loads are undefined, so the chain short-circuits
+    assert!(ctx.eval("var_not_declared_zz?.x").unwrap().is_undefined());
+}
+
+#[test]
+fn test_optional_chaining_method_call() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var g = { m: function(v) { return this.v + v; }, v: 10 };
+             g?.m(5);",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(15));
+    assert!(ctx.eval("g?.x?.()").unwrap().is_undefined());
+    // ?. before the call keeps `this` (receiver from the member load)
+    let r3 = ctx
+        .eval("var g2 = { m: function() { return this.v; }, v: 7 }; g2.m?.()")
+        .unwrap();
+    assert_eq!(r3.as_smi(), Some(7));
+    // missing member -> nullish method -> undefined, no call
+    assert!(ctx.eval("g.missing?.()").unwrap().is_undefined());
+}
+
+#[test]
+fn test_optional_chaining_optional_call() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval("var fn = function(x) { return x * 2; }; fn?.(21)")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(42));
+    let r2 = ctx
+        .eval("var f2 = function() { return 99; }; f2?.()")
+        .unwrap();
+    assert_eq!(r2.as_smi(), Some(99));
+    assert!(ctx.eval("var n = null; n?.(1)").unwrap().is_undefined());
+}
+
+#[test]
+fn test_optional_chaining_computed_and_short_circuit() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("var arr = [1, 2, 3]; arr?.[1]").unwrap();
+    assert_eq!(r.as_smi(), Some(2));
+    assert!(ctx.eval("arr?.[99]?.x").unwrap().is_undefined());
+    let r2 = ctx
+        .eval(
+            "var count = 0;
+             function t() { count++; return null; }
+             var v = t()?.x.y.z;
+             v;",
+        )
+        .unwrap();
+    assert!(r2.is_undefined());
+    let c = ctx.eval("count").unwrap();
+    assert_eq!(c.as_smi(), Some(1), "later links must not evaluate");
+    let r3 = ctx
+        .eval("var o2 = { deep: null }; o2?.deep ?? 'fallback'")
+        .unwrap();
+    assert!(
+        r3.to_bool(),
+        "expected the truthy 'fallback' string, got {:?}",
+        r3
+    );
+}
+
+#[test]
+fn test_optional_chaining_syntax_errors() {
+    let mut ctx = Context::new_small();
+    assert!(ctx.eval("var a = {}; a?.b = 1;").is_err());
+    assert!(ctx.eval("var a = {}; a?.b++;").is_err());
+    assert!(ctx.eval("var a = {}; a?.b--;").is_err());
+    assert!(ctx.eval("new a?.b;").is_err());
+    assert!(ctx.eval("super?.b;").is_err());
+    assert!(ctx.eval("var a; a?.;").is_err());
+}
+
+#[test]
+fn test_optional_chaining_in_loop() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var rows = [{ v: 1 }, null, { v: 3 }];
+             var s = 0;
+             for (var i = 0; i < rows.length; i++) { s += rows[i]?.v ?? 0; }
+             s;",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(4));
+}
+
+#[test]
+fn test_ternary_binds_looser_than_binary_ops() {
+    let mut ctx = Context::new_small();
+    // Previously `a === b ? x : y` silently parsed as `a === (b ? x : y)`.
+    assert_eq!(ctx.eval("1 === 1 ? 7 : 8").unwrap().as_smi(), Some(7));
+    assert_eq!(ctx.eval("1 === 2 ? 7 : 8").unwrap().as_smi(), Some(8));
+    assert_eq!(ctx.eval("1 < 2 ? 7 : 8").unwrap().as_smi(), Some(7));
+    assert_eq!(
+        ctx.eval("1 + 2 === 3 ? 100 : 200").unwrap().as_smi(),
+        Some(100)
+    );
+    assert_eq!(ctx.eval("2 === 2 ? 1 : 0").unwrap().as_smi(), Some(1));
+    assert_eq!(ctx.eval("0 || 5 ? 1 : 0").unwrap().as_smi(), Some(1));
+    // nested ternary inside the else branch (right-associative chain)
+    assert_eq!(
+        ctx.eval("2 === 2 ? (3 === 3 ? 9 : 8) : 7")
+            .unwrap()
+            .as_smi(),
+        Some(9)
+    );
+    assert_eq!(
+        ctx.eval("5 > 3 ? 1 > 0 ? 3 : 2 : 1").unwrap().as_smi(),
+        Some(3)
+    );
+}

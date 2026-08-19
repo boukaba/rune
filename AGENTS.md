@@ -51,9 +51,12 @@ breadth to run real workloads correctly, with the cold-start wedge intact.
 - [x] **TypedArray family** — Uint8Array/Int32Array/Float64Array + all 9
       element types + ArrayBuffer, typed indexing + set/subarray/fill/at/
       indexOf/includes/slice + iteration
-- [ ] **String methods** — trim/trimStart/trimEnd, toUpperCase/toLowerCase,
+- [x] **String methods** — trim/trimStart/trimEnd, toUpperCase/toLowerCase,
       charCodeAt/fromCharCode, startsWith/endsWith/includes, padStart/padEnd,
-      repeat, split with regex
+      repeat, split with regex — all position math in UTF-16 code units
+      (byte-indexing bugs in charCodeAt/codePointAt/slice/substring/substr/
+      includes/startsWith/endsWith/indexOf fixed; fromCharCode now ToUint16
+      for all arg types; pad/repeat RangeError guards)
 - [ ] **RegExp completion** — `RegExp()` constructor, exec `.index`/`.input`,
       replaceAll function replacement, global search, lookahead
 - [ ] **Classes completion** — static private fields, private methods,
@@ -83,6 +86,8 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ### Goal
 Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8× vs Node) with enough stdlib to run real workloads. v0.4 = stdlib breadth (14 builtins). v0.5 = Promise + async patterns.
 
+### Done — v0.6 (String methods UTF-16 pass)
+- **String methods conformance** — fixed byte-indexing bugs that produced wrong results or panics on non-ASCII: `charCodeAt`/`codePointAt` now UTF-16 code units (surrogate-pair decoding), `includes`/`startsWith`/`endsWith`/`indexOf`/`slice`/`substring`/`substr` operate on `Vec<u16>` with spec position semantics (no more `&s[start..]` char-boundary panics); `String.fromCharCode` does ToNumber→ToUint16 per arg (was Smi-only); `padStart`/`padEnd` shared `string_pad` helper (UTF-16 math, RangeError on ±Infinity/>2^53-1, no more invalid-UTF-8 truncation); `repeat` step-8 RangeError guard (no usize-overflow OOM); `charAt` ToIntegerOrInfinity coercion. 14 new tests. 569/569 integration, 726 workspace. Known gaps: charAt returns whole code points (lone surrogate halves unrepresentable — HeapString UTF-16 model decodes lone surrogates to U+FFFD); no `String.fromCodePoint`.
 ### Done — v0.6 (TypedArray)
 - **TypedArray family + ArrayBuffer** — `RuneArrayBuffer` 32B (byte block OUTSIDE the semi-space — GC copies the header only, data ptr stays valid) + `RuneTypedArray` 40B (buffer traced, byte_offset/length u32, kind u8, prototype@32), TAG_ARRAY_BUFFER=14/TAG_TYPED_ARRAY=15; 9 element types (Table 71, no BigInt/Float16), little-endian, `convert_number` per kind (Uint8Clamp = round-half-to-even); ctor §23.2.5.1: empty/number (ToIndex, RangeError > 2^53-1)/typedArray elementwise copy/ArrayBuffer view (offset % elementSize → RangeError, length-element form, bounds RangeError)/array+string array-like fill (sync-only — no JS-iterator drain in the ctor, documented); plain call → catchable TypeError; ArrayBuffer byteLength + slice (ToClampedIndex) + isView; %TypedArray.prototype% methods: set (value snapshot first — overlapping-safe), subarray (shared buffer), fill/at/indexOf/includes/slice, values/keys/entries via make_iterator_object + "Array_iterator_next" (extended with TAG_TYPED_ARRAY), @@iterator → values, per-type proto has BYTES_PER_ELEMENT/constructor/@@toStringTag inheriting the shared base; vm.rs: New arms (allocate tagged obj, sync builtin), Call TypeError arm, LoadProperty opcode tag list + load_property_recursive arms (canonical numeric index read, out-of-bounds → undefined w/o proto consult, computed length/byteLength/byteOffset/buffer, else walk proto), do_store_property (in-range writes, out-of-range no-op), has_property + ordinary_has_instance arms (typed arrays NOT instanceof Array), get_iter_method TAG_TYPED_ARRAY; `default_builtins` 21 entries; Vm fields + Vec roots (typed_array_ctors/protos/ctor_handles kind-indexed). 24 integration tests. 559/559 integration tests, 716 workspace. Known gaps: ctor not iterable-general, no Object.prototype.toString builtin (toStringTag unobservable), BigInt/Float16 kinds absent, `instanceof Object` broken for builtin wrappers (pre-existing).
 ### Done — v0.4
@@ -172,7 +177,7 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - Trace perf: bailout-per-iteration paths (e.g. float-promoted acc in a loop) still bail each iteration — re-record or stay native with float ops (correctness fine)
 
 ### Next Steps — v1.0 (ordered by leverage)
-1. **String methods** — trim/trimStart/trimEnd, toUpperCase/toLowerCase, charCodeAt/fromCharCode, startsWith/endsWith/includes, padStart/padEnd, repeat, split with regex
-2. Trace perf: float-promoted accumulator loops bail per-iteration — re-record or emit float ops natively.
-3. `RegExp()` constructor
-4. Match result array `.index`/`.input` properties
+1. Trace perf: float-promoted accumulator loops bail per-iteration — re-record or emit float ops natively.
+2. `RegExp()` constructor
+3. Match result array `.index`/`.input` properties
+4. Classes completion — static private fields, private methods, `this.prop++`, `let`+`new` scoping bug, nested accessors

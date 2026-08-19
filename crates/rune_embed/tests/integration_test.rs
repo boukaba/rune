@@ -8835,3 +8835,316 @@ fn test_typed_array_overlapping_set() {
         .unwrap();
     assert_eq!(r.as_smi(), Some(7));
 }
+
+#[test]
+fn test_string_from_char_code() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("String.fromCharCode(65, 66, 67)").unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "ABC"
+    );
+    let r = ctx.eval("String.fromCharCode(65.9, 66.5)").unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "AB"
+    );
+    let r = ctx.eval("String.fromCharCode(true, false, '65')").unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "\u{1}\u{0}A"
+    );
+    let r = ctx.eval("String.fromCharCode(0x1F601)").unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "\u{f601}"
+    );
+}
+
+#[test]
+fn test_string_char_code_at_utf16() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("'\\u00e9'.charCodeAt(0)").unwrap();
+    assert_eq!(r.as_smi(), Some(233));
+    let r = ctx.eval("'\\u{1F600}'.charCodeAt(0)").unwrap();
+    assert_eq!(r.as_smi(), Some(0xD83D));
+    let r = ctx.eval("'\\u{1F600}'.charCodeAt(1)").unwrap();
+    assert_eq!(r.as_smi(), Some(0xDE00));
+    let r = ctx.eval("'ab'.charCodeAt(5)").unwrap();
+    assert!(r.as_float64().unwrap().is_nan());
+    let r = ctx.eval("'ab'.charCodeAt(1.9)").unwrap();
+    assert_eq!(r.as_smi(), Some(98));
+}
+
+#[test]
+fn test_string_code_point_at() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("'\\u{1F600}'.codePointAt(0)").unwrap();
+    assert_eq!(r.as_smi(), Some(0x1F600));
+    let r = ctx.eval("'\\u{1F600}'.codePointAt(1)").unwrap();
+    assert_eq!(r.as_smi(), Some(0xDE00));
+    let r = ctx.eval("'ab'.codePointAt(9)").unwrap();
+    assert!(r.is_undefined());
+}
+
+#[test]
+fn test_string_utf16_positions() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("'\\u00e9a'.includes('a', 1)").unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+    let r = ctx.eval("'\\u{1F600}x'.startsWith('x', 2)").unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+    let r = ctx.eval("'x\\u{1F600}'.endsWith('x', 1)").unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+    let r = ctx.eval("'\\u{1F600}ab'.indexOf('a', 1)").unwrap();
+    assert_eq!(r.as_smi(), Some(2));
+    let r = ctx.eval("'\\u{1F600}ab'.indexOf('a', 2)").unwrap();
+    assert_eq!(r.as_smi(), Some(2));
+}
+
+#[test]
+fn test_string_slice_utf16() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("'\\u00e9abc'.slice(1, 3)").unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "ab"
+    );
+    let r = ctx.eval("'\\u{1F600}xy'.substring(1, 3)").unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "\u{FFFD}x"
+    );
+    let r = ctx.eval("'\\u{1F600}xy'.substr(1, 2)").unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "\u{FFFD}x"
+    );
+}
+
+#[test]
+fn test_string_pad_utf16() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("'ab'.padStart(5, 'xy')").unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "xyxab"
+    );
+    let r = ctx.eval("'ab'.padEnd(5, 'xy')").unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "abxyx"
+    );
+    let r = ctx.eval("'\\u{1F600}'.padStart(4, 'ab')").unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "ab\u{1F600}"
+    );
+    let r = ctx.eval("'ab'.padStart(4)").unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "  ab"
+    );
+    let r = ctx.eval("'ab'.padStart(2, 'x')").unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "ab"
+    );
+    let r = ctx.eval("'ab'.padEnd(3, '')").unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "ab "
+    );
+}
+
+#[test]
+fn test_string_pad_infinity_throws() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var x;
+             try { 'a'.padStart(Infinity); x = 'no'; } catch (e) { x = 'yes'; }
+             x;",
+        )
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "yes"
+    );
+}
+
+#[test]
+fn test_string_repeat() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("'ab'.repeat(3)").unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "ababab"
+    );
+    let r = ctx.eval("'ab'.repeat(0)").unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        ""
+    );
+    let r = ctx.eval("'ab'.repeat(2.9)").unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "abab"
+    );
+    let r = ctx
+        .eval(
+            "var x;
+             try { 'a'.repeat(-1); x = 'no'; } catch (e) { x = 'yes'; }
+             x;",
+        )
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "yes"
+    );
+}
+
+#[test]
+fn test_string_trim_family() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("'  \\t\\n  ab  \\r '.trim()").unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "ab"
+    );
+    let r = ctx.eval("'  ab  '.trimStart()").unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "ab  "
+    );
+    let r = ctx.eval("'  ab  '.trimEnd()").unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "  ab"
+    );
+    let r = ctx.eval("'\\u{2028}ab\\u{2029}'.trim()").unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "ab"
+    );
+}
+
+#[test]
+fn test_string_case_conversion() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("'HeLLo WoRLD'.toLowerCase()").unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "hello world"
+    );
+    let r = ctx.eval("'HeLLo WoRLD'.toUpperCase()").unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "HELLO WORLD"
+    );
+    let r = ctx.eval("'\\u00e9\\u00df'.toUpperCase()").unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "\u{C9}SS"
+    );
+}

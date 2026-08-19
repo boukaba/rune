@@ -2,10 +2,23 @@
 
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
-> **Status:** v0.6.0 🚧 (In Progress — 559/559 integration tests Pass, 3 Ignored; workspace 716 tests Pass)
+> **Status:** v0.6.0 🚧 (In Progress — 569/569 integration tests Pass, 3 Ignored; workspace 726 tests Pass)
 > SIDT validated, AFPC bytecode + native-code cache functional (AArch64); x86-64 runs bytecode/IC/shape caching only (JIT codegen disabled there). Cold start 2.8× faster than Node
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
+
+## String methods UTF-16 conformance pass (2026-08-19)
+
+- [x] **Audit of the checklist item** — most String methods already existed (trim/trimStart/trimEnd, toUpperCase/toLowerCase, charCodeAt, fromCharCode, startsWith/endsWith/includes, padStart/padEnd, repeat, split incl. RegExp). This pass fixed the **spec-correctness bugs** that made them wrong/panicking on non-ASCII input
+- [x] **`String.fromCharCode`** — was Smi-only (floats/booleans/strings silently dropped, e.g. `String.fromCharCode(65.9)` → "" instead of "A"); now ToNumber → ToUint16 per arg (§22.1.2.2): `65.9`→65, `true`→1, `'65'`→65, `0x1F601`→0xF601; lone surrogates decode to U+FFFD (engine string model)
+- [x] **`charCodeAt` / `codePointAt`** — were BYTE-indexed (`s.as_bytes()[idx]` — `'é'.charCodeAt(0)` returned 195, wrong; OOB math also byte-based). Now UTF-16 code units: `'é'.charCodeAt(0)` = 233, `'😀'.charCodeAt(0)` = 0xD83D / (1) = 0xDE00, OOB → NaN; `codePointAt` decodes surrogate pairs (0x1F600) and returns `undefined` OOB
+- [x] **`includes` / `startsWith` / `endsWith` / `indexOf`** — were byte-slicing (`&s[start..]` — **panic** on a non-char-boundary position like `'éa'.startsWith('a', 1)`). Now operate on UTF-16 code units with spec position semantics (ToIntegerOrInfinity, clamp, negative→0); slice-equality on `Vec<u16>`
+- [x] **`slice` / `substring` / `substr`** — same byte-slice panic/wrongness on multi-byte strings; now UTF-16-unit based (`String::from_utf16_lossy` on the unit window — a cut inside a surrogate pair yields U+FFFD, consistent with the engine model). `substring` keeps spec arg-swap, `substr` keeps legacy negative-start, `slice` keeps negative-from-end + NaN→0 + Infinity clamping
+- [x] **`padStart` / `padEnd`** — were BYTE-based (`pad.truncate(pad_len)` could produce **invalid UTF-8** mid-surrogate → bad HeapString); now UTF-16 unit math per §22.1.3.21/22 (shared `string_pad` helper), empty fill → " ", target ≤ length → unchanged, and **RangeError "Invalid string length" for ±Infinity / > 2^53-1 targets** (`'a'.padStart(Infinity)` no longer OOMs)
+- [x] **`repeat`** — added the §22.1.3.28 step-8 RangeError guard: result length > 2^53-1 code units → RangeError (also prevents `s.len() * n` usize overflow panic on huge counts); NaN/negative/±Infinity → RangeError already correct
+- [x] **`charAt`** — index coercion via ToIntegerOrInfinity (`'abc'.charAt(1.9)` → "b"); still code-point-based (engine can't represent lone surrogates — documented divergence, representable superset)
+- [x] 14 new integration tests (fromCharCode floats/bools/strings/wraparound, charCodeAt/codePointAt UTF-16 + OOB, includes/startsWith/endsWith/indexOf with astral positions, slice/substring/substr on non-ASCII, padStart/padEnd incl. astral fill + default fill + empty fill + no-pad, pad Infinity RangeError via try/catch, repeat basics + negative RangeError, trim family incl. U+2028/U+2029, case conversion incl. `é`/`ß`→SS) — **569 integration tests pass, 3 ignored (workspace 726)**; cargo fmt + clippy clean (CI flags); `--no-default-features` probe clean
+- **Known gaps**: `charAt` returns whole code points (V8 returns lone surrogate halves); lone surrogates unrepresentable in HeapString (decode to U+FFFD); `String.fromCodePoint` not implemented (not on the checklist); split/replace/match regex paths unchanged (already covered)
 
 ## TypedArray family + ArrayBuffer (2026-08-19)
 

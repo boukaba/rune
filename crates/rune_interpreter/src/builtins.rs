@@ -3720,10 +3720,21 @@ pub fn string_from_char_code(
     args: &[Value],
     _vm: &mut Vm,
 ) -> Value {
+    // §22.1.2.2 String.fromCharCode(...codeUnits): each arg → ToNumber →
+    // ToUint16 → UTF-16 code unit. (Lone surrogates are unrepresentable in
+    // the engine's UTF-16 storage — they decode to U+FFFD like elsewhere.)
     let mut s = String::new();
     for arg in args {
-        if let Some(n) = arg.as_smi() {
-            s.push(char::from_u32(n as u32).unwrap_or('\u{FFFD}'));
+        let n = to_number(*arg);
+        let unit = if n.is_nan() || n.is_infinite() {
+            0
+        } else {
+            (n.trunc() as i64).rem_euclid(0x1_0000) as u16
+        };
+        if let Some(c) = char::from_u32(unit as u32) {
+            s.push(c);
+        } else {
+            s.push('\u{FFFD}');
         }
     }
     let ptr = HeapString::allocate(gc, &s);
@@ -3761,7 +3772,10 @@ pub fn string_char_at(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let index = args.first().and_then(|v| v.as_smi()).unwrap_or(0) as usize;
+    let index = args
+        .first()
+        .map(|&v| to_integer_or_infinity(v).max(0.0) as usize)
+        .unwrap_or(0);
     let s = string_from_value(this);
     if index >= s.chars().count() {
         let empty = HeapString::allocate(gc, "");
@@ -3779,12 +3793,10 @@ pub fn string_slice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    fn to_number(v: Value) -> f64 {
-        crate::vm::to_number(v)
-    }
     let s = string_from_value(this);
-    let len = s.len() as f64;
-    let raw_start = args.first().map(|&v| to_number(v)).unwrap_or(0.0);
+    let units = s.encode_utf16().collect::<Vec<u16>>();
+    let len = units.len() as f64;
+    let raw_start = to_number(args.first().copied().unwrap_or(Value::undefined()));
     let raw_end = args.get(1).map(|&v| to_number(v));
     let int_start = if raw_start.is_nan() { 0.0 } else { raw_start };
     let int_end = match raw_end {
@@ -3808,9 +3820,9 @@ pub fn string_slice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
         let empty = HeapString::allocate(gc, "");
         return Value::from_heap_ptr(empty as *mut u8);
     }
-    let result_s = &s[start..end];
-    let result = HeapString::allocate(gc, result_s);
-    Value::from_heap_ptr(result as *mut u8)
+    let result = String::from_utf16_lossy(&units[start..end]);
+    let heap = HeapString::allocate(gc, &result);
+    Value::from_heap_ptr(heap as *mut u8)
 }
 
 /// Convert an optional argument to a string via ToPrimitive (sync, no callbacks).
@@ -3827,26 +3839,30 @@ pub fn string_index_of(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
         return Value::undefined();
     }
     let s = string_from_value(this);
+    let units = s.encode_utf16().collect::<Vec<u16>>();
     let search_str = arg_to_string(gc, args.first().copied(), vm);
+    let search_units = search_str.encode_utf16().collect::<Vec<u16>>();
     let pos = args.get(1).copied().unwrap_or(Value::undefined());
     let start = if pos.is_undefined() {
         0
-    } else if let Some(smi) = pos.as_smi() {
-        if smi < 0 { 0 } else { smi as usize }
-    } else if let Some(f) = pos.as_float64() {
-        let clamped = if f.is_nan() || f < 0.0 { 0.0 } else { f };
-        (clamped as usize).min(s.len())
     } else {
-        0
+        let f = to_integer_or_infinity(pos);
+        if f.is_nan() || f < 0.0 {
+            0
+        } else {
+            (f as usize).min(units.len())
+        }
     };
-    let start = start.min(s.len());
-    if search_str.is_empty() {
+    if search_units.is_empty() {
         return Value::smi(start as i32);
     }
-    if start + search_str.len() > s.len() {
+    if start + search_units.len() > units.len() {
         return Value::smi(-1);
     }
-    if let Some(idx) = s[start..].find(&search_str) {
+    if let Some(idx) = units[start..]
+        .windows(search_units.len())
+        .position(|w| w == search_units)
+    {
         Value::smi((start + idx) as i32)
     } else {
         Value::smi(-1)
@@ -3859,26 +3875,31 @@ pub fn string_includes(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
         return Value::undefined();
     }
     let s = string_from_value(this);
+    let units = s.encode_utf16().collect::<Vec<u16>>();
     let search_str = arg_to_string(gc, args.first().copied(), vm);
+    let search_units = search_str.encode_utf16().collect::<Vec<u16>>();
     let pos = args.get(1).copied().unwrap_or(Value::undefined());
     let start = if pos.is_undefined() {
         0
-    } else if let Some(smi) = pos.as_smi() {
-        if smi < 0 { 0 } else { smi as usize }
-    } else if let Some(f) = pos.as_float64() {
-        let clamped = if f.is_nan() || f < 0.0 { 0.0 } else { f };
-        (clamped as usize).min(s.len())
     } else {
-        0
+        let f = to_integer_or_infinity(pos);
+        if f.is_nan() || f < 0.0 {
+            0
+        } else {
+            (f as usize).min(units.len())
+        }
     };
-    let start = start.min(s.len());
-    if search_str.is_empty() {
+    if search_units.is_empty() {
         return Value::boolean(true);
     }
-    if start + search_str.len() > s.len() {
+    if start + search_units.len() > units.len() {
         return Value::boolean(false);
     }
-    Value::boolean(s[start..].contains(&search_str))
+    Value::boolean(
+        units[start..]
+            .windows(search_units.len())
+            .any(|w| w == search_units),
+    )
 }
 
 /// String.prototype.startsWith(searchString, position) — checks if string starts with searchString.
@@ -3887,19 +3908,21 @@ pub fn string_starts_with(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
         return Value::undefined();
     }
     let s = string_from_value(this);
+    let units = s.encode_utf16().collect::<Vec<u16>>();
     let search_str = arg_to_string(gc, args.first().copied(), vm);
+    let search_units = search_str.encode_utf16().collect::<Vec<u16>>();
     let pos = args.get(1).copied().unwrap_or(Value::undefined());
     let start = if pos.is_undefined() {
         0
-    } else if let Some(smi) = pos.as_smi() {
-        if smi < 0 { 0 } else { smi as usize }
-    } else if let Some(f) = pos.as_float64() {
-        let clamped = if f.is_nan() || f < 0.0 { 0.0 } else { f };
-        (clamped as usize).min(s.len())
     } else {
-        0
+        let f = to_integer_or_infinity(pos);
+        if f.is_nan() || f < 0.0 {
+            0
+        } else {
+            (f as usize).min(units.len())
+        }
     };
-    Value::boolean(s[start..].starts_with(&search_str))
+    Value::boolean(units[start..].starts_with(&search_units))
 }
 
 /// String.prototype.endsWith(searchString, endPosition) — checks if string ends with searchString.
@@ -3908,19 +3931,21 @@ pub fn string_ends_with(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
         return Value::undefined();
     }
     let s = string_from_value(this);
+    let units = s.encode_utf16().collect::<Vec<u16>>();
     let search_str = arg_to_string(gc, args.first().copied(), vm);
+    let search_units = search_str.encode_utf16().collect::<Vec<u16>>();
     let end_pos = args.get(1).copied().unwrap_or(Value::undefined());
     let end = if end_pos.is_undefined() {
-        s.len()
-    } else if let Some(smi) = end_pos.as_smi() {
-        if smi < 0 { 0 } else { smi as usize }
-    } else if let Some(f) = end_pos.as_float64() {
-        let clamped = if f.is_nan() || f < 0.0 { 0.0 } else { f };
-        (clamped as usize).min(s.len())
+        units.len()
     } else {
-        s.len()
+        let f = to_integer_or_infinity(end_pos);
+        if f.is_nan() || f < 0.0 {
+            0
+        } else {
+            (f as usize).min(units.len())
+        }
     };
-    Value::boolean(s[..end].ends_with(&search_str))
+    Value::boolean(units[..end].ends_with(&search_units))
 }
 
 fn to_integer_or_infinity(v: Value) -> f64 {
@@ -3949,15 +3974,20 @@ pub fn string_char_code_at(gc: &mut SemiSpace, this: Value, args: &[Value], vm: 
     }
     let s = string_from_value(this);
     let pos = args.first().copied().unwrap_or(Value::undefined());
+    // §22.1.3.4: pos = ToIntegerOrInfinity(index); NaN → 0 (to_integer_or_infinity).
     let idx = to_integer_or_infinity(pos) as isize;
-    if idx < 0 || idx as usize >= s.len() {
+    if idx < 0 {
         return Value::from_float64(f64::NAN);
     }
-    let byte = s.as_bytes()[idx as usize];
-    Value::smi(byte as i32)
+    let units = s.encode_utf16().collect::<Vec<u16>>();
+    if (idx as usize) >= units.len() {
+        return Value::from_float64(f64::NAN);
+    }
+    Value::smi(units[idx as usize] as i32)
 }
 
-/// String.prototype.codePointAt(index) — returns Unicode code point at position.
+/// String.prototype.codePointAt(index) — returns Unicode code point at position
+/// (decodes surrogate pairs; an isolated low surrogate returns itself).
 pub fn string_code_point_at(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
@@ -3965,11 +3995,23 @@ pub fn string_code_point_at(gc: &mut SemiSpace, this: Value, args: &[Value], vm:
     let s = string_from_value(this);
     let pos = args.first().copied().unwrap_or(Value::undefined());
     let idx = to_integer_or_infinity(pos) as isize;
-    if idx < 0 || idx as usize >= s.len() {
+    if idx < 0 {
         return Value::undefined();
     }
-    let byte = s.as_bytes()[idx as usize];
-    Value::smi(byte as i32)
+    let units = s.encode_utf16().collect::<Vec<u16>>();
+    let idx = idx as usize;
+    if idx >= units.len() {
+        return Value::undefined();
+    }
+    let cp = units[idx];
+    if (0xD800..=0xDBFF).contains(&cp) && idx + 1 < units.len() {
+        let low = units[idx + 1];
+        if (0xDC00..=0xDFFF).contains(&low) {
+            let code_point = 0x10000 + ((cp as u32 - 0xD800) << 10) + (low as u32 - 0xDC00);
+            return Value::smi(code_point as i32);
+        }
+    }
+    Value::smi(cp as i32)
 }
 
 /// String.prototype.substring(start, end) — returns substring with args clamped/sorted.
@@ -3978,21 +4020,23 @@ pub fn string_substring(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
         return Value::undefined();
     }
     let s = string_from_value(this);
-    let len = s.len() as f64;
+    let units = s.encode_utf16().collect::<Vec<u16>>();
+    let len = units.len() as f64;
     let raw_start = to_integer_or_infinity(args.first().copied().unwrap_or(Value::undefined()));
     let raw_end = args.get(1).map(|&v| to_integer_or_infinity(v));
     let final_start = raw_start.max(0.0).min(len) as usize;
     let final_end = match raw_end {
         Some(e) => e.max(0.0).min(len) as usize,
-        None => s.len(),
+        None => units.len(),
     };
     let (lo, hi) = if final_start <= final_end {
         (final_start, final_end)
     } else {
         (final_end, final_start)
     };
-    let result = HeapString::allocate(gc, &s[lo..hi]);
-    Value::from_heap_ptr(result as *mut u8)
+    let result = String::from_utf16_lossy(&units[lo..hi]);
+    let heap = HeapString::allocate(gc, &result);
+    Value::from_heap_ptr(heap as *mut u8)
 }
 
 /// String.prototype.substr(start, length) — legacy, negative start offset.
@@ -4001,7 +4045,8 @@ pub fn string_substr(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
         return Value::undefined();
     }
     let s = string_from_value(this);
-    let len = s.len();
+    let units = s.encode_utf16().collect::<Vec<u16>>();
+    let len = units.len();
     let raw_start = to_integer_or_infinity(args.first().copied().unwrap_or(Value::undefined()));
     let int_start = if raw_start < 0.0 {
         (len as f64 + raw_start).max(0.0) as usize
@@ -4016,8 +4061,9 @@ pub fn string_substr(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
         }
         None => len,
     };
-    let result = HeapString::allocate(gc, &s[int_start..end]);
-    Value::from_heap_ptr(result as *mut u8)
+    let result = String::from_utf16_lossy(&units[int_start..end]);
+    let heap = HeapString::allocate(gc, &result);
+    Value::from_heap_ptr(heap as *mut u8)
 }
 
 /// String.prototype.trim() — removes whitespace from both ends.
@@ -4098,7 +4144,15 @@ pub fn string_repeat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
         let empty = HeapString::allocate(gc, "");
         return Value::from_heap_ptr(empty as *mut u8);
     }
-    let mut result = String::with_capacity(s.len() * n);
+    // §22.1.3.28 step 8: RangeError when the result exceeds 2^53-1 units
+    // (also guards usize overflow on `s.len() * n`).
+    let result_units = s.encode_utf16().count() as u64 * n as u64;
+    if result_units > 9_007_199_254_740_991 {
+        let err = make_error(gc, "RangeError: Invalid string length");
+        vm.set_pending_exception(err);
+        return Value::undefined();
+    }
+    let mut result = String::with_capacity(s.len().saturating_mul(n).min(1 << 24));
     for _ in 0..n {
         result.push_str(&s);
     }
@@ -4107,67 +4161,58 @@ pub fn string_repeat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
 }
 
 /// String.prototype.padStart(maxLength, fillString) — pads string to maxLength with fillString.
-pub fn string_pad_start(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+/// Lengths are measured in UTF-16 code units (§22.1.3.21); a fill truncated in
+/// the middle of a surrogate pair decodes to U+FFFD (engine string model).
+fn string_pad(gc: &mut SemiSpace, vm: &mut Vm, this: Value, args: &[Value], at_end: bool) -> Value {
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
     let s = string_from_value(this);
+    let units = s.encode_utf16().collect::<Vec<u16>>();
     let max_len = args.first().copied().unwrap_or(Value::undefined());
-    let target_len = to_integer_or_infinity(max_len) as usize;
-    if target_len <= s.len() {
+    let target_f = to_integer_or_infinity(max_len);
+    if target_f.is_nan() || !target_f.is_finite() || target_f > 9_007_199_254_740_991.0 {
+        let err = make_error(gc, "RangeError: Invalid string length");
+        vm.set_pending_exception(err);
+        return Value::undefined();
+    }
+    let target_len = target_f.max(0.0) as usize;
+    if target_len <= units.len() {
         let result = HeapString::allocate(gc, &s);
         return Value::from_heap_ptr(result as *mut u8);
     }
     let fill = match args.get(1) {
         Some(v) if !v.is_undefined() => arg_to_string(gc, Some(*v), vm),
-        None | Some(_) => " ".to_string(),
+        _ => " ".to_string(),
     };
     let fill = if fill.is_empty() {
         " ".to_string()
     } else {
         fill
     };
-    let pad_len = target_len - s.len();
-    let mut pad = String::with_capacity(pad_len);
+    let fill_units = fill.encode_utf16().collect::<Vec<u16>>();
+    let pad_len = target_len - units.len();
+    let mut pad = Vec::with_capacity(pad_len);
     while pad.len() < pad_len {
-        pad.push_str(&fill);
+        pad.extend_from_slice(&fill_units);
     }
     pad.truncate(pad_len);
-    let result_str = pad + &s;
+    let pad_string = String::from_utf16_lossy(&pad);
+    let result_str = if at_end {
+        s + &pad_string
+    } else {
+        pad_string + &s
+    };
     let result = HeapString::allocate(gc, &result_str);
     Value::from_heap_ptr(result as *mut u8)
 }
 
-/// String.prototype.padEnd(maxLength, fillString) — pads string to maxLength with fillString.
+pub fn string_pad_start(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    string_pad(gc, vm, this, args, false)
+}
+
 pub fn string_pad_end(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    if !require_object_coercible(this, vm, gc) {
-        return Value::undefined();
-    }
-    let s = string_from_value(this);
-    let max_len = args.first().copied().unwrap_or(Value::undefined());
-    let target_len = to_integer_or_infinity(max_len) as usize;
-    if target_len <= s.len() {
-        let result = HeapString::allocate(gc, &s);
-        return Value::from_heap_ptr(result as *mut u8);
-    }
-    let fill = match args.get(1) {
-        Some(v) if !v.is_undefined() => arg_to_string(gc, Some(*v), vm),
-        None | Some(_) => " ".to_string(),
-    };
-    let fill = if fill.is_empty() {
-        " ".to_string()
-    } else {
-        fill
-    };
-    let pad_len = target_len - s.len();
-    let mut pad = String::with_capacity(pad_len);
-    while pad.len() < pad_len {
-        pad.push_str(&fill);
-    }
-    pad.truncate(pad_len);
-    let result_str = s + &pad;
-    let result = HeapString::allocate(gc, &result_str);
-    Value::from_heap_ptr(result as *mut u8)
+    string_pad(gc, vm, this, args, true)
 }
 
 /// String.prototype.toString() — returns the string value of the String object.

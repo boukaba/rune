@@ -16,4 +16,11 @@ pub enum RegexExpr {
     AnchorStart,
     AnchorEnd,
     Backref(usize),
+    /// Zero-width lookahead assertion: the inner expression must match
+    /// starting at the current position (negated = negative lookahead).
+    /// Captures inside a positive lookahead participate in the match.
+    Lookahead {
+        expr: Box<RegexExpr>,
+        negated: bool,
+    },
 }

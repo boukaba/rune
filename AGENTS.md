@@ -57,8 +57,10 @@ breadth to run real workloads correctly, with the cold-start wedge intact.
       (byte-indexing bugs in charCodeAt/codePointAt/slice/substring/substr/
       includes/startsWith/endsWith/indexOf fixed; fromCharCode now ToUint16
       for all arg types; pad/repeat RangeError guards)
-- [ ] **RegExp completion** — `RegExp()` constructor, exec `.index`/`.input`,
-      replaceAll function replacement, global search, lookahead
+- [x] **RegExp completion** — `RegExp()` constructor (flag validation,
+      plain-call identity), exec RegExpBuiltinExec semantics (`.index`/`.input`
+      via RuneArray extra_props, global/sticky lastIndex, sticky failure reset),
+      replaceAll function replacement, lookahead + `{n,m}` quantifiers
 - [ ] **Classes completion** — static private fields, private methods,
       `this.prop++`, `let`+`new` scoping bug, nested accessors
 - [ ] **ESM** — `import`/`export`, module namespace, hoisting, circular deps
@@ -86,6 +88,8 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ### Goal
 Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8× vs Node) with enough stdlib to run real workloads. v0.4 = stdlib breadth (14 builtins). v0.5 = Promise + async patterns.
 
+### Done — v0.6 (RegExp completion)
+- **RegExp completion (v1.0 checklist item)** — `RegExp()` constructor §22.2.4.1 (new/plain-call, RegExp arg copies source+flags, plain-call with RegExp + no flags returns the pattern itself, flag validation `dgimsuvy` no-dups → SyntaxError, parse failure → SyntaxError, flag bits g=1..v=128 — v handled in all three flags reconstruction sites, wrapper+proto wiring, `regexp_constructor` Vm field rooted); **exec RegExpBuiltinExec semantics** (global/sticky start at lastIndex, failure advance loop, sticky failure → lastIndex=0 + null — match must start exactly at lastIndex, PikeVM's at-or-after match was accepted as sticky before), test delegates to exec (global test advances lastIndex), match results `.index`/`.input` via **RuneArray extra_props** (layout `[shape(8)|length(4)|cap(4)|prototype@24(8)|extra_props@32(8)|elements@40]`, ARRAY_HEADER_END=40, GC scan/scan_end updated, load/store/IC arms, Object.keys/values/entries include extra_props names); **replaceAll function replacement** (PendingReplaceAllOp state machine in the Return handler, regex + string search modes, UTF-8-safe advance on empty matches, args (match, ...captures, position, input) / (searchString, position, input); **fixed `source_frame_depth`** — `push_callback_call` overwrites the depth for every known pending op, `pending_replace_all_op` was missing → fired on the script's final Return → underflow panic); lastIndex stores (to_number + clamp in do_store_property TAG_REGEXP arm); search lastIndex save/reset/restore; `instanceof RegExp` (ordinary_has_instance TAG_REGEXP arm). 13 new tests. 582/582 integration tests, 743 workspace. Known gaps: match `index`/`input` enumerability unobservable (no shape enum flags); `v` flag literal `/a/v` unsupported (parser whitelist predates ctor); backrefs/anchors no-ops; `{n,m}` captures return first copy; engine unit = Rust char.
 ### Done — v0.6 (String methods UTF-16 pass)
 - **String methods conformance** — fixed byte-indexing bugs that produced wrong results or panics on non-ASCII: `charCodeAt`/`codePointAt` now UTF-16 code units (surrogate-pair decoding), `includes`/`startsWith`/`endsWith`/`indexOf`/`slice`/`substring`/`substr` operate on `Vec<u16>` with spec position semantics (no more `&s[start..]` char-boundary panics); `String.fromCharCode` does ToNumber→ToUint16 per arg (was Smi-only); `padStart`/`padEnd` shared `string_pad` helper (UTF-16 math, RangeError on ±Infinity/>2^53-1, no more invalid-UTF-8 truncation); `repeat` step-8 RangeError guard (no usize-overflow OOM); `charAt` ToIntegerOrInfinity coercion. 14 new tests. 569/569 integration, 726 workspace. Known gaps: charAt returns whole code points (lone surrogate halves unrepresentable — HeapString UTF-16 model decodes lone surrogates to U+FFFD); no `String.fromCodePoint`.
 ### Done — v0.6 (TypedArray)
@@ -162,10 +166,8 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - aarch64 JIT execution tests — crash with SIGSEGV on both macOS and Linux arm64 (pre-existing, disabled with `#[cfg(any())]`)
 - `test_prototype_clang_determinism` — Clang produces empty output on first compilation in CI. Marked `#[ignore]`.
 - `test_prototype_patch_stencil` — same Clang availability issue in CI. Marked `#[ignore]`.
-- `RegExp()` constructor not yet implemented
+- `RegExp` gaps: match-result `index`/`input` enumerability unobservable (no shape enum flags — `Object.keys` includes them); `v` flag literal `/a/v` unsupported (parser whitelist predates the ctor); backrefs/anchors are no-ops; `{n,m}` captures return the first copy's capture; engine unit = Rust char (no `u`-flag UTF-16 index math); empty-match at end-of-string not found by exec
 - Date is UTC-only (getTimezoneOffset always 0, no local tz); `toLocaleString` family = `toString` family (no ECMA-402); `toJSON` handles Date receivers only; no `setYear`/`getYear`/`toGMTString` (Annex B); no `Date.prototype[Symbol.toStringTag]` (not in 2027 edition); ToPrimitive doesn't dispatch `@@toPrimitive` (Date special-cased)
-- Match result arrays don't set `.index`/`.input` properties (no named-property support on TAG_ARRAY)
-- `replaceAll` function replacement not yet implemented
 - `Number(sym)`/arithmetic beyond `+` treat symbols as NaN (ToNumber(symbol) should throw TypeError — needs exception plumbing through to_number's call sites; deferred to conformance pass)
 - `Symbol.prototype.description` is computed in LoadProperty, not a real getter (getOwnPropertyDescriptor unavailable)
 - for..of gaps: no IteratorClose on break/return (observable only for user iterators with `return()`); `let`/`const` loop vars are plain locals (no per-iteration fresh binding); `Array.prototype.values/keys/entries` require TAG_ARRAY receivers (no array-likes); destructuring LHS in for..of discards the value; `done`/`value` read via load_property_recursive (accessors unresolved); iterator objects have no separate %IteratorPrototype%
@@ -178,6 +180,4 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 
 ### Next Steps — v1.0 (ordered by leverage)
 1. Trace perf: float-promoted accumulator loops bail per-iteration — re-record or emit float ops natively.
-2. `RegExp()` constructor
-3. Match result array `.index`/`.input` properties
-4. Classes completion — static private fields, private methods, `this.prop++`, `let`+`new` scoping bug, nested accessors
+2. Classes completion — static private fields, private methods, `this.prop++`, `let`+`new` scoping bug, nested accessors

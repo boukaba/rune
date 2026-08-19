@@ -33,6 +33,18 @@ impl RegExp {
         unsafe { (*(ptr as *mut RegExp)).pattern }
     }
 
+    pub unsafe fn set_pattern(ptr: *mut u8, pattern: *mut u8) {
+        unsafe {
+            (*(ptr as *mut RegExp)).pattern = pattern;
+        }
+    }
+
+    pub unsafe fn set_flags(ptr: *mut u8, flags: u32) {
+        unsafe {
+            (*(ptr as *mut RegExp)).flags = flags;
+        }
+    }
+
     pub unsafe fn flags(ptr: *mut u8) -> u32 {
         unsafe { (*(ptr as *mut RegExp)).flags }
     }

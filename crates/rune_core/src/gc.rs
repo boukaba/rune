@@ -227,8 +227,11 @@ impl SemiSpace {
                         // Forward prototype pointer (if non-null)
                         let proto_ptr = scan_ptr.add(OBJECT_PROTOTYPE_OFFSET) as *mut u64;
                         self.forward_value(proto_ptr);
+                        // Forward extra_props (named props JSObject, offset 32)
+                        let extra_ptr = scan_ptr.add(32) as *mut u64;
+                        self.forward_value(extra_ptr);
                         // Forward array elements
-                        let slots_ptr = scan_ptr.add(OBJECT_SLOTS_OFFSET) as *mut u64;
+                        let slots_ptr = scan_ptr.add(crate::array::ARRAY_HEADER_END) as *mut u64;
                         // Array layout: offset +16 = length, offset +20 = capacity
                         let cap = *(scan_ptr.add(20) as *const u32) as usize;
                         for i in 0..cap {
@@ -351,7 +354,7 @@ impl SemiSpace {
                     // Array layout: offset +20 = capacity
                     let capacity_ptr = obj_start.add(20) as *const u32;
                     let capacity = *capacity_ptr as usize;
-                    let total = OBJECT_SLOTS_OFFSET + capacity * size_of::<u64>();
+                    let total = crate::array::ARRAY_HEADER_END + capacity * size_of::<u64>();
                     obj_start.add(align_up(total, 8))
                 }
                 TAG_ENV => {

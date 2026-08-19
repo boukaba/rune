@@ -17,6 +17,16 @@ pub enum Edge {
     Epsilon(usize),
     Dot(usize),
     Save(usize, usize),
+    /// Zero-width lookahead assertion. At the current position, run the
+    /// sub-automaton rooted at `sub_start`; it matches when a thread reaches
+    /// `sub_match`. On success (or failure for a negated lookahead) continue
+    /// at `target` with the same position.
+    Lookahead {
+        sub_start: usize,
+        sub_match: usize,
+        negated: bool,
+        target: usize,
+    },
 }
 
 pub struct Nfa {
@@ -140,6 +150,19 @@ fn compile_expr(
             } else {
                 compile_expr(inner, states, group_count)
             }
+        }
+        RegexExpr::Lookahead { expr, negated } => {
+            let (s_in, s_out) = compile_expr(expr, states, group_count);
+            let s_start = alloc_state(states);
+            let s_end = alloc_state(states);
+            states[s_end].is_match = true;
+            states[s_start].edges.push(Edge::Lookahead {
+                sub_start: s_in,
+                sub_match: s_out,
+                negated: *negated,
+                target: s_end,
+            });
+            (s_start, s_end)
         }
         RegexExpr::CharClass { negated, ranges } => {
             let s1 = alloc_state(states);

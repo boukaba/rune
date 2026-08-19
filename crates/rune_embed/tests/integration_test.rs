@@ -6011,6 +6011,285 @@ fn test_regexp_prototype_last_index() {
 }
 
 #[test]
+fn test_regexp_constructor_basic() {
+    let mut ctx = Context::new_small();
+    assert_eq!(
+        eval_str(&mut ctx, r#"new RegExp("a(b)c", "g").source"#),
+        "a(b)c"
+    );
+    assert_eq!(eval_str(&mut ctx, r#"new RegExp("a(b)c", "g").flags"#), "g");
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            r#"var r = new RegExp("a(b)c", "g"); r.exec("xabcyabc").index + "/" + r.lastIndex;"#
+        ),
+        "1/4"
+    );
+    assert_eq!(eval_str(&mut ctx, r#"new RegExp().source"#), "");
+    assert_eq!(eval_str(&mut ctx, r#"new RegExp("xy").flags"#), "");
+}
+
+#[test]
+fn test_regexp_constructor_regexp_arg() {
+    let mut ctx = Context::new_small();
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            r#"var r1 = /ab/gi; new RegExp(r1).source + "/" + new RegExp(r1).flags"#
+        ),
+        "ab/gi"
+    );
+    assert_eq!(
+        ctx.eval(r#"var r1 = /ab/; RegExp(r1) === r1;"#)
+            .unwrap()
+            .to_boolean(),
+        Some(true)
+    );
+    assert_eq!(
+        ctx.eval(r#"var r = RegExp("xy", "m"); r instanceof RegExp;"#)
+            .unwrap()
+            .to_boolean(),
+        Some(true)
+    );
+    assert_eq!(
+        ctx.eval(r#"var r = new RegExp("xy"); r instanceof RegExp;"#)
+            .unwrap()
+            .to_boolean(),
+        Some(true)
+    );
+}
+
+#[test]
+fn test_regexp_constructor_flags_validation() {
+    let mut ctx = Context::new_small();
+    for bad in ["q", "gg", "mm", "ag"] {
+        let result = ctx.eval(&format!(r#"new RegExp("a", "{bad}");"#));
+        assert!(result.is_err(), "flag {bad} should throw");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("SyntaxError") || err.contains("RegExp"),
+            "unexpected error: {err}"
+        );
+    }
+    // Valid flags still work; .flags returns them in canonical order.
+    assert_eq!(
+        eval_str(&mut ctx, r#"new RegExp("a", "dgimsuvy").flags"#),
+        "gimsuydv"
+    );
+}
+
+#[test]
+fn test_regexp_exec_index_input() {
+    let mut ctx = Context::new_small();
+    assert_eq!(
+        ctx.eval(r#"/b+/.exec("xxabbb").index"#).unwrap().as_smi(),
+        Some(3)
+    );
+    assert_eq!(eval_str(&mut ctx, r#"/b+/.exec("xxabbb").input"#), "xxabbb");
+    assert_eq!(
+        ctx.eval(r#"/b+/.exec("xxabbb").length"#).unwrap().as_smi(),
+        Some(1)
+    );
+    assert_eq!(
+        ctx.eval(r#"/(\d+)/.exec("a123b").index"#).unwrap().as_smi(),
+        Some(1)
+    );
+    assert_eq!(
+        eval_str(&mut ctx, r#"/(\d+)/.exec("a123b").input"#),
+        "a123b"
+    );
+}
+
+#[test]
+fn test_regexp_exec_lastindex_global() {
+    let mut ctx = Context::new_small();
+    // Global exec advances lastIndex per match, starting from lastIndex.
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            r#"var r = /a/g; r.exec("aba"); var i1 = r.lastIndex; var m2 = r.exec("aba"); i1 + "/" + m2.index + "/" + r.lastIndex;"#
+        ),
+        "1/2/3"
+    );
+    // Failure resets lastIndex to 0.
+    assert_eq!(
+        ctx.eval(r#"var r = /a/g; r.exec("zzz"); r.lastIndex;"#)
+            .unwrap()
+            .as_smi(),
+        Some(0)
+    );
+    // Global exec with no more matches returns null.
+    assert_eq!(
+        ctx.eval(
+            r#"var r = /a/g; r.exec("aaa"); r.exec("aaa"); r.exec("aaa"); r.exec("aaa") === null;"#
+        )
+        .unwrap()
+        .to_boolean(),
+        Some(true)
+    );
+}
+
+#[test]
+fn test_regexp_exec_lastindex_sticky() {
+    let mut ctx = Context::new_small();
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            r#"var r = /a/y; r.lastIndex = 1; var m = r.exec("baa"); m.index + "/" + r.lastIndex;"#
+        ),
+        "1/2"
+    );
+    // Sticky failure resets lastIndex to 0.
+    assert_eq!(
+        ctx.eval(r#"var r = /a/y; r.lastIndex = 0; r.exec("baa"); r.lastIndex;"#)
+            .unwrap()
+            .as_smi(),
+        Some(0)
+    );
+}
+
+#[test]
+fn test_regexp_lastindex_store() {
+    let mut ctx = Context::new_small();
+    // Setting lastIndex on a regexp works and is used by global exec.
+    assert_eq!(
+        ctx.eval(r#"var r = /b/g; r.lastIndex = 2; r.exec("abbb").index;"#)
+            .unwrap()
+            .as_smi(),
+        Some(2)
+    );
+    // lastIndex on a literal regexp is stored back.
+    assert_eq!(
+        ctx.eval(r#"var r = /x/g; r.test("xax"); r.lastIndex;"#)
+            .unwrap()
+            .as_smi(),
+        Some(1)
+    );
+}
+
+#[test]
+fn test_regexp_search_resets_lastindex() {
+    let mut ctx = Context::new_small();
+    assert_eq!(
+        ctx.eval(r#"var r = /a/g; r.lastIndex = 1; "aba".search(r); r.lastIndex;"#)
+            .unwrap()
+            .as_smi(),
+        Some(1)
+    );
+    assert_eq!(ctx.eval(r#""aba".search(/b/)"#).unwrap().as_smi(), Some(1));
+}
+
+#[test]
+fn test_regexp_match_global_lastindex() {
+    let mut ctx = Context::new_small();
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            r#"var r = /a/g; "aba".match(r).length + "/" + r.lastIndex;"#
+        ),
+        "2/3"
+    );
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            r#""foo".match(/o+/).index + "/" + "foo".match(/o+/).input;"#
+        ),
+        "1/foo"
+    );
+}
+
+#[test]
+fn test_regex_replace_all_function() {
+    let mut ctx = Context::new_small();
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            r#""a1b2c3".replaceAll(/(\d)/g, function(m, d, p, s) { return "[" + d + "]"; })"#
+        ),
+        "a[1]b[2]c[3]"
+    );
+    // Position and input args.
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            r#"var out = []; "a1b2c3".replaceAll(/(\d)/g, function(m, d, p, s) { out.push(m + "@" + p); return ""; }); out.length + "|" + out[0] + "|" + out[1] + "|" + out[2];"#
+        ),
+        "3|1@1|2@3|3@5"
+    );
+    // String search + function replacement.
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            r#""abab".replaceAll("a", function(m, p, s) { return "" + p; })"#
+        ),
+        "0b2b"
+    );
+    // Adjacent matches and empty-string matches must not loop forever.
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            r#""abab".replaceAll("a", function(m, p) { return "x"; })"#
+        ),
+        "xbxb"
+    );
+}
+
+#[test]
+fn test_regex_lookahead() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_str(&mut ctx, r#"/a(?=b)/.exec("abac")[0]"#), "a");
+    assert_eq!(eval_str(&mut ctx, r#"/a(?!b)/.exec("ac")[0]"#), "a");
+    // /a(?!b)/ still matches the 'a' at index 2 of "abac" (followed by 'c').
+    assert_eq!(eval_str(&mut ctx, r#"/a(?!b)/.exec("abac")[0]"#), "a");
+    assert_eq!(eval_str(&mut ctx, r#"/a(?!b)/.exec("ac")[0]"#), "a");
+    assert_eq!(eval_str(&mut ctx, r#"/(?=(a+))a/.exec("baaab")[1]"#), "aaa");
+    assert_eq!(eval_str(&mut ctx, r#"/\d+(?=px)/.exec("100px")[0]"#), "100");
+}
+
+#[test]
+fn test_regex_quantifier() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_str(&mut ctx, r#"/\d{3}/.exec("ab123")[0]"#), "123");
+    assert_eq!(eval_str(&mut ctx, r#"/a{2,3}/.exec("baaa")[0]"#), "aaa");
+    assert!(ctx.eval(r#"/a{2}/.exec("ba")"#).unwrap().is_null());
+    assert_eq!(eval_str(&mut ctx, r#"/a{1,2}/.exec("baaa")[0]"#), "aa");
+    assert_eq!(eval_str(&mut ctx, r#"/\d{2,}/.exec("a123")[0]"#), "123");
+}
+
+#[test]
+fn test_array_named_props() {
+    let mut ctx = Context::new_small();
+    assert_eq!(
+        ctx.eval(r#"var a = [1,2]; a.foo = 42; a.foo;"#)
+            .unwrap()
+            .as_smi(),
+        Some(42)
+    );
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            r#"var a = [1,2]; a.foo = 42; a.foo + "/" + a.length;"#
+        ),
+        "42/2"
+    );
+    // Named props are own enumerable properties for Object.keys.
+    assert_eq!(
+        ctx.eval(r#"var a = [1,2]; a.foo = 42; Object.keys(a).length;"#)
+            .unwrap()
+            .as_smi(),
+        Some(3)
+    );
+    // Overwriting an element still works alongside named props.
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            r#"var a = [1,2]; a.foo = 42; a[0] = 9; a[0] + "/" + a.foo;"#
+        ),
+        "9/42"
+    );
+}
+
+#[test]
 fn test_regex_replace_function() {
     let mut ctx = Context::new_small();
     assert_eq!(

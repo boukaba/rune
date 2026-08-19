@@ -2,16 +2,23 @@ use crate::gc::{GcHeader, SemiSpace, TAG_ARRAY, size_of};
 use crate::value::Value;
 use std::ptr;
 
-/// Memory layout (identical byte layout to JSObject):
+/// Memory layout:
 ///   [0..8)   GcHeader with TAG_ARRAY
 ///   [8..16)  shape: *const Shape (DENSE_ARRAY_SHAPE for all arrays)
 ///   [16..20) length: u32 (number of elements)
 ///   [20..24) capacity: u32 (allocated element capacity)
 ///   [24..32) prototype: *mut u8 (Array.prototype, set by VM)
-///   [32..)   elements: Value[]
+///   [32..40) extra_props: *mut u8 (JSObject with named properties such as
+///            the non-enumerable "index"/"input" on match-result arrays)
+///   [40..)   elements: Value[]
 ///
-/// Reuses OBJECT_HEADER_END (32) and OBJECT_PROTOTYPE_OFFSET (24) from object.rs
+/// Reuses OBJECT_PROTOTYPE_OFFSET (24) from object.rs
 pub struct RuneArray;
+
+/// Byte offset of the extra_props pointer (JSObject or null).
+pub const EXTRA_PROPS_OFFSET: usize = 32;
+/// Byte offset of the first element slot (header end).
+pub const ARRAY_HEADER_END: usize = 40;
 
 /// Number of extra element slots to reserve beyond initial length.
 const RESERVED_ELEMENTS: usize = 4;
@@ -21,7 +28,7 @@ impl RuneArray {
     pub fn allocate(ss: &mut SemiSpace, elements: &[Value]) -> *mut RuneArray {
         let len = elements.len();
         let cap = len + RESERVED_ELEMENTS;
-        let total_size = crate::object::OBJECT_HEADER_END + cap * size_of::<Value>();
+        let total_size = ARRAY_HEADER_END + cap * size_of::<Value>();
         let ptr = ss.alloc(total_size);
         unsafe {
             let header = &mut *(ptr as *mut GcHeader);
@@ -41,7 +48,11 @@ impl RuneArray {
             let proto_ptr = ptr.add(24) as *mut *mut u8;
             *proto_ptr = std::ptr::null_mut();
 
-            let elems_ptr = ptr.add(crate::object::OBJECT_HEADER_END) as *mut Value;
+            // extra_props starts as null
+            let extra_ptr = ptr.add(EXTRA_PROPS_OFFSET) as *mut *mut u8;
+            *extra_ptr = std::ptr::null_mut();
+
+            let elems_ptr = ptr.add(ARRAY_HEADER_END) as *mut Value;
             ptr::copy_nonoverlapping(elements.as_ptr(), elems_ptr, len);
             // Zero out reserved elements
             for i in len..cap {
@@ -67,15 +78,25 @@ impl RuneArray {
 
     pub unsafe fn get_element(arr: *mut RuneArray, index: usize) -> Value {
         unsafe {
-            let elems_ptr = (arr as *mut u8).add(crate::object::OBJECT_HEADER_END) as *const Value;
+            let elems_ptr = (arr as *mut u8).add(ARRAY_HEADER_END) as *const Value;
             *elems_ptr.add(index)
         }
     }
 
     pub unsafe fn set_element(arr: *mut RuneArray, index: usize, val: Value) {
         unsafe {
-            let elems_ptr = (arr as *mut u8).add(crate::object::OBJECT_HEADER_END) as *mut Value;
+            let elems_ptr = (arr as *mut u8).add(ARRAY_HEADER_END) as *mut Value;
             *elems_ptr.add(index) = val;
+        }
+    }
+
+    pub unsafe fn extra_props(arr: *mut RuneArray) -> *mut u8 {
+        unsafe { *((arr as *mut u8).add(EXTRA_PROPS_OFFSET) as *const *mut u8) }
+    }
+
+    pub unsafe fn set_extra_props(arr: *mut RuneArray, props: *mut u8) {
+        unsafe {
+            *((arr as *mut u8).add(EXTRA_PROPS_OFFSET) as *mut *mut u8) = props;
         }
     }
 
@@ -108,7 +129,7 @@ impl RuneArray {
             let old_len = Self::length(arr) as usize;
             let old_cap = Self::capacity(arr) as usize;
             let new_cap = (old_cap * 3 / 2).max(old_cap + 8);
-            let total_size = crate::object::OBJECT_HEADER_END + new_cap * size_of::<Value>();
+            let total_size = ARRAY_HEADER_END + new_cap * size_of::<Value>();
             let new_ptr = ss.alloc(total_size);
             // If GC ran during alloc, `arr` may be a stale from-space pointer
             // with a forwarded header. Resolve to the to-space copy.
@@ -117,13 +138,14 @@ impl RuneArray {
             } else {
                 arr as *mut u8
             };
-            // Copy header (GcHeader + shape + length + capacity + prototype) = 32 bytes
-            std::ptr::copy_nonoverlapping(src, new_ptr, crate::object::OBJECT_HEADER_END);
+            // Copy header (GcHeader + shape + length + capacity + prototype +
+            // extra_props) = 40 bytes
+            std::ptr::copy_nonoverlapping(src, new_ptr, ARRAY_HEADER_END);
             // Update capacity in new header
             *(new_ptr.add(20) as *mut u32) = new_cap as u32;
             // Copy elements
-            let old_elems = src.add(crate::object::OBJECT_HEADER_END) as *const Value;
-            let new_elems = new_ptr.add(crate::object::OBJECT_HEADER_END) as *mut Value;
+            let old_elems = src.add(ARRAY_HEADER_END) as *const Value;
+            let new_elems = new_ptr.add(ARRAY_HEADER_END) as *mut Value;
             std::ptr::copy_nonoverlapping(old_elems, new_elems, old_len);
             // Zero out new element slots
             for i in old_len..new_cap {

@@ -3526,10 +3526,25 @@ fn object_own_entries(
             }
             TAG_ARRAY => {
                 let len = unsafe { RuneArray::length(ptr as *mut RuneArray) } as usize;
-                let mut entries = Vec::with_capacity(len);
+                let mut entries = Vec::with_capacity(len + 4);
                 for i in 0..len {
                     let value = unsafe { RuneArray::get_element(ptr as *mut RuneArray, i) };
                     entries.push((i.to_string(), value));
+                }
+                // Named properties (e.g. "index"/"input" on match-result arrays,
+                // user assignments like a.foo) are own enumerable properties.
+                let extra_ptr = unsafe { RuneArray::extra_props(ptr as *mut RuneArray) };
+                if !extra_ptr.is_null() {
+                    let shape = unsafe { JSObject::shape_ptr(extra_ptr as *mut JSObject) };
+                    let count = unsafe { JSObject::slot_count(extra_ptr as *mut JSObject) };
+                    for i in 0..count {
+                        if shape.entries[i].0.is_symbol() {
+                            continue;
+                        }
+                        let key = shape.key_name_at(i).unwrap_or("").to_string();
+                        let value = unsafe { JSObject::get_slot(extra_ptr as *mut JSObject, i) };
+                        entries.push((key, value));
+                    }
                 }
                 Ok(entries)
             }
@@ -4539,11 +4554,11 @@ pub fn string_replace_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
     }
     let s = string_from_value(this);
     let search = args.first().copied().unwrap_or(Value::undefined());
-    let replacement = if args.len() > 1 {
-        arg_to_string(gc, Some(args[1]), vm)
-    } else {
-        "undefined".to_string()
-    };
+    let replacement_fn = args.get(1).copied();
+    let is_fn_replacement = replacement_fn.is_some_and(|v| {
+        v.heap_ptr()
+            .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC })
+    });
 
     // Check if search is a RegExp
     if let Some(ptr) = search.heap_ptr() {
@@ -4555,6 +4570,47 @@ pub fn string_replace_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
                 Ok(expr) => {
                     let nfa = rune_regex::nfa::compile(&expr);
                     let pike_vm = rune_regex::pikevm::PikeVm::new();
+                    if is_fn_replacement {
+                        // Callable replacement: state machine in the Return
+                        // handler re-invokes fn per match (spec §22.1.3.20
+                        // @@replace path: fn(match, ...captures, position, string)).
+                        let fn_val = replacement_fn.unwrap();
+                        match pike_vm.exec(&nfa, &s, 0) {
+                            Some(m) => {
+                                let (start, end) = m.groups[0];
+                                let mut fn_args = Vec::with_capacity(m.groups.len() + 2);
+                                let match_str = HeapString::allocate(gc, &s[start..end]);
+                                fn_args.push(Value::from_heap_ptr(match_str as *mut u8));
+                                for i in 1..m.groups.len() {
+                                    let (gs, ge) = m.groups[i];
+                                    let cap_str = HeapString::allocate(gc, &s[gs..ge]);
+                                    fn_args.push(Value::from_heap_ptr(cap_str as *mut u8));
+                                }
+                                fn_args.push(Value::smi(start as i32));
+                                let input_str = HeapString::allocate(gc, &s);
+                                fn_args.push(Value::from_heap_ptr(input_str as *mut u8));
+                                let empty = start == end;
+                                vm.pending_replace_all_op = Some(crate::vm::PendingReplaceAllOp {
+                                    source_frame_depth: 0,
+                                    input: s.clone(),
+                                    search_str: String::new(),
+                                    regex_pattern: Some(pattern.clone()),
+                                    fn_val,
+                                    next_pos: if empty { start + 1 } else { end },
+                                    accumulated: s[..start].to_string(),
+                                    last_end: end,
+                                });
+                                vm.push_callback_call(gc, fn_val, Value::undefined(), fn_args);
+                                return Value::undefined();
+                            }
+                            None => {
+                                return Value::from_heap_ptr(
+                                    HeapString::allocate(gc, &s) as *mut u8
+                                );
+                            }
+                        }
+                    }
+                    let replacement = arg_to_string(gc, replacement_fn, vm);
                     let mut result = String::new();
                     let mut last_end = 0;
                     while let Some(m) = pike_vm.exec(&nfa, &s, last_end) {
@@ -4580,6 +4636,45 @@ pub fn string_replace_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
 
     // String pattern (original logic)
     let search_str = arg_to_string(gc, args.first().copied(), vm);
+    if is_fn_replacement {
+        // Callable replacement for a string search:
+        // fn(searchString, position, string) per occurrence.
+        let fn_val = replacement_fn.unwrap();
+        let find_pos = if search_str.is_empty() {
+            Some(0)
+        } else {
+            s.find(&search_str)
+        };
+        if let Some(start) = find_pos {
+            let end = start + search_str.len();
+            let mut fn_args = Vec::with_capacity(3);
+            let ss = HeapString::allocate(gc, &search_str);
+            fn_args.push(Value::from_heap_ptr(ss as *mut u8));
+            fn_args.push(Value::smi(start as i32));
+            let input_str = HeapString::allocate(gc, &s);
+            fn_args.push(Value::from_heap_ptr(input_str as *mut u8));
+            let empty = search_str.is_empty();
+            let advance = if empty {
+                s[start..].chars().next().map(|c| c.len_utf8()).unwrap_or(1)
+            } else {
+                end - start
+            };
+            vm.pending_replace_all_op = Some(crate::vm::PendingReplaceAllOp {
+                source_frame_depth: 0,
+                input: s.clone(),
+                search_str: search_str.clone(),
+                regex_pattern: None,
+                fn_val,
+                next_pos: start + advance,
+                accumulated: s[..start].to_string(),
+                last_end: end,
+            });
+            vm.push_callback_call(gc, fn_val, Value::undefined(), fn_args);
+            return Value::undefined();
+        }
+        return Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8);
+    }
+    let replacement = arg_to_string(gc, replacement_fn, vm);
     if search_str.is_empty() {
         let result = s
             .chars()
@@ -4633,7 +4728,7 @@ fn make_match_result_array(
     gc: &mut SemiSpace,
     groups: &[(usize, usize)],
     input: &str,
-    _match_index: usize,
+    match_index: usize,
     array_proto: Value,
 ) -> Value {
     let mut elements = Vec::with_capacity(groups.len());
@@ -4649,6 +4744,24 @@ fn make_match_result_array(
         if let Some(proto) = array_proto.heap_ptr() {
             *(ptr.add(24) as *mut *mut u8) = proto;
         }
+        // §22.2.7.2 steps 18-19: non-enumerable "index" and "input" data
+        // properties. Stored in extra_props (never enumerated by
+        // for-in/Object.keys — matches the spec's non-enumerability).
+        let props = JSObject::allocate(gc, Shape::empty(), &[]);
+        let input_str = HeapString::allocate(gc, input);
+        JSObject::add_property(
+            props,
+            PropertyKey::from_string("index"),
+            "index".to_string(),
+            Value::smi(match_index as i32),
+        );
+        JSObject::add_property(
+            props,
+            PropertyKey::from_string("input"),
+            "input".to_string(),
+            Value::from_heap_ptr(input_str as *mut u8),
+        );
+        RuneArray::set_extra_props(ptr as *mut RuneArray, props as *mut u8);
     }
     Value::from_heap_ptr(arr as *mut u8)
 }
@@ -4826,10 +4939,18 @@ pub fn string_search(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
         }
     };
 
-    match regexp_exec_internal(gc, rx_ptr, &s, 0) {
+    // §22.2.6.12 steps 4-8: lastIndex is reset to 0 before the exec and
+    // restored afterwards — search ignores the "lastIndex"/"global" state.
+    let prev_li = unsafe { RegExp::last_index(rx_ptr) };
+    if prev_li != 0 {
+        unsafe { RegExp::set_last_index(rx_ptr, 0) };
+    }
+    let result = match regexp_exec_internal(gc, rx_ptr, &s, 0) {
         Some(groups) => Value::smi(groups[0].0 as i32),
         None => Value::smi(-1),
-    }
+    };
+    unsafe { RegExp::set_last_index(rx_ptr, prev_li) };
+    result
 }
 
 /// Math.floor(x) — rounds down.
@@ -7194,6 +7315,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             func: async_reject,
         },
         Builtin {
+            length: 2,
+            name: "RegExp",
+            func: regexp_constructor,
+        },
+        Builtin {
             length: 1,
             name: "RegExp_prototype_exec",
             func: regexp_exec,
@@ -7854,50 +7980,71 @@ pub fn build_object_constructor(gc: &mut SemiSpace) -> Value {
 }
 
 /// RegExp.prototype.exec(string) — run regex, return match array or null.
-pub fn regexp_exec(gc: &mut SemiSpace, this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+/// RegExp.prototype.exec(string) — §22.2.6.2 RegExpBuiltinExec.
+/// Global/sticky regexps start at lastIndex and advance it; non-global
+/// searches from 0. The result array carries non-enumerable "index" and
+/// "input" properties.
+pub fn regexp_exec(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let regexp_ptr = match get_regexp_this(this) {
         Some(p) => p,
         None => return Value::null(),
     };
-    let pattern = unsafe { HeapString::to_string(RegExp::pattern(regexp_ptr) as *mut HeapString) };
     let input = args
         .first()
         .map(|v| string_from_value(*v))
         .unwrap_or_default();
+    let s = input;
+    let len = s.chars().count();
 
-    match rune_regex::parse_regex(&pattern) {
-        Ok(expr) => {
-            let nfa = rune_regex::nfa::compile(&expr);
-            let pike_vm = rune_regex::pikevm::PikeVm::new();
-            match pike_vm.exec(&nfa, &input, 0) {
-                Some(m) => {
-                    let group_count = m.groups.len();
-                    let mut elements = Vec::with_capacity(group_count);
-                    for i in 0..group_count {
-                        let (gs, ge) = m.groups[i];
-                        let s = HeapString::allocate(gc, &input[gs..ge]);
-                        elements.push(Value::from_heap_ptr(s as *mut u8));
-                    }
-                    let arr = RuneArray::allocate(gc, &elements);
-                    unsafe {
-                        let ptr = arr as *mut u8;
-                        *(ptr.add(8) as *mut *const rune_core::shape::Shape) =
-                            *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
-                        if _vm.array_prototype.heap_ptr().is_some() {
-                            let proto = _vm.array_prototype.heap_ptr().unwrap();
-                            *(ptr.add(24) as *mut *mut u8) = proto;
-                        }
-                    }
-                    Value::from_heap_ptr(arr as *mut u8)
+    let global = unsafe { RegExp::has_flag(regexp_ptr, 0) };
+    let sticky = unsafe { RegExp::has_flag(regexp_ptr, 5) };
+
+    let mut last = if global || sticky {
+        unsafe { RegExp::last_index(regexp_ptr) as usize }
+    } else {
+        0
+    };
+
+    loop {
+        // §22.2.7.2 step 9.a: lastIndex beyond the string → reset + null.
+        if last > len {
+            if global || sticky {
+                unsafe { RegExp::set_last_index(regexp_ptr, 0) };
+            }
+            return Value::null();
+        }
+        match regexp_exec_internal(gc, regexp_ptr, &s, last) {
+            Some(groups) => {
+                let (start, end) = groups[0];
+                // §22.2.7.2 step 10: sticky requires the match to start
+                // exactly at lastIndex; any later match is a failure.
+                if sticky && start != last {
+                    unsafe { RegExp::set_last_index(regexp_ptr, 0) };
+                    return Value::null();
                 }
-                None => Value::null(),
+                // §22.2.7.2 step 12: global/sticky advance lastIndex to the
+                // match end (zero-length matches keep the same lastIndex; the
+                // caller advances to avoid infinite loops).
+                if global || sticky {
+                    unsafe { RegExp::set_last_index(regexp_ptr, end as u32) };
+                }
+                return make_match_result_array(gc, &groups, &s, start, vm.array_prototype);
+            }
+            None => {
+                // Failure: sticky returns null immediately (lastIndex = 0);
+                // otherwise advance one code unit and retry.
+                if sticky {
+                    unsafe { RegExp::set_last_index(regexp_ptr, 0) };
+                    return Value::null();
+                }
+                last += 1;
             }
         }
-        Err(_) => Value::null(),
     }
 }
 
 /// RegExp.prototype.test(string) — return true if pattern matches.
+/// Global/sticky regexps advance lastIndex exactly like exec.
 pub fn regexp_test(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let result = regexp_exec(gc, this, args, vm);
     if result.is_null() {
@@ -7905,6 +8052,138 @@ pub fn regexp_test(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
     } else {
         Value::boolean(true)
     }
+}
+
+/// The RegExp constructor — §22.2.4.1.
+/// Called with `new` (this = freshly allocated TAG_REGEXP) or as a plain
+/// function (this = undefined). Plain-call with a RegExp pattern and no flags
+/// returns the pattern itself; every other form creates a new RegExp.
+pub fn regexp_constructor(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let pattern_arg = args.first().copied().unwrap_or(Value::undefined());
+    let flags_arg = args.get(1).copied().unwrap_or(Value::undefined());
+
+    let is_new = this.is_heap_object()
+        && this
+            .heap_ptr()
+            .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_REGEXP });
+
+    // §22.2.4.1 step 3: plain call with a RegExp pattern and no flags returns
+    // the pattern itself (same-constructor shortcut).
+    if !is_new {
+        if let Some(ptr) = pattern_arg.heap_ptr() {
+            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+            if tag == TAG_REGEXP && flags_arg.is_undefined() {
+                return pattern_arg;
+            }
+        }
+    }
+
+    // Extract pattern source and flags per §22.2.4.1 steps 4-7.
+    let mut flags_str = String::new();
+    let pattern_str = if let Some(ptr) = pattern_arg.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_REGEXP {
+            let pattern_ptr = unsafe { RegExp::pattern(ptr) };
+            let src = unsafe { HeapString::to_string(pattern_ptr as *mut HeapString) };
+            if flags_arg.is_undefined() {
+                let f = unsafe { RegExp::flags(ptr) };
+                let mut fs = String::new();
+                if f & 1 != 0 {
+                    fs.push('g');
+                }
+                if f & 2 != 0 {
+                    fs.push('i');
+                }
+                if f & 4 != 0 {
+                    fs.push('m');
+                }
+                if f & 8 != 0 {
+                    fs.push('s');
+                }
+                if f & 16 != 0 {
+                    fs.push('u');
+                }
+                if f & 32 != 0 {
+                    fs.push('y');
+                }
+                if f & 64 != 0 {
+                    fs.push('d');
+                }
+                if f & 128 != 0 {
+                    fs.push('v');
+                }
+                flags_str = fs;
+            } else {
+                flags_str = arg_to_string(gc, Some(flags_arg), vm);
+            }
+            src
+        } else {
+            if !flags_arg.is_undefined() {
+                flags_str = arg_to_string(gc, Some(flags_arg), vm);
+            }
+            value_to_pattern_string(Some(pattern_arg), gc, vm)
+        }
+    } else {
+        if !flags_arg.is_undefined() {
+            flags_str = arg_to_string(gc, Some(flags_arg), vm);
+        }
+        value_to_pattern_string(Some(pattern_arg), gc, vm)
+    };
+
+    // §22.2.3.3: flags must only contain d/g/i/m/s/u/v/y, no duplicates.
+    let mut seen: u32 = 0;
+    for c in flags_str.chars() {
+        let bit = match c {
+            'g' => 1,
+            'i' => 2,
+            'm' => 4,
+            's' => 8,
+            'u' => 16,
+            'y' => 32,
+            'd' => 64,
+            'v' => 128,
+            _ => {
+                vm.set_pending_exception(make_error(
+                    gc,
+                    "SyntaxError: Invalid regular expression flags",
+                ));
+                return Value::undefined();
+            }
+        };
+        if seen & bit != 0 {
+            vm.set_pending_exception(make_error(
+                gc,
+                "SyntaxError: Duplicate regular expression flag",
+            ));
+            return Value::undefined();
+        }
+        seen |= bit;
+    }
+
+    // §22.2.3.3: pattern must parse, else SyntaxError.
+    if rune_regex::parse_regex(&pattern_str).is_err() {
+        vm.set_pending_exception(make_error(gc, "SyntaxError: Invalid regular expression"));
+        return Value::undefined();
+    }
+
+    if is_new {
+        let new_ptr = this.heap_ptr().unwrap();
+        let pattern_heap = HeapString::allocate(gc, &pattern_str);
+        unsafe {
+            RegExp::set_pattern(new_ptr, pattern_heap as *mut u8);
+            RegExp::set_flags(new_ptr, seen);
+            RegExp::set_last_index(new_ptr, 0);
+        }
+        return this;
+    }
+
+    let rx = alloc_regexp_from_string(gc, &pattern_str, seen, vm.regexp_prototype);
+    unsafe {
+        if let Some(p) = rx.heap_ptr() {
+            RegExp::set_last_index(p, 0);
+        }
+    }
+    rx
 }
 
 fn get_regexp_this(this: Value) -> Option<*mut u8> {
@@ -7955,6 +8234,9 @@ pub fn regexp_flags(gc: &mut SemiSpace, this: Value, _args: &[Value], _vm: &mut 
     }
     if flags & 64 != 0 {
         s.push('d');
+    }
+    if flags & 128 != 0 {
+        s.push('v');
     }
     Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8)
 }

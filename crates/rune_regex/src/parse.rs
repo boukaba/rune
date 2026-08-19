@@ -46,6 +46,80 @@ fn parse_repetition(chars: &[char], i: &mut usize) -> Result<RegexExpr, String> 
                 *i += 1;
                 return Ok(RegexExpr::Optional(Box::new(node)));
             }
+            '{' => {
+                // {n}, {n,}, {n,m} quantifier. If the braces don't enclose a
+                // valid count, `{` is a literal (non-unicode mode).
+                let save = *i;
+                *i += 1;
+                let mut n = 0usize;
+                let mut digits = 0usize;
+                while *i < chars.len() && chars[*i].is_ascii_digit() {
+                    n = n * 10 + (chars[*i] as u8 - b'0') as usize;
+                    digits += 1;
+                    *i += 1;
+                }
+                if digits == 0 {
+                    *i = save;
+                    return Ok(node);
+                }
+                let mut m = n;
+                let has_m = if *i < chars.len() && chars[*i] == ',' {
+                    *i += 1;
+                    m = 0;
+                    let mut m_digits = 0usize;
+                    while *i < chars.len() && chars[*i].is_ascii_digit() {
+                        m = m * 10 + (chars[*i] as u8 - b'0') as usize;
+                        m_digits += 1;
+                        *i += 1;
+                    }
+                    if m_digits > 0 {
+                        true
+                    } else {
+                        // {n,} — unbounded upper
+                        if *i < chars.len() && chars[*i] == '}' {
+                            *i += 1;
+                            let mut nodes = vec![node.clone(); n];
+                            if n > 0 {
+                                nodes.push(RegexExpr::Star(Box::new(node)));
+                            }
+                            return Ok(if nodes.len() == 1 {
+                                nodes.remove(0)
+                            } else {
+                                RegexExpr::Concat(nodes)
+                            });
+                        }
+                        *i = save;
+                        return Ok(node);
+                    }
+                } else {
+                    false
+                };
+                if *i >= chars.len() || chars[*i] != '}' {
+                    *i = save;
+                    return Ok(node);
+                }
+                *i += 1;
+                if has_m && m < n {
+                    return Err("Invalid quantifier range".into());
+                }
+                if m == n {
+                    let mut nodes = vec![node.clone(); n];
+                    return Ok(if nodes.len() == 1 {
+                        nodes.remove(0)
+                    } else {
+                        RegexExpr::Concat(nodes)
+                    });
+                }
+                // {n,m}: n copies + (m - n) optional copies.
+                let mut nodes: Vec<RegexExpr> = Vec::new();
+                for _ in 0..n {
+                    nodes.push(node.clone());
+                }
+                for _ in n..m {
+                    nodes.push(RegexExpr::Optional(Box::new(node.clone())));
+                }
+                return Ok(RegexExpr::Concat(nodes));
+            }
             _ => {}
         }
     }
@@ -119,6 +193,23 @@ fn parse_atom(chars: &[char], i: &mut usize) -> Result<RegexExpr, String> {
         }
         '(' => {
             *i += 1;
+            // Lookahead assertions: (?=...) positive, (?!...) negative.
+            if *i + 1 < chars.len()
+                && chars[*i] == '?'
+                && (chars[*i + 1] == '=' || chars[*i + 1] == '!')
+            {
+                let negated = chars[*i + 1] == '!';
+                *i += 2;
+                let expr = parse_alt(chars, i)?;
+                if *i >= chars.len() || chars[*i] != ')' {
+                    return Err("Unclosed group".into());
+                }
+                *i += 1;
+                return Ok(RegexExpr::Lookahead {
+                    expr: Box::new(expr),
+                    negated,
+                });
+            }
             // Check for (?:...) non-capturing group
             let capturing = if *i + 1 < chars.len() && chars[*i] == '?' && chars[*i + 1] == ':' {
                 *i += 2;

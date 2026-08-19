@@ -292,6 +292,22 @@ pub(crate) struct PendingReplaceOp {
     pub(crate) groups: Vec<(usize, usize)>,
 }
 
+/// State for a pending String.prototype.replaceAll callback.
+/// Multi-match state machine: each callback return appends the substitution,
+/// finds the next match, and either calls the callback again or finishes.
+/// `search_str` is the plain-string pattern (mode A); `regex_pattern` is the
+/// regex source (mode B, captures passed to the callback).
+pub(crate) struct PendingReplaceAllOp {
+    pub(crate) source_frame_depth: usize,
+    pub(crate) input: String,
+    pub(crate) search_str: String,
+    pub(crate) regex_pattern: Option<String>,
+    pub(crate) fn_val: Value,
+    pub(crate) next_pos: usize,
+    pub(crate) accumulated: String,
+    pub(crate) last_end: usize,
+}
+
 /// State for async generator resumption via bridge function (async_continue/async_reject).
 pub(crate) struct PendingAsyncGen {
     pub(crate) gen_id: usize,
@@ -542,6 +558,7 @@ pub struct Vm {
     pub set_prototype: Value,
     pub date_constructor: Value,
     pub date_prototype: Value,
+    pub regexp_constructor: Value,
     pub array_buffer_constructor: Value,
     pub array_buffer_prototype: Value,
     /// TypedArray ctor wrappers / prototypes / ctor builtin handles, indexed by
@@ -593,6 +610,8 @@ pub struct Vm {
     pub(crate) pending_finally_op: Option<PendingFinallyOp>,
     /// Pending String.prototype.replace callback state.
     pub(crate) pending_replace_op: Option<PendingReplaceOp>,
+    /// Pending String.prototype.replaceAll callback state machine.
+    pub(crate) pending_replace_all_op: Option<PendingReplaceAllOp>,
     /// Pending assert.throws callback.
     pub(crate) pending_assert: Option<PendingAssert>,
     /// Pending accessor call (getter/setter).
@@ -685,6 +704,7 @@ impl Vm {
             set_prototype: Value::undefined(),
             date_constructor: Value::undefined(),
             date_prototype: Value::undefined(),
+            regexp_constructor: Value::undefined(),
             array_buffer_constructor: Value::undefined(),
             array_buffer_prototype: Value::undefined(),
             typed_array_ctors: Vec::new(),
@@ -712,6 +732,7 @@ impl Vm {
             pending_async_gen: None,
             pending_finally_op: None,
             pending_replace_op: None,
+            pending_replace_all_op: None,
             pending_assert: None,
             pending_accessor_call: None,
             pending_primitive_conversion: None,
@@ -1454,10 +1475,14 @@ impl Vm {
             if let Some(h) = li_h {
                 proto_entries.push(("lastIndex", h));
             }
+            let re_ctor_handle =
+                find_handle(&self.builtins, "RegExp").unwrap_or(Value::undefined());
+            proto_entries.push(("constructor", re_ctor_handle));
             let re_proto = make_object(gc, &proto_entries);
             self.regexp_prototype = re_proto;
             let re_ctor = make_object(gc, &[("prototype", re_proto)]);
             self.builtin_wrappers.insert("RegExp".to_string(), re_ctor);
+            self.regexp_constructor = re_ctor;
         }
 
         // Math namespace with all methods + constants
@@ -1905,6 +1930,7 @@ impl Vm {
         gc.push_root(&self.map_prototype as *const Value as *mut u64);
         gc.push_root(&self.set_prototype as *const Value as *mut u64);
         gc.push_root(&self.date_constructor as *const Value as *mut u64);
+        gc.push_root(&self.regexp_constructor as *const Value as *mut u64);
         gc.push_root(&self.date_prototype as *const Value as *mut u64);
         gc.push_root(&self.array_buffer_constructor as *const Value as *mut u64);
         gc.push_root(&self.array_buffer_prototype as *const Value as *mut u64);
@@ -1989,6 +2015,10 @@ impl Vm {
             gc.push_root(&pfe.this_arg as *const Value as *mut u64);
             gc.push_root(&pfe.collection as *const Value as *mut u64);
         }
+        // Root pending replaceAll callback fn (re-invoked per match)
+        if let Some(ref pra) = self.pending_replace_all_op {
+            gc.push_root(&pra.fn_val as *const Value as *mut u64);
+        }
     }
 
     /// Push a frame for a JS function call (used by array method callbacks).
@@ -2058,6 +2088,9 @@ impl Vm {
             state.source_frame_depth = self.frames.len() - 1;
         }
         if let Some(ref mut state) = self.pending_replace_op {
+            state.source_frame_depth = self.frames.len() - 1;
+        }
+        if let Some(ref mut state) = self.pending_replace_all_op {
             state.source_frame_depth = self.frames.len() - 1;
         }
         if let Some(ref mut state) = self.pending_symbol_dispatch {
@@ -4996,6 +5029,31 @@ impl Vm {
                         self.frames[fi].pc = pc + 1;
                         continue;
                     }
+                    // RegExp constructor [[Construct]]: allocate a tagged
+                    // RegExp placeholder; the builtin fills in pattern, flags
+                    // and lastIndex (or returns the pattern itself for a
+                    // plain call — handled in the Call arm).
+                    if constructor == self.regexp_constructor {
+                        let empty_pat = HeapString::allocate(gc, "");
+                        let obj_ptr =
+                            rune_core::regexp::RegExp::allocate(gc, empty_pat as *mut u8, 0);
+                        if let Some(proto_ptr) = self.regexp_prototype.heap_ptr() {
+                            unsafe {
+                                rune_core::regexp::RegExp::set_prototype(obj_ptr, proto_ptr);
+                            }
+                        }
+                        let obj_val = Value::from_heap_ptr(obj_ptr);
+                        let result = crate::builtins::regexp_constructor(gc, obj_val, &args, self);
+                        if let Some(exc) = self.pending_exception.take() {
+                            if let Some(exit) = self.handle_throw(gc, exc) {
+                                return exit;
+                            }
+                            continue;
+                        }
+                        self.push(result);
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    }
                     // TypedArray constructor [[Construct]]: find which element
                     // type this ctor wrapper corresponds to, allocate the tagged
                     // RuneTypedArray and run the per-kind builtin.
@@ -5247,6 +5305,7 @@ impl Vm {
                                     || self.pending_promise_ctor.is_some()
                                     || self.pending_finally_op.is_some()
                                     || self.pending_replace_op.is_some()
+                                    || self.pending_replace_all_op.is_some()
                                     || self.pending_symbol_dispatch.is_some()
                                     || self.pending_collection_foreach.is_some()
                                     || self.pending_collection_ctor.is_some()
@@ -5371,6 +5430,27 @@ impl Vm {
                         let tv = date::now_ms();
                         let s = date::to_date_string(tv);
                         self.push(Value::from_heap_ptr(crate::vm::heap_string(gc, &s)));
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    }
+
+                    // §22.2.4.1: RegExp() called without `new` — returns the
+                    // pattern itself if it's a RegExp with no flags argument,
+                    // otherwise creates a new RegExp.
+                    if callee == self.regexp_constructor {
+                        let result = crate::builtins::regexp_constructor(
+                            gc,
+                            Value::undefined(),
+                            &args,
+                            self,
+                        );
+                        if let Some(exc) = self.pending_exception.take() {
+                            if let Some(exit) = self.handle_throw(gc, exc) {
+                                return exit;
+                            }
+                            continue;
+                        }
+                        self.push(result);
                         self.frames[fi].pc = pc + 1;
                         continue;
                     }
@@ -6600,6 +6680,116 @@ impl Vm {
                             let (start, end) = pro.groups[0];
                             let final_str =
                                 pro.input[..start].to_string() + &repl_str + &pro.input[end..];
+                            let ptr = HeapString::allocate(gc, &final_str);
+                            self.stack.truncate(callee_base);
+                            self.push(Value::from_heap_ptr(ptr as *mut u8));
+                            let caller_idx = self.frames.len() - 1;
+                            self.frames[caller_idx].pc += 1;
+                            continue;
+                        }
+                    }
+                    // Check if this return completes a String.prototype.replaceAll
+                    // callback: append the substitution, find the next match and
+                    // either invoke the callback again or finish.
+                    if let Some(ref pra) = self.pending_replace_all_op {
+                        if self.frames.len() == pra.source_frame_depth {
+                            let mut pra = self.pending_replace_all_op.take().unwrap();
+                            let repl_str = crate::builtins::value_to_js_string(result);
+                            pra.accumulated.push_str(&repl_str);
+                            let input = pra.input.clone();
+                            let search_str = pra.search_str.clone();
+                            let regex_pattern = pra.regex_pattern.clone();
+                            let next_pos = pra.next_pos;
+                            let last_end = pra.last_end;
+                            let fn_val = pra.fn_val;
+                            // Find the next match at/after next_pos.
+                            let next_match: Option<(Vec<(usize, usize)>, usize)> =
+                                if let Some(pat) = &regex_pattern {
+                                    match rune_regex::parse_regex(pat) {
+                                        Ok(expr) => {
+                                            let nfa = rune_regex::nfa::compile(&expr);
+                                            let pike_vm = rune_regex::pikevm::PikeVm::new();
+                                            pike_vm.exec(&nfa, &input, next_pos).map(|m| {
+                                                let start = m.groups[0].0;
+                                                (m.groups, start)
+                                            })
+                                        }
+                                        Err(_) => None,
+                                    }
+                                } else if next_pos <= input.len() {
+                                    // String mode: StringIndexOf from next_pos.
+                                    if let Some(rel) = input[next_pos..].find(&search_str) {
+                                        let p = next_pos + rel;
+                                        Some((vec![(p, p + search_str.len())], p))
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                };
+                            if let Some((groups, start)) = next_match {
+                                let end = groups[0].1;
+                                let preserved = if start >= last_end {
+                                    input[last_end..start].to_string()
+                                } else {
+                                    String::new()
+                                };
+                                pra.accumulated.push_str(&preserved);
+                                let empty = start == end;
+                                pra.next_pos = if empty {
+                                    if regex_pattern.is_some() {
+                                        start + 1
+                                    } else {
+                                        // String mode: skip one full char (byte
+                                        // offsets must stay on UTF-8 boundaries).
+                                        start
+                                            + input[start..]
+                                                .chars()
+                                                .next()
+                                                .map(|c| c.len_utf8())
+                                                .unwrap_or(1)
+                                    }
+                                } else {
+                                    end
+                                };
+                                pra.last_end = end;
+                                // Build callback args: (match, ...captures, position, string)
+                                // for regex mode; (searchString, position, string) for
+                                // string mode.
+                                let mut fn_args = Vec::new();
+                                if regex_pattern.is_some() {
+                                    let match_str = HeapString::allocate(gc, &input[start..end]);
+                                    fn_args.push(Value::from_heap_ptr(match_str as *mut u8));
+                                    for &(gs, ge) in &groups[1..] {
+                                        let cap = HeapString::allocate(gc, &input[gs..ge]);
+                                        fn_args.push(Value::from_heap_ptr(cap as *mut u8));
+                                    }
+                                    fn_args.push(Value::smi(start as i32));
+                                    let input_str = HeapString::allocate(gc, &input);
+                                    fn_args.push(Value::from_heap_ptr(input_str as *mut u8));
+                                } else {
+                                    let ss = HeapString::allocate(gc, &search_str);
+                                    fn_args.push(Value::from_heap_ptr(ss as *mut u8));
+                                    fn_args.push(Value::smi(start as i32));
+                                    let input_str = HeapString::allocate(gc, &input);
+                                    fn_args.push(Value::from_heap_ptr(input_str as *mut u8));
+                                }
+                                self.pending_replace_all_op = Some(PendingReplaceAllOp {
+                                    source_frame_depth: pra.source_frame_depth,
+                                    input,
+                                    search_str,
+                                    regex_pattern,
+                                    fn_val,
+                                    next_pos: pra.next_pos,
+                                    accumulated: pra.accumulated,
+                                    last_end: pra.last_end,
+                                });
+                                self.push_callback_call(gc, fn_val, Value::undefined(), fn_args);
+                                continue;
+                            }
+                            // No more matches — finish: append the tail.
+                            let final_str =
+                                pra.accumulated + &input[pra.last_end.min(input.len())..];
                             let ptr = HeapString::allocate(gc, &final_str);
                             self.stack.truncate(callee_base);
                             self.push(Value::from_heap_ptr(ptr as *mut u8));
@@ -8039,6 +8229,17 @@ pub(crate) fn load_property_recursive(
                         }
                     }
                 }
+                // Non-numeric key: consult extra_props (named properties like
+                // the non-enumerable "index"/"input" on match-result arrays)
+                let extra = unsafe { RuneArray::extra_props(ptr as *mut RuneArray) };
+                if !extra.is_null() {
+                    if let Some(key) = value_to_prop_key(raw_key) {
+                        let extra_shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                        if let Some(slot) = extra_shape.lookup(&key) {
+                            return unsafe { JSObject::get_slot(extra as *mut JSObject, slot) };
+                        }
+                    }
+                }
                 // Non-numeric key → walk to prototype
                 let proto = unsafe { JSObject::prototype(ptr as *mut JSObject) };
                 if proto.is_null() {
@@ -8137,6 +8338,9 @@ pub(crate) fn load_property_recursive(
                             }
                             if f & 64 != 0 {
                                 s.push('d');
+                            }
+                            if f & 128 != 0 {
+                                s.push('v');
                             }
                             let ptr = HeapString::allocate(gc, &s);
                             return Value::from_heap_ptr(ptr as *mut u8);
@@ -8393,6 +8597,16 @@ fn load_property_recursive_ic(
                         },
                     );
                 } else if let Some(key) = value_to_prop_key(raw_key) {
+                    // Arrays with extra_props (e.g. match-result "index"/
+                    // "input") can't use the proto-walk cache — the key may be
+                    // an own named property.
+                    let extra = unsafe { RuneArray::extra_props(ptr as *mut RuneArray) };
+                    if !extra.is_null() {
+                        let extra_shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                        if extra_shape.lookup(&key).is_some() {
+                            return result;
+                        }
+                    }
                     // Non-numeric key — inherited from Array.prototype
                     let (shape_id, key_hash) = ic_cache_key(DENSE_ARRAY_SHAPE.id, raw_key);
                     let mut depth = 0usize;
@@ -8474,6 +8688,28 @@ fn do_store_property(obj: Value, raw_key: Value, value: Value, gc: &mut SemiSpac
                         }
                         unsafe { RuneArray::set_length(arr, new_len) };
                     }
+                } else if let Some(key) = value_to_prop_key(raw_key) {
+                    // Named property → extra_props JSObject (lazily allocated).
+                    // Re-resolve ptr after allocation (GC may move objects).
+                    let _key = key;
+                    let mut arr_ptr = obj.heap_ptr().unwrap();
+                    unsafe {
+                        let mut props = RuneArray::extra_props(arr_ptr as *mut RuneArray);
+                        if props.is_null() {
+                            let new_obj = JSObject::allocate(gc, Shape::empty(), &[]);
+                            let gc_tag = (*(arr_ptr as *const GcHeader)).tag();
+                            if gc_tag == TAG_ARRAY && (*(arr_ptr as *const GcHeader)).is_forwarded()
+                            {
+                                arr_ptr = (*(arr_ptr as *const GcHeader)).forwarding_addr();
+                            }
+                            RuneArray::set_extra_props(
+                                arr_ptr as *mut RuneArray,
+                                new_obj as *mut u8,
+                            );
+                            props = new_obj as *mut u8;
+                        }
+                        do_store_property(Value::from_heap_ptr(props), raw_key, value, gc);
+                    }
                 }
             }
         } else if tag == TAG_TYPED_ARRAY {
@@ -8486,6 +8722,20 @@ fn do_store_property(obj: Value, raw_key: Value, value: Value, gc: &mut SemiSpac
                     let n = to_number(value);
                     unsafe {
                         typedarray::write_element(ptr, index, typedarray::convert_number(kind, n));
+                    }
+                }
+            }
+        } else if tag == TAG_REGEXP {
+            // RegExp instance properties: only "lastIndex" is writable.
+            // ToLength (§22.2.7.2 step 3) coerces the stored value on use.
+            if let Some(key_ptr) = raw_key.heap_ptr() {
+                let key_tag = unsafe { (*(key_ptr as *const GcHeader)).tag() };
+                if key_tag == TAG_STRING {
+                    let key_str = unsafe { HeapString::to_string(key_ptr as *mut HeapString) };
+                    if key_str == "lastIndex" {
+                        let n = to_number(value);
+                        let clamped = if n.is_nan() || n <= 0.0 { 0 } else { n as u32 };
+                        unsafe { rune_core::regexp::RegExp::set_last_index(ptr, clamped) };
                     }
                 }
             }
@@ -8786,6 +9036,8 @@ fn ordinary_has_instance(lhs: Value, rhs_proto_ptr: *mut u8) -> bool {
                 unsafe { date::RuneDate::prototype(ptr) }
             } else if tag == TAG_TYPED_ARRAY {
                 unsafe { typedarray::RuneTypedArray::prototype(ptr) }
+            } else if tag == TAG_REGEXP {
+                unsafe { rune_core::regexp::RegExp::prototype(ptr) }
             } else {
                 return false;
             };

@@ -2,7 +2,7 @@ use crate::nfa::{Edge, Nfa};
 
 pub struct PikeVm;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Match {
     pub groups: Vec<(usize, usize)>,
 }
@@ -45,7 +45,7 @@ impl PikeVm {
                 }
 
                 // Follow Save and Epsilon edges (non-consuming) until fixpoint
-                let expanded = follow_nonconsuming(&clist, nfa, p);
+                let expanded = follow_nonconsuming(&clist, nfa, p, &chars);
 
                 // Check match in expanded threads
                 for t in &expanded {
@@ -84,7 +84,7 @@ impl PikeVm {
                             Edge::Dot(target) => {
                                 add_thread(&mut nlist, nfa, *target, &t.saves);
                             }
-                            Edge::Epsilon(_) | Edge::Save(_, _) => {}
+                            Edge::Epsilon(_) | Edge::Save(_, _) | Edge::Lookahead { .. } => {}
                         }
                     }
                 }
@@ -92,7 +92,7 @@ impl PikeVm {
             }
 
             // Check match at end of string
-            let expanded = follow_nonconsuming(&clist, nfa, chars.len());
+            let expanded = follow_nonconsuming(&clist, nfa, chars.len(), &chars);
             for t in &expanded {
                 if nfa.states[t.pc].is_match {
                     let end_pos = chars.len();
@@ -115,8 +115,8 @@ impl PikeVm {
     }
 }
 
-/// Follow all non-consuming edges (Save and Epsilon) until fixpoint.
-fn follow_nonconsuming(threads: &[Thread], nfa: &Nfa, pos: usize) -> Vec<Thread> {
+/// Follow all non-consuming edges (Save, Epsilon, Lookahead) until fixpoint.
+fn follow_nonconsuming(threads: &[Thread], nfa: &Nfa, pos: usize, chars: &[char]) -> Vec<Thread> {
     let mut result: Vec<Thread> = Vec::new();
     let mut worklist: Vec<Thread> = threads.to_vec();
 
@@ -143,6 +143,34 @@ fn follow_nonconsuming(threads: &[Thread], nfa: &Nfa, pos: usize) -> Vec<Thread>
                         worklist.push(new_t);
                     }
                 }
+                Edge::Lookahead {
+                    sub_start,
+                    sub_match,
+                    negated,
+                    target,
+                } => {
+                    has_nonconsuming = true;
+                    let sub_result =
+                        lookahead_matches(nfa, *sub_start, *sub_match, chars, pos, &t.saves);
+                    let ok = if *negated {
+                        sub_result.is_none()
+                    } else {
+                        sub_result.is_some()
+                    };
+                    if ok {
+                        // Positive lookahead captures merge into the thread's
+                        // saves (spec: captures inside (?=...) participate).
+                        // lookahead_matches starts from the outer saves, so the
+                        // returned saves already contain both.
+                        let new_t = Thread {
+                            pc: *target,
+                            saves: sub_result.unwrap_or_else(|| t.saves.clone()),
+                        };
+                        if !in_sets(&new_t, &worklist, &result) {
+                            worklist.push(new_t);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -156,6 +184,71 @@ fn follow_nonconsuming(threads: &[Thread], nfa: &Nfa, pos: usize) -> Vec<Thread>
 fn in_sets(t: &Thread, worklist: &[Thread], result: &[Thread]) -> bool {
     worklist.iter().any(|w| w.pc == t.pc && w.saves == t.saves)
         || result.iter().any(|r| r.pc == t.pc && r.saves == t.saves)
+}
+
+/// Run the lookahead sub-automaton rooted at `sub_start` from position `pos`
+/// over `chars`. Returns the saves of the longest sub-match (initialized from
+/// the outer thread's saves so outer captures survive and inner captures
+/// overwrite their own slots), or None if the sub-pattern does not match.
+fn lookahead_matches(
+    nfa: &Nfa,
+    sub_start: usize,
+    sub_match: usize,
+    chars: &[char],
+    pos: usize,
+    init_saves: &[Option<usize>],
+) -> Option<Vec<Option<usize>>> {
+    let mut best: Option<(usize, Vec<Option<usize>>)> = None;
+    let mut clist: Vec<Thread> = Vec::new();
+    add_thread(&mut clist, nfa, sub_start, init_saves);
+    let mut p = pos;
+    loop {
+        let expanded = follow_nonconsuming(&clist, nfa, p, chars);
+        for t in &expanded {
+            if t.pc == sub_match {
+                let should_replace = match &best {
+                    None => true,
+                    Some((prev_end, _)) => p > *prev_end,
+                };
+                if should_replace {
+                    best = Some((p, t.saves.clone()));
+                }
+            }
+        }
+        if p >= chars.len() || clist.is_empty() {
+            break;
+        }
+        let c = chars[p];
+        let mut nlist: Vec<Thread> = Vec::new();
+        for t in &expanded {
+            for edge in &nfa.states[t.pc].edges {
+                match edge {
+                    Edge::Char(ch, target) => {
+                        if *ch == c {
+                            add_thread(&mut nlist, nfa, *target, &t.saves);
+                        }
+                    }
+                    Edge::CharClass {
+                        negated,
+                        ranges,
+                        target,
+                    } => {
+                        let in_class = ranges.iter().any(|(lo, hi)| c >= *lo && c <= *hi);
+                        if *negated != in_class {
+                            add_thread(&mut nlist, nfa, *target, &t.saves);
+                        }
+                    }
+                    Edge::Dot(target) => {
+                        add_thread(&mut nlist, nfa, *target, &t.saves);
+                    }
+                    Edge::Epsilon(_) | Edge::Save(_, _) | Edge::Lookahead { .. } => {}
+                }
+            }
+        }
+        clist = nlist;
+        p += 1;
+    }
+    best.map(|(_, saves)| saves)
 }
 
 fn in_result(t: &Thread, result: &[Thread]) -> bool {
@@ -312,5 +405,47 @@ mod tests {
         assert_eq!(m.groups[0], (4, 15));
         assert_eq!(m.groups[1], (4, 9));
         assert_eq!(m.groups[2], (10, 15));
+    }
+
+    #[test]
+    fn test_positive_lookahead() {
+        let expr = parse_regex(r"a(?=b)").unwrap();
+        let nfa = crate::nfa::compile(&expr);
+        let vm = PikeVm::new();
+        let m = vm.exec(&nfa, "abac", 0).unwrap();
+        assert_eq!(m.groups[0], (0, 1));
+        assert_eq!(vm.exec(&nfa, "ac", 0), None);
+    }
+
+    #[test]
+    fn test_lookahead_with_capture() {
+        // Backrefs (\1) are no-ops in this engine, so use a plain `a` after
+        // the lookahead; the lookahead's capture must still be recorded.
+        let expr = parse_regex(r"(?=(a+))a").unwrap();
+        let nfa = crate::nfa::compile(&expr);
+        assert_eq!(nfa.num_captures, 1);
+        let vm = PikeVm::new();
+        let m = vm.exec(&nfa, "baaaab", 0).unwrap();
+        assert_eq!(m.groups[0], (1, 2));
+        assert_eq!(m.groups[1], (1, 5));
+    }
+
+    #[test]
+    fn test_negative_lookahead() {
+        let expr = parse_regex(r"a(?!b)").unwrap();
+        let nfa = crate::nfa::compile(&expr);
+        let vm = PikeVm::new();
+        let m = vm.exec(&nfa, "ac", 0).unwrap();
+        assert_eq!(m.groups[0], (0, 1));
+        assert_eq!(vm.exec(&nfa, "ab", 0), None);
+    }
+
+    #[test]
+    fn test_lookahead_after_match_pos() {
+        let expr = parse_regex(r"(?=\d{3}$)\d{3}").unwrap();
+        let nfa = crate::nfa::compile(&expr);
+        let vm = PikeVm::new();
+        let m = vm.exec(&nfa, "abc123", 0).unwrap();
+        assert_eq!(m.groups[0], (3, 6));
     }
 }

@@ -1100,6 +1100,7 @@ dependencies = [
  "rune_core",
  "rune_embed",
  "rune_interpreter",
+ "rune_module",
  "rune_parser",
  "serde_json",
  "tracing",
@@ -1138,6 +1139,7 @@ dependencies = [
  "rune_core",
  "rune_interpreter",
  "rune_jit_baseline",
+ "rune_module",
  "rune_parser",
  "tracing",
 ]

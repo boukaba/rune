@@ -84,6 +84,11 @@ fn main() {
             }
             source => {
                 // Read source code from file, or use inline if it's a valid expression.
+                let entry_path = if std::path::Path::new(source).exists() {
+                    Some(source.to_string())
+                } else {
+                    None
+                };
                 let source = if let Ok(code) = std::fs::read_to_string(source) {
                     code
                 } else {
@@ -135,7 +140,36 @@ fn main() {
                         }
                     }
                 } else {
-                    ctx.eval(&source)
+                    // ESM: `.mjs` files (and any file whose script-mode parse
+                    // reports Import/Export tokens) evaluate as modules with a
+                    // filesystem resolver. Script mode otherwise.
+                    let is_module_file = entry_path
+                        .as_ref()
+                        .map(|p| p.ends_with(".mjs"))
+                        .unwrap_or(false);
+                    let script_result = if is_module_file {
+                        None
+                    } else {
+                        Some(ctx.eval(&source))
+                    };
+                    let module_err = script_result.as_ref().and_then(|r| r.as_ref().err());
+                    let looks_like_module = module_err
+                        .map(|e| e.contains("Import") || e.contains("Export"))
+                        .unwrap_or(false);
+                    if is_module_file || looks_like_module {
+                        let entry = entry_path.unwrap_or_else(|| "<inline>".to_string());
+                        let mut resolver = |spec: &str, referrer: &str| -> Result<String, String> {
+                            let referrer = if referrer == "<entry>" {
+                                &entry
+                            } else {
+                                referrer
+                            };
+                            rune_module::fs_resolve(spec, referrer)
+                        };
+                        ctx.eval_module(&source, &mut resolver)
+                    } else {
+                        script_result.unwrap()
+                    }
                 };
 
                 match result {

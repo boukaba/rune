@@ -214,6 +214,44 @@ pub enum Stmt {
     Function(Box<FnNode>, Span),
     Empty(Span),
     Class(Box<ClassNode>, Span),
+    Import(Box<ImportDecl>, Span),
+    Export(Box<ExportDecl>, Span),
+}
+
+/// `import` declaration (module goal only).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImportDecl {
+    /// `import d from "m"` — the default local binding ("" if absent).
+    pub default_local: Box<str>,
+    /// `import * as ns from "m"` — the namespace local binding ("" if absent).
+    pub namespace_local: Box<str>,
+    /// Named imports: (exported name, local binding).
+    pub named: Vec<(Box<str>, Box<str>)>,
+    pub specifier: Box<str>,
+    pub span: Span,
+}
+
+/// `export` declaration (module goal only).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExportDecl {
+    pub kind: ExportKind,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ExportKind {
+    /// `export { a, b as c }` — (exported name, local name).
+    Named(Vec<(Box<str>, Box<str>)>),
+    /// `export { a } from "m"` — (exported name, imported name), specifier.
+    NamedFrom(Vec<(Box<str>, Box<str>)>, Box<str>),
+    /// `export * from "m"`.
+    Star(Box<str>),
+    /// `export * as ns from "m"`.
+    StarAs(Box<str>, Box<str>),
+    /// `export default <stmt|expr>`.
+    Default(Box<Stmt>),
+    /// `export <var|function|class decl>`.
+    Decl(Box<Stmt>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -267,6 +305,9 @@ pub struct Decl {
 pub struct Program {
     pub body: Vec<Stmt>,
     pub span: Span,
+    /// True when parsed with the Module goal (import/export allowed, strict
+    /// mode implied).
+    pub is_module: bool,
 }
 
 impl fmt::Display for BinaryOp {

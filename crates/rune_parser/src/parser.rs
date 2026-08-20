@@ -5,6 +5,8 @@ pub struct Parser {
     lexer: Lexer,
     tok: Token,
     pub errors: Vec<String>,
+    /// Module goal: import/export allowed at top level, strict mode implied.
+    module: bool,
 }
 
 impl Parser {
@@ -15,6 +17,20 @@ impl Parser {
             lexer,
             tok,
             errors: Vec::new(),
+            module: false,
+        }
+    }
+
+    /// Parser for the Module goal (ECMAScript §16.1): `import`/`export`
+    /// statements are permitted at top level.
+    pub fn new_module(source: &str) -> Self {
+        let mut lexer = Lexer::new(source);
+        let tok = lexer.next_token();
+        Parser {
+            lexer,
+            tok,
+            errors: Vec::new(),
+            module: true,
         }
     }
 
@@ -67,14 +83,28 @@ impl Parser {
     pub fn parse(&mut self) -> Program {
         let start = self.tok.span.start;
         let mut body = Vec::new();
+        let mut export_names: Vec<String> = Vec::new();
         while self.tok.kind != TokenKind::Eof {
             let stmt = self.parse_statement();
+            if let Stmt::Export(exp, _) = &stmt {
+                for name in export_decl_names(exp) {
+                    if export_names.contains(&name) {
+                        self.errors.push(format!(
+                            "Duplicate export of {name:?} at {}",
+                            self.tok.span.start
+                        ));
+                    } else {
+                        export_names.push(name);
+                    }
+                }
+            }
             body.push(stmt);
         }
         let end = self.tok.span.end;
         Program {
             body,
             span: Span { start, end },
+            is_module: self.module,
         }
     }
 
@@ -104,6 +134,8 @@ impl Parser {
                 self.advance();
                 Stmt::Empty(s)
             }
+            TokenKind::Import if self.module => self.parse_import(),
+            TokenKind::Export if self.module => self.parse_export(),
             _ => {
                 let expr = self.parse_expr_comma();
                 self.consume_semicolon();
@@ -126,6 +158,284 @@ impl Parser {
             Span {
                 start: start.start,
                 end: end.end,
+            },
+        )
+    }
+
+    fn tok_is_identifier(&self, name: &str) -> bool {
+        self.tok.kind == TokenKind::Identifier && self.tok.value == name
+    }
+
+    /// `import` declaration (§16.2.1-16.2.3). Forms:
+    /// `import "mod";` | `import d from "mod";` | `import * as ns from "mod";`
+    /// | `import {a, b as c} from "mod";` and combinations of default + ns/named.
+    fn parse_import(&mut self) -> Stmt {
+        let start = self.span();
+        self.expect(TokenKind::Import);
+        let mut default_local = Box::from("");
+        let mut namespace_local = Box::from("");
+        let mut named: Vec<(Box<str>, Box<str>)> = Vec::new();
+        let mut specifier: Box<str> = Box::from("");
+        if self.tok.kind == TokenKind::String {
+            specifier = self.tok.value.clone().into_boxed_str();
+            self.advance();
+        } else {
+            // ImportClause
+            match self.tok.kind {
+                TokenKind::Identifier => {
+                    default_local = self.tok.value.clone().into_boxed_str();
+                    self.advance();
+                    if self.tok.kind == TokenKind::Comma {
+                        self.advance();
+                        if self.tok.kind == TokenKind::Star {
+                            let (ns, rest) = self.parse_namespace_import();
+                            namespace_local = ns;
+                            if !rest.is_empty() {
+                                named = rest;
+                            }
+                        } else {
+                            named = self.parse_named_imports();
+                        }
+                    }
+                }
+                TokenKind::Star => {
+                    let (ns, rest) = self.parse_namespace_import();
+                    namespace_local = ns;
+                    if !rest.is_empty() {
+                        named = rest;
+                    }
+                }
+                TokenKind::LBrace => {
+                    named = self.parse_named_imports();
+                }
+                _ => {
+                    self.error("Expected import clause".into());
+                }
+            }
+            if self.tok_is_identifier("from") {
+                self.advance();
+                if self.tok.kind == TokenKind::String {
+                    specifier = self.tok.value.clone().into_boxed_str();
+                    self.advance();
+                } else {
+                    self.error("Expected module specifier string".into());
+                }
+            } else {
+                self.error("Expected 'from'".into());
+            }
+        }
+        self.consume_semicolon();
+        Stmt::Import(
+            Box::new(ImportDecl {
+                default_local,
+                namespace_local,
+                named,
+                specifier,
+                span: Span {
+                    start: start.start,
+                    end: self.span().end,
+                },
+            }),
+            Span {
+                start: start.start,
+                end: self.span().end,
+            },
+        )
+    }
+
+    /// `* as ns` → (ns name, []). If followed by `, {named}` returns the rest.
+    #[allow(clippy::type_complexity)]
+    fn parse_namespace_import(&mut self) -> (Box<str>, Vec<(Box<str>, Box<str>)>) {
+        self.expect(TokenKind::Star);
+        if self.tok_is_identifier("as") {
+            self.advance();
+            if self.tok.kind == TokenKind::Identifier {
+                let ns = self.tok.value.clone().into_boxed_str();
+                self.advance();
+                if self.tok.kind == TokenKind::Comma {
+                    self.advance();
+                    return (ns, self.parse_named_imports());
+                }
+                return (ns, Vec::new());
+            }
+            self.error("Expected binding identifier".into());
+            (Box::from(""), Vec::new())
+        } else {
+            self.error("Expected 'as'".into());
+            (Box::from(""), Vec::new())
+        }
+    }
+
+    /// `{ a, b as c }` → list of (exported name, local name).
+    fn parse_named_imports(&mut self) -> Vec<(Box<str>, Box<str>)> {
+        let mut out = Vec::new();
+        self.expect(TokenKind::LBrace);
+        while self.tok.kind != TokenKind::RBrace && self.tok.kind != TokenKind::Eof {
+            if self.tok.kind == TokenKind::Comma {
+                self.advance();
+                continue;
+            }
+            let exported = match self.tok.kind {
+                TokenKind::Identifier | TokenKind::String => {
+                    self.tok.value.clone().into_boxed_str()
+                }
+                _ => {
+                    self.error("Expected import specifier name".into());
+                    Box::from("")
+                }
+            };
+            self.advance();
+            let local = if self.tok_is_identifier("as") {
+                self.advance();
+                if self.tok.kind == TokenKind::Identifier {
+                    let l = self.tok.value.clone().into_boxed_str();
+                    self.advance();
+                    l
+                } else {
+                    self.error("Expected binding identifier".into());
+                    Box::from("")
+                }
+            } else {
+                exported.clone()
+            };
+            out.push((exported, local));
+        }
+        self.expect(TokenKind::RBrace);
+        out
+    }
+
+    /// `export` declaration (§16.2.4-16.2.10).
+    fn parse_export(&mut self) -> Stmt {
+        let start = self.span();
+        self.expect(TokenKind::Export);
+        let kind = match self.tok.kind {
+            TokenKind::LBrace => {
+                let mut names = Vec::new();
+                self.advance();
+                while self.tok.kind != TokenKind::RBrace && self.tok.kind != TokenKind::Eof {
+                    if self.tok.kind == TokenKind::Comma {
+                        self.advance();
+                        continue;
+                    }
+                    let exported = match self.tok.kind {
+                        TokenKind::Identifier | TokenKind::String => {
+                            self.tok.value.clone().into_boxed_str()
+                        }
+                        _ => {
+                            self.error("Expected export name".into());
+                            Box::from("")
+                        }
+                    };
+                    self.advance();
+                    let local = if self.tok_is_identifier("as") {
+                        self.advance();
+                        let l = match self.tok.kind {
+                            TokenKind::Identifier | TokenKind::String => {
+                                self.tok.value.clone().into_boxed_str()
+                            }
+                            _ => {
+                                self.error("Expected export name".into());
+                                Box::from("")
+                            }
+                        };
+                        self.advance();
+                        l
+                    } else {
+                        exported.clone()
+                    };
+                    names.push((exported, local));
+                }
+                self.expect(TokenKind::RBrace);
+                if self.tok_is_identifier("from") {
+                    self.advance();
+                    if self.tok.kind == TokenKind::String {
+                        let spec = self.tok.value.clone().into_boxed_str();
+                        self.advance();
+                        ExportKind::NamedFrom(names, spec)
+                    } else {
+                        self.error("Expected module specifier string".into());
+                        ExportKind::Named(Vec::new())
+                    }
+                } else {
+                    ExportKind::Named(names)
+                }
+            }
+            TokenKind::Star => {
+                self.advance();
+                if self.tok_is_identifier("as") {
+                    self.advance();
+                    if self.tok.kind == TokenKind::Identifier {
+                        let ns = self.tok.value.clone().into_boxed_str();
+                        self.advance();
+                        if self.tok_is_identifier("from") {
+                            self.advance();
+                            if self.tok.kind == TokenKind::String {
+                                let spec = self.tok.value.clone().into_boxed_str();
+                                self.advance();
+                                ExportKind::StarAs(ns, spec)
+                            } else {
+                                self.error("Expected module specifier string".into());
+                                ExportKind::Star(Box::from(""))
+                            }
+                        } else {
+                            self.error("Expected 'from'".into());
+                            ExportKind::Star(Box::from(""))
+                        }
+                    } else {
+                        self.error("Expected binding identifier".into());
+                        ExportKind::Star(Box::from(""))
+                    }
+                } else if self.tok_is_identifier("from") {
+                    self.advance();
+                    if self.tok.kind == TokenKind::String {
+                        let spec = self.tok.value.clone().into_boxed_str();
+                        self.advance();
+                        ExportKind::Star(spec)
+                    } else {
+                        self.error("Expected module specifier string".into());
+                        ExportKind::Star(Box::from(""))
+                    }
+                } else {
+                    self.error("Expected 'from'".into());
+                    ExportKind::Star(Box::from(""))
+                }
+            }
+            TokenKind::Default => {
+                self.advance();
+                let inner = match self.tok.kind {
+                    TokenKind::Function | TokenKind::Async | TokenKind::Class => {
+                        self.parse_statement()
+                    }
+                    _ => {
+                        let expr = self.parse_expr_comma();
+                        self.consume_semicolon();
+                        Stmt::Expr(expr, self.span())
+                    }
+                };
+                ExportKind::Default(Box::new(inner))
+            }
+            TokenKind::Var
+            | TokenKind::Let
+            | TokenKind::Const
+            | TokenKind::Function
+            | TokenKind::Async
+            | TokenKind::Class => ExportKind::Decl(Box::new(self.parse_statement())),
+            _ => {
+                self.error("Expected export clause".into());
+                ExportKind::Named(Vec::new())
+            }
+        };
+        Stmt::Export(
+            Box::new(ExportDecl {
+                kind,
+                span: Span {
+                    start: start.start,
+                    end: self.span().end,
+                },
+            }),
+            Span {
+                start: start.start,
+                end: self.span().end,
             },
         )
     }
@@ -2869,6 +3179,35 @@ impl Parser {
 impl std::fmt::Debug for Parser {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Parser").finish()
+    }
+}
+
+fn export_decl_names(exp: &ExportDecl) -> Vec<String> {
+    match &exp.kind {
+        ExportKind::Named(names) | ExportKind::NamedFrom(names, _) => {
+            // Tuple is (local_binding, exported_name) — the duplicate check
+            // is over exported names.
+            names.iter().map(|(_, n)| n.to_string()).collect()
+        }
+        ExportKind::Star(spec) => vec![format!("*{}", spec)],
+        ExportKind::StarAs(ns, _) => vec![ns.to_string()],
+        ExportKind::Default(_) => vec!["default".to_string()],
+        ExportKind::Decl(stmt) => match stmt.as_ref() {
+            Stmt::Function(f, _) => vec![
+                f.name
+                    .as_ref()
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "default".to_string()),
+            ],
+            Stmt::Class(c, _) => vec![
+                c.name
+                    .as_ref()
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "default".to_string()),
+            ],
+            Stmt::Var(_, decls, _) => decls.iter().map(|d| d.name.to_string()).collect(),
+            _ => Vec::new(),
+        },
     }
 }
 

@@ -63,7 +63,7 @@ breadth to run real workloads correctly, with the cold-start wedge intact.
       replaceAll function replacement, lookahead + `{n,m}` quantifiers
 - [x] **Classes completion** — static private fields, private methods,
       `this.prop++`, `let`+`new` scoping bug, nested accessors
-- [ ] **ESM** — `import`/`export`, module namespace, hoisting, circular deps
+- [x] **ESM** — `import`/`export`, module namespace, hoisting, circular deps
 - [ ] **Conformance pass** — lift test262 suites into the 80%+ band; fix silent
       miscompiles; register full Error type set (TypeError as a real global)
 - [ ] **JIT gap** — float-promoted accumulators stay native, optional chaining +
@@ -87,6 +87,17 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 
 ### Goal
 Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8× vs Node) with enough stdlib to run real workloads. v0.4 = stdlib breadth (14 builtins). v0.5 = Promise + async patterns.
+
+### Done — v0.8 (ESM modules)
+- **`Context::eval_module(entry, resolver)`** — `rune_module::compile_module` compiles the whole import graph into one `BytecodeProgram` (entry first, then deps, each specifier evaluated once); programs pinned `Pin<Box<BytecodeProgram>>` in the Context (module-register must NOT memcpy — `programs.remove(0)` + `Box::pin` kept a stale address → "8 bytes not covered" crash); `Context::module_export(spec, name)` + `Context::call_value(func, args)` added; `Vm::resolve_export_value`/`run_loop`/`Exit` pub
+- **Import/export forms** — default (`export default` expr + decl via `Stmt::Export(Decl(inner))` recursion), named + renames, namespace (`import * as ns`), re-exports (`export {x} from` / `export * from` / `export * as ns from`); indirect re-export tuple `(exported_name, spec, imported_name)`; duplicate-export early error on tuple element 2; `module.local_exports = export_map` transfer was missing (exported `let`/`const`/`class` bindings were dropped)
+- **Live bindings** — exports resolve through the module record each read (importer sees mutations of exported `let`/`var`); plain `x = 1` assignment checks `module_imports` → `StoreModuleImport` (was a silent write into shared globals); `StoreGlobal` on an imported binding throws catchable "TypeError: Assignment to constant variable."
+- **TDZ** — `ModuleTdz` opcode seeds hoisted let/const/functions with `Value::empty_sentinel()`; section-3 initializers store; reads of the sentinel throw catchable "ReferenceError: Cannot access '<name>' before initialization" (spec §16.2.1.7 — a circular-dep test passing with silent `undefined` was the wrong-reason pass)
+- **Circular deps** — re-export specifiers appended as dependency-only ModuleImport entries (evaluated before dependents); **root-cause fix**: `LoadModuleImport`/`ExportSync` resolved against `module_stack.last()` (the ENTRY) instead of the function's owning module → infinite self-call recursion; `current_module_mi(fi)` = frame's module_mi, fallback entry
+- **Module functions** — `Func::module_mi` packed into the existing flags word (bit 0 = is_arrow, high bits = module_mi+1; GC hardcodes 80-byte Func — a real field at offset 72 with `alloc(88)` corrupted the heap, 36 test failures); `MakeFunction` sets it from `module_stack.last()`
+- **JIT gates** — module top-level Call sites + module-created functions skip IC fast path + tier-up (module `for` loop calling `fib` panicked "bailout stack-depth mismatch (tier-up)": the IC recorded the module-context stack depth, then fib's recursion bailed at a different depth); LoadGlobal in JIT code reads shared globals, not the module env
+- **CLI** — `rune_cli` → `rune_module` dep; `.mjs` + script-parse-error fallback route through `eval_module` with an `fs_resolve` filesystem resolver (**fs_resolve returns file CONTENTS, not a path** — double-read made every dep fail); verified `main.mjs` (import ok) / `check.mjs` (imports resolve) / `fib` loop (interpreter-correct) / auto-fallback `.js` with `import`
+- 18 new integration tests (`test_esm_*`) — **613/613 integration tests, 3 ignored (workspace 774)**; clippy/fmt/no-default-features clean
 
 ### Done — v0.7 (Classes completion)
 - **Static private fields** — `static #x = expr` / `static #x;` (§15.7.14 step 32: DefineField on the constructor AFTER PrivateMethodOrAccessorAdd — 7.7 before 7.8 in emit_class): the initializer runs as a synthesized zero-arg function called with `this` = the constructor (`FnNode` wrapper via `compile_function`, `LoadLocal ctor; Dup; MakeFunction; Call 0; DefinePrivateField slot` — the `Dup` is REQUIRED: `Call` pops the receiver, so without it the field store targeted a phantom stack slot); reads/writes via `this.#x` in static methods (LoadPrivateProperty/StorePrivateProperty with the constructor as receiver, `Func::extra_props` storage)
@@ -171,6 +182,7 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - **Bug fixes found wiring Map/Set** — (a) LoadProperty tag list lacked TAG_MAP/TAG_SET (`m.set` → undefined); (b) Call opcode "skip result push when pending callback" list lacked `pending_collection_foreach`/`pending_collection_ctor` → callback junk leaked onto the caller stack (forEach chain calls corrupted); (c) `map_constructor`/`set_constructor` truncated the stack unconditionally, stealing the `[this]` root under a pending @@iterator frame (Return underflow) — Pending outcomes no longer truncate, continuations truncate to `root_base`; (d) `process_collection_result` required Map-style Object entries for Sets (`new Set([10,20,30])` threw); (e) plain-call TypeError used `throw_type_error` (uncatchable Exit::Throw) instead of `handle_throw`.
 
 ### Known Gaps
+- ESM: no dynamic `import()` / `import.meta`; resolver is a callback (no node_modules algorithm); module programs + module-created functions never JIT (interpreter-only — documented); no error objects across module boundaries (string-encoded messages)
 - TypedArray ctor doesn't accept general JS iterables (sync-only); no BigInt64Array/BigUint64Array/Float16Array (no BigInt); non-numeric own props on typed arrays unsupported; no `Object.prototype.toString` builtin (`@@toStringTag` unobservable); `instanceof Object` broken for builtin ctor wrappers (pre-existing)
 - `test_gc_during_jit_call_preserves_locals` — pre-existing flaky GC/IC test (broken since getter/setter syntax), not a regression from CI fix. Marked `#[ignore]`.
 - `bench_real_cache` — slow benchmark (500 iterations), not a correctness test, skipped on CI
@@ -188,5 +200,5 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - Trace perf: bailout-per-iteration paths (e.g. float-promoted acc in a loop) still bail each iteration — re-record or stay native with float ops (correctness fine)
 
 ### Next Steps — v1.0 (ordered by leverage)
-1. Trace perf: float-promoted accumulator loops bail per-iteration — re-record or emit float ops natively.
-2. ESM — `import`/`export`, module namespace, hoisting, circular deps (next open checklist item after Classes completion)
+1. Conformance pass — lift test262 suites into the 80%+ band (next open checklist item); register full Error type set.
+2. Trace perf: float-promoted accumulator loops bail per-iteration — re-record or emit float ops natively.

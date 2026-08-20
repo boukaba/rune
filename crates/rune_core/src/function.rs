@@ -72,6 +72,27 @@ impl Func {
         }
     }
 
+    /// The owning module record index, or -1 if this function was created
+    /// outside module evaluation. Stored in the high 31 bits of the flags
+    /// word (bit 0 = is_arrow). Set by MakeFunction while a module program
+    /// runs; used by LoadGlobal/StoreGlobal to resolve module bindings.
+    pub unsafe fn module_mi(ptr: *mut Func) -> i32 {
+        unsafe {
+            let ptr_bytes = ptr as *mut u8;
+            let flags = *(ptr_bytes.add(size_of::<GcHeader>() + 28) as *const u32);
+            ((flags >> 1) as i32) - 1
+        }
+    }
+
+    pub unsafe fn set_module_mi(ptr: *mut Func, mi: i32) {
+        unsafe {
+            let ptr_bytes = ptr as *mut u8;
+            let flags_ptr = ptr_bytes.add(size_of::<GcHeader>() + 28) as *mut u32;
+            let flags = *flags_ptr;
+            *flags_ptr = (flags & 1) | (((mi + 1) as u32) << 1);
+        }
+    }
+
     /// Get the captured environment pointer (may be null).
     pub unsafe fn env_ptr(ptr: *mut Func) -> *mut u8 {
         unsafe {

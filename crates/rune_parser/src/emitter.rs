@@ -1,5 +1,6 @@
 use crate::ast::*;
-use rune_bytecode::opcode::{BytecodeProgram, Instruction, Opcode};
+use rune_bytecode::opcode::{BytecodeProgram, Instruction, ModuleImport, ModuleInfo, Opcode};
+use std::collections::HashMap;
 
 /// A lexical scope binding with its allocated absolute slot index.
 struct LexicalBinding {
@@ -54,6 +55,16 @@ pub struct Emitter {
     switch_break_jumps: Vec<usize>,
     /// Private field names declared by the enclosing class (for #name → slot index resolution).
     private_field_names: Vec<String>,
+    /// Module goal mode: top-level bindings are module bindings (StoreGlobal
+    /// routes into the module environment at runtime).
+    module_mode: bool,
+    /// Imported binding names → index into the module's `ModuleInfo.imports`.
+    /// Reads/writes of these emit LoadModuleImport/StoreModuleImport (live bindings).
+    module_imports: HashMap<Box<str>, usize>,
+    /// Module bindings that are exported under a DIFFERENT name (e.g.
+    /// `export {a as b}`): stored name → export names. After each module-level
+    /// store of the stored name, an ExportSync for each export name is emitted.
+    module_export_renames: HashMap<String, Vec<String>>,
 }
 
 impl Default for Emitter {
@@ -85,6 +96,9 @@ impl Emitter {
             switch_exit_stack: Vec::new(),
             switch_break_jumps: Vec::new(),
             private_field_names: Vec::new(),
+            module_mode: false,
+            module_imports: HashMap::new(),
+            module_export_renames: HashMap::new(),
         }
     }
 
@@ -149,11 +163,360 @@ impl Emitter {
         }
     }
 
+    /// Emit a module-goal program (ESM §16).
+    ///
+    /// Instruction layout (matches spec instantiation/evaluation ordering):
+    ///   section 1: hoisted bindings — function/class/var/let/const declarations
+    ///              create module bindings in source order (functions fully
+    ///              created; everything else bound to `undefined`)
+    ///   section 2: `ImportModule` per import (evaluates dependencies in DFS
+    ///              order; cycle-safe via per-module status)
+    ///   section 3: remaining statements in source order (var initializers,
+    ///              let/const initializers, class evaluation, everything else)
+    /// Top-level module bindings route through StoreGlobal, which the VM
+    /// redirects into the module environment while it runs. The program ends
+    /// with `undefined` (module evaluation has no completion value).
+    pub fn emit_module_program(mut self, prog: &Program) -> BytecodeProgram {
+        self.module_mode = true;
+        let mut module = ModuleInfo {
+            imports: Vec::new(),
+            local_exports: Vec::new(),
+            indirect_exports: Vec::new(),
+            star_exports: Vec::new(),
+            namespace_exports: Vec::new(),
+        };
+        // export_name → local/stored name
+        let mut export_map: Vec<(String, String)> = Vec::new();
+        // stored name → export names needing ExportSync after each store
+        let mut renames: HashMap<String, Vec<String>> = HashMap::new();
+        let mut hoisted_functions: Vec<FnNode> = Vec::new();
+        let mut hoisted_vars: Vec<(String, VarKind)> = Vec::new();
+        let mut hoisted_classes: Vec<ClassNode> = Vec::new();
+        let mut imports: Vec<&ImportDecl> = Vec::new();
+
+        // ---- classify top-level statements ----
+        for stmt in &prog.body {
+            match stmt {
+                Stmt::Import(imp, _) => {
+                    imports.push(imp);
+                }
+                Stmt::Export(exp, _) => match &exp.kind {
+                    ExportKind::Named(names) => {
+                        for (exported, local) in names {
+                            // The parser tuple is (local_binding, exported_name)
+                            // — `export { local as exported }` yields
+                            // ("local", "exported").
+                            export_map.push((local.to_string(), exported.to_string()));
+                            if exported != local {
+                                renames
+                                    .entry(exported.to_string())
+                                    .or_default()
+                                    .push(local.to_string());
+                            }
+                        }
+                    }
+                    ExportKind::NamedFrom(names, spec) => {
+                        for (exported, local) in names {
+                            // The parser tuple is (exported, local); for a
+                            // re-export the "local" is the exported name and
+                            // the "exported" is the imported name.
+                            module.indirect_exports.push((
+                                local.to_string(),
+                                spec.to_string(),
+                                exported.to_string(),
+                            ));
+                        }
+                    }
+                    ExportKind::Star(spec) => {
+                        module.star_exports.push(spec.to_string());
+                    }
+                    ExportKind::StarAs(ns, spec) => {
+                        module
+                            .namespace_exports
+                            .push((ns.to_string(), spec.to_string()));
+                    }
+                    ExportKind::Default(inner) => match inner.as_ref() {
+                        Stmt::Function(f, _) => {
+                            let mut f = (**f).clone();
+                            if f.name.is_none() {
+                                f.name = Some(Box::from("*default*"));
+                            }
+                            let name = f.name.clone().unwrap().to_string();
+                            hoisted_functions.push(f);
+                            export_map.push(("default".to_string(), name));
+                        }
+                        Stmt::Class(c, _) => {
+                            let mut c = (**c).clone();
+                            if c.name.is_none() {
+                                c.name = Some(Box::from("*default*"));
+                            }
+                            let name = c.name.clone().unwrap().to_string();
+                            hoisted_classes.push(c);
+                            export_map.push(("default".to_string(), name));
+                        }
+                        // `export default <expr>` — evaluated in section 3 and
+                        // synced into the env under the internal "*default*" key.
+                        _ => {
+                            export_map.push(("default".to_string(), "*default*".to_string()));
+                        }
+                    },
+                    ExportKind::Decl(stmt) => match stmt.as_ref() {
+                        Stmt::Function(f, _) => {
+                            let name = f.name.clone().unwrap().to_string();
+                            hoisted_functions.push((**f).clone());
+                            export_map.push((name.clone(), name));
+                        }
+                        Stmt::Class(c, _) => {
+                            let name = c.name.clone().unwrap().to_string();
+                            hoisted_classes.push((**c).clone());
+                            export_map.push((name.clone(), name));
+                        }
+                        Stmt::Var(kind, decls, _) => {
+                            for d in decls {
+                                if d.pattern.is_none() {
+                                    hoisted_vars.push((d.name.to_string(), kind.clone()));
+                                    export_map.push((d.name.to_string(), d.name.to_string()));
+                                }
+                            }
+                        }
+                        _ => {}
+                    },
+                },
+                _ => {}
+            }
+        }
+        // De-duplicate export_map (e.g. `export var x` + `export {x as y}`)
+        let mut seen: Vec<String> = Vec::new();
+        export_map.retain(|(exported, _)| {
+            if seen.contains(exported) {
+                false
+            } else {
+                seen.push(exported.clone());
+                true
+            }
+        });
+        module.local_exports = export_map;
+
+        // ---- build import metadata + register namespace-import locals ----
+        for imp in imports.iter() {
+            if !imp.default_local.is_empty() {
+                module.imports.push(ModuleImport {
+                    specifier: imp.specifier.to_string(),
+                    imported: "default".to_string(),
+                    local: imp.default_local.to_string(),
+                });
+            }
+            for (exported, local) in &imp.named {
+                module.imports.push(ModuleImport {
+                    specifier: imp.specifier.to_string(),
+                    imported: exported.to_string(),
+                    local: local.to_string(),
+                });
+            }
+            if !imp.namespace_local.is_empty() {
+                module.imports.push(ModuleImport {
+                    specifier: imp.specifier.to_string(),
+                    imported: "*ns*".to_string(),
+                    local: imp.namespace_local.to_string(),
+                });
+            }
+            if imp.default_local.is_empty()
+                && imp.namespace_local.is_empty()
+                && imp.named.is_empty()
+            {
+                module.imports.push(ModuleImport {
+                    specifier: imp.specifier.to_string(),
+                    imported: String::new(),
+                    local: String::new(),
+                });
+            }
+        }
+        // Re-exported modules are dependencies too (§16.2.1.5 ModuleRequests
+        // includes `export ... from` and `export * from` specifiers) — append
+        // dependency-only entries so section 2 evaluates them in DFS order.
+        let mut dep_specs: Vec<String> = Vec::new();
+        for (_, spec, _) in &module.indirect_exports {
+            dep_specs.push(spec.clone());
+        }
+        for spec in &module.star_exports {
+            dep_specs.push(spec.clone());
+        }
+        for (_, spec) in &module.namespace_exports {
+            dep_specs.push(spec.clone());
+        }
+        for spec in dep_specs {
+            if !module.imports.iter().any(|i| i.specifier == spec) {
+                module.imports.push(ModuleImport {
+                    specifier: spec,
+                    imported: String::new(),
+                    local: String::new(),
+                });
+            }
+        }
+        // local binding name → import entry index
+        let mut import_locals: HashMap<Box<str>, usize> = HashMap::new();
+        for (idx, entry) in module.imports.iter().enumerate() {
+            if entry.imported == "*ns*" {
+                if !self.locals.contains(&entry.local) {
+                    self.locals.push(entry.local.clone());
+                }
+            } else {
+                import_locals.insert(entry.local.clone().into_boxed_str(), idx);
+            }
+        }
+        self.module_imports = import_locals;
+        // renames for ExportSync hooks
+        for (stored, export_names) in &renames {
+            if !stored.is_empty() {
+                self.module_export_renames
+                    .entry(stored.clone())
+                    .or_default()
+                    .extend(export_names.iter().cloned());
+            }
+        }
+
+        // ---- section 1: hoisted bindings in source order ----
+        for f in &hoisted_functions {
+            let idx = self.compile_function(f);
+            self.emit(Opcode::MakeFunction, vec![idx as i64]);
+            if let Some(name) = &f.name {
+                let name_idx = self.intern_string(name) as i64;
+                self.emit(Opcode::StoreGlobal, vec![name_idx]);
+                self.emit(Opcode::Pop, vec![]);
+                self.emit_module_rename_sync(name);
+            }
+        }
+        for c in &hoisted_classes {
+            if let Some(name) = &c.name {
+                let name_idx = self.intern_string(name) as i64;
+                self.emit(Opcode::LoadUndefined, vec![]);
+                self.emit(Opcode::StoreGlobal, vec![name_idx]);
+                self.emit(Opcode::Pop, vec![]);
+            }
+        }
+        for (name, kind) in &hoisted_vars {
+            let name_idx = self.intern_string(name) as i64;
+            // `var` bindings initialize to undefined at instantiation; `let`/
+            // `const` start in the TDZ (ModuleTdz marks the env binding with a
+            // sentinel — reads throw ReferenceError until section 3 runs the
+            // initializer).
+            if *kind == VarKind::Var {
+                self.emit(Opcode::LoadUndefined, vec![]);
+                self.emit(Opcode::StoreGlobal, vec![name_idx]);
+                self.emit(Opcode::Pop, vec![]);
+            } else {
+                self.emit(Opcode::ModuleTdz, vec![name_idx]);
+            }
+        }
+
+        // ---- section 2: import evaluation (DFS, cycle-safe) ----
+        for (idx, _) in module.imports.iter().enumerate() {
+            self.emit(Opcode::ImportModule, vec![idx as i64]);
+            self.emit(Opcode::Pop, vec![]);
+        }
+
+        // ---- section 3: remaining statements ----
+        for stmt in &prog.body {
+            self.emit_module_statement(stmt);
+        }
+
+        self.emit(Opcode::LoadUndefined, vec![]);
+        self.emit(Opcode::Return, vec![]);
+
+        let mut program = self.into_bytecode();
+        program.is_module = true;
+        program.module = Some(module);
+        program
+    }
+
+    /// Emit ExportSync hooks after a module-level store of a renamed export.
+    fn emit_module_rename_sync(&mut self, stored: &str) {
+        if !self.module_mode {
+            return;
+        }
+        let export_names: Vec<String> = self
+            .module_export_renames
+            .get(stored)
+            .cloned()
+            .unwrap_or_default();
+        for name in &export_names {
+            let idx = self.intern_string(name) as i64;
+            self.emit(Opcode::ExportSync, vec![idx]);
+        }
+    }
+
+    /// Emit a top-level module statement (section 3). Declarations that were
+    /// already handled by section 1 (functions, var/let/const declaration
+    /// parts) emit only their initializer/assignment parts here.
+    fn emit_module_statement(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::Import(_, _) | Stmt::Function(_, _) => {}
+            Stmt::Export(exp, _) => match &exp.kind {
+                // `export default <expr>` — evaluate and sync into the env.
+                ExportKind::Default(inner) => {
+                    if let Stmt::Expr(e, _) = inner.as_ref() {
+                        self.emit_expression(e);
+                        let idx = self.intern_string("*default*") as i64;
+                        self.emit(Opcode::ExportSync, vec![idx]);
+                        self.emit(Opcode::Pop, vec![]);
+                    }
+                    // Default function/class decls were fully created in
+                    // section 1 — nothing to do here.
+                }
+                // `export <var|let|const|class decl>` — emit the declaration
+                // body (initializers/class evaluation); section 1 declared
+                // the bindings. StoreGlobal keeps the env in sync.
+                ExportKind::Decl(inner) => self.emit_module_statement(inner),
+                _ => {}
+            },
+            Stmt::Class(class, _) => {
+                self.emit_class(class, false);
+                if let Some(name) = &class.name {
+                    if let Some(idx) = self.local_index(name) {
+                        self.emit(Opcode::LoadLocal, vec![idx as i64]);
+                        let name_idx = self.intern_string(name) as i64;
+                        self.emit(Opcode::ExportSync, vec![name_idx]);
+                        self.emit(Opcode::Pop, vec![]);
+                    }
+                }
+            }
+            Stmt::Var(kind, decls, _) => {
+                for decl in decls {
+                    if let Some(pattern) = &decl.pattern {
+                        if let Some(init) = &decl.init {
+                            self.emit_expression(init);
+                            self.emit_destructuring(pattern, &DestructureStore::Decl(VarKind::Var));
+                        }
+                    } else if let Some(init) = &decl.init {
+                        self.emit_expression(init);
+                        let name_idx = self.intern_string(&decl.name) as i64;
+                        self.emit(Opcode::StoreGlobal, vec![name_idx]);
+                        self.emit(Opcode::Pop, vec![]);
+                        self.emit_module_rename_sync(&decl.name);
+                    } else if *kind != VarKind::Var {
+                        // Bare `let x;` — the declaration statement itself
+                        // initializes the binding to undefined (module-level
+                        // var already initialized in section 1).
+                        let name_idx = self.intern_string(&decl.name) as i64;
+                        self.emit(Opcode::LoadUndefined, vec![]);
+                        self.emit(Opcode::StoreGlobal, vec![name_idx]);
+                        self.emit(Opcode::Pop, vec![]);
+                        self.emit_module_rename_sync(&decl.name);
+                    }
+                }
+            }
+            _ => self.emit_statement(stmt),
+        }
+    }
+
     /// Compile a function node into a nested BytecodeProgram and return its index.
     fn compile_function(&mut self, func: &FnNode) -> usize {
         let mut sub = Emitter::new();
         sub.env_scope_stack = self.env_scope_stack.clone();
         sub.private_field_names = self.private_field_names.clone();
+        sub.module_mode = self.module_mode;
+        sub.module_imports = self.module_imports.clone();
+        sub.module_export_renames = self.module_export_renames.clone();
         sub.is_generator = func.is_generator;
         sub.is_async = func.is_async;
         let named_offset = if let Some(name) = &func.name {
@@ -271,6 +634,9 @@ impl Emitter {
         let mut sub = Emitter::new();
         sub.env_scope_stack = self.env_scope_stack.clone();
         sub.private_field_names = self.private_field_names.clone();
+        sub.module_mode = self.module_mode;
+        sub.module_imports = self.module_imports.clone();
+        sub.module_export_renames = self.module_export_renames.clone();
         sub.is_generator = func.is_generator;
         sub.is_async = func.is_async;
         if let Some(name) = &func.name {
@@ -1072,6 +1438,7 @@ impl Emitter {
                     let name_idx = self.intern_string(name) as i64;
                     self.emit(Opcode::StoreGlobal, vec![name_idx]);
                     self.emit(Opcode::Pop, vec![]);
+                    self.emit_module_rename_sync(name);
                 }
             }
             DestructureStore::Decl(VarKind::Let | VarKind::Const) => {
@@ -1091,6 +1458,10 @@ impl Emitter {
         match stmt {
             Stmt::Expr(expr, _) => {
                 self.emit_expression(expr);
+                self.emit(Opcode::Pop, vec![]);
+            }
+            Stmt::Import(_, _) | Stmt::Export(_, _) => {
+                self.emit(Opcode::LoadUndefined, vec![]);
                 self.emit(Opcode::Pop, vec![]);
             }
             Stmt::Block(stmts, _) => {
@@ -1375,6 +1746,7 @@ impl Emitter {
                                     let name_idx = self.intern_string(&decl.name) as i64;
                                     self.emit(Opcode::StoreGlobal, vec![name_idx]);
                                     self.emit(Opcode::Pop, vec![]);
+                                    self.emit_module_rename_sync(&decl.name);
                                 }
                             }
                         }
@@ -1796,6 +2168,13 @@ impl Emitter {
                     self.emit(Opcode::LoadLexical, vec![slot as i64]);
                 } else if let Some(idx) = self.local_index(name) {
                     self.emit(Opcode::LoadLocal, vec![idx as i64]);
+                } else if self.module_mode {
+                    if let Some(import_idx) = self.module_imports.get(name) {
+                        self.emit(Opcode::LoadModuleImport, vec![*import_idx as i64]);
+                    } else {
+                        let name_idx = self.intern_string(name) as i64;
+                        self.emit(Opcode::LoadGlobal, vec![name_idx]);
+                    }
                 } else {
                     let name_idx = self.intern_string(name) as i64;
                     self.emit(Opcode::LoadGlobal, vec![name_idx]);
@@ -2419,6 +2798,15 @@ impl Emitter {
                         self.emit(Opcode::StoreLexical, vec![slot as i64]);
                     } else if let Some(idx) = self.local_index(name) {
                         self.emit(Opcode::StoreLocal, vec![idx as i64]);
+                    } else if self.module_mode {
+                        if let Some(import_idx) = self.module_imports.get(name) {
+                            // Assigning to an imported binding is a TypeError
+                            // at runtime (§9.2.2.3).
+                            self.emit(Opcode::StoreModuleImport, vec![*import_idx as i64]);
+                        } else {
+                            let name_idx = self.intern_string(name) as i64;
+                            self.emit(Opcode::StoreGlobal, vec![name_idx]);
+                        }
                     } else {
                         let name_idx = self.intern_string(name) as i64;
                         self.emit(Opcode::StoreGlobal, vec![name_idx]);
@@ -2829,6 +3217,13 @@ impl Emitter {
             self.emit(Opcode::LoadLexical, vec![slot as i64]);
         } else if let Some(idx) = self.local_index(name) {
             self.emit(Opcode::LoadLocal, vec![idx as i64]);
+        } else if self.module_mode {
+            if let Some(import_idx) = self.module_imports.get(name) {
+                self.emit(Opcode::LoadModuleImport, vec![*import_idx as i64]);
+            } else {
+                let name_idx = self.intern_string(name) as i64;
+                self.emit(Opcode::LoadGlobal, vec![name_idx]);
+            }
         } else {
             let name_idx = self.intern_string(name) as i64;
             self.emit(Opcode::LoadGlobal, vec![name_idx]);
@@ -2849,6 +3244,17 @@ impl Emitter {
         } else if let Some(idx) = self.local_index(name) {
             self.emit(Opcode::StoreLocal, vec![idx as i64]);
             self.emit(Opcode::Pop, vec![]);
+        } else if self.module_mode {
+            if let Some(import_idx) = self.module_imports.get(name) {
+                // Assignment to an imported binding is a TypeError at runtime.
+                self.emit(Opcode::StoreModuleImport, vec![*import_idx as i64]);
+                self.emit(Opcode::Pop, vec![]);
+            } else {
+                let name_idx = self.intern_string(name) as i64;
+                self.emit(Opcode::StoreGlobal, vec![name_idx]);
+                self.emit(Opcode::Pop, vec![]);
+                self.emit_module_rename_sync(name);
+            }
         } else {
             let name_idx = self.intern_string(name) as i64;
             self.emit(Opcode::StoreGlobal, vec![name_idx]);
@@ -2865,6 +3271,14 @@ impl Emitter {
             self.emit(Opcode::StoreLexical, vec![slot as i64]);
         } else if let Some(idx) = self.local_index(name) {
             self.emit(Opcode::StoreLocal, vec![idx as i64]);
+        } else if self.module_mode {
+            if let Some(import_idx) = self.module_imports.get(name) {
+                self.emit(Opcode::StoreModuleImport, vec![*import_idx as i64]);
+            } else {
+                let name_idx = self.intern_string(name) as i64;
+                self.emit(Opcode::StoreGlobal, vec![name_idx]);
+                self.emit_module_rename_sync(name);
+            }
         } else {
             let name_idx = self.intern_string(name) as i64;
             self.emit(Opcode::StoreGlobal, vec![name_idx]);
@@ -3053,6 +3467,7 @@ impl Emitter {
 fn contains_inner_function_stmt(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Expr(expr, _) => contains_inner_function_expr(expr),
+        Stmt::Import(_, _) | Stmt::Export(_, _) => false,
         Stmt::Return(Some(expr), _) => contains_inner_function_expr(expr),
         Stmt::Throw(expr, _) => contains_inner_function_expr(expr),
         Stmt::Block(stmts, _) => stmts.iter().any(contains_inner_function_stmt),
@@ -3220,6 +3635,7 @@ fn collect_var_names_stmt(stmt: &Stmt, names: &mut Vec<String>) {
 fn uses_arguments_stmt(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Expr(expr, _) => uses_arguments_expr(expr),
+        Stmt::Import(_, _) | Stmt::Export(_, _) => false,
         Stmt::Block(stmts, _) => stmts.iter().any(uses_arguments_stmt),
         Stmt::If(cond, then, else_, _) => {
             uses_arguments_expr(cond)

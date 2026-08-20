@@ -9601,3 +9601,429 @@ fn test_string_case_conversion() {
         "\u{C9}SS"
     );
 }
+
+// ---------- ESM modules (§16) ----------
+
+/// Evaluate an entry module whose dependency sources are looked up in `deps`
+/// (specifier → source). Returns the module-export read helper.
+fn eval_module_with(ctx: &mut Context, entry: &str, deps: &[(&str, &str)]) -> Result<(), String> {
+    let mut resolver = |spec: &str, _referrer: &str| -> Result<String, String> {
+        deps.iter()
+            .find(|(s, _)| *s == spec)
+            .map(|(_, src)| src.to_string())
+            .ok_or_else(|| format!("no source for {spec}"))
+    };
+    ctx.eval_module(entry, &mut resolver).map(|_| ())
+}
+
+/// Read an exported binding (may be a module function for call_value).
+fn module_export_smi(ctx: &mut Context, spec: &str, name: &str) -> Option<i32> {
+    ctx.module_export(spec, name).and_then(|v| v.as_smi())
+}
+
+fn module_export_str(ctx: &mut Context, spec: &str, name: &str) -> String {
+    let v = ctx.module_export(spec, name).unwrap();
+    unsafe {
+        rune_core::string::HeapString::to_string(
+            v.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+        )
+    }
+}
+
+#[test]
+fn test_esm_basic_import_export() {
+    let mut ctx = Context::new_small();
+    eval_module_with(
+        &mut ctx,
+        r#"
+            import { add, mul as times } from "./math.js";
+            export function run() { return add(2, 3) + times(4, 5); }
+        "#,
+        &[(
+            "./math.js",
+            r#"
+                export function add(a, b) { return a + b; }
+                export function mul(a, b) { return a * b; }
+            "#,
+        )],
+    )
+    .unwrap();
+    let run = ctx.module_export("<entry>", "run").unwrap();
+    let v = ctx.call_value(run, &[]).unwrap();
+    assert_eq!(v.as_smi(), Some(25));
+}
+
+#[test]
+fn test_esm_default_export_import() {
+    let mut ctx = Context::new_small();
+    eval_module_with(
+        &mut ctx,
+        r#"
+            import def from "./math.js";
+            export function run() { return def(3, 4); }
+        "#,
+        &[(
+            "./math.js",
+            r#"export default function(a, b) { return a * b; }"#,
+        )],
+    )
+    .unwrap();
+    let run = ctx.module_export("<entry>", "run").unwrap();
+    let v = ctx.call_value(run, &[]).unwrap();
+    assert_eq!(v.as_smi(), Some(12));
+}
+
+#[test]
+fn test_esm_default_export_expression() {
+    let mut ctx = Context::new_small();
+    eval_module_with(
+        &mut ctx,
+        r#"
+            import def from "./v.js";
+            export const got = def;
+        "#,
+        &[("./v.js", r#"export default 42;"#)],
+    )
+    .unwrap();
+    assert_eq!(module_export_smi(&mut ctx, "<entry>", "got"), Some(42));
+}
+
+#[test]
+fn test_esm_namespace_import() {
+    let mut ctx = Context::new_small();
+    eval_module_with(
+        &mut ctx,
+        r#"
+            import * as ns from "./math.js";
+            export const total = ns.add(10, 20) + ns.mul(3, 4);
+        "#,
+        &[(
+            "./math.js",
+            r#"
+                export function add(a, b) { return a + b; }
+                export function mul(a, b) { return a * b; }
+            "#,
+        )],
+    )
+    .unwrap();
+    assert_eq!(module_export_smi(&mut ctx, "<entry>", "total"), Some(42));
+}
+
+#[test]
+fn test_esm_reexport() {
+    let mut ctx = Context::new_small();
+    eval_module_with(
+        &mut ctx,
+        r#"
+            import { plus } from "./agg.js";
+            export const t = plus(10, 1);
+        "#,
+        &[
+            (
+                "./math.js",
+                r#"export function add(a, b) { return a + b; }"#,
+            ),
+            ("./agg.js", r#"export { add as plus } from "./math.js";"#),
+        ],
+    )
+    .unwrap();
+    assert_eq!(module_export_smi(&mut ctx, "<entry>", "t"), Some(11));
+}
+
+#[test]
+fn test_esm_export_star() {
+    let mut ctx = Context::new_small();
+    eval_module_with(
+        &mut ctx,
+        r#"
+            import { add } from "./agg.js";
+            export const t = add(1, 2);
+        "#,
+        &[
+            (
+                "./math.js",
+                r#"export function add(a, b) { return a + b; }"#,
+            ),
+            ("./agg.js", r#"export * from "./math.js";"#),
+        ],
+    )
+    .unwrap();
+    assert_eq!(module_export_smi(&mut ctx, "<entry>", "t"), Some(3));
+}
+
+#[test]
+fn test_esm_export_star_as() {
+    let mut ctx = Context::new_small();
+    eval_module_with(
+        &mut ctx,
+        r#"
+            import { ns } from "./agg.js";
+            export const t = ns.add(5, 6);
+        "#,
+        &[
+            (
+                "./math.js",
+                r#"export function add(a, b) { return a + b; }"#,
+            ),
+            ("./agg.js", r#"export * as ns from "./math.js";"#),
+        ],
+    )
+    .unwrap();
+    assert_eq!(module_export_smi(&mut ctx, "<entry>", "t"), Some(11));
+}
+
+#[test]
+fn test_esm_export_rename_local() {
+    let mut ctx = Context::new_small();
+    eval_module_with(
+        &mut ctx,
+        r#"
+            export function double(x) { return x * 2; }
+            export { double as twice };
+            export const val = 5;
+            export { val as v2 };
+        "#,
+        &[],
+    )
+    .unwrap();
+    assert_eq!(module_export_smi(&mut ctx, "<entry>", "val"), Some(5));
+    assert_eq!(module_export_smi(&mut ctx, "<entry>", "v2"), Some(5));
+    let twice = ctx.module_export("<entry>", "twice").unwrap();
+    assert_eq!(
+        ctx.call_value(twice, &[rune_core::value::Value::smi(21)])
+            .unwrap()
+            .as_smi(),
+        Some(42)
+    );
+}
+
+#[test]
+fn test_esm_circular_dependencies() {
+    let mut ctx = Context::new_small();
+    eval_module_with(
+        &mut ctx,
+        r#"
+            import { bfn } from "./b.js";
+            import { afn } from "./a.js";
+            export function run() { return afn() + "|" + bfn(); }
+        "#,
+        &[
+            (
+                "./a.js",
+                r#"
+                    import { bfn } from "./b.js";
+                    export const a_val = "a";
+                    export function afn() { return "A" + bfn(); }
+                "#,
+            ),
+            (
+                "./b.js",
+                r#"
+                    import { a_val } from "./a.js";
+                    export function bfn() { return "B" + a_val; }
+                "#,
+            ),
+        ],
+    )
+    .unwrap();
+    let run = ctx.module_export("<entry>", "run").unwrap();
+    let v = ctx.call_value(run, &[]).unwrap();
+    assert_eq!(
+        unsafe {
+            rune_core::string::HeapString::to_string(
+                v.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+            )
+        },
+        "ABa|Ba"
+    );
+}
+
+#[test]
+fn test_esm_self_cycle() {
+    let mut ctx = Context::new_small();
+    eval_module_with(
+        &mut ctx,
+        r#"
+            import { self_f, self_val } from "./self.js";
+            export function run() { return self_f() + self_val; }
+        "#,
+        &[(
+            "./self.js",
+            r#"
+                export const self_val = 1;
+                export function self_f() { return self_val * 2; }
+            "#,
+        )],
+    )
+    .unwrap();
+    let run = ctx.module_export("<entry>", "run").unwrap();
+    assert_eq!(ctx.call_value(run, &[]).unwrap().as_smi(), Some(3));
+}
+
+#[test]
+fn test_esm_module_let_and_const() {
+    let mut ctx = Context::new_small();
+    eval_module_with(
+        &mut ctx,
+        r#"
+            import { counter, bump } from "./state.js";
+            export function run() { const before = counter; bump(); return before + counter; }
+        "#,
+        &[(
+            "./state.js",
+            r#"
+                export let counter = 1;
+                export function bump() { counter = counter + 1; }
+            "#,
+        )],
+    )
+    .unwrap();
+    let run = ctx.module_export("<entry>", "run").unwrap();
+    assert_eq!(ctx.call_value(run, &[]).unwrap().as_smi(), Some(3));
+}
+
+#[test]
+fn test_esm_module_function_sees_own_bindings() {
+    let mut ctx = Context::new_small();
+    eval_module_with(
+        &mut ctx,
+        r#"
+            import { seed } from "./dep.js";
+            const local = seed * 10;
+            export function run() { return local + seed; }
+        "#,
+        &[("./dep.js", r#"export const seed = 4;"#)],
+    )
+    .unwrap();
+    let run = ctx.module_export("<entry>", "run").unwrap();
+    assert_eq!(ctx.call_value(run, &[]).unwrap().as_smi(), Some(44));
+}
+
+#[test]
+fn test_esm_tdz_cycle_read_throws() {
+    let mut ctx = Context::new_small();
+    // b reads a's `a_val` at top level while a is mid-evaluation (cycle):
+    // a_val is still in the TDZ → ReferenceError (§9.2.2.2 / TDZ semantics).
+    let r = eval_module_with(
+        &mut ctx,
+        r#"
+            import { afn } from "./a.js";
+            export function run() { return afn(); }
+        "#,
+        &[
+            (
+                "./a.js",
+                r#"
+                    import { bval } from "./b.js";
+                    export const a_val = bval + "a";
+                    export function afn() { return a_val; }
+                "#,
+            ),
+            (
+                "./b.js",
+                r#"
+                    import { a_val } from "./a.js";
+                    export const bval = a_val + "!";
+                "#,
+            ),
+        ],
+    );
+    match r {
+        Err(msg) => assert!(
+            msg.contains("ReferenceError"),
+            "expected ReferenceError, got: {msg}"
+        ),
+        Ok(()) => panic!("expected TDZ ReferenceError but module evaluated"),
+    }
+}
+
+#[test]
+fn test_esm_duplicate_export_early_error() {
+    let mut ctx = Context::new_small();
+    let r = eval_module_with(
+        &mut ctx,
+        r#"
+            export const x = 1;
+            export { x as y };
+            export { y };
+        "#,
+        &[],
+    );
+    match r {
+        Err(msg) => assert!(
+            msg.contains("Duplicate export"),
+            "expected duplicate-export error, got: {msg}"
+        ),
+        Ok(()) => panic!("expected duplicate export early error"),
+    }
+}
+
+#[test]
+fn test_esm_imported_binding_assignment_throws() {
+    let mut ctx = Context::new_small();
+    // Assignment to an imported binding is a TypeError (§9.2.2.3), both at
+    // module top level (StoreModuleImport) and inside module functions.
+    let r = eval_module_with(
+        &mut ctx,
+        r#"
+            import { x } from "./dep.js";
+            export function run() { x = 5; return x; }
+            x = 1;
+        "#,
+        &[("./dep.js", r#"export const x = 1;"#)],
+    );
+    match r {
+        Err(msg) => assert!(
+            msg.contains("Assignment to constant variable"),
+            "expected assignment TypeError, got: {msg}"
+        ),
+        Ok(()) => panic!("expected imported-assignment TypeError"),
+    }
+}
+
+#[test]
+fn test_esm_missing_import_value_is_undefined() {
+    let mut ctx = Context::new_small();
+    eval_module_with(
+        &mut ctx,
+        r#"
+            import { nope } from "./m.js";
+            export const v = nope;
+        "#,
+        &[("./m.js", r#"export const other = 1;"#)],
+    )
+    .unwrap();
+    assert!(ctx.module_export("<entry>", "v").unwrap().is_undefined());
+}
+
+#[test]
+fn test_esm_hoisted_function_available_in_cycle() {
+    let mut ctx = Context::new_small();
+    // Function declarations are initialized at instantiation (not TDZ), so a
+    // cycle can call a function before its module finishes evaluating.
+    eval_module_with(
+        &mut ctx,
+        r#"
+            import { late } from "./dep.js";
+            export const result = late();
+        "#,
+        &[("./dep.js", r#"export function late() { return 99; }"#)],
+    )
+    .unwrap();
+    assert_eq!(module_export_smi(&mut ctx, "<entry>", "result"), Some(99));
+}
+
+#[test]
+fn test_esm_bare_let_initializes_undefined() {
+    let mut ctx = Context::new_small();
+    eval_module_with(
+        &mut ctx,
+        r#"
+            export let x;
+            export const has = typeof x;
+        "#,
+        &[],
+    )
+    .unwrap();
+    assert_eq!(module_export_str(&mut ctx, "<entry>", "has"), "undefined");
+}

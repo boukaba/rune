@@ -134,6 +134,18 @@ pub enum Opcode {
     StorePrivateProperty, // pop value, obj, private slot index → PrivateSet
     DefinePrivateField, // pop value, obj, private slot index → PrivateFieldAdd
     MakeAccessorPair, // pop setter, pop getter → push AccessorPair (private accessors)
+    // ESM modules
+    ImportModule, // operands[0] = index into program.module.imports; evaluates the
+    // dependency (DFS, cycle-safe) and seeds namespace-import locals
+    LoadModuleImport, // operands[0] = index into program.module.imports; push the
+    // dependency's live binding value (undefined if absent)
+    StoreModuleImport, // pop value; write into the dependency's module environment;
+    // push value back
+    ExportSync, // pop value; store into the current module environment under the
+    // string-pool name operands[0]; push value back
+    ModuleTdz, // operands[0] = string-pool name; mark the module binding as
+               // uninitialized (TDZ sentinel) — reads throw ReferenceError until
+               // the initializer runs (§9.2.2.2 InitializeBinding / TDZ reads)
 }
 
 #[derive(Clone, Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -194,6 +206,41 @@ pub struct BytecodeProgram {
     pub captured_env_size: usize,
     /// Pre-compiled regex patterns and flags for LoadRegExp.
     pub regex_pool: Vec<(String, String)>,
+    /// True when this program is a module top-level program (not a function).
+    /// Module programs must not seed locals from / sync back to the globals map.
+    pub is_module: bool,
+    /// ESM linkage metadata; `None` for scripts and function programs.
+    pub module: Option<ModuleInfo>,
+}
+
+/// Linkage metadata for an ESM module program.
+///
+/// `local_exports` maps exported names to the module's OWN local binding name
+/// (e.g. `export const x = 1` → `("x", "x")`, `export {a as b}` → `("b", "a")`,
+/// `export default expr` → `("default", "*default*")`). `indirect_exports`
+/// maps exported names to `(specifier, imported_name)` for `export {a} from`,
+/// and `star_exports` holds the specifiers of `export * from` clauses.
+/// `namespace_exports` holds `(namespace_name, specifier)` for
+/// `export * as ns from`. A namespace object built from a module merges its
+/// local exports, indirect exports, and (minus conflicts) star exports.
+#[derive(Clone, Debug, PartialEq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct ModuleInfo {
+    pub imports: Vec<ModuleImport>,
+    pub local_exports: Vec<(String, String)>,
+    pub indirect_exports: Vec<(String, String, String)>,
+    pub star_exports: Vec<String>,
+    pub namespace_exports: Vec<(String, String)>,
+}
+
+/// One import entry. `imported` is the exported name ("*default*" for default
+/// imports, "*ns*" for namespace imports); `local` is the importing module's
+/// local binding name ("" for namespace imports, whose local is seeded by the
+/// VM at the ImportModule site).
+#[derive(Clone, Debug, PartialEq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct ModuleImport {
+    pub specifier: String,
+    pub imported: String,
+    pub local: String,
 }
 
 impl BytecodeProgram {
@@ -213,6 +260,8 @@ impl BytecodeProgram {
             local_names: vec![],
             captured_env_size: 0,
             regex_pool: vec![],
+            is_module: false,
+            module: None,
         }
     }
 

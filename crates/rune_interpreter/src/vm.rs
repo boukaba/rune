@@ -126,7 +126,8 @@ struct Frame {
 }
 
 /// Result of the bytecode loop: normal return, generator yield, or throw.
-enum Exit {
+#[derive(Debug)]
+pub enum Exit {
     Return(Value),
     Yield(Value),
     Throw(Value),
@@ -187,6 +188,21 @@ pub struct JitHelpers {
     /// Call helper for JIT-to-JIT function calls (Phase E).
     pub call_helper: usize,
     _reserved: [usize; 1],
+}
+
+/// An ESM module record (§16.2.1.2 ModuleRecord, minimal form).
+///
+/// `env` holds the module's bindings (exported names and, for `export {a as b}`
+/// renames, the export aliases). `namespace` caches the module namespace object
+/// created on first `import * as ns`/`export * as ns` use.
+#[derive(Clone, Debug)]
+pub struct ModuleRecord {
+    pub specifier: String,
+    pub program: *const BytecodeProgram,
+    /// 0 = unstarted, 1 = evaluating, 2 = evaluated (cycle guard).
+    pub status: u8,
+    pub env: HashMap<String, Value>,
+    pub namespace: Option<Value>,
 }
 
 /// A cached call-IC entry: stores the expected callee Func pointer and its
@@ -480,6 +496,20 @@ pub struct Vm {
     pub generators: Vec<Generator>,
     pub builtins: Vec<Builtin>,
     pub globals: HashMap<String, Value>,
+    /// ESM module records, indexed by `modules[specifier]`. Programs are kept
+    /// alive by the embedding Context; `program` points into its pinned heap.
+    pub module_records: Vec<ModuleRecord>,
+    /// Specifier → index into `module_records`.
+    pub modules: HashMap<String, usize>,
+    /// Module evaluation stack (record indices). The top entry is the module
+    /// currently executing; module opcodes resolve against it.
+    pub module_stack: Vec<usize>,
+    /// While a module is evaluating, LoadGlobal/StoreGlobal are redirected
+    /// into this module record's env instead of the shared globals map.
+    pub globals_override: Option<usize>,
+    /// Run-loop exit floor: a `Return` exits the loop when the frame count
+    /// drops to this value (used for nested module evaluation).
+    pub return_frame_floor: usize,
     /// Call-site ICs for monomorphic Call caching (Opcode::Call fast path).
     pub call_ics: Vec<CallIcEntry>,
     /// Reusable buffer for JIT locals Vec to avoid per-call heap allocation.
@@ -665,6 +695,11 @@ impl Vm {
             builtins: Vec::new(),
             globals: HashMap::new(),
             call_ics: Vec::new(),
+            module_records: Vec::new(),
+            modules: HashMap::new(),
+            module_stack: Vec::new(),
+            globals_override: None,
+            return_frame_floor: 0,
             jit_locals_buffer: Vec::new(),
             ics: Vec::new(),
             ic_entries: Vec::new(),
@@ -1966,6 +2001,15 @@ impl Vm {
         for val in self.globals.values() {
             gc.push_root(val as *const Value as *mut u64);
         }
+        // Root ESM module environments (exported values, namespaces)
+        for rec in &self.module_records {
+            for val in rec.env.values() {
+                gc.push_root(val as *const Value as *mut u64);
+            }
+            if let Some(ref ns) = rec.namespace {
+                gc.push_root(ns as *const Value as *mut u64);
+            }
+        }
         // Root builtin constructor/prototype wrappers (Object, Array, String, Math)
         for val in self.builtin_wrappers.values() {
             gc.push_root(val as *const Value as *mut u64);
@@ -2194,16 +2238,22 @@ impl Vm {
         self.assert_called = false;
 
         // Initialize top-level locals from persisted globals
-        let locals: Vec<Value> = program
-            .local_names
-            .iter()
-            .map(|name| {
-                self.globals
-                    .get(name)
-                    .copied()
-                    .unwrap_or(Value::undefined())
-            })
-            .collect();
+        // (module programs never go through execute(), but guard anyway —
+        // module locals are seeded by ImportModule, not globals)
+        let locals: Vec<Value> = if program.is_module {
+            vec![Value::undefined(); program.local_names.len()]
+        } else {
+            program
+                .local_names
+                .iter()
+                .map(|name| {
+                    self.globals
+                        .get(name)
+                        .copied()
+                        .unwrap_or(Value::undefined())
+                })
+                .collect()
+        };
 
         self.frames.push(Frame {
             locals,
@@ -2243,12 +2293,261 @@ impl Vm {
 
         // Sync locals back to globals for persistence
         for (i, name) in program.local_names.iter().enumerate() {
-            if i < self.last_locals.len() {
+            if i < self.last_locals.len() && !program.is_module {
                 self.globals.insert(name.clone(), self.last_locals[i]);
             }
         }
 
         result
+    }
+
+    /// Evaluate an ESM module (and, transitively, all of its dependencies) and
+    /// return the module's evaluation outcome. Modules must be pre-registered
+    /// via `modules`/`module_records` before calling (the embedding Context
+    /// compiles the whole import graph first).
+    pub fn evaluate_module(&mut self, gc: &mut SemiSpace, specifier: &str) -> Result<(), Value> {
+        let idx = match self.modules.get(specifier) {
+            Some(&i) => i,
+            None => return Ok(()),
+        };
+        self.eval_module_rec(gc, idx)
+    }
+
+    /// The module record in effect for the current frame: the owning module
+    /// of the executing function (functions created during module evaluation
+    /// resolve imported bindings against their own module), falling back to
+    /// the top of the module evaluation stack (top-level module code).
+    fn current_module_mi(&self, fi: usize) -> Option<usize> {
+        self.module_mi_of_frame(fi)
+            .or_else(|| self.module_stack.last().copied())
+    }
+
+    /// The module record index owning the executing function of frame `fi`
+    /// (None for script functions and the module top-level program itself,
+    /// which resolves via `globals_override` instead).
+    fn module_mi_of_frame(&self, fi: usize) -> Option<usize> {
+        let fp = self.frames.get(fi)?.func_ptr;
+        if fp.is_null() {
+            return None;
+        }
+        let mi = unsafe { Func::module_mi(fp as *mut Func) };
+        if mi < 0 { None } else { Some(mi as usize) }
+    }
+
+    /// Resolve a global-name read against the owning module of the executing
+    /// function: the module env (locals, namespace seeds, rename syncs) first,
+    /// then live imported bindings, then None (caller falls back to globals).
+    fn load_global_from_module_frame(
+        &mut self,
+        gc: &mut SemiSpace,
+        fi: usize,
+        name: &str,
+    ) -> Option<Value> {
+        let mi = self.module_mi_of_frame(fi)?;
+        let env = &self.module_records[mi].env;
+        if let Some(v) = env.get(name) {
+            if v == &Value::empty_sentinel() {
+                self.pending_exception = Some(self.tdz_error(gc, name));
+                return None;
+            }
+            return Some(*v);
+        }
+        let info = unsafe { (*self.module_records[mi].program).module.as_ref() }?;
+        for imp in &info.imports {
+            if imp.imported == "*ns*" || imp.local != name {
+                continue;
+            }
+            let dep = self.modules.get(&imp.specifier).copied()?;
+            return self.resolve_export_value(gc, dep, &imp.imported, &mut Vec::new());
+        }
+        None
+    }
+
+    /// Evaluate one module record (DFS, cycle-safe via `status`).
+    ///
+    /// Runs the module's program in its own frame. LoadGlobal/StoreGlobal are
+    /// redirected into the module env (`globals_override`) while it runs, and
+    /// nested module evaluation re-enters `run_loop` with a `return_frame_floor`
+    /// so the nested loop exits when the module frame returns.
+    fn eval_module_rec(&mut self, gc: &mut SemiSpace, idx: usize) -> Result<(), Value> {
+        let status = self.module_records[idx].status;
+        if status != 0 {
+            // Cycle or already evaluated — bindings are available (section 1
+            // of an evaluating module has already run for cycles).
+            return Ok(());
+        }
+        self.module_records[idx].status = 1;
+        let program = self.module_records[idx].program;
+        self.module_stack.push(idx);
+        let saved_override = self.globals_override.replace(idx);
+        let saved_floor = self.return_frame_floor;
+        self.return_frame_floor = self.frames.len();
+        let base = self.stack.len();
+        self.frames.push(Frame {
+            locals: vec![Value::undefined(); unsafe { (*program).local_names.len() }],
+            lexical_slots: Vec::new(),
+            lexical_tdz: Vec::new(),
+            lexical_const: Vec::new(),
+            scope_boundaries: Vec::new(),
+            passed_argc: 0,
+            pc: 0,
+            stack_base: base,
+            prog: program,
+            generator_id: None,
+            this: Value::undefined(),
+            is_constructor_call: false,
+            constructed_object: Value::undefined(),
+            env: std::ptr::null_mut(),
+            func_ptr: std::ptr::null_mut(),
+            private_name_ids: std::ptr::null_mut(),
+        });
+        let exit = self.run_loop(gc);
+        // The exception unwinder may have already popped frames above this
+        // module's frame (uncaught throw) — truncate defensively.
+        let saved_len = self.return_frame_floor;
+        self.return_frame_floor = saved_floor;
+        self.globals_override = saved_override;
+        self.module_stack.pop();
+        self.frames.truncate(saved_len);
+        self.stack.truncate(base);
+        self.module_records[idx].status = 2;
+        match exit {
+            Exit::Return(_) => Ok(()),
+            Exit::Throw(v) => Err(v),
+            Exit::Yield(_) => Ok(()),
+        }
+    }
+
+    /// A catchable ReferenceError for a TDZ module-binding read.
+    fn tdz_error(&self, gc: &mut SemiSpace, name: &str) -> Value {
+        let msg = format!("ReferenceError: Cannot access '{name}' before initialization");
+        Value::from_heap_ptr(heap_string(gc, &msg))
+    }
+
+    /// Resolve an exported name of a module to its current value, following
+    /// local bindings, re-exports (`export {a} from`), namespace exports, and
+    /// star exports. `visited` guards against star-export cycles.
+    pub fn resolve_export_value(
+        &mut self,
+        gc: &mut SemiSpace,
+        mi: usize,
+        export_name: &str,
+        visited: &mut Vec<usize>,
+    ) -> Option<Value> {
+        if visited.contains(&mi) {
+            return None;
+        }
+        visited.push(mi);
+        let info = unsafe {
+            let rec = &self.module_records[mi];
+            (*rec.program).module.as_ref()?
+        };
+        // 1. Local exports (export_name → local binding).
+        for (exported, local) in &info.local_exports {
+            if exported == export_name {
+                // The local may itself be an imported binding re-exported.
+                for imp in &info.imports {
+                    if imp.imported != "*ns*" && &imp.local == local {
+                        if let Some(&dep) = self.modules.get(&imp.specifier) {
+                            return self.resolve_export_value(gc, dep, &imp.imported, visited);
+                        }
+                        return None;
+                    }
+                }
+                return self.module_records[mi].env.get(local).copied();
+            }
+        }
+        // 2. Indirect exports.
+        for (exported, spec, imported) in &info.indirect_exports {
+            if exported == export_name {
+                if let Some(&dep) = self.modules.get(spec) {
+                    return self.resolve_export_value(gc, dep, imported, visited);
+                }
+                return None;
+            }
+        }
+        // 3. Namespace exports (`export * as ns from`).
+        for (ns, spec) in &info.namespace_exports {
+            if ns == export_name {
+                if let Some(&dep) = self.modules.get(spec) {
+                    return Some(self.make_module_namespace(gc, dep));
+                }
+                return None;
+            }
+        }
+        // 4. Star exports (first hit wins; conflicts resolve to the first).
+        for spec in &info.star_exports {
+            if let Some(&dep) = self.modules.get(spec) {
+                if let Some(v) = self.resolve_export_value(gc, dep, export_name, visited) {
+                    return Some(v);
+                }
+            }
+        }
+        None
+    }
+
+    /// Enumerate the export names of a module (local + indirect + namespace
+    /// + star-merged, minus star conflicts and `default`).
+    fn module_export_names(&self, mi: usize) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        let Some(info) = (unsafe { (*self.module_records[mi].program).module.as_ref() }) else {
+            return names;
+        };
+        for (exported, _) in &info.local_exports {
+            if !names.contains(exported) {
+                names.push(exported.clone());
+            }
+        }
+        for (exported, _, _) in &info.indirect_exports {
+            if !names.contains(exported) {
+                names.push(exported.clone());
+            }
+        }
+        for (ns, _) in &info.namespace_exports {
+            if !names.contains(ns) {
+                names.push(ns.clone());
+            }
+        }
+        for spec in &info.star_exports {
+            if let Some(&dep) = self.modules.get(spec) {
+                for name in self.module_export_names(dep) {
+                    if name == "default" || names.contains(&name) {
+                        continue;
+                    }
+                    names.push(name);
+                }
+            }
+        }
+        names
+    }
+
+    /// Create (or return the cached) module namespace object for a module —
+    /// a plain JSObject snapshot of its exports (§16.2.1.2 CreateNamespace).
+    /// Values are snapshotted at creation time (not live).
+    fn make_module_namespace(&mut self, gc: &mut SemiSpace, mi: usize) -> Value {
+        if let Some(ns) = self.module_records[mi].namespace {
+            return ns;
+        }
+        let names = self.module_export_names(mi);
+        let mut entries: Vec<(PropertyKey, usize)> = Vec::with_capacity(names.len());
+        let mut key_names: Vec<String> = Vec::with_capacity(names.len());
+        let mut values: Vec<Value> = Vec::with_capacity(names.len());
+        for name in &names {
+            entries.push((PropertyKey::from_string(name), values.len()));
+            key_names.push(name.clone());
+            let v = self
+                .resolve_export_value(gc, mi, name, &mut Vec::new())
+                .unwrap_or(Value::undefined());
+            values.push(v);
+        }
+        let shape = Shape::intern(entries, key_names);
+        let obj = JSObject::allocate(gc, shape, &values);
+        if self.object_prototype.is_heap_object() {
+            unsafe { JSObject::set_prototype(obj, self.object_prototype.heap_ptr().unwrap()) };
+        }
+        let ns = Value::from_heap_ptr(obj as *mut u8);
+        self.module_records[mi].namespace = Some(ns);
+        ns
     }
 
     /// Resume a suspended generator with `arg` as the yield result value.
@@ -2318,7 +2617,7 @@ impl Vm {
         }
     }
 
-    fn run_loop(&mut self, gc: &mut SemiSpace) -> Exit {
+    pub fn run_loop(&mut self, gc: &mut SemiSpace) -> Exit {
         'run: loop {
             let fi = self.frames.len() - 1;
             let pc = self.frames[fi].pc;
@@ -4111,13 +4410,42 @@ impl Vm {
                 Opcode::LoadGlobal => {
                     let name_idx = instr.operands[0] as usize;
                     if let Some(name) = self.frames[fi].prog_str(name_idx) {
-                        let val = self
-                            .globals
-                            .get(&name)
-                            .copied()
-                            .or_else(|| self.builtin_wrappers.get(&name).copied())
-                            .or_else(|| self.get_builtin(&name))
-                            .unwrap_or(Value::undefined());
+                        let val = if let Some(mi) = self.globals_override {
+                            let env_v = self.module_records[mi].env.get(&name).copied();
+                            if let Some(v) = env_v {
+                                if v == Value::empty_sentinel() {
+                                    let exc = self.tdz_error(gc, &name);
+                                    if let Some(exit) = self.handle_throw(gc, exc) {
+                                        return exit;
+                                    }
+                                    self.push(Value::undefined());
+                                    self.frames[fi].pc = pc + 1;
+                                    continue;
+                                }
+                                v
+                            } else {
+                                self.globals
+                                    .get(&name)
+                                    .copied()
+                                    .or_else(|| self.builtin_wrappers.get(&name).copied())
+                                    .or_else(|| self.get_builtin(&name))
+                                    .unwrap_or(Value::undefined())
+                            }
+                        } else {
+                            self.load_global_from_module_frame(gc, fi, &name)
+                                .or_else(|| self.globals.get(&name).copied())
+                                .or_else(|| self.builtin_wrappers.get(&name).copied())
+                                .or_else(|| self.get_builtin(&name))
+                                .unwrap_or(Value::undefined())
+                        };
+                        if let Some(exc) = self.pending_exception.take() {
+                            if let Some(exit) = self.handle_throw(gc, exc) {
+                                return exit;
+                            }
+                            self.push(Value::undefined());
+                            self.frames[fi].pc = pc + 1;
+                            continue;
+                        }
                         self.push(val);
                     } else {
                         self.push(Value::undefined());
@@ -4128,9 +4456,151 @@ impl Vm {
                     let name_idx = instr.operands[0] as usize;
                     let value = self.pop();
                     if let Some(name) = self.frames[fi].prog_str(name_idx) {
-                        self.globals.insert(name, value);
+                        if let Some(mi) = self.globals_override {
+                            self.module_records[mi].env.insert(name, value);
+                        } else if let Some(mi) = self.module_mi_of_frame(fi) {
+                            let info =
+                                unsafe { (*self.module_records[mi].program).module.as_ref() };
+                            let imported = info
+                                .map(|i| {
+                                    i.imports
+                                        .iter()
+                                        .any(|imp| imp.imported != "*ns*" && imp.local == name)
+                                })
+                                .unwrap_or(false);
+                            if imported {
+                                // Assigning to an imported binding is a TypeError.
+                                let exc = Value::from_heap_ptr(heap_string(
+                                    gc,
+                                    "Assignment to constant variable.",
+                                ));
+                                if let Some(exit) = self.handle_throw(gc, exc) {
+                                    return exit;
+                                }
+                                self.push(value);
+                                self.frames[fi].pc = pc + 1;
+                                continue;
+                            }
+                            self.module_records[mi].env.insert(name, value);
+                        } else {
+                            self.globals.insert(name, value);
+                        }
                     }
                     self.push(value);
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::ImportModule => {
+                    let idx = instr.operands[0] as usize;
+                    let (specifier, imported, local) = if let Some(mi) = self.module_stack.last() {
+                        let program = self.module_records[*mi].program;
+                        if let Some(info) = unsafe { (*program).module.as_ref() } {
+                            if let Some(imp) = info.imports.get(idx) {
+                                (
+                                    imp.specifier.clone(),
+                                    imp.imported.clone(),
+                                    imp.local.clone(),
+                                )
+                            } else {
+                                (String::new(), String::new(), String::new())
+                            }
+                        } else {
+                            (String::new(), String::new(), String::new())
+                        }
+                    } else {
+                        (String::new(), String::new(), String::new())
+                    };
+                    let dep_idx = match self.modules.get(&specifier) {
+                        Some(&d) => d,
+                        None => {
+                            // Dependency not pre-loaded (loader gap) — treat as
+                            // empty module so imports resolve to undefined.
+                            self.push(Value::undefined());
+                            self.frames[fi].pc = pc + 1;
+                            continue;
+                        }
+                    };
+                    if let Err(v) = self.eval_module_rec(gc, dep_idx) {
+                        return Exit::Throw(v);
+                    }
+                    if imported == "*ns*" {
+                        let ns = self.make_module_namespace(gc, dep_idx);
+                        if let Some(mi) = self.module_stack.last() {
+                            let program = self.module_records[*mi].program;
+                            if let Some(slot) =
+                                unsafe { (*program).local_names.iter().position(|n| *n == local) }
+                            {
+                                if let Some(frame) = self.frames.last_mut() {
+                                    if slot < frame.locals.len() {
+                                        frame.locals[slot] = ns;
+                                    }
+                                }
+                            }
+                        }
+                        self.push(ns);
+                    } else {
+                        self.push(Value::undefined());
+                    }
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::LoadModuleImport => {
+                    let idx = instr.operands[0] as usize;
+                    if let Some(mi) = self.current_module_mi(fi) {
+                        let program = self.module_records[mi].program;
+                        if let Some(info) = unsafe { (*program).module.as_ref() } {
+                            if let Some(imp) = info.imports.get(idx) {
+                                let dep_idx = self.modules.get(&imp.specifier).copied();
+                                let v = match dep_idx {
+                                    Some(d) => self
+                                        .resolve_export_value(gc, d, &imp.imported, &mut Vec::new())
+                                        .unwrap_or(Value::undefined()),
+                                    None => Value::undefined(),
+                                };
+                                if v == Value::empty_sentinel() {
+                                    let exc = self.tdz_error(gc, &imp.imported);
+                                    if let Some(exit) = self.handle_throw(gc, exc) {
+                                        return exit;
+                                    }
+                                    self.push(Value::undefined());
+                                    self.frames[fi].pc = pc + 1;
+                                    continue;
+                                }
+                                self.push(v);
+                                self.frames[fi].pc = pc + 1;
+                                continue;
+                            }
+                        }
+                    }
+                    self.push(Value::undefined());
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::StoreModuleImport => {
+                    // §9.2.2.3 SetMutableBinding on an imported binding: TypeError.
+                    let value = self.pop();
+                    self.push(value);
+                    self.frames[fi].pc = pc + 1;
+                    return self.throw_type_error(gc, "Assignment to constant variable.");
+                }
+                Opcode::ExportSync => {
+                    let name_idx = instr.operands[0] as usize;
+                    let value = self.pop();
+                    if let Some(name) = self.frames[fi].prog_str(name_idx) {
+                        if let Some(mi) = self.current_module_mi(fi) {
+                            self.module_records[mi].env.insert(name, value);
+                        }
+                    }
+                    self.push(value);
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::ModuleTdz => {
+                    // Mark a module binding as uninitialized (§9.2.2.2).
+                    let name_idx = instr.operands[0] as usize;
+                    if let Some(name) = self.frames[fi].prog_str(name_idx) {
+                        if let Some(mi) = self.current_module_mi(fi) {
+                            self.module_records[mi]
+                                .env
+                                .insert(name, Value::empty_sentinel());
+                        }
+                    }
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::IncLocal => {
@@ -4329,6 +4799,14 @@ impl Vm {
                     if target < pc {
                         // Back-edge: loop iteration
                         let key: TraceKey = (prog_ptr as usize, target);
+                        // Module programs are not traced: their LoadGlobal/
+                        // StoreGlobal target the module env (globals_override),
+                        // not the shared globals map the JIT code reads.
+                        let module_prog = unsafe { (*prog_ptr).is_module };
+                        if module_prog {
+                            self.frames[fi].pc = target;
+                            continue;
+                        }
                         let entry = self.loop_counts.entry(key).or_insert(0);
                         *entry += 1;
                         // Start recording a trace at threshold, or when a
@@ -4740,6 +5218,12 @@ impl Vm {
                         }
                         if !ids.is_null() {
                             Func::set_private_name_ids(resolved_ptr, ids);
+                        }
+                        // Record the owning module (if created during module
+                        // evaluation) so LoadGlobal/StoreGlobal inside this
+                        // function resolve against the module env.
+                        if let Some(mi) = self.module_stack.last() {
+                            Func::set_module_mi(resolved_ptr, *mi as i32);
                         }
                         self.push(Value::from_heap_ptr(resolved_ptr as *mut u8));
                     }
@@ -5575,6 +6059,7 @@ impl Vm {
                             };
                             if func_idx < creator_prog.functions.len() {
                                 let func_prog = &creator_prog.functions[func_idx];
+
                                 if func_prog.is_async {
                                     let passed_argc = args.len();
                                     let mut g = Generator::new(
@@ -5658,8 +6143,22 @@ impl Vm {
                                         );
                                     }
                                 }
+                                // Module top-level call sites are cold-start
+                                // only — skip JIT for them (their LoadGlobal
+                                // reads the module env and bailout snapshots
+                                // assume the shared globals model).
+                                let caller_module = prog.is_module;
+                                // Functions created during module evaluation
+                                // never JIT: their LoadGlobal reads the module
+                                // env (JIT code reads shared globals) and their
+                                // bailout snapshots mix module-context depths.
+                                let caller_is_module_fn =
+                                    unsafe { Func::module_mi(ptr as *mut Func) >= 0 };
                                 // --- Call IC fast path ---
-                                if instr.call_ic_index >= 0 {
+                                if instr.call_ic_index >= 0
+                                    && !caller_module
+                                    && !caller_is_module_fn
+                                {
                                     let ic_idx = instr.call_ic_index as usize;
                                     if ic_idx < self.call_ics.len() {
                                         let ic = &self.call_ics[ic_idx];
@@ -5797,7 +6296,7 @@ impl Vm {
 
                                 // --- JIT tier-up (if enabled) ---
                                 #[cfg(all(feature = "jit", target_arch = "aarch64"))]
-                                {
+                                if !caller_module && !caller_is_module_fn {
                                     unsafe { Func::increment_call_count(ptr as *mut Func) };
                                     let count = unsafe { Func::call_count(ptr as *mut Func) };
                                     const JIT_THRESHOLD: u32 = 50;
@@ -6979,6 +7478,14 @@ impl Vm {
                         self.stack.clear();
                         return Exit::Return(result);
                     }
+                    if self.frames.len() <= self.return_frame_floor {
+                        // Nested module evaluation: the module frame returned.
+                        // The stack above the caller's base is the module's
+                        // temporaries — discard them.
+                        let caller_base = self.frames.last().unwrap().stack_base;
+                        self.stack.truncate(caller_base);
+                        return Exit::Return(result);
+                    }
                     let new_fi = self.frames.len() - 1;
                     self.stack.truncate(callee_base);
                     // §11.2.2 [[Construct]]: if constructor returns a heap object, use it;
@@ -7155,6 +7662,7 @@ impl Vm {
                             };
                             if func_idx < creator_prog.functions.len() {
                                 let func_prog = &creator_prog.functions[func_idx];
+
                                 // CallFromArray for async
                                 if func_prog.is_async {
                                     let passed_argc = args.len();

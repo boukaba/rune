@@ -113,6 +113,107 @@ impl Context {
         })
     }
 
+    /// Evaluate an ESM module graph.
+    ///
+    /// `entry` is the source of the entry module; `resolve(specifier, referrer)`
+    /// returns the source of every requested dependency. The whole static
+    /// import graph is compiled up-front (cycle-safe), then the entry module is
+    /// evaluated (DFS evaluation order, matching §16.2.1.5 Evaluate).
+    pub fn eval_module(
+        &mut self,
+        entry: &str,
+        resolve: &mut dyn FnMut(&str, &str) -> Result<String, String>,
+    ) -> Result<Value, String> {
+        self.vm.enable_inlining = self.enable_inlining;
+        self.vm.stencil_jit = self.stencil_jit;
+
+        // Compile the full import graph: (specifier, source) → pinned program.
+        struct Pending {
+            specifier: String,
+            source: String,
+        }
+        let mut pending = vec![Pending {
+            specifier: "<entry>".to_string(),
+            source: entry.to_string(),
+        }];
+        let mut seen: Vec<String> = Vec::new();
+        let mut programs: Vec<Pin<Box<BytecodeProgram>>> = Vec::new();
+        let mut records: Vec<(String, usize)> = Vec::new(); // (specifier, program idx)
+        while let Some(p) = pending.pop() {
+            if seen.contains(&p.specifier) {
+                continue;
+            }
+            seen.push(p.specifier.clone());
+            let program = rune_module::compile_module(&p.source)?;
+            let prog_idx = programs.len();
+            let pinned = Box::pin(program);
+            programs.push(pinned);
+            let prog_ref: &BytecodeProgram = &programs.last().unwrap().as_ref();
+            let mut ordered_deps: Vec<String> = Vec::new();
+            if let Some(info) = &prog_ref.module {
+                for imp in &info.imports {
+                    if !ordered_deps.contains(&imp.specifier) {
+                        ordered_deps.push(imp.specifier.clone());
+                    }
+                }
+                for (_, spec, _) in &info.indirect_exports {
+                    if !ordered_deps.contains(spec) {
+                        ordered_deps.push(spec.clone());
+                    }
+                }
+                for spec in &info.star_exports {
+                    if !ordered_deps.contains(spec) {
+                        ordered_deps.push(spec.clone());
+                    }
+                }
+                for (_, spec) in &info.namespace_exports {
+                    if !ordered_deps.contains(spec) {
+                        ordered_deps.push(spec.clone());
+                    }
+                }
+            }
+            // Resolve dependencies (unresolved → empty module).
+            for dep in ordered_deps {
+                if !seen.contains(&dep) {
+                    let src = resolve(&dep, &p.specifier).unwrap_or_else(|_| String::new());
+                    pending.push(Pending {
+                        specifier: dep.clone(),
+                        source: src,
+                    });
+                }
+            }
+            records.push((p.specifier.clone(), prog_idx));
+        }
+        // Pin all programs (stable addresses) and register module records.
+        let base = self.programs.len();
+        for (_specifier, _prog_idx) in &records {
+            self.programs.push(programs.remove(0));
+        }
+        self.vm.modules.clear();
+        self.vm.module_records.clear();
+        for (specifier, prog_idx) in &records {
+            let prog_ref: &BytecodeProgram = &self.programs[base + *prog_idx].as_ref();
+            let rec = rune_interpreter::vm::ModuleRecord {
+                specifier: specifier.clone(),
+                program: prog_ref as *const BytecodeProgram,
+                status: 0,
+                env: std::collections::HashMap::new(),
+                namespace: None,
+            };
+            let idx = self.vm.module_records.len();
+            self.vm.module_records.push(rec);
+            self.vm.modules.insert(specifier.clone(), idx);
+        }
+        self.vm
+            .evaluate_module(&mut self.gc, "<entry>")
+            .map_err(|v| {
+                let msg = rune_interpreter::builtins::read_error_message(v)
+                    .unwrap_or_else(|| format!("Uncaught: {v:?}"));
+                format!("Uncaught: {msg}")
+            })?;
+        Ok(Value::undefined())
+    }
+
     /// Evaluate raw bytecode instructions and return the top-of-stack Value.
     pub fn eval_bytecode(&mut self, bytecode: &BytecodeProgram) -> Result<Value, Value> {
         self.vm.execute(&mut self.gc, bytecode)
@@ -123,6 +224,29 @@ impl Context {
     /// Returns the next yielded (or returned) value.
     pub fn resume(&mut self, gen_id: usize, arg: Value) -> Result<Value, Value> {
         self.vm.resume_generator(&mut self.gc, gen_id, arg)
+    }
+
+    /// Read the current value of an exported binding of an evaluated module
+    /// (following re-exports and star exports). Returns `None` if the module
+    /// or export does not exist.
+    pub fn module_export(&mut self, specifier: &str, export_name: &str) -> Option<Value> {
+        let idx = self.vm.modules.get(specifier)?;
+        self.vm
+            .resolve_export_value(&mut self.gc, *idx, export_name, &mut Vec::new())
+    }
+
+    /// Call a function Value with arguments (no receiver).
+    pub fn call_value(&mut self, func: Value, args: &[Value]) -> Result<Value, String> {
+        self.vm
+            .push_callback_call(&mut self.gc, func, Value::undefined(), args.to_vec());
+        match self.vm.run_loop(&mut self.gc) {
+            rune_interpreter::vm::Exit::Return(v) => Ok(v),
+            rune_interpreter::vm::Exit::Throw(v) => {
+                Err(rune_interpreter::builtins::read_error_message(v)
+                    .unwrap_or_else(|| format!("Uncaught: {v:?}")))
+            }
+            _ => Ok(Value::undefined()),
+        }
     }
 
     /// Allocate a string in the GC heap.

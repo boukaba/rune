@@ -2,10 +2,12 @@
 
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
-> **Status:** v0.8.0 🚧 (In Progress — 613/613 integration tests Pass, 3 Ignored; workspace 774 tests Pass)
+> **Status:** v0.8.1 🚧 (In Progress — 620/620 integration tests Pass, 3 Ignored; workspace 781 tests Pass)
 > SIDT validated, AFPC bytecode + native-code cache functional (AArch64); x86-64 runs bytecode/IC/shape caching only (JIT codegen disabled there). Cold start 2.8× faster than Node
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
+
+> **v1.0 roadmap (2026-08-21):** Core novelties locked — SIDT+content-addressed shapes+AFPC permanent validity, NaN-boxed float self-tagging, SIMD IC (NEON/SSE), Cheney semispace (16 MiB), copy-and-patch baseline+trace JIT. v1.0 loop = Conformance pass (80%+ test262, silent miscompiles, full Error globals) → JIT gap (float acc native, optional chaining/Dup newer opcodes whitelisted, x86-64 verified). Each slice stays bail-to-interpreter correct; new opcodes OUT of JIT whitelist unless item explicitly requires JIT work.
 
 ## ESM modules (v1.0 checklist item) (2026-08-20)
 
@@ -3545,3 +3547,21 @@ during the run, both clean, final result `114330883345000` correct.
   map/modules/promise/regexp/set suites.
 - New tests: 620 integration tests pass (was 613), 781 workspace, 0 failed.
 - `repro_test.rs` example keeps the crash repro (small semispace + let loop).
+
+## v1.0 Plan — Organized Todo (2026-08-21) — preserve core architecture, bail-to-interpreter correct
+
+> **Invariant:** Every slice preserves Rune novelties — immutable SIDT + FxHash64 content-addressed shapes + AFPC magic+version cache, NaN-boxed Value (tag 6 symbol / tag 7 sentinel), SIMD IC stride 32B, 80B Func/32B JSObject, Cheney GC dedup, copy-and-patch JIT (x86-64+aarch64). No shape transition, no heap Float64, no megamorphic cliff reintroduced.
+
+- **C0 — Baseline lightweight conformance measure + docs sync (this slice)** — no OOM: per-file `Context::new_small` runner, single-suite metrics only; sync `progress.md/AGENTS.md/README.md`; CI already `branches: [main]` valid (prior review outdated). Verified locally: 620/620 integration (3 ignored), 781 workspace, fmt/clippy clean; sample test262 `language/types` 55/39/19, `language/asi` 56/11/35; `built-ins/Array` OOM at 20M need >16M semispace (known).
+- **C1 — RegExp anchors ^/$** — add `Edge::AnchorStart/AnchorEnd` (nfa.rs:178 currently no-op `(s,s)`) + `follow_nonconsuming` pos checks + PikeVm start/end guard; keep Thompson NFA → PikeVM longest→leftmost fix separately.
+- **C2 — RegExp \b/\B word boundaries** — new `Edge::WordBoundary{negated}` + `is_word_char` helper (ASCII `[A-Za-z0-9_]`, extend later for unicode), pos 0/len edge cases.
+- **C3 — RegExp backrefs \1..9** — replay capture `saves[slot]` substring equality in PikeVM (preserve Save slots `2*cap+2`).
+- **C4 — RegExp semantics leftmost-first + flags i/m/s** — fix `exec` longest→first-match + case-fold + dotAll + multiline ^/$ per `m` flag.
+- **C5 — ToNumber(symbol) TypeError** — plumb `pending_exception` through 33 `to_number` call sites (preserve Value tag 6, bail-to-interpreter).
+- **C6 — Full Error type set globals** — audit `Vm.error_ctors Vec` (Error/EvalError/RangeError/ReferenceError/SyntaxError/TypeError/URIError via `to_string_for_error`), ensure `TypeError` real global not just `make_error_object`.
+- **C7 — Missing Array batch (RuneArray layout preserved: header 40B, extra_props@32)** — `reverse/splice/concat/shift/unshift/fill/copyWithin/at` via `array_builtin` state machines.
+- **C8 — Missing Object/Function/Math statics (shape model preserved)** — `Object.defineProperty/freeze/assign`, `Function.apply/bind`, `Math.*` via `value_to_prop_key` + `Shape::intern_with_parent`.
+- **J1 — JIT optional chaining + newer opcodes whitelist** — add `JumpIfNullOrUndefined/TypeOf/Div/Exp/In/Instanceof` to `is_jit_compatible` (lib.rs:61); bail-to-interpreter stays correct (JumpIfNullOrUndefined not yet whitelisted).
+- **J2 — JIT float-promoted accumulator stays native** — emit native f64 Add/Sub/Div without per-iteration bail (`BailoutReason::Overflow` → float helper), preserve NaN-boxing collision `^0x0001...`.
+- **J3 — JIT x86-64 verification + AFPC trace persist** — fix `CodeGen` vs `Aarch64CodeGen` parity, re-enable `target_arch=x86_64` build (currently SIGTRAP disabled), persist `compiled_traces` in `AfpcCache`.
+- **DOC gate per slice** — `progress.md/AGENTS.md/README.md` update + `cargo test --workspace` (or `cargo test -p rune_interpreter --no-default-features` on low-RAM), `cargo fmt/clippy`, `--no-default-features`, then `git add -A && commit && push` (exclude `ecma262.md`).

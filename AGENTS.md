@@ -204,6 +204,19 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - Class-decl names don't resolve inside static methods; static private lookup walks the superclass chain (see v0.7 Known gaps)
 - Trace perf: bailout-per-iteration paths (e.g. float-promoted acc in a loop) still bail each iteration — re-record or stay native with float ops (correctness fine)
 
-### Next Steps — v1.0 (ordered by leverage)
-1. Conformance pass — lift test262 suites into the 80%+ band (next open checklist item); register full Error type set.
-2. Trace perf: float-promoted accumulator loops bail per-iteration — re-record or emit float ops natively.
+### Next Steps — v1.0 (ordered, slice = parser → emitter → VM → builtin, bail-to-interpreter correct, never break SIDT/AFPC/NaN-boxing/SIMD/GC)
+
+**Invariant:** All slices preserve Rune novelties — immutable content-addressed SIDT shapes (`shape.rs:22 FxHasher64`), NaN-boxed Value tag 6/7 (`value.rs:1`), SIMD IC stride 32B (`ic.rs:316`), 80B Func (`function.rs:1`), Cheney 16MiB semispace with dedup (`gc.rs:124`), copy-and-patch baseline+trace JIT (`codegen*.rs`).
+
+1. **C0 (done this slice)** — Baseline lightweight conformance + docs sync — 620/620 integ, 781 workspace verified; sample test262 `language/types` 55 pass/39 fail/19 skip, `language/asi` 56/11/35; `built-ins/Array` 20M OOM >16M known; CI `branches: [main]` valid.
+2. **C1** — RegExp anchors `^/$` (`nfa.rs:178` no-op → `Edge::AnchorStart/End` + PikeVM pos check)
+3. **C2** — RegExp `\b/\B` word boundaries
+4. **C3** — RegExp backrefs `\1..9` via Save slots
+5. **C4** — RegExp leftmost-first + flags `i/m/s`
+6. **C5** — `ToNumber(symbol)` TypeError via `pending_exception` (33 call sites)
+7. **C6** — Full Error type set globals (`Vm.error_ctors Vec` — TypeError as real global)
+8. **C7** — Missing Array batch (RuneArray header 40B `extra_props@32` preserved) — `reverse/splice/concat/shift/unshift`
+9. **C8** — Object/Function/Math statics (shape model preserved)
+10. **J1** — JIT whitelist `JumpIfNullOrUndefined` (optional chaining) + `Div/Exp/In/Instanceof` (`lib.rs:61 is_jit_compatible`)
+11. **J2** — Float-promoted accumulator stays native (no per-iter bail, preserve NaN-boxing `^0x0001...`)
+12. **J3** — x86-64 codegen verified + AFPC trace persist (`AfpcCache.complied_traces`)

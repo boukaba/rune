@@ -27,6 +27,9 @@ pub enum Edge {
         negated: bool,
         target: usize,
     },
+    /// Zero-width anchor assertions (preserve Thompson NFA→PikeVM arch; checked at current pos).
+    AnchorStart(usize),
+    AnchorEnd(usize),
 }
 
 pub struct Nfa {
@@ -175,7 +178,21 @@ fn compile_expr(
             });
             (s1, s2)
         }
-        RegexExpr::AnchorStart | RegexExpr::AnchorEnd | RegexExpr::Backref(_) => {
+        RegexExpr::AnchorStart => {
+            let s1 = alloc_state(states);
+            let s2 = alloc_state(states);
+            states[s2].is_match = true;
+            states[s1].edges.push(Edge::AnchorStart(s2));
+            (s1, s2)
+        }
+        RegexExpr::AnchorEnd => {
+            let s1 = alloc_state(states);
+            let s2 = alloc_state(states);
+            states[s2].is_match = true;
+            states[s1].edges.push(Edge::AnchorEnd(s2));
+            (s1, s2)
+        }
+        RegexExpr::Backref(_) => {
             let s = alloc_state(states);
             (s, s)
         }

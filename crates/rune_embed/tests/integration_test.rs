@@ -6168,6 +6168,57 @@ fn test_regexp_lastindex_store() {
 }
 
 #[test]
+fn test_regexp_anchors() {
+    let mut ctx = Context::new_small();
+    // ^ anchors to start: should not match later position
+    assert_eq!(
+        ctx.eval(r#"/^abc/.test("xabc")"#).unwrap().to_boolean(),
+        Some(false)
+    );
+    assert_eq!(
+        ctx.eval(r#"/^abc/.test("abc")"#).unwrap().to_boolean(),
+        Some(true)
+    );
+    // $ anchors to end
+    assert_eq!(
+        ctx.eval(r#"/abc$/.test("abcx")"#).unwrap().to_boolean(),
+        Some(false)
+    );
+    assert_eq!(
+        ctx.eval(r#"/abc$/.test("xabc")"#).unwrap().to_boolean(),
+        Some(true)
+    );
+    // ^$ together
+    assert_eq!(
+        ctx.eval(r#"/^abc$/.test("abc")"#).unwrap().to_boolean(),
+        Some(true)
+    );
+    assert_eq!(
+        ctx.eval(r#"/^abc$/.test("ab")"#).unwrap().to_boolean(),
+        Some(false)
+    );
+    assert_eq!(
+        ctx.eval(r#"/^$/.test("")"#).unwrap().to_boolean(),
+        Some(true)
+    );
+    assert_eq!(
+        ctx.eval(r#"/^$/.test("a")"#).unwrap().to_boolean(),
+        Some(false)
+    );
+    // Anchors with sticky/global lastIndex handling
+    assert_eq!(
+        ctx.eval(r#"var r=/a/y; r.lastIndex=0; r.exec("baa") === null"#)
+            .unwrap()
+            .to_boolean(),
+        Some(true)
+    );
+    assert_eq!(
+        ctx.eval(r#"/^a/.test("ba")"#).unwrap().to_boolean(),
+        Some(false)
+    );
+}
+
+#[test]
 fn test_regexp_search_resets_lastindex() {
     let mut ctx = Context::new_small();
     assert_eq!(

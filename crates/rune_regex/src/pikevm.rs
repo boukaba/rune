@@ -26,13 +26,13 @@ impl PikeVm {
 
     pub fn exec(&self, nfa: &Nfa, text: &str, start: usize) -> Option<Match> {
         let chars: Vec<char> = text.chars().collect();
-        if start >= chars.len() {
+        if start > chars.len() {
             return None;
         }
 
         let num_slots = (nfa.num_captures + 1) * 2;
 
-        for pos in start..chars.len() {
+        for pos in start..=chars.len() {
             let mut clist: Vec<Thread> = Vec::new();
             add_thread(&mut clist, nfa, nfa.start, &vec![None; num_slots]);
 
@@ -84,7 +84,11 @@ impl PikeVm {
                             Edge::Dot(target) => {
                                 add_thread(&mut nlist, nfa, *target, &t.saves);
                             }
-                            Edge::Epsilon(_) | Edge::Save(_, _) | Edge::Lookahead { .. } => {}
+                            Edge::Epsilon(_)
+                            | Edge::Save(_, _)
+                            | Edge::Lookahead { .. }
+                            | Edge::AnchorStart(_)
+                            | Edge::AnchorEnd(_) => {}
                         }
                     }
                 }
@@ -171,6 +175,30 @@ fn follow_nonconsuming(threads: &[Thread], nfa: &Nfa, pos: usize, chars: &[char]
                         }
                     }
                 }
+                Edge::AnchorStart(target) => {
+                    has_nonconsuming = true;
+                    if pos == 0 {
+                        let new_t = Thread {
+                            pc: *target,
+                            saves: t.saves.clone(),
+                        };
+                        if !in_sets(&new_t, &worklist, &result) {
+                            worklist.push(new_t);
+                        }
+                    }
+                }
+                Edge::AnchorEnd(target) => {
+                    has_nonconsuming = true;
+                    if pos == chars.len() {
+                        let new_t = Thread {
+                            pc: *target,
+                            saves: t.saves.clone(),
+                        };
+                        if !in_sets(&new_t, &worklist, &result) {
+                            worklist.push(new_t);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -241,7 +269,11 @@ fn lookahead_matches(
                     Edge::Dot(target) => {
                         add_thread(&mut nlist, nfa, *target, &t.saves);
                     }
-                    Edge::Epsilon(_) | Edge::Save(_, _) | Edge::Lookahead { .. } => {}
+                    Edge::Epsilon(_)
+                    | Edge::Save(_, _)
+                    | Edge::Lookahead { .. }
+                    | Edge::AnchorStart(_)
+                    | Edge::AnchorEnd(_) => {}
                 }
             }
         }

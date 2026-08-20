@@ -194,7 +194,7 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - aarch64 JIT execution tests — crash with SIGSEGV on both macOS and Linux arm64 (pre-existing, disabled with `#[cfg(any())]`)
 - `test_prototype_clang_determinism` — Clang produces empty output on first compilation in CI. Marked `#[ignore]`.
 - `test_prototype_patch_stencil` — same Clang availability issue in CI. Marked `#[ignore]`.
-- `RegExp` gaps: match-result `index`/`input` enumerability unobservable (no shape enum flags — `Object.keys` includes them); `v` flag literal `/a/v` unsupported (parser whitelist predates the ctor); backrefs/anchors are no-ops; `{n,m}` captures return the first copy's capture; engine unit = Rust char (no `u`-flag UTF-16 index math); empty-match at end-of-string not found by exec
+- `RegExp` gaps: match-result `index`/`input` enumerability unobservable (no shape enum flags — `Object.keys` includes them); `v` flag literal `/a/v` unsupported (parser whitelist predates the ctor); backrefs are no-ops; **anchors `^`/`$` fixed (C1) — pos==0/len via `Edge::AnchorStart/End` + `pos..=len` inclusive, sticky-aware**; `{n,m}` captures return the first copy's capture; engine unit = Rust char (no `u`-flag UTF-16 index math)
 - Date is UTC-only (getTimezoneOffset always 0, no local tz); `toLocaleString` family = `toString` family (no ECMA-402); `toJSON` handles Date receivers only; no `setYear`/`getYear`/`toGMTString` (Annex B); no `Date.prototype[Symbol.toStringTag]` (not in 2027 edition); ToPrimitive doesn't dispatch `@@toPrimitive` (Date special-cased)
 - `Number(sym)`/arithmetic beyond `+` treat symbols as NaN (ToNumber(symbol) should throw TypeError — needs exception plumbing through to_number's call sites; deferred to conformance pass)
 - `Symbol.prototype.description` is computed in LoadProperty, not a real getter (getOwnPropertyDescriptor unavailable)
@@ -209,7 +209,7 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 **Invariant:** All slices preserve Rune novelties — immutable content-addressed SIDT shapes (`shape.rs:22 FxHasher64`), NaN-boxed Value tag 6/7 (`value.rs:1`), SIMD IC stride 32B (`ic.rs:316`), 80B Func (`function.rs:1`), Cheney 16MiB semispace with dedup (`gc.rs:124`), copy-and-patch baseline+trace JIT (`codegen*.rs`).
 
 1. **C0 (done this slice)** — Baseline lightweight conformance + docs sync — 620/620 integ, 781 workspace verified; sample test262 `language/types` 55 pass/39 fail/19 skip, `language/asi` 56/11/35; `built-ins/Array` 20M OOM >16M known; CI `branches: [main]` valid.
-2. **C1** — RegExp anchors `^/$` (`nfa.rs:178` no-op → `Edge::AnchorStart/End` + PikeVM pos check)
+2. **C1 (done this slice)** — RegExp anchors `^/$` fixed — `Edge::AnchorStart/End` + PikeVM pos==0/len via `pos..=len` (`nfa.rs:178` was `(s,s)`), 621/621 integ
 3. **C2** — RegExp `\b/\B` word boundaries
 4. **C3** — RegExp backrefs `\1..9` via Save slots
 5. **C4** — RegExp leftmost-first + flags `i/m/s`

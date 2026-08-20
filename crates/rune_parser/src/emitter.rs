@@ -263,16 +263,114 @@ impl Emitter {
         idx
     }
 
+    /// Compile a function node into a nested BytecodeProgram (appended by the
+    /// caller to a specific program's `functions` list — used when a MakeFunction
+    /// will execute inside that program, e.g. private methods defined in a class
+    /// constructor).
+    fn compile_function_into(&mut self, func: &FnNode) -> BytecodeProgram {
+        let mut sub = Emitter::new();
+        sub.env_scope_stack = self.env_scope_stack.clone();
+        sub.private_field_names = self.private_field_names.clone();
+        sub.is_generator = func.is_generator;
+        sub.is_async = func.is_async;
+        if let Some(name) = &func.name {
+            sub.named_function = true;
+            sub.locals.push(name.to_string());
+        }
+        for param in &func.params {
+            match param {
+                Pattern::Identifier(name, _, _) => sub.locals.push(name.to_string()),
+                _ => sub.locals.push("_destructure".to_string()),
+            }
+        }
+        if let Some(rest_name) = &func.rest_param {
+            sub.locals.push(rest_name.to_string());
+            sub.emit(Opcode::MakeRestArray, vec![func.params.len() as i64]);
+            if let Some(idx) = sub.local_index(rest_name) {
+                sub.emit(Opcode::StoreLocal, vec![idx as i64]);
+                sub.emit(Opcode::Pop, vec![]);
+            }
+        }
+        for (i, param) in func.params.iter().enumerate() {
+            let param_idx = (if func.name.is_some() { 1 } else { 0 }) + i;
+            match param {
+                Pattern::Identifier(name, _, default) => {
+                    if default.is_some() {
+                        sub.emit(Opcode::LoadLocal, vec![param_idx as i64]);
+                        sub.emit_store_with_default(
+                            name.as_ref(),
+                            &DestructureStore::Decl(VarKind::Var),
+                            default,
+                        );
+                    }
+                }
+                _ => {
+                    sub.emit(Opcode::LoadLocal, vec![param_idx as i64]);
+                    sub.emit_destructuring_binding(param, &DestructureStore::Decl(VarKind::Var));
+                }
+            }
+        }
+        if !func.is_arrow && uses_arguments_stmt(&func.body) {
+            sub.locals.push("arguments".to_string());
+            sub.emit(Opcode::MakeArgumentsArray, vec![]);
+            if let Some(idx) = sub.local_index("arguments") {
+                sub.emit(Opcode::StoreLocal, vec![idx as i64]);
+                sub.emit(Opcode::Pop, vec![]);
+            }
+        }
+        let mut all_var_names: Vec<String> = Vec::new();
+        collect_var_names_stmt(&func.body, &mut all_var_names);
+        for name in &all_var_names {
+            if !sub.locals.contains(name) {
+                sub.locals.push(name.clone());
+            }
+        }
+        let has_inner = contains_inner_function_stmt(&func.body);
+        if has_inner && !sub.locals.is_empty() {
+            sub.captured_names = sub.locals.clone();
+            sub.captured_env_size = sub.locals.len();
+            sub.emit(Opcode::MakeEnv, vec![sub.captured_env_size as i64]);
+            for i in 0..sub.captured_env_size {
+                sub.emit(Opcode::LoadLocal, vec![i as i64]);
+                sub.emit(Opcode::StoreCaptured, vec![0, i as i64]);
+            }
+            sub.env_scope_stack.push(sub.captured_names.clone());
+        }
+        let is_arrow_expr = func.name.is_none() && matches!(&func.body, Stmt::Expr(..));
+        match &func.body {
+            Stmt::Expr(expr, _) if is_arrow_expr => {
+                sub.emit_expression(expr);
+                sub.emit(Opcode::Return, vec![]);
+            }
+            _ => {
+                sub.emit_statement(&func.body);
+                let needs_return = match sub.instructions.last() {
+                    Some(last) => last.opcode != Opcode::Return,
+                    None => true,
+                };
+                if needs_return {
+                    sub.emit(Opcode::LoadUndefined, vec![]);
+                    sub.emit(Opcode::Return, vec![]);
+                }
+            }
+        }
+        // The caller appends into the target program's functions list.
+        sub.into_bytecode()
+    }
+
     /// Emit bytecode for a class node.
     /// `for_expr`: true for class expressions (leaves constructor on stack), false for declarations (statement, no stack value).
     fn emit_class(&mut self, class: &ClassNode, for_expr: bool) {
-        // 0. Save and set private field names for method sub-emitters
+        // 0. Save and set private element names (fields + private methods,
+        //    deduplicated — getter/setter pairs share one slot) for method sub-emitters
         let _saved_private = self.private_field_names.clone();
-        self.private_field_names = class
-            .private_fields
-            .iter()
-            .map(|pf| pf.name.to_string())
-            .collect();
+        let mut names: Vec<String> = Vec::new();
+        for pf in &class.private_fields {
+            if !names.iter().any(|n| n == pf.name.as_ref()) {
+                names.push(pf.name.to_string());
+            }
+        }
+        self.private_field_names = names;
 
         // 1. Compile all methods, identify constructor
         let mut constructor_idx = None;
@@ -318,6 +416,32 @@ impl Emitter {
                 static_method_funcs.push((method.key.clone(), idx));
             } else {
                 method_funcs.push((method.key.clone(), idx));
+            }
+        }
+
+        // 1b. Compile static private method/accessor functions (parallel to
+        //     private_fields). Instance private methods are compiled into the
+        //     constructor's program at step 4.5 (their MakeFunction executes
+        //     inside the ctor, which resolves indices against the ctor program).
+        let mut private_funcs: Vec<Option<(usize, Option<usize>)>> =
+            Vec::with_capacity(class.private_fields.len());
+        for pf in &class.private_fields {
+            if pf.is_static {
+                if let Some(func) = &pf.func {
+                    let mut f = (**func).clone();
+                    f.name = Some(pf.name.clone());
+                    let idx = self.compile_function(&f);
+                    let second = pf.second_func.as_ref().map(|sf| {
+                        let mut s = (**sf).clone();
+                        s.name = Some(pf.name.clone());
+                        self.compile_function(&s)
+                    });
+                    private_funcs.push(Some((idx, second)));
+                } else {
+                    private_funcs.push(None);
+                }
+            } else {
+                private_funcs.push(None);
             }
         }
 
@@ -481,35 +605,96 @@ impl Emitter {
         });
         self.emit(Opcode::MakeFunction, vec![ctor_idx as i64]);
 
-        // 4.5 Inject private field initialization into the constructor body.
-        //     For each private field with an initializer, inject:
-        //       LoadThis; <init_expr>; DefinePrivateField slot_idx
-        //     at the end of the constructor (before the implicit Return).
+        // 4.5 Inject private element initialization into the constructor body.
+        //     Instance private fields/methods are defined on `this` before the
+        //     constructor body runs (InitializeInstanceElements, §7.3.33):
+        //       field:   LoadThis; <init_expr>|undefined; DefinePrivateField slot
+        //       method:  LoadThis; MakeFunction idx; DefinePrivateField slot
+        //       accessor: LoadThis; <getter>|undefined; <setter>|undefined;
+        //                MakeAccessorPair; DefinePrivateField slot
         if !class.private_fields.is_empty() {
-            let ctor_prog = &mut self.nested_funcs[ctor_idx];
+            // Compile instance private method/accessor functions INTO the ctor
+            // program (the MakeFunction emitted below executes inside the ctor,
+            // where func indices resolve against the ctor program).
+            let mut ctor_private_funcs: Vec<Option<(usize, Option<usize>)>> =
+                Vec::with_capacity(class.private_fields.len());
+            for pf in &class.private_fields {
+                if !pf.is_static {
+                    if let Some(func) = &pf.func {
+                        let mut f = (**func).clone();
+                        f.name = Some(pf.name.clone());
+                        let program = self.compile_function_into(&f);
+                        let ctor_prog = &mut self.nested_funcs[ctor_idx];
+                        let idx = ctor_prog.functions.len();
+                        ctor_prog.functions.push(program);
+                        let second = pf.second_func.as_ref().map(|sf| {
+                            let mut s = (**sf).clone();
+                            s.name = Some(pf.name.clone());
+                            let program = self.compile_function_into(&s);
+                            let ctor_prog = &mut self.nested_funcs[ctor_idx];
+                            let idx = ctor_prog.functions.len();
+                            ctor_prog.functions.push(program);
+                            idx
+                        });
+                        ctor_private_funcs.push(Some((idx, second)));
+                    } else {
+                        ctor_private_funcs.push(None);
+                    }
+                } else {
+                    ctor_private_funcs.push(None);
+                }
+            }
             // Find the last Return instruction
+            let ctor_prog = &mut self.nested_funcs[ctor_idx];
             let return_pos = ctor_prog
                 .instructions
                 .iter()
                 .rposition(|i| i.opcode == Opcode::Return);
             let mut inject = Vec::new();
             for (slot, field) in class.private_fields.iter().enumerate() {
-                if !field.is_static {
-                    inject.push(Instruction::new(Opcode::LoadThis, vec![]));
-                    if let Some(init) = &field.init {
-                        // Emit the initializer expression
-                        let mut sub = Emitter::new();
-                        sub.private_field_names = self.private_field_names.clone();
-                        sub.emit_expression(init);
-                        inject.extend(sub.instructions);
-                    } else {
-                        inject.push(Instruction::new(Opcode::LoadUndefined, vec![]));
-                    }
-                    inject.push(Instruction::new(
-                        Opcode::DefinePrivateField,
-                        vec![slot as i64],
-                    ));
+                if field.is_static {
+                    continue;
                 }
+                inject.push(Instruction::new(Opcode::LoadThis, vec![]));
+                if let Some((func_idx, second_idx)) = ctor_private_funcs[slot] {
+                    if field.is_getter || field.is_setter {
+                        // Private accessor: func = getter, second_func = setter.
+                        if field.is_getter {
+                            inject.push(Instruction::new(
+                                Opcode::MakeFunction,
+                                vec![func_idx as i64],
+                            ));
+                        } else {
+                            inject.push(Instruction::new(Opcode::LoadUndefined, vec![]));
+                        }
+                        if field.is_setter {
+                            inject.push(Instruction::new(
+                                Opcode::MakeFunction,
+                                vec![second_idx.unwrap() as i64],
+                            ));
+                        } else {
+                            inject.push(Instruction::new(Opcode::LoadUndefined, vec![]));
+                        }
+                        inject.push(Instruction::new(Opcode::MakeAccessorPair, vec![]));
+                    } else {
+                        inject.push(Instruction::new(
+                            Opcode::MakeFunction,
+                            vec![func_idx as i64],
+                        ));
+                    }
+                } else if let Some(init) = &field.init {
+                    // Emit the initializer expression
+                    let mut sub = Emitter::new();
+                    sub.private_field_names = self.private_field_names.clone();
+                    sub.emit_expression(init);
+                    inject.extend(sub.instructions);
+                } else {
+                    inject.push(Instruction::new(Opcode::LoadUndefined, vec![]));
+                }
+                inject.push(Instruction::new(
+                    Opcode::DefinePrivateField,
+                    vec![slot as i64],
+                ));
             }
             if let Some(pos) = return_pos {
                 // Insert injected instructions before Return
@@ -652,6 +837,71 @@ impl Emitter {
                     };
                     let key_idx = self.intern_string(&key_str) as i64;
                     self.emit(Opcode::DefineAccessor, vec![key_idx]);
+                    self.emit(Opcode::Pop, vec![]);
+                }
+            }
+        }
+
+        // 7.7 Add static private methods/accessors to constructor (§15.7.14 step 31:
+        //     PrivateMethodOrAccessorAdd on the constructor, BEFORE static fields)
+        if let Some(ctor_slot) = save_slot {
+            for (slot, field) in class.private_fields.iter().enumerate() {
+                if !field.is_static {
+                    continue;
+                }
+                if let Some((func_idx, second_idx)) = private_funcs[slot] {
+                    self.emit(Opcode::LoadLocal, vec![ctor_slot as i64]);
+                    if field.is_getter || field.is_setter {
+                        // func = getter, second_func = setter (see parser merge).
+                        if field.is_getter {
+                            self.emit(Opcode::MakeFunction, vec![func_idx as i64]);
+                        } else {
+                            self.emit(Opcode::LoadUndefined, vec![]);
+                        }
+                        if field.is_setter {
+                            self.emit(Opcode::MakeFunction, vec![second_idx.unwrap() as i64]);
+                        } else {
+                            self.emit(Opcode::LoadUndefined, vec![]);
+                        }
+                        self.emit(Opcode::MakeAccessorPair, vec![]);
+                    } else {
+                        self.emit(Opcode::MakeFunction, vec![func_idx as i64]);
+                    }
+                    self.emit(Opcode::DefinePrivateField, vec![slot as i64]);
+                    self.emit(Opcode::Pop, vec![]);
+                }
+            }
+            // 7.8 Static private fields: DefineField(ctor, record) — the initializer
+            //     runs as a zero-arg function with `this` = the constructor (§15.7.14
+            //     step 32, §15.7.10 initializer wrapping, DefineField §7.3.32).
+            for (slot, field) in class.private_fields.iter().enumerate() {
+                if !field.is_static || field.func.is_some() {
+                    continue;
+                }
+                if let Some(init) = &field.init {
+                    let synth = FnNode {
+                        name: None,
+                        params: vec![],
+                        rest_param: None,
+                        body: Stmt::Expr((**init).clone(), Span { start: 0, end: 0 }),
+                        is_generator: false,
+                        is_async: false,
+                        is_arrow: false,
+                        span: Span { start: 0, end: 0 },
+                    };
+                    let wrapper_idx = self.compile_function(&synth);
+                    // [ctor] → [ctor, ctor] → [ctor, ctor, wrapper] → Call pops
+                    // [wrapper, ctor] leaving [ctor, result] for DefinePrivateField.
+                    self.emit(Opcode::LoadLocal, vec![ctor_slot as i64]);
+                    self.emit(Opcode::Dup, vec![]);
+                    self.emit(Opcode::MakeFunction, vec![wrapper_idx as i64]);
+                    self.emit(Opcode::Call, vec![0]);
+                    self.emit(Opcode::DefinePrivateField, vec![slot as i64]);
+                    self.emit(Opcode::Pop, vec![]);
+                } else {
+                    self.emit(Opcode::LoadLocal, vec![ctor_slot as i64]);
+                    self.emit(Opcode::LoadUndefined, vec![]);
+                    self.emit(Opcode::DefinePrivateField, vec![slot as i64]);
                     self.emit(Opcode::Pop, vec![]);
                 }
             }
@@ -2347,7 +2597,11 @@ impl Emitter {
             Expr::Object(props, _) => {
                 let mut has_spread_or_computed = false;
                 for prop in props {
-                    if prop.is_spread || matches!(prop.key, PropKey::Computed(_)) {
+                    if prop.is_spread
+                        || prop.is_getter
+                        || prop.is_setter
+                        || matches!(prop.key, PropKey::Computed(_))
+                    {
                         has_spread_or_computed = true;
                         break;
                     }
@@ -2358,6 +2612,34 @@ impl Emitter {
                         if prop.is_spread {
                             self.emit_expression(&prop.value);
                             self.emit(Opcode::SpreadIntoObject, vec![]);
+                        } else if prop.is_getter || prop.is_setter {
+                            // Accessor: { get k() {}, set k(v) {} } → DefineAccessor.
+                            // Stack: [obj, getter, setter] (+key for computed).
+                            // DefineAccessor pops setter, getter, key?, obj.
+                            self.emit(Opcode::Dup, vec![]);
+                            if let PropKey::Computed(key_expr) = &prop.key {
+                                self.emit_expression(key_expr);
+                            }
+                            if prop.is_getter {
+                                self.emit_expression(&prop.value);
+                                self.emit(Opcode::LoadUndefined, vec![]);
+                            } else {
+                                self.emit(Opcode::LoadUndefined, vec![]);
+                                self.emit_expression(&prop.value);
+                            }
+                            if matches!(prop.key, PropKey::Computed(_)) {
+                                self.emit(Opcode::DefineAccessor, vec![usize::MAX as i64]);
+                            } else {
+                                let key_str = match &prop.key {
+                                    PropKey::String(s) => s.to_string(),
+                                    PropKey::Identifier(s) => s.to_string(),
+                                    PropKey::Number(n) => n.to_string(),
+                                    PropKey::Computed(_) => unreachable!(),
+                                };
+                                let idx = self.intern_string(&key_str) as i64;
+                                self.emit(Opcode::DefineAccessor, vec![idx]);
+                            }
+                            self.emit(Opcode::Pop, vec![]);
                         } else if matches!(prop.key, PropKey::Computed(_)) {
                             self.emit(Opcode::Dup, vec![]);
                             if let PropKey::Computed(key_expr) = &prop.key {

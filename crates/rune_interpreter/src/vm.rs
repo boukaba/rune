@@ -4726,12 +4726,20 @@ impl Vm {
                             };
                             Func::set_prototype(resolved_ptr, resolved_proto);
                         }
-                        // Propagate private name IDs from class evaluation frame to Func
-                        if !self.frames[fi].private_name_ids.is_null() {
-                            Func::set_private_name_ids(
-                                resolved_ptr,
-                                self.frames[fi].private_name_ids,
-                            );
+                        // Propagate private name IDs from class evaluation frame to Func.
+                        // Inside a constructor (which itself was created during class
+                        // evaluation), the frame has no IDs but the executing Func does —
+                        // fall back to it so private methods/accessors defined in the
+                        // ctor keep access to the class's private names.
+                        let mut ids = self.frames[fi].private_name_ids;
+                        if ids.is_null() {
+                            let cur_func = self.frames[fi].func_ptr;
+                            if !cur_func.is_null() {
+                                ids = Func::private_name_ids(cur_func as *mut Func);
+                            }
+                        }
+                        if !ids.is_null() {
+                            Func::set_private_name_ids(resolved_ptr, ids);
                         }
                         self.push(Value::from_heap_ptr(resolved_ptr as *mut u8));
                     }
@@ -4803,6 +4811,13 @@ impl Vm {
                     do_store_property(obj, key_val, val, gc);
                     self.frames[fi].pc = pc + 1;
                 }
+                Opcode::MakeAccessorPair => {
+                    let setter = self.pop();
+                    let getter = self.pop();
+                    let acc_ptr = AccessorPair::allocate(gc, getter, setter);
+                    self.push(Value::from_heap_ptr(acc_ptr));
+                    self.frames[fi].pc = pc + 1;
+                }
                 Opcode::LoadPrivateProperty => {
                     let slot_idx = instr.operands[0] as u32;
                     let obj = self.pop();
@@ -4825,8 +4840,34 @@ impl Vm {
                     let key_str = format!("\x00private_{}", priv_name_id);
                     let key_val =
                         Value::from_heap_ptr(HeapString::allocate(gc, &key_str) as *mut u8);
+                    // §7.3.30 PrivateGet: missing private element → TypeError
+                    if !has_property(obj, key_val, Some(self.function_prototype)) {
+                        self.register_roots(gc);
+                        let err = make_error_object(
+                            gc,
+                            "TypeError",
+                            "Cannot read private member from object",
+                        );
+                        self.push(err);
+                        if let Some(exit) = self.handle_throw(gc, err) {
+                            return exit;
+                        }
+                        continue;
+                    }
                     let result =
                         load_property_recursive(obj, key_val, Some(self.function_prototype), gc);
+                    // Private accessor getter dispatch (get #x() {} / set #x() {})
+                    if let Some(ptr) = result.heap_ptr() {
+                        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_ACCESSOR {
+                            let (v, pending) = self.resolve_accessor_for_read(result, obj, gc);
+                            if pending {
+                                continue;
+                            }
+                            self.push(v);
+                            self.frames[fi].pc = pc + 1;
+                            continue;
+                        }
+                    }
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
                 }
@@ -4853,6 +4894,76 @@ impl Vm {
                     let key_str = format!("\x00private_{}", priv_name_id);
                     let key_val =
                         Value::from_heap_ptr(HeapString::allocate(gc, &key_str) as *mut u8);
+                    // §7.3.31 PrivateSet: missing private element → TypeError
+                    if !has_property(obj, key_val, Some(self.function_prototype)) {
+                        self.register_roots(gc);
+                        let err = make_error_object(
+                            gc,
+                            "TypeError",
+                            "Cannot write private member to object",
+                        );
+                        self.push(err);
+                        if let Some(exit) = self.handle_throw(gc, err) {
+                            return exit;
+                        }
+                        continue;
+                    }
+                    // Private accessor setter dispatch (set #x(v) {})
+                    let current =
+                        load_property_recursive(obj, key_val, Some(self.function_prototype), gc);
+                    if let Some(vptr) = current.heap_ptr() {
+                        if unsafe { (*(vptr as *const GcHeader)).tag() } == TAG_ACCESSOR {
+                            let setter = unsafe { AccessorPair::setter(vptr) };
+                            if !setter.is_undefined() {
+                                if let Some(sptr) = setter.heap_ptr() {
+                                    if unsafe { (*(sptr as *const GcHeader)).tag() } == TAG_FUNC {
+                                        self.pending_accessor_call = Some(PendingAccessorCall {
+                                            source_frame_depth: self.frames.len(),
+                                            is_getter: false,
+                                        });
+                                        let func_ptr = sptr;
+                                        let func_idx =
+                                            unsafe { Func::func_index(func_ptr as *mut Func) }
+                                                as usize;
+                                        let creator_prog = unsafe {
+                                            &*(Func::prog_ptr(func_ptr as *mut Func)
+                                                as *const BytecodeProgram)
+                                        };
+                                        if func_idx < creator_prog.functions.len() {
+                                            let func_prog = &creator_prog.functions[func_idx];
+                                            let func_env =
+                                                unsafe { Func::env_ptr(func_ptr as *mut Func) };
+                                            let mut locals = if func_prog.named_function {
+                                                vec![setter]
+                                            } else {
+                                                vec![]
+                                            };
+                                            locals.push(val);
+                                            self.frames.push(Frame {
+                                                locals,
+                                                lexical_slots: Vec::new(),
+                                                lexical_tdz: Vec::new(),
+                                                lexical_const: Vec::new(),
+                                                scope_boundaries: Vec::new(),
+                                                passed_argc: 1,
+                                                pc: 0,
+                                                stack_base: self.stack.len(),
+                                                prog: func_prog as *const BytecodeProgram,
+                                                generator_id: None,
+                                                this: obj,
+                                                is_constructor_call: false,
+                                                constructed_object: Value::undefined(),
+                                                env: func_env,
+                                                func_ptr,
+                                                private_name_ids: std::ptr::null_mut(),
+                                            });
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     do_store_property(obj, key_val, val, gc);
                     self.frames[fi].pc = pc + 1;
                 }
@@ -8949,6 +9060,31 @@ fn has_property(obj: Value, raw_key: Value, function_prototype: Option<Value>) -
                 }
             }
             false
+        } else if tag == TAG_FUNC {
+            // Static methods/private elements live on the function's extra_props
+            if let Some(key) = value_to_prop_key(raw_key) {
+                if key == *PROTOTYPE_KEY {
+                    return true;
+                }
+                let extra = unsafe { Func::extra_props(ptr as *mut Func) };
+                if !extra.is_null() {
+                    let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                    if shape.lookup(&key).is_some() {
+                        return true;
+                    }
+                }
+            }
+            // Walk the superclass chain (static inheritance), else Function.prototype
+            let super_ptr = unsafe { Func::superclass(ptr as *mut Func) };
+            if super_ptr.is_null() {
+                if let Some(fp) = function_prototype {
+                    if fp.is_heap_object() {
+                        return has_property(fp, raw_key, function_prototype);
+                    }
+                }
+                return false;
+            }
+            has_property(Value::from_heap_ptr(super_ptr), raw_key, function_prototype)
         } else if tag == TAG_ARRAY {
             if let Some(index) = value_to_array_index(raw_key) {
                 let len = unsafe { RuneArray::length(ptr as *mut RuneArray) };
@@ -8985,19 +9121,6 @@ fn has_property(obj: Value, raw_key: Value, function_prototype: Option<Value>) -
             let proto_ptr = unsafe { typedarray::RuneTypedArray::prototype(ptr) };
             if !proto_ptr.is_null() {
                 return has_property(Value::from_heap_ptr(proto_ptr), raw_key, function_prototype);
-            }
-            false
-        } else if tag == TAG_FUNC {
-            if let Some(key) = value_to_prop_key(raw_key) {
-                if key == *PROTOTYPE_KEY {
-                    return true;
-                }
-            }
-            // Check Function.prototype
-            if let Some(fp) = function_prototype {
-                if fp.is_heap_object() {
-                    return has_property(fp, raw_key, function_prototype);
-                }
             }
             false
         } else if tag == TAG_STRING {

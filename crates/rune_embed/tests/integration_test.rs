@@ -6927,6 +6927,180 @@ fn test_private_member_write_error() {
 }
 
 #[test]
+fn test_private_method_instance() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval("class C { #m() { return 42; } get() { return this.#m(); } } new C().get();")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(42));
+}
+
+#[test]
+fn test_private_accessor_pair_instance() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "class C { #v; get #g() { return this.#v; } set #g(x) { this.#v = x; } \
+             setG(v) { this.#g = v; } getG() { return this.#g; } } \
+             let c = new C(); c.setG(9); c.getG();",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(9));
+}
+
+#[test]
+fn test_private_accessor_setter_first() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "class C { #v; set #g(x) { this.#v = x; } get #g() { return this.#v; } \
+             setG(v) { this.#g = v; } getG() { return this.#g; } } \
+             let c = new C(); c.setG(6); c.getG();",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(6));
+}
+
+#[test]
+fn test_static_private_field() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval("class C { static #x = 10; static getX() { return this.#x; } } C.getX();")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(10));
+    let r = ctx
+        .eval(
+            "class C { static #x = 10; static setX(v) { this.#x = v; } \
+             static getX() { return this.#x; } } C.setX(33); C.getX();",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(33));
+    let r = ctx
+        .eval(
+            "class C { static #x; static getX() { return this.#x === undefined ? 5 : 0; } } \
+             C.getX();",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(5));
+}
+
+#[test]
+fn test_static_private_method() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval("class C { static #m() { return 7; } static g() { return this.#m(); } } C.g();")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(7));
+}
+
+#[test]
+fn test_static_private_accessor_pair() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "class C { static #v = 4; static get #g() { return this.#v; } \
+             static getG() { return this.#g; } } C.getG();",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(4));
+    let r = ctx
+        .eval(
+            "class C { static #v = 4; static get #g() { return this.#v; } \
+             static set #g(v) { this.#v = v; } static setG(v) { this.#g = v; } \
+             static getG() { return this.#g; } } C.setG(9); C.getG();",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(9));
+}
+
+#[test]
+fn test_private_fields_inherited() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "class A { #x = 3; getX() { return this.#x; } } \
+             class B extends A {} new B().getX();",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(3));
+    let r = ctx
+        .eval(
+            "class A { #x = 3; getX() { return this.#x; } } \
+             class B extends A { getY() { return this.getX(); } } new B().getY();",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(3));
+}
+
+#[test]
+fn test_private_missing_on_wrong_receiver() {
+    let mut ctx = Context::new_small();
+    let result = ctx.eval("class C { #x = 1; getX(o) { return o.#x; } } new C().getX({});");
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("private member"));
+}
+
+#[test]
+fn test_duplicate_private_name_error() {
+    let mut ctx = Context::new_small();
+    let result = ctx.eval("class C { #x; #x; }");
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("Duplicate private name"));
+}
+
+#[test]
+fn test_object_literal_accessors() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("let o = { get a() { return 7; } }; o.a;").unwrap();
+    assert_eq!(r.as_smi(), Some(7));
+    let r = ctx
+        .eval("let o = { set a(v) { this.b = v; } }; o.a = 3; o.b;")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(3));
+    let r = ctx
+        .eval("let o = { get [1+1]() { return 8; } }; o[2];")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(8));
+}
+
+#[test]
+fn test_object_literal_nested_accessors() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval("let o = { get a() { return this.b; }, get b() { return 7; } }; o.a;")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(7));
+}
+
+#[test]
+fn test_this_prop_inc_in_class() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "class C { constructor() { this.x = 5; } inc() { this.x++; } } \
+             let c = new C(); c.inc(); c.x;",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(6));
+    let r = ctx
+        .eval(
+            "class C { constructor() { this.x = 5; } inc() { return this.x++; } } \
+             let c = new C(); c.inc(); c.x;",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(6));
+}
+
+#[test]
+fn test_let_new_class_scoping() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval("function f() { let C = class { m() { return 5; } }; return new C().m(); } f();")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(5));
+}
+
+#[test]
 fn test_string_match_basic() {
     let mut ctx = Context::new_small();
     assert_eq!(eval_str(&mut ctx, r#""abc".match(/a/)[0]"#), "a");

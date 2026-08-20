@@ -256,7 +256,7 @@ impl Parser {
     fn parse_class_body(&mut self) -> (Vec<ClassMethod>, Vec<PrivateField>) {
         self.expect(TokenKind::LBrace);
         let mut methods = Vec::new();
-        let mut private_fields = Vec::new();
+        let mut private_fields: Vec<PrivateField> = Vec::new();
         while self.tok.kind != TokenKind::RBrace && self.tok.kind != TokenKind::Eof {
             let mstart = self.span();
             let is_static = if self.tok.kind == TokenKind::Identifier
@@ -268,38 +268,7 @@ impl Parser {
             } else {
                 false
             };
-            // Detect private field: #name or #name = expr
-            if self.tok.kind == TokenKind::Hash {
-                self.advance(); // consume '#'
-                let name = if self.tok.kind == TokenKind::Identifier {
-                    let t = self.tok.clone();
-                    self.advance();
-                    t.value.into_boxed_str()
-                } else {
-                    self.error("Expected identifier after #".to_string());
-                    Box::from("")
-                };
-                let init = if self.tok.kind == TokenKind::EqAssign {
-                    self.advance(); // consume '='
-                    Some(Box::new(self.parse_expr(0)))
-                } else {
-                    None
-                };
-                private_fields.push(PrivateField {
-                    name,
-                    init,
-                    is_static,
-                    span: Span {
-                        start: mstart.start,
-                        end: self.span().end,
-                    },
-                });
-                if self.tok.kind == TokenKind::Semicolon {
-                    self.advance();
-                }
-                continue;
-            }
-            // Detect getter/setter: `get foo() {}` or `set foo(v) {}`
+            // Detect getter/setter: `get foo() {}` / `set foo(v) {}` / `get #x() {}`
             let (is_getter, is_setter) = if self.tok.kind == TokenKind::Identifier
                 && self.tok.value == "get"
                 && self.lexer.peek_token().kind != TokenKind::LParen
@@ -315,6 +284,100 @@ impl Parser {
             } else {
                 (false, false)
             };
+            // Detect private element: #name, #name = expr, #name() {}, get #x() {}
+            if self.tok.kind == TokenKind::Hash {
+                self.advance(); // consume '#'
+                let name = if self.tok.kind == TokenKind::Identifier {
+                    let t = self.tok.clone();
+                    self.advance();
+                    t.value.into_boxed_str()
+                } else {
+                    self.error("Expected identifier after #".to_string());
+                    Box::from("")
+                };
+                if self.tok.kind == TokenKind::LParen {
+                    // Private method / accessor: #m() {} | get #x() {} | set #x(v) {}
+                    let func = self.parse_function_body(Some(name.clone()), false, false, mstart);
+                    if is_getter && !func.params.is_empty() {
+                        self.error("Getter must have 0 parameters".to_string());
+                    }
+                    if is_setter && func.params.len() != 1 {
+                        self.error("Setter must have exactly 1 parameter".to_string());
+                    }
+                    // Merge complementary accessors (`get #x` + `set #x`) into ONE
+                    // entry: they share a slot and a private name id.
+                    let mut func = Some(Box::new(func));
+                    let mut merged = false;
+                    if is_getter || is_setter {
+                        for existing in private_fields.iter_mut() {
+                            if existing.name == name
+                                && existing.is_static == is_static
+                                && existing.func.is_some()
+                                && (existing.is_getter || existing.is_setter)
+                                && !(existing.is_getter && existing.is_setter)
+                                && existing.is_getter != is_getter
+                            {
+                                if is_getter {
+                                    // Setter was parsed first: swap so `func`
+                                    // holds the getter and `second_func` the setter.
+                                    existing.second_func = existing.func.take();
+                                    existing.func = func.take();
+                                    existing.is_getter = true;
+                                } else {
+                                    existing.second_func = func.take();
+                                    existing.is_setter = true;
+                                }
+                                merged = true;
+                                break;
+                            }
+                        }
+                    }
+                    if merged {
+                        if self.tok.kind == TokenKind::Semicolon {
+                            self.advance();
+                        }
+                        continue;
+                    }
+                    private_fields.push(PrivateField {
+                        name,
+                        init: None,
+                        is_static,
+                        func,
+                        second_func: None,
+                        is_getter,
+                        is_setter,
+                        span: Span {
+                            start: mstart.start,
+                            end: self.span().end,
+                        },
+                    });
+                } else {
+                    // Private field: #name or #name = expr
+                    let init = if self.tok.kind == TokenKind::EqAssign {
+                        self.advance(); // consume '='
+                        Some(Box::new(self.parse_expr(0)))
+                    } else {
+                        None
+                    };
+                    private_fields.push(PrivateField {
+                        name,
+                        init,
+                        is_static,
+                        func: None,
+                        second_func: None,
+                        is_getter: false,
+                        is_setter: false,
+                        span: Span {
+                            start: mstart.start,
+                            end: self.span().end,
+                        },
+                    });
+                }
+                if self.tok.kind == TokenKind::Semicolon {
+                    self.advance();
+                }
+                continue;
+            }
             let key = if self.tok.kind == TokenKind::LBracket {
                 // Computed property key: [expr]() {}
                 self.advance();
@@ -361,6 +424,34 @@ impl Parser {
             }
         }
         self.expect(TokenKind::RBrace);
+        // §15.7.1 early error: duplicate private names are a SyntaxError unless
+        // the name is used once as a getter and once as a setter (same static-ness).
+        let mut checked: Vec<(Box<str>, bool)> = Vec::new();
+        for (i, pf) in private_fields.iter().enumerate() {
+            if checked.iter().any(|(n, _)| n.as_ref() == pf.name.as_ref()) {
+                continue;
+            }
+            let others: Vec<&PrivateField> = private_fields
+                .iter()
+                .enumerate()
+                .filter(|(j, o)| *j != i && o.name.as_ref() == pf.name.as_ref())
+                .map(|(_, o)| o)
+                .collect();
+            if !others.is_empty() {
+                let all = std::iter::once(pf)
+                    .chain(others.iter().copied())
+                    .collect::<Vec<_>>();
+                let is_getter_setter_pair = all.len() == 2
+                    && all.iter().all(|p| p.is_static == pf.is_static)
+                    && all.iter().all(|p| p.is_getter || p.is_setter)
+                    && all.iter().filter(|p| p.is_getter).count() == 1
+                    && all.iter().filter(|p| p.is_setter).count() == 1;
+                if !is_getter_setter_pair {
+                    self.error(format!("Duplicate private name #{} in class body", pf.name));
+                }
+            }
+            checked.push((pf.name.clone(), pf.is_static));
+        }
         (methods, private_fields)
     }
 
@@ -1535,6 +1626,8 @@ impl Parser {
                             key: PropKey::String(Box::from("")),
                             value,
                             is_spread: true,
+                            is_getter: false,
+                            is_setter: false,
                             span: Span {
                                 start: pstart.start,
                                 end: self.span().end,
@@ -1559,6 +1652,8 @@ impl Parser {
                                     },
                                 ),
                                 is_spread: false,
+                                is_getter: false,
+                                is_setter: false,
                                 span: Span {
                                     start: pstart.start,
                                     end: self.span().end,
@@ -1571,6 +1666,8 @@ impl Parser {
                                 key: PropKey::Computed(Box::new(key_expr)),
                                 value,
                                 is_spread: false,
+                                is_getter: false,
+                                is_setter: false,
                                 span: Span {
                                     start: pstart.start,
                                     end: self.span().end,
@@ -1578,8 +1675,66 @@ impl Parser {
                             });
                         }
                     } else {
-                        let key = self.parse_prop_key();
-                        if self.tok.kind == TokenKind::LParen {
+                        // Detect accessor: `get key() {}` / `set key(v) {}`
+                        // (not when followed by ':' — regular key named get/set)
+                        let (is_getter, is_setter) = if self.tok.kind == TokenKind::Identifier
+                            && self.tok.value == "get"
+                            && self.lexer.peek_token().kind != TokenKind::LParen
+                            && self.lexer.peek_token().kind != TokenKind::Colon
+                        {
+                            self.advance();
+                            (true, false)
+                        } else if self.tok.kind == TokenKind::Identifier
+                            && self.tok.value == "set"
+                            && self.lexer.peek_token().kind != TokenKind::LParen
+                            && self.lexer.peek_token().kind != TokenKind::Colon
+                        {
+                            self.advance();
+                            (false, true)
+                        } else {
+                            (false, false)
+                        };
+                        let key = if self.tok.kind == TokenKind::LBracket {
+                            // Computed accessor key: get [expr]() {}
+                            self.advance();
+                            let key_expr = self.parse_expr(0);
+                            self.expect(TokenKind::RBracket);
+                            PropKey::Computed(Box::new(key_expr))
+                        } else {
+                            self.parse_prop_key()
+                        };
+                        if is_getter || is_setter {
+                            let name = match &key {
+                                PropKey::Identifier(n) => Some(n.clone()),
+                                PropKey::String(n) => Some(n.clone()),
+                                PropKey::Number(n) => Some(Box::from(n.to_string())),
+                                _ => None,
+                            };
+                            let fn_body = self.parse_function_body(name, false, false, pstart);
+                            if is_getter && !fn_body.params.is_empty() {
+                                self.error("Getter must have 0 parameters".to_string());
+                            }
+                            if is_setter && fn_body.params.len() != 1 {
+                                self.error("Setter must have exactly 1 parameter".to_string());
+                            }
+                            props.push(Property {
+                                key,
+                                value: Expr::Function(
+                                    Box::new(fn_body),
+                                    Span {
+                                        start: pstart.start,
+                                        end: self.span().end,
+                                    },
+                                ),
+                                is_spread: false,
+                                is_getter,
+                                is_setter,
+                                span: Span {
+                                    start: pstart.start,
+                                    end: self.span().end,
+                                },
+                            });
+                        } else if self.tok.kind == TokenKind::LParen {
                             // Method shorthand: { foo() { body } }
                             let name = match &key {
                                 PropKey::Identifier(n) => Some(n.clone()),
@@ -1598,6 +1753,8 @@ impl Parser {
                                     },
                                 ),
                                 is_spread: false,
+                                is_getter: false,
+                                is_setter: false,
                                 span: Span {
                                     start: pstart.start,
                                     end: self.span().end,
@@ -1611,6 +1768,8 @@ impl Parser {
                                 key,
                                 value,
                                 is_spread: false,
+                                is_getter: false,
+                                is_setter: false,
                                 span: Span {
                                     start: pstart.start,
                                     end: self.span().end,
@@ -1636,6 +1795,8 @@ impl Parser {
                                 key,
                                 value,
                                 is_spread: false,
+                                is_getter: false,
+                                is_setter: false,
                                 span: Span {
                                     start: pstart.start,
                                     end: self.span().end,

@@ -55,6 +55,8 @@ pub struct Property {
     pub key: PropKey,
     pub value: Expr,
     pub is_spread: bool,
+    pub is_getter: bool,
+    pub is_setter: bool,
     pub span: Span,
 }
 
@@ -167,6 +169,12 @@ pub struct PrivateField {
     pub name: Box<str>,
     pub init: Option<Box<Expr>>,
     pub is_static: bool,
+    /// Present for private methods/accessors (`#m() {}`, `get #x() {}`, `set #x(v) {}`).
+    pub func: Option<Box<FnNode>>,
+    /// Second accessor of a merged `get #x` + `set #x` pair (the first lives in `func`).
+    pub second_func: Option<Box<FnNode>>,
+    pub is_getter: bool,
+    pub is_setter: bool,
     pub span: Span,
 }
 

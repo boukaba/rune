@@ -133,6 +133,7 @@ pub enum Opcode {
     LoadPrivateProperty, // pop obj, private slot index → PrivateGet
     StorePrivateProperty, // pop value, obj, private slot index → PrivateSet
     DefinePrivateField, // pop value, obj, private slot index → PrivateFieldAdd
+    MakeAccessorPair, // pop setter, pop getter → push AccessorPair (private accessors)
 }
 
 #[derive(Clone, Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]

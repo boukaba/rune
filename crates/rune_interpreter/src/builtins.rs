@@ -3777,12 +3777,8 @@ pub fn object_prototype_to_string(
         "Undefined".to_string()
     } else if this.is_null() {
         "Null".to_string()
-    } else if let Some(b) = this.to_boolean() {
-        if b {
-            "Boolean".to_string()
-        } else {
-            "Boolean".to_string()
-        }
+    } else if this.to_boolean().is_some() {
+        "Boolean".to_string()
     } else if this.is_symbol() {
         "Symbol".to_string()
     } else if this.is_smi() || this.as_float64().is_some() {
@@ -3888,7 +3884,7 @@ pub fn object_prototype_has_own_property(
         TAG_TYPED_ARRAY => {
             if let Some(index) = value_to_array_index(key) {
                 let len = unsafe { rune_core::typedarray::RuneTypedArray::length(ptr) };
-                index < len as usize
+                index < len
             } else {
                 key_is_str("length")
                     || key_is_str("byteLength")
@@ -3951,7 +3947,7 @@ pub fn object_prototype_property_is_enumerable(
         TAG_TYPED_ARRAY => {
             if let Some(index) = value_to_array_index(key) {
                 let len = unsafe { rune_core::typedarray::RuneTypedArray::length(ptr) };
-                index < len as usize
+                index < len
             } else {
                 key_is_str("length")
                     || key_is_str("byteLength")

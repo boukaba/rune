@@ -1785,7 +1785,7 @@ impl Vm {
                         if shape.lookup(&PROTOTYPE_KEY).is_none() {
                             JSObject::add_property(
                                 ptr as *mut JSObject,
-                                PROTOTYPE_KEY.clone(),
+                                *PROTOTYPE_KEY,
                                 "prototype".to_string(),
                                 self.object_prototype,
                             );
@@ -4260,7 +4260,7 @@ impl Vm {
                                 };
                                 if let Some(k) = key_str {
                                     if k == "name" {
-                                        let hs = HeapString::allocate(gc, &self.builtins[id].name)
+                                        let hs = HeapString::allocate(gc, self.builtins[id].name)
                                             as *mut u8;
                                         self.push(Value::from_heap_ptr(hs));
                                         self.frames[fi].pc = pc + 1;

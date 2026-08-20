@@ -30,6 +30,11 @@ pub enum Edge {
     /// Zero-width anchor assertions (preserve Thompson NFA→PikeVM arch; checked at current pos).
     AnchorStart(usize),
     AnchorEnd(usize),
+    /// Word boundary assertion: `\b` (negated=false) or `\B` (negated=true).
+    WordBoundary {
+        negated: bool,
+        target: usize,
+    },
 }
 
 pub struct Nfa {
@@ -190,6 +195,16 @@ fn compile_expr(
             let s2 = alloc_state(states);
             states[s2].is_match = true;
             states[s1].edges.push(Edge::AnchorEnd(s2));
+            (s1, s2)
+        }
+        RegexExpr::WordBoundary { negated } => {
+            let s1 = alloc_state(states);
+            let s2 = alloc_state(states);
+            states[s2].is_match = true;
+            states[s1].edges.push(Edge::WordBoundary {
+                negated: *negated,
+                target: s2,
+            });
             (s1, s2)
         }
         RegexExpr::Backref(_) => {

@@ -15,6 +15,9 @@ pub enum RegexExpr {
     },
     AnchorStart,
     AnchorEnd,
+    WordBoundary {
+        negated: bool,
+    },
     Backref(usize),
     /// Zero-width lookahead assertion: the inner expression must match
     /// starting at the current position (negated = negative lookahead).

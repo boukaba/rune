@@ -175,10 +175,7 @@ fn parse_atom(chars: &[char], i: &mut usize) -> Result<RegexExpr, String> {
                         Ok(RegexExpr::Backref(n as usize))
                     }
                 }
-                'b' | 'B' => {
-                    // Word boundary — simplified: skip
-                    Ok(RegexExpr::Empty)
-                }
+                'b' | 'B' => Ok(RegexExpr::WordBoundary { negated: c == 'B' }),
                 'n' => Ok(RegexExpr::Literal('\n')),
                 'r' => Ok(RegexExpr::Literal('\r')),
                 't' => Ok(RegexExpr::Literal('\t')),

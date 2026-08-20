@@ -13,6 +13,11 @@ struct Thread {
     saves: Vec<Option<usize>>,
 }
 
+#[inline]
+fn is_word_char(c: char) -> bool {
+    matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '_')
+}
+
 impl Default for PikeVm {
     fn default() -> Self {
         Self::new()
@@ -88,7 +93,8 @@ impl PikeVm {
                             | Edge::Save(_, _)
                             | Edge::Lookahead { .. }
                             | Edge::AnchorStart(_)
-                            | Edge::AnchorEnd(_) => {}
+                            | Edge::AnchorEnd(_)
+                            | Edge::WordBoundary { .. } => {}
                         }
                     }
                 }
@@ -199,6 +205,30 @@ fn follow_nonconsuming(threads: &[Thread], nfa: &Nfa, pos: usize, chars: &[char]
                         }
                     }
                 }
+                Edge::WordBoundary { negated, target } => {
+                    has_nonconsuming = true;
+                    let left_is_word = if pos == 0 {
+                        false
+                    } else {
+                        is_word_char(chars[pos - 1])
+                    };
+                    let right_is_word = if pos >= chars.len() {
+                        false
+                    } else {
+                        is_word_char(chars[pos])
+                    };
+                    let is_boundary = left_is_word != right_is_word;
+                    let ok = if *negated { !is_boundary } else { is_boundary };
+                    if ok {
+                        let new_t = Thread {
+                            pc: *target,
+                            saves: t.saves.clone(),
+                        };
+                        if !in_sets(&new_t, &worklist, &result) {
+                            worklist.push(new_t);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -273,7 +303,8 @@ fn lookahead_matches(
                     | Edge::Save(_, _)
                     | Edge::Lookahead { .. }
                     | Edge::AnchorStart(_)
-                    | Edge::AnchorEnd(_) => {}
+                    | Edge::AnchorEnd(_)
+                    | Edge::WordBoundary { .. } => {}
                 }
             }
         }

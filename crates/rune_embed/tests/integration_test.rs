@@ -6219,6 +6219,66 @@ fn test_regexp_anchors() {
 }
 
 #[test]
+fn test_regexp_word_boundaries() {
+    let mut ctx = Context::new_small();
+    // \b matches word boundary (transition between \w and \W or string edge)
+    assert_eq!(
+        ctx.eval(r#"/\bword\b/.test("word")"#).unwrap().to_boolean(),
+        Some(true)
+    );
+    assert_eq!(
+        ctx.eval(r#"/\bword\b/.test("xword")"#)
+            .unwrap()
+            .to_boolean(),
+        Some(false)
+    );
+    assert_eq!(
+        ctx.eval(r#"/\bword\b/.test("wordx")"#)
+            .unwrap()
+            .to_boolean(),
+        Some(false)
+    );
+    assert_eq!(
+        ctx.eval(r#"/\bhello\b/.test("hello world")"#)
+            .unwrap()
+            .to_boolean(),
+        Some(true)
+    );
+    assert_eq!(
+        ctx.eval(r#"/\bhello\b/.test("ahello")"#)
+            .unwrap()
+            .to_boolean(),
+        Some(false)
+    );
+    // \B matches non-boundary
+    assert_eq!(
+        ctx.eval(r#"/\Bword\B/.test("xwordx")"#)
+            .unwrap()
+            .to_boolean(),
+        Some(true)
+    );
+    assert_eq!(
+        ctx.eval(r#"/\Bword\B/.test(" word ") "#)
+            .unwrap()
+            .to_boolean(),
+        Some(false)
+    );
+    // \b at start/end edge cases
+    assert_eq!(
+        ctx.eval(r#"/\b/.test("a")"#).unwrap().to_boolean(),
+        Some(true)
+    );
+    assert_eq!(
+        ctx.eval(r#"/\B/.test("a")"#).unwrap().to_boolean(),
+        Some(false)
+    );
+    assert_eq!(
+        ctx.eval(r#"/\b/.test("")"#).unwrap().to_boolean(),
+        Some(false)
+    );
+}
+
+#[test]
 fn test_regexp_search_resets_lastindex() {
     let mut ctx = Context::new_small();
     assert_eq!(

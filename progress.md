@@ -3554,7 +3554,7 @@ during the run, both clean, final result `114330883345000` correct.
 
 - [x] **C0 — Baseline lightweight conformance measure + docs sync (this slice)** — no OOM: per-file `Context::new_small` runner, single-suite metrics only; sync `progress.md/AGENTS.md/README.md`; CI already `branches: [main]` valid (prior review outdated). Verified locally: 620/620 integration (3 ignored), 781 workspace, fmt/clippy clean; sample test262 `language/types` 55/39/19, `language/asi` 56/11/35; `built-ins/Array` OOM at 20M need >16M semispace (known).
 - [x] **C1 — RegExp anchors ^/$** — added `Edge::AnchorStart/AnchorEnd` (nfa.rs:178 was no-op `(s,s)`) + `follow_nonconsuming` pos==0/len checks + PikeVM `start>len` guard and `pos..=len` inclusive loop for `^$` empty and `$` zero-length at end; sticky-aware via VM post-check. Preserved Thompson NFA→PikeVM arch. 1 new integration test `test_regexp_anchors` (8 cases), 621/621 integ, 17 regex unit pass.
-- [ ] **C2 — RegExp \b/\B word boundaries** — new `Edge::WordBoundary{negated}` + `is_word_char` helper (ASCII `[A-Za-z0-9_]`, extend later for unicode), pos 0/len edge cases.
+- [x] **C2 — RegExp \b/\B word boundaries** — added `RegexExpr::WordBoundary{negated}` (parse.rs `Empty` was skip) + `Edge::WordBoundary{negated,target}` (nfa.rs) + `follow_nonconsuming` `left!=right` boundary via `is_word_char=[A-Za-z0-9_]` (pikevm.rs), `pos..=len` handled 0/len as non-word. 1 new integration test `test_regexp_word_boundaries` (9 cases), 622/622 integ.
 - [ ] **C3 — RegExp backrefs \1..9** — replay capture `saves[slot]` substring equality in PikeVM (preserve Save slots `2*cap+2`).
 - [ ] **C4 — RegExp semantics leftmost-first + flags i/m/s** — fix `exec` longest→first-match + case-fold + dotAll + multiline ^/$ per `m` flag.
 - [ ] **C5 — ToNumber(symbol) TypeError** — plumb `pending_exception` through 33 `to_number` call sites (preserve Value tag 6, bail-to-interpreter).
@@ -3572,4 +3572,12 @@ during the run, both clean, final result `114330883345000` correct.
 - [x] **NFA `Edge::AnchorStart/AnchorEnd` (nfa.rs:10-32)** — was single-state no-op `(s,s)`; now two-state `s1→AnchorStart(s2)` / `AnchorEnd(s2)` (preserve Thompson NFA→PikeVM arch, no heap Float64)
 - [x] **PikeVM `follow_nonconsuming` (pikevm.rs:152-188)** — zero-width checks `pos==0` for `^`, `pos==len` for `$`, `pos..=len` inclusive loop for `^$` empty string and `$` zero-length at end (`start>len` guard instead of `>=`), `add_thread` epsilon only; `lookahead_matches` also gains Anchor ignore arms (char advancement)
 - [x] **Lightweight verification** — CLI: `^abc` vs `xabc` false, `abc$` vs `abcx` false, `^abc$` true, `^$` empty true; sticky `r=/a/y exec("baa")` still null (VM sticky check preserved); 621/621 integration (new `test_regexp_anchors`), 17/17 regex unit; fmt/clippy clean; no arch breakage (SIDT/GC/AFPC intact)
-- **Known gaps remaining:** `\b/\B` still no-op, backrefs no-op, longest-match not leftmost-first, flags `i/m/s` not yet
+- **Known gaps remaining:** backrefs no-op, longest-match not leftmost-first, flags `i/m/s` not yet
+
+## C2 — RegExp word boundaries \b/\B (2026-08-21)
+
+- [x] **AST `RegexExpr::WordBoundary{negated}` (ast.rs:16)** — `\b`=false, `\B`=true; parser `Empty` skip → proper variant (preserve char class `[A-Za-z0-9_]` via `\w` already)
+- [x] **NFA `Edge::WordBoundary{negated,target}` (nfa.rs:30)** — two-state zero-width, like Anchor
+- [x] **PikeVM `follow_nonconsuming` (pikevm.rs:210) + `is_word_char` helper** — `left = pos>0 && is_word(chars[pos-1])`, `right = pos<len && is_word(chars[pos])`, `is_boundary = left!=right`, `ok = negated?!is_boundary:is_boundary`; `pos..=len` inclusive for start/end, `lookahead_matches` also ignores WordBoundary in char advancement
+- [x] **Verification** — CLI `/\bword\b/` on `word` true, `xword`/`wordx` false, `/\Bword\B/` on `xwordx` true, `/\b/` on `a` true, `/\B/` on `a` false, `/\b/` on `` false; 622/622 integ (new test), 17/17 regex, fmt/clippy clean
+- **Known gaps:** backrefs no-op, longest-match semantics still longest not leftmost, flags `i/m/s` pending

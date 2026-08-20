@@ -3555,7 +3555,7 @@ during the run, both clean, final result `114330883345000` correct.
 - [x] **C0 — Baseline lightweight conformance measure + docs sync (this slice)** — no OOM: per-file `Context::new_small` runner, single-suite metrics only; sync `progress.md/AGENTS.md/README.md`; CI already `branches: [main]` valid (prior review outdated). Verified locally: 620/620 integration (3 ignored), 781 workspace, fmt/clippy clean; sample test262 `language/types` 55/39/19, `language/asi` 56/11/35; `built-ins/Array` OOM at 20M need >16M semispace (known).
 - [x] **C1 — RegExp anchors ^/$** — added `Edge::AnchorStart/AnchorEnd` (nfa.rs:178 was no-op `(s,s)`) + `follow_nonconsuming` pos==0/len checks + PikeVM `start>len` guard and `pos..=len` inclusive loop for `^$` empty and `$` zero-length at end; sticky-aware via VM post-check. Preserved Thompson NFA→PikeVM arch. 1 new integration test `test_regexp_anchors` (8 cases), 621/621 integ, 17 regex unit pass.
 - [x] **C2 — RegExp \b/\B word boundaries** — added `RegexExpr::WordBoundary{negated}` (parse.rs `Empty` was skip) + `Edge::WordBoundary{negated,target}` (nfa.rs) + `follow_nonconsuming` `left!=right` boundary via `is_word_char=[A-Za-z0-9_]` (pikevm.rs), `pos..=len` handled 0/len as non-word. 1 new integration test `test_regexp_word_boundaries` (9 cases), 622/622 integ.
-- [ ] **C3 — RegExp backrefs \1..9** — replay capture `saves[slot]` substring equality in PikeVM (preserve Save slots `2*cap+2`).
+- [x] **C3 — RegExp backrefs \1..9** — added `Edge::Backref{index,target}` (nfa.rs was `(s,s)` no-op) + per-start queue in `PikeVM::exec` (`queues[remaining+1]`), `follow_nonconsuming` empty→epsilon, `main` loop `curPos+cap_len` substring equality via `chars[s + k]==chars[curPos+k]`, out-of-range→fail, empty/non-participating→epsilon; preserves `Save` slots `2*cap+2` and Thomson NFA→PikeVM arch; 1 new integration test `test_regexp_backrefs` (9 cases), 623/623 integ.
 - [ ] **C4 — RegExp semantics leftmost-first + flags i/m/s** — fix `exec` longest→first-match + case-fold + dotAll + multiline ^/$ per `m` flag.
 - [ ] **C5 — ToNumber(symbol) TypeError** — plumb `pending_exception` through 33 `to_number` call sites (preserve Value tag 6, bail-to-interpreter).
 - [ ] **C6 — Full Error type set globals** — audit `Vm.error_ctors Vec` (Error/EvalError/RangeError/ReferenceError/SyntaxError/TypeError/URIError via `to_string_for_error`), ensure `TypeError` real global not just `make_error_object`.
@@ -3580,4 +3580,14 @@ during the run, both clean, final result `114330883345000` correct.
 - [x] **NFA `Edge::WordBoundary{negated,target}` (nfa.rs:30)** — two-state zero-width, like Anchor
 - [x] **PikeVM `follow_nonconsuming` (pikevm.rs:210) + `is_word_char` helper** — `left = pos>0 && is_word(chars[pos-1])`, `right = pos<len && is_word(chars[pos])`, `is_boundary = left!=right`, `ok = negated?!is_boundary:is_boundary`; `pos..=len` inclusive for start/end, `lookahead_matches` also ignores WordBoundary in char advancement
 - [x] **Verification** — CLI `/\bword\b/` on `word` true, `xword`/`wordx` false, `/\Bword\B/` on `xwordx` true, `/\b/` on `a` true, `/\B/` on `a` false, `/\b/` on `` false; 622/622 integ (new test), 17/17 regex, fmt/clippy clean
-- **Known gaps:** backrefs no-op, longest-match semantics still longest not leftmost, flags `i/m/s` pending
+- **Known gaps:** longest-match semantics still longest not leftmost, flags `i/m/s` pending
+
+## C3 — RegExp backrefs \1..9 (2026-08-21)
+
+- [x] **AST/NFA `RegexExpr::Backref(idx)` → `Edge::Backref{index,target}` (nfa.rs:210)** — was `(s,s)` no-op, now two-state with target
+- [x] **Parser `\\0`→`'\0'` vs `\\1..9`→Backref** — already correct (parse.rs:170), no change
+- [x] **PikeVM `exec` per-start queue (pikevm.rs:32)** — `queues[remaining+1]` per `pos` start, `offset` loop with `curPos=pos+offset`, `expanded=follow(curPos)`, longest tracking per start, `curPos+cap_len` enqueue for non-empty backref substring equality (`chars[s+k]==chars[curPos+k]`), empty/non-participating handled as epsilon in `follow_nonconsuming` (Backref empty → epsilon, non-empty → leave for main loop)
+- [x] **Follow empty case** — `(Some(s),Some(e)) e==s` or `None` → epsilon push target; non-empty → not epsilon (stay in expanded for main loop)
+- [x] **Lookahead char loop** — ignores `Backref` (subpatterns with backref rare; deferred)
+- [x] **Verification** — CLI `/(a)\\1/` on `aa` true/`ab` false, `/(ab)\\1/` on `abab` true, `/(a)(b)\\1\\2` on `abab` true, `\\B` cross-check still true, `/(a+)\1/` on `aaa` → `aa`/`a` correct, `/(a)?\\1/` non-participating empty → true; 623/623 integ (new test), 17/17 regex, fmt/clippy clean
+- **Known gaps:** longest-match still longest (spec leftmost-first), flags `i/m/s` pending, backref in lookahead not yet

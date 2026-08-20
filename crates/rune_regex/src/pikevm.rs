@@ -37,43 +37,44 @@ impl PikeVm {
 
         let num_slots = (nfa.num_captures + 1) * 2;
 
+        // Leftmost start loop — try each position as match start (ECMAScript leftmost)
         for pos in start..=chars.len() {
-            let mut clist: Vec<Thread> = Vec::new();
-            add_thread(&mut clist, nfa, nfa.start, &vec![None; num_slots]);
+            let remaining = chars.len() - pos;
+            // queues[offset] = threads that are at absolute pos = pos+offset and are ready to be expanded
+            let mut queues: Vec<Vec<Thread>> = vec![Vec::new(); remaining + 1];
+            add_thread(&mut queues[0], nfa, nfa.start, &vec![None; num_slots]);
+            let mut longest: Option<Match> = None;
 
-            let mut longest_match: Option<Match> = None;
-
-            for (i, &c) in chars[pos..].iter().enumerate() {
-                let p = pos + i;
-                if clist.is_empty() {
-                    break;
+            for offset in 0..queues.len() {
+                let cur_pos = pos + offset;
+                let cur_threads = std::mem::take(&mut queues[offset]);
+                if cur_threads.is_empty() {
+                    continue;
                 }
-
-                // Follow Save and Epsilon edges (non-consuming) until fixpoint
-                let expanded = follow_nonconsuming(&clist, nfa, p, &chars);
-
-                // Check match in expanded threads
+                let expanded = follow_nonconsuming(&cur_threads, nfa, cur_pos, &chars);
+                // Check for match at cur_pos (after epsilon closure)
                 for t in &expanded {
                     if nfa.states[t.pc].is_match {
-                        let match_groups = build_groups(&t.saves, pos, p, nfa.num_captures);
-                        let should_replace = match &longest_match {
+                        let m = build_groups(&t.saves, pos, cur_pos, nfa.num_captures);
+                        let should_replace = match &longest {
                             None => true,
-                            Some(prev) => p > prev.groups[0].1,
+                            Some(prev) => cur_pos > prev.groups[0].1,
                         };
                         if should_replace {
-                            longest_match = Some(match_groups);
+                            longest = Some(m);
                         }
                     }
                 }
-
-                // Advance threads with current character
-                let mut nlist: Vec<Thread> = Vec::new();
+                if cur_pos == chars.len() {
+                    continue;
+                }
+                let c = chars[cur_pos];
                 for t in &expanded {
                     for edge in &nfa.states[t.pc].edges {
                         match edge {
                             Edge::Char(ch, target) => {
                                 if *ch == c {
-                                    add_thread(&mut nlist, nfa, *target, &t.saves);
+                                    add_thread(&mut queues[offset + 1], nfa, *target, &t.saves);
                                 }
                             }
                             Edge::CharClass {
@@ -83,41 +84,60 @@ impl PikeVm {
                             } => {
                                 let in_class = ranges.iter().any(|(lo, hi)| c >= *lo && c <= *hi);
                                 if *negated != in_class {
-                                    add_thread(&mut nlist, nfa, *target, &t.saves);
+                                    add_thread(&mut queues[offset + 1], nfa, *target, &t.saves);
                                 }
                             }
                             Edge::Dot(target) => {
-                                add_thread(&mut nlist, nfa, *target, &t.saves);
+                                add_thread(&mut queues[offset + 1], nfa, *target, &t.saves);
                             }
-                            Edge::Epsilon(_)
-                            | Edge::Save(_, _)
-                            | Edge::Lookahead { .. }
-                            | Edge::AnchorStart(_)
-                            | Edge::AnchorEnd(_)
-                            | Edge::WordBoundary { .. } => {}
+                            Edge::Backref { index, target } => {
+                                if *index == 0 {
+                                    continue;
+                                }
+                                let s_idx = (*index - 1) * 2 + 2;
+                                let e_idx = (*index - 1) * 2 + 3;
+                                if s_idx >= t.saves.len() || e_idx >= t.saves.len() {
+                                    continue;
+                                }
+                                match (t.saves[s_idx], t.saves[e_idx]) {
+                                    (Some(s), Some(e)) => {
+                                        let cap_len = e - s;
+                                        if cap_len == 0 {
+                                            // Empty — already handled as epsilon in follow, skip here
+                                            continue;
+                                        }
+                                        if cur_pos + cap_len <= chars.len() {
+                                            let mut ok = true;
+                                            for k in 0..cap_len {
+                                                if chars[s + k] != chars[cur_pos + k] {
+                                                    ok = false;
+                                                    break;
+                                                }
+                                            }
+                                            if ok {
+                                                // Enqueue after consuming cap_len chars
+                                                if offset + cap_len < queues.len() {
+                                                    add_thread(
+                                                        &mut queues[offset + cap_len],
+                                                        nfa,
+                                                        *target,
+                                                        &t.saves,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        // Non-participating → empty, handled in follow
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
-                clist = nlist;
             }
-
-            // Check match at end of string
-            let expanded = follow_nonconsuming(&clist, nfa, chars.len(), &chars);
-            for t in &expanded {
-                if nfa.states[t.pc].is_match {
-                    let end_pos = chars.len();
-                    let match_groups = build_groups(&t.saves, pos, end_pos, nfa.num_captures);
-                    let should_replace = match &longest_match {
-                        None => true,
-                        Some(prev) => end_pos > prev.groups[0].1,
-                    };
-                    if should_replace {
-                        longest_match = Some(match_groups);
-                    }
-                }
-            }
-
-            if let Some(m) = longest_match {
+            if let Some(m) = longest {
                 return Some(m);
             }
         }
@@ -229,6 +249,36 @@ fn follow_nonconsuming(threads: &[Thread], nfa: &Nfa, pos: usize, chars: &[char]
                         }
                     }
                 }
+                Edge::Backref { index, target } => {
+                    // Empty or non-participating backref acts as epsilon (zero-width)
+                    // at same position; non-empty is handled as consuming in the main loop.
+                    if *index == 0 {
+                        has_nonconsuming = true;
+                        continue;
+                    }
+                    let s_idx = (*index - 1) * 2 + 2;
+                    let e_idx = (*index - 1) * 2 + 3;
+                    if s_idx >= t.saves.len() || e_idx >= t.saves.len() {
+                        has_nonconsuming = true;
+                        continue;
+                    }
+                    match (t.saves[s_idx], t.saves[e_idx]) {
+                        (Some(s), Some(e)) if e != s => {
+                            // Non-empty: consuming, leave for main loop — do not mark as non-consuming
+                        }
+                        _ => {
+                            // Empty or non-participating → epsilon
+                            has_nonconsuming = true;
+                            let new_t = Thread {
+                                pc: *target,
+                                saves: t.saves.clone(),
+                            };
+                            if !in_sets(&new_t, &worklist, &result) {
+                                worklist.push(new_t);
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -304,7 +354,8 @@ fn lookahead_matches(
                     | Edge::Lookahead { .. }
                     | Edge::AnchorStart(_)
                     | Edge::AnchorEnd(_)
-                    | Edge::WordBoundary { .. } => {}
+                    | Edge::WordBoundary { .. }
+                    | Edge::Backref { .. } => {}
                 }
             }
         }

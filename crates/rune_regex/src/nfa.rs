@@ -35,6 +35,11 @@ pub enum Edge {
         negated: bool,
         target: usize,
     },
+    /// Backreference to capture group `index` (1-indexed).
+    Backref {
+        index: usize,
+        target: usize,
+    },
 }
 
 pub struct Nfa {
@@ -207,9 +212,15 @@ fn compile_expr(
             });
             (s1, s2)
         }
-        RegexExpr::Backref(_) => {
-            let s = alloc_state(states);
-            (s, s)
+        RegexExpr::Backref(idx) => {
+            let s1 = alloc_state(states);
+            let s2 = alloc_state(states);
+            states[s2].is_match = true;
+            states[s1].edges.push(Edge::Backref {
+                index: *idx,
+                target: s2,
+            });
+            (s1, s2)
         }
     }
 }

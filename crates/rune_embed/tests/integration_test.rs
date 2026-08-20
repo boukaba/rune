@@ -6279,6 +6279,53 @@ fn test_regexp_word_boundaries() {
 }
 
 #[test]
+fn test_regexp_backrefs() {
+    let mut ctx = Context::new_small();
+    // Simple backref (a)\1
+    assert_eq!(
+        ctx.eval(r#"/(a)\1/.test("aa")"#).unwrap().to_boolean(),
+        Some(true)
+    );
+    assert_eq!(
+        ctx.eval(r#"/(a)\1/.test("ab")"#).unwrap().to_boolean(),
+        Some(false)
+    );
+    assert_eq!(
+        ctx.eval(r#"/(ab)\1/.test("abab")"#).unwrap().to_boolean(),
+        Some(true)
+    );
+    assert_eq!(
+        ctx.eval(r#"/(ab)\1/.test("abac")"#).unwrap().to_boolean(),
+        Some(false)
+    );
+    // Multiple backrefs (a)(b)\1\2 → abab
+    assert_eq!(
+        ctx.eval(r#"/(a)(b)\1\2/.test("abab")"#)
+            .unwrap()
+            .to_boolean(),
+        Some(true)
+    );
+    assert_eq!(
+        ctx.eval(r#"/(a)(b)\2\1/.test("abba")"#)
+            .unwrap()
+            .to_boolean(),
+        Some(true)
+    );
+    // Backref to non-participating group acts as empty
+    assert_eq!(
+        ctx.eval(r#"/(a)?\1/.test("aa")"#).unwrap().to_boolean(),
+        Some(true)
+    );
+    assert_eq!(
+        ctx.eval(r#"/(a)?\1/.test("b")"#).unwrap().to_boolean(),
+        Some(true)
+    );
+    // (a+)\1 with greedy quantifier
+    assert_eq!(eval_str(&mut ctx, r#"/(a+)\1/.exec("aaa")[0]"#), "aa");
+    assert_eq!(eval_str(&mut ctx, r#"/(a+)\1/.exec("aaa")[1]"#), "a");
+}
+
+#[test]
 fn test_regexp_search_resets_lastindex() {
     let mut ctx = Context::new_small();
     assert_eq!(

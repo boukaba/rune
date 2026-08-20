@@ -36,40 +36,27 @@ pub struct TestCase {
 
 /// Features we definitely do NOT support yet.
 const UNSUPPORTED_FEATURES: &[&str] = &[
-    "class",
-    "class-fields",
-    "class-fields-private",
-    "class-methods-private",
-    "class-static-fields-private",
-    "class-static-fields-public",
-    "class-static-methods-private",
+    "bigint",
+    "BigInt",
+    "class-static-block",
     "cross-realm",
     "dynamic-import",
-    "export",
-    "import",
+    "error-cause",
+    "error-stack-accessor",
     "import-assertions",
     "import-attributes",
     "iterator-helpers",
-    "json",
-    "map",
-    "modules",
-    "promise",
     "proxy",
     "reflect",
-    "regexp",
     "regexp-dotall",
     "regexp-lookbehind",
     "regexp-named-groups",
     "regexp-unicode-property-escape",
     "regexp-v-flag",
-    "set",
     "set-methods",
     "shadowrealm",
     "shared-array-buffer",
-    "string-trimming",
-    "symbol",
     "top-level-await",
-    "typedarray",
     "weakmap",
     "weakref",
     "weakset",
@@ -167,8 +154,9 @@ fn build_test_source(test: &TestCase) -> Result<String, String> {
     let harness_dir = test.suite_dir.join("harness");
 
     // Don't inject sta.js — builtins provide Test262Error, $DONOTEVALUATE
-    // Don't inject assert.js — uses unsupported features (typeof, JSON, bigint, etc.)
-    // Include other requested harness files (skip known ones that use unsupported features)
+    // Don't inject assert.js — builtins provide an `assert` wrapper
+    // (sameValue/throws/...). Include other requested harness files (skip
+    // known ones that use unsupported features).
     const SKIP_INCLUDES: &[&str] = &[
         "sta.js",
         "sta",
@@ -185,8 +173,17 @@ fn build_test_source(test: &TestCase) -> Result<String, String> {
         "propertyHelper.js",
     ];
 
+    // Harness files whose behaviour is emulated by builtins, so tests that
+    // include them can still run faithfully.
+    const EMULATED_INCLUDES: &[&str] = &["sta.js", "sta", "assert.js", "assert"];
+
     for include in &test.meta.includes {
         if SKIP_INCLUDES.contains(&include.as_str()) {
+            // If the harness is NOT emulated by builtins, the test cannot be
+            // executed faithfully — signal the caller to skip it.
+            if !EMULATED_INCLUDES.contains(&include.as_str()) {
+                return Err(format!("unsupported harness include: {include}"));
+            }
             continue;
         }
         let path = harness_dir.join(include);
@@ -333,6 +330,17 @@ fn parse_metadata(source: &str) -> TestMeta {
                 .split(',')
                 .map(|s| s.trim().trim_matches('"').to_string())
                 .collect();
+        } else if let Some(val) = line.strip_prefix("features: ") {
+            // Treat unsupported features like flags so the run_test skip
+            // check applies to both uniformly.
+            let list = val.trim().strip_prefix('[').unwrap_or(val.trim());
+            let list = list.strip_suffix(']').unwrap_or(list.trim());
+            let feats: Vec<String> = list
+                .split(',')
+                .map(|s| s.trim().trim_matches('"').to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            meta.flags.extend(feats);
         } else if line == "negative:" {
             negative_next = true;
         } else if negative_next {

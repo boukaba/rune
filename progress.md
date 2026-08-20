@@ -3492,3 +3492,56 @@ Replaced all `&& let` patterns with nested `if let` for Rust 1.85 MSRV compatibi
 
 ### Next Steps
 1. `String.prototype.match`/`search`/`split` for RegExp
+
+### Session: JIT let-loop GC crash (duplicate-root double-forward) — root cause FOUND & FIXED
+
+`test_jit_let_loop_bailout_preserves_lexicals` crashed deterministically (SIGBUS,
+exit 138/139) under `Context::new_small()` (1 MiB semispace) after ~32480 JIT
+`LEX_MAKE_ENV` iterations filled the from-space.
+
+**Root cause — duplicate root slots → double-forward → header clobber → scan desync:**
+`Vm::register_roots` (vm.rs) pushed `builtin_wrappers` map values TWICE (two
+near-identical loops). The same slot address then appeared twice in the GC root
+list (confirmed via `uniq -c` on root prints: 20+ slots with count 2). The Cheney
+forward pass copied the object on the 1st visit and wrote the new to-space address
+into the slot; the 2nd visit re-read the *updated* value (now a to-space address),
+`forward_object` saw a non-forwarded header and **copied it again**, then
+`set_forwarding` wrote `(dst|7)` into the *first copy's header*. The scan then read
+tag=7 (TAG_FORWARDED) where an object was expected → `scan_end` = 8 bytes → the
+scan walked object-body words as objects (Smi low nibbles faked tags 15/13/5) →
+phantom Env with `count=0xfffffe73` → 4.29e9-slot forward loop → SIGBUS.
+
+**Fix:** (1) `SemiSpace::push_root` now dedups (`if !self.roots.contains(&slot)`),
+the general safety net; (2) removed the redundant second `builtin_wrappers` push in
+`register_roots`. Distinct slots holding the same value stay benign (the 2nd
+forward sees the from-space forwarding marker and skips).
+
+**Why `f.env` reads NULL at collect:** the collect fires *inside*
+`EnvObject::allocate` during `LEX_MAKE_ENV`, before `f.env = resolved` executes, so
+the frame env root is legitimately absent; the loop's live state lives in
+`frame.lexical_slots` (rooted), and each iteration's env is fresh (parent NULL,
+popped by `RestoreEnv`) — no stale envs need preservation. Verified: 2 collects
+during the run, both clean, final result `114330883345000` correct.
+
+### Session: regression batch (skip-gate, object_constructor, Array.join, parser)
+
+- **skip-gate fix:** `push_callback_call` overwrites `source_frame_depth` for every
+  known pending op; missing ops fired on the script's final Return → underflow
+  panic. All 14 pending-op sites now gate on `fi < p.source_frame_depth`.
+- **`new Object()`:** `object_constructor` fully wired (init, Call, New arms, GC
+  root); `Object.getPrototypeOf`, `Object.prototype.*` (hasOwnProperty,
+  isPrototypeOf, propertyIsEnumerable, valueOf, toString), full Error ctor set
+  (EvalError/RangeError/ReferenceError/SyntaxError/TypeError/URIError) with
+  `to_string_for_error`.
+- **`Array.prototype.join`:** implemented with undefined/null → "" coercion and
+  custom `toString` dispatch.
+- **Parser:** `new Error().x` member chain parses as postfix on the New expression
+  (`!new E().x` = `!(new E().x)`).
+- **GC:** `RESERVED_SLOTS` 4 → 8 (JSObject extra-prop capacity); raw-pointer
+  `forward_value` branch now region-checks + 8-aligns before deref (debug-only
+  derefs were crashing on raw float doubles).
+- **test262.rs:** excluded bigint/BigInt/class-static-block/error-cause/
+  error-stack-accessor dirs (out of scope), re-enabled class/import/export/json/
+  map/modules/promise/regexp/set suites.
+- New tests: 620 integration tests pass (was 613), 781 workspace, 0 failed.
+- `repro_test.rs` example keeps the crash repro (small semispace + let loop).

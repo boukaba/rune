@@ -10027,3 +10027,170 @@ fn test_esm_bare_let_initializes_undefined() {
     .unwrap();
     assert_eq!(module_export_str(&mut ctx, "<entry>", "has"), "undefined");
 }
+
+#[test]
+fn test_error_family_basic() {
+    let mut ctx = Context::new_small();
+    assert_eq!(
+        eval_str(&mut ctx, r#"new TypeError("boom").message"#),
+        "boom"
+    );
+    assert_eq!(
+        eval_str(&mut ctx, r#"new TypeError("boom").name"#),
+        "TypeError"
+    );
+    assert_eq!(eval_str(&mut ctx, r#"new Error().message"#), "");
+    assert_eq!(eval_str(&mut ctx, r#"new Error().name"#), "Error");
+    assert_eq!(eval_str(&mut ctx, r#"new RangeError(42).message"#), "42");
+    assert_eq!(
+        eval_str(&mut ctx, r#"new SyntaxError().toString()"#),
+        "SyntaxError"
+    );
+    assert_eq!(
+        eval_str(&mut ctx, r#"new Error("msg").toString()"#),
+        "Error: msg"
+    );
+    assert_eq!(
+        eval_str(&mut ctx, r#"new TypeError("x").toString()"#),
+        "TypeError: x"
+    );
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            r#"new TypeError("m").message + "|" + new TypeError("m").name"#
+        ),
+        "m|TypeError"
+    );
+}
+
+#[test]
+fn test_error_family_instanceof() {
+    let mut ctx = Context::new_small();
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            r#"String(new TypeError("x") instanceof TypeError)"#
+        ),
+        "true"
+    );
+    assert_eq!(
+        eval_str(&mut ctx, r#"String(new TypeError("x") instanceof Error)"#),
+        "true"
+    );
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            r#"String(new TypeError("x") instanceof RangeError)"#
+        ),
+        "false"
+    );
+    assert_eq!(
+        eval_str(&mut ctx, r#"String(new Error("x") instanceof Error)"#),
+        "true"
+    );
+    assert_eq!(
+        eval_str(&mut ctx, r#"String(new Error("x") instanceof TypeError)"#),
+        "false"
+    );
+    assert_eq!(
+        eval_str(&mut ctx, r#"String(new URIError("u") instanceof Error)"#),
+        "true"
+    );
+    assert_eq!(
+        eval_str(&mut ctx, r#"String(TypeError.prototype instanceof Error)"#),
+        "true"
+    );
+}
+
+#[test]
+fn test_error_family_plain_call() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_str(&mut ctx, r#"TypeError("boom").message"#), "boom");
+    assert_eq!(eval_str(&mut ctx, r#"EvalError("e").name"#), "EvalError");
+    assert_eq!(
+        eval_str(&mut ctx, r#"String(URIError("u") instanceof URIError)"#),
+        "true"
+    );
+}
+
+#[test]
+fn test_error_family_symbol_message_throws() {
+    let mut ctx = Context::new_small();
+    let s = eval_str(
+        &mut ctx,
+        r#"var r; try { new TypeError(Symbol("s")); } catch (e) { r = e; } r;"#,
+    );
+    assert_eq!(s, "TypeError: Cannot convert a Symbol value to a string");
+    let s2 = eval_str(
+        &mut ctx,
+        r#"var r; try { new Error(Symbol("s")); } catch (e) { r = e; } r;"#,
+    );
+    assert_eq!(s2, "TypeError: Cannot convert a Symbol value to a string");
+}
+
+#[test]
+fn test_error_family_cause() {
+    let mut ctx = Context::new_small();
+    assert_eq!(
+        eval_str(&mut ctx, r#"String(new Error("m", { cause: 42 }).cause)"#),
+        "42"
+    );
+    assert_eq!(
+        eval_str(&mut ctx, r#"String(new Error("m").cause)"#),
+        "undefined"
+    );
+    assert_eq!(
+        eval_str(&mut ctx, r#"String(new Error("m", {}).cause)"#),
+        "undefined"
+    );
+    assert_eq!(
+        eval_str(&mut ctx, r#"String(new Error("m", "str").cause)"#),
+        "undefined"
+    );
+}
+
+#[test]
+fn test_error_family_prototype_chain() {
+    let mut ctx = Context::new_small();
+    assert_eq!(
+        eval_str(&mut ctx, r#"String(TypeError.prototype instanceof Error)"#),
+        "true"
+    );
+    assert_eq!(eval_str(&mut ctx, r#"String(TypeError.length)"#), "1");
+    assert_eq!(eval_str(&mut ctx, r#"String(Error.length)"#), "1");
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            r#"String(TypeError.prototype.constructor === TypeError)"#
+        ),
+        "true"
+    );
+    assert_eq!(
+        eval_str(&mut ctx, r#"String(Error.prototype.constructor === Error)"#),
+        "true"
+    );
+    assert_eq!(
+        eval_str(&mut ctx, r#"TypeError.prototype.name"#),
+        "TypeError"
+    );
+    assert_eq!(eval_str(&mut ctx, r#"Error.prototype.name"#), "Error");
+}
+
+#[test]
+fn test_error_family_assert_throws_wrapper() {
+    let mut ctx = Context::new_small();
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            r#"(function(){ try { (function(){ throw 3.14; })(); } catch (e) { assert.throws(TypeError, function(){ throw new TypeError("x"); }); return "ok"; } })()"#
+        ),
+        "ok"
+    );
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            r#"(function(){ try { (function(){ throw 3.14; })(); } catch (e) { return "outer"; } })()"#
+        ),
+        "outer"
+    );
+}

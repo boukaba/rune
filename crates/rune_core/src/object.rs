@@ -13,7 +13,7 @@ use std::ptr;
 pub const OBJECT_HEADER_END: usize = 32;
 
 /// Number of extra slots to reserve beyond the initial shape's property count.
-const RESERVED_SLOTS: usize = 4;
+const RESERVED_SLOTS: usize = 8;
 
 /// A GC-allocated JavaScript object.
 pub struct JSObject;
@@ -71,7 +71,7 @@ impl JSObject {
         }
     }
 
-    unsafe fn set_slot_count(ptr: *mut JSObject, n: usize) {
+    pub unsafe fn set_slot_count(ptr: *mut JSObject, n: usize) {
         unsafe {
             let ptr = ptr as *mut u8;
             let sc_ptr = ptr.add(20) as *mut u32;

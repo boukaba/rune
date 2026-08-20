@@ -177,7 +177,7 @@
 
 ## P15: test_hot_property_mono_1m SIGSEGV in JIT code 🔴 P0
 
-**Status:** 🔴 Unfixed — pre-existing on `main`
+**Status:** ✅ Resolved (2026-08-20) — the bailout-work register/untag fixes (Bailout PR1: StorePropertyIC NaN-untag, Mul/Mod Smi untag via `AND PAYLOAD_MASK; LSL #19; ASR #20`) eliminated the garbage-pointer dereference; the test now passes in the full suite.
 
 **Symptom:** `test_hot_property_mono_1m` crashes with SIGSEGV (`EXC_BAD_ACCESS`). The test accesses `o.x` on one object 1M times in a loop. Crash is in JIT-compiled code (no debug symbols, mmap'd executable region).
 
@@ -240,7 +240,7 @@
 
 ## P18: Trace JIT LoadPropertyIC — three sub-bugs + codegen shape-guard failure 🔴 P0
 
-**Status:** 🔴 Same-day investigation results below
+**Status:** ✅ Superseded (2026-08-20) — resolved through the bailout PR work (validate_bailout_snapshot, `push_raw` pre-opcode depth model, StorePropertyIC NaN-untag). On AArch64 the JIT path now runs correctly; x86-64 JIT codegen is disabled repo-wide (known-bad output, SIGTRAP) so the guard/proto_depth paths are only exercised on arm64.
 
 **Summary:** Three diagnosed sub-bugs from earlier analysis were re-investigated:
 - **Sub-bug #1 (shape recording):** ✅ ALREADY FIXED. The LoadPropertyIC handler at `vm.rs:1644–1653` records `trace.shape_ids` correctly. Verified via debug output: `compile_trace_native` shows `shape_ids=[3014187217855022801]` for a monomorphic load.
@@ -385,7 +385,7 @@ for val in self.builtin_wrappers.values_mut() {
 
 ## P23: IC stats counter inconsistency — hits + misses > lookups (negative gap) 🟡 P2
 
-**Status:** 🟡 Unfixed
+**Status:** 🟡 Unfixed — cosmetic; `dump_ic_stats` reports raw lookups/hits/misses/gap alongside the rate so the double-counting is visible, and the gap metric is no longer asserted (removed in the stats rework). Reporting only, no correctness impact.
 
 **Symptom:** `dump_ic_stats()` shows `gap: -200021` (negative), meaning `hits + misses > lookups`. This violates the `debug_assert` at `vm.rs:3383` but the assert is compiled out in release builds.
 
@@ -406,7 +406,7 @@ Result per access: `1 lookup + 1 miss + 1 hit` → gap = `1 - 2 = -1`. With 200K
 
 ## P24: CLI uses 1 MiB semispace — OOM on allocation-heavy workloads 🔴 P0
 
-**Status:** 🟡 Fix ready
+**Status:** ✅ Fixed — `crates/rune_cli/src/main.rs` now uses `rune_embed::Context::new()` (16 MiB semispace).
 
 **Symptom:** `array_push_grow_100k` test panics in CLI mode:
 ```
@@ -447,13 +447,13 @@ let mut ctx = rune_embed::Context::new();
 | P12 | Trace compiler wired to loop execution | ✅ Fixed | — |
 | P13 | Smi overflow → float64 Add promotion | ✅ Resolved | 597b12c |
 | P14 | InlineCache::get_scalar cfg-gate | ✅ Fixed | current |
-| P15 | test_hot_property_mono_1m SIGSEGV | 🔴 P0 | — |
+| P15 | test_hot_property_mono_1m SIGSEGV | ✅ Resolved | bailout PR1 |
 | P16 | NEON/SSE SIMD IC stride bug | ✅ Fixed | current |
 | P17 | LoadPropertyIC stats tracking | ✅ Fixed | current |
-| P18 | Trace JIT LoadPropertyIC shape guard fails | 🔴 P0 | — |
-| P19 | Proto_chain 0% IC hit rate | 🔴 P0 | — |
+| P18 | Trace JIT LoadPropertyIC shape guard fails | ✅ Superseded | bailout PR |
+| P19 | Proto_chain 0% IC hit rate | ✅ Superseded | bailout PR |
 | P20 | Cross-loop trace recording contamination | ✅ Fixed | 93aec5c |
 | P21 | Criterion benchmark source (wrong nested-loop form) | ✅ Fixed | c3d4bc3 |
 | P22 | GC root tracing missing globals (and 3 other fields) | ✅ Fixed | fd938da |
-| P23 | IC stats counter inconsistency (negative gap) | 🟡 P2 | — |
-| P24 | CLI semispace too small (1 MiB → 16 MiB) | 🔴 P0 | fix ready |
+| P23 | IC stats counter inconsistency (negative gap) | 🟡 Cosmetic | — |
+| P24 | CLI semispace too small (1 MiB → 16 MiB) | ✅ Fixed | — |

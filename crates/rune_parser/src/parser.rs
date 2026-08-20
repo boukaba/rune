@@ -1584,14 +1584,18 @@ impl Parser {
                 } else {
                     Vec::new()
                 };
-                Expr::New(
+                let new_expr = Expr::New(
                     callee,
                     args,
                     Span {
                         start: start.start,
                         end: self.span().end,
                     },
-                )
+                );
+                // `new Error().x` — the member chain continues on the new
+                // expression (member access binds tighter than the enclosing
+                // unary op: `!new E().x` is `!(new E().x)`).
+                self.parse_postfix(new_expr)
             }
             TokenKind::Yield => {
                 self.advance();

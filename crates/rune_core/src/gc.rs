@@ -122,7 +122,9 @@ impl SemiSpace {
     /// Register a root slot (pointer to a Value's raw u64).
     /// The caller must ensure the slot remains valid until the next `collect()`.
     pub fn push_root(&mut self, slot: *mut u64) {
-        self.roots.push(slot);
+        if !self.roots.contains(&slot) {
+            self.roots.push(slot);
+        }
     }
 
     pub fn pop_root(&mut self) {
@@ -390,6 +392,22 @@ impl SemiSpace {
                 *slot = 0x7FF8_0000_0000_0000u64
                     | (FST_HEAP_PTR_TAG << FST_TAG_SHIFT)
                     | ((new_addr as u64) >> 3);
+            } else {
+                // Raw pointer slot (EnvObject parent, frame env roots, etc.).
+                // Not NaN-boxed — forward via the raw-pointer path.
+                let obj = raw as *mut GcHeader;
+                if !obj.is_null() {
+                    let lo0 = self.regions[0] as usize;
+                    let lo1 = self.regions[1] as usize;
+                    let sz = self.semispace_size;
+                    let addr = obj as usize;
+                    let in_region =
+                        (addr >= lo0 && addr < lo0 + sz) || (addr >= lo1 && addr < lo1 + sz);
+                    if in_region && (addr & 7) == 0 {
+                        let new_addr = self.forward_object(obj);
+                        *slot = new_addr as u64;
+                    }
+                }
             }
         }
     }

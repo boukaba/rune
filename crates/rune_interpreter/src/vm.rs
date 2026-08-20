@@ -573,6 +573,7 @@ pub struct Vm {
     pub string_prototype: Value,
     pub string_constructor: Value,
     pub number_constructor: Value,
+    pub object_constructor: Value,
     pub promise_constructor: Value,
     pub promise_prototype: Value,
     /// Bytecode bridge program for resolve/reject functions.
@@ -596,6 +597,15 @@ pub struct Vm {
     pub typed_array_ctors: Vec<Value>,
     pub typed_array_protos: Vec<Value>,
     pub typed_array_ctor_handles: Vec<Value>,
+    /// Error-family ctor wrappers / prototypes, indexed by
+    /// `builtins::ERROR_TYPE_NAMES` (Error, EvalError, RangeError,
+    /// ReferenceError, SyntaxError, TypeError, URIError).
+    pub error_ctors: Vec<Value>,
+    pub error_protos: Vec<Value>,
+    /// Wrapper objects that behave as functions (builtin constructors with
+    /// Call/New dispatch). Their [[Prototype]] is %Function.prototype% and
+    /// `typeof` reports "function".
+    pub callable_wrappers: Vec<Value>,
     /// Symbol.prototype — where Symbol.prototype.toString/[@@toPrimitive] live.
     pub symbol_prototype: Value,
     /// Pending well-known-symbol @@method dispatch (set by String.prototype
@@ -725,6 +735,7 @@ impl Vm {
             array_prototype: Value::undefined(),
             string_prototype: Value::undefined(),
             string_constructor: Value::undefined(),
+            object_constructor: Value::undefined(),
             number_constructor: Value::undefined(),
             promise_constructor: Value::undefined(),
             promise_prototype: Value::undefined(),
@@ -745,6 +756,9 @@ impl Vm {
             typed_array_ctors: Vec::new(),
             typed_array_protos: Vec::new(),
             typed_array_ctor_handles: Vec::new(),
+            error_ctors: Vec::new(),
+            callable_wrappers: Vec::new(),
+            error_protos: Vec::new(),
             symbol_prototype: Value::undefined(),
             pending_symbol_dispatch: None,
             pending_symbol_coercion: None,
@@ -818,7 +832,10 @@ impl Vm {
                 obj_entries.push(("entries", h));
             }
             let obj_val = make_object(gc, &obj_entries);
+            self.object_constructor = obj_val;
             self.builtin_wrappers.insert("Object".to_string(), obj_val);
+            // Object.getPrototypeOf — attach later (prototype objects don't
+            // exist yet at this point).
         }
 
         // Array.prototype with push/pop/filter/map/reduce methods
@@ -859,6 +876,9 @@ impl Vm {
             }
             if let Some(iof) = index_of_handle {
                 proto_entries.push(("indexOf", iof));
+            }
+            if let Some(jh) = find_handle(&self.builtins, "Array_prototype_join") {
+                proto_entries.push(("join", jh));
             }
             if let Some(fnd) = find_h {
                 proto_entries.push(("find", fnd));
@@ -1552,16 +1572,308 @@ impl Vm {
             self.builtin_wrappers.insert("JSON".to_string(), json_obj);
         }
 
-        // Function.prototype with .call() method
+        // Function.prototype with .call() method; its constructor is the
+        // %Function% wrapper so `ctor.constructor` chains resolve (spec:
+        // %Error%.[[Prototype]] is %Function.prototype%).
         if let Some(call_handle) = find_handle(&self.builtins, "Function_prototype_call") {
             let func_proto = make_object(gc, &[("call", call_handle)]);
             self.function_prototype = func_proto;
+            // %Function% wrapper
+            let fn_name = HeapString::allocate(gc, "Function") as *mut u8;
+            let fn_ctor = make_object(
+                gc,
+                &[
+                    ("prototype", func_proto),
+                    ("length", Value::smi(1)),
+                    ("name", Value::from_heap_ptr(fn_name)),
+                ],
+            );
+            unsafe {
+                JSObject::add_property(
+                    func_proto.heap_ptr().unwrap() as *mut JSObject,
+                    PropertyKey::from_string("constructor"),
+                    "constructor".to_string(),
+                    fn_ctor,
+                );
+            }
+            self.builtin_wrappers
+                .insert("Function".to_string(), fn_ctor);
         }
 
         // Object.prototype — an empty object that serves as default [[Prototype]]
         let obj_proto_shape = Shape::empty();
         let obj_proto_ptr = JSObject::allocate(gc, obj_proto_shape, &[]);
         self.object_prototype = Value::from_heap_ptr(obj_proto_ptr as *mut u8);
+        // Object.prototype methods: toString / hasOwnProperty / isPrototypeOf
+        {
+            let to_string_handle = find_handle(&self.builtins, "Object_prototype_toString");
+            let has_own_handle = find_handle(&self.builtins, "Object_prototype_hasOwnProperty");
+            let is_proto_handle = find_handle(&self.builtins, "Object_prototype_isPrototypeOf");
+            let obj_proto_ptr = self.object_prototype.heap_ptr().unwrap() as *mut JSObject;
+            if let Some(h) = to_string_handle {
+                unsafe {
+                    JSObject::add_property(
+                        obj_proto_ptr,
+                        PropertyKey::from_string("toString"),
+                        "toString".to_string(),
+                        h,
+                    );
+                }
+            }
+            if let Some(h) = has_own_handle {
+                unsafe {
+                    JSObject::add_property(
+                        obj_proto_ptr,
+                        PropertyKey::from_string("hasOwnProperty"),
+                        "hasOwnProperty".to_string(),
+                        h,
+                    );
+                }
+            }
+            if let Some(h) = is_proto_handle {
+                unsafe {
+                    JSObject::add_property(
+                        obj_proto_ptr,
+                        PropertyKey::from_string("isPrototypeOf"),
+                        "isPrototypeOf".to_string(),
+                        h,
+                    );
+                }
+            }
+            if let Some(h) = find_handle(&self.builtins, "Object_prototype_propertyIsEnumerable") {
+                unsafe {
+                    JSObject::add_property(
+                        obj_proto_ptr,
+                        PropertyKey::from_string("propertyIsEnumerable"),
+                        "propertyIsEnumerable".to_string(),
+                        h,
+                    );
+                }
+            }
+            if let Some(h) = find_handle(&self.builtins, "Object_prototype_valueOf") {
+                unsafe {
+                    JSObject::add_property(
+                        obj_proto_ptr,
+                        PropertyKey::from_string("valueOf"),
+                        "valueOf".to_string(),
+                        h,
+                    );
+                }
+            }
+        }
+
+        // Error family — Error, EvalError, RangeError, ReferenceError,
+        // SyntaxError, TypeError, URIError. Each ctor wrapper exposes
+        // .prototype/.length/.name; each prototype chains to Error.prototype,
+        // which chains to Object.prototype. Instances get their [[Prototype]]
+        // from the wrapper's "prototype" property via the New/Call arms.
+        {
+            let names = crate::builtins::ERROR_TYPE_NAMES;
+            let to_string_handle = find_handle(&self.builtins, "Error_prototype_toString");
+            // Error.prototype
+            let mut err_proto_pairs: Vec<(&str, Value)> = vec![
+                (
+                    "name",
+                    Value::from_heap_ptr(HeapString::allocate(gc, "Error") as *mut u8),
+                ),
+                (
+                    "message",
+                    Value::from_heap_ptr(HeapString::allocate(gc, "") as *mut u8),
+                ),
+            ];
+            if let Some(h) = to_string_handle {
+                err_proto_pairs.push(("toString", h));
+            }
+            let err_proto = make_object(gc, &err_proto_pairs);
+            unsafe {
+                JSObject::set_prototype(
+                    err_proto.heap_ptr().unwrap() as *mut JSObject,
+                    self.object_prototype.heap_ptr().unwrap(),
+                );
+            }
+            self.error_protos.push(err_proto);
+            // Error wrapper
+            let err_name = Value::from_heap_ptr(HeapString::allocate(gc, "Error") as *mut u8);
+            let err_ctor = make_object(
+                gc,
+                &[
+                    ("prototype", err_proto),
+                    ("length", Value::smi(1)),
+                    ("name", err_name),
+                ],
+            );
+            self.error_ctors.push(err_ctor);
+            self.builtin_wrappers.insert("Error".to_string(), err_ctor);
+            unsafe {
+                JSObject::add_property(
+                    err_proto.heap_ptr().unwrap() as *mut JSObject,
+                    PropertyKey::from_string("constructor"),
+                    "constructor".to_string(),
+                    err_ctor,
+                );
+            }
+            if let Some(h) = find_handle(&self.builtins, "isError") {
+                unsafe {
+                    JSObject::add_property(
+                        err_ctor.heap_ptr().unwrap() as *mut JSObject,
+                        PropertyKey::from_string("isError"),
+                        "isError".to_string(),
+                        h,
+                    );
+                }
+            }
+            // Native error types (skip Error at index 0)
+            for (i, name) in names.iter().enumerate().skip(1) {
+                let proto_pairs: Vec<(&str, Value)> = vec![
+                    (
+                        "name",
+                        Value::from_heap_ptr(HeapString::allocate(gc, name) as *mut u8),
+                    ),
+                    (
+                        "message",
+                        Value::from_heap_ptr(HeapString::allocate(gc, "") as *mut u8),
+                    ),
+                ];
+                let proto = make_object(gc, &proto_pairs);
+                unsafe {
+                    JSObject::set_prototype(
+                        proto.heap_ptr().unwrap() as *mut JSObject,
+                        err_proto.heap_ptr().unwrap(),
+                    );
+                }
+                self.error_protos.push(proto);
+                let ctor_name = Value::from_heap_ptr(HeapString::allocate(gc, name) as *mut u8);
+                let ctor = make_object(
+                    gc,
+                    &[
+                        ("prototype", proto),
+                        ("length", Value::smi(1)),
+                        ("name", ctor_name),
+                    ],
+                );
+                self.error_ctors.push(ctor);
+                self.builtin_wrappers.insert(name.to_string(), ctor);
+                unsafe {
+                    JSObject::set_prototype(
+                        ctor.heap_ptr().unwrap() as *mut JSObject,
+                        err_ctor.heap_ptr().unwrap(),
+                    );
+                }
+                unsafe {
+                    JSObject::add_property(
+                        proto.heap_ptr().unwrap() as *mut JSObject,
+                        PropertyKey::from_string("constructor"),
+                        "constructor".to_string(),
+                        ctor,
+                    );
+                }
+                let _ = i;
+            }
+        }
+
+        // Wire the callable wrapper set: every builtin constructor wrapper
+        // gets [[Prototype]] = %Function.prototype% and joins
+        // `callable_wrappers` (drives `typeof` → "function" and
+        // `Object.prototype.toString` → "[object Function]").
+        if let Some(fp) = self.function_prototype.heap_ptr() {
+            // %Object% needs a "prototype" property (created earlier without
+            // one — object_prototype didn't exist yet).
+            if let Some(obj_wrapper) = self.builtin_wrappers.get("Object").copied() {
+                if let Some(ptr) = obj_wrapper.heap_ptr() {
+                    unsafe {
+                        let shape = JSObject::shape_ptr(ptr as *mut JSObject);
+                        if shape.lookup(&PROTOTYPE_KEY).is_none() {
+                            JSObject::add_property(
+                                ptr as *mut JSObject,
+                                PROTOTYPE_KEY.clone(),
+                                "prototype".to_string(),
+                                self.object_prototype,
+                            );
+                        }
+                        // Object.getPrototypeOf (constructor static).
+                        if let Some(h) = find_handle(&self.builtins, "Object_getPrototypeOf") {
+                            if shape
+                                .lookup(&PropertyKey::from_string("getPrototypeOf"))
+                                .is_none()
+                            {
+                                JSObject::add_property(
+                                    ptr as *mut JSObject,
+                                    PropertyKey::from_string("getPrototypeOf"),
+                                    "getPrototypeOf".to_string(),
+                                    h,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            // %Function.prototype%.[[Prototype]] = %Object.prototype%, and
+            // %Function%.[[Prototype]] = %Function.prototype% (self-chain).
+            unsafe {
+                JSObject::set_prototype(
+                    fp as *mut JSObject,
+                    self.object_prototype
+                        .heap_ptr()
+                        .unwrap_or(std::ptr::null_mut()),
+                );
+            }
+            if let Some(fn_ctor) = self.builtin_wrappers.get("Function").copied() {
+                if let Some(ptr) = fn_ctor.heap_ptr() {
+                    unsafe {
+                        JSObject::set_prototype(ptr as *mut JSObject, fp);
+                    }
+                }
+            }
+            let mut wrappers: Vec<Value> = Vec::new();
+            wrappers.extend(self.error_ctors.iter().copied());
+            if let Some(v) = self.string_constructor.heap_ptr() {
+                wrappers.push(Value::from_heap_ptr(v));
+            }
+            if let Some(v) = self.number_constructor.heap_ptr() {
+                wrappers.push(Value::from_heap_ptr(v));
+            }
+            if let Some(v) = self.symbol_ctor.heap_ptr() {
+                wrappers.push(Value::from_heap_ptr(v));
+            }
+            if let Some(v) = self.promise_constructor.heap_ptr() {
+                wrappers.push(Value::from_heap_ptr(v));
+            }
+            if let Some(v) = self.map_constructor.heap_ptr() {
+                wrappers.push(Value::from_heap_ptr(v));
+            }
+            if let Some(v) = self.set_constructor.heap_ptr() {
+                wrappers.push(Value::from_heap_ptr(v));
+            }
+            if let Some(v) = self.date_constructor.heap_ptr() {
+                wrappers.push(Value::from_heap_ptr(v));
+            }
+            if let Some(v) = self.array_buffer_constructor.heap_ptr() {
+                wrappers.push(Value::from_heap_ptr(v));
+            }
+            if let Some(v) = self.regexp_constructor.heap_ptr() {
+                wrappers.push(Value::from_heap_ptr(v));
+            }
+            wrappers.extend(self.typed_array_ctors.iter().copied());
+            for w in &wrappers {
+                if let Some(ptr) = w.heap_ptr() {
+                    // Native error constructors inherit from %Error%, not
+                    // %Function.prototype% (their proto was set in the error
+                    // family block above).
+                    if self
+                        .error_ctors
+                        .iter()
+                        .skip(1)
+                        .any(|e| e.heap_ptr() == Some(ptr))
+                    {
+                        continue;
+                    }
+                    unsafe {
+                        JSObject::set_prototype(ptr as *mut JSObject, fp);
+                    }
+                }
+            }
+            self.callable_wrappers = wrappers;
+        }
 
         // Global constants: NaN, Infinity, undefined
         let nan_val = Value::from_float64(f64::NAN);
@@ -1753,6 +2065,28 @@ impl Vm {
                 let s = unsafe { HeapString::to_string(ptr as *mut HeapString) };
                 return crate::builtins::read_error_name(thrown).as_deref() == Some(s.as_str());
             }
+            if tag == TAG_OBJECT {
+                // Error-family constructor wrapper (TypeError, RangeError, …):
+                // the thrown value matches if its prototype chain contains the
+                // corresponding error prototype (instanceof semantics), or its
+                // name reads back to the same type name.
+                if let Some(ti) = self
+                    .error_ctors
+                    .iter()
+                    .position(|c| c.heap_ptr() == Some(ptr))
+                {
+                    let proto = self.error_protos.get(ti).and_then(|v| v.heap_ptr());
+                    if let Some(pp) = proto {
+                        if ordinary_has_instance(thrown, pp) {
+                            return true;
+                        }
+                    }
+                    return crate::builtins::read_error_name(thrown)
+                        .as_deref()
+                        .is_some_and(|n| n == self.error_ctor_name(ptr).as_deref().unwrap_or(""));
+                }
+                return true;
+            }
             return true;
         }
         if let Some(smi) = expected.as_smi() {
@@ -1766,12 +2100,35 @@ impl Vm {
         true
     }
 
+    /// Type name of an Error-family constructor wrapper ("TypeError", …),
+    /// read from its prototype's `name` property. None for non-error objects.
+    fn error_ctor_name(&self, ctor_ptr: *mut u8) -> Option<String> {
+        let ti = self
+            .error_ctors
+            .iter()
+            .position(|c| c.heap_ptr() == Some(ctor_ptr))?;
+        let proto = self.error_protos.get(ti)?.heap_ptr()?;
+        let shape = unsafe { JSObject::shape_ptr(proto as *mut JSObject) };
+        let slot = shape.lookup(&PropertyKey::from_string("name"))?;
+        let name_val = unsafe { JSObject::get_slot(proto as *mut JSObject, slot) };
+        let name_ptr = name_val.heap_ptr()?;
+        if unsafe { (*(name_ptr as *const GcHeader)).tag() } != TAG_STRING {
+            return None;
+        }
+        Some(unsafe { HeapString::to_string(name_ptr as *mut HeapString) })
+    }
+
     /// Human-readable name for an `assert.throws` expectation value.
     fn describe_expected_error(&self, expected: Value) -> String {
         if let Some(ptr) = expected.heap_ptr() {
             let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
             if tag == TAG_STRING {
                 return unsafe { HeapString::to_string(ptr as *mut HeapString) };
+            }
+            if tag == TAG_OBJECT {
+                if let Some(name) = self.error_ctor_name(ptr) {
+                    return name;
+                }
             }
         }
         if let Some(smi) = expected.as_smi() {
@@ -1958,6 +2315,7 @@ impl Vm {
         gc.push_root(&self.array_prototype as *const Value as *mut u64);
         gc.push_root(&self.string_prototype as *const Value as *mut u64);
         gc.push_root(&self.string_constructor as *const Value as *mut u64);
+        gc.push_root(&self.object_constructor as *const Value as *mut u64);
         gc.push_root(&self.number_constructor as *const Value as *mut u64);
         gc.push_root(&self.promise_constructor as *const Value as *mut u64);
         gc.push_root(&self.map_constructor as *const Value as *mut u64);
@@ -1977,6 +2335,22 @@ impl Vm {
         }
         for v in self.typed_array_ctor_handles.iter_mut() {
             gc.push_root(v as *mut Value as *mut u64);
+        }
+        for v in self.error_ctors.iter_mut() {
+            gc.push_root(v as *mut Value as *mut u64);
+        }
+        for v in self.error_protos.iter_mut() {
+            gc.push_root(v as *mut Value as *mut u64);
+        }
+        for v in self.callable_wrappers.iter_mut() {
+            gc.push_root(v as *mut Value as *mut u64);
+        }
+        // Root builtin wrapper objects (assert, Object, Array, String,
+        // Function, Error, …) held in the builtin_wrappers map — they are
+        // read by LoadGlobal and the Call/New arms, so they must stay
+        // forwarded in place after a GC.
+        for val in self.builtin_wrappers.values() {
+            gc.push_root(val as *const Value as *mut u64);
         }
         gc.push_root(&self.promise_prototype as *const Value as *mut u64);
         gc.push_root(&self.function_prototype as *const Value as *mut u64);
@@ -2009,10 +2383,6 @@ impl Vm {
             if let Some(ref ns) = rec.namespace {
                 gc.push_root(ns as *const Value as *mut u64);
             }
-        }
-        // Root builtin constructor/prototype wrappers (Object, Array, String, Math)
-        for val in self.builtin_wrappers.values() {
-            gc.push_root(val as *const Value as *mut u64);
         }
         // Root JIT call helper's locals buffer (holds callee + args during JIT calls)
         for val in &self.jit_locals_buffer {
@@ -3871,6 +4241,37 @@ impl Vm {
                         }
                     } else if let Some(smi) = obj.as_smi() {
                         if smi < 0 {
+                            // Negative Smi = builtin handle — expose name/length
+                            // metadata (Function.prototype fallback for the rest).
+                            let id = ((-smi) as usize) - 1;
+                            if id < self.builtins.len() {
+                                let key_str = match raw_key.heap_ptr() {
+                                    Some(ptr) => {
+                                        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+                                        if tag == TAG_STRING {
+                                            Some(unsafe {
+                                                HeapString::to_string(ptr as *mut HeapString)
+                                            })
+                                        } else {
+                                            None
+                                        }
+                                    }
+                                    None => None,
+                                };
+                                if let Some(k) = key_str {
+                                    if k == "name" {
+                                        let hs = HeapString::allocate(gc, &self.builtins[id].name)
+                                            as *mut u8;
+                                        self.push(Value::from_heap_ptr(hs));
+                                        self.frames[fi].pc = pc + 1;
+                                        continue;
+                                    } else if k == "length" {
+                                        self.push(Value::smi(self.builtins[id].length as i32));
+                                        self.frames[fi].pc = pc + 1;
+                                        continue;
+                                    }
+                                }
+                            }
                             // Negative Smi = builtin handle — check Function.prototype
                             if self.function_prototype.is_heap_object() {
                                 load_property_recursive(
@@ -3926,6 +4327,27 @@ impl Vm {
                         } else {
                             Value::undefined()
                         }
+                    } else if obj.is_boolean() {
+                        // Boolean primitive property access — boxed semantics:
+                        // the value is an object with [[Prototype]] =
+                        // %Object.prototype% (no %Boolean.prototype% in the
+                        // engine), so Object.prototype methods resolve.
+                        load_property_recursive(
+                            self.object_prototype,
+                            raw_key,
+                            Some(self.function_prototype),
+                            gc,
+                        )
+                    } else if obj.as_float64().is_some() {
+                        // Number primitive — same boxed-object semantics
+                        // (Number.prototype is not implemented, so only
+                        // Object.prototype methods resolve).
+                        load_property_recursive(
+                            self.object_prototype,
+                            raw_key,
+                            Some(self.function_prototype),
+                            gc,
+                        )
                     } else {
                         Value::undefined()
                     };
@@ -4774,7 +5196,12 @@ impl Vm {
                     } else if val.is_symbol() {
                         "symbol"
                     } else if val.is_smi() {
-                        "number"
+                        // Negative Smis are builtin handles — they are callable.
+                        if val.as_smi().unwrap() < 0 {
+                            "function"
+                        } else {
+                            "number"
+                        }
                     } else if let Some(ptr) = val.heap_ptr() {
                         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
                         match tag {
@@ -4782,6 +5209,17 @@ impl Vm {
                             TAG_FUNC => "function",
                             TAG_FLOAT64 => "number",
                             TAG_STRING_OBJ => "object",
+                            TAG_OBJECT => {
+                                if self
+                                    .callable_wrappers
+                                    .iter()
+                                    .any(|w| w.heap_ptr() == Some(ptr))
+                                {
+                                    "function"
+                                } else {
+                                    "object"
+                                }
+                            }
                             _ => "object",
                         }
                     } else {
@@ -5526,6 +5964,21 @@ impl Vm {
                     if constructor == self.symbol_ctor {
                         return self.throw_type_error(gc, "Symbol is not a constructor");
                     }
+                    // §20.1.1.1: `new Object(...)` — fresh empty object with
+                    // %Object.prototype% as [[Prototype]].
+                    if constructor == self.object_constructor {
+                        let shape = Shape::empty();
+                        let proto_ptr = self.object_prototype.heap_ptr();
+                        let obj = JSObject::allocate(gc, shape, &[]);
+                        if let Some(pp) = proto_ptr {
+                            unsafe {
+                                JSObject::set_prototype(obj, pp);
+                            }
+                        }
+                        self.push(Value::from_heap_ptr(obj as *mut u8));
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    }
                     // Promise constructor [[Construct]] / [[Call]]
                     if constructor == self.promise_constructor {
                         let result = crate::builtins::promise_constructor(
@@ -5685,6 +6138,25 @@ impl Vm {
                             continue;
                         }
                     }
+                    // Error-family constructors: new TypeError(message[, options])
+                    if let Some(ptr) = constructor.heap_ptr() {
+                        if let Some(ti) = self
+                            .error_ctors
+                            .iter()
+                            .position(|c| c.heap_ptr() == Some(ptr))
+                        {
+                            let result = crate::builtins::error_constructor(gc, ti, &args, self);
+                            if let Some(exc) = self.pending_exception.take() {
+                                if let Some(exit) = self.handle_throw(gc, exc) {
+                                    return exit;
+                                }
+                                continue;
+                            }
+                            self.push(result);
+                            self.frames[fi].pc = pc + 1;
+                            continue;
+                        }
+                    }
                     // Create a new empty object
                     let shape = Shape::empty();
                     let obj = JSObject::allocate(gc, shape, &[]);
@@ -5694,6 +6166,25 @@ impl Vm {
                         if smi_val < 0 {
                             let id = ((-smi_val) as usize) - 1;
                             if id < self.builtins.len() {
+                                // §20.5.2.4: only Test262Error (the harness error
+                                // ctor) is constructible among Smi-handle builtins —
+                                // everything else throws "not a constructor"
+                                // (previously: silently invoked as a constructor,
+                                // so `new Error.prototype.toString()` returned an
+                                // object instead of throwing).
+                                if self.builtins[id].name != "Test262Error" {
+                                    let exc = Value::from_heap_ptr(crate::vm::heap_string(
+                                        gc,
+                                        &format!(
+                                            "TypeError: {} is not a constructor",
+                                            self.builtins[id].name
+                                        ),
+                                    ));
+                                    if let Some(exit) = self.handle_throw(gc, exc) {
+                                        return exit;
+                                    }
+                                    continue;
+                                }
                                 let result =
                                     (self.builtins[id].func)(gc, obj_val, &args, &mut *self);
                                 if let Some(exc) = self.pending_exception.take() {
@@ -5872,8 +6363,17 @@ impl Vm {
                             }
                         }
                     }
-                    self.push(obj_val);
-                    self.frames[fi].pc = pc + 1;
+                    // §13.3.5.1: `new` on a non-constructor throws a TypeError
+                    // (previously returned a bare object — a miscompile).
+                    let desc = crate::builtins::value_to_js_string(constructor);
+                    let exc = Value::from_heap_ptr(crate::vm::heap_string(
+                        gc,
+                        &format!("TypeError: {} is not a constructor", desc),
+                    ));
+                    if let Some(exit) = self.handle_throw(gc, exc) {
+                        return exit;
+                    }
+                    continue;
                 }
                 Opcode::Call => {
                     let argc = instr.operands[0] as usize;
@@ -5894,21 +6394,56 @@ impl Vm {
                                     }
                                     continue;
                                 }
-                                if self.pending_array_op.is_some()
-                                    || self.pending_call.is_some()
-                                    || self.pending_assert.is_some()
-                                    || self.pending_promise_ctor.is_some()
-                                    || self.pending_finally_op.is_some()
-                                    || self.pending_replace_op.is_some()
-                                    || self.pending_replace_all_op.is_some()
-                                    || self.pending_symbol_dispatch.is_some()
-                                    || self.pending_collection_foreach.is_some()
-                                    || self.pending_collection_ctor.is_some()
-                                {
-                                    // Array method builtin or .call() or assert.throws
-                                    // set up a callback. Don't push result or advance pc —
-                                    // the callback frame is already on the stack.
-                                    // The Return handler will continue the state machine.
+                                // The callback-setup builtin (array method / .call() / assert.throws /
+                                // collection method) pushed the callback frame
+                                // itself — skip the result push and pc advance
+                                // so the Return handler's state machine owns
+                                // the pc. Only applies when THIS frame is
+                                // below the pending op's callback frame
+                                // (source_frame_depth = the callback's index):
+                                // builtin calls made INSIDE the user callback
+                                // must complete normally.
+                                let skip = self
+                                    .pending_array_op
+                                    .as_ref()
+                                    .is_some_and(|p| fi < p.source_frame_depth)
+                                    || self
+                                        .pending_call
+                                        .as_ref()
+                                        .is_some_and(|p| fi < p.source_frame_depth)
+                                    || self
+                                        .pending_assert
+                                        .as_ref()
+                                        .is_some_and(|p| fi < p.source_frame_depth)
+                                    || self
+                                        .pending_promise_ctor
+                                        .as_ref()
+                                        .is_some_and(|p| fi < p.source_frame_depth)
+                                    || self
+                                        .pending_finally_op
+                                        .as_ref()
+                                        .is_some_and(|p| fi < p.source_frame_depth)
+                                    || self
+                                        .pending_replace_op
+                                        .as_ref()
+                                        .is_some_and(|p| fi < p.source_frame_depth)
+                                    || self
+                                        .pending_replace_all_op
+                                        .as_ref()
+                                        .is_some_and(|p| fi < p.source_frame_depth)
+                                    || self
+                                        .pending_symbol_dispatch
+                                        .as_ref()
+                                        .is_some_and(|p| fi < p.source_frame_depth)
+                                    || self
+                                        .pending_collection_foreach
+                                        .as_ref()
+                                        .is_some_and(|p| fi < p.source_frame_depth)
+                                    || self
+                                        .pending_collection_ctor
+                                        .as_ref()
+                                        .is_some_and(|p| fi < p.source_frame_depth);
+                                if skip {
                                     continue;
                                 }
                                 self.push(result);
@@ -5933,6 +6468,20 @@ impl Vm {
                             continue;
                         }
                         if self.pending_call.is_some() {
+                            continue;
+                        }
+                        self.push(result);
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    }
+
+                    // §20.1.1.1: Object(value) called as a function.
+                    if callee == self.object_constructor {
+                        let result = crate::builtins::object_builtin(gc, this, &args, self);
+                        if let Some(exc) = self.pending_exception.take() {
+                            if let Some(exit) = self.handle_throw(gc, exc) {
+                                return exit;
+                            }
                             continue;
                         }
                         self.push(result);
@@ -6048,6 +6597,55 @@ impl Vm {
                         self.push(result);
                         self.frames[fi].pc = pc + 1;
                         continue;
+                    }
+
+                    // The test262 `assert` wrapper object (holds sameValue/
+                    // notSameValue/throws) is directly callable:
+                    // `assert(cond, msg)` → the "assert" builtin. Previously a
+                    // silent `undefined` — a vacuous pass for every bare
+                    // `assert(...)` in the suites.
+                    if let Some(ptr) = callee.heap_ptr() {
+                        if self
+                            .builtin_wrappers
+                            .get("assert")
+                            .and_then(|v| v.heap_ptr())
+                            == Some(ptr)
+                        {
+                            if let Some(id) = self.builtins.iter().position(|b| b.name == "assert")
+                            {
+                                let result = (self.builtins[id].func)(gc, this, &args, &mut *self);
+                                if let Some(exc) = self.pending_exception.take() {
+                                    if let Some(exit) = self.handle_throw(gc, exc) {
+                                        return exit;
+                                    }
+                                    continue;
+                                }
+                                self.push(result);
+                                self.frames[fi].pc = pc + 1;
+                                continue;
+                            }
+                        }
+                    }
+
+                    // §20.5.1.1 / §20.5.6.1.1: Error and the native errors are
+                    // callable without `new` — they return a new error object.
+                    if let Some(ptr) = callee.heap_ptr() {
+                        if let Some(ti) = self
+                            .error_ctors
+                            .iter()
+                            .position(|c| c.heap_ptr() == Some(ptr))
+                        {
+                            let result = crate::builtins::error_constructor(gc, ti, &args, self);
+                            if let Some(exc) = self.pending_exception.take() {
+                                if let Some(exit) = self.handle_throw(gc, exc) {
+                                    return exit;
+                                }
+                                continue;
+                            }
+                            self.push(result);
+                            self.frames[fi].pc = pc + 1;
+                            continue;
+                        }
                     }
 
                     if let Some(ptr) = callee.heap_ptr() {
@@ -6515,8 +7113,17 @@ impl Vm {
                             }
                         }
                     }
-                    self.push(Value::undefined());
-                    self.frames[fi].pc = pc + 1;
+                    // §13.3.6.1: calling a non-callable throws a TypeError
+                    // (previously a silent `undefined` — a miscompile).
+                    let desc = crate::builtins::value_to_js_string(callee);
+                    let exc = Value::from_heap_ptr(crate::vm::heap_string(
+                        gc,
+                        &format!("TypeError: {} is not a function", desc),
+                    ));
+                    if let Some(exit) = self.handle_throw(gc, exc) {
+                        return exit;
+                    }
+                    continue;
                 }
                 Opcode::Return => {
                     debug_assert!(
@@ -8498,7 +9105,7 @@ fn arg_to_js_string_for_ctor(val: Value, gc: &mut SemiSpace, vm: &mut Vm) -> Str
     to_primitive_string_sync(val, gc, vm)
 }
 
-fn value_to_prop_key(val: Value) -> Option<PropertyKey> {
+pub(crate) fn value_to_prop_key(val: Value) -> Option<PropertyKey> {
     // Symbols are valid property keys (stored under their registry id).
     if let Some(id) = val.as_symbol_id() {
         return Some(PropertyKey::from_symbol(id));
@@ -8816,7 +9423,8 @@ pub(crate) fn load_property_recursive(
                     }
                     let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
                     if let Some(slot) = shape.lookup(&key) {
-                        return unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+                        let v = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+                        return v;
                     }
                     // Not found — walk to prototype
                     let proto = unsafe { JSObject::prototype(ptr as *mut JSObject) };
@@ -9119,17 +9727,42 @@ fn load_property_recursive_ic(
                                 return JSObject::get_slot(ptr as *mut JSObject, entry.offset);
                             }
                         } else {
+                            // Inherited property: re-walk the proto chain and verify
+                            // the key is actually found at the cached depth. The cached
+                            // depth was measured from the first instance's chain; other
+                            // objects sharing the same shape may resolve the same key at
+                            // a different depth (e.g. all Error subtypes share the
+                            // "message" shape but chain to different prototypes), so a
+                            // blind hop-and-read would read a slot out of the wrong
+                            // object.
+                            let key = value_to_prop_key(raw_key);
                             let mut p = ptr;
-                            for _ in 0..entry.proto_depth {
+                            let mut depth = 0usize;
+                            let mut hit = false;
+                            let mut found = Value::undefined();
+                            loop {
                                 let next = unsafe { JSObject::prototype(p as *mut JSObject) };
                                 if next.is_null() {
                                     break;
                                 }
+                                depth += 1;
+                                let next_shape =
+                                    unsafe { JSObject::shape_ptr(next as *mut JSObject) };
+                                if let Some(offset) = key.and_then(|k| next_shape.lookup(&k)) {
+                                    if depth == entry.proto_depth as usize {
+                                        found = unsafe {
+                                            JSObject::get_slot(next as *mut JSObject, offset)
+                                        };
+                                        hit = true;
+                                    }
+                                    break;
+                                }
                                 p = next;
                             }
-                            unsafe {
-                                return JSObject::get_slot(p as *mut JSObject, entry.offset);
+                            if hit {
+                                return found;
                             }
+                            // Mismatch — fall through to full lookup below.
                         }
                     }
                 }
@@ -9695,7 +10328,7 @@ fn value_is_string(v: Value) -> bool {
 }
 
 /// Convert a Value to an array index if it is a non-negative Smi.
-fn value_to_array_index(v: Value) -> Option<usize> {
+pub(crate) fn value_to_array_index(v: Value) -> Option<usize> {
     if let Some(n) = v.as_smi() {
         if n >= 0 { Some(n as usize) } else { None }
     } else if let Some(ptr) = v.heap_ptr() {
@@ -10224,7 +10857,12 @@ pub extern "C" fn rune_jit_typeof_helper(vm_ptr: *mut u8, value_raw: u64) -> u64
     } else if val.is_boolean() {
         TYPEOF_BOOLEAN
     } else if val.is_smi() {
-        TYPEOF_NUMBER
+        // Negative Smis are builtin handles — they are callable.
+        if val.as_smi().unwrap() < 0 {
+            TYPEOF_FUNCTION
+        } else {
+            TYPEOF_NUMBER
+        }
     } else if val.is_symbol() {
         TYPEOF_SYMBOL
     } else if let Some(ptr) = val.heap_ptr() {
@@ -10233,6 +10871,17 @@ pub extern "C" fn rune_jit_typeof_helper(vm_ptr: *mut u8, value_raw: u64) -> u64
             TAG_STRING => TYPEOF_STRING,
             TAG_FUNC => TYPEOF_FUNCTION,
             TAG_FLOAT64 => TYPEOF_NUMBER,
+            TAG_OBJECT => {
+                if vm
+                    .callable_wrappers
+                    .iter()
+                    .any(|w| w.heap_ptr() == Some(ptr))
+                {
+                    TYPEOF_FUNCTION
+                } else {
+                    TYPEOF_OBJECT
+                }
+            }
             _ => TYPEOF_OBJECT,
         }
     } else {

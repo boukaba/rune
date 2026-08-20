@@ -4,6 +4,8 @@ use crate::vm::get_iter_method;
 use crate::vm::get_symbol_method;
 use crate::vm::load_property_recursive;
 use crate::vm::to_number;
+use crate::vm::value_to_array_index;
+use crate::vm::value_to_prop_key;
 use crate::vm::{CollectionCtorState, PendingCollectionCtor, PendingCollectionForEach};
 use rune_core::array::RuneArray;
 use rune_core::date;
@@ -3433,10 +3435,636 @@ fn make_simple_object(gc: &mut SemiSpace, key: &str, val: Value) -> Value {
     Value::from_heap_ptr(obj as *mut u8)
 }
 
-/// Error(message) — creates a minimal error object with `name` and `message` properties.
-pub fn error_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
-    error_with_name(gc, args, "Error")
+/// NativeError type names, indexed consistently with `Vm::error_ctors` and
+/// `Vm::error_protos` (Error first, then the six native errors).
+pub const ERROR_TYPE_NAMES: [&str; 7] = [
+    "Error",
+    "EvalError",
+    "RangeError",
+    "ReferenceError",
+    "SyntaxError",
+    "TypeError",
+    "URIError",
+];
+
+/// Result of converting an Error constructor message argument to a string.
+enum ErrorMessageToString {
+    Done(String),
+    /// ToString threw — `vm.pending_exception` is set.
+    Throw,
+    /// The message object has a user-defined toString/valueOf; the callback
+    /// machinery is deferred (documented gap) — treat as "no message".
+    Pending,
 }
+
+/// §7.1.18 ToString for an Error constructor message. Symbols throw a
+/// TypeError; objects without a usable toString/valueOf throw a TypeError
+/// (§7.1.1 ToPrimitive with string hint).
+fn to_string_for_error(val: Value, gc: &mut SemiSpace, vm: &mut Vm) -> ErrorMessageToString {
+    if val.is_symbol() {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "TypeError: Cannot convert a Symbol value to a string",
+        )));
+        return ErrorMessageToString::Throw;
+    }
+    if !val.is_heap_object() {
+        return ErrorMessageToString::Done(value_to_js_string(val));
+    }
+    let ptr = val.heap_ptr().unwrap();
+    let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+    if tag == TAG_STRING || tag == TAG_STRING_OBJ || tag == TAG_DATE {
+        return ErrorMessageToString::Done(value_to_js_string(val));
+    }
+    if tag == TAG_OBJECT {
+        // ToPrimitive with string hint: try toString(), then valueOf().
+        // The value is pushed onto the operand stack so it survives any GC
+        // triggered by a builtin call below; re-read it each iteration.
+        let depth = vm.stack.len();
+        vm.push(val);
+        let mut outcome = ErrorMessageToString::Throw;
+        'outer: for method in ["toString", "valueOf"] {
+            let cur = vm.stack[depth];
+            let ptr = cur.heap_ptr().unwrap();
+            let key = PropertyKey::from_string(method);
+            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+            if let Some(slot) = shape.lookup(&key) {
+                let m = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+                if let Some(smi) = m.as_smi() {
+                    if smi < 0 {
+                        let id = ((-smi) as usize) - 1;
+                        if id < vm.builtins.len() {
+                            let r = (vm.builtins[id].func)(gc, cur, &[], vm);
+                            if let Some(exc) = vm.pending_exception.take() {
+                                vm.pending_exception = Some(exc);
+                                outcome = ErrorMessageToString::Throw;
+                                break 'outer;
+                            }
+                            if !r.is_heap_object() {
+                                outcome = ErrorMessageToString::Done(value_to_js_string(r));
+                                break 'outer;
+                            }
+                        }
+                    }
+                } else if let Some(func_ptr) = m.heap_ptr() {
+                    let ft = unsafe { (*(func_ptr as *const GcHeader)).tag() };
+                    if ft == rune_core::gc::TAG_FUNC {
+                        // User-defined toString/valueOf — the pending-callback
+                        // continuation is not wired for Error ctors (gap).
+                        outcome = ErrorMessageToString::Pending;
+                        break 'outer;
+                    }
+                }
+            }
+        }
+        vm.stack.truncate(depth);
+        if matches!(outcome, ErrorMessageToString::Throw) && vm.pending_exception.is_none() {
+            vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+                gc,
+                "TypeError: Cannot convert object to primitive value",
+            )));
+        }
+        return outcome;
+    }
+    ErrorMessageToString::Done(value_to_js_string(val))
+}
+
+/// §20.5.1.1 Error(message[, options]) / §20.5.6.1.1 NativeError(message[, options]).
+/// Creates an object whose [[Prototype]] is the given type's prototype, with
+/// an own `message` property (when message is not undefined) and an own
+/// `cause` property (when options is an object with a data "cause" property).
+pub fn error_constructor(
+    gc: &mut SemiSpace,
+    type_idx: usize,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    // Push the args onto the operand stack: register_roots re-forwards the
+    // stack on every collection, so values are safe to re-read from there
+    // after any allocation below. Raw copies in locals go stale across a GC.
+    let base = vm.stack.len();
+    let nargs = args.len();
+    for a in args {
+        vm.push(*a);
+    }
+
+    let mut has_message = false;
+    let mut msg = String::new();
+    if let Some(m) = args.first() {
+        if !m.is_undefined() {
+            match to_string_for_error(*m, gc, vm) {
+                ErrorMessageToString::Done(s) => {
+                    has_message = true;
+                    msg = s;
+                }
+                ErrorMessageToString::Throw => {
+                    vm.stack.truncate(base);
+                    return Value::undefined();
+                }
+                ErrorMessageToString::Pending => {}
+            }
+        }
+    }
+    // §20.5.8.1 InstallErrorCause: only object options with a "cause" data
+    // property. Accessor (getter) values are skipped — no accessor dispatch
+    // here (documented gap). `has_cause` is decided here; the cause VALUE is
+    // re-read after the allocations below (GC may move it).
+    let mut has_cause = false;
+    let opts_val = if nargs >= 2 {
+        vm.stack[base + 1]
+    } else {
+        Value::undefined()
+    };
+    if let Some(ptr) = opts_val.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_OBJECT {
+            let key = PropertyKey::from_string("cause");
+            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+            if let Some(slot) = shape.lookup(&key) {
+                let cv = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+                let is_accessor = cv.heap_ptr().is_some_and(|cp| unsafe {
+                    (*(cp as *const GcHeader)).tag() == rune_core::gc::TAG_ACCESSOR
+                });
+                if !is_accessor {
+                    has_cause = true;
+                }
+            }
+        }
+    }
+    let (shape, _slots) = match (has_message, has_cause) {
+        (true, true) => {
+            let entries = vec![
+                (PropertyKey::from_string("message"), 0usize),
+                (PropertyKey::from_string("cause"), 1usize),
+            ];
+            let key_names = vec!["message".to_string(), "cause".to_string()];
+            (Shape::intern(entries, key_names), 2usize)
+        }
+        (true, false) => {
+            let entries = vec![(PropertyKey::from_string("message"), 0usize)];
+            let key_names = vec!["message".to_string()];
+            (Shape::intern(entries, key_names), 1usize)
+        }
+        (false, true) => {
+            let entries = vec![(PropertyKey::from_string("cause"), 0usize)];
+            let key_names = vec!["cause".to_string()];
+            let shape = Shape::intern(entries, key_names);
+            (shape, 1usize)
+        }
+        (false, false) => (Shape::empty(), 0usize),
+    };
+    // Allocate the message string FIRST and root it on the operand stack,
+    // then allocate the object LAST. The object allocate may trigger a GC
+    // that moves the message string and error prototypes, so those are
+    // re-read from the rooted stack / vm fields after it.
+    let msg_string_slot = if has_message {
+        let slot = vm.stack.len();
+        vm.push(Value::from_heap_ptr(crate::vm::heap_string(gc, &msg)));
+        slot
+    } else {
+        0
+    };
+    let obj = JSObject::allocate(gc, shape, &[]);
+    let mut slot = 0;
+    if has_message {
+        let m = vm.stack[msg_string_slot];
+        unsafe {
+            JSObject::set_slot(obj, slot, m);
+        }
+        slot += 1;
+    }
+    let proto_ptr = vm.error_protos.get(type_idx).and_then(|v| v.heap_ptr());
+    if let Some(p) = proto_ptr {
+        unsafe {
+            JSObject::set_prototype(obj, p);
+        }
+    }
+    if has_cause {
+        // stack[base + 1] is the options value — re-read after any GC.
+        let opts2 = if nargs >= 2 {
+            vm.stack[base + 1]
+        } else {
+            Value::undefined()
+        };
+        let mut cause = Value::undefined();
+        if let Some(ptr) = opts2.heap_ptr() {
+            if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_OBJECT {
+                let key = PropertyKey::from_string("cause");
+                let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                if let Some(slot) = shape.lookup(&key) {
+                    cause = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+                }
+            }
+        }
+        unsafe {
+            JSObject::set_slot(obj, slot, cause);
+        }
+    }
+    // The shape was created with the slots we just filled — record the count
+    // so future add_property() transitions append past them instead of
+    // overwriting slot 0 (clobbering `message`).
+    unsafe {
+        JSObject::set_slot_count(obj, slot);
+    }
+    vm.stack.truncate(base);
+    let _ = nargs;
+    Value::from_heap_ptr(obj as *mut u8)
+}
+
+/// Error(message) — creates a minimal error object with `name` and `message` properties.
+pub fn error_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    error_constructor(gc, 0, args, vm)
+}
+
+/// EvalError(message)
+pub fn eval_error_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    error_constructor(gc, 1, args, vm)
+}
+
+/// RangeError(message)
+pub fn range_error_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    error_constructor(gc, 2, args, vm)
+}
+
+/// ReferenceError(message)
+pub fn reference_error_builtin(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    error_constructor(gc, 3, args, vm)
+}
+
+/// SyntaxError(message)
+pub fn syntax_error_builtin(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    error_constructor(gc, 4, args, vm)
+}
+
+/// TypeError(message)
+pub fn type_error_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    error_constructor(gc, 5, args, vm)
+}
+
+/// URIError(message)
+pub fn uri_error_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    error_constructor(gc, 6, args, vm)
+}
+
+/// §20.5.3.1 Error.prototype.toString()
+pub fn error_prototype_to_string(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    if !this.is_heap_object() {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "TypeError: Error.prototype.toString requires that 'this' be an Object",
+        )));
+        return Value::undefined();
+    }
+    // Push `this` onto the operand stack: register_roots re-forwards it on
+    // every collection, so re-reading it after any allocation is safe.
+    let base = vm.stack.len();
+    vm.push(this);
+    // Allocate the key strings up front so no allocation happens between
+    // the two property reads.
+    let name_key = Value::from_heap_ptr(crate::vm::heap_string(gc, "name"));
+    let msg_key = Value::from_heap_ptr(crate::vm::heap_string(gc, "message"));
+    let this_val = vm.stack[base];
+    // name: Get(O, "name"); undefined → "Error".
+    let name = load_property_recursive(this_val, name_key, Some(vm.function_prototype), gc);
+    let name_str = if name.is_undefined() {
+        "Error".to_string()
+    } else {
+        value_to_js_string(name)
+    };
+    // message: Get(O, "message"); undefined → "".
+    let this_val2 = vm.stack[base];
+    let msg = load_property_recursive(this_val2, msg_key, Some(vm.function_prototype), gc);
+    vm.stack.truncate(base);
+    let msg_str = if msg.is_undefined() {
+        String::new()
+    } else {
+        value_to_js_string(msg)
+    };
+    let result = if name_str.is_empty() {
+        msg_str
+    } else if msg_str.is_empty() {
+        name_str
+    } else {
+        format!("{}: {}", name_str, msg_str)
+    };
+    Value::from_heap_ptr(crate::vm::heap_string(gc, &result))
+}
+
+/// §20.3.4.2 Object.prototype.toString() — returns "[object Tag]" where Tag
+/// comes from the receiver's type (and, for Error instances, the prototype
+/// chain reaching one of the seven error prototypes).
+pub fn object_prototype_to_string(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let tag = if this.is_undefined() {
+        "Undefined".to_string()
+    } else if this.is_null() {
+        "Null".to_string()
+    } else if let Some(b) = this.to_boolean() {
+        if b {
+            "Boolean".to_string()
+        } else {
+            "Boolean".to_string()
+        }
+    } else if this.is_symbol() {
+        "Symbol".to_string()
+    } else if this.is_smi() || this.as_float64().is_some() {
+        "Number".to_string()
+    } else if let Some(ptr) = this.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        match tag {
+            TAG_STRING => "String".to_string(),
+            TAG_STRING_OBJ => "String".to_string(),
+            TAG_ARRAY => "Array".to_string(),
+            TAG_FUNC => "Function".to_string(),
+            TAG_REGEXP => "RegExp".to_string(),
+            TAG_PROMISE => "Promise".to_string(),
+            TAG_MAP => "Map".to_string(),
+            TAG_SET => "Set".to_string(),
+            TAG_DATE => "Date".to_string(),
+            TAG_ARRAY_BUFFER => "ArrayBuffer".to_string(),
+            TAG_TYPED_ARRAY => "Object".to_string(),
+            TAG_OBJECT => {
+                // Callable wrappers (builtin constructors) are functions.
+                if vm
+                    .callable_wrappers
+                    .iter()
+                    .any(|w| w.heap_ptr() == Some(ptr))
+                {
+                    "Function".to_string()
+                } else if vm.error_protos.iter().any(|ep| ep.heap_ptr() == Some(ptr)) {
+                    // Error prototype objects themselves are ordinary objects
+                    // (no [[ErrorData]] slot) — only *instances* whose chain
+                    // reaches an error prototype get the "Error" tag.
+                    "Object".to_string()
+                } else if vm
+                    .error_protos
+                    .iter()
+                    .any(|ep| ep.heap_ptr().is_some_and(|p| is_on_proto_chain(ptr, p)))
+                {
+                    "Error".to_string()
+                } else {
+                    "Object".to_string()
+                }
+            }
+            _ => "Object".to_string(),
+        }
+    } else {
+        "Object".to_string()
+    };
+    Value::from_heap_ptr(crate::vm::heap_string(gc, &format!("[object {}]", tag)))
+}
+
+/// True iff `obj` (exclusive) has `proto` somewhere in its prototype chain.
+fn is_on_proto_chain(obj: *mut u8, proto: *mut u8) -> bool {
+    let mut cur = unsafe { JSObject::prototype(obj as *mut JSObject) };
+    for _ in 0..MAX_PROTOTYPE_DEPTH {
+        if cur.is_null() {
+            return false;
+        }
+        if cur == proto {
+            return true;
+        }
+        cur = unsafe { JSObject::prototype(cur as *mut JSObject) };
+    }
+    false
+}
+
+/// §20.3.4.4 Object.prototype.hasOwnProperty(key) — own-property check only.
+pub fn object_prototype_has_own_property(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    if this.is_undefined() || this.is_null() {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "TypeError: Cannot convert undefined or null to object",
+        )));
+        return Value::undefined();
+    }
+    let key = args.first().copied().unwrap_or(Value::undefined());
+    let Some(ptr) = this.heap_ptr() else {
+        // Primitives have no own properties (string exotic props unsupported).
+        return Value::boolean(false);
+    };
+    let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+    let key_str: Option<String> = match key.heap_ptr() {
+        Some(kp) if unsafe { (*(kp as *const GcHeader)).tag() } == TAG_STRING => Some(unsafe {
+            rune_core::string::HeapString::to_string(kp as *mut rune_core::string::HeapString)
+        }),
+        _ => None,
+    };
+    let key_is_str = |s: &str| key_str.as_deref() == Some(s);
+    let found = match tag {
+        TAG_ARRAY => {
+            if let Some(index) = value_to_array_index(key) {
+                let len = unsafe {
+                    rune_core::array::RuneArray::length(ptr as *mut rune_core::array::RuneArray)
+                };
+                index < len as usize
+            } else {
+                key_is_str("length")
+            }
+        }
+        TAG_TYPED_ARRAY => {
+            if let Some(index) = value_to_array_index(key) {
+                let len = unsafe { rune_core::typedarray::RuneTypedArray::length(ptr) };
+                index < len as usize
+            } else {
+                key_is_str("length")
+                    || key_is_str("byteLength")
+                    || key_is_str("byteOffset")
+                    || key_is_str("buffer")
+            }
+        }
+        TAG_OBJECT => {
+            let Some(pk) = value_to_prop_key(key) else {
+                return Value::boolean(false);
+            };
+            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+            shape.lookup(&pk).is_some()
+        }
+        _ => false,
+    };
+    Value::boolean(found)
+}
+
+/// §20.3.4.5 Object.prototype.propertyIsEnumerable(key) — true iff the key is
+/// an own property AND enumerable. The engine has no per-property
+/// enumerability flags, so the result equals hasOwnProperty (all own
+/// properties are treated as enumerable).
+pub fn object_prototype_property_is_enumerable(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    if this.is_undefined() || this.is_null() {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "TypeError: Cannot convert undefined or null to object",
+        )));
+        return Value::undefined();
+    }
+    let key = args.first().copied().unwrap_or(Value::undefined());
+    let Some(ptr) = this.heap_ptr() else {
+        return Value::boolean(false);
+    };
+    let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+    let key_str: Option<String> = match key.heap_ptr() {
+        Some(kp) if unsafe { (*(kp as *const GcHeader)).tag() } == TAG_STRING => Some(unsafe {
+            rune_core::string::HeapString::to_string(kp as *mut rune_core::string::HeapString)
+        }),
+        _ => None,
+    };
+    let key_is_str = |s: &str| key_str.as_deref() == Some(s);
+    let found = match tag {
+        TAG_ARRAY => {
+            if let Some(index) = value_to_array_index(key) {
+                let len = unsafe {
+                    rune_core::array::RuneArray::length(ptr as *mut rune_core::array::RuneArray)
+                };
+                index < len as usize
+            } else {
+                key_is_str("length")
+            }
+        }
+        TAG_TYPED_ARRAY => {
+            if let Some(index) = value_to_array_index(key) {
+                let len = unsafe { rune_core::typedarray::RuneTypedArray::length(ptr) };
+                index < len as usize
+            } else {
+                key_is_str("length")
+                    || key_is_str("byteLength")
+                    || key_is_str("byteOffset")
+                    || key_is_str("buffer")
+            }
+        }
+        TAG_OBJECT => {
+            let Some(pk) = value_to_prop_key(key) else {
+                return Value::boolean(false);
+            };
+            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+            shape.lookup(&pk).is_some()
+        }
+        _ => false,
+    };
+    Value::boolean(found)
+}
+
+/// §20.3.4.5 Object.prototype.valueOf() — returns the receiver object.
+pub fn object_prototype_value_of(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    if !this.is_heap_object() {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "TypeError: Object.prototype.valueOf called on non-object",
+        )));
+        return Value::undefined();
+    }
+    this
+}
+
+/// §20.1.2.10 Object.getPrototypeOf(obj) — returns the [[Prototype]].
+pub fn object_get_prototype_of(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let obj = args.first().copied().unwrap_or(Value::undefined());
+    let Some(ptr) = obj.heap_ptr() else {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "TypeError: Object.getPrototypeOf called on non-object",
+        )));
+        return Value::undefined();
+    };
+    let proto = unsafe { JSObject::prototype(ptr as *mut JSObject) };
+    if proto.is_null() {
+        return Value::null();
+    }
+    Value::from_heap_ptr(proto)
+}
+
+/// §20.3.4.5 Object.prototype.isPrototypeOf(obj) — true iff the receiver is
+/// on `obj`'s prototype chain.
+pub fn object_prototype_is_prototype_of(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(this_ptr) = this.heap_ptr() else {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "TypeError: Object.prototype.isPrototypeOf called on non-object",
+        )));
+        return Value::undefined();
+    };
+    let target = args.first().copied().unwrap_or(Value::undefined());
+    let Some(tgt_ptr) = target.heap_ptr() else {
+        return Value::boolean(false);
+    };
+    if tgt_ptr == this_ptr {
+        return Value::boolean(true);
+    }
+    Value::boolean(is_on_proto_chain(tgt_ptr, this_ptr))
+}
+
+/// §20.5.2.4 Error.isError(value) — true iff value has an [[ErrorData]]
+/// internal slot (i.e. it is an Error or subclass instance). Our error
+/// instances are ordinary objects whose prototype chain reaches one of the
+/// seven error prototypes; walk the chain (fake errors that merely inherit
+/// from Error.prototype without going through a constructor are not marked).
+/// [[Construct]] is not implemented — the New arm rejects `new Error.isError`.
+pub fn error_is_error(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let val = args.first().copied().unwrap_or(Value::undefined());
+    let mut cur = match val.heap_ptr() {
+        Some(ptr) => ptr,
+        None => return Value::boolean(false),
+    };
+    let tag = unsafe { (*(cur as *const GcHeader)).tag() };
+    if tag != TAG_OBJECT {
+        return Value::boolean(false);
+    }
+    for _ in 0..MAX_PROTOTYPE_DEPTH {
+        let proto = unsafe { JSObject::prototype(cur as *mut JSObject) };
+        if proto.is_null() {
+            return Value::boolean(false);
+        }
+        if _vm.error_protos.iter().any(|p| p.heap_ptr() == Some(proto)) {
+            return Value::boolean(true);
+        }
+        cur = proto;
+    }
+    Value::boolean(false)
+}
+
+const MAX_PROTOTYPE_DEPTH: usize = 256;
 
 /// Test262Error(message) — built-in replacement for sta.js Test262Error constructor.
 pub fn test262_error_builtin(
@@ -5785,6 +6413,37 @@ pub fn array_index_of(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
     Value::smi(-1)
 }
 
+/// Array.prototype.join(separator) — §23.1.3.17. Concatenates the array
+/// elements (undefined/null → "") separated by the separator (default ",").
+pub fn array_join(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let length = match crate::vm::array_like_length(this) {
+        Some(len) => len,
+        None => return Value::from_heap_ptr(crate::vm::heap_string(gc, "")),
+    };
+    let sep = match args.first().copied().unwrap_or(Value::undefined()) {
+        v if v.is_undefined() => ",".to_string(),
+        v => value_to_js_string(v),
+    };
+    if length == 0 {
+        return Value::from_heap_ptr(crate::vm::heap_string(gc, ""));
+    }
+    let mut parts: Vec<String> = Vec::new();
+    for i in 0..length {
+        let elem = crate::vm::array_like_index(this, i).unwrap_or(Value::undefined());
+        let next = if elem.is_undefined() || elem.is_null() {
+            String::new()
+        } else {
+            value_to_js_string(elem)
+        };
+        parts.push(next);
+    }
+    let joined = parts.join(&sep);
+    Value::from_heap_ptr(crate::vm::heap_string(gc, &joined))
+}
+
 /// Array.prototype.includes(searchElement, fromIndex) — SameValueZero search.
 pub fn array_includes(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
@@ -7366,6 +8025,77 @@ pub fn default_builtins() -> Vec<Builtin> {
         },
         Builtin {
             length: 1,
+            name: "EvalError",
+            func: eval_error_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "RangeError",
+            func: range_error_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "ReferenceError",
+            func: reference_error_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "SyntaxError",
+            func: syntax_error_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "TypeError",
+            func: type_error_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "URIError",
+            func: uri_error_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Error_prototype_toString",
+            func: error_prototype_to_string,
+        },
+        Builtin {
+            length: 1,
+            name: "isError",
+            func: error_is_error,
+        },
+        // Object.prototype methods
+        Builtin {
+            length: 0,
+            name: "Object_prototype_toString",
+            func: object_prototype_to_string,
+        },
+        Builtin {
+            length: 1,
+            name: "Object_prototype_hasOwnProperty",
+            func: object_prototype_has_own_property,
+        },
+        Builtin {
+            length: 1,
+            name: "Object_prototype_isPrototypeOf",
+            func: object_prototype_is_prototype_of,
+        },
+        Builtin {
+            length: 1,
+            name: "Object_prototype_propertyIsEnumerable",
+            func: object_prototype_property_is_enumerable,
+        },
+        Builtin {
+            length: 0,
+            name: "Object_prototype_valueOf",
+            func: object_prototype_value_of,
+        },
+        Builtin {
+            length: 1,
+            name: "Object_getPrototypeOf",
+            func: object_get_prototype_of,
+        },
+        Builtin {
+            length: 1,
             name: "Test262Error",
             func: test262_error_builtin,
         },
@@ -7634,6 +8364,11 @@ pub fn default_builtins() -> Vec<Builtin> {
         },
         Builtin {
             length: 1,
+            name: "Array_prototype_join",
+            func: array_join,
+        },
+        Builtin {
+            length: 1,
             name: "Array_prototype_find",
             func: array_find,
         },
@@ -7827,7 +8562,15 @@ pub fn read_error_name(val: Value) -> Option<String> {
     unsafe {
         let tag = (*(ptr as *const GcHeader)).tag();
         if tag == TAG_STRING {
-            return Some(HeapString::to_string(ptr as *mut HeapString));
+            let s = HeapString::to_string(ptr as *mut HeapString);
+            // Thrown values are encoded as "Name: message" strings; match
+            // assert.throws expectations against the name prefix.
+            if let Some(idx) = s.find(": ") {
+                if idx < 64 && !s[..idx].is_empty() {
+                    return Some(s[..idx].to_string());
+                }
+            }
+            return Some(s);
         }
         if tag != TAG_OBJECT {
             return None;

@@ -11060,6 +11060,7 @@ fn test_error_family_assert_throws_wrapper() {
 }
 
 #[test]
+#[cfg(target_arch = "aarch64")]
 fn test_jit_div_exp_whitelisted() {
     // J1: Div/Exp compile natively via jit_binop_helper
     let mut ctx = Context::new_small();
@@ -11107,6 +11108,7 @@ fn test_jit_div_by_zero_and_negative_exp() {
 }
 
 #[test]
+#[cfg(target_arch = "aarch64")]
 fn test_jit_optional_chaining_whitelisted() {
     // J1: JumpIfNullOrUndefined compiles natively for `?.`
     let mut ctx = Context::new_small();

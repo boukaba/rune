@@ -3273,7 +3273,7 @@ impl Vm {
                         let err = Value::from_heap_ptr(heap_string(
                             gc,
                             "TypeError: Cannot convert a Symbol value to a number",
-                        ) as *mut u8);
+                        ));
                         if let Some(exit) = self.handle_throw(gc, err) {
                             return exit;
                         }
@@ -3303,8 +3303,7 @@ impl Vm {
                             let err = Value::from_heap_ptr(heap_string(
                                 gc,
                                 "TypeError: Cannot convert a Symbol value to a number",
-                            )
-                                as *mut u8);
+                            ));
                             if let Some(exit) = self.handle_throw(gc, err) {
                                 return exit;
                             }
@@ -3331,7 +3330,7 @@ impl Vm {
                         let err = Value::from_heap_ptr(heap_string(
                             gc,
                             "TypeError: Cannot convert a Symbol value to a number",
-                        ) as *mut u8);
+                        ));
                         if let Some(exit) = self.handle_throw(gc, err) {
                             return exit;
                         }
@@ -3385,8 +3384,7 @@ impl Vm {
                             let err = Value::from_heap_ptr(heap_string(
                                 gc,
                                 "TypeError: Cannot convert a Symbol value to a string",
-                            )
-                                as *mut u8);
+                            ));
                             if let Some(exit) = self.handle_throw(gc, err) {
                                 return exit;
                             }
@@ -3402,8 +3400,7 @@ impl Vm {
                             let err = Value::from_heap_ptr(heap_string(
                                 gc,
                                 "TypeError: Cannot convert a Symbol value to a number",
-                            )
-                                as *mut u8);
+                            ));
                             if let Some(exit) = self.handle_throw(gc, err) {
                                 return exit;
                             }
@@ -3434,8 +3431,7 @@ impl Vm {
                             let err = Value::from_heap_ptr(heap_string(
                                 gc,
                                 "TypeError: Cannot convert a Symbol value to a number",
-                            )
-                                as *mut u8);
+                            ));
                             if let Some(exit) = self.handle_throw(gc, err) {
                                 return exit;
                             }
@@ -3466,8 +3462,7 @@ impl Vm {
                             let err = Value::from_heap_ptr(heap_string(
                                 gc,
                                 "TypeError: Cannot convert a Symbol value to a number",
-                            )
-                                as *mut u8);
+                            ));
                             if let Some(exit) = self.handle_throw(gc, err) {
                                 return exit;
                             }
@@ -3487,7 +3482,7 @@ impl Vm {
                         let err = Value::from_heap_ptr(heap_string(
                             gc,
                             "TypeError: Cannot convert a Symbol value to a number",
-                        ) as *mut u8);
+                        ));
                         if let Some(exit) = self.handle_throw(gc, err) {
                             return exit;
                         }
@@ -3518,8 +3513,7 @@ impl Vm {
                             let err = Value::from_heap_ptr(heap_string(
                                 gc,
                                 "TypeError: Cannot convert a Symbol value to a number",
-                            )
-                                as *mut u8);
+                            ));
                             if let Some(exit) = self.handle_throw(gc, err) {
                                 return exit;
                             }
@@ -3551,8 +3545,7 @@ impl Vm {
                             let err = Value::from_heap_ptr(heap_string(
                                 gc,
                                 "TypeError: Cannot convert a Symbol value to a number",
-                            )
-                                as *mut u8);
+                            ));
                             if let Some(exit) = self.handle_throw(gc, err) {
                                 return exit;
                             }
@@ -3574,7 +3567,7 @@ impl Vm {
                         let err = Value::from_heap_ptr(heap_string(
                             gc,
                             "TypeError: Cannot convert a Symbol value to a number",
-                        ) as *mut u8);
+                        ));
                         if let Some(exit) = self.handle_throw(gc, err) {
                             return exit;
                         }
@@ -3597,7 +3590,7 @@ impl Vm {
                         let err = Value::from_heap_ptr(heap_string(
                             gc,
                             "TypeError: Cannot convert a Symbol value to a number",
-                        ) as *mut u8);
+                        ));
                         if let Some(exit) = self.handle_throw(gc, err) {
                             return exit;
                         }
@@ -3615,7 +3608,7 @@ impl Vm {
                         let err = Value::from_heap_ptr(heap_string(
                             gc,
                             "TypeError: Cannot convert a Symbol value to a number",
-                        ) as *mut u8);
+                        ));
                         if let Some(exit) = self.handle_throw(gc, err) {
                             return exit;
                         }
@@ -3638,7 +3631,7 @@ impl Vm {
                         let err = Value::from_heap_ptr(heap_string(
                             gc,
                             "TypeError: Cannot convert a Symbol value to a number",
-                        ) as *mut u8);
+                        ));
                         if let Some(exit) = self.handle_throw(gc, err) {
                             return exit;
                         }
@@ -3661,7 +3654,7 @@ impl Vm {
                         let err = Value::from_heap_ptr(heap_string(
                             gc,
                             "TypeError: Cannot convert a Symbol value to a number",
-                        ) as *mut u8);
+                        ));
                         if let Some(exit) = self.handle_throw(gc, err) {
                             return exit;
                         }
@@ -3684,7 +3677,7 @@ impl Vm {
                         let err = Value::from_heap_ptr(heap_string(
                             gc,
                             "TypeError: Cannot convert a Symbol value to a number",
-                        ) as *mut u8);
+                        ));
                         if let Some(exit) = self.handle_throw(gc, err) {
                             return exit;
                         }
@@ -5199,7 +5192,7 @@ impl Vm {
                         let err = Value::from_heap_ptr(heap_string(
                             gc,
                             "TypeError: Cannot convert a Symbol value to a number",
-                        ) as *mut u8);
+                        ));
                         if let Some(exit) = self.handle_throw(gc, err) {
                             return exit;
                         }
@@ -5226,7 +5219,7 @@ impl Vm {
                         let err = Value::from_heap_ptr(heap_string(
                             gc,
                             "TypeError: Cannot convert a Symbol value to a number",
-                        ) as *mut u8);
+                        ));
                         if let Some(exit) = self.handle_throw(gc, err) {
                             return exit;
                         }
@@ -5256,8 +5249,7 @@ impl Vm {
                             let err = Value::from_heap_ptr(heap_string(
                                 gc,
                                 "TypeError: Cannot convert a Symbol value to a number",
-                            )
-                                as *mut u8);
+                            ));
                             if let Some(exit) = self.handle_throw(gc, err) {
                                 return exit;
                             }
@@ -5287,8 +5279,7 @@ impl Vm {
                             let err = Value::from_heap_ptr(heap_string(
                                 gc,
                                 "TypeError: Cannot convert a Symbol value to a number",
-                            )
-                                as *mut u8);
+                            ));
                             if let Some(exit) = self.handle_throw(gc, err) {
                                 return exit;
                             }

@@ -214,7 +214,7 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 4. **C3 (done this slice)** — RegExp backrefs `\1..9` fixed — `Backref{index,target}` + per-start queue `cap_len` replay (`nfa.rs (s,s)` was no-op), 623/623 integ
 5. **C4 (done this slice)** — RegExp flags `i/m/s` — `exec_with_flags` + `m` multiline `^`/`$`, `i` case-fold, `s` dotAll (still longest not leftmost)
 6. **C5 (done this slice)** — `ToNumber(symbol)` TypeError — `is_symbol()` guards + `handle_throw`/`pending_exception` (`vm.rs` Add/Sub/Mul/Div/Mod/Exp/Shl/Shr/Bit ops/IncLocal, `number_builtin`), 625/625 integ
-7. **C6** — Full Error type set globals (`Vm.error_ctors Vec` — TypeError as real global)
+7. **C6 (done this slice)** — Full Error globals audit — 7 types via `error_ctors`/`builtin_wrappers` (`Error`/`EvalError`/`RangeError`/`ReferenceError`/`SyntaxError`/`TypeError`/`URIError`), 625/625 integ (no code change, already via v0.8.1)
 8. **C7** — Missing Array batch (RuneArray header 40B `extra_props@32` preserved) — `reverse/splice/concat/shift/unshift`
 9. **C8** — Object/Function/Math statics (shape model preserved)
 10. **J1** — JIT whitelist `JumpIfNullOrUndefined` (optional chaining) + `Div/Exp/In/Instanceof` (`lib.rs:61 is_jit_compatible`)

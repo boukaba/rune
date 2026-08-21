@@ -5063,12 +5063,13 @@ pub fn string_replace(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
         if tag == TAG_REGEXP {
             let pattern_ptr = unsafe { RegExp::pattern(ptr) };
             let pattern = unsafe { HeapString::to_string(pattern_ptr as *mut HeapString) };
-            // Parse and execute regex
+            // Parse and execute regex (flags-aware for i/m/s)
             match rune_regex::parse_regex(&pattern) {
                 Ok(expr) => {
                     let nfa = rune_regex::nfa::compile(&expr);
                     let pike_vm = rune_regex::pikevm::PikeVm::new();
-                    if let Some(m) = pike_vm.exec(&nfa, &s, 0) {
+                    let flags = unsafe { RegExp::flags(ptr) };
+                    if let Some(m) = pike_vm.exec_with_flags(&nfa, &s, 0, flags) {
                         let (start, end) = m.groups[0];
                         if is_fn_replacement {
                             let fn_val = replacement_fn.unwrap();
@@ -5194,12 +5195,13 @@ pub fn string_replace_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
                 Ok(expr) => {
                     let nfa = rune_regex::nfa::compile(&expr);
                     let pike_vm = rune_regex::pikevm::PikeVm::new();
+                    let flags = unsafe { RegExp::flags(ptr) };
                     if is_fn_replacement {
                         // Callable replacement: state machine in the Return
                         // handler re-invokes fn per match (spec §22.1.3.20
                         // @@replace path: fn(match, ...captures, position, string)).
                         let fn_val = replacement_fn.unwrap();
-                        match pike_vm.exec(&nfa, &s, 0) {
+                        match pike_vm.exec_with_flags(&nfa, &s, 0, flags) {
                             Some(m) => {
                                 let (start, end) = m.groups[0];
                                 let mut fn_args = Vec::with_capacity(m.groups.len() + 2);
@@ -5219,6 +5221,7 @@ pub fn string_replace_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
                                     input: s.clone(),
                                     search_str: String::new(),
                                     regex_pattern: Some(pattern.clone()),
+                                    regex_flags: flags,
                                     fn_val,
                                     next_pos: if empty { start + 1 } else { end },
                                     accumulated: s[..start].to_string(),
@@ -5237,7 +5240,7 @@ pub fn string_replace_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
                     let replacement = arg_to_string(gc, replacement_fn, vm);
                     let mut result = String::new();
                     let mut last_end = 0;
-                    while let Some(m) = pike_vm.exec(&nfa, &s, last_end) {
+                    while let Some(m) = pike_vm.exec_with_flags(&nfa, &s, last_end, flags) {
                         let (start, end) = m.groups[0];
                         result.push_str(&s[last_end..start]);
                         result.push_str(&expand_replacement(&s, &m.groups, &replacement));
@@ -5288,6 +5291,7 @@ pub fn string_replace_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
                 input: s.clone(),
                 search_str: search_str.clone(),
                 regex_pattern: None,
+                regex_flags: 0,
                 fn_val,
                 next_pos: start + advance,
                 accumulated: s[..start].to_string(),
@@ -5322,11 +5326,14 @@ fn regexp_exec_internal(
     start_pos: usize,
 ) -> Option<Vec<(usize, usize)>> {
     let pattern = unsafe { HeapString::to_string(RegExp::pattern(regexp_ptr) as *mut HeapString) };
+    let flags = unsafe { RegExp::flags(regexp_ptr) };
     match rune_regex::parse_regex(&pattern) {
         Ok(expr) => {
             let nfa = rune_regex::nfa::compile(&expr);
             let pike_vm = rune_regex::pikevm::PikeVm::new();
-            pike_vm.exec(&nfa, input, start_pos).map(|m| m.groups)
+            pike_vm
+                .exec_with_flags(&nfa, input, start_pos, flags)
+                .map(|m| m.groups)
         }
         Err(_) => None,
     }

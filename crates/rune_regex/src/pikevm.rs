@@ -30,6 +30,16 @@ impl PikeVm {
     }
 
     pub fn exec(&self, nfa: &Nfa, text: &str, start: usize) -> Option<Match> {
+        self.exec_with_flags(nfa, text, start, 0)
+    }
+
+    pub fn exec_with_flags(
+        &self,
+        nfa: &Nfa,
+        text: &str,
+        start: usize,
+        flags: u32,
+    ) -> Option<Match> {
         let chars: Vec<char> = text.chars().collect();
         if start > chars.len() {
             return None;
@@ -51,7 +61,7 @@ impl PikeVm {
                 if cur_threads.is_empty() {
                     continue;
                 }
-                let expanded = follow_nonconsuming(&cur_threads, nfa, cur_pos, &chars);
+                let expanded = follow_nonconsuming(&cur_threads, nfa, cur_pos, &chars, flags);
                 // Check for match at cur_pos (after epsilon closure)
                 for t in &expanded {
                     if nfa.states[t.pc].is_match {
@@ -73,7 +83,12 @@ impl PikeVm {
                     for edge in &nfa.states[t.pc].edges {
                         match edge {
                             Edge::Char(ch, target) => {
-                                if *ch == c {
+                                let eq = if flags & 2 != 0 {
+                                    ch.eq_ignore_ascii_case(&c)
+                                } else {
+                                    *ch == c
+                                };
+                                if eq {
                                     add_thread(&mut queues[offset + 1], nfa, *target, &t.saves);
                                 }
                             }
@@ -82,13 +97,24 @@ impl PikeVm {
                                 ranges,
                                 target,
                             } => {
-                                let in_class = ranges.iter().any(|(lo, hi)| c >= *lo && c <= *hi);
+                                let mut in_class =
+                                    ranges.iter().any(|(lo, hi)| c >= *lo && c <= *hi);
+                                if flags & 2 != 0 && !in_class {
+                                    // Case-insensitive: also check lower/upper variants
+                                    let lower = c.to_ascii_lowercase();
+                                    let upper = c.to_ascii_uppercase();
+                                    in_class = ranges.iter().any(|(lo, hi)| {
+                                        lower >= *lo && lower <= *hi || upper >= *lo && upper <= *hi
+                                    });
+                                }
                                 if *negated != in_class {
                                     add_thread(&mut queues[offset + 1], nfa, *target, &t.saves);
                                 }
                             }
                             Edge::Dot(target) => {
-                                add_thread(&mut queues[offset + 1], nfa, *target, &t.saves);
+                                if flags & 8 != 0 || c != '\n' {
+                                    add_thread(&mut queues[offset + 1], nfa, *target, &t.saves);
+                                }
                             }
                             Edge::Backref { index, target } => {
                                 if *index == 0 {
@@ -109,7 +135,14 @@ impl PikeVm {
                                         if cur_pos + cap_len <= chars.len() {
                                             let mut ok = true;
                                             for k in 0..cap_len {
-                                                if chars[s + k] != chars[cur_pos + k] {
+                                                let a = chars[s + k];
+                                                let b = chars[cur_pos + k];
+                                                let eq = if flags & 2 != 0 {
+                                                    a.eq_ignore_ascii_case(&b)
+                                                } else {
+                                                    a == b
+                                                };
+                                                if !eq {
                                                     ok = false;
                                                     break;
                                                 }
@@ -146,7 +179,13 @@ impl PikeVm {
 }
 
 /// Follow all non-consuming edges (Save, Epsilon, Lookahead) until fixpoint.
-fn follow_nonconsuming(threads: &[Thread], nfa: &Nfa, pos: usize, chars: &[char]) -> Vec<Thread> {
+fn follow_nonconsuming(
+    threads: &[Thread],
+    nfa: &Nfa,
+    pos: usize,
+    chars: &[char],
+    flags: u32,
+) -> Vec<Thread> {
     let mut result: Vec<Thread> = Vec::new();
     let mut worklist: Vec<Thread> = threads.to_vec();
 
@@ -181,7 +220,7 @@ fn follow_nonconsuming(threads: &[Thread], nfa: &Nfa, pos: usize, chars: &[char]
                 } => {
                     has_nonconsuming = true;
                     let sub_result =
-                        lookahead_matches(nfa, *sub_start, *sub_match, chars, pos, &t.saves);
+                        lookahead_matches(nfa, *sub_start, *sub_match, chars, pos, &t.saves, flags);
                     let ok = if *negated {
                         sub_result.is_none()
                     } else {
@@ -203,7 +242,9 @@ fn follow_nonconsuming(threads: &[Thread], nfa: &Nfa, pos: usize, chars: &[char]
                 }
                 Edge::AnchorStart(target) => {
                     has_nonconsuming = true;
-                    if pos == 0 {
+                    let is_start =
+                        pos == 0 || (flags & 4 != 0 && pos > 0 && chars[pos - 1] == '\n');
+                    if is_start {
                         let new_t = Thread {
                             pc: *target,
                             saves: t.saves.clone(),
@@ -215,7 +256,9 @@ fn follow_nonconsuming(threads: &[Thread], nfa: &Nfa, pos: usize, chars: &[char]
                 }
                 Edge::AnchorEnd(target) => {
                     has_nonconsuming = true;
-                    if pos == chars.len() {
+                    let is_end = pos == chars.len()
+                        || (flags & 4 != 0 && pos < chars.len() && chars[pos] == '\n');
+                    if is_end {
                         let new_t = Thread {
                             pc: *target,
                             saves: t.saves.clone(),
@@ -305,13 +348,14 @@ fn lookahead_matches(
     chars: &[char],
     pos: usize,
     init_saves: &[Option<usize>],
+    flags: u32,
 ) -> Option<Vec<Option<usize>>> {
     let mut best: Option<(usize, Vec<Option<usize>>)> = None;
     let mut clist: Vec<Thread> = Vec::new();
     add_thread(&mut clist, nfa, sub_start, init_saves);
     let mut p = pos;
     loop {
-        let expanded = follow_nonconsuming(&clist, nfa, p, chars);
+        let expanded = follow_nonconsuming(&clist, nfa, p, chars, flags);
         for t in &expanded {
             if t.pc == sub_match {
                 let should_replace = match &best {
@@ -332,7 +376,12 @@ fn lookahead_matches(
             for edge in &nfa.states[t.pc].edges {
                 match edge {
                     Edge::Char(ch, target) => {
-                        if *ch == c {
+                        let eq = if flags & 2 != 0 {
+                            ch.eq_ignore_ascii_case(&c)
+                        } else {
+                            *ch == c
+                        };
+                        if eq {
                             add_thread(&mut nlist, nfa, *target, &t.saves);
                         }
                     }
@@ -341,13 +390,22 @@ fn lookahead_matches(
                         ranges,
                         target,
                     } => {
-                        let in_class = ranges.iter().any(|(lo, hi)| c >= *lo && c <= *hi);
+                        let mut in_class = ranges.iter().any(|(lo, hi)| c >= *lo && c <= *hi);
+                        if flags & 2 != 0 && !in_class {
+                            let lower = c.to_ascii_lowercase();
+                            let upper = c.to_ascii_uppercase();
+                            in_class = ranges.iter().any(|(lo, hi)| {
+                                lower >= *lo && lower <= *hi || upper >= *lo && upper <= *hi
+                            });
+                        }
                         if *negated != in_class {
                             add_thread(&mut nlist, nfa, *target, &t.saves);
                         }
                     }
                     Edge::Dot(target) => {
-                        add_thread(&mut nlist, nfa, *target, &t.saves);
+                        if flags & 8 != 0 || c != '\n' {
+                            add_thread(&mut nlist, nfa, *target, &t.saves);
+                        }
                     }
                     Edge::Epsilon(_)
                     | Edge::Save(_, _)

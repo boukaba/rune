@@ -2,7 +2,7 @@
 
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
-> **Status:** v0.8.1 🚧 (In Progress — 620/620 integration tests Pass, 3 Ignored; workspace 781 tests Pass)
+> **Status:** v0.8.1 🚧 (In Progress — 624/624 integration tests Pass, 3 Ignored; workspace 785 tests Pass)
 > SIDT validated, AFPC bytecode + native-code cache functional (AArch64); x86-64 runs bytecode/IC/shape caching only (JIT codegen disabled there). Cold start 2.8× faster than Node
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
@@ -3556,7 +3556,7 @@ during the run, both clean, final result `114330883345000` correct.
 - [x] **C1 — RegExp anchors ^/$** — added `Edge::AnchorStart/AnchorEnd` (nfa.rs:178 was no-op `(s,s)`) + `follow_nonconsuming` pos==0/len checks + PikeVM `start>len` guard and `pos..=len` inclusive loop for `^$` empty and `$` zero-length at end; sticky-aware via VM post-check. Preserved Thompson NFA→PikeVM arch. 1 new integration test `test_regexp_anchors` (8 cases), 621/621 integ, 17 regex unit pass.
 - [x] **C2 — RegExp \b/\B word boundaries** — added `RegexExpr::WordBoundary{negated}` (parse.rs `Empty` was skip) + `Edge::WordBoundary{negated,target}` (nfa.rs) + `follow_nonconsuming` `left!=right` boundary via `is_word_char=[A-Za-z0-9_]` (pikevm.rs), `pos..=len` handled 0/len as non-word. 1 new integration test `test_regexp_word_boundaries` (9 cases), 622/622 integ.
 - [x] **C3 — RegExp backrefs \1..9** — added `Edge::Backref{index,target}` (nfa.rs was `(s,s)` no-op) + per-start queue in `PikeVM::exec` (`queues[remaining+1]`), `follow_nonconsuming` empty→epsilon, `main` loop `curPos+cap_len` substring equality via `chars[s + k]==chars[curPos+k]`, out-of-range→fail, empty/non-participating→epsilon; preserves `Save` slots `2*cap+2` and Thomson NFA→PikeVM arch; 1 new integration test `test_regexp_backrefs` (9 cases), 623/623 integ.
-- [ ] **C4 — RegExp semantics leftmost-first + flags i/m/s** — fix `exec` longest→first-match + case-fold + dotAll + multiline ^/$ per `m` flag.
+- [x] **C4 — RegExp flags `i/m/s` (+ dotAll/multiline) + leftmost note** — added `PikeVm::exec_with_flags(nfa,text,start,flags)` (flags `g=1,i=2,m=4,s=8`), `follow_nonconsuming` now `pos==0 || (m&&chars[pos-1]=='\n')` for `^` and `pos==len || (m&&chars[pos]=='\n')` for `$`, `Char` via `eq_ignore_ascii_case` when `i`, `CharClass` lower/upper check when `i`, `Dot` via `s||c!='\n'`, `Backref` substring `eq_ignore_ascii_case` when `i`; `regexp_exec_internal` now reads `RegExp::flags` and calls `exec_with_flags`; `PendingReplaceAllOp.regex_flags` added and plumbed through `vm.rs` replaceAll loop; 1 new integration test `test_regexp_flags` (9 cases: `i`/`m`/`s`/`backref+i`), 624/624 integ.
 - [ ] **C5 — ToNumber(symbol) TypeError** — plumb `pending_exception` through 33 `to_number` call sites (preserve Value tag 6, bail-to-interpreter).
 - [ ] **C6 — Full Error type set globals** — audit `Vm.error_ctors Vec` (Error/EvalError/RangeError/ReferenceError/SyntaxError/TypeError/URIError via `to_string_for_error`), ensure `TypeError` real global not just `make_error_object`.
 - [ ] **C7 — Missing Array batch (RuneArray layout preserved: header 40B, extra_props@32)** — `reverse/splice/concat/shift/unshift/fill/copyWithin/at` via `array_builtin` state machines.
@@ -3590,4 +3590,14 @@ during the run, both clean, final result `114330883345000` correct.
 - [x] **Follow empty case** — `(Some(s),Some(e)) e==s` or `None` → epsilon push target; non-empty → not epsilon (stay in expanded for main loop)
 - [x] **Lookahead char loop** — ignores `Backref` (subpatterns with backref rare; deferred)
 - [x] **Verification** — CLI `/(a)\\1/` on `aa` true/`ab` false, `/(ab)\\1/` on `abab` true, `/(a)(b)\\1\\2` on `abab` true, `\\B` cross-check still true, `/(a+)\1/` on `aaa` → `aa`/`a` correct, `/(a)?\\1/` non-participating empty → true; 623/623 integ (new test), 17/17 regex, fmt/clippy clean
-- **Known gaps:** longest-match still longest (spec leftmost-first), flags `i/m/s` pending, backref in lookahead not yet
+- **Known gaps:** longest-match still longest (spec leftmost-first, `a|ab` gives `ab` not `a` — POSIX vs ES, fix needs priority queue), backref in lookahead not yet
+
+## C4 — RegExp flags `i/m/s` (2026-08-21)
+
+- [x] **PikeVM `exec_with_flags` (pikevm.rs:32)** — new `exec(nfa,text,start)` delegates to `exec_with_flags(nfa,text,start,flags)` with `flags` bits `g=1,i=2,m=4,s=8,u=16,y=32,d=64,v=128`; `follow_nonconsuming(threads,nfa,pos,chars,flags)` now handles `^`/`$` with `m` (`pos==0||m&&'\n'`), `i` not needed in follow
+- [x] **Char/CharClass/Dot/Backref with flags** — `Char` via `eq_ignore_ascii_case` when `i`, `CharClass` lower/upper check when `i`, `Dot` via `s||c!='\n'`, `Backref` substring `eq_ignore_ascii_case` when `i`
+- [x] **Lookahead with flags** — `lookahead_matches(nfa,sub_start,sub_match,chars,pos,saves,flags)` now takes flags, `follow` and char loop respect `i/s`
+- [x] **Builtins `regexp_exec_internal` (builtins.rs:5318)** — now reads `RegExp::flags` and calls `exec_with_flags`; `PendingReplaceAllOp.regex_flags` added (`vm.rs:316`) and plumbed through `builtins.rs:5223` and `vm.rs:7919` replaceAll loop
+- [x] **Direct `pike_vm.exec` calls** — `string_replace`/`replaceAll` etc now flag-aware where `RegExp` ptr available, else `exec` wrapper with `0`
+- [x] **Verification** — CLI `/a/i` on `A` true, `hello/i` on `HELLO` true, `/^a/m` on `\na` true, `/a$/m` on `a\n` true, `/./` on `\n` false vs `/./s` true, backref `/(a)\1/i` on `AA` true; 624/624 integ (new `test_regexp_flags`), 17/17 regex, clippy fix `eq_ignore_ascii_case`, fmt clean
+- **Known gaps:** leftmost-first still longest (spec `a|ab` gives `ab` not `a` — needs priority queue), `v`/`u` flags not yet, char class case-folding simplified to ASCII

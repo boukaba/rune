@@ -6326,6 +6326,59 @@ fn test_regexp_backrefs() {
 }
 
 #[test]
+fn test_regexp_flags() {
+    let mut ctx = Context::new_small();
+    // i flag — case-insensitive
+    assert_eq!(
+        ctx.eval(r#"/a/i.test("A")"#).unwrap().to_boolean(),
+        Some(true)
+    );
+    assert_eq!(
+        ctx.eval(r#"/hello/i.test("HELLO")"#).unwrap().to_boolean(),
+        Some(true)
+    );
+    assert_eq!(
+        ctx.eval(r#"/A/i.test("a")"#).unwrap().to_boolean(),
+        Some(true)
+    );
+    assert_eq!(
+        ctx.eval(r#"/a/.test("A")"#).unwrap().to_boolean(),
+        Some(false)
+    );
+    // i with backref
+    assert_eq!(
+        ctx.eval(r#"/(a)\1/i.test("AA")"#).unwrap().to_boolean(),
+        Some(true)
+    );
+    // m flag — multiline ^ and $
+    assert_eq!(
+        ctx.eval(r#"/^a/m.test("\na")"#).unwrap().to_boolean(),
+        Some(true)
+    );
+    assert_eq!(
+        ctx.eval(r#"/^a/.test("\na")"#).unwrap().to_boolean(),
+        Some(false)
+    );
+    assert_eq!(
+        ctx.eval(r#"/a$/m.test("a\n")"#).unwrap().to_boolean(),
+        Some(true)
+    );
+    assert_eq!(
+        ctx.eval(r#"/a$/.test("a\n")"#).unwrap().to_boolean(),
+        Some(false)
+    );
+    // s flag — dotAll
+    assert_eq!(
+        ctx.eval(r#"/./.test("\n")"#).unwrap().to_boolean(),
+        Some(false)
+    );
+    assert_eq!(
+        ctx.eval(r#"/./s.test("\n")"#).unwrap().to_boolean(),
+        Some(true)
+    );
+}
+
+#[test]
 fn test_regexp_search_resets_lastindex() {
     let mut ctx = Context::new_small();
     assert_eq!(

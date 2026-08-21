@@ -318,6 +318,7 @@ pub(crate) struct PendingReplaceAllOp {
     pub(crate) input: String,
     pub(crate) search_str: String,
     pub(crate) regex_pattern: Option<String>,
+    pub(crate) regex_flags: u32,
     pub(crate) fn_val: Value,
     pub(crate) next_pos: usize,
     pub(crate) accumulated: String,
@@ -7916,6 +7917,7 @@ impl Vm {
                             let input = pra.input.clone();
                             let search_str = pra.search_str.clone();
                             let regex_pattern = pra.regex_pattern.clone();
+                            let regex_flags = pra.regex_flags;
                             let next_pos = pra.next_pos;
                             let last_end = pra.last_end;
                             let fn_val = pra.fn_val;
@@ -7926,10 +7928,17 @@ impl Vm {
                                         Ok(expr) => {
                                             let nfa = rune_regex::nfa::compile(&expr);
                                             let pike_vm = rune_regex::pikevm::PikeVm::new();
-                                            pike_vm.exec(&nfa, &input, next_pos).map(|m| {
-                                                let start = m.groups[0].0;
-                                                (m.groups, start)
-                                            })
+                                            pike_vm
+                                                .exec_with_flags(
+                                                    &nfa,
+                                                    &input,
+                                                    next_pos,
+                                                    regex_flags,
+                                                )
+                                                .map(|m| {
+                                                    let start = m.groups[0].0;
+                                                    (m.groups, start)
+                                                })
                                         }
                                         Err(_) => None,
                                     }
@@ -7996,6 +8005,7 @@ impl Vm {
                                     input,
                                     search_str,
                                     regex_pattern,
+                                    regex_flags: pra.regex_flags,
                                     fn_val,
                                     next_pos: pra.next_pos,
                                     accumulated: pra.accumulated,

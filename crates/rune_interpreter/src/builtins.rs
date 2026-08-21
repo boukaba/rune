@@ -306,6 +306,13 @@ pub fn number_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
         Some(v) => v,
         None => return Value::smi(0),
     };
+    if val.is_symbol() {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "TypeError: Cannot convert a Symbol value to a number",
+        )));
+        return Value::undefined();
+    }
     if val.is_undefined() {
         return Value::from_float64(f64::NAN);
     }

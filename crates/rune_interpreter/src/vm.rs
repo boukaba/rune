@@ -3269,6 +3269,16 @@ impl Vm {
                 Opcode::UnaryPlus => {
                     let a = self.pop();
                     // §13.5.3: Return ToNumber(UnaryExpression)
+                    if a.is_symbol() {
+                        let err = Value::from_heap_ptr(heap_string(
+                            gc,
+                            "TypeError: Cannot convert a Symbol value to a number",
+                        ) as *mut u8);
+                        if let Some(exit) = self.handle_throw(gc, err) {
+                            return exit;
+                        }
+                        continue;
+                    }
                     let n = to_number(a);
                     let result = number_result(gc, n);
                     self.push(result);
@@ -3289,6 +3299,17 @@ impl Vm {
                     } else if let Some(v) = a.as_float64() {
                         Value::from_float64(-v)
                     } else {
+                        if a.is_symbol() {
+                            let err = Value::from_heap_ptr(heap_string(
+                                gc,
+                                "TypeError: Cannot convert a Symbol value to a number",
+                            )
+                                as *mut u8);
+                            if let Some(exit) = self.handle_throw(gc, err) {
+                                return exit;
+                            }
+                            continue;
+                        }
                         let n = to_number(a);
                         Value::from_float64(-n)
                     };
@@ -3306,6 +3327,16 @@ impl Vm {
                 }
                 Opcode::BitNot => {
                     let a = self.pop();
+                    if a.is_symbol() {
+                        let err = Value::from_heap_ptr(heap_string(
+                            gc,
+                            "TypeError: Cannot convert a Symbol value to a number",
+                        ) as *mut u8);
+                        if let Some(exit) = self.handle_throw(gc, err) {
+                            return exit;
+                        }
+                        continue;
+                    }
                     let n = to_int32(a);
                     // !n always fits in i32; use number_result for i31 safety
                     let result = number_result(gc, (!n) as f64);
@@ -3348,20 +3379,36 @@ impl Vm {
                     };
                     let a_is_str = value_is_string(a);
                     let b_is_str = value_is_string(b);
-                    // §7.1.12.1 ToString(Symbol) throws TypeError (§7.1.1 ToPrimitive
-                    // leaves symbols unchanged, so a symbol operand can never be
-                    // string-concatenated).
-                    if a.is_symbol() || b.is_symbol() {
-                        return self
-                            .throw_type_error(gc, "Cannot convert a Symbol value to a string");
-                    }
                     let result = if a_is_str || b_is_str {
+                        // §7.1.12.1 ToString(Symbol) throws TypeError
+                        if a.is_symbol() || b.is_symbol() {
+                            let err = Value::from_heap_ptr(heap_string(
+                                gc,
+                                "TypeError: Cannot convert a Symbol value to a string",
+                            )
+                                as *mut u8);
+                            if let Some(exit) = self.handle_throw(gc, err) {
+                                return exit;
+                            }
+                            continue;
+                        }
                         let sa = value_to_debug_string(a);
                         let sb = value_to_debug_string(b);
                         let combined = sa + &sb;
                         let ptr = HeapString::allocate(gc, &combined);
                         Value::from_heap_ptr(ptr as *mut u8)
                     } else {
+                        if a.is_symbol() || b.is_symbol() {
+                            let err = Value::from_heap_ptr(heap_string(
+                                gc,
+                                "TypeError: Cannot convert a Symbol value to a number",
+                            )
+                                as *mut u8);
+                            if let Some(exit) = self.handle_throw(gc, err) {
+                                return exit;
+                            }
+                            continue;
+                        }
                         let av = to_number(a);
                         let bv = to_number(b);
                         number_result(gc, av + bv)
@@ -3383,6 +3430,17 @@ impl Vm {
                             number_result(gc, av as f64 - bv as f64)
                         }
                     } else {
+                        if a.is_symbol() || b.is_symbol() {
+                            let err = Value::from_heap_ptr(heap_string(
+                                gc,
+                                "TypeError: Cannot convert a Symbol value to a number",
+                            )
+                                as *mut u8);
+                            if let Some(exit) = self.handle_throw(gc, err) {
+                                return exit;
+                            }
+                            continue;
+                        }
                         let av = to_number(a);
                         let bv = to_number(b);
                         number_result(gc, av - bv)
@@ -3404,6 +3462,17 @@ impl Vm {
                             number_result(gc, av as f64 * bv as f64)
                         }
                     } else {
+                        if a.is_symbol() || b.is_symbol() {
+                            let err = Value::from_heap_ptr(heap_string(
+                                gc,
+                                "TypeError: Cannot convert a Symbol value to a number",
+                            )
+                                as *mut u8);
+                            if let Some(exit) = self.handle_throw(gc, err) {
+                                return exit;
+                            }
+                            continue;
+                        }
                         let av = to_number(a);
                         let bv = to_number(b);
                         number_result(gc, av * bv)
@@ -3414,6 +3483,16 @@ impl Vm {
                 Opcode::Div => {
                     let b = self.pop();
                     let a = self.pop();
+                    if a.is_symbol() || b.is_symbol() {
+                        let err = Value::from_heap_ptr(heap_string(
+                            gc,
+                            "TypeError: Cannot convert a Symbol value to a number",
+                        ) as *mut u8);
+                        if let Some(exit) = self.handle_throw(gc, err) {
+                            return exit;
+                        }
+                        continue;
+                    }
                     let av = to_number(a);
                     let bv = to_number(b);
                     let result = number_result(gc, av / bv);
@@ -3435,6 +3514,17 @@ impl Vm {
                             }
                         }
                     } else {
+                        if a.is_symbol() || b.is_symbol() {
+                            let err = Value::from_heap_ptr(heap_string(
+                                gc,
+                                "TypeError: Cannot convert a Symbol value to a number",
+                            )
+                                as *mut u8);
+                            if let Some(exit) = self.handle_throw(gc, err) {
+                                return exit;
+                            }
+                            continue;
+                        }
                         let av = to_number(a);
                         let bv = to_number(b);
                         number_result(gc, av % bv)
@@ -3457,6 +3547,17 @@ impl Vm {
                             }
                         }
                     } else {
+                        if a.is_symbol() || b.is_symbol() {
+                            let err = Value::from_heap_ptr(heap_string(
+                                gc,
+                                "TypeError: Cannot convert a Symbol value to a number",
+                            )
+                                as *mut u8);
+                            if let Some(exit) = self.handle_throw(gc, err) {
+                                return exit;
+                            }
+                            continue;
+                        }
                         let av = to_number(a);
                         let bv = to_number(b);
                         number_result(gc, av.powf(bv))
@@ -3469,6 +3570,16 @@ impl Vm {
                 Opcode::Shl => {
                     let b = self.pop();
                     let a = self.pop();
+                    if a.is_symbol() || b.is_symbol() {
+                        let err = Value::from_heap_ptr(heap_string(
+                            gc,
+                            "TypeError: Cannot convert a Symbol value to a number",
+                        ) as *mut u8);
+                        if let Some(exit) = self.handle_throw(gc, err) {
+                            return exit;
+                        }
+                        continue;
+                    }
                     let av = to_int32(a);
                     let bv = to_int32(b);
                     let r = av.wrapping_shl(bv as u32);
@@ -3482,6 +3593,16 @@ impl Vm {
                 Opcode::Shr => {
                     let b = self.pop();
                     let a = self.pop();
+                    if a.is_symbol() || b.is_symbol() {
+                        let err = Value::from_heap_ptr(heap_string(
+                            gc,
+                            "TypeError: Cannot convert a Symbol value to a number",
+                        ) as *mut u8);
+                        if let Some(exit) = self.handle_throw(gc, err) {
+                            return exit;
+                        }
+                        continue;
+                    }
                     let av = to_int32(a);
                     let bv = to_int32(b);
                     self.push(Value::smi(av.wrapping_shr(bv as u32)));
@@ -3490,6 +3611,16 @@ impl Vm {
                 Opcode::ShrU => {
                     let b = self.pop();
                     let a = self.pop();
+                    if a.is_symbol() || b.is_symbol() {
+                        let err = Value::from_heap_ptr(heap_string(
+                            gc,
+                            "TypeError: Cannot convert a Symbol value to a number",
+                        ) as *mut u8);
+                        if let Some(exit) = self.handle_throw(gc, err) {
+                            return exit;
+                        }
+                        continue;
+                    }
                     let av = to_int32(a);
                     let bv = to_int32(b);
                     let r = (av as u32).wrapping_shr(bv as u32);
@@ -3503,6 +3634,16 @@ impl Vm {
                 Opcode::BitOr => {
                     let b = self.pop();
                     let a = self.pop();
+                    if a.is_symbol() || b.is_symbol() {
+                        let err = Value::from_heap_ptr(heap_string(
+                            gc,
+                            "TypeError: Cannot convert a Symbol value to a number",
+                        ) as *mut u8);
+                        if let Some(exit) = self.handle_throw(gc, err) {
+                            return exit;
+                        }
+                        continue;
+                    }
                     let av = to_int32(a);
                     let bv = to_int32(b);
                     let r = av | bv;
@@ -3516,6 +3657,16 @@ impl Vm {
                 Opcode::BitXor => {
                     let b = self.pop();
                     let a = self.pop();
+                    if a.is_symbol() || b.is_symbol() {
+                        let err = Value::from_heap_ptr(heap_string(
+                            gc,
+                            "TypeError: Cannot convert a Symbol value to a number",
+                        ) as *mut u8);
+                        if let Some(exit) = self.handle_throw(gc, err) {
+                            return exit;
+                        }
+                        continue;
+                    }
                     let av = to_int32(a);
                     let bv = to_int32(b);
                     let r = av ^ bv;
@@ -3529,6 +3680,16 @@ impl Vm {
                 Opcode::BitAnd => {
                     let b = self.pop();
                     let a = self.pop();
+                    if a.is_symbol() || b.is_symbol() {
+                        let err = Value::from_heap_ptr(heap_string(
+                            gc,
+                            "TypeError: Cannot convert a Symbol value to a number",
+                        ) as *mut u8);
+                        if let Some(exit) = self.handle_throw(gc, err) {
+                            return exit;
+                        }
+                        continue;
+                    }
                     let av = to_int32(a);
                     let bv = to_int32(b);
                     self.push(Value::smi(av & bv));
@@ -5034,6 +5195,16 @@ impl Vm {
                     } else {
                         Value::undefined()
                     };
+                    if old_val.is_symbol() {
+                        let err = Value::from_heap_ptr(heap_string(
+                            gc,
+                            "TypeError: Cannot convert a Symbol value to a number",
+                        ) as *mut u8);
+                        if let Some(exit) = self.handle_throw(gc, err) {
+                            return exit;
+                        }
+                        continue;
+                    }
                     let n = to_number(old_val) + 1.0;
                     let new_val = number_result(gc, n);
                     if idx >= self.frames[fi].locals.len() {
@@ -5051,6 +5222,16 @@ impl Vm {
                     } else {
                         Value::undefined()
                     };
+                    if old_val.is_symbol() {
+                        let err = Value::from_heap_ptr(heap_string(
+                            gc,
+                            "TypeError: Cannot convert a Symbol value to a number",
+                        ) as *mut u8);
+                        if let Some(exit) = self.handle_throw(gc, err) {
+                            return exit;
+                        }
+                        continue;
+                    }
                     let n = to_number(old_val) - 1.0;
                     let new_val = number_result(gc, n);
                     if idx >= self.frames[fi].locals.len() {
@@ -5071,6 +5252,17 @@ impl Vm {
                             .or_else(|| self.builtin_wrappers.get(&name).copied())
                             .or_else(|| self.get_builtin(&name))
                             .unwrap_or(Value::undefined());
+                        if old_val.is_symbol() {
+                            let err = Value::from_heap_ptr(heap_string(
+                                gc,
+                                "TypeError: Cannot convert a Symbol value to a number",
+                            )
+                                as *mut u8);
+                            if let Some(exit) = self.handle_throw(gc, err) {
+                                return exit;
+                            }
+                            continue;
+                        }
                         let n = to_number(old_val) + 1.0;
                         let new_val = number_result(gc, n);
                         self.globals.insert(name, new_val);
@@ -5091,6 +5283,17 @@ impl Vm {
                             .or_else(|| self.builtin_wrappers.get(&name).copied())
                             .or_else(|| self.get_builtin(&name))
                             .unwrap_or(Value::undefined());
+                        if old_val.is_symbol() {
+                            let err = Value::from_heap_ptr(heap_string(
+                                gc,
+                                "TypeError: Cannot convert a Symbol value to a number",
+                            )
+                                as *mut u8);
+                            if let Some(exit) = self.handle_throw(gc, err) {
+                                return exit;
+                            }
+                            continue;
+                        }
                         let n = to_number(old_val) - 1.0;
                         let new_val = number_result(gc, n);
                         self.globals.insert(name, new_val);
@@ -10099,8 +10302,33 @@ pub(crate) fn to_number(v: Value) -> f64 {
             f64::NAN
         }
     } else {
+        // Symbol and other exotic values fall through to NaN here;
+        // callers that need TypeError must check is_symbol() before calling.
         f64::NAN
     }
+}
+
+/// Checked ToNumber that throws TypeError for Symbol (preserve Value tag 6).
+/// For VM opcode paths that return Exit, use this to bail correctly.
+#[allow(dead_code)]
+pub(crate) fn to_number_checked(v: Value, vm: &mut Vm, gc: &mut SemiSpace) -> Result<f64, Exit> {
+    if v.is_symbol() {
+        return Err(vm.throw_type_error(gc, "Cannot convert a Symbol value to a number"));
+    }
+    Ok(to_number(v))
+}
+
+/// Checked ToNumber for builtin paths that set pending_exception.
+#[allow(dead_code)]
+pub(crate) fn to_number_builtin_checked(v: Value, vm: &mut Vm, gc: &mut SemiSpace) -> Option<f64> {
+    if v.is_symbol() {
+        vm.set_pending_exception(Value::from_heap_ptr(heap_string(
+            gc,
+            "TypeError: Cannot convert a Symbol value to a number",
+        )));
+        return None;
+    }
+    Some(to_number(v))
 }
 
 /// §7.1.6 ToInt32: Convert a Value to a signed 32-bit integer.

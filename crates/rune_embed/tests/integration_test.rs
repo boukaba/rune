@@ -6379,6 +6379,47 @@ fn test_regexp_flags() {
 }
 
 #[test]
+fn test_tonumber_symbol_throws() {
+    let mut ctx = Context::new_small();
+    // Number(Symbol) should throw TypeError (catchable)
+    assert!(ctx.eval(r#"Number(Symbol("a"))"#).is_err());
+    assert_eq!(
+        ctx.eval(
+            r#"var r = false; try { Number(Symbol("a")); } catch(e) { r = String(e).includes("TypeError"); } r"#
+        )
+        .unwrap()
+        .to_boolean(),
+        Some(true)
+    );
+    // Arithmetic with Symbol should throw
+    assert!(ctx.eval(r#"1 + Symbol("a")"#).is_err());
+    assert!(ctx.eval(r#"Symbol("a") - 1"#).is_err());
+    assert!(ctx.eval(r#"Symbol("a") * 2"#).is_err());
+    assert!(ctx.eval(r#"Symbol("a") / 2"#).is_err());
+    assert!(ctx.eval(r#"Symbol("a") % 2"#).is_err());
+    assert!(ctx.eval(r#"Symbol("a") ** 2"#).is_err());
+    assert!(ctx.eval(r#"Symbol("a") << 1"#).is_err());
+    assert!(ctx.eval(r#"Symbol("a") | 1"#).is_err());
+    // String concatenation with Symbol should throw TypeError for string
+    assert!(ctx.eval(r#""a" + Symbol("b")"#).is_err());
+    assert!(ctx.eval(r#"Symbol("a") + "b""#).is_err());
+    // Unary plus with Symbol should throw
+    assert!(ctx.eval(r#"+Symbol("a")"#).is_err());
+    // Inc/dec with Symbol
+    assert!(ctx.eval(r#"var s = Symbol("a"); ++s"#).is_err());
+    assert!(ctx.eval(r#"var s = Symbol("a"); s++"#).is_err());
+    // Comparison via number coercion should not throw for == with symbol? Instead false, but ToNumber for symbol in == string/number case is not called for symbol vs number - returns false directly. So check that == does not throw
+    assert_eq!(
+        ctx.eval(r#"Symbol("a") == 1"#).unwrap().to_boolean(),
+        Some(false)
+    );
+    assert_eq!(
+        ctx.eval(r#"Symbol("a") != 1"#).unwrap().to_boolean(),
+        Some(true)
+    );
+}
+
+#[test]
 fn test_regexp_search_resets_lastindex() {
     let mut ctx = Context::new_small();
     assert_eq!(

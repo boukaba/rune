@@ -2,7 +2,7 @@
 
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
-> **Status:** v0.8.1 🚧 (In Progress — 624/624 integration tests Pass, 3 Ignored; workspace 785 tests Pass)
+> **Status:** v0.8.1 🚧 (In Progress — 625/625 integration tests Pass, 3 Ignored; workspace 786 tests Pass)
 > SIDT validated, AFPC bytecode + native-code cache functional (AArch64); x86-64 runs bytecode/IC/shape caching only (JIT codegen disabled there). Cold start 2.8× faster than Node
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
@@ -3557,7 +3557,7 @@ during the run, both clean, final result `114330883345000` correct.
 - [x] **C2 — RegExp \b/\B word boundaries** — added `RegexExpr::WordBoundary{negated}` (parse.rs `Empty` was skip) + `Edge::WordBoundary{negated,target}` (nfa.rs) + `follow_nonconsuming` `left!=right` boundary via `is_word_char=[A-Za-z0-9_]` (pikevm.rs), `pos..=len` handled 0/len as non-word. 1 new integration test `test_regexp_word_boundaries` (9 cases), 622/622 integ.
 - [x] **C3 — RegExp backrefs \1..9** — added `Edge::Backref{index,target}` (nfa.rs was `(s,s)` no-op) + per-start queue in `PikeVM::exec` (`queues[remaining+1]`), `follow_nonconsuming` empty→epsilon, `main` loop `curPos+cap_len` substring equality via `chars[s + k]==chars[curPos+k]`, out-of-range→fail, empty/non-participating→epsilon; preserves `Save` slots `2*cap+2` and Thomson NFA→PikeVM arch; 1 new integration test `test_regexp_backrefs` (9 cases), 623/623 integ.
 - [x] **C4 — RegExp flags `i/m/s` (+ dotAll/multiline) + leftmost note** — added `PikeVm::exec_with_flags(nfa,text,start,flags)` (flags `g=1,i=2,m=4,s=8`), `follow_nonconsuming` now `pos==0 || (m&&chars[pos-1]=='\n')` for `^` and `pos==len || (m&&chars[pos]=='\n')` for `$`, `Char` via `eq_ignore_ascii_case` when `i`, `CharClass` lower/upper check when `i`, `Dot` via `s||c!='\n'`, `Backref` substring `eq_ignore_ascii_case` when `i`; `regexp_exec_internal` now reads `RegExp::flags` and calls `exec_with_flags`; `PendingReplaceAllOp.regex_flags` added and plumbed through `vm.rs` replaceAll loop; 1 new integration test `test_regexp_flags` (9 cases: `i`/`m`/`s`/`backref+i`), 624/624 integ.
-- [ ] **C5 — ToNumber(symbol) TypeError** — plumb `pending_exception` through 33 `to_number` call sites (preserve Value tag 6, bail-to-interpreter).
+- [x] **C5 — ToNumber(symbol) TypeError** — added `to_number_checked`/`to_number_builtin_checked` + explicit `is_symbol()` guards in `vm.rs` Add/Sub/Mul/Div/Mod/Exp/Shl/Shr/Bit ops/IncLocal etc (33 sites) via `handle_throw` (catchable) and `number_builtin` via `set_pending_exception`; `Add` string vs number paths split correctly (`"a"+Symbol` → string error, `1+Symbol` → number error); 1 new integration test `test_tonumber_symbol_throws` (12 cases inc. `Number(Symbol)`, `1+Symbol`, `Symbol*2`, `<<`, `|`, `++s`, `==` non-throw), 625/625 integ.
 - [ ] **C6 — Full Error type set globals** — audit `Vm.error_ctors Vec` (Error/EvalError/RangeError/ReferenceError/SyntaxError/TypeError/URIError via `to_string_for_error`), ensure `TypeError` real global not just `make_error_object`.
 - [ ] **C7 — Missing Array batch (RuneArray layout preserved: header 40B, extra_props@32)** — `reverse/splice/concat/shift/unshift/fill/copyWithin/at` via `array_builtin` state machines.
 - [ ] **C8 — Missing Object/Function/Math statics (shape model preserved)** — `Object.defineProperty/freeze/assign`, `Function.apply/bind`, `Math.*` via `value_to_prop_key` + `Shape::intern_with_parent`.
@@ -3601,3 +3601,11 @@ during the run, both clean, final result `114330883345000` correct.
 - [x] **Direct `pike_vm.exec` calls** — `string_replace`/`replaceAll` etc now flag-aware where `RegExp` ptr available, else `exec` wrapper with `0`
 - [x] **Verification** — CLI `/a/i` on `A` true, `hello/i` on `HELLO` true, `/^a/m` on `\na` true, `/a$/m` on `a\n` true, `/./` on `\n` false vs `/./s` true, backref `/(a)\1/i` on `AA` true; 624/624 integ (new `test_regexp_flags`), 17/17 regex, clippy fix `eq_ignore_ascii_case`, fmt clean
 - **Known gaps:** leftmost-first still longest (spec `a|ab` gives `ab` not `a` — needs priority queue), `v`/`u` flags not yet, char class case-folding simplified to ASCII
+
+## C5 — ToNumber(symbol) TypeError (2026-08-21)
+
+- [x] **VM `to_number` (vm.rs:10041) kept pure (returns `f64::NAN` for symbol)** — new `to_number_checked`/`to_number_builtin_checked` helpers check `is_symbol()` before calling `to_number`; `to_int32` similarly guarded
+- [x] **Opcode handlers (vm.rs:3272 Add, 3372 Sub, 3404 Mul, 3428 Div, 3437 Mod, 3462 Exp, 3495 Shl/Shr etc, 5130 IncLocal/DecLocal, 3272 UnaryPlus)** — each now `if a.is_symbol()||b.is_symbol() { let err=heap_string(gc,"TypeError: ..."); if let Some(exit)=handle_throw(gc,err){return exit;} continue; }` before `to_number`/`to_int32`; `Add` splits string vs number correctly (`"a"+Symbol` → string error, `1+Symbol` → number error); catchable via `try/catch` (was `throw_type_error` Uncaught)
+- [x] **Builtin `Number` (builtins.rs:303)** — `if val.is_symbol()` → `set_pending_exception` with `TypeError` and return `undefined` (pending path, catchable via `try { Number(Symbol()) }`)
+- [x] **Verification** — CLI `Number(Symbol)` throws, `1+Symbol` number error, `"a"+Symbol` string error, `Symbol*2`/`/2`/`%2`/`**2`/`<<1`/`|1`/`++s` all throw catchable; `Symbol==1` correctly false without throw (abstract equality special case preserved); 625/625 integ (new `test_tonumber_symbol_throws` 12 cases), fmt/clippy (eq_ignore_ascii_case) clean, `to_number` archival NaN path preserved for non-throwing contexts
+- **Known gaps:** `ToNumber` for `BigInt` etc not yet; `value_to_array_index` etc still use unchecked `to_number` (deferred)

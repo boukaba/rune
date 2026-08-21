@@ -196,7 +196,7 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - `test_prototype_patch_stencil` — same Clang availability issue in CI. Marked `#[ignore]`.
 - `RegExp` gaps: match-result `index`/`input` enumerability unobservable (no shape enum flags — `Object.keys` includes them); `v` flag literal `/a/v` unsupported (parser whitelist predates the ctor); **anchors `^`/`$`+`\b`/`\B`+backrefs+flags `i`/`m`/`s` fixed (C1-C4) — `Edge::Anchor/WordBoundary/Backref` + `exec_with_flags` exec, `m` multiline `^`/`$` via `\n`, `i` via `eq_ignore_ascii_case`, `s` via `Dot` `s||c!='\n'`**; `{n,m}` captures return the first copy's capture; engine unit = Rust char (no `u`-flag UTF-16 index math); leftmost still longest (spec `a|ab` gives `ab` not `a`)
 - Date is UTC-only (getTimezoneOffset always 0, no local tz); `toLocaleString` family = `toString` family (no ECMA-402); `toJSON` handles Date receivers only; no `setYear`/`getYear`/`toGMTString` (Annex B); no `Date.prototype[Symbol.toStringTag]` (not in 2027 edition); ToPrimitive doesn't dispatch `@@toPrimitive` (Date special-cased)
-- `Number(sym)`/arithmetic beyond `+` treat symbols as NaN (ToNumber(symbol) should throw TypeError — needs exception plumbing through to_number's call sites; deferred to conformance pass)
+- `Number(sym)`/arithmetic now correctly throw `TypeError: Cannot convert a Symbol value to a number` (C5) — `is_symbol()` guards in `vm.rs` Add/Sub/Mul/Div/Mod/Exp/Shl/Shr/Bit ops/IncLocal and `number_builtin` via `pending_exception`/`handle_throw`, `+` splits string vs number; `Symbol==1` still false without throw (abstract equality)
 - `Symbol.prototype.description` is computed in LoadProperty, not a real getter (getOwnPropertyDescriptor unavailable)
 - for..of gaps: no IteratorClose on break/return (observable only for user iterators with `return()`); `let`/`const` loop vars are plain locals (no per-iteration fresh binding); `Array.prototype.values/keys/entries` require TAG_ARRAY receivers (no array-likes); destructuring LHS in for..of discards the value; `done`/`value` read via load_property_recursive (accessors unresolved); iterator objects have no separate %IteratorPrototype%
 - `?.` in JIT: JumpIfNullOrUndefined not in the whitelist — optional chains bail to the interpreter (correct, slower in hot loops)
@@ -213,7 +213,7 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 3. **C2 (done this slice)** — RegExp `\b/\B` fixed — `WordBoundary{negated}` + `is_word_char` `[A-Za-z0-9_]` via `follow_nonconsuming` (`parse.rs Empty` was skip), 622/622 integ
 4. **C3 (done this slice)** — RegExp backrefs `\1..9` fixed — `Backref{index,target}` + per-start queue `cap_len` replay (`nfa.rs (s,s)` was no-op), 623/623 integ
 5. **C4 (done this slice)** — RegExp flags `i/m/s` — `exec_with_flags` + `m` multiline `^`/`$`, `i` case-fold, `s` dotAll (still longest not leftmost)
-6. **C5** — `ToNumber(symbol)` TypeError via `pending_exception` (33 call sites)
+6. **C5 (done this slice)** — `ToNumber(symbol)` TypeError — `is_symbol()` guards + `handle_throw`/`pending_exception` (`vm.rs` Add/Sub/Mul/Div/Mod/Exp/Shl/Shr/Bit ops/IncLocal, `number_builtin`), 625/625 integ
 7. **C6** — Full Error type set globals (`Vm.error_ctors Vec` — TypeError as real global)
 8. **C7** — Missing Array batch (RuneArray header 40B `extra_props@32` preserved) — `reverse/splice/concat/shift/unshift`
 9. **C8** — Object/Function/Math statics (shape model preserved)

@@ -129,7 +129,12 @@ pub fn is_jit_compatible(prog: &rune_bytecode::opcode::BytecodeProgram) -> bool 
             | Opcode::IncGlobal
             | Opcode::DecGlobal
             | Opcode::Call
-            | Opcode::Mod => {}
+            | Opcode::Mod
+            | Opcode::Div
+            | Opcode::Exp
+            | Opcode::JumpIfNullOrUndefined
+            | Opcode::In
+            | Opcode::Instanceof => {}
             _ => return false,
         }
     }

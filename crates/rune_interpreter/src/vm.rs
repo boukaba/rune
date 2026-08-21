@@ -202,7 +202,9 @@ pub struct JitHelpers {
     pub float64_add_helper: usize,
     /// Call helper for JIT-to-JIT function calls (Phase E).
     pub call_helper: usize,
-    _reserved: [usize; 1],
+    /// JIT binary float helper: Div/Exp via one entry point (op id in x2).
+    /// Replaces the former `_reserved` slot — JitHelpers layout size unchanged.
+    pub jit_binop_helper: usize,
 }
 
 /// An ESM module record (§16.2.1.2 ModuleRecord, minimal form).
@@ -707,7 +709,7 @@ impl Vm {
                 call_helper: rune_jit_call_helper as *const () as usize,
                 #[cfg(not(feature = "jit"))]
                 call_helper: 0,
-                _reserved: [0; 1],
+                jit_binop_helper: rune_jit_float64_div_exp_helper as *const () as usize,
             },
             jit_stack_base: 0,
             #[cfg(feature = "jit")]
@@ -5544,16 +5546,27 @@ impl Vm {
                                 let instrs = (*prog_ptr).instructions.as_ptr();
                                 for i in target..=pc {
                                     let op = (*instrs.add(i)).opcode;
-                                    if matches!(
-                                        op,
+                                    match op {
+                                        // Recorder-corruption gates: IC-bearing
+                                        // property loads (silent NaNs) and calls
+                                        // (bailout depth-model mismatch when a
+                                        // callee tiers up mid-record) stay on the
+                                        // interpreter — "bail-to-interpreter stays
+                                        // correct". Numeric-only loops still trace.
                                         Opcode::LoadProperty
-                                            | Opcode::StoreProperty
-                                            | Opcode::LoadPropertyIC
-                                            | Opcode::StorePropertyIC
-                                    ) && (*instrs.add(i)).ic_index >= 0
-                                    {
-                                        trace_eligible = false;
-                                        break;
+                                        | Opcode::StoreProperty
+                                        | Opcode::LoadPropertyIC
+                                        | Opcode::StorePropertyIC
+                                            if (*instrs.add(i)).ic_index >= 0 =>
+                                        {
+                                            trace_eligible = false;
+                                            break;
+                                        }
+                                        Opcode::Call | Opcode::CallFromArray | Opcode::New => {
+                                            trace_eligible = false;
+                                            break;
+                                        }
+                                        _ => {}
                                     }
                                 }
                             }
@@ -9351,7 +9364,7 @@ fn compare_strings_lt(a: Value, b: Value) -> Option<bool> {
     None
 }
 
-fn value_to_debug_string(val: Value) -> String {
+pub(crate) fn value_to_debug_string(val: Value) -> String {
     if val.is_undefined() {
         "undefined".to_string()
     } else if val.is_null() {
@@ -10657,7 +10670,7 @@ fn ordinary_has_instance(lhs: Value, rhs_proto_ptr: *mut u8) -> bool {
 }
 
 /// Check if a Value is a GC-allocated string.
-fn value_is_string(v: Value) -> bool {
+pub(crate) fn value_is_string(v: Value) -> bool {
     if let Some(ptr) = v.heap_ptr() {
         unsafe { (*(ptr as *const GcHeader)).tag() == TAG_STRING }
     } else {
@@ -10975,10 +10988,40 @@ pub extern "C" fn rune_jit_float64_add_helper(
     a_raw: u64,
     b_raw: u64,
 ) -> u64 {
-    let _ = vm_ptr;
+    let vm = unsafe { &mut *(vm_ptr as *mut Vm) };
     let gc = unsafe { &mut *(gc_ptr as *mut SemiSpace) };
     let a = Value::from_raw(a_raw);
     let b = Value::from_raw(b_raw);
+    // §12.8.5 Add semantics (mirror of the interpreter's Opcode::Add arm,
+    // sync-only): promote objects to strings, then either-string → concat,
+    // else numeric addition.
+    let a2 = if a.is_heap_object() {
+        let s = crate::builtins::to_primitive_string_sync(a, gc, vm);
+        Value::from_heap_ptr(heap_string(gc, &s))
+    } else {
+        a
+    };
+    let b2 = if b.is_heap_object() {
+        let s = crate::builtins::to_primitive_string_sync(b, gc, vm);
+        Value::from_heap_ptr(heap_string(gc, &s))
+    } else {
+        b
+    };
+    if value_is_string(a2) || value_is_string(b2) {
+        // §7.1.12.1: ToString(Symbol) throws TypeError
+        if a.is_symbol() || b.is_symbol() {
+            let err = Value::from_heap_ptr(heap_string(
+                gc,
+                "TypeError: Cannot convert a Symbol value to a string",
+            ));
+            vm.set_pending_exception(err);
+            return Value::undefined().raw();
+        }
+        let sa = value_to_debug_string(a2);
+        let sb = value_to_debug_string(b2);
+        let ptr = HeapString::allocate(gc, &(sa + &sb));
+        return Value::from_heap_ptr(ptr as *mut u8).raw();
+    }
     let av = to_number(a);
     let bv = to_number(b);
     number_result(gc, av + bv).raw()
@@ -11328,6 +11371,30 @@ pub extern "C" fn rune_jit_global_helper(
         }
         _ => Value::undefined().raw(),
     }
+}
+
+/// JIT helper for Div/Exp (J1). One entry point, op id selects:
+/// 0 = Div (`a / b`), 1 = Exp (`a ** b`). Mirrors the float64_add_helper
+/// calling convention; allocation-free for numeric results.
+/// x0=vm_ptr, x1=gc_ptr, x2=op, x3=a_raw, x4=b_raw → x0=result raw.
+pub extern "C" fn rune_jit_float64_div_exp_helper(
+    vm_ptr: *mut u8,
+    gc_ptr: *mut u8,
+    op: u64,
+    a_raw: u64,
+    b_raw: u64,
+) -> u64 {
+    let _ = vm_ptr;
+    let _gc = unsafe { &mut *(gc_ptr as *mut SemiSpace) };
+    let a = Value::from_raw(a_raw);
+    let b = Value::from_raw(b_raw);
+    let av = to_number(a);
+    let bv = to_number(b);
+    let r = match op {
+        0 => av / bv,
+        _ => av.powf(bv),
+    };
+    number_result(_gc, r).raw()
 }
 
 #[cfg(test)]

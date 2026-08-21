@@ -11058,3 +11058,98 @@ fn test_error_family_assert_throws_wrapper() {
         "outer"
     );
 }
+
+#[test]
+fn test_jit_div_exp_whitelisted() {
+    // J1: Div/Exp compile natively via jit_binop_helper
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+            function half(x) { return x / 2; }
+            function cube(x) { return x ** 3; }
+            var last = "";
+            for (var i = 0; i < 200; i++) { last = String(half(21)) + "," + String(cube(3)); }
+        "#,
+    )
+    .unwrap();
+    // Post-tier-up iterations ran natively — the final loop value must be
+    // exactly right and nothing may have bailed.
+    assert_eq!(eval_str(&mut ctx, "last"), "10.5,27");
+    assert!(
+        ctx.vm().jit_entry_count > 0,
+        "Div/Exp fns must have been JIT-compiled"
+    );
+    assert_eq!(
+        ctx.vm().jit_bailout_count,
+        0,
+        "native Div/Exp must not bail"
+    );
+}
+
+#[test]
+fn test_jit_div_by_zero_and_negative_exp() {
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+            function d(x, y) { return x / y; }
+            function e(x, y) { return x ** y; }
+            for (var i = 0; i < 100; i++) { d(i - 50, 3); e(2, i % 5); }
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        eval_str(&mut ctx, "String(d(1,0))"),
+        "Infinity",
+        "x/0 must be Infinity per §12.6.3"
+    );
+    assert_eq!(eval_str(&mut ctx, "String(e(2,-2))"), "0.25");
+    assert_eq!(eval_str(&mut ctx, "String(e(4,0.5))"), "2");
+}
+
+#[test]
+fn test_jit_optional_chaining_whitelisted() {
+    // J1: JumpIfNullOrUndefined compiles natively for `?.`
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            function pick(o) { return o?.x; }
+            var objs = [{x: 1}, {x: 2}, null, undefined, {x: 5}];
+            var s = 0;
+            for (var i = 0; i < 100; i++) {
+                var o = objs[i % 5];
+                var v = pick(o);
+                if (v !== undefined) { s += v; }
+            }
+            s
+        "#,
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some((1 + 2 + 5) * 20));
+    assert!(
+        ctx.vm().jit_entry_count > 0,
+        "optional-chaining fn should tier up"
+    );
+}
+
+#[test]
+fn test_jit_in_instanceof_bail_correctness() {
+    // J1: In/Instanceof are whitelisted but always bail — results must stay
+    // exactly correct whether or not native code ran.
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            function check(o) {
+                var has = 'x' in o;
+                var inst = o instanceof Object;
+                return (has ? 1 : 0) + (inst ? 10 : 0);
+            }
+            var sum = 0;
+            for (var i = 0; i < 100; i++) { sum += check({x: 1}); }
+            sum
+        "#,
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(11 * 100));
+}

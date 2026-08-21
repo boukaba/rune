@@ -88,6 +88,14 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ### Goal
 Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8× vs Node) with enough stdlib to run real workloads. v0.4 = stdlib breadth (14 builtins). v0.5 = Promise + async patterns.
 
+### Done — v0.9.2 / J1 (JIT whitelist: JumpIfNullOrUndefined + Div/Exp/In/Instanceof)
+- **Div/Exp native** — `jit_binop_helper` replaces `JitHelpers._reserved` (layout size UNCHANGED, VM offset 568) + `rune_jit_float64_div_exp_helper(vm,gc,op,a,b)`; codegen arms = Add-style helper calls, zero bailout paths
+- **JumpIfNullOrUndefined native** — exact: `(raw>>48)!=0x7FF8` excludes f64s, tag∈{2,3} → branch; optional chaining runs natively
+- **In/Instanceof** — whitelisted, compile to unconditional bailouts (operands restored, record at pre-depth+2, BLR bailout_helper@520): tier-up works, ops stay interpreted
+- **Pre-existing trace bugs found + fixed/gated**: (a) compiled-trace Add was numeric-only → `"x"+i` silently NaN'd after tracing (proven on clean main) — add helper now mirrors the interpreter's full §12.8.5 arm (sync object→string promotion, either-string concat, symbol TypeError); (b) call-bearing loops recording while a callee tiers up mid-record → "bailout stack-depth mismatch (trace)" abort (proven pre-existing with pure-Add callee) — such loops never start recording now
+- **4 new tests** — **815 workspace passed, 0 failed; clippy/fmt/no-default-features clean**
+- **Known gaps:** In/Instanceof bail every exec; JIT-Add symbol path returns undefined w/ pending exception not checked until interpreter sync; x86-64 untouched (J3)
+
 ### Done — v0.9.1 / C8 (Object/Function/Math statics)
 - **Math completion (§21.3)** — +18 methods: `round` (tie toward +∞; guards the `0.49999999999999994` floor(x+0.5) hazard via the spec's step-3/4 ranges; -0.5 → -0), `trunc` (±0 preserved), `sign` (NaN/±0 passthrough), `hypot` (coerce-all first → ±Inf beats NaN → all-zero +0), `clz32`, `imul`, `cbrt/log/log2/log10/exp/sin/cos/tan/asin/acos/atan/atan2`; new `math_to_f64` (numeric-string coercion — old math_op_unary fns untouched), `math_result` Smi-ification. Constants LN2/LN10/LOG2E/LOG10E/SQRT1_2/SQRT2
 - **Object statics** — `assign` (indices-first ordering, null/undefined sources skipped, stores via do_store_property), `is` (SameValue: NaN true, ±0 distinct), `getOwnPropertyNames` (= keys set; enumerability untracked — gap), `fromEntries` (array-of-pairs sync-only), `hasOwn` (dense indices/length/extra_props/symbols), `setPrototypeOf` (invalid proto throws even for primitive obj per spec step order)
@@ -231,6 +239,6 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 7. **C6 (done this slice)** — Full Error globals audit — 7 types via `error_ctors`/`builtin_wrappers` (`Error`/`EvalError`/`RangeError`/`ReferenceError`/`SyntaxError`/`TypeError`/`URIError`), 625/625 integ (no code change, already via v0.8.1)
 8. **C7 (done this slice)** — Missing Array batch — `reverse/splice/concat/shift/unshift` fixed + tested; **trace-recorder corruption gated** (IC-bearing loops stay interpreted; recorder root cause deferred to J1/J2), 640/640 integ
 9. **C8 (done this slice)** — Object/Function/Math statics — Math +18 fns + 6 constants, Object assign/is/getOwnPropertyNames/fromEntries/hasOwn/setPrototypeOf, Function.prototype.apply; Number-to-string Infinity/NaN/-0 fix; 811 workspace passed
-10. **J1** — JIT whitelist `JumpIfNullOrUndefined` (optional chaining) + `Div/Exp/In/Instanceof` (`lib.rs:61 is_jit_compatible`)
+10. **J1 (done this slice)** — JIT whitelist `JumpIfNullOrUndefined` (optional chaining) + `Div/Exp/In/Instanceof` — Div/Exp native via jit_binop_helper@568, JNUU exact nullish branch, In/Instanceof unconditional-bail; trace Add string-concat fixed; call-bearing loops excluded from recording. 815 workspace passed
 11. **J2** — Float-promoted accumulator stays native (no per-iter bail, preserve NaN-boxing `^0x0001...`)
 12. **J3** — x86-64 codegen verified + AFPC trace persist (`AfpcCache.complied_traces`)

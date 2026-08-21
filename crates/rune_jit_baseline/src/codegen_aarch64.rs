@@ -1076,6 +1076,25 @@ impl Aarch64CodeGen {
                     self.mem.patch_u32(mod_ok, 0x14000000 | (d & 0x03FF_FFFF));
                     self.push();
                 }
+                Opcode::Div | Opcode::Exp => {
+                    // J1: float division / exponentiation via the shared
+                    // jit_binop_helper (JitHelpers offset 568) — same
+                    // allocation-free convention as float64_add_helper.
+                    // x0=vm, x1=gc, x2=op(0=Div,1=Exp), x3=a_raw, x4=b_raw.
+                    let op_id: u64 = if instr.opcode == Opcode::Div { 0 } else { 1 };
+                    self.pop(); // x0 = b
+                    mov_reg(&mut self.mem, 9, 0);
+                    self.pop(); // x0 = a
+                    mov_reg(&mut self.mem, 8, 0);
+                    mov_reg(&mut self.mem, 0, VM_REG);
+                    mov_reg(&mut self.mem, 1, GC_REG);
+                    mov_imm64(&mut self.mem, 2, op_id);
+                    mov_reg(&mut self.mem, 3, 8);
+                    mov_reg(&mut self.mem, 4, 9);
+                    ldr_off(&mut self.mem, 15, VM_REG, 568); // jit_binop_helper
+                    emit(&mut self.mem, 0xD63F01E0); // BLR x15
+                    self.push();
+                }
                 Opcode::Lt => {
                     self.pop();
                     self.emit_smi_check(bc_idx, &[]); // check b
@@ -1419,6 +1438,67 @@ impl Aarch64CodeGen {
                 Opcode::Jump => {
                     let target = instr.operands[0] as usize;
                     self.emit_b(target);
+                }
+                Opcode::JumpIfNullOrUndefined => {
+                    // J1: optional chaining (`?.`). Exact semantics: only
+                    // undefined (tag 2) and null (tag 3) jump — float64
+                    // values are excluded by the QNAN top-16 check.
+                    let target = instr.operands[0] as usize;
+                    self.pop(); // x0 = value
+                    // Step 1: if (raw >> 48) != 0x7FF8 → not NaN-boxed →
+                    // it's a plain f64, never nullish → fall through.
+                    movz(&mut self.mem, 1, 48);
+                    lsr_reg(&mut self.mem, 1, 0, 1); // x1 = raw >> 48
+                    movz(&mut self.mem, 2, 0x7FF8);
+                    cmp_reg(&mut self.mem, 1, 2);
+                    let not_boxed = self.mem.current_offset();
+                    emit(&mut self.mem, 0x54000001); // B.NE +0 → fall through
+                    // Step 2: tag = (raw >> 45) & 7
+                    movz(&mut self.mem, 1, 45);
+                    lsr_reg(&mut self.mem, 1, 0, 1);
+                    movz(&mut self.mem, 2, 7);
+                    and_reg(&mut self.mem, 1, 1, 2);
+                    // undefined (tag 2)
+                    movz(&mut self.mem, 2, 2);
+                    cmp_reg(&mut self.mem, 1, 2);
+                    self.emit_b_cond(0x0, target); // B.EQ target
+                    // null (tag 3)
+                    movz(&mut self.mem, 2, 3);
+                    cmp_reg(&mut self.mem, 1, 2);
+                    self.emit_b_cond(0x0, target); // B.EQ target
+                    // Fall through: patch the B.NE to here
+                    let fallthrough = self.mem.current_offset();
+                    let nd = ((fallthrough as i64 - not_boxed as i64) / 4) as u32;
+                    self.mem
+                        .patch_u32(not_boxed, 0x54000001 | ((nd & 0x7FFFF) << 5));
+                }
+                Opcode::In | Opcode::Instanceof => {
+                    // J1: full semantics ([[HasProperty]] walk /
+                    // OrdinaryHasInstance + @@hasInstance dispatch) require
+                    // VM runtime — bail unconditionally. Operands are pushed
+                    // back so the interpreter re-executes the instruction.
+                    self.pop(); // x0 = rhs
+                    mov_reg(&mut self.mem, 9, 0);
+                    self.pop(); // x0 = lhs
+                    mov_reg(&mut self.mem, 8, 0);
+                    // Restore operands for interpreter re-execution
+                    mov_reg(&mut self.mem, 0, 8);
+                    self.push_raw();
+                    mov_reg(&mut self.mem, 0, 9);
+                    self.push_raw();
+                    self.record_bailout_point_at(
+                        bc_idx,
+                        BailoutReason::Unimplemented,
+                        self.stack_depth + 2,
+                    );
+                    mov_reg(&mut self.mem, 2, JIT_STACK_REG);
+                    mov_imm64(&mut self.mem, 1, bc_idx as u64);
+                    mov_reg(&mut self.mem, 0, VM_REG);
+                    ldr_off(&mut self.mem, 15, VM_REG, 520); // bailout_helper
+                    emit(&mut self.mem, 0xD63F01E0); // BLR x15
+                    movz(&mut self.mem, 0, 0);
+                    self.push_raw();
+                    self.emit_epilogue();
                 }
                 Opcode::JumpIfFalse => {
                     let target = instr.operands[0] as usize;
@@ -2279,7 +2359,7 @@ mod tests {
                 global_helper: 0,
                 float64_add_helper: test_float64_add_stub as usize,
                 call_helper: 0,
-                _reserved: [0; 1],
+                jit_binop_helper: 0,
             },
             jit_stack_base: 0,
         });
@@ -2773,7 +2853,7 @@ mod tests {
                 global_helper: 0,
                 float64_add_helper: 0,
                 call_helper: 0,
-                _reserved: [0; 1],
+                jit_binop_helper: 0,
             },
             jit_stack_base: 0,
         };

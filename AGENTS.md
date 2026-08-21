@@ -66,8 +66,9 @@ breadth to run real workloads correctly, with the cold-start wedge intact.
 - [x] **ESM** — `import`/`export`, module namespace, hoisting, circular deps
 - [ ] **Conformance pass** — lift test262 suites into the 80%+ band; fix silent
       miscompiles; register full Error type set (TypeError as a real global)
-- [ ] **JIT gap** — float-promoted accumulators stay native, optional chaining +
-      newer opcodes in the whitelist, x86-64 codegen verified
+- [ ] **JIT gap** — J1 done (JumpIfNullOrUndefined + Div/Exp native,
+      In/Instanceof bail); remaining: J2 float-promoted accumulators stay
+      native, J3 x86-64 codegen verified
 
 ## Spec discipline
 Before implementing ANY feature, always:
@@ -221,7 +222,6 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - `Number(sym)`/arithmetic now correctly throw `TypeError: Cannot convert a Symbol value to a number` (C5) — `is_symbol()` guards in `vm.rs` Add/Sub/Mul/Div/Mod/Exp/Shl/Shr/Bit ops/IncLocal and `number_builtin` via `pending_exception`/`handle_throw`, `+` splits string vs number; `Symbol==1` still false without throw (abstract equality)
 - `Symbol.prototype.description` is computed in LoadProperty, not a real getter (getOwnPropertyDescriptor unavailable)
 - for..of gaps: no IteratorClose on break/return (observable only for user iterators with `return()`); `let`/`const` loop vars are plain locals (no per-iteration fresh binding); `Array.prototype.values/keys/entries` require TAG_ARRAY receivers (no array-likes); destructuring LHS in for..of discards the value; `done`/`value` read via load_property_recursive (accessors unresolved); iterator objects have no separate %IteratorPrototype%
-- `?.` in JIT: JumpIfNullOrUndefined not in the whitelist — optional chains bail to the interpreter (correct, slower in hot loops)
 - Nested accessors through the single PendingAccessorCall slot still unsupported (getter inside getter) — object-literal/class accessor CHAINS work; a getter CALLING a getter on another object bails (pre-existing)
 - Class-decl names don't resolve inside static methods; static private lookup walks the superclass chain (see v0.7 Known gaps)
 - Trace perf: bailout-per-iteration paths (e.g. float-promoted acc in a loop) still bail each iteration — re-record or stay native with float ops (correctness fine)

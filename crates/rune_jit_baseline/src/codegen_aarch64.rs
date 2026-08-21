@@ -1222,11 +1222,15 @@ impl Aarch64CodeGen {
                     self.push();
                 }
                 Opcode::Ge => {
-                    self.pop();
-                    self.emit_smi_check(bc_idx, &[]); // check b
-                    mov_reg(&mut self.mem, 1, 0);
-                    self.pop();
-                    self.emit_smi_check(bc_idx, &[1]); // check a; saved=[x1(b)]
+                    self.pop(); // x0 = b
+                    mov_reg(&mut self.mem, 9, 0);
+                    self.pop(); // x0 = a
+                    mov_reg(&mut self.mem, 8, 0);
+                    // J2: helper fallback instead of interpreter bail
+                    let p_b = self.emit_branch_if_not_smi(9);
+                    let p_a = self.emit_branch_if_not_smi(8);
+                    mov_reg(&mut self.mem, 1, 9);
+                    mov_reg(&mut self.mem, 0, 8);
                     cmp_reg(&mut self.mem, 0, 1);
                     // CSET x0, GE = CSINC x0, XZR, XZR, LT (= !GE)
                     emit(&mut self.mem, 0x9A9FB7E0);
@@ -1234,8 +1238,20 @@ impl Aarch64CodeGen {
                     orr_imm1(&mut self.mem, 0, 0);
                     mov_imm64(&mut self.mem, 1, QNAN_PREFIX);
                     orr_reg(&mut self.mem, 0, 0, 1);
-                    orr_imm1(&mut self.mem, 0, 0);
                     self.push();
+                    let after_fast = self.mem.current_offset();
+                    emit(&mut self.mem, 0x14000000); // B +0 (skip slow)
+                    let slow = self.mem.current_offset();
+                    self.emit_binop_helper_slow(8);
+                    let end = self.mem.current_offset();
+                    for (site, reg) in [(p_b, 9u32), (p_a, 8u32)] {
+                        let d2 = ((slow as i64 - site as i64) / 4) as u32;
+                        self.mem
+                            .patch_u32(site, 0x36000000 | reg | ((d2 & 0x3FFF) << 5));
+                    }
+                    let d3 = ((end as i64 - after_fast as i64) / 4) as u32;
+                    self.mem
+                        .patch_u32(after_fast, 0x14000000 | (d3 & 0x03FF_FFFF));
                 }
                 Opcode::StrictEq => {
                     self.pop();

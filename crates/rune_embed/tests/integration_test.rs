@@ -11226,3 +11226,29 @@ fn test_jit_float_mod_native() {
     assert_eq!(eval_str(&mut ctx, "String(m(5, 0))"), "NaN");
     assert!(ctx.vm().jit_entry_count > 0);
 }
+
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn test_jit_float_comparisons_native() {
+    // J2#3d: Lt/Gt/Le/Ge with float operands via helper
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+            function cmp(a, b) {
+                var r = '';
+                if (a < b) { r += 'L'; }
+                if (a > b) { r += 'G'; }
+                if (a <= b) { r += 'l'; }
+                if (a >= b) { r += 'g'; }
+                return r;
+            }
+            for (var i = 0; i < 100; i++) { cmp(i, i + 1); }
+        "#,
+    )
+    .unwrap();
+    assert_eq!(eval_str(&mut ctx, "cmp(1, 2.5)"), "Ll");
+    assert_eq!(eval_str(&mut ctx, "cmp(2.5, 1)"), "Gg");
+    assert_eq!(eval_str(&mut ctx, "cmp(2, 2)"), "lg");
+    assert_eq!(eval_str(&mut ctx, "cmp(-1.5, -1)"), "Ll");
+    assert!(ctx.vm().jit_entry_count > 0);
+}

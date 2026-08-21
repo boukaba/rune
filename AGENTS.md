@@ -67,10 +67,11 @@ breadth to run real workloads correctly, with the cold-start wedge intact.
 - [ ] **Conformance pass** — lift test262 suites into the 80%+ band; fix silent
       miscompiles; register full Error type set (TypeError as a real global)
 - [ ] **JIT gap** — J1 done (JumpIfNullOrUndefined + Div/Exp native,
-      In/Instanceof bail); J2 resume #1 DONE (negative-Smi
-      native Mul/Mod/Sub NaN root-caused: unmasked payload ORR QNAN —
-      mask-before-guard/box fix landed + regression test); remaining:
-      J2 depth-model audit then arm relayout, J3 x86-64 codegen verified
+      In/Instanceof bail); J2 DONE (resume #1 negative-Smi
+      NaN root-caused+fixed; #2 audit resolved — "depth coupling" was
+      the TBZ Rt-wipe bug; #3 all 7 arms relaid out one-per-commit;
+      #4 LoadFloat64 gate relaxed; accumulators stay native,
+      zero bailouts); remaining: J3 x86-64 codegen verified
 
 ## Spec discipline
 Before implementing ANY feature, always:
@@ -242,5 +243,5 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 8. **C7 (done this slice)** — Missing Array batch — `reverse/splice/concat/shift/unshift` fixed + tested; **trace-recorder corruption gated** (IC-bearing loops stay interpreted; recorder root cause deferred to J1/J2), 640/640 integ
 9. **C8 (done this slice)** — Object/Function/Math statics — Math +18 fns + 6 constants, Object assign/is/getOwnPropertyNames/fromEntries/hasOwn/setPrototypeOf, Function.prototype.apply; Number-to-string Infinity/NaN/-0 fix; 811 workspace passed
 10. **J1 (done this slice)** — JIT whitelist `JumpIfNullOrUndefined` (optional chaining) + `Div/Exp/In/Instanceof` — Div/Exp native via jit_binop_helper@568, JNUU exact nullish branch, In/Instanceof unconditional-bail; trace Add string-concat fixed; call-bearing loops excluded from recording. 815 workspace passed
-11. **J2 (resume #1 done)** — helper ops 2-8 landed; negative-Smi NaN FIXED (mask-before-box); remaining: depth-model audit, arm relayout (one arm per commit), LoadFloat64 gate relaxation
+11. **J2 (done)** — helper ops 2-8 + mask-before-box fix; all 7 arithmetic/comparison arms relaid out (TBZ fast path + jit_binop_helper slow path); LoadFloat64 gate relaxed; float accumulators native w/ zero bailouts. 820 workspace passed
 12. **J3** — x86-64 codegen verified + AFPC trace persist (`AfpcCache.complied_traces`)

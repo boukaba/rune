@@ -11252,3 +11252,30 @@ fn test_jit_float_comparisons_native() {
     assert_eq!(eval_str(&mut ctx, "cmp(-1.5, -1)"), "Ll");
     assert!(ctx.vm().jit_entry_count > 0);
 }
+
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn test_jit_float_literal_accumulator() {
+    // J2#4 + goal: float LITERALS inside fn bodies are now eligible;
+    // the accumulator goes float after iteration 1 and stays native.
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+            function grow(n) {
+                var acc = 1;
+                for (var i = 0; i < n; i++) { acc = acc * 1.5; }
+                return acc;
+            }
+            for (var k = 0; k < 100; k++) { grow(50); }
+        "#,
+    )
+    .unwrap();
+    assert!(ctx.vm().jit_entry_count > 0, "grow must tier up");
+    assert_eq!(eval_str(&mut ctx, "String(grow(4))"), "5.0625");
+    assert_eq!(eval_str(&mut ctx, "String(grow(200000))"), "Infinity");
+    assert_eq!(
+        ctx.vm().jit_bailout_count,
+        0,
+        "float accumulator must not bail (J2 goal)"
+    );
+}

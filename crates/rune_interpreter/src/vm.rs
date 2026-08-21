@@ -11373,9 +11373,10 @@ pub extern "C" fn rune_jit_global_helper(
     }
 }
 
-/// JIT helper for Div/Exp (J1). One entry point, op id selects:
-/// 0 = Div (`a / b`), 1 = Exp (`a ** b`). Mirrors the float64_add_helper
-/// calling convention; allocation-free for numeric results.
+/// JIT helper for float binary ops (J1/J2). One entry point, op id selects:
+/// 0 = Div (`a / b`), 1 = Exp (`a ** b`), 2 = Sub, 3 = Mul, 4 = Mod (fmod),
+/// 5..8 = Lt/Gt/Le/Ge (boolean-encoded result). Mirrors the
+/// float64_add_helper calling convention; allocation-free for numerics.
 /// x0=vm_ptr, x1=gc_ptr, x2=op, x3=a_raw, x4=b_raw → x0=result raw.
 pub extern "C" fn rune_jit_float64_div_exp_helper(
     vm_ptr: *mut u8,
@@ -11385,16 +11386,23 @@ pub extern "C" fn rune_jit_float64_div_exp_helper(
     b_raw: u64,
 ) -> u64 {
     let _ = vm_ptr;
-    let _gc = unsafe { &mut *(gc_ptr as *mut SemiSpace) };
+    let gc = unsafe { &mut *(gc_ptr as *mut SemiSpace) };
     let a = Value::from_raw(a_raw);
     let b = Value::from_raw(b_raw);
     let av = to_number(a);
     let bv = to_number(b);
-    let r = match op {
-        0 => av / bv,
-        _ => av.powf(bv),
-    };
-    number_result(_gc, r).raw()
+    match op {
+        0 => number_result(gc, av / bv).raw(),
+        1 => number_result(gc, av.powf(bv)).raw(),
+        2 => number_result(gc, av - bv).raw(),
+        3 => number_result(gc, av * bv).raw(),
+        4 => number_result(gc, av % bv).raw(),
+        5 => Value::boolean(av < bv).raw(),
+        6 => Value::boolean(av > bv).raw(),
+        7 => Value::boolean(av <= bv).raw(),
+        8 => Value::boolean(av >= bv).raw(),
+        _ => Value::from_float64(f64::NAN).raw(),
+    }
 }
 
 #[cfg(test)]

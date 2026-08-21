@@ -6328,6 +6328,505 @@ pub fn array_slice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
     Value::from_heap_ptr(result_ptr)
 }
 
+/// Array.prototype.reverse — §23.1.3.31, reverses elements in place and returns this.
+pub fn array_reverse(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    let Some(length) = crate::vm::array_like_length(this) else {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "TypeError: Array.prototype.reverse called on null or undefined",
+        )));
+        return Value::undefined();
+    };
+    if length <= 1 {
+        return this;
+    }
+    // For dense arrays, swap directly via RuneArray
+    if let Some(ptr) = this.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_ARRAY {
+            let arr = ptr as *mut RuneArray;
+            let len = unsafe { RuneArray::length(arr) } as usize;
+            for i in 0..len / 2 {
+                let a = unsafe { RuneArray::get_element(arr, i) };
+                let b = unsafe { RuneArray::get_element(arr, len - 1 - i) };
+                unsafe {
+                    RuneArray::set_element(arr, i, b);
+                    RuneArray::set_element(arr, len - 1 - i, a);
+                }
+            }
+            return this;
+        }
+    }
+    // Generic array-like (object) — use HasProperty/Get/Set/Delete per spec
+    // For simplicity, handle via array_like helpers plus JSObject property ops
+    for k in 0..length / 2 {
+        let lower = k;
+        let upper = length - 1 - k;
+        let lower_exists = crate::vm::array_like_index(this, lower).is_some();
+        let upper_exists = crate::vm::array_like_index(this, upper).is_some();
+        let lower_val = crate::vm::array_like_index(this, lower).unwrap_or(Value::undefined());
+        let upper_val = crate::vm::array_like_index(this, upper).unwrap_or(Value::undefined());
+        if lower_exists && upper_exists {
+            set_array_like_index(this, lower, upper_val, gc);
+            set_array_like_index(this, upper, lower_val, gc);
+        } else if !lower_exists && upper_exists {
+            set_array_like_index(this, lower, upper_val, gc);
+            delete_array_like_index(this, upper);
+        } else if lower_exists && !upper_exists {
+            delete_array_like_index(this, lower);
+            set_array_like_index(this, upper, lower_val, gc);
+        }
+    }
+    this
+}
+
+/// Array.prototype.concat — §23.1.3.4, concatenates arrays/values, respects @@isConcatSpreadable
+pub fn array_concat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let result_arr = RuneArray::allocate(gc, &[]);
+    unsafe {
+        let ptr = result_arr as *mut u8;
+        *(ptr.add(8) as *mut *const rune_core::shape::Shape) =
+            *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
+        if let Some(proto) = vm.array_prototype.heap_ptr() {
+            *(ptr.add(24) as *mut *mut u8) = proto;
+        }
+    }
+    let mut result_ptr = result_arr as *mut u8;
+    let mut all = Vec::with_capacity(1 + args.len());
+    all.push(this);
+    all.extend_from_slice(args);
+    for item in all {
+        let spreadable = if let Some(ptr) = item.heap_ptr() {
+            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+            // Check Symbol.isConcatSpreadable if present
+            let sym_key = PropertyKey::from_symbol(rune_core::symbol::SYM_IS_CONCAT_SPREADABLE);
+            let spread_val = if tag == TAG_ARRAY {
+                // Arrays store named props in extra_props
+                let extra = unsafe { RuneArray::extra_props(ptr as *mut RuneArray) };
+                if extra.is_null() {
+                    None
+                } else {
+                    let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                    shape
+                        .lookup(&sym_key)
+                        .map(|slot| unsafe { JSObject::get_slot(extra as *mut JSObject, slot) })
+                }
+            } else if tag == TAG_OBJECT {
+                let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                shape
+                    .lookup(&sym_key)
+                    .map(|slot| unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) })
+            } else {
+                None
+            };
+            if let Some(v) = spread_val {
+                // If present, ToBoolean determines spreadability
+                v.to_bool()
+            } else {
+                // Default: arrays are spreadable, others not
+                tag == TAG_ARRAY
+            }
+        } else {
+            false
+        };
+        if spreadable {
+            if let Some(len) = crate::vm::array_like_length(item) {
+                for k in 0..len {
+                    let v = crate::vm::array_like_index(item, k).unwrap_or(Value::undefined());
+                    unsafe {
+                        let new_ptr = RuneArray::push(gc, result_ptr as *mut RuneArray, v);
+                        if new_ptr as *mut u8 != result_ptr {
+                            result_ptr = new_ptr as *mut u8;
+                        }
+                    }
+                }
+            }
+        } else {
+            unsafe {
+                let new_ptr =
+                    RuneArray::push(gc, result_ptr as *mut RuneArray, refresh_value(item));
+                if new_ptr as *mut u8 != result_ptr {
+                    result_ptr = new_ptr as *mut u8;
+                }
+            }
+        }
+    }
+    Value::from_heap_ptr(result_ptr)
+}
+
+/// Array.prototype.shift — §23.1.3.33, removes first element and returns it
+pub fn array_shift(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let Some(length) = crate::vm::array_like_length(this) else {
+        return Value::undefined();
+    };
+    if length == 0 {
+        // Ensure length is 0
+        if let Some(ptr) = this.heap_ptr() {
+            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+            if tag == TAG_ARRAY {
+                unsafe { RuneArray::set_length(ptr as *mut RuneArray, 0) };
+            }
+        }
+        return Value::undefined();
+    }
+    let first = crate::vm::array_like_index(this, 0).unwrap_or(Value::undefined());
+    if let Some(ptr) = this.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_ARRAY {
+            let arr = ptr as *mut RuneArray;
+            let len = unsafe { RuneArray::length(arr) } as usize;
+            for i in 1..len {
+                let v = unsafe { RuneArray::get_element(arr, i) };
+                unsafe { RuneArray::set_element(arr, i - 1, v) };
+            }
+            unsafe { RuneArray::set_length(arr, (len - 1) as u32) };
+        } else if tag == TAG_OBJECT {
+            for i in 1..length {
+                let v = crate::vm::array_like_index(this, i).unwrap_or(Value::undefined());
+                let exists = crate::vm::array_like_index(this, i).is_some();
+                if exists {
+                    set_array_like_index(this, i - 1, v, gc);
+                } else {
+                    delete_array_like_index(this, i - 1);
+                }
+            }
+            delete_array_like_index(this, length - 1);
+            // Update length
+            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+            if let Some(slot) = shape.lookup(&PropertyKey::from_string("length")) {
+                unsafe {
+                    JSObject::set_slot(ptr as *mut JSObject, slot, Value::smi((length - 1) as i32))
+                };
+            }
+        }
+    }
+    first
+}
+
+/// Array.prototype.unshift — §23.1.3.35, inserts elements at start and returns new length
+pub fn array_unshift(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let Some(length) = crate::vm::array_like_length(this) else {
+        return Value::undefined();
+    };
+    let arg_count = args.len() as u32;
+    let new_len = length + arg_count;
+    if let Some(ptr) = this.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_ARRAY {
+            // Grow first (each grow may move the array / trigger a GC) and keep
+            // using the live pointer. Capacity must be re-read after every grow.
+            let mut arr = ptr as *mut RuneArray;
+            unsafe {
+                while (new_len as usize) > RuneArray::capacity(arr) as usize {
+                    arr = grow_dense_array(gc, vm, arr);
+                }
+                // Shift existing elements to the right
+                for i in (0..length).rev() {
+                    let v = RuneArray::get_element(arr, i as usize);
+                    RuneArray::set_element(arr, (i + arg_count) as usize, v);
+                }
+                for (i, &arg) in args.iter().enumerate() {
+                    RuneArray::set_element(arr, i, refresh_value(arg));
+                }
+                RuneArray::set_length(arr, new_len);
+            }
+        } else if tag == TAG_OBJECT {
+            for i in (0..length).rev() {
+                let v = crate::vm::array_like_index(this, i).unwrap_or(Value::undefined());
+                let exists = crate::vm::array_like_index(this, i).is_some();
+                if exists {
+                    set_array_like_index(this, i + arg_count, v, gc);
+                } else {
+                    delete_array_like_index(this, i + arg_count);
+                }
+            }
+            for (i, &arg) in args.iter().enumerate() {
+                set_array_like_index(this, i as u32, arg, gc);
+            }
+            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+            if let Some(slot) = shape.lookup(&PropertyKey::from_string("length")) {
+                unsafe {
+                    JSObject::set_slot(ptr as *mut JSObject, slot, Value::smi(new_len as i32))
+                };
+            }
+        }
+    }
+    Value::smi(new_len as i32)
+}
+
+/// Array.prototype.splice — §23.1.3.32
+pub fn array_splice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let Some(length) = crate::vm::array_like_length(this) else {
+        return Value::undefined();
+    };
+    // §23.1.3.32 step 3: actualStart = ToClampedIndex(start, length)
+    let relative_start = args
+        .first()
+        .and_then(|&v| coerce_integer_arg(v))
+        .unwrap_or(0.0);
+    let actual_start: u32 = if relative_start < 0.0 {
+        ((length as f64) + relative_start).max(0.0) as u32
+    } else if relative_start >= (length as f64) {
+        length
+    } else {
+        relative_start as u32
+    };
+    // Steps 5-7: start absent → 0 deletes; deleteCount absent → to the end;
+    // else ToIntegerOrInfinity clamped to [0, length - actualStart]
+    let delete_count: u32 = if args.is_empty() {
+        0
+    } else if args.len() == 1 {
+        length - actual_start
+    } else {
+        let max_dc = (length - actual_start) as f64;
+        match coerce_integer_arg(args[1]) {
+            Some(dc) => dc.clamp(0.0, max_dc) as u32,
+            None => 0,
+        }
+    };
+    let item_count = if args.len() > 2 {
+        (args.len() - 2) as u32
+    } else {
+        0
+    };
+    let new_len = length - delete_count + item_count;
+
+    // Create array of deleted elements
+    let deleted_arr = RuneArray::allocate(gc, &[]);
+    unsafe {
+        let ptr = deleted_arr as *mut u8;
+        *(ptr.add(8) as *mut *const rune_core::shape::Shape) =
+            *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
+        if let Some(proto) = vm.array_prototype.heap_ptr() {
+            *(ptr.add(24) as *mut *mut u8) = proto;
+        }
+    }
+    let mut deleted_ptr = deleted_arr as *mut u8;
+    for k in 0..delete_count {
+        let v = crate::vm::array_like_index(this, actual_start + k).unwrap_or(Value::undefined());
+        unsafe {
+            let new_ptr = RuneArray::push(gc, deleted_ptr as *mut RuneArray, v);
+            if new_ptr as *mut u8 != deleted_ptr {
+                deleted_ptr = new_ptr as *mut u8;
+            }
+        }
+    }
+
+    // Re-resolve the receiver after deleted-array allocations — a GC during a
+    // push may have moved it (local `this` copy holds the stale from-space
+    // address; roots were already rewritten by the collector).
+    let this = refresh_value(this);
+
+    // Handle dense array in place
+    if let Some(ptr) = this.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_ARRAY {
+            let mut arr = ptr as *mut RuneArray;
+            // Shift tail
+            if item_count != delete_count {
+                if item_count > delete_count {
+                    // Need to grow and shift right; re-read capacity after each
+                    // grow (each grow may move the array / trigger a GC).
+                    unsafe {
+                        while (new_len as usize) > RuneArray::capacity(arr) as usize {
+                            arr = grow_dense_array(gc, vm, arr);
+                        }
+                    }
+                    for i in (actual_start + delete_count..length).rev() {
+                        let v = unsafe { RuneArray::get_element(arr, i as usize) };
+                        unsafe {
+                            RuneArray::set_element(arr, (i + item_count - delete_count) as usize, v)
+                        };
+                    }
+                } else {
+                    for i in actual_start + delete_count..length {
+                        let v = unsafe { RuneArray::get_element(arr, i as usize) };
+                        unsafe {
+                            RuneArray::set_element(arr, (i + item_count - delete_count) as usize, v)
+                        };
+                    }
+                }
+            }
+            for (i, &item) in args.iter().skip(2).enumerate() {
+                unsafe {
+                    RuneArray::set_element(
+                        arr,
+                        (actual_start + i as u32) as usize,
+                        refresh_value(item),
+                    )
+                };
+            }
+            unsafe { RuneArray::set_length(arr, new_len) };
+            return Value::from_heap_ptr(deleted_ptr);
+        }
+    }
+    // Generic object fallback — use delete/insert via helpers
+    // Shift tail
+    if item_count != delete_count {
+        if item_count > delete_count {
+            for i in (actual_start + delete_count..length).rev() {
+                let v = crate::vm::array_like_index(this, i).unwrap_or(Value::undefined());
+                let exists = crate::vm::array_like_index(this, i).is_some();
+                let new_idx = i + item_count - delete_count;
+                if exists {
+                    set_array_like_index(this, new_idx, v, gc);
+                } else {
+                    delete_array_like_index(this, new_idx);
+                }
+            }
+        } else {
+            for i in actual_start + delete_count..length {
+                let v = crate::vm::array_like_index(this, i).unwrap_or(Value::undefined());
+                let exists = crate::vm::array_like_index(this, i).is_some();
+                let new_idx = i + item_count - delete_count;
+                if exists {
+                    set_array_like_index(this, new_idx, v, gc);
+                } else {
+                    delete_array_like_index(this, new_idx);
+                }
+            }
+            for i in new_len..length {
+                delete_array_like_index(this, i);
+            }
+        }
+    }
+    for (i, &item) in args.iter().skip(2).enumerate() {
+        set_array_like_index(this, actual_start + i as u32, item, gc);
+    }
+    // Update length for generic
+    if let Some(ptr) = this.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_OBJECT {
+            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+            if let Some(slot) = shape.lookup(&PropertyKey::from_string("length")) {
+                unsafe {
+                    JSObject::set_slot(ptr as *mut JSObject, slot, Value::smi(new_len as i32))
+                };
+            }
+        }
+    }
+    Value::from_heap_ptr(deleted_ptr)
+}
+
+fn set_array_like_index(this: Value, index: u32, val: Value, _gc: &mut SemiSpace) {
+    if let Some(ptr) = this.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        match tag {
+            TAG_ARRAY => unsafe {
+                RuneArray::set_element(ptr as *mut RuneArray, index as usize, val)
+            },
+            TAG_OBJECT => unsafe {
+                let key = index.to_string();
+                let shape = JSObject::shape_ptr(ptr as *mut JSObject);
+                if let Some(slot) = shape.lookup(&PropertyKey::from_string(&key)) {
+                    JSObject::set_slot(ptr as *mut JSObject, slot, val);
+                } else {
+                    JSObject::add_property(
+                        ptr as *mut JSObject,
+                        PropertyKey::from_string(&key),
+                        key,
+                        val,
+                    );
+                }
+            },
+            _ => {}
+        }
+    }
+}
+
+fn delete_array_like_index(this: Value, index: u32) {
+    if let Some(ptr) = this.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_OBJECT {
+            unsafe {
+                let key = PropertyKey::from_string(&index.to_string());
+                JSObject::remove_property(ptr as *mut JSObject, &key);
+            }
+        }
+    }
+}
+
+/// Resolve a possibly-forwarded GC pointer to its current address (single hop).
+/// After a collection, local Value copies hold stale from-space addresses whose
+/// headers carry a forwarding pointer to the live to-space copy.
+fn resolve_forwarded(ptr: *mut u8) -> *mut u8 {
+    unsafe {
+        let h = ptr as *const GcHeader;
+        if (*h).is_forwarded() {
+            (*h).forwarding_addr()
+        } else {
+            ptr
+        }
+    }
+}
+
+/// Re-resolve a local Value copy after an allocation may have triggered a GC
+/// that moved its heap object. Roots were rewritten by the collector itself;
+/// only Rust-local copies need refreshing.
+fn refresh_value(v: Value) -> Value {
+    match v.heap_ptr() {
+        Some(p) => {
+            let r = resolve_forwarded(p);
+            if std::ptr::eq(r, p) {
+                v
+            } else {
+                Value::from_heap_ptr(r)
+            }
+        }
+        None => v,
+    }
+}
+
+/// Grow a dense array, keeping VM roots in sync (same discipline as array_push).
+/// Returns the live pointer to use for subsequent element access.
+unsafe fn grow_dense_array(gc: &mut SemiSpace, vm: &mut Vm, cur: *mut RuneArray) -> *mut RuneArray {
+    unsafe {
+        let (resolved_old, new_arr) = RuneArray::grow(gc, cur);
+        if resolved_old != new_arr as *mut u8 {
+            vm.update_heap_reference(resolved_old, new_arr as *mut u8);
+        }
+        new_arr
+    }
+}
+
+/// ToIntegerOrInfinity-lite for splice start/deleteCount: Smis, floats,
+/// numeric strings, booleans, null/undefined. Objects without valueOf
+/// dispatch coerce via truthiness fallback of None → 0 (documented gap).
+fn coerce_integer_arg(v: Value) -> Option<f64> {
+    if v.is_undefined() || v.is_null() {
+        return Some(0.0);
+    }
+    if let Some(smi) = v.as_smi() {
+        return Some(smi as f64);
+    }
+    if let Some(f) = v.as_float64() {
+        return Some(if f.is_nan() { 0.0 } else { f.trunc() });
+    }
+    if let Some(b) = v.to_boolean() {
+        return Some(if b { 1.0 } else { 0.0 });
+    }
+    if let Some(ptr) = v.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_STRING {
+            let s = unsafe { HeapString::to_string(ptr as *mut HeapString) };
+            return s.trim().parse::<f64>().ok().map(|n| n.trunc());
+        }
+    }
+    None
+}
+
 /// Convert a Value to an integer for use as fromIndex in array methods.
 /// Approximates ToInteger (omits valueOf/getter callbacks for objects).
 fn to_index(v: Value, length: u32) -> u32 {
@@ -8153,6 +8652,36 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 0,
             name: "Array_prototype_pop",
             func: array_pop,
+        },
+        Builtin {
+            length: 0,
+            name: "Array_prototype_reverse",
+            func: array_reverse,
+        },
+        Builtin {
+            length: 1,
+            name: "Array_prototype_concat",
+            func: array_concat,
+        },
+        Builtin {
+            length: 0,
+            name: "Array_prototype_shift",
+            func: array_shift,
+        },
+        Builtin {
+            length: 1,
+            name: "Array_prototype_unshift",
+            func: array_unshift,
+        },
+        Builtin {
+            length: 2,
+            name: "Array_prototype_splice",
+            func: array_splice,
+        },
+        Builtin {
+            length: 2,
+            name: "Array_prototype_slice",
+            func: array_slice,
         },
         Builtin {
             length: 1,

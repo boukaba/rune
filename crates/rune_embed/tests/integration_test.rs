@@ -5257,6 +5257,344 @@ fn test_array_slice_no_mutate_original() {
     assert_eq!(r.as_smi(), Some(3));
 }
 
+// ---- C7: Array.prototype reverse / splice / concat / shift / unshift ----
+
+#[test]
+fn test_array_reverse_basic() {
+    let mut ctx = Context::new_small();
+    assert_eq!(eval_str(&mut ctx, "[1, 2, 3].reverse().join(',')"), "3,2,1");
+    assert_eq!(eval_str(&mut ctx, "[1].reverse().join(',')"), "1");
+    assert_eq!(eval_array_len(&mut ctx, "[].reverse()"), 0);
+    // Even length
+    assert_eq!(
+        eval_str(&mut ctx, "[1,2,3,4].reverse().join(',')"),
+        "4,3,2,1"
+    );
+}
+
+#[test]
+fn test_array_reverse_in_place_returns_this() {
+    let mut ctx = Context::new_small();
+    // reverse() mutates in place and returns the same array object
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "var b=[1,2]; var c=b.reverse(); (c===b)+'|'+b.join(',')"
+        ),
+        "true|2,1"
+    );
+}
+
+#[test]
+fn test_array_concat_basic() {
+    let mut ctx = Context::new_small();
+    assert_eq!(
+        eval_str(&mut ctx, "[1,2].concat([3,4],[5]).join(',')"),
+        "1,2,3,4,5"
+    );
+    // Non-array args are appended as single items
+    assert_eq!(
+        eval_str(&mut ctx, "[1].concat(2,'three').join(',')"),
+        "1,2,three"
+    );
+    // Nested arrays flatten exactly one level
+    assert_eq!(
+        ctx.eval("[1].concat([2,[3]]).length").unwrap().as_smi(),
+        Some(3)
+    );
+    assert_eq!(eval_array_len(&mut ctx, "[].concat()"), 0);
+    // Original untouched
+    assert_eq!(
+        ctx.eval("var o=[1]; o.concat([2]); o.length")
+            .unwrap()
+            .as_smi(),
+        Some(1)
+    );
+}
+
+#[test]
+fn test_array_concat_isconcatspreadable() {
+    let mut ctx = Context::new_small();
+    // Array-like object with @@isConcatSpreadable spreads
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            r#"
+        var arrlike = { 0: 'a', 1: 'b', length: 2 };
+        arrlike[Symbol.isConcatSpreadable] = true;
+        [0].concat(arrlike).join(',')
+    "#
+        ),
+        "0,a,b"
+    );
+    // Explicitly non-spreadable array is appended whole
+    assert_eq!(
+        ctx.eval(
+            r#"
+        var arr = [9, 9];
+        arr[Symbol.isConcatSpreadable] = false;
+        [1].concat(arr).length
+    "#
+        )
+        .unwrap()
+        .as_smi(),
+        Some(3)
+    );
+}
+
+#[test]
+fn test_array_concat_null_this_throws() {
+    let mut ctx = Context::new_small();
+    assert!(ctx.eval("[].concat.call(null)").is_err());
+    assert!(ctx.eval("[].concat.call(undefined, 1)").is_err());
+}
+
+#[test]
+fn test_array_shift_basic() {
+    let mut ctx = Context::new_small();
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "var a=[10,20,30]; var f=a.shift(); f+'|'+a.join(',')"
+        ),
+        "10|20,30"
+    );
+    // Empty array → undefined
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "var e=[]; var f=e.shift(); (f===undefined)+'|'+e.length"
+        ),
+        "true|0"
+    );
+}
+
+#[test]
+fn test_array_unshift_basic() {
+    let mut ctx = Context::new_small();
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "var a=[3,4]; var n=a.unshift(1,2); n+'|'+a.join(',')"
+        ),
+        "4|1,2,3,4"
+    );
+    // No args → length unchanged
+    assert_eq!(
+        eval_str(&mut ctx, "var a=[1]; a.unshift(); '|'+a.length"),
+        "|1"
+    );
+}
+
+#[test]
+fn test_array_unshift_grow_regression() {
+    let mut ctx = Context::new_small();
+    // Regression: unshift past capacity used to loop forever allocating
+    // (discarded grow pointers) and OOM the engine.
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "var a=[1,2,3]; var n=a.unshift(4,5,6,7,8,9); n+'|'+a.join(',')"
+        ),
+        "9|4,5,6,7,8,9,1,2,3"
+    );
+    // Repeated growth under GC pressure in a small heap
+    assert_eq!(
+        ctx.eval(
+            r#"
+        var a = [];
+        for (var i = 0; i < 200; i = i + 1) { a.unshift(i, [i, i]); }
+        a.length
+    "#
+        )
+        .unwrap()
+        .as_smi(),
+        Some(400)
+    );
+}
+
+#[test]
+fn test_array_shift_unshift_object_receiver() {
+    let mut ctx = Context::new_small();
+    // Array-like object receiver
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            r#"
+        var o = { 0: 'x', 1: 'y', 2: 'z', length: 3 };
+        var f = Array.prototype.shift.call(o);
+        f + '|' + o[0] + '|' + o[1] + '|' + o.length
+    "#
+        ),
+        "x|y|z|2"
+    );
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            r#"
+        var p = { 0: 'b', length: 1 };
+        var n = Array.prototype.unshift.call(p, 'a');
+        n + '|' + p[0] + '|' + p[1] + '|' + p.length
+    "#
+        ),
+        "2|a|b|2"
+    );
+}
+
+#[test]
+fn test_array_splice_no_args_noop() {
+    let mut ctx = Context::new_small();
+    // Regression: splice() with no args used to delete the entire array
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "var a=[1,2,3]; var d=a.splice(); d.length+'|'+a.length+'|'+a[0]"
+        ),
+        "0|3|1"
+    );
+}
+
+#[test]
+fn test_array_splice_delete_only() {
+    let mut ctx = Context::new_small();
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "var a=[1,2,3,4]; var d=a.splice(1,2); d.join(',')+'|'+a.join(',')"
+        ),
+        "2,3|1,4"
+    );
+    // Negative start counts from the end
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "var a=[1,2,3,4]; var d=a.splice(-2); d.join(',')+'|'+a.join(',')"
+        ),
+        "3,4|1,2"
+    );
+    // Start beyond end clamps
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "var a=[1,2]; var d=a.splice(99); d.length+'|'+a.length"
+        ),
+        "0|2"
+    );
+    // deleteCount absent → deletes to end
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "var a=[1,2,3]; var d=a.splice(1); d.join(',')+'|'+a.length"
+        ),
+        "2,3|1"
+    );
+}
+
+#[test]
+fn test_array_splice_insert_grow_regression() {
+    let mut ctx = Context::new_small();
+    // Regression: insert-heavy splice used to infinite-loop growing
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "var a=[1,2,3]; var d=a.splice(1,0,'x','y','z','w','v','u'); d.length+'|'+a.join(',')"
+        ),
+        "0|1,x,y,z,w,v,u,2,3"
+    );
+}
+
+#[test]
+fn test_array_splice_replace() {
+    let mut ctx = Context::new_small();
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "var a=[1,2,3,4,5]; var d=a.splice(1,2,'x','y'); d.join(',')+'|'+a.join(',')"
+        ),
+        "2,3|1,x,y,4,5"
+    );
+    // Fewer items than deleted shrinks
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "var a=[1,2,3,4]; var d=a.splice(1,3,'z'); d.join(',')+'|'+a.join(',')"
+        ),
+        "2,3,4|1,z"
+    );
+}
+
+#[test]
+fn test_array_splice_coercions() {
+    let mut ctx = Context::new_small();
+    // String start coerces via ToIntegerOrInfinity
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "var a=[1,2,3]; var d=a.splice('1',1); d.join(',')+'|'+a.join(',')"
+        ),
+        "2|1,3"
+    );
+    // Float start truncates toward zero
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "var a=[1,2,3]; var d=a.splice(1.9,1); d.join(',')+'|'+a.join(',')"
+        ),
+        "2|1,3"
+    );
+    // Negative float start truncates toward zero then offsets
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "var a=[1,2,3]; var d=a.splice(-1.5); d.join(',')+'|'+a.join(',')"
+        ),
+        "3|1,2"
+    );
+    // NaN start → 0
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "var a=[1,2,3]; var d=a.splice(NaN,1); d.join(',')+'|'+a.join(',')"
+        ),
+        "1|2,3"
+    );
+    // String deleteCount coerces
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "var a=[1,2,3]; var d=a.splice(0,'2'); d.join(',')+'|'+a.join(',')"
+        ),
+        "1,2|3"
+    );
+    // Negative deleteCount clamps to 0
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "var a=[1,2,3]; var d=a.splice(0,-5); d.length+'|'+a.length"
+        ),
+        "0|3"
+    );
+}
+
+#[test]
+fn test_array_methods_null_this_throw() {
+    let mut ctx = Context::new_small();
+    for m in ["shift", "unshift", "splice", "concat", "reverse"] {
+        assert!(
+            ctx.eval(&format!("Array.prototype.{}.call(null)", m))
+                .is_err(),
+            "{} on null should throw",
+            m
+        );
+        assert!(
+            ctx.eval(&format!("Array.prototype.{}.call(undefined)", m))
+                .is_err(),
+            "{} on undefined should throw",
+            m
+        );
+    }
+}
+
 // ---- Stdlib: JSON.stringify ----
 
 #[test]

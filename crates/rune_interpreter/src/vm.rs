@@ -855,6 +855,11 @@ impl Vm {
         let every_h = find_handle(&self.builtins, "Array_prototype_every");
         let flat_h = find_handle(&self.builtins, "Array_prototype_flat");
         let flat_map_h = find_handle(&self.builtins, "Array_prototype_flatMap");
+        let reverse_handle = find_handle(&self.builtins, "Array_prototype_reverse");
+        let concat_handle = find_handle(&self.builtins, "Array_prototype_concat");
+        let shift_handle = find_handle(&self.builtins, "Array_prototype_shift");
+        let unshift_handle = find_handle(&self.builtins, "Array_prototype_unshift");
+        let splice_handle = find_handle(&self.builtins, "Array_prototype_splice");
         if let (Some(push), Some(pop)) = (push_handle, pop_handle) {
             let mut proto_entries: Vec<(&str, Value)> = vec![("push", push), ("pop", pop)];
             if let Some(f) = filter_handle {
@@ -898,6 +903,21 @@ impl Vm {
             }
             if let Some(fm) = flat_map_h {
                 proto_entries.push(("flatMap", fm));
+            }
+            if let Some(rv) = reverse_handle {
+                proto_entries.push(("reverse", rv));
+            }
+            if let Some(cc) = concat_handle {
+                proto_entries.push(("concat", cc));
+            }
+            if let Some(shf) = shift_handle {
+                proto_entries.push(("shift", shf));
+            }
+            if let Some(ush) = unshift_handle {
+                proto_entries.push(("unshift", ush));
+            }
+            if let Some(sp) = splice_handle {
+                proto_entries.push(("splice", sp));
             }
             if let Some(sh) = find_handle(&self.builtins, "Array_prototype_sort") {
                 proto_entries.push(("sort", sh));
@@ -5444,7 +5464,33 @@ impl Vm {
                         *entry += 1;
                         // Start recording a trace at threshold, or when a
                         // previous recording was discarded (pending_rerecord)
-                        if *entry == 50 || self.pending_rerecord.remove(&key) {
+                        // Conservative trace-eligibility gate: loops whose bodies
+                        // contain IC-bearing property instructions must stay on the
+                        // interpreter. Recording such a loop corrupts execution
+                        // (pre-existing recorder bug — receivers/pc flow degrade
+                        // right after the recorded pass closes), so we never even
+                        // start recording for them. Numeric-only loops still trace.
+                        let mut trace_eligible = true;
+                        if *entry == 50 {
+                            unsafe {
+                                let instrs = (*prog_ptr).instructions.as_ptr();
+                                for i in target..=pc {
+                                    let op = (*instrs.add(i)).opcode;
+                                    if matches!(
+                                        op,
+                                        Opcode::LoadProperty
+                                            | Opcode::StoreProperty
+                                            | Opcode::LoadPropertyIC
+                                            | Opcode::StorePropertyIC
+                                    ) && (*instrs.add(i)).ic_index >= 0
+                                    {
+                                        trace_eligible = false;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if *entry == 50 && trace_eligible || self.pending_rerecord.remove(&key) {
                             self.recording_trace = Some(key);
                             self.loop_traces.insert(
                                 key,
@@ -9042,7 +9088,7 @@ impl Vm {
             return;
         }
 
-        let mut patched = 0u32;
+        let mut _patched = 0u32;
         for pc in target_pc..=back_edge_pc {
             let instr_ptr = unsafe {
                 let instrs = (*prog_ptr).instructions.as_ptr() as *mut Instruction;
@@ -9061,7 +9107,7 @@ impl Vm {
                                 entry.offset as i64,
                                 entry.proto_depth as i64,
                             ]);
-                            patched += 1;
+                            _patched += 1;
                             break;
                         }
                     }
@@ -9069,11 +9115,6 @@ impl Vm {
             }
         }
 
-        if patched > 0 {
-            // Trace: patched LoadProperty → LoadPropertyIC
-        } else {
-            // Trace: already LoadPropertyIC
-        }
         self.loop_patched.insert(key);
     }
 }

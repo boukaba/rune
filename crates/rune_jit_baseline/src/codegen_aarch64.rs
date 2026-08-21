@@ -505,6 +505,25 @@ impl Aarch64CodeGen {
     /// NonSmiInput bailout, call bailout_helper, and return.
     /// `saved`: register indices of previously-popped values in chronological
     /// order (earliest first). Restored on bail after current x0.
+    /// Emit `TBZ Xn, #0, <patched>` — branches when Xn is NOT a Smi.
+    fn emit_branch_if_not_smi(&mut self, reg: u32) -> usize {
+        let site = self.mem.current_offset();
+        emit(&mut self.mem, 0x36000000 | reg);
+        site
+    }
+
+    /// J2 slow path: call jit_binop_helper(op, a=x8, b=x9) and push.
+    fn emit_binop_helper_slow(&mut self, op_id: u64) {
+        mov_reg(&mut self.mem, 0, VM_REG);
+        mov_reg(&mut self.mem, 1, GC_REG);
+        mov_imm64(&mut self.mem, 2, op_id);
+        mov_reg(&mut self.mem, 3, 8); // a_raw
+        mov_reg(&mut self.mem, 4, 9); // b_raw
+        ldr_off(&mut self.mem, 15, VM_REG, 568); // jit_binop_helper
+        emit(&mut self.mem, 0xD63F01E0); // BLR x15
+        self.push();
+    }
+
     fn emit_smi_check(&mut self, bc_idx: usize, saved: &[u8]) {
         let patch_bail = self.mem.current_offset();
         emit(&mut self.mem, 0x36000000); // TBZ X0, #0, <0> (patched; branches if not Smi)
@@ -1000,11 +1019,13 @@ impl Aarch64CodeGen {
                 Opcode::Mul => {
                     self.pop(); // x0 = b
                     mov_reg(&mut self.mem, 9, 0); // x9 = b
-                    self.emit_smi_check(bc_idx, &[]); // check b
-                    mov_reg(&mut self.mem, 1, 0);
                     self.pop(); // x0 = a
                     mov_reg(&mut self.mem, 8, 0); // x8 = a
-                    self.emit_smi_check(bc_idx, &[9]); // check a; saved=[x9(b)]
+                    // J2: helper fallback instead of interpreter bail
+                    let p_b = self.emit_branch_if_not_smi(9);
+                    let p_a = self.emit_branch_if_not_smi(8);
+                    mov_reg(&mut self.mem, 1, 9);
+                    mov_reg(&mut self.mem, 0, 8);
                     // Untag the NaN-encoded Smis to plain signed 64-bit:
                     // mask to the 45-bit payload, shift the payload's sign
                     // bit (bit 44) up to bit 63, then arithmetic-shift back
@@ -1031,6 +1052,19 @@ impl Aarch64CodeGen {
                     mov_imm64(&mut self.mem, 1, QNAN_PREFIX);
                     orr_reg(&mut self.mem, 0, 0, 1);
                     self.push();
+                    let after_fast = self.mem.current_offset();
+                    emit(&mut self.mem, 0x14000000); // B +0 (skip slow)
+                    let slow = self.mem.current_offset();
+                    self.emit_binop_helper_slow(3);
+                    let end = self.mem.current_offset();
+                    for (site, reg) in [(p_b, 9u32), (p_a, 8u32)] {
+                        let d = ((slow as i64 - site as i64) / 4) as u32;
+                        self.mem
+                            .patch_u32(site, 0x36000000 | reg | ((d & 0x3FFF) << 5));
+                    }
+                    let d = ((end as i64 - after_fast as i64) / 4) as u32;
+                    self.mem
+                        .patch_u32(after_fast, 0x14000000 | (d & 0x03FF_FFFF));
                 }
                 Opcode::Mod => {
                     self.pop();

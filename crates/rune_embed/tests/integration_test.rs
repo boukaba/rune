@@ -11206,5 +11206,5 @@ fn test_jit_float_sub_native() {
         "2.5",
         "Smi - float must be exact via helper"
     );
-    assert_eq!(ctx.vm().jit_entry_count > 0, true);
+    assert!(ctx.vm().jit_entry_count > 0);
 }

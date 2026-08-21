@@ -11208,3 +11208,21 @@ fn test_jit_float_sub_native() {
     );
     assert!(ctx.vm().jit_entry_count > 0);
 }
+
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn test_jit_float_mod_native() {
+    // J2#3c: float Mod via helper — incl. x % 0 → NaN without bailing
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+            function m(a, b) { return a % b; }
+            for (var i = 0; i < 100; i++) { m(i + 7, i + 3); }
+        "#,
+    )
+    .unwrap();
+    assert_eq!(eval_str(&mut ctx, "String(m(5.5, 2))"), "1.5");
+    assert_eq!(eval_str(&mut ctx, "String(m(-7, 3))"), "-1");
+    assert_eq!(eval_str(&mut ctx, "String(m(5, 0))"), "NaN");
+    assert!(ctx.vm().jit_entry_count > 0);
+}

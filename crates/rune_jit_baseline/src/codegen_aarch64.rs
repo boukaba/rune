@@ -1082,13 +1082,15 @@ impl Aarch64CodeGen {
                         .patch_u32(after_fast, 0x14000000 | (d & 0x03FF_FFFF));
                 }
                 Opcode::Mod => {
-                    self.pop();
-                    mov_reg(&mut self.mem, 9, 0);
-                    self.emit_smi_check(bc_idx, &[]);
-                    mov_reg(&mut self.mem, 1, 0);
-                    self.pop();
-                    mov_reg(&mut self.mem, 8, 0);
-                    self.emit_smi_check(bc_idx, &[9]);
+                    self.pop(); // x0 = b
+                    mov_reg(&mut self.mem, 9, 0); // x9 = b
+                    self.pop(); // x0 = a
+                    mov_reg(&mut self.mem, 8, 0); // x8 = a
+                    // J2: helper fallback instead of interpreter bail
+                    let p_b = self.emit_branch_if_not_smi(9);
+                    let p_a = self.emit_branch_if_not_smi(8);
+                    mov_reg(&mut self.mem, 1, 9);
+                    mov_reg(&mut self.mem, 0, 8);
                     // Extract real Smi values from NaN-encoded operands.
                     // Mask to the 45-bit payload, shift the payload's sign
                     // bit (bit 44) to bit 63, then arithmetic-shift back:
@@ -1141,6 +1143,19 @@ impl Aarch64CodeGen {
                     let d = ((push_label as i64 - mod_ok as i64) / 4) as u32;
                     self.mem.patch_u32(mod_ok, 0x14000000 | (d & 0x03FF_FFFF));
                     self.push();
+                    let after_fast = self.mem.current_offset();
+                    emit(&mut self.mem, 0x14000000); // B +0 (skip slow)
+                    let slow = self.mem.current_offset();
+                    self.emit_binop_helper_slow(4); // Mod (fmod)
+                    let end = self.mem.current_offset();
+                    for (site, reg) in [(p_b, 9u32), (p_a, 8u32)] {
+                        let d2 = ((slow as i64 - site as i64) / 4) as u32;
+                        self.mem
+                            .patch_u32(site, 0x36000000 | reg | ((d2 & 0x3FFF) << 5));
+                    }
+                    let d3 = ((end as i64 - after_fast as i64) / 4) as u32;
+                    self.mem
+                        .patch_u32(after_fast, 0x14000000 | (d3 & 0x03FF_FFFF));
                 }
                 Opcode::Div | Opcode::Exp => {
                     // J1: float division / exponentiation via the shared

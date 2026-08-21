@@ -997,11 +997,13 @@ impl Aarch64CodeGen {
                 Opcode::Sub => {
                     self.pop(); // x0 = b
                     mov_reg(&mut self.mem, 9, 0); // x9 = b
-                    self.emit_smi_check(bc_idx, &[]); // check b
-                    mov_reg(&mut self.mem, 1, 0);
                     self.pop(); // x0 = a
                     mov_reg(&mut self.mem, 8, 0); // x8 = a
-                    self.emit_smi_check(bc_idx, &[9]); // check a; saved=[x9(b)]
+                    // J2: helper fallback instead of interpreter bail
+                    let p_b = self.emit_branch_if_not_smi(9);
+                    let p_a = self.emit_branch_if_not_smi(8);
+                    mov_reg(&mut self.mem, 1, 9);
+                    mov_reg(&mut self.mem, 0, 8);
                     sub_reg(&mut self.mem, 0, 0, 1);
                     add_imm(&mut self.mem, 0, 0, 1); // retag
                     // J2-fix: mask the 45-bit payload BEFORE the range guard.
@@ -1015,6 +1017,19 @@ impl Aarch64CodeGen {
                     mov_imm64(&mut self.mem, 1, QNAN_PREFIX);
                     orr_reg(&mut self.mem, 0, 0, 1);
                     self.push();
+                    let after_fast = self.mem.current_offset();
+                    emit(&mut self.mem, 0x14000000); // B +0 (skip slow)
+                    let slow = self.mem.current_offset();
+                    self.emit_binop_helper_slow(2); // Sub
+                    let end = self.mem.current_offset();
+                    for (site, reg) in [(p_b, 9u32), (p_a, 8u32)] {
+                        let d = ((slow as i64 - site as i64) / 4) as u32;
+                        self.mem
+                            .patch_u32(site, 0x36000000 | reg | ((d & 0x3FFF) << 5));
+                    }
+                    let d = ((end as i64 - after_fast as i64) / 4) as u32;
+                    self.mem
+                        .patch_u32(after_fast, 0x14000000 | (d & 0x03FF_FFFF));
                 }
                 Opcode::Mul => {
                     self.pop(); // x0 = b

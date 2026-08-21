@@ -11186,3 +11186,25 @@ fn test_jit_negative_smi_results_boxed() {
     assert_eq!(ctx.eval("q(3, 7)").unwrap().as_smi(), Some(21));
     assert_eq!(ctx.eval("s(7, 3)").unwrap().as_smi(), Some(4));
 }
+
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn test_jit_float_sub_native() {
+    // J2#3b: Smi - float takes the helper path, stays native
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+            function f(a, b) { return a - b; }
+            // Float arrives as an ARGUMENT (float literals in fn bodies still
+            // gate eligibility — J2 checklist #4)
+            for (var i = 0; i < 100; i++) { f(i + 1, i + 2); }
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        eval_str(&mut ctx, "String(f(3, 0.5))"),
+        "2.5",
+        "Smi - float must be exact via helper"
+    );
+    assert_eq!(ctx.vm().jit_entry_count > 0, true);
+}

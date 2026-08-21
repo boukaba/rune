@@ -985,7 +985,16 @@ impl Aarch64CodeGen {
                     self.emit_smi_check(bc_idx, &[9]); // check a; saved=[x9(b)]
                     sub_reg(&mut self.mem, 0, 0, 1);
                     add_imm(&mut self.mem, 0, 0, 1); // retag
+                    // J2-fix: mask the 45-bit payload BEFORE the range guard.
+                    // Negative results arrive sign-extended (borrow polluted
+                    // the prefix region); Value::smi masks in Rust, so the
+                    // JIT must too — unmasked, ORR QNAN later sets tag bits
+                    // to 7 (invalid) and the value reads back as NaN.
+                    mov_imm64(&mut self.mem, 2, PAYLOAD_MASK);
+                    and_reg(&mut self.mem, 0, 0, 2);
                     self.emit_smi_overflow_bailout_or_continue(bc_idx, Some(8), Some(9));
+                    mov_imm64(&mut self.mem, 1, QNAN_PREFIX);
+                    orr_reg(&mut self.mem, 0, 0, 1);
                     self.push();
                 }
                 Opcode::Mul => {
@@ -1012,6 +1021,10 @@ impl Aarch64CodeGen {
                     emit(&mut self.mem, 0x9B017C00); // MUL x0, x0, x1
                     emit(&mut self.mem, 0xD37FF800); // LSL x0, x0, #1
                     add_imm(&mut self.mem, 0, 0, 1);
+                    // J2-fix: mask the payload (see Sub) so negative products
+                    // don't pollute the tag/prefix bits.
+                    mov_imm64(&mut self.mem, 2, PAYLOAD_MASK);
+                    and_reg(&mut self.mem, 0, 0, 2);
                     self.emit_smi_overflow_bailout_or_continue(bc_idx, Some(8), Some(9));
                     // NaN-encode the raw Smi result (the guard above compared
                     // the raw form; the VM requires the QNAN prefix).
@@ -1045,6 +1058,10 @@ impl Aarch64CodeGen {
                     emit(&mut self.mem, 0x9B018040); // MSUB x0, x2, x1, x0
                     emit(&mut self.mem, 0xD37FF800); // LSL x0, x0, #1
                     add_imm(&mut self.mem, 0, 0, 1);
+                    // J2-fix: mask the payload (see Sub) — negative remainders
+                    // are sign-extended and would corrupt the tag bits.
+                    mov_imm64(&mut self.mem, 2, PAYLOAD_MASK);
+                    and_reg(&mut self.mem, 0, 0, 2);
                     // NaN-encode the result: x0 = QNAN_PREFIX | x0
                     mov_imm64(&mut self.mem, 1, QNAN_PREFIX);
                     orr_reg(&mut self.mem, 0, 0, 1);

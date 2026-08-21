@@ -11155,3 +11155,34 @@ fn test_jit_in_instanceof_bail_correctness() {
         .unwrap();
     assert_eq!(r.as_smi(), Some(11 * 100));
 }
+
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn test_jit_negative_smi_results_boxed() {
+    // J2-fix regression: native Sub/Mul/Mod with NEGATIVE Smi results used to
+    // ORR the QNAN prefix onto an unmasked sign-extended payload — tag bits
+    // became 7 (invalid) and the value read back as NaN.
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+            function m(a, b) { return a % b; }
+            function q(a, b) { return a * b; }
+            function s(a, b) { return a - b; }
+            for (var i = 0; i < 100; i++) {
+                m(i + 7, i + 3); q(i + 1, i + 2); s(i, i + 1);
+            }
+        "#,
+    )
+    .unwrap();
+    // Post-tier-up native calls with negative results
+    assert_eq!(ctx.eval("m(-7, 3)").unwrap().as_smi(), Some(-1));
+    assert_eq!(ctx.eval("q(3, -7)").unwrap().as_smi(), Some(-21));
+    assert_eq!(ctx.eval("s(3, -7)").unwrap().as_smi(), Some(10));
+    assert_eq!(ctx.eval("m(-7, -3)").unwrap().as_smi(), Some(-1));
+    assert_eq!(ctx.eval("q(-3, -7)").unwrap().as_smi(), Some(21));
+    assert_eq!(ctx.eval("s(-3, 7)").unwrap().as_smi(), Some(-10));
+    // Positives unaffected
+    assert_eq!(ctx.eval("m(7, 3)").unwrap().as_smi(), Some(1));
+    assert_eq!(ctx.eval("q(3, 7)").unwrap().as_smi(), Some(21));
+    assert_eq!(ctx.eval("s(7, 3)").unwrap().as_smi(), Some(4));
+}

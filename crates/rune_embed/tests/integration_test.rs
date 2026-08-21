@@ -5595,6 +5595,280 @@ fn test_array_methods_null_this_throw() {
     }
 }
 
+// ---- C8: Object / Function / Math statics ----
+
+#[test]
+fn test_math_round_spec_semantics() {
+    let mut ctx = Context::new_small();
+    // Ties toward +∞: -2.5 → -2 (NOT away-from-zero)
+    assert_eq!(ctx.eval("Math.round(2.5)").unwrap().as_smi(), Some(3));
+    assert_eq!(ctx.eval("Math.round(-2.5)").unwrap().as_smi(), Some(-2));
+    assert_eq!(ctx.eval("Math.round(-3.5)").unwrap().as_smi(), Some(-3));
+    // The 0.49999999999999994 hazard must not round up
+    assert_eq!(
+        ctx.eval("Math.round(0.49999999999999994)")
+            .unwrap()
+            .as_smi(),
+        Some(0)
+    );
+    // -0.5 rounds to -0 (float, not Smi)
+    assert_eq!(
+        eval_str(&mut ctx, "String(1/Math.round(-0.5))"),
+        "-Infinity"
+    );
+    // Non-finite passthrough
+    assert_eq!(
+        eval_str(&mut ctx, "String(Math.round(Infinity))"),
+        "Infinity"
+    );
+    assert_eq!(eval_str(&mut ctx, "String(Math.round(NaN))"), "NaN");
+    assert_eq!(ctx.eval("Math.round('7.6')").unwrap().as_smi(), Some(8));
+}
+
+#[test]
+fn test_math_trunc_sign_misc() {
+    let mut ctx = Context::new_small();
+    assert_eq!(ctx.eval("Math.trunc(4.7)").unwrap().as_smi(), Some(4));
+    assert_eq!(ctx.eval("Math.trunc(-4.7)").unwrap().as_smi(), Some(-4));
+    assert_eq!(ctx.eval("Math.sign(-3)").unwrap().as_smi(), Some(-1));
+    assert_eq!(ctx.eval("Math.sign(9)").unwrap().as_smi(), Some(1));
+    assert_eq!(eval_str(&mut ctx, "String(Math.sign(NaN))"), "NaN");
+    // ±0 preserved through sign
+    assert_eq!(eval_str(&mut ctx, "String(1/Math.sign(-0))"), "-Infinity");
+    assert_eq!(
+        eval_str(&mut ctx, "String(1/Math.trunc(-0.5))"),
+        "-Infinity"
+    );
+}
+
+#[test]
+fn test_math_hypot_clz32_imul() {
+    let mut ctx = Context::new_small();
+    assert_eq!(ctx.eval("Math.hypot(3,4)").unwrap().as_smi(), Some(5));
+    // Infinity wins over NaN (coerce-all-first semantics)
+    assert_eq!(
+        eval_str(&mut ctx, "String(Math.hypot(NaN, Infinity))"),
+        "Infinity"
+    );
+    assert_eq!(eval_str(&mut ctx, "String(Math.hypot(NaN))"), "NaN");
+    assert_eq!(ctx.eval("Math.hypot()").unwrap().as_smi(), Some(0));
+    assert_eq!(ctx.eval("Math.clz32(1)").unwrap().as_smi(), Some(31));
+    assert_eq!(ctx.eval("Math.clz32(0x10000)").unwrap().as_smi(), Some(15));
+    assert_eq!(ctx.eval("Math.clz32(0)").unwrap().as_smi(), Some(32));
+    // imul wraps to 32 bits
+    assert_eq!(
+        ctx.eval("Math.imul(0xffffffff, 5)").unwrap().as_smi(),
+        Some(-5)
+    );
+    assert_eq!(ctx.eval("Math.imul(3, 4)").unwrap().as_smi(), Some(12));
+}
+
+#[test]
+fn test_math_constants_and_fns() {
+    let mut ctx = Context::new_small();
+    assert_eq!(
+        ctx.eval("Math.PI").unwrap().as_float64(),
+        Some(std::f64::consts::PI)
+    );
+    assert_eq!(
+        ctx.eval("Math.SQRT2").unwrap().as_float64(),
+        Some(std::f64::consts::SQRT_2)
+    );
+    assert_eq!(
+        ctx.eval("Math.LN2").unwrap().as_float64(),
+        Some(std::f64::consts::LN_2)
+    );
+    assert_eq!(
+        ctx.eval("Math.E").unwrap().as_float64(),
+        Some(std::f64::consts::E)
+    );
+    assert_eq!(
+        ctx.eval("Math.LOG2E").unwrap().as_float64(),
+        Some(std::f64::consts::LOG2_E)
+    );
+    assert_eq!(ctx.eval("Math.cbrt(27)").unwrap().as_smi(), Some(3));
+    assert_eq!(ctx.eval("Math.log2(8)").unwrap().as_smi(), Some(3));
+    assert_eq!(ctx.eval("Math.log10(1000)").unwrap().as_smi(), Some(3));
+    assert_eq!(
+        eval_str(&mut ctx, "String(Math.atan2(1, 1))"),
+        "0.7853981633974483"
+    );
+    assert_eq!(ctx.eval("Math.exp(0)").unwrap().as_smi(), Some(1));
+}
+
+#[test]
+fn test_object_assign_basic_and_order() {
+    let mut ctx = Context::new_small();
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "var t={a:1}; Object.assign(t,{b:2},{c:3}); t.a+','+t.b+','+t.c"
+        ),
+        "1,2,3"
+    );
+    // Later sources overwrite earlier
+    assert_eq!(
+        ctx.eval("var u={}; Object.assign(u,{x:1},{x:2}); u.x")
+            .unwrap()
+            .as_smi(),
+        Some(2)
+    );
+    // Array sources copy indices then named props
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "var v={}; Object.assign(v,[10,20]); v[0]+','+v[1]+','+String(v.length)"
+        ),
+        "10,20,undefined"
+    );
+    // null/undefined sources are skipped
+    assert_eq!(
+        ctx.eval("var w={k:1}; Object.assign(w,null,{j:2},undefined); w.k+w.j")
+            .unwrap()
+            .as_smi(),
+        Some(3)
+    );
+    // Returns the target object
+    assert_eq!(
+        ctx.eval("var q={}; Object.assign(q,{m:1}) === q")
+            .unwrap()
+            .to_boolean(),
+        Some(true)
+    );
+}
+
+#[test]
+fn test_object_is_same_value() {
+    let mut ctx = Context::new_small();
+    let is = |ctx: &mut Context, code: &str| ctx.eval(code).unwrap().to_boolean();
+    assert_eq!(is(&mut ctx, "Object.is(NaN, NaN)"), Some(true));
+    assert_eq!(is(&mut ctx, "Object.is(0, -0)"), Some(false));
+    assert_eq!(is(&mut ctx, "Object.is(-0, -0)"), Some(true));
+    assert_eq!(is(&mut ctx, "Object.is(1, 1)"), Some(true));
+    assert_eq!(is(&mut ctx, "Object.is('a', 'a')"), Some(true));
+    assert_eq!(is(&mut ctx, "var o={}; Object.is(o, o)"), Some(true));
+    assert_eq!(is(&mut ctx, "Object.is({}, {})"), Some(false));
+    assert_eq!(is(&mut ctx, "Object.is(1, '1')"), Some(false));
+}
+
+#[test]
+fn test_object_get_own_property_names() {
+    let mut ctx = Context::new_small();
+    assert_eq!(
+        eval_str(&mut ctx, "Object.getOwnPropertyNames({b:1,a:2}).join(',')"),
+        "b,a"
+    );
+    // Arrays include indices and length? Engine exposes dense indices via keys
+    assert_eq!(
+        eval_array_len(&mut ctx, "Object.getOwnPropertyNames([7,8])"),
+        2
+    );
+}
+
+#[test]
+fn test_object_from_entries_has_own() {
+    let mut ctx = Context::new_small();
+    assert_eq!(
+        ctx.eval("var o=Object.fromEntries([['x',1],['y',2]]); o.x+o.y")
+            .unwrap()
+            .as_smi(),
+        Some(3)
+    );
+    // Numeric keys stringified
+    assert_eq!(
+        eval_str(&mut ctx, "var p=Object.fromEntries([[1,'a']]); p['1']+p[1]"),
+        "aa"
+    );
+    assert_eq!(
+        ctx.eval("Object.hasOwn({a:1},'a')").unwrap().to_boolean(),
+        Some(true)
+    );
+    assert_eq!(
+        ctx.eval("Object.hasOwn({a:1},'b')").unwrap().to_boolean(),
+        Some(false)
+    );
+    // Inherited props are NOT own
+    assert_eq!(
+        ctx.eval(
+            "var proto={inherited:1}; var c=Object.create(proto); Object.hasOwn(c,'inherited')"
+        )
+        .unwrap()
+        .to_boolean(),
+        Some(false)
+    );
+    assert_eq!(
+        ctx.eval("Object.hasOwn([9], 0)").unwrap().to_boolean(),
+        Some(true)
+    );
+    // Numeric keys stringified part 2 + null throws
+    assert!(ctx.eval("Object.hasOwn(null, 'x')").is_err());
+    assert!(ctx.eval("Object.fromEntries(null)").is_err());
+}
+
+#[test]
+fn test_object_set_prototype_of() {
+    let mut ctx = Context::new_small();
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "var base={greet(){return 'hi';}}; var child=Object.create(null); \
+             Object.setPrototypeOf(child, base); child.greet()"
+        ),
+        "hi"
+    );
+    // Invalid proto throws even for primitive obj (spec step order)
+    assert!(ctx.eval("Object.setPrototypeOf(42, 'x')").is_err());
+    assert!(ctx.eval("Object.setPrototypeOf({}, 42)").is_err());
+    // null proto allowed
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "var n={}; Object.setPrototypeOf(n, null); typeof n"
+        ),
+        "object"
+    );
+}
+
+#[test]
+fn test_function_apply() {
+    let mut ctx = Context::new_small();
+    assert_eq!(
+        ctx.eval("function add(a,b){return a+b;} add.apply(null,[20,22])")
+            .unwrap()
+            .as_smi(),
+        Some(42)
+    );
+    // this binding flows through
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "function who(){return this.name;} who.apply({name:'rune'},[])"
+        ),
+        "rune"
+    );
+    // undefined/null argArray → no args
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "function n(){return arguments.length;} String(n.apply(null,undefined))+String(n.apply(null))"
+        ),
+        "00"
+    );
+    // Array-like argArray works
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "function first(a){return a;} first.apply(null, {0:'q', length:1})"
+        ),
+        "q"
+    );
+    // Non-callable throws
+    assert!(
+        ctx.eval("Function.prototype.apply.call(42, null, [])")
+            .is_err()
+    );
+}
+
 // ---- Stdlib: JSON.stringify ----
 
 #[test]

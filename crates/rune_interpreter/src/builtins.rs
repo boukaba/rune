@@ -51,7 +51,20 @@ pub fn value_to_js_string(v: Value) -> String {
     } else if let Some(n) = v.as_smi() {
         n.to_string()
     } else if let Some(f) = v.as_float64() {
-        f.to_string()
+        // §7.1.12.1 Number::toString: non-finite values spell out; -0 prints as "0"
+        if f.is_nan() {
+            "NaN".to_string()
+        } else if f == 0.0 {
+            "0".to_string()
+        } else if f.is_infinite() {
+            if f < 0.0 {
+                "-Infinity".to_string()
+            } else {
+                "Infinity".to_string()
+            }
+        } else {
+            f.to_string()
+        }
     } else if let Some(ptr) = v.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_STRING {
@@ -4272,6 +4285,248 @@ pub fn object_entries(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
     build_array(gc, &pairs, vm)
 }
 
+/// Object.assign(target, ...sources) — §20.1.2.1: copies own enumerable
+/// properties (indices ascending first, then string keys in insertion order —
+/// the order object_own_entries already produces) onto target.
+pub fn object_assign(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let target = args.first().copied().unwrap_or(Value::undefined());
+    // Step 1: ToObject(target) — null/undefined throw; primitives become
+    // fresh empty objects (engine ToObject-lite).
+    let target_obj = if target.is_null() || target.is_undefined() {
+        let msg =
+            crate::vm::heap_string(gc, "TypeError: Cannot convert undefined or null to object");
+        vm.set_pending_exception(Value::from_heap_ptr(msg));
+        return Value::undefined();
+    } else if target.heap_ptr().is_none() {
+        let shape = Shape::empty();
+        let ptr = JSObject::allocate(gc, shape, &[]);
+        unsafe {
+            if let Some(proto) = vm.object_prototype.heap_ptr() {
+                *((ptr as *mut u8).add(24) as *mut *mut u8) = proto;
+            }
+        }
+        Value::from_heap_ptr(ptr as *mut u8)
+    } else {
+        target
+    };
+    // Step 3: for each source (skip undefined/null)
+    for &next_source in args.iter().skip(1) {
+        if next_source.is_null() || next_source.is_undefined() {
+            continue;
+        }
+        let entries = match object_own_entries(gc, next_source, vm) {
+            Ok(e) => e,
+            Err(()) => return Value::undefined(),
+        };
+        for (key, value) in entries {
+            // Set(targetObj, key, value, true) via the VM's store path so
+            // dense arrays / extra_props / shapes all behave identically.
+            let key_val = Value::from_heap_ptr(HeapString::allocate(gc, &key) as *mut u8);
+            crate::vm::do_store_property(target_obj, key_val, value, gc);
+        }
+    }
+    target_obj
+}
+
+/// Object.is(value1, value2) — §20.1.2.15 SameValue: NaN↔NaN true, ±0 distinct.
+pub fn object_is(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let a = args.first().copied().unwrap_or(Value::undefined());
+    let b = args.get(1).copied().unwrap_or(Value::undefined());
+    let na = a.as_smi().map(|s| s as f64).or_else(|| a.as_float64());
+    let nb = b.as_smi().map(|s| s as f64).or_else(|| b.as_float64());
+    if let (Some(x), Some(y)) = (na, nb) {
+        if x.is_nan() && y.is_nan() {
+            return Value::boolean(true);
+        }
+        if x == 0.0 && y == 0.0 {
+            // Smi zero is always +0; floats carry a sign bit
+            let neg = |v: Value, f: f64| !v.is_smi() && f.is_sign_negative();
+            return Value::boolean(neg(a, x) == neg(b, y));
+        }
+        return Value::boolean(x == y);
+    }
+    Value::boolean(crate::vm::values_strictly_equal(a, b))
+}
+
+/// Object.getOwnPropertyNames(obj) — §20.1.2.10. The engine does not track
+/// enumerability flags on shapes yet, so this returns the same key set as
+/// Object.keys (documented gap).
+pub fn object_get_own_property_names(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let target = args.first().copied().unwrap_or(Value::undefined());
+    let entries = match object_own_entries(gc, target, vm) {
+        Ok(e) => e,
+        Err(()) => return Value::undefined(),
+    };
+    let keys: Vec<Value> = entries
+        .iter()
+        .map(|(k, _)| Value::from_heap_ptr(HeapString::allocate(gc, k) as *mut u8))
+        .collect();
+    build_array(gc, &keys, vm)
+}
+
+/// Object.fromEntries(iterable) — §20.1.2.7. Sync-only: accepts an array of
+/// [key, value] pairs (general iterables drain via JS callbacks and are not
+/// supported inside sync builtins — documented gap).
+pub fn object_from_entries(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let iterable = args.first().copied().unwrap_or(Value::undefined());
+    if iterable.is_null() || iterable.is_undefined() {
+        let msg = crate::vm::heap_string(
+            gc,
+            "TypeError: Object.fromEntries called on null or undefined",
+        );
+        vm.set_pending_exception(Value::from_heap_ptr(msg));
+        return Value::undefined();
+    }
+    // Step 2: fresh ordinary object
+    let shape = Shape::empty();
+    let obj_ptr = JSObject::allocate(gc, shape, &[]);
+    unsafe {
+        if let Some(proto) = vm.object_prototype.heap_ptr() {
+            *((obj_ptr as *mut u8).add(24) as *mut *mut u8) = proto;
+        }
+    }
+    let obj = Value::from_heap_ptr(obj_ptr as *mut u8);
+    // AddEntriesFromIterable — array-of-pairs support only
+    if let Some(ptr) = iterable.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_ARRAY {
+            let len = unsafe { RuneArray::length(ptr as *mut RuneArray) };
+            for i in 0..len {
+                let entry = crate::vm::array_like_index(iterable, i).unwrap_or(Value::undefined());
+                let key_v = crate::vm::array_like_index(entry, 0).unwrap_or(Value::undefined());
+                let val_v = crate::vm::array_like_index(entry, 1).unwrap_or(Value::undefined());
+                // ToPropertyKey(key): strings direct, numbers ToString'd
+                let key_str = match key_v.as_smi() {
+                    Some(n) => n.to_string(),
+                    None => {
+                        if let Some(f) = key_v.as_float64() {
+                            f.to_string()
+                        } else if let Some(kp) = key_v.heap_ptr() {
+                            let ktag = unsafe { (*(kp as *const GcHeader)).tag() };
+                            if ktag == TAG_STRING {
+                                unsafe { HeapString::to_string(kp as *mut HeapString) }
+                            } else {
+                                continue;
+                            }
+                        } else {
+                            continue;
+                        }
+                    }
+                };
+                unsafe {
+                    JSObject::add_property(
+                        obj_ptr,
+                        PropertyKey::from_string(&key_str),
+                        key_str,
+                        val_v,
+                    );
+                }
+            }
+        }
+    }
+    obj
+}
+
+/// Object.hasOwn(obj, key) — §20.1.2.14: HasOwnProperty after ToObject.
+pub fn object_has_own(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let target = args.first().copied().unwrap_or(Value::undefined());
+    if target.is_null() || target.is_undefined() {
+        let msg =
+            crate::vm::heap_string(gc, "TypeError: Cannot convert undefined or null to object");
+        vm.set_pending_exception(Value::from_heap_ptr(msg));
+        return Value::undefined();
+    }
+    let key = args.get(1).copied().unwrap_or(Value::undefined());
+    let Some(ptr) = target.heap_ptr() else {
+        return Value::boolean(false);
+    };
+    let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+    match tag {
+        TAG_OBJECT => {
+            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+            if let Some(pk) = crate::vm::value_to_prop_key(key) {
+                Value::boolean(shape.lookup(&pk).is_some())
+            } else {
+                Value::boolean(false)
+            }
+        }
+        TAG_ARRAY => {
+            if let Some(idx) = crate::vm::value_to_array_index(key) {
+                let len = unsafe { RuneArray::length(ptr as *mut RuneArray) };
+                Value::boolean((idx as u32) < len)
+            } else if let Some(pk) = crate::vm::value_to_prop_key(key) {
+                if pk.as_u64() == PropertyKey::from_string("length").as_u64() {
+                    return Value::boolean(true);
+                }
+                let extra = unsafe { RuneArray::extra_props(ptr as *mut RuneArray) };
+                if !extra.is_null() {
+                    let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                    Value::boolean(shape.lookup(&pk).is_some())
+                } else {
+                    Value::boolean(false)
+                }
+            } else {
+                Value::boolean(false)
+            }
+        }
+        _ => Value::boolean(false),
+    }
+}
+
+/// Object.setPrototypeOf(obj, proto) — §20.1.2.23. Note step order: an
+/// invalid proto throws even when obj is a primitive passthrough.
+pub fn object_set_prototype_of(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let obj = args.first().copied().unwrap_or(Value::undefined());
+    let proto = args.get(1).copied().unwrap_or(Value::undefined());
+    // Step 1: RequireObjectCoercible(obj)
+    if obj.is_null() || obj.is_undefined() {
+        let msg =
+            crate::vm::heap_string(gc, "TypeError: Cannot convert undefined or null to object");
+        vm.set_pending_exception(Value::from_heap_ptr(msg));
+        return Value::undefined();
+    }
+    // Step 2: proto must be Object or null
+    let proto_ok = proto.is_null()
+        || proto
+            .heap_ptr()
+            .map(|p| {
+                let t = unsafe { (*(p as *const GcHeader)).tag() };
+                matches!(t, TAG_OBJECT | TAG_ARRAY | TAG_FUNC)
+            })
+            .unwrap_or(false);
+    if !proto_ok {
+        let msg = crate::vm::heap_string(gc, "TypeError: prototype must be an Object or null");
+        vm.set_pending_exception(Value::from_heap_ptr(msg));
+        return Value::undefined();
+    }
+    // Step 3: non-object obj returned as-is
+    let Some(ptr) = obj.heap_ptr() else {
+        return obj;
+    };
+    let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+    let new_proto = if proto.is_null() {
+        std::ptr::null_mut()
+    } else {
+        proto.heap_ptr().unwrap()
+    };
+    match tag {
+        TAG_OBJECT => unsafe { JSObject::set_prototype(ptr as *mut JSObject, new_proto) },
+        TAG_ARRAY => unsafe { RuneArray::set_prototype(ptr as *mut RuneArray, new_proto) },
+        _ => {}
+    }
+    obj
+}
+
 /// Object.create(proto) — creates a new object with the given prototype.
 /// Per §20.1.2.2, throws TypeError if proto is not an Object or null.
 pub fn object_create_builtin(
@@ -5694,6 +5949,215 @@ pub fn math_sqrt(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm
     math_op_unary(args, f64::sqrt)
 }
 
+/// Coerce a Value to f64 for the newer Math methods: Smi/float direct,
+/// numeric strings parsed (§7.1.4 ToNumber-lite), else NaN.
+fn math_to_f64(v: Value) -> f64 {
+    if let Some(smi) = v.as_smi() {
+        return smi as f64;
+    }
+    if let Some(f) = v.as_float64() {
+        return f;
+    }
+    if let Some(b) = v.to_boolean() {
+        return if b { 1.0 } else { 0.0 };
+    }
+    if let Some(ptr) = v.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_STRING {
+            let s = unsafe { HeapString::to_string(ptr as *mut HeapString) };
+            let t = s.trim();
+            if t.is_empty() {
+                return 0.0;
+            }
+            return t.parse::<f64>().unwrap_or(f64::NAN);
+        }
+    }
+    if v.is_undefined() {
+        return f64::NAN;
+    }
+    if v.is_null() {
+        return 0.0;
+    }
+    f64::NAN
+}
+
+/// Wrap an f64 builtin result: integral finite values within i32 become
+/// Smis (same convention as math_op_unary), everything else stays float64.
+fn math_result(r: f64) -> Value {
+    if r.fract() == 0.0 && r.is_finite() {
+        let i = r as i32;
+        if i as f64 == r {
+            return Value::smi(i);
+        }
+    }
+    Value::from_float64(r)
+}
+
+/// Math.round — §21.3.2.29: closest integral Number, ties toward +∞.
+/// Math.round(-3.5) === -3 (NOT away-from-zero).
+pub fn math_round(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let x = math_to_f64(args.first().copied().unwrap_or(Value::undefined()));
+    // Step 2: non-finite or already integral → n unchanged
+    if !x.is_finite() || x == x.trunc() {
+        return Value::from_float64(x);
+    }
+    // Step 3: 0 < n < 0.5 → +0
+    if x > 0.0 && x < 0.5 {
+        return Value::smi(0);
+    }
+    // Step 4: -0.5 <= n < -0 → -0
+    if (-0.5..0.0).contains(&x) && x < 0.0 {
+        return Value::from_float64(-0.0);
+    }
+    // Step 5: tie toward +∞. floor(x+0.5) is exact here because the
+    // 0.49999999999999994 hazard is excluded by step 3 and |fract| >= 0.5
+    // boundaries are handled; large magnitudes returned integral by step 2.
+    let r = (x + 0.5).floor();
+    if r.fract() == 0.0 && r.is_finite() {
+        let i = r as i32;
+        if i as f64 == r {
+            return Value::smi(i);
+        }
+    }
+    Value::from_float64(r)
+}
+
+/// Math.trunc — §21.3.2.37: integral part toward zero, ±0 preserved.
+pub fn math_trunc(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let x = math_to_f64(args.first().copied().unwrap_or(Value::undefined()));
+    if !x.is_finite() || x == 0.0 {
+        return Value::from_float64(x);
+    }
+    let r = x.trunc();
+    if r == 0.0 {
+        // Preserve the sign of zero for inputs in (-1, 1)
+        return Value::from_float64(if x < 0.0 { -0.0 } else { 0.0 });
+    }
+    if r.fract() == 0.0 && r.is_finite() {
+        let i = r as i32;
+        if i as f64 == r {
+            return Value::smi(i);
+        }
+    }
+    Value::from_float64(r)
+}
+
+/// Math.sign — §21.3.2.30: NaN/±0 → n unchanged, negative → -1, else 1.
+pub fn math_sign(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let x = math_to_f64(args.first().copied().unwrap_or(Value::undefined()));
+    if x.is_nan() || x == 0.0 {
+        return Value::from_float64(x);
+    }
+    Value::smi(if x < 0.0 { -1 } else { 1 })
+}
+
+/// Math.hypot — §21.3.2.19: coerce all first, ±Inf wins over NaN, all-zero → +0.
+pub fn math_hypot(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let coerced: Vec<f64> = args.iter().map(|&v| math_to_f64(v)).collect();
+    // Step 3: any ±Infinity → +Infinity (checked before NaN)
+    if coerced.iter().any(|n| n.is_infinite()) {
+        return Value::from_float64(f64::INFINITY);
+    }
+    // Step 5: any NaN → NaN
+    if coerced.iter().any(|n| n.is_nan()) {
+        return Value::from_float64(f64::NAN);
+    }
+    // Step 6: all zeros → +0
+    let sum_sq: f64 = coerced.iter().map(|n| n * n).sum();
+    math_result(sum_sq.sqrt())
+}
+
+/// Math.clz32 — §21.3.2.11: leading zero bits of ToUint32(x).
+pub fn math_clz32(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let x = math_to_f64(args.first().copied().unwrap_or(Value::undefined()));
+    let n = if x.is_finite() {
+        x.trunc() as i64 as u32
+    } else {
+        0u32
+    };
+    Value::smi(n.leading_zeros() as i32)
+}
+
+/// Math.imul — §21.3.2.20: 32-bit integer multiplication.
+pub fn math_imul(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let a = math_to_f64(args.first().copied().unwrap_or(Value::undefined()));
+    let b = math_to_f64(args.get(1).copied().unwrap_or(Value::undefined()));
+    let ua = if a.is_finite() {
+        a.trunc() as i64 as u32
+    } else {
+        0u32
+    };
+    let ub = if b.is_finite() {
+        b.trunc() as i64 as u32
+    } else {
+        0u32
+    };
+    let product = ua.wrapping_mul(ub);
+    Value::smi(product as i32)
+}
+
+/// Math.cbrt / log family / exp / trig — direct f64 ops via the shared helper.
+pub fn math_cbrt(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let x = math_to_f64(args.first().copied().unwrap_or(Value::undefined()));
+    math_result(x.cbrt())
+}
+
+pub fn math_log(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let x = math_to_f64(args.first().copied().unwrap_or(Value::undefined()));
+    math_result(x.ln())
+}
+
+pub fn math_log2(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let x = math_to_f64(args.first().copied().unwrap_or(Value::undefined()));
+    math_result(x.log2())
+}
+
+pub fn math_log10(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let x = math_to_f64(args.first().copied().unwrap_or(Value::undefined()));
+    math_result(x.log10())
+}
+
+pub fn math_exp(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let x = math_to_f64(args.first().copied().unwrap_or(Value::undefined()));
+    math_result(x.exp())
+}
+
+pub fn math_sin(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let x = math_to_f64(args.first().copied().unwrap_or(Value::undefined()));
+    math_result(x.sin())
+}
+
+pub fn math_cos(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let x = math_to_f64(args.first().copied().unwrap_or(Value::undefined()));
+    math_result(x.cos())
+}
+
+pub fn math_tan(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let x = math_to_f64(args.first().copied().unwrap_or(Value::undefined()));
+    math_result(x.tan())
+}
+
+pub fn math_asin(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let x = math_to_f64(args.first().copied().unwrap_or(Value::undefined()));
+    math_result(x.asin())
+}
+
+pub fn math_acos(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let x = math_to_f64(args.first().copied().unwrap_or(Value::undefined()));
+    math_result(x.acos())
+}
+
+pub fn math_atan(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let x = math_to_f64(args.first().copied().unwrap_or(Value::undefined()));
+    math_result(x.atan())
+}
+
+pub fn math_atan2(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let y = math_to_f64(args.first().copied().unwrap_or(Value::undefined()));
+    let x = math_to_f64(args.get(1).copied().unwrap_or(Value::undefined()));
+    math_result(y.atan2(x))
+}
+
 /// parseInt(string, radix) — parses a string argument and returns an integer.
 /// Per §21.1.2.9.
 pub fn parse_int_builtin(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
@@ -6276,6 +6740,61 @@ pub fn call_builtin(_gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
             return Value::undefined();
         }
     }
+    Value::undefined()
+}
+
+/// Function.prototype.apply(thisArg, argArray) — §20.2.3.1. argArray is read
+/// as an array-like (sync); undefined/null → no arguments.
+pub fn apply_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let target = this;
+    let new_this = args.first().copied().unwrap_or(Value::undefined());
+    let arg_array = args.get(1).copied().unwrap_or(Value::undefined());
+
+    // Step 2: IsCallable(func) else TypeError
+    let target_smi = target.as_smi().filter(|&s| s < 0);
+    let is_js_func = target
+        .heap_ptr()
+        .map(|ptr| unsafe { (*(ptr as *const GcHeader)).tag() } == rune_core::gc::TAG_FUNC)
+        .unwrap_or(false);
+    if !(target_smi.is_some() || is_js_func) {
+        let msg = crate::vm::heap_string(
+            gc,
+            "TypeError: Function.prototype.apply called on non-function",
+        );
+        vm.set_pending_exception(Value::from_heap_ptr(msg));
+        return Value::undefined();
+    }
+
+    // Step 3-4: CreateListFromArrayLike (undefined/null → empty list)
+    let call_args: Vec<Value> = if arg_array.is_null() || arg_array.is_undefined() {
+        Vec::new()
+    } else {
+        match crate::vm::array_like_length(arg_array) {
+            Some(len) => (0..len)
+                .map(|i| crate::vm::array_like_index(arg_array, i).unwrap_or(Value::undefined()))
+                .collect(),
+            None => {
+                let msg = crate::vm::heap_string(
+                    gc,
+                    "TypeError: CreateListFromArrayLike called on non-object",
+                );
+                vm.set_pending_exception(Value::from_heap_ptr(msg));
+                return Value::undefined();
+            }
+        }
+    };
+
+    // Step 6: builtin target → direct call; JS function → pending callback
+    if let Some(smi) = target_smi {
+        let id = ((-smi) as usize) - 1;
+        if id < vm.builtins.len() {
+            return (vm.builtins[id].func)(gc, new_this, &call_args, vm);
+        }
+    }
+    vm.pending_call = Some(crate::vm::PendingCall {
+        source_frame_depth: 0,
+    });
+    vm.push_callback_call(gc, target, new_this, call_args);
     Value::undefined()
 }
 
@@ -8639,6 +9158,36 @@ pub fn default_builtins() -> Vec<Builtin> {
             func: object_entries,
         },
         Builtin {
+            length: 2,
+            name: "Object_assign",
+            func: object_assign,
+        },
+        Builtin {
+            length: 2,
+            name: "Object_is",
+            func: object_is,
+        },
+        Builtin {
+            length: 1,
+            name: "Object_getOwnPropertyNames",
+            func: object_get_own_property_names,
+        },
+        Builtin {
+            length: 1,
+            name: "Object_fromEntries",
+            func: object_from_entries,
+        },
+        Builtin {
+            length: 2,
+            name: "Object_hasOwn",
+            func: object_has_own,
+        },
+        Builtin {
+            length: 2,
+            name: "Object_setPrototypeOf",
+            func: object_set_prototype_of,
+        },
+        Builtin {
             length: 1,
             name: "Array_isArray",
             func: array_is_array,
@@ -8843,6 +9392,96 @@ pub fn default_builtins() -> Vec<Builtin> {
             name: "Math_sqrt",
             func: math_sqrt,
         },
+        Builtin {
+            length: 1,
+            name: "Math_round",
+            func: math_round,
+        },
+        Builtin {
+            length: 1,
+            name: "Math_trunc",
+            func: math_trunc,
+        },
+        Builtin {
+            length: 1,
+            name: "Math_sign",
+            func: math_sign,
+        },
+        Builtin {
+            length: 2,
+            name: "Math_hypot",
+            func: math_hypot,
+        },
+        Builtin {
+            length: 1,
+            name: "Math_clz32",
+            func: math_clz32,
+        },
+        Builtin {
+            length: 2,
+            name: "Math_imul",
+            func: math_imul,
+        },
+        Builtin {
+            length: 1,
+            name: "Math_cbrt",
+            func: math_cbrt,
+        },
+        Builtin {
+            length: 1,
+            name: "Math_log",
+            func: math_log,
+        },
+        Builtin {
+            length: 1,
+            name: "Math_log2",
+            func: math_log2,
+        },
+        Builtin {
+            length: 1,
+            name: "Math_log10",
+            func: math_log10,
+        },
+        Builtin {
+            length: 1,
+            name: "Math_exp",
+            func: math_exp,
+        },
+        Builtin {
+            length: 1,
+            name: "Math_sin",
+            func: math_sin,
+        },
+        Builtin {
+            length: 1,
+            name: "Math_cos",
+            func: math_cos,
+        },
+        Builtin {
+            length: 1,
+            name: "Math_tan",
+            func: math_tan,
+        },
+        Builtin {
+            length: 1,
+            name: "Math_asin",
+            func: math_asin,
+        },
+        Builtin {
+            length: 1,
+            name: "Math_acos",
+            func: math_acos,
+        },
+        Builtin {
+            length: 1,
+            name: "Math_atan",
+            func: math_atan,
+        },
+        Builtin {
+            length: 2,
+            name: "Math_atan2",
+            func: math_atan2,
+        },
         // Global functions
         Builtin {
             length: 2,
@@ -8945,6 +9584,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 1,
             name: "Function_prototype_call",
             func: call_builtin,
+        },
+        Builtin {
+            length: 2,
+            name: "Function_prototype_apply",
+            func: apply_builtin,
         },
         // Test262 assert builtins
         Builtin {

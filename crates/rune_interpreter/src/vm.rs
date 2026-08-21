@@ -58,7 +58,22 @@ fn property_key_string(val: Value) -> String {
         return n.to_string();
     }
     if val.is_float64() {
-        return val.as_float64().unwrap_or(f64::NAN).to_string();
+        let f = val.as_float64().unwrap_or(f64::NAN);
+        // §7.1.12.1 Number::toString: non-finite values spell out
+        if f.is_nan() {
+            return "NaN".to_string();
+        }
+        if f == 0.0 {
+            return "0".to_string();
+        }
+        if f.is_infinite() {
+            return if f < 0.0 {
+                "-Infinity".to_string()
+            } else {
+                "Infinity".to_string()
+            };
+        }
+        return f.to_string();
     }
     if let Some(ptr) = val.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
@@ -832,6 +847,24 @@ impl Vm {
             if let Some(h) = entries_handle {
                 obj_entries.push(("entries", h));
             }
+            if let Some(h) = find_handle(&self.builtins, "Object_assign") {
+                obj_entries.push(("assign", h));
+            }
+            if let Some(h) = find_handle(&self.builtins, "Object_is") {
+                obj_entries.push(("is", h));
+            }
+            if let Some(h) = find_handle(&self.builtins, "Object_getOwnPropertyNames") {
+                obj_entries.push(("getOwnPropertyNames", h));
+            }
+            if let Some(h) = find_handle(&self.builtins, "Object_fromEntries") {
+                obj_entries.push(("fromEntries", h));
+            }
+            if let Some(h) = find_handle(&self.builtins, "Object_hasOwn") {
+                obj_entries.push(("hasOwn", h));
+            }
+            if let Some(h) = find_handle(&self.builtins, "Object_setPrototypeOf") {
+                obj_entries.push(("setPrototypeOf", h));
+            }
             let obj_val = make_object(gc, &obj_entries);
             self.object_constructor = obj_val;
             self.builtin_wrappers.insert("Object".to_string(), obj_val);
@@ -1572,8 +1605,39 @@ impl Vm {
             ("max", find_handle(&self.builtins, "Math_max")),
             ("pow", find_handle(&self.builtins, "Math_pow")),
             ("sqrt", find_handle(&self.builtins, "Math_sqrt")),
+            ("round", find_handle(&self.builtins, "Math_round")),
+            ("trunc", find_handle(&self.builtins, "Math_trunc")),
+            ("sign", find_handle(&self.builtins, "Math_sign")),
+            ("hypot", find_handle(&self.builtins, "Math_hypot")),
+            ("clz32", find_handle(&self.builtins, "Math_clz32")),
+            ("imul", find_handle(&self.builtins, "Math_imul")),
+            ("cbrt", find_handle(&self.builtins, "Math_cbrt")),
+            ("log", find_handle(&self.builtins, "Math_log")),
+            ("log2", find_handle(&self.builtins, "Math_log2")),
+            ("log10", find_handle(&self.builtins, "Math_log10")),
+            ("exp", find_handle(&self.builtins, "Math_exp")),
+            ("sin", find_handle(&self.builtins, "Math_sin")),
+            ("cos", find_handle(&self.builtins, "Math_cos")),
+            ("tan", find_handle(&self.builtins, "Math_tan")),
+            ("asin", find_handle(&self.builtins, "Math_asin")),
+            ("acos", find_handle(&self.builtins, "Math_acos")),
+            ("atan", find_handle(&self.builtins, "Math_atan")),
+            ("atan2", find_handle(&self.builtins, "Math_atan2")),
+            // §21.3.1.1-8 constants
             ("PI", Some(pi_val)),
             ("E", Some(e_val)),
+            ("LN2", Some(Value::from_float64(std::f64::consts::LN_2))),
+            ("LN10", Some(Value::from_float64(std::f64::consts::LN_10))),
+            ("LOG2E", Some(Value::from_float64(std::f64::consts::LOG2_E))),
+            (
+                "LOG10E",
+                Some(Value::from_float64(1.0 / std::f64::consts::LN_10)),
+            ),
+            ("SQRT2", Some(Value::from_float64(std::f64::consts::SQRT_2))),
+            (
+                "SQRT1_2",
+                Some(Value::from_float64(std::f64::consts::FRAC_1_SQRT_2)),
+            ),
         ]
         .iter()
         .filter_map(|(name, val)| val.map(|v| (*name, v)))
@@ -1597,7 +1661,11 @@ impl Vm {
         // %Function% wrapper so `ctor.constructor` chains resolve (spec:
         // %Error%.[[Prototype]] is %Function.prototype%).
         if let Some(call_handle) = find_handle(&self.builtins, "Function_prototype_call") {
-            let func_proto = make_object(gc, &[("call", call_handle)]);
+            let mut proto_entries_f: Vec<(&str, Value)> = vec![("call", call_handle)];
+            if let Some(apply_handle) = find_handle(&self.builtins, "Function_prototype_apply") {
+                proto_entries_f.push(("apply", apply_handle));
+            }
+            let func_proto = make_object(gc, &proto_entries_f);
             self.function_prototype = func_proto;
             // %Function% wrapper
             let fn_name = HeapString::allocate(gc, "Function") as *mut u8;
@@ -9207,7 +9275,7 @@ fn value_to_f64(v: Value) -> f64 {
     }
 }
 
-fn values_strictly_equal(a: Value, b: Value) -> bool {
+pub(crate) fn values_strictly_equal(a: Value, b: Value) -> bool {
     // Both are Number type (Smi or Float64)
     if a.is_smi() || b.is_smi() || a.is_float64() || b.is_float64() {
         let na = if a.is_smi() {
@@ -10140,7 +10208,7 @@ fn load_property_recursive_ic(
 }
 
 /// Perform the full store-property logic (modelled after StoreProperty handler body).
-fn do_store_property(obj: Value, raw_key: Value, value: Value, gc: &mut SemiSpace) {
+pub(crate) fn do_store_property(obj: Value, raw_key: Value, value: Value, gc: &mut SemiSpace) {
     if let Some(ptr) = obj.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_OBJECT {

@@ -3718,3 +3718,9 @@ during the run, both clean, final result `114330883345000` correct.
 3. **Computed accessor names** (accessor-name-{computed,static}-computed-in ×4, setter-super-prop): `get ['x' in empty](){}` — parser suspected to loop on `in` inside computed keys; plus super-prop chains (superPropChains)
 Others: quantifiable-assertion regexes ×2 (annexB+RegExp S15.10.2.x — PikeVM non-progress on lookahead edges), try-finally-throw async ×2, await/async-generator interleaving, nested-let-inner-continue, optional-chaining-for, superPropChains
 Each is an isolated mini-slice: repro is a single small file, no debugger needed (hang = visible missing progress).
+
+## Stability #2a — `for(;;)` infinite-loop family ROOT-CAUSED + FIXED (2026-08-22)
+
+- **Root cause**: the For-loop tail called `self.patch(exit_jump, …)` unconditionally. With NO condition, `exit_jump` pointed at the **body's first instruction**, and patching rewrote its operands — e.g. `++n`'s global-index became the exit pc, so the increment silently incremented a phantom slot while reads returned undefined (`it0` forever, `n=n+1` → NaN). Any body whose first instruction's operands mattered was corrupted; loops only "worked" when corruption happened to be harmless
+- **Fix**: guard the exit-path patch behind `cond.is_some()`; empty-cond loops now rely on the break-sentinel (previous commit) for exits. Also verified: S12.6.3_A1 (throw-exit), head-init/inc-empty-syntax ×2, nested-let-inner-continue, accessor-name-computed-in — all previously-HANGING tests now pass (the accessor one contained an internal `for(;;)`-shaped pattern hit by the same clobber)
+- 820 workspace passed, clippy/fmt clean

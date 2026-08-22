@@ -1648,7 +1648,15 @@ impl Emitter {
                 } else {
                     self.current()
                 };
-                self.loop_exit_stack.push(exit_jump);
+                // Empty-cond loops (`for(;;)`) have NO JumpIfFalse to break
+                // to — a concrete position here would point at the body start
+                // (infinite loop). Use the sentinel so breaks are patched to
+                // the true exit after the body is emitted.
+                self.loop_exit_stack.push(if cond.is_some() {
+                    exit_jump
+                } else {
+                    usize::MAX
+                });
                 // `continue` must jump to the update expression, not the
                 // condition (which would skip the update and loop forever).
                 // The update is emitted after the body, so use a sentinel and
@@ -1682,23 +1690,40 @@ impl Emitter {
                     self.lexical_slot_count -= per_iteration_count;
                 }
                 self.emit(Opcode::Jump, vec![loop_start as i64]);
-                // Exit path (JumpIfFalse lands here): restore env before leaving
-                if per_iteration_count > 0 {
-                    self.patch(exit_jump, self.current());
+                // Exit path (JumpIfFalse lands here): restore env before leaving.
+                // With NO condition there is no JumpIfFalse — exit_jump points
+                // at the body's first instruction, and patching it would
+                // clobber that instruction's operands (seen as `++n` never
+                // incrementing inside `for(;;)`). Breaks use the sentinel.
+                if cond.is_some() {
+                    if per_iteration_count > 0 {
+                        self.patch(exit_jump, self.current());
+                        self.emit(Opcode::RestoreEnv, vec![]);
+                    } else {
+                        self.patch(exit_jump, self.current());
+                    }
+                } else if per_iteration_count > 0 {
                     self.emit(Opcode::RestoreEnv, vec![]);
-                } else {
-                    self.patch(exit_jump, self.current());
                 }
-                // Patch `continue` jumps to the update tail
-                for (pos, kind) in self.pending_loop_jumps.pop().unwrap_or_default() {
-                    if let LoopJumpKind::Continue = kind {
-                        self.patch(pos, continue_target);
+                // Patch `continue` jumps to the update tail; breaks for
+                // empty-cond loops (sentinel) go to the TRUE exit — after the
+                // init-scope BlockLeave below, matching natural fall-through.
+                let jumps = self.pending_loop_jumps.pop().unwrap_or_default();
+                let mut break_jumps: Vec<usize> = Vec::new();
+                for (pos, kind) in &jumps {
+                    match kind {
+                        LoopJumpKind::Continue => self.patch(*pos, continue_target),
+                        LoopJumpKind::Break => break_jumps.push(*pos),
                     }
                 }
                 // Leave for-init lexical scope
                 if init_has_scope {
                     self.emit(Opcode::BlockLeave, vec![]);
                     self.leave_lexical_scope();
+                }
+                let for_true_exit = self.current();
+                for pos in break_jumps {
+                    self.patch(pos, for_true_exit);
                 }
             }
             Stmt::Return(value, _) => {

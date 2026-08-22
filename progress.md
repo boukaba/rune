@@ -3702,3 +3702,10 @@ during the run, both clean, final result `114330883345000` correct.
 - **Ruled out**: scope_boundaries/env pairing imbalance (handlers verified balanced); JIT (3 iterations < tier-up threshold); missing update ops (only difference vs working case — masks corruption via extra allocations/GC timing)
 - **Blocked on tooling**: lldb broken on this machine (missing python framework). Next session: fix lldb or add signal-handler-based backtrace to the binary
 - **Not blocking the campaign**: isolated runner already converts these into ENGINE PANIC failures — measurement proceeds
+
+## Stability #1c — SEGV forensic snapshot (2026-08-22, tooling-blocked)
+
+- **Corruption characterized precisely**: at Context teardown, `_keep_alive`'s Vec header reads `[ptr=0x8, cap=0, len=QNAN|UNDEF]` — i.e., three consecutive words overwritten with VM-stack-style Values ([small-int-ish, 0, undefined]). Every VM collection (frames/stack/globals/wrappers/ics/traces) verifies sane. Writer = a stray 3-value sequential write from the let-for-no-update+continue execution into neighboring Rust-heap memory (allocator-layout dependent: minimal loop crashes release-only; with trailing code both modes crash)
+- Crash site symbolized without lldb: `.ips` frame `rune+40576` → `Vec<T,A>::drop +0x30` inside `drop_in_place<Context>` — freeing the corrupted header (null ptr + cap-read at +0x8)
+- **Blocked on**: no working lldb on this machine (python framework missing). Next session options: (a) repair lldb, (b) add in-binary SIGSEGV handler printing `std::backtrace`, or (c) bisect by neutralizing BlockEnter/CopyLexical/MakeEnv ops in a debug harness
+- Instrumentation removed; repro preserved (`for(let x=0;x<3;){x++;continue;}` + trailing stmt). Isolated runner contains impact (ENGINE PANIC failures)

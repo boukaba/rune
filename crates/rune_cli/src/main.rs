@@ -100,8 +100,8 @@ fn main() {
                         std::process::exit(3);
                     }
                 };
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    match mode {
+                let result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match mode {
                         "parse" => {
                             let ctx = rune_embed::Context::new();
                             ctx.compile(&src).map(|_| ())
@@ -110,18 +110,25 @@ fn main() {
                             let mut ctx = rune_embed::Context::new();
                             ctx.eval(&src).map(|_| ())
                         }
-                    }
-                }));
+                    }));
                 let code = match result {
                     Err(_) => {
                         // Panic inside the engine — treat as crash.
                         2
                     }
                     Ok(Ok(())) => {
-                        if mode == "throw" || mode == "parse" { 1 } else { 0 }
+                        if mode == "throw" || mode == "parse" {
+                            1
+                        } else {
+                            0
+                        }
                     }
                     Ok(Err(_)) => {
-                        if mode == "ok" { 1 } else { 0 }
+                        if mode == "ok" {
+                            1
+                        } else {
+                            0
+                        }
                     }
                 };
                 std::process::exit(code);

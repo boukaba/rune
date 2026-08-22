@@ -3193,9 +3193,6 @@ impl Vm {
                 }
             }
 
-            if std::env::var("RUNE_OPTRACE").is_ok() {
-                eprintln!("T pc={:?} sp={}", instr.opcode, self.stack.len());
-            }
             match instr.opcode {
                 // ---- Literals ----
                 Opcode::LoadSmi => {

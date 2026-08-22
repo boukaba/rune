@@ -231,9 +231,9 @@ fn run_isolated(
         uuid_counter()
     ));
     {
-        let mut f = std::fs::File::create(&tmp)
+        let mut f = std::fs::File::create(&tmp).map_err(|e| format!("tmp write: {e}"))?;
+        f.write_all(src.as_bytes())
             .map_err(|e| format!("tmp write: {e}"))?;
-        f.write_all(src.as_bytes()).map_err(|e| format!("tmp write: {e}"))?;
     }
     let res = (|| {
         let mut child = std::process::Command::new(exe)
@@ -313,24 +313,27 @@ fn run_test(test: &TestCase) -> Outcome {
 
     let exe = match std::env::current_exe() {
         Ok(e) => e,
-        Err(e) => return Outcome::Skipped { reason: format!("current_exe: {e}") },
+        Err(e) => {
+            return Outcome::Skipped {
+                reason: format!("current_exe: {e}"),
+            };
+        }
     };
     let timeout_ms: u64 = std::env::var("TEST262_TIMEOUT_MS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(2000);
 
-    let (expect, neg_type): (Expect, Option<&str>) =
-        if let Some(ref nt) = test.meta.negative_type {
-            let phase = test.meta.negative_phase.as_deref().unwrap_or("runtime");
-            if phase == "parse" {
-                (Expect::Parse, Some(nt))
-            } else {
-                (Expect::Throw, Some(nt))
-            }
+    let (expect, neg_type): (Expect, Option<&str>) = if let Some(ref nt) = test.meta.negative_type {
+        let phase = test.meta.negative_phase.as_deref().unwrap_or("runtime");
+        if phase == "parse" {
+            (Expect::Parse, Some(nt))
         } else {
-            (Expect::Ok, None)
-        };
+            (Expect::Throw, Some(nt))
+        }
+    } else {
+        (Expect::Ok, None)
+    };
 
     let mode = match expect {
         Expect::Ok => "ok",
@@ -346,7 +349,9 @@ fn run_test(test: &TestCase) -> Outcome {
         Ok(2) => Outcome::Fail {
             message: format!(
                 "ENGINE PANIC{}",
-                neg_type.map(|n| format!(" (expected {n})")).unwrap_or_default()
+                neg_type
+                    .map(|n| format!(" (expected {n})"))
+                    .unwrap_or_default()
             ),
         },
         Ok(_) => {

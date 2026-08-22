@@ -103,7 +103,7 @@ fn main() {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     match mode {
                         "parse" => {
-                            let mut ctx = rune_embed::Context::new();
+                            let ctx = rune_embed::Context::new();
                             ctx.compile(&src).map(|_| ())
                         }
                         _ => {

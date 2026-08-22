@@ -7142,7 +7142,8 @@ impl Vm {
                                                 JIT_CALL_DEPTH.with(|d| d.set(d.get() + 1));
                                                 let result_raw =
                                                     unsafe { func(vm_ptr, gc_ptr, locals_ptr) };
-                                                JIT_CALL_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+                                                JIT_CALL_DEPTH
+                                                    .with(|d| d.set(d.get().saturating_sub(1)));
                                                 if self.jit_bailout.pending {
                                                     let bailout_bc_pc = self.jit_bailout.bc_pc;
                                                     self.jit_bailout.pending = false;
@@ -11165,8 +11166,7 @@ pub unsafe extern "C" fn rune_jit_call_helper(
                     // (e.g. `add(a,b){return a+b;}`) do not; skip the Frame
                     // setup to avoid per-call overhead.
                     let needs_frame = func_prog.needs_frame();
-                    let nested_native =
-                        !needs_frame && JIT_CALL_DEPTH.with(|d| d.get()) > 0;
+                    let nested_native = !needs_frame && JIT_CALL_DEPTH.with(|d| d.get()) > 0;
 
                     // Three calling conventions:
                     //   1. needs_frame        → real Frame + moved-out buffer

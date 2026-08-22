@@ -3709,3 +3709,12 @@ during the run, both clean, final result `114330883345000` correct.
 - Crash site symbolized without lldb: `.ips` frame `rune+40576` → `Vec<T,A>::drop +0x30` inside `drop_in_place<Context>` — freeing the corrupted header (null ptr + cap-read at +0x8)
 - **Blocked on**: no working lldb on this machine (python framework missing). Next session options: (a) repair lldb, (b) add in-binary SIGSEGV handler printing `std::backtrace`, or (c) bisect by neutralizing BlockEnter/CopyLexical/MakeEnv ops in a debug harness
 - Instrumentation removed; repro preserved (`for(let x=0;x<3;){x++;continue;}` + trailing stmt). Isolated runner contains impact (ENGINE PANIC failures)
+
+## Stability #2 — hang taxonomy (2026-08-22)
+
+33 timeout tests cluster into ≥3 independent root causes (files enumerated in conformance logs):
+1. **for(;;)+throw-exit class** (`S12.6.3_A1`, head-init/inc-empty-syntax ×2): `for(;;){ if(++global>100) throw }` never exits — suspect IncGlobal/prefix-inc semantics in for bodies
+2. **String-object property keys** (`S15.4_A1.1_T8`, staging to-length/replace-math/string-mapping/sort_stable): `x[new String("0")]=0` family loops later in-file — ToPropertyKey via String-object path suspected
+3. **Computed accessor names** (accessor-name-{computed,static}-computed-in ×4, setter-super-prop): `get ['x' in empty](){}` — parser suspected to loop on `in` inside computed keys; plus super-prop chains (superPropChains)
+Others: quantifiable-assertion regexes ×2 (annexB+RegExp S15.10.2.x — PikeVM non-progress on lookahead edges), try-finally-throw async ×2, await/async-generator interleaving, nested-let-inner-continue, optional-chaining-for, superPropChains
+Each is an isolated mini-slice: repro is a single small file, no debugger needed (hang = visible missing progress).

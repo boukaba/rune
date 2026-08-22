@@ -4822,7 +4822,7 @@ impl Vm {
                             }
                         }
                     }
-                    do_store_property(obj, raw_key, value, gc);
+                    do_store_property(obj, raw_key, value, gc, self);
                     self.push(value);
                     self.frames[fi].pc = pc + 1;
                 }
@@ -4839,10 +4839,10 @@ impl Vm {
                         {
                             unsafe { JSObject::set_slot(ptr as *mut JSObject, offset, value) };
                         } else {
-                            do_store_property(obj, raw_key, value, gc);
+                            do_store_property(obj, raw_key, value, gc, self);
                         }
                     } else {
-                        do_store_property(obj, raw_key, value, gc);
+                        do_store_property(obj, raw_key, value, gc, self);
                     }
                     self.push(value);
                     self.frames[fi].pc = pc + 1;
@@ -4916,7 +4916,7 @@ impl Vm {
                                     gc, &key_str,
                                 )
                                     as *mut u8);
-                                do_store_property(obj, raw_key, value, gc);
+                                do_store_property(obj, raw_key, value, gc, self);
                             }
                         }
                     }
@@ -4978,7 +4978,7 @@ impl Vm {
                                         gc, &key_str,
                                     )
                                         as *mut u8);
-                                    do_store_property(obj, raw_key, acc_val, gc);
+                                    do_store_property(obj, raw_key, acc_val, gc, self);
                                 }
                             }
                         }
@@ -6052,7 +6052,7 @@ impl Vm {
                     let key_str = format!("\x00private_{}", priv_name_id);
                     let key_val =
                         Value::from_heap_ptr(HeapString::allocate(gc, &key_str) as *mut u8);
-                    do_store_property(obj, key_val, val, gc);
+                    do_store_property(obj, key_val, val, gc, self);
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::MakeAccessorPair => {
@@ -6208,7 +6208,7 @@ impl Vm {
                             }
                         }
                     }
-                    do_store_property(obj, key_val, val, gc);
+                    do_store_property(obj, key_val, val, gc, self);
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::MakeEnv => {
@@ -9442,6 +9442,14 @@ pub(crate) fn value_to_prop_key(val: Value) -> Option<PropertyKey> {
             let s = unsafe { HeapString::to_string(ptr as *mut HeapString) };
             return Some(PropertyKey::from_string(&s));
         }
+        // §7.1.17 ToPropertyKey: String wrapper objects ToPrimitive → their
+        // inner string ("x[new String("0")]" must hit element 0).
+        if tag == TAG_STRING_OBJ {
+            let sptr =
+                unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
+            let s = unsafe { HeapString::to_string(sptr as *mut HeapString) };
+            return Some(PropertyKey::from_string(&s));
+        }
     }
     if let Some(v) = val.as_smi() {
         return Some(PropertyKey::from_string(&v.to_string()));
@@ -10221,7 +10229,13 @@ fn load_property_recursive_ic(
 }
 
 /// Perform the full store-property logic (modelled after StoreProperty handler body).
-pub(crate) fn do_store_property(obj: Value, raw_key: Value, value: Value, gc: &mut SemiSpace) {
+pub(crate) fn do_store_property(
+    obj: Value,
+    raw_key: Value,
+    value: Value,
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+) {
     if let Some(ptr) = obj.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_OBJECT {
@@ -10249,8 +10263,34 @@ pub(crate) fn do_store_property(obj: Value, raw_key: Value, value: Value, gc: &m
         } else if tag == TAG_ARRAY {
             if let Some(index) = value_to_array_index(raw_key) {
                 let len = unsafe { RuneArray::length(ptr as *mut RuneArray) };
-                if index < len as usize {
+                if (index as u32) < len {
                     unsafe { RuneArray::set_element(ptr as *mut RuneArray, index, value) };
+                } else {
+                    // §7.3.4 CreateDataPropertyOrThrow on an array: indices at
+                    // or beyond length GROW the array (length = index+1).
+                    // Pad with undefined via push (handles grow + root updates),
+                    // mirroring the array_push discipline.
+                    let mut cur = ptr as *mut RuneArray;
+                    unsafe {
+                        for k in len..=(index as u32) {
+                            let v = if k == index as u32 { value } else { Value::undefined() };
+                            let new_arr = RuneArray::push(gc, cur, v);
+                            if new_arr as *mut u8 != cur as *mut u8 {
+                                let resolved_old =
+                                    if (*(cur as *const GcHeader)).is_forwarded() {
+                                        (*(cur as *const GcHeader)).forwarding_addr()
+                                    } else {
+                                        cur as *mut u8
+                                    };
+                                vm.update_heap_reference(resolved_old, new_arr as *mut u8);
+                                // Keep obj's stack slot fresh too — callers may
+                                // still hold the old address.
+                                let _ = obj;
+                            }
+                            cur = new_arr;
+                        }
+                        let _ = obj; // obj refreshed by update_heap_reference above
+                    }
                 }
             } else if let Some(key_str) = raw_key.heap_ptr() {
                 let k = unsafe { HeapString::to_string(key_str as *mut HeapString) };
@@ -10286,7 +10326,7 @@ pub(crate) fn do_store_property(obj: Value, raw_key: Value, value: Value, gc: &m
                             );
                             props = new_obj as *mut u8;
                         }
-                        do_store_property(Value::from_heap_ptr(props), raw_key, value, gc);
+                        do_store_property(Value::from_heap_ptr(props), raw_key, value, gc, vm);
                     }
                 }
             }
@@ -10344,7 +10384,7 @@ pub(crate) fn do_store_property(obj: Value, raw_key: Value, value: Value, gc: &m
                             Func::set_extra_props(obj_ptr as *mut Func, new_obj as *mut u8);
                             props = new_obj as *mut u8;
                         }
-                        do_store_property(Value::from_heap_ptr(props), raw_key, value, gc);
+                        do_store_property(Value::from_heap_ptr(props), raw_key, value, gc, vm);
                     }
                 }
             }
@@ -10687,6 +10727,11 @@ pub(crate) fn value_to_array_index(v: Value) -> Option<usize> {
         if tag == TAG_STRING {
             let s = unsafe { HeapString::to_string(ptr as *mut HeapString) };
             // Only parse canonical numeric strings to avoid surprises
+            s.parse::<usize>().ok()
+        } else if tag == TAG_STRING_OBJ {
+            let sptr =
+                unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
+            let s = unsafe { HeapString::to_string(sptr as *mut HeapString) };
             s.parse::<usize>().ok()
         } else {
             None

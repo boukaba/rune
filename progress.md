@@ -3724,3 +3724,9 @@ Each is an isolated mini-slice: repro is a single small file, no debugger needed
 - **Root cause**: the For-loop tail called `self.patch(exit_jump, …)` unconditionally. With NO condition, `exit_jump` pointed at the **body's first instruction**, and patching rewrote its operands — e.g. `++n`'s global-index became the exit pc, so the increment silently incremented a phantom slot while reads returned undefined (`it0` forever, `n=n+1` → NaN). Any body whose first instruction's operands mattered was corrupted; loops only "worked" when corruption happened to be harmless
 - **Fix**: guard the exit-path patch behind `cond.is_some()`; empty-cond loops now rely on the break-sentinel (previous commit) for exits. Also verified: S12.6.3_A1 (throw-exit), head-init/inc-empty-syntax ×2, nested-let-inner-continue, accessor-name-computed-in — all previously-HANGING tests now pass (the accessor one contained an internal `for(;;)`-shaped pattern hit by the same clobber)
 - 820 workspace passed, clippy/fmt clean
+
+## Stability #2b — array index-store growth + String-object keys FIXED (2026-08-22)
+
+- **`a[i]=v` with i ≥ length now GROWS** (§7.3.4): do_store_property TAG_ARRAY pads via RuneArray::push with forwarding-resolve + update_heap_reference (push discipline); signature gained `&mut Vm` (all 11 call sites threaded). Previously out-of-bounds numeric stores were silently dropped (`var a=[]; a[3]=7` → undefined/len0!) — a major hidden conformance hole
+- **String wrapper objects as property keys** (`x[new String("0")]`): value_to_prop_key + value_to_array_index gained TAG_STRING_OBJ arms (ToPrimitive → inner string → canonical numeric key). Previously fell into a garbage-key path reading StringObject as HeapString
+- built-ins/Array 794→805 ✓; minimal repros pass; 820 workspace green

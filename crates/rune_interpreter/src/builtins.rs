@@ -4322,7 +4322,7 @@ pub fn object_assign(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut 
             // Set(targetObj, key, value, true) via the VM's store path so
             // dense arrays / extra_props / shapes all behave identically.
             let key_val = Value::from_heap_ptr(HeapString::allocate(gc, &key) as *mut u8);
-            crate::vm::do_store_property(target_obj, key_val, value, gc);
+            crate::vm::do_store_property(target_obj, key_val, value, gc, vm);
         }
     }
     target_obj

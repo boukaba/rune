@@ -3693,3 +3693,12 @@ during the run, both clean, final result `114330883345000` correct.
 - **Updated totals: PASS 8835 / 47,586 executed = 18%** (18083 skipped as unsupported-features; intl402 excluded). Hidden passes revealed by isolation: expressions/class 344✓, built-ins/Array 794✓, Object 282✓, Promise 214✓, RegExp 360✓, Temporal completes at 18/4603
 - **Crash inventory → concrete reproducers**: statements/continue/{no-label-continue, shadowing-loop-variable-in-same-scope-as-continue, nested-let-bound-for-loops-outer-continue} (the SIGSEGV trio); ~50 class private/static-setter panics; 1640 panics inside Temporal alone. 33 timeout tests enumerated
 - Report regenerated: conformance-report.md (94-row table)
+
+## Stability slice #1b — continue-SEGV investigation (2026-08-22)
+
+- **Reproducer narrowed to 3 lines**: `function f(){return 1;} for(let x=0;x<3;){x++;continue;} f()` → SIGSEGV. Requires: let-scoped for WITHOUT update clause + `continue` + any trailing statement. With update clause present → clean. Minimal loop alone: release-only crash; fuller file crashes debug too
+- **Crash site identified via macOS .ips**: `drop_in_place<rune_embed::context::Context>` — EXC_BAD_ACCESS at 0x8 (null base + offset 8) during TEARDOWN, i.e., the loop corrupts a pointer that Context's derived drop later follows. Execution itself completes (op-trace shows Return reached)
+- **Bytecode audited**: continue→RestoreEnv→CopyLexical→BlockLeave→Jump(loop_start); exit path RestoreEnv+BlockLeave. One latent leak found: init-scope BlockEnter never paired with BlockLeave on ANY for-let variant (present in working cases too) — hygiene issue, not the segv
+- **Ruled out**: scope_boundaries/env pairing imbalance (handlers verified balanced); JIT (3 iterations < tier-up threshold); missing update ops (only difference vs working case — masks corruption via extra allocations/GC timing)
+- **Blocked on tooling**: lldb broken on this machine (missing python framework). Next session: fix lldb or add signal-handler-based backtrace to the binary
+- **Not blocking the campaign**: isolated runner already converts these into ENGINE PANIC failures — measurement proceeds

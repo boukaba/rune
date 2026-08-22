@@ -90,6 +90,11 @@ impl Context {
         let bytecode = self.compile(source)?;
 
         // Execute — keep bytecode alive for dangling prog_ptr refs from Func
+        if std::env::var("RUNE_DUMP").is_ok() {
+            for (i, instr) in bytecode.instructions.iter().enumerate() {
+                eprintln!("D {:03} {:?} {:?}", i, instr.opcode, instr.operands);
+            }
+        }
         let pinned = Box::pin(bytecode);
         self.programs.push(pinned);
         let prog_ref: &BytecodeProgram = &self.programs.last().unwrap().as_ref();

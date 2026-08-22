@@ -2305,7 +2305,7 @@ impl Aarch64CodeGen {
                     // compile-time depth grows by (argc+2) PER CALL SITE,
                     // so a second guarded site in the same function records a
                     // depth the runtime can never produce (fib-style cascades).
-                    self.stack_depth = self.stack_depth.saturating_sub((argc + 2) as u32);
+                    self.stack_depth = self.stack_depth.saturating_sub(argc + 2);
                     self.push();
                     // Patch B.NE to skip bailout
                     let d = ((done_path as i64 - bail_path as i64) / 4) as u32;

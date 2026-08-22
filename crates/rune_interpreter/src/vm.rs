@@ -9445,8 +9445,7 @@ pub(crate) fn value_to_prop_key(val: Value) -> Option<PropertyKey> {
         // §7.1.17 ToPropertyKey: String wrapper objects ToPrimitive → their
         // inner string ("x[new String("0")]" must hit element 0).
         if tag == TAG_STRING_OBJ {
-            let sptr =
-                unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
+            let sptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
             let s = unsafe { HeapString::to_string(sptr as *mut HeapString) };
             return Some(PropertyKey::from_string(&s));
         }
@@ -10273,15 +10272,18 @@ pub(crate) fn do_store_property(
                     let mut cur = ptr as *mut RuneArray;
                     unsafe {
                         for k in len..=(index as u32) {
-                            let v = if k == index as u32 { value } else { Value::undefined() };
+                            let v = if k == index as u32 {
+                                value
+                            } else {
+                                Value::undefined()
+                            };
                             let new_arr = RuneArray::push(gc, cur, v);
                             if new_arr as *mut u8 != cur as *mut u8 {
-                                let resolved_old =
-                                    if (*(cur as *const GcHeader)).is_forwarded() {
-                                        (*(cur as *const GcHeader)).forwarding_addr()
-                                    } else {
-                                        cur as *mut u8
-                                    };
+                                let resolved_old = if (*(cur as *const GcHeader)).is_forwarded() {
+                                    (*(cur as *const GcHeader)).forwarding_addr()
+                                } else {
+                                    cur as *mut u8
+                                };
                                 vm.update_heap_reference(resolved_old, new_arr as *mut u8);
                                 // Keep obj's stack slot fresh too — callers may
                                 // still hold the old address.
@@ -10729,8 +10731,7 @@ pub(crate) fn value_to_array_index(v: Value) -> Option<usize> {
             // Only parse canonical numeric strings to avoid surprises
             s.parse::<usize>().ok()
         } else if tag == TAG_STRING_OBJ {
-            let sptr =
-                unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
+            let sptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
             let s = unsafe { HeapString::to_string(sptr as *mut HeapString) };
             s.parse::<usize>().ok()
         } else {

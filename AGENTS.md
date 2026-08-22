@@ -216,6 +216,11 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - for(;;)-family hang FIXED: For tail patched exit_jump even with no condition, clobbering the body's first instruction's operands (++n never stuck). Guarded by cond.is_some() + break-sentinel. 4+ hang tests now pass
 - Isolated runner shipped: test262-exec per-test subprocess + 1.5s timeout; full 94-suite measurement possible
 
+### Stability wins #2 (2026-08-22)
+- for-of destructuring shipped via parser desugar (var-pattern path); const-pattern init allowance; for-in/of arity panics → parse errors
+- Class-name capture inside ALL methods fixed (MakeEnv+StoreCaptured around class eval; env scope pushed at compile time)
+- NEW pre-existing repro escalated: recursive-fn tier-up mid-recursion → call-ic bailout validation panic (fib(10); affects d42da9f too). NEXT TARGET
+
 ### Known Gaps (stability, from conformance baseline 2026-08-22)
 - continue-SEGV: `for(let..;NO-UPD;){..continue}` + trailing stmt → Context::drop null+8 deref (repro in progress.md; execution completes; teardown crashes)
 - Per-test timeout gap closed: subprocess-isolated runner shipped (`test262-exec`)

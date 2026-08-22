@@ -738,6 +738,24 @@ impl Emitter {
         }
         self.private_field_names = names;
 
+        // 0.5 Named classes: expose the class binding to ALL methods (static
+        // and instance) through the lexical-env capture channel. The env scope
+        // is pushed at COMPILE time so method bodies resolve the name via
+        // LoadCaptured; the matching MakeEnv/StoreCaptured below fills it at
+        // runtime before any method can be called.
+        let mut class_env_pushed = false;
+        if let Some(ref cname) = class.name {
+            let already = self
+                .env_scope_stack
+                .iter()
+                .any(|sc| sc.iter().any(|n| n.as_str() == cname.as_ref()));
+            if !already {
+                self.env_scope_stack.push(vec![cname.to_string()]);
+                class_env_pushed = true;
+                self.emit(Opcode::MakeEnv, vec![1]);
+            }
+        }
+
         // 1. Compile all methods, identify constructor
         let mut constructor_idx = None;
         let mut method_funcs: Vec<(PropKey, usize)> = Vec::new();
@@ -1099,6 +1117,14 @@ impl Emitter {
         if let Some(idx) = save_slot {
             self.emit(Opcode::StoreLocal, vec![idx as i64]);
         }
+        // 5-pre. Bind the class name inside the capture env (slot filled any
+        // time before the first method call — closures hold the env object).
+        if class_env_pushed {
+            if let Some(ctor_slot) = save_slot {
+                self.emit(Opcode::LoadLocal, vec![ctor_slot as i64]);
+                self.emit(Opcode::StoreCaptured, vec![0i64, 0i64]);
+            }
+        }
 
         // 5a. Set superclass on the constructor for super() calls in derived classes
         if let (Some(sslot), Some(ctor_slot)) = (heritage_super_slot, save_slot) {
@@ -1282,6 +1308,14 @@ impl Emitter {
 
         // 9. Restore parent's private field names (may be empty for top-level)
         self.private_field_names = _saved_private;
+
+        // 10. Pop the class-name capture env (pushed at 0.5). Every method
+        // closure already holds the env object, so restoring the frame's env
+        // here cannot detach them.
+        if class_env_pushed {
+            self.emit(Opcode::RestoreEnv, vec![]);
+            self.env_scope_stack.pop();
+        }
     }
 
     /// Emit bytecode for destructuring a value according to the pattern.

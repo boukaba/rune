@@ -883,7 +883,9 @@ impl Parser {
             } else {
                 None
             };
-            if kind == VarKind::Const && init.is_none() {
+            // Pattern consts are initialized by their consuming construct
+            // (for-of/for-in desugaring binds them per iteration).
+            if kind == VarKind::Const && init.is_none() && pattern.is_none() {
                 self.error("const declaration must be initialized".to_string());
             }
             decls.push(Decl {
@@ -1152,7 +1154,10 @@ impl Parser {
                 // Extract the variable name from the var declaration
                 let name = match &var_stmt {
                     Stmt::Var(_, decls, _) if decls.len() == 1 => decls[0].name.clone(),
-                    _ => panic!("for-in must have exactly one loop variable"),
+                    _ => {
+                        self.error("for-in must have exactly one loop variable".into());
+                        return Stmt::Empty(Span::default());
+                    }
                 };
                 let lhs = Box::new(Expr::Identifier(name, Span::default()));
                 return Stmt::ForIn(
@@ -1166,16 +1171,48 @@ impl Parser {
                 );
             }
             if self.tok.kind == TokenKind::Of {
-                // for (var x of iterable)
+                // for (var x of iterable)  |  for (var [a, b] of iterable)
                 self.advance();
                 let obj = self.parse_expr(0);
                 self.expect(TokenKind::RParen);
-                let body = Box::new(self.parse_statement());
-                let name = match &var_stmt {
-                    Stmt::Var(_, decls, _) if decls.len() == 1 && decls[0].pattern.is_none() => {
-                        decls[0].name.clone()
+                let user_body = self.parse_statement();
+                let (name, body): (Box<str>, Box<Stmt>) = match &var_stmt {
+                    Stmt::Var(_, decls, _) if decls.len() == 1 => {
+                        if let Some(pattern) = &decls[0].pattern {
+                            // Desugar `for (var P of it) BODY` into
+                            // `for (var __tmp of it) { var P = __tmp; BODY }`
+                            // via the well-trodden var-pattern declaration path.
+                            let tmp: Box<str> = "__rune_forof_tmp__".into();
+                            let decl = Decl {
+                                name: "_destructure".into(),
+                                pattern: Some(pattern.clone()),
+                                init: Some(Box::new(Expr::Identifier(
+                                    tmp.clone(),
+                                    Span::default(),
+                                ))),
+                                span: Span::default(),
+                            };
+                            let kind = match &var_stmt {
+                                Stmt::Var(k, _, _) => k.clone(),
+                                _ => VarKind::Var,
+                            };
+                            let span = Span {
+                                start: start.start,
+                                end: self.span().end,
+                            };
+                            let new_body = Stmt::Block(
+                                vec![Stmt::Var(kind, vec![decl], span), user_body],
+                                span,
+                            );
+                            (tmp, Box::new(new_body))
+                        } else {
+                            (decls[0].name.clone(), Box::new(user_body))
+                        }
                     }
-                    _ => panic!("for-of must have exactly one loop variable"),
+                    _ => {
+                        self.error("for-of must have exactly one loop variable".into());
+                        return Stmt::Empty(Span::default());
+                    }
                 };
                 let lhs = Box::new(Expr::Identifier(name, Span::default()));
                 return Stmt::ForOf(

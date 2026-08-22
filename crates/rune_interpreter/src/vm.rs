@@ -7139,8 +7139,10 @@ impl Vm {
                                                 let vm_ptr = self as *mut Vm as *mut u8;
                                                 let gc_ptr = gc as *mut SemiSpace as *mut u8;
                                                 self.jit_bailout.pending = false;
+                                                JIT_CALL_DEPTH.with(|d| d.set(d.get() + 1));
                                                 let result_raw =
                                                     unsafe { func(vm_ptr, gc_ptr, locals_ptr) };
+                                                JIT_CALL_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
                                                 if self.jit_bailout.pending {
                                                     let bailout_bc_pc = self.jit_bailout.bc_pc;
                                                     self.jit_bailout.pending = false;
@@ -11163,8 +11165,31 @@ pub unsafe extern "C" fn rune_jit_call_helper(
                     // (e.g. `add(a,b){return a+b;}`) do not; skip the Frame
                     // setup to avoid per-call overhead.
                     let needs_frame = func_prog.needs_frame();
+                    let nested_native =
+                        !needs_frame && JIT_CALL_DEPTH.with(|d| d.get()) > 0;
 
-                    let locals_ptr: *mut u64 = if needs_frame {
+                    // Three calling conventions:
+                    //   1. needs_frame        → real Frame + moved-out buffer
+                    //   2. nested native leaf → private stack scratch (the
+                    //      shared jit_locals_buffer belongs to an OUTER live
+                    //      native frame; aliasing it corrupts that frame's
+                    //      locals mid-execution)
+                    //   3. plain non-nested   → shared jit_locals_buffer
+                    let locals_ptr: *mut u64 = if nested_native {
+                        let mut scratch: Vec<u64> =
+                            Vec::with_capacity(local_count.max(argc_usize + 2));
+                        if func_prog.named_function {
+                            scratch.push(callee_raw);
+                        }
+                        for i in 0..argc_usize {
+                            let raw = unsafe { *args_ptr.sub(argc_usize - i) };
+                            scratch.push(raw);
+                        }
+                        while scratch.len() < local_count {
+                            scratch.push(Value::undefined().raw());
+                        }
+                        scratch.as_mut_ptr()
+                    } else if needs_frame {
                         // Push a Frame for the callee so that lexical-scope
                         // helpers find the correct frame.  Swap the locals
                         // out of jit_locals_buffer to avoid a per-call
@@ -11200,12 +11225,15 @@ pub unsafe extern "C" fn rune_jit_call_helper(
                     vm.jit_entry_count += 1;
                     let func: JitEntryFn = unsafe { std::mem::transmute(jit_entry) };
                     vm.jit_bailout.pending = false;
+                    JIT_CALL_DEPTH.with(|d| d.set(d.get() + 1));
                     let result_raw = unsafe { func(vm_ptr, gc_ptr, locals_ptr) };
+                    JIT_CALL_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
 
                     // Pop callee Frame if one was pushed.
                     if needs_frame {
                         vm.frames.pop();
                     }
+                    // nested-native scratch drops automatically (Rust stack)
 
                     // If callee bailed out, set the bailout flag for the
                     // caller.
@@ -11255,6 +11283,14 @@ pub unsafe extern "C" fn rune_jit_call_helper(
         reason: rune_jit_baseline::BailoutReason::BailOnEntry,
     };
     0
+}
+
+thread_local! {
+    /// Depth of currently-executing JIT frames that may be using
+    /// `jit_locals_buffer`. When >0, a new non-frame callee must NOT alias
+    /// the buffer (the outer native frame is still reading it) — it takes
+    /// the Frame path instead so the buffer is moved out safely.
+    static JIT_CALL_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Indices into Vm::typeof_strings for each typeof result.

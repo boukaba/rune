@@ -3754,3 +3754,8 @@ Three interacting sites identified:
 
 Failing fib facts: recorded pc11=5 / pc17=10 (static model, BailOnEntry); runtime bail at pc16 (Overflow — suspicious with small n!) snap=5. Delta exactly one call-segment ⟹ suspect the Overflow guard firing spuriously when n arrives as a misboxed value during tier-up-transition frames, and/or double-snapshot overwrite across nested native callers (each caller BLRs bailout_helper again, overwriting vm.jit_bailout with its own bc_pc while keeping the FIRST snapshot).
 Fix session plan: (a) dump n/locals at pc16 guard entry, (b) audit nested-bailout propagation (flag+snapshot ownership across ≥2 native frames), (c) align Call-arm model depth with runtime pre-call state.
+
+## Stability #4c — snapshot contents captured (2026-08-22)
+
+- BailOnEntry@bc11 snapshot decoded: `[denormal-bits≈0x506, Smi(2), 0.0-bits]` — NOT this/callee/arg values; the runtime JIT-stack pointer sits ABOVE the live data reading stale slots, while the model claims depth 10. Both sides wrong ⟹ sp/model drift begins EARLIER in the unit (likely at first Call's helper-vs-model mismatch), and the Sub "overflow" at pc16 is a downstream symptom of computing on stale slots
+- Confirms: fix = full Call-arm stack-contract re-derivation against rune_jit_call_helper (who consumes what, when), not spot patches. Session closed here; plan in #4b stands

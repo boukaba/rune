@@ -2300,6 +2300,12 @@ impl Aarch64CodeGen {
                     let done_path = self.mem.current_offset();
                     let pop_bytes = (argc + 2) * 8;
                     sub_imm(&mut self.mem, JIT_STACK_REG, JIT_STACK_REG, pop_bytes);
+                    // Model unwind: the runtime just consumed this+callee+args
+                    // (pop_bytes above). Without matching the counter here the
+                    // compile-time depth grows by (argc+2) PER CALL SITE,
+                    // so a second guarded site in the same function records a
+                    // depth the runtime can never produce (fib-style cascades).
+                    self.stack_depth = self.stack_depth.saturating_sub((argc + 2) as u32);
                     self.push();
                     // Patch B.NE to skip bailout
                     let d = ((done_path as i64 - bail_path as i64) / 4) as u32;

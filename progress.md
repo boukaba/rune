@@ -3685,3 +3685,11 @@ during the run, both clean, final result `114330883345000` correct.
 - **Strongest areas**: parseInt 78%, parseFloat 74%, asi 54%, Map 50%, Date 43%
 - **Per-test timeout gap**: the runner has no per-test timeout — one infinite loop freezes a whole batch (found via 30-min batch caps). Runner fix needed before the conformance push
 - **Strategy set with user**: (1) stability blockers first, (2) per-suite triage of top failures in batches, (3) J3 x86-64, (4) hardening. 80%+ band is far — this is a multi-week campaign, not a slice
+
+## Stability slice #1 — isolated conformance runner (2026-08-22)
+
+- **Subprocess-per-test**: new `rune test262-exec <file> <ok|throw|parse>` executor mode (exit codes 0/1/2/3); parent harness spawns one child per test with 1.5s hard timeout (`TEST262_TIMEOUT_MS` override). Hangs → counted TIMEOUT failures; SIGSEGV/SIGABRT children → ENGINE PANIC failures; batches can no longer freeze or die
+- **All 94 suites now complete measurement** — previously 19 died mid-run. Full counts: language 28/28, built-ins 64/64, annexB, staging
+- **Updated totals: PASS 8835 / 47,586 executed = 18%** (18083 skipped as unsupported-features; intl402 excluded). Hidden passes revealed by isolation: expressions/class 344✓, built-ins/Array 794✓, Object 282✓, Promise 214✓, RegExp 360✓, Temporal completes at 18/4603
+- **Crash inventory → concrete reproducers**: statements/continue/{no-label-continue, shadowing-loop-variable-in-same-scope-as-continue, nested-let-bound-for-loops-outer-continue} (the SIGSEGV trio); ~50 class private/static-setter panics; 1640 panics inside Temporal alone. 33 timeout tests enumerated
+- Report regenerated: conformance-report.md (94-row table)

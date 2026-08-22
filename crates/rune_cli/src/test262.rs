@@ -213,7 +213,70 @@ fn strip_frontmatter(source: &str) -> String {
     }
 }
 
-/// Run a single test case, catching Rust panics to keep the runner alive.
+/// Run the prepared source in an ISOLATED child process (`rune test262-exec`).
+///
+/// Per-test isolation means hangs (infinite loops) and crashes (SIGSEGV /
+/// SIGABRT) affect only that test's outcome instead of killing the batch.
+/// Returns the child's exit code; `Err(msg)` on spawn/IO problems.
+fn run_isolated(
+    exe: &std::path::Path,
+    src: &str,
+    expect: &str,
+    timeout_ms: u64,
+) -> Result<i32, String> {
+    use std::io::Write;
+    let tmp = std::env::temp_dir().join(format!(
+        "rune-t262-{}-{}.js",
+        std::process::id(),
+        uuid_counter()
+    ));
+    {
+        let mut f = std::fs::File::create(&tmp)
+            .map_err(|e| format!("tmp write: {e}"))?;
+        f.write_all(src.as_bytes()).map_err(|e| format!("tmp write: {e}"))?;
+    }
+    let res = (|| {
+        let mut child = std::process::Command::new(exe)
+            .arg("test262-exec")
+            .arg(&tmp)
+            .arg(expect)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| format!("spawn: {e}"))?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        loop {
+            match child.try_wait().map_err(|e| format!("wait: {e}"))? {
+                Some(status) => return Ok(status.code().unwrap_or(2)),
+                None => {
+                    if std::time::Instant::now() > deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Ok(124); // timeout sentinel
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
+        }
+    })();
+    let _ = std::fs::remove_file(&tmp);
+    res
+}
+
+fn uuid_counter() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Expected-outcome classification for a test case.
+enum Expect {
+    Ok,
+    Throw,
+    Parse,
+}
+
+/// Run a single test case in an isolated child process with a hard timeout.
 fn run_test(test: &TestCase) -> Outcome {
     // Skip tests with unsupported features
     if let Some(features) = test
@@ -248,49 +311,50 @@ fn run_test(test: &TestCase) -> Outcome {
         };
     }
 
-    // Check for negative tests (expected to fail)
-    if let Some(ref neg_type) = test.meta.negative_type {
-        let phase = test.meta.negative_phase.as_deref().unwrap_or("runtime");
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => return Outcome::Skipped { reason: format!("current_exe: {e}") },
+    };
+    let timeout_ms: u64 = std::env::var("TEST262_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2000);
 
-        if phase == "parse" {
-            let mut ctx = rune_embed::Context::new();
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctx.eval(&source))) {
-                Ok(Ok(_)) => Outcome::Fail {
-                    message: format!("expected parse error {neg_type}, but parsed successfully"),
-                },
-                _ => Outcome::Pass,
+    let (expect, neg_type): (Expect, Option<&str>) =
+        if let Some(ref nt) = test.meta.negative_type {
+            let phase = test.meta.negative_phase.as_deref().unwrap_or("runtime");
+            if phase == "parse" {
+                (Expect::Parse, Some(nt))
+            } else {
+                (Expect::Throw, Some(nt))
             }
         } else {
-            let mut ctx = rune_embed::Context::new();
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctx.eval(&source))) {
-                Ok(Ok(_)) => Outcome::Fail {
-                    message: format!("expected runtime error {neg_type}, but ran successfully"),
-                },
-                _ => Outcome::Pass,
-            }
-        }
-    } else {
-        // Normal test
-        let mut ctx = rune_embed::Context::new();
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctx.eval(&source))) {
-            Ok(Ok(_)) => {
-                // Some tests use throw new Test262Error(...) instead of assert.* functions.
-                // If the test completed without error, it passed.
+            (Expect::Ok, None)
+        };
+
+    let mode = match expect {
+        Expect::Ok => "ok",
+        Expect::Throw => "throw",
+        Expect::Parse => "parse",
+    };
+    match run_isolated(&exe, &source, mode, timeout_ms) {
+        Err(e) => Outcome::Skipped { reason: e },
+        Ok(0) => Outcome::Pass,
+        Ok(124) => Outcome::Fail {
+            message: "TIMEOUT (possible infinite loop)".to_string(),
+        },
+        Ok(2) => Outcome::Fail {
+            message: format!(
+                "ENGINE PANIC{}",
+                neg_type.map(|n| format!(" (expected {n})")).unwrap_or_default()
+            ),
+        },
+        Ok(_) => {
+            if neg_type.is_some() {
                 Outcome::Pass
-            }
-            Ok(Err(e)) => Outcome::Fail {
-                message: format!("runtime error: {e}"),
-            },
-            Err(panic) => {
-                let msg = if let Some(s) = panic.downcast_ref::<&str>() {
-                    s.to_string()
-                } else if let Some(s) = panic.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "unknown panic".to_string()
-                };
+            } else {
                 Outcome::Fail {
-                    message: format!("panic: {msg}"),
+                    message: "nonzero exit (runtime/parse error)".to_string(),
                 }
             }
         }

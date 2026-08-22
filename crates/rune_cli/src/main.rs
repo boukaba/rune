@@ -82,6 +82,50 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+            "test262-exec" => {
+                // Isolated single-test executor for the conformance harness.
+                // Args: test262-exec <file> <ok|throw|parse>
+                // Exit codes: 0 = expected outcome, 1 = wrong outcome,
+                //             2 = panic/crash, 3 = usage/IO error.
+                let path = source_args.get(1).cloned();
+                let mode = source_args.get(2).map(|s| s.as_str()).unwrap_or("");
+                if mode.is_empty() || path.is_none() {
+                    eprintln!("usage: rune test262-exec <file> <ok|throw|parse>");
+                    std::process::exit(3);
+                }
+                let src = match std::fs::read_to_string(path.unwrap()) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("read error: {e}");
+                        std::process::exit(3);
+                    }
+                };
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    match mode {
+                        "parse" => {
+                            let mut ctx = rune_embed::Context::new();
+                            ctx.compile(&src).map(|_| ())
+                        }
+                        _ => {
+                            let mut ctx = rune_embed::Context::new();
+                            ctx.eval(&src).map(|_| ())
+                        }
+                    }
+                }));
+                let code = match result {
+                    Err(_) => {
+                        // Panic inside the engine — treat as crash.
+                        2
+                    }
+                    Ok(Ok(())) => {
+                        if mode == "throw" || mode == "parse" { 1 } else { 0 }
+                    }
+                    Ok(Err(_)) => {
+                        if mode == "ok" { 1 } else { 0 }
+                    }
+                };
+                std::process::exit(code);
+            }
             source => {
                 // Read source code from file, or use inline if it's a valid expression.
                 let entry_path = if std::path::Path::new(source).exists() {

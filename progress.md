@@ -3744,3 +3744,13 @@ Each is an isolated mini-slice: repro is a single small file, no debugger needed
 - Instrumented both ends: compile-time records show **pc11 depth=5, pc17 depth=10** (BailOnEntry via Call arm's `record_bailout_point` = current model depth). Runtime snapshot at pc16 = 5
 - Delta = exactly one call-segment of model depth ⟹ hypothesis: the Call arm's model NEVER decrements for consumed args/callee/this (comment: matches call_helper which restores later) but SOMETHING in the tier-up-mid-recursion path consumes at runtime without model awareness — i.e., the Call arm's static model over-counts cumulative depth for RECURSIVE programs whose bailouts cascade through nested frames
 - Fix plan (next session): re-derive Opcode::Call arm stack contract against `rune_jit_call_helper` (does helper consume argc+2? who owns the sub_imm?), then correct either the model or the restore. One focused session.
+
+## Stability #4b — call-IC mechanism notes for the fix session (2026-08-22)
+
+Three interacting sites identified:
+1. **Interpreter call-IC** (vm.rs ~:7157): cached-callee fast path calls JIT fn; on `jit_bailout.pending` validates the CALLEE's bailout_table at callee-bc_pc against FULL-stack snapshot len, then resumes by pushing snapshot values into a frame resumed at bc_pc
+2. **rune_jit_call_helper non-JIT branch**: snapshots the ENTIRE JIT stack from jit_stack_base (not just this+callee+args) and sets BailOnEntry
+3. **Codegen Call arm**: model NEVER decrements stack_depth for consumed args/callee/this ("Do NOT update stack_depth" comment); runtime consumption happens via sub_imm((argc+2)*8) in the NORMAL path after helper returns; bailout path records at current model depth
+
+Failing fib facts: recorded pc11=5 / pc17=10 (static model, BailOnEntry); runtime bail at pc16 (Overflow — suspicious with small n!) snap=5. Delta exactly one call-segment ⟹ suspect the Overflow guard firing spuriously when n arrives as a misboxed value during tier-up-transition frames, and/or double-snapshot overwrite across nested native callers (each caller BLRs bailout_helper again, overwriting vm.jit_bailout with its own bc_pc while keeping the FIRST snapshot).
+Fix session plan: (a) dump n/locals at pc16 guard entry, (b) audit nested-bailout propagation (flag+snapshot ownership across ≥2 native frames), (c) align Call-arm model depth with runtime pre-call state.

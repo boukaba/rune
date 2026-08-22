@@ -3737,3 +3737,10 @@ Each is an isolated mini-slice: repro is a single small file, no debugger needed
 - **Class-name capture inside methods FIXED** (`static g(){ return A }` / instance alike — previously `undefined`, a documented gap): named classes now push a one-slot lexical env at COMPILE time (env_scope_stack) and emit MakeEnv+StoreCaptured around class-eval so every method closure captures the binding. RestoreEnv+pop at end of emit_class
 - **NEW pre-existing repro discovered** (`d42da9f` also affected → NOT from recent commits): recursive fn called ≥50× in one Context panics at validate_bailout_snapshot "call-ic: snapshot 5 != recorded 10" — e.g. `function fib(n){...} fib(10)` via -e/test262-exec. The call-IC bailout point records the PRE-CALL model depth while the runtime snapshot after the first inner bail is shallower. Same family as the J2#2 audit but for CallIC sites. Escalated to next-slice priority (blocks recursion-heavy hot code)
 - 820 workspace passed throughout; instrumentation removed
+
+## Stability #4 — call-IC recursion panic instrumented (2026-08-22)
+
+- Repro: `function fib(n){return n<2?n:fib(n-1)+fib(n-2);} fib(10)` (any recursive fn crossing tier-up mid-recursion). Panic: validate_bailout_snapshot "call-ic" snap=5 vs recorded=10 at the SECOND Sub's overflow/bail sites (pc16/17)
+- Instrumented both ends: compile-time records show **pc11 depth=5, pc17 depth=10** (BailOnEntry via Call arm's `record_bailout_point` = current model depth). Runtime snapshot at pc16 = 5
+- Delta = exactly one call-segment of model depth ⟹ hypothesis: the Call arm's model NEVER decrements for consumed args/callee/this (comment: matches call_helper which restores later) but SOMETHING in the tier-up-mid-recursion path consumes at runtime without model awareness — i.e., the Call arm's static model over-counts cumulative depth for RECURSIVE programs whose bailouts cascade through nested frames
+- Fix plan (next session): re-derive Opcode::Call arm stack contract against `rune_jit_call_helper` (does helper consume argc+2? who owns the sub_imm?), then correct either the model or the restore. One focused session.

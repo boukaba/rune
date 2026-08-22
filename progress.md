@@ -3676,3 +3676,12 @@ during the run, both clean, final result `114330883345000` correct.
 - [x] **#4 LoadFloat64 gate relaxed** — any f64 literal eligible (codegen already emitted mov_imm64 of raw bits; the i31-only check was a stale relic). shape_miss/let_loop PASS with it relaxed — also Rt-wipe collateral. New `test_jit_float_literal_accumulator`: literal-1.5 accumulator tiers up, exact results, **zero bailouts**
 - [x] **New tests this batch** — float_sub_native, float_mod_native, float_comparisons_native (4 ops through mixed Smi/float), float_literal_accumulator. **820 workspace passed, 0 failed; clippy/fmt/no-default-features clean**
 - **J2 GOAL MET**: float-promoted accumulators stay native end-to-end — no per-iteration interpreter bails. NaN-boxing preserved throughout (mask-before-box)
+
+## Conformance baseline (2026-08-22) — full test262 measurement
+
+- **16% pass rate on completed suites** (3623/22257; 7481 skipped as unsupported-feature tests; intl402 excluded). Report: `conformance-report.md`
+- **19 suites CRASH or HANG before completing** — biggest: Temporal(2492 fails then death), statements/class(2171), Array(1842), Object(1225), expressions(959). Crash signatures: SIGSEGV (statements/continue, built-ins/Object, Promise, staging), SIGABRT (expressions/call, ArrayBuffer), infinite-loop hangs (async-function ×2, class ×2, object, optional-chaining, for, try, RegExp, annexB)
+- **Feature deserts (0-7%)**: for-await-of 0%, dynamic-import 0%, async-generator 4%, generators 1-6%, Iterator 5%, DataView 7%, for-of 7%, Proxy 4%, Atomics 2%, TypedArray suite 0%
+- **Strongest areas**: parseInt 78%, parseFloat 74%, asi 54%, Map 50%, Date 43%
+- **Per-test timeout gap**: the runner has no per-test timeout — one infinite loop freezes a whole batch (found via 30-min batch caps). Runner fix needed before the conformance push
+- **Strategy set with user**: (1) stability blockers first, (2) per-suite triage of top failures in batches, (3) J3 x86-64, (4) hardening. 80%+ band is far — this is a multi-week campaign, not a slice

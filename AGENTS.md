@@ -222,7 +222,7 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 - NEW pre-existing repro escalated: recursive-fn tier-up mid-recursion → call-ic bailout validation panic (fib(10); affects d42da9f too). NEXT TARGET
 
 ### Stability wins #3 (2026-08-22)
-- call-ic recursion panic ROOT CAUSED: emit_prologue rebases JIT_STACK_REG to global base on every native entry → nested native frames share/alias one stack; bailout snapshots (global-base) vs records (frame-relative) mismatch under live ancestors. Fix design = JIT convention v2 (per-frame cursor), documented in progress.md #4d. NEXT SESSION
+- call-ic recursion panic ROOT CAUSED: emit_prologue rebases JIT_STACK_REG to global base on every native entry → nested native frames share/alias one stack; bailout snapshots (global-base) vs records (frame-relative) mismatch under live ancestors. Fix design = JIT convention v2 REFINED (enlarge jit_stack to 512 slots + migrate pinned offsets + per-frame cursor/x28 regions + fb-aware helpers), step-by-step in progress.md #4e. NEXT SESSION
 
 ### Known Gaps (stability, from conformance baseline 2026-08-22)
 - continue-SEGV: `for(let..;NO-UPD;){..continue}` + trailing stmt → Context::drop null+8 deref (repro in progress.md; execution completes; teardown crashes)

@@ -3766,3 +3766,13 @@ Fix session plan: (a) dump n/locals at pc16 guard entry, (b) audit nested-bailou
 - **Definitive root cause**: emit_prologue sets `JIT_STACK_REG = vm_base + jit_stack_offset(0)` on EVERY native entry — i.e., all native frames share ONE contiguous stack starting at the same base. Consequences: (a) nested native callees overwrite ancestor live slots (accidentally harmless only when ancestors don't re-read); (b) bailout snapshots taken from the GLOBAL base while bailout tables record FRAME-relative depths → snapshot length ≠ recorded depth whenever any ancestor values are live (fib recursion)
 - **Fix design (next session, ~focused slice)**: JIT calling convention v2 — either (a) per-frame regions via a vm.jit_stack_cursor maintained at native entry/exit (prologue: sp = cursor; epilogue: restore), or (b) pass entry-sp through the existing args_ptr mechanism and make records/snapshots frame-relative. Option (a) is smallest: one field + prologue/epilogue/call_helper updates, no ABI change
 - RUNE_DUMP kept (env-gated, recurses into function programs — broadly useful)
+
+## Stability #4e — Convention-v2 refined design (2026-08-22, implementation next session)
+
+Hard constraint discovered: helper offsets are PINNED (jit_stack@0..512, helpers@520, base@576) because codegen hardcodes them ~15× and test JitVmState mirrors them. Therefore v2 = **enlarge the value-stack area and migrate offsets once**:
+1. `jit_stack: [u64; 512]` (4096 B = 64 slots × 8 frames headroom); jit_helpers moves to @4104; jit_stack_base→@4160; NEW jit_stack_cursor→@4168. Mechanical sed of constants in codegen_aarch64.rs + test JitVmState structs
+2. Prologue (aarch64): `x28 = [VM+4168]` (frame base); `x22 = x28`; `[VM+4168] += 2048` (256 slots/frame); add x27/x28 to push/pop_callee_saved pairs
+3. Epilogue: `[VM+4168] = x28` before pop; Return keeps existing result read
+4. Bailout/call-helper ABI: append frame-base reg — bailout_helper(vm,bc,sp,fb=x28), call_helper(...,fb=x5); snapshots become `fb..sp` (frame-relative ✓); all ~8 bailout sites add `mov_reg(3, FB_REG)`; Call arm adds `mov_reg(5, 28)`
+5. Depth guard (#4c scratch work) stays — orthogonal protection for buffer aliasing
+Acceptance: fib(8/10/15/20) exact; full jit suite; workspace 820+; conformance spot-check Array/String unchanged

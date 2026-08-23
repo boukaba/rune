@@ -3776,3 +3776,19 @@ Hard constraint discovered: helper offsets are PINNED (jit_stack@0..512, helpers
 4. Bailout/call-helper ABI: append frame-base reg — bailout_helper(vm,bc,sp,fb=x28), call_helper(...,fb=x5); snapshots become `fb..sp` (frame-relative ✓); all ~8 bailout sites add `mov_reg(3, FB_REG)`; Call arm adds `mov_reg(5, 28)`
 5. Depth guard (#4c scratch work) stays — orthogonal protection for buffer aliasing
 Acceptance: fib(8/10/15/20) exact; full jit suite; workspace 820+; conformance spot-check Array/String unchanged
+
+## ⚡ NEXT SESSION START HERE — call-IC fix: apply the prepared 4-part patch
+
+The convention-v2 region/cursor attempt was REVERTED (it traded the panic for silent post-bail skips — worse). The correct fix, fully designed and partially validated (pc10 validates with model unwind; pc16 residual +2 traced to ternary ops), is a FRAME-CHAIN patch. An earlier application attempt failed only on formatting mismatches in vm.rs — re-derive against current text.
+
+**The 4 edits** (all in `rune_interpreter/src/vm.rs` unless noted):
+1. **Universal Frame** in `rune_jit_call_helper`: delete the `needs_frame = func_prog.needs_frame()` leaf fast-path AND the scratch-buffer/nested-native branch → force `let needs_frame = true;`. Every native callee gets a real Frame (fixes jit_locals_buffer aliasing AND makes bailouts interpreter-resumable)
+2. **Stamp call-site pc**: where the Frame is pushed in call_helper, set `pc: bc_idx as usize` (was `pc: 0`). Do the same at the INTERPRETER tier-up/call-IC site (~:7140s block pushing Frame with `pc: 0`). Then ANY frame in a native chain can resume interpreted
+3. **Keep frame chain on pending**: in call_helper's pending branch, do NOT `frames.pop()` — just set flag[504]=1 and return. The flag propagates outward through each enclosing native caller's existing post-BLR check; their Frames stay stacked for the interpreter
+4. **Codegen Call arm** (`codegen_aarch64.rs`, main trace arm): strip `record_bailout_point(bc_idx, BailOnEntry)` + the bailout_helper BLR + push_raw/epilogue from its bail path — replace with straight epilogue after movz(0). The origin guard/helper already recorded; Call-arm re-recording caused snapshot/record divergence
+
+**Verify state before starting**: check whether the Call-arm MODEL unwind (`stack_depth.saturating_sub(argc+2)` after done_path sub_imm) is present — it validates pc10 and is KEEP regardless of pc16 residual.
+
+**Acceptance**: `fib(6/8/10/15/20)` all print exact values via `-e`; jit suite green; workspace 820+ green; then conformance spot-check built-ins/Function + language/expressions/call.
+
+Then proceed: remaining hang classes (progress.md #Stability#2) → iterator/generator deserts → mid-band clustering → J3.

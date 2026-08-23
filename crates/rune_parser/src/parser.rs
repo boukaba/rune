@@ -7,6 +7,10 @@ pub struct Parser {
     pub errors: Vec<String>,
     /// Module goal: import/export allowed at top level, strict mode implied.
     module: bool,
+    /// Depth counter for the no-In grammar of §14.7.3: while positive,
+    /// parsing a for-head LHS must not consume `in` as a binary operator
+    /// (as in `for (x in obj)`).
+    no_in_depth: usize,
 }
 
 impl Parser {
@@ -18,6 +22,7 @@ impl Parser {
             tok,
             errors: Vec::new(),
             module: false,
+            no_in_depth: 0,
         }
     }
 
@@ -31,6 +36,7 @@ impl Parser {
             tok,
             errors: Vec::new(),
             module: true,
+            no_in_depth: 0,
         }
     }
 
@@ -1236,8 +1242,11 @@ impl Parser {
             // C-style for with var: cond and update follow
             return self.parse_for_c_style(Some(Box::new(var_stmt)), start);
         }
-        // Try `for (lhs in obj)` — parse expression and check for `in`
+        // Try `for (lhs in obj)` / `for (lhs of it)` — parse the LHS with
+        // the no-In grammar so `in` reaches the for-in dispatch below.
+        self.no_in_depth += 1;
         let lhs = self.parse_expr_comma();
+        self.no_in_depth -= 1;
         if self.tok.kind == TokenKind::In {
             self.advance();
             let obj = self.parse_expr(0);
@@ -1342,7 +1351,12 @@ impl Parser {
 
         loop {
             let prec = self.binary_precedence();
-            if prec < min_prec {
+            // §14.7.3 no-In grammar: inside a for-head LHS, `in` is not a
+            // binary operator — it terminates the expression so the for-in
+            // dispatch below can consume it. (Precedence 0 would fall into
+            // the assignment tier instead of breaking.)
+            let in_blocked = self.no_in_depth > 0 && self.tok.kind == TokenKind::In;
+            if prec < min_prec || in_blocked {
                 break;
             }
             let op = match self.tok.kind {

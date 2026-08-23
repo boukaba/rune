@@ -92,6 +92,9 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ### Goal
 Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8× vs Node) with enough stdlib to run real workloads. v0.4 = stdlib breadth (14 builtins). v0.5 = Promise + async patterns.
 
+### Done — v0.9.7 / for-in/of bare-identifier LHS
+- **`for (x in obj)` parses** — no-In grammar via Parser.no_in_depth; the parse_expr binary loop breaks on `In` while active (gate must live in the LOOP-EXIT condition, not binary_precedence: returning prec 0 falls into the assignment tier). for-in suite 9→14 (+5); member/declared/var LHS shapes verified; 820/0 workspace
+
 ### Done — v0.9.6 / labeled statements + for-in jump machinery
 - **`label: stmt`** parsed (Stmt::Labeled) and bound to loop frames; `break lbl`/`continue lbl` resolve nearest labeled loop, bypassing switches; label stacking works. **for-in got sentinel break/continue frames** (continue=next key) — previously breaks fell through to enclosing scopes. Walkers updated. Net: statements/labeled 0→2, break 1→7, continue 1→3. Known: labeled jumps into let-for shapes hit the pre-existing per-iteration-env corruption family (contained). 820/0 workspace; clippy/fmt/no-default/x86 clean
 

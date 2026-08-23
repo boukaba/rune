@@ -22,6 +22,19 @@
 - [x] 18 new integration tests (basic/default/namespace/reexport/star/star-as/rename/circular/self-cycle/let-mutation/own-bindings/TDZ-cycle-throw/duplicate-export/imported-assignment/missing-import/hoisted-in-cycle/bare-let) + CLI probes (`main.mjs`/`check.mjs`/`fib.mjs` loop + bench) — **613 integration tests pass, 3 ignored (workspace 774)**; cargo fmt + clippy clean (CI flags); `--no-default-features` probe clean
 - **Known gaps**: no dynamic `import()` / `import.meta`; resolver is a callback (no node_modules algorithm); module programs + module functions don't JIT (documented — interpreter-only); exception carry is via string-encoded Error message (no error objects across module boundaries); module `func_idx` resolution assumes a single program per `compile_module` call
 
+## for-in/of bare-identifier LHS FIXED (2026-08-23)
+
+- **`for (x in obj)` parsed** — the expression-LHS path consumed `in` as a
+  binary operator (precedence 7 ≥ min_prec), so the ForIn dispatch never
+  fired. Added a no-In mode (§14.7.3): a `no_in_depth` counter on Parser;
+  the parse_expr binary loop BREAKS on `In` while positive. First attempt
+  returned precedence 0 from binary_precedence — wrong: 0 is the assignment
+  tier, the loop ENTERED and misparsed; the gate belongs in the loop-exit
+  condition.
+- statements/for-in **9→14 passed** (+5); for-of unchanged (136); all four
+  LHS shapes verified (bare ident, declared var, member expr `o.p in`,
+  var-decl path). Workspace 820/0; clippy/fmt/no-default/x86 clean.
+
 ## Labeled statements + for-in break/continue (2026-08-23)
 
 - **`label: stmt` implemented** (§13.13): parser production `Identifier :` →

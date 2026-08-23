@@ -188,7 +188,7 @@ impl Default for JitBailoutState {
 }
 
 /// JIT helper function pointers, stored at a fixed offset from vm_ptr
-/// (offset 512 = 64 * 8, right after jit_stack) so JIT code can load
+/// (offset JIT_HELPERS_OFFSET, right after jit_stack) so JIT code can load
 /// and call them without cross-crate symbol resolution.
 #[repr(C)]
 pub struct JitHelpers {
@@ -494,14 +494,27 @@ pub struct Vm {
     /// pointer (x19). Using heap memory for the JIT stack avoids macOS
     /// Apple Silicon restrictions on writes through the real stack pointer
     /// from JIT pages.
-    pub jit_stack: [u64; 64],
-    /// JIT helper function pointer table. Must follow jit_stack immediately
-    /// for the JIT to locate it at a known offset (512) from vm_ptr.
+    ///
+    /// Convention v2 (#4e-lite): divided into per-frame REGIONS claimed from
+    /// `jit_stack_cursor` at each native entry (see
+    /// `rune_jit_baseline::JIT_FRAME_BUDGET`). Nested native frames start
+    /// ABOVE their caller's live slots — a callee can no longer clobber
+    /// caller operands, and bailout snapshots are frame-relative.
+    pub jit_stack: [u64; rune_jit_baseline::JIT_STACK_SIZE],
+    /// JIT helper function pointer table. Must follow jit_stack immediately;
+    /// emitted code loads helpers at `JIT_HELPERS_OFFSET` (= 2048*8) + idx*8.
     pub jit_helpers: JitHelpers,
     /// JIT stack base pointer, written by the JIT prologue.
     /// On AArch64: points to the base of jit_stack[] (== vm_ptr).
     /// On x86-64: points to the allocated native stack area (== initial rbx).
     pub jit_stack_base: u64,
+    /// Monotonic region cursor (byte offset into jit_stack). Bumped by every
+    /// native prologue by JIT_FRAME_BUDGET bytes; restored by epilogues and
+    /// the overflow exit. Mirrors `[VM + JIT_CURSOR_OFFSET]`.
+    pub jit_stack_cursor: u64,
+    /// Pending-bailout flag read/written by emitted code at
+    /// `JIT_FLAG_OFFSET` (was jit_stack[63] @ 504 before convention v2).
+    pub jit_flag: u64,
     /// Bailout state, set by bailout helper during JIT execution.
     #[cfg(feature = "jit")]
     pub jit_bailout: JitBailoutState,
@@ -694,7 +707,7 @@ impl Default for Vm {
 impl Vm {
     pub fn new() -> Self {
         Vm {
-            jit_stack: [0; 64],
+            jit_stack: [0; rune_jit_baseline::JIT_STACK_SIZE],
             jit_helpers: JitHelpers {
                 lexical_helper: rune_jit_lexical_helper as *const () as usize,
                 #[cfg(feature = "jit")]
@@ -712,6 +725,8 @@ impl Vm {
                 jit_binop_helper: rune_jit_float64_div_exp_helper as *const () as usize,
             },
             jit_stack_base: 0,
+            jit_stack_cursor: 0,
+            jit_flag: 0,
             #[cfg(feature = "jit")]
             jit_bailout: JitBailoutState::default(),
             #[cfg(feature = "jit")]
@@ -7097,42 +7112,43 @@ impl Vm {
                                                 while self.jit_locals_buffer.len() < local_count {
                                                     self.jit_locals_buffer.push(Value::undefined());
                                                 }
-                                                // Same needs_frame handling as the
-                                                // tier-up path: push a callee Frame
-                                                // so lexical helpers target the
-                                                // correct frame; keep it on bailout
-                                                // so the interpreter resumes with
-                                                // live lexical state.
-                                                let needs_frame = func_prog.needs_frame();
-                                                let locals_ptr: *mut u64 = if needs_frame {
-                                                    let func_env =
-                                                        unsafe { Func::env_ptr(ptr as *mut Func) };
-                                                    let callee_locals =
-                                                        std::mem::take(&mut self.jit_locals_buffer);
-                                                    let frame_fi = self.frames.len();
-                                                    self.frames.push(Frame {
-                                                        locals: callee_locals,
-                                                        lexical_slots: Vec::new(),
-                                                        lexical_tdz: Vec::new(),
-                                                        lexical_const: Vec::new(),
-                                                        scope_boundaries: Vec::new(),
-                                                        passed_argc: argc,
-                                                        pc: 0,
-                                                        stack_base: self.stack.len(),
-                                                        prog: func_prog as *const BytecodeProgram,
-                                                        generator_id: None,
-                                                        this,
-                                                        is_constructor_call: false,
-                                                        constructed_object: Value::undefined(),
-                                                        env: func_env,
-                                                        func_ptr: ptr,
-                                                        private_name_ids: std::ptr::null_mut(),
-                                                    });
+                                                // Universal Frame convention (matches
+                                                // rune_jit_call_helper): ALWAYS push
+                                                // a callee Frame. A frameless leaf
+                                                // holding locals in the shared
+                                                // jit_locals_buffer dangles the
+                                                // moment a nested helper call takes
+                                                // the buffer (fib-class corruption).
+                                                // pc is stamped with this Call's
+                                                // index so a propagated bailout can
+                                                // resume the chain coherently
+                                                // (direct bailouts overwrite it).
+                                                let func_env =
+                                                    unsafe { Func::env_ptr(ptr as *mut Func) };
+                                                let callee_locals =
+                                                    std::mem::take(&mut self.jit_locals_buffer);
+                                                let frame_fi = self.frames.len();
+                                                self.frames.push(Frame {
+                                                    locals: callee_locals,
+                                                    lexical_slots: Vec::new(),
+                                                    lexical_tdz: Vec::new(),
+                                                    lexical_const: Vec::new(),
+                                                    scope_boundaries: Vec::new(),
+                                                    passed_argc: argc,
+                                                    pc,
+                                                    stack_base: self.stack.len(),
+                                                    prog: func_prog as *const BytecodeProgram,
+                                                    generator_id: None,
+                                                    this,
+                                                    is_constructor_call: false,
+                                                    constructed_object: Value::undefined(),
+                                                    env: func_env,
+                                                    func_ptr: ptr,
+                                                    private_name_ids: std::ptr::null_mut(),
+                                                });
+                                                let locals_ptr =
                                                     self.frames[frame_fi].locals.as_mut_ptr()
-                                                        as *mut u64
-                                                } else {
-                                                    self.jit_locals_buffer.as_mut_ptr() as *mut u64
-                                                };
+                                                        as *mut u64;
                                                 self.jit_entry_count += 1;
                                                 let func: JitEntryFn =
                                                     unsafe { std::mem::transmute(jit_entry) };
@@ -7159,56 +7175,21 @@ impl Vm {
                                                         snapshot.len(),
                                                         "call-ic",
                                                     );
-                                                    if needs_frame {
-                                                        let cf = self.frames.len() - 1;
-                                                        self.frames[cf].pc = bailout_bc_pc;
-                                                        for val in snapshot {
-                                                            self.push(Value::from_raw(val));
-                                                        }
-                                                        continue;
-                                                    }
-                                                    let mut bailout_locals =
-                                                        self.jit_locals_buffer.clone();
-                                                    self.jit_locals_buffer.clear();
-                                                    while bailout_locals.len() < local_count {
-                                                        bailout_locals.push(Value::undefined());
-                                                    }
-                                                    let func_env =
-                                                        unsafe { Func::env_ptr(ptr as *mut Func) };
-                                                    self.frames.push(Frame {
-                                                        locals: bailout_locals,
-                                                        lexical_slots: Vec::new(),
-                                                        lexical_tdz: Vec::new(),
-                                                        lexical_const: Vec::new(),
-                                                        scope_boundaries: Vec::new(),
-                                                        passed_argc: argc,
-                                                        pc: bailout_bc_pc,
-                                                        stack_base: self.stack.len(),
-                                                        prog: func_prog as *const BytecodeProgram,
-                                                        generator_id: None,
-                                                        this,
-                                                        is_constructor_call: false,
-                                                        constructed_object: Value::undefined(),
-                                                        env: func_env,
-                                                        func_ptr: ptr,
-                                                        private_name_ids: std::ptr::null_mut(),
-                                                    });
+                                                    // Frame chain stays stacked (helpers
+                                                    // keep theirs on pending too); resume
+                                                    // the top frame — the innermost bailed
+                                                    // unit — at its bailout PC.
+                                                    let cf = self.frames.len() - 1;
+                                                    self.frames[cf].pc = bailout_bc_pc;
                                                     for val in snapshot {
                                                         self.push(Value::from_raw(val));
                                                     }
                                                     continue;
                                                 }
-                                                if needs_frame {
-                                                    let top = self.frames.len() - 1;
-                                                    self.last_locals = std::mem::take(
-                                                        &mut self.frames[top].locals,
-                                                    );
-                                                    self.frames.pop();
-                                                } else {
-                                                    self.last_locals =
-                                                        self.jit_locals_buffer.clone();
-                                                    self.jit_locals_buffer.clear();
-                                                }
+                                                let top = self.frames.len() - 1;
+                                                self.last_locals =
+                                                    std::mem::take(&mut self.frames[top].locals);
+                                                self.frames.pop();
                                                 self.push(Value::from_raw(result_raw));
                                                 self.frames[fi].pc = pc + 1;
                                                 continue;
@@ -7289,45 +7270,40 @@ impl Vm {
                                         while self.jit_locals_buffer.len() < local_count {
                                             self.jit_locals_buffer.push(Value::undefined());
                                         }
-                                        // Push a callee Frame when the function
-                                        // needs lexical state (BlockEnter,
-                                        // DeclareLet, closure-env ops, LoadThis,
-                                        // ...). The lexical helper targets the
-                                        // top frame, so without this the JIT's
-                                        // lexical ops would corrupt the caller's
-                                        // frame. On bailout the frame is kept
-                                        // (pc reset) so the interpreter resumes
-                                        // with the JIT-maintained lexical state
-                                        // (§10.1).
-                                        let needs_frame = func_prog.needs_frame();
-                                        let locals_ptr: *mut u64 = if needs_frame {
-                                            let func_env =
-                                                unsafe { Func::env_ptr(ptr as *mut Func) };
-                                            let callee_locals =
-                                                std::mem::take(&mut self.jit_locals_buffer);
-                                            let frame_fi = self.frames.len();
-                                            self.frames.push(Frame {
-                                                locals: callee_locals,
-                                                lexical_slots: Vec::new(),
-                                                lexical_tdz: Vec::new(),
-                                                lexical_const: Vec::new(),
-                                                scope_boundaries: Vec::new(),
-                                                passed_argc: args.len(),
-                                                pc: 0,
-                                                stack_base: self.stack.len(),
-                                                prog: func_prog as *const BytecodeProgram,
-                                                generator_id: None,
-                                                this,
-                                                is_constructor_call: false,
-                                                constructed_object: Value::undefined(),
-                                                env: func_env,
-                                                func_ptr: ptr,
-                                                private_name_ids: std::ptr::null_mut(),
-                                            });
-                                            self.frames[frame_fi].locals.as_mut_ptr() as *mut u64
-                                        } else {
-                                            self.jit_locals_buffer.as_mut_ptr() as *mut u64
-                                        };
+                                        // Universal Frame convention (matches
+                                        // rune_jit_call_helper): ALWAYS push
+                                        // a callee Frame — a frameless leaf's
+                                        // shared-buffer locals dangle the
+                                        // moment a nested helper call takes
+                                        // the buffer. The lexical helper
+                                        // targets the top frame, so this also
+                                        // keeps lexical ops correct. On bailout
+                                        // the chain is kept (pc stamped) so the
+                                        // interpreter resumes it (§10.1).
+                                        let func_env = unsafe { Func::env_ptr(ptr as *mut Func) };
+                                        let callee_locals =
+                                            std::mem::take(&mut self.jit_locals_buffer);
+                                        let frame_fi = self.frames.len();
+                                        self.frames.push(Frame {
+                                            locals: callee_locals,
+                                            lexical_slots: Vec::new(),
+                                            lexical_tdz: Vec::new(),
+                                            lexical_const: Vec::new(),
+                                            scope_boundaries: Vec::new(),
+                                            passed_argc: args.len(),
+                                            pc,
+                                            stack_base: self.stack.len(),
+                                            prog: func_prog as *const BytecodeProgram,
+                                            generator_id: None,
+                                            this,
+                                            is_constructor_call: false,
+                                            constructed_object: Value::undefined(),
+                                            env: func_env,
+                                            func_ptr: ptr,
+                                            private_name_ids: std::ptr::null_mut(),
+                                        });
+                                        let locals_ptr =
+                                            self.frames[frame_fi].locals.as_mut_ptr() as *mut u64;
                                         self.jit_entry_count += 1;
                                         let func: JitEntryFn =
                                             unsafe { std::mem::transmute(jit_entry) };
@@ -7351,56 +7327,21 @@ impl Vm {
                                                 snapshot.len(),
                                                 "tier-up",
                                             );
-                                            if needs_frame {
-                                                // Callee Frame is still on top
-                                                // with live lexical/env state;
-                                                // resume it at the bailout PC.
-                                                let cf = self.frames.len() - 1;
-                                                self.frames[cf].pc = bailout_bc_pc;
-                                                for val in snapshot {
-                                                    self.push(Value::from_raw(val));
-                                                }
-                                                continue;
-                                            }
-                                            let mut bailout_locals = self.jit_locals_buffer.clone();
-                                            self.jit_locals_buffer.clear();
-                                            while bailout_locals.len() < local_count {
-                                                bailout_locals.push(Value::undefined());
-                                            }
-                                            let func_env =
-                                                unsafe { Func::env_ptr(ptr as *mut Func) };
-                                            self.frames.push(Frame {
-                                                locals: bailout_locals,
-                                                lexical_slots: Vec::new(),
-                                                lexical_tdz: Vec::new(),
-                                                lexical_const: Vec::new(),
-                                                scope_boundaries: Vec::new(),
-                                                passed_argc: args.len(),
-                                                pc: bailout_bc_pc,
-                                                stack_base: self.stack.len(),
-                                                prog: func_prog as *const BytecodeProgram,
-                                                generator_id: None,
-                                                this,
-                                                is_constructor_call: false,
-                                                constructed_object: Value::undefined(),
-                                                env: func_env,
-                                                func_ptr: ptr,
-                                                private_name_ids: std::ptr::null_mut(),
-                                            });
+                                            // Frame chain stays stacked (helpers keep
+                                            // theirs on pending too); resume the top
+                                            // frame — the innermost bailed unit — at
+                                            // its bailout PC.
+                                            let cf = self.frames.len() - 1;
+                                            self.frames[cf].pc = bailout_bc_pc;
                                             for val in snapshot {
                                                 self.push(Value::from_raw(val));
                                             }
                                             continue;
                                         }
-                                        if needs_frame {
-                                            let top = self.frames.len() - 1;
-                                            self.last_locals =
-                                                std::mem::take(&mut self.frames[top].locals);
-                                            self.frames.pop();
-                                        } else {
-                                            self.last_locals = self.jit_locals_buffer.clone();
-                                            self.jit_locals_buffer.clear();
-                                        }
+                                        let top = self.frames.len() - 1;
+                                        self.last_locals =
+                                            std::mem::take(&mut self.frames[top].locals);
+                                        self.frames.pop();
                                         self.push(Value::from_raw(result_raw));
                                         self.frames[fi].pc = pc + 1;
                                         continue;
@@ -10987,20 +10928,30 @@ fn validate_bailout_snapshot(
 
 /// Bailout helper called from JIT code when a guard fails.
 ///
-/// Snapshots the JIT value stack and records the bailout PC so the
-/// `vm.rs` call site can materialise interpreter state after the JIT
-/// function returns.
+/// Snapshots the JIT value stack (FRAME-RELATIVE: from the frame base `fb`
+/// passed in x3 by convention-v2 emitted code, falling back to
+/// `jit_stack_base` when null) and records the bailout PC so the `vm.rs`
+/// call site can materialise interpreter state after the JIT function
+/// returns.
 ///
 /// # Safety
 ///
 /// `vm_ptr` must be a valid pointer to a `Vm`. `jit_sp` must point into
-/// the JIT value stack (between `vm.jit_stack_base` and the current top).
+/// the JIT value stack region owned by the frame (`fb..jit_sp`).
 #[cfg(feature = "jit")]
-pub extern "C" fn rune_jit_bailout_helper(vm_ptr: *mut u8, bc_pc: usize, jit_sp: *mut u64) -> u64 {
+pub extern "C" fn rune_jit_bailout_helper(
+    vm_ptr: *mut u8,
+    bc_pc: usize,
+    jit_sp: *mut u64,
+    fb: *mut u64,
+) -> u64 {
     let vm = unsafe { &mut *(vm_ptr as *mut Vm) };
     vm.jit_bailout_count += 1;
-
-    let base = vm.jit_stack_base as usize;
+    let base = if fb.is_null() {
+        vm.jit_stack_base as usize
+    } else {
+        fb as usize
+    };
     let current = jit_sp as usize;
     let count = if current >= base {
         (current - base) / 8
@@ -11098,6 +11049,8 @@ pub extern "C" fn rune_jit_float64_add_helper(
 /// - `argc`: number of arguments (x2)
 /// - `bc_idx`: bytecode PC of the Call opcode (x3)
 /// - `args_ptr`: pointer to `arg_{argc-1}` on the JIT stack (x4)
+/// - `fb`: caller's JIT frame base (x5, convention v2) — used for
+///   frame-relative snapshots in the fallback bailout path.
 ///
 /// # Safety
 /// All pointers must be valid and the JIT stack must be in the pre-Call state.
@@ -11108,6 +11061,7 @@ pub unsafe extern "C" fn rune_jit_call_helper(
     argc: u64,
     bc_idx: u64,
     args_ptr: *mut u64,
+    fb: *mut u64,
 ) -> u64 {
     let vm = unsafe { &mut *(vm_ptr as *mut Vm) };
     let gc = unsafe { &mut *(gc_ptr as *mut SemiSpace) };
@@ -11158,68 +11112,44 @@ pub unsafe extern "C" fn rune_jit_call_helper(
                         vm.jit_locals_buffer.push(Value::undefined());
                     }
 
-                    // Determine whether the callee needs a Frame for
-                    // lexical-scope access (BlockEnter/Leave, DeclareLet/Const,
-                    // LoadLexical/StoreLexical, LoadThis, and closure-env ops
-                    // CopyLexical/MakeEnv/RestoreEnv/LoadCaptured/StoreCaptured
-                    // per `needs_frame()`). Most JIT-compiled leaf functions
-                    // (e.g. `add(a,b){return a+b;}`) do not; skip the Frame
-                    // setup to avoid per-call overhead.
-                    let needs_frame = func_prog.needs_frame();
-                    let nested_native = !needs_frame && JIT_CALL_DEPTH.with(|d| d.get()) > 0;
-
-                    // Three calling conventions:
-                    //   1. needs_frame        → real Frame + moved-out buffer
-                    //   2. nested native leaf → private stack scratch (the
-                    //      shared jit_locals_buffer belongs to an OUTER live
-                    //      native frame; aliasing it corrupts that frame's
-                    //      locals mid-execution)
-                    //   3. plain non-nested   → shared jit_locals_buffer
-                    let locals_ptr: *mut u64 = if nested_native {
-                        let mut scratch: Vec<u64> =
-                            Vec::with_capacity(local_count.max(argc_usize + 2));
-                        if func_prog.named_function {
-                            scratch.push(callee_raw);
-                        }
-                        for i in 0..argc_usize {
-                            let raw = unsafe { *args_ptr.sub(argc_usize - i) };
-                            scratch.push(raw);
-                        }
-                        while scratch.len() < local_count {
-                            scratch.push(Value::undefined().raw());
-                        }
-                        scratch.as_mut_ptr()
-                    } else if needs_frame {
-                        // Push a Frame for the callee so that lexical-scope
-                        // helpers find the correct frame.  Swap the locals
-                        // out of jit_locals_buffer to avoid a per-call
-                        // allocation (jit_locals_buffer will be cleared and
-                        // refilled on next use anyway).
-                        let func_env = unsafe { Func::env_ptr(func_ptr) };
-                        let callee_locals = std::mem::take(&mut vm.jit_locals_buffer);
-                        let fi = vm.frames.len();
-                        vm.frames.push(Frame {
-                            locals: callee_locals,
-                            lexical_slots: Vec::new(),
-                            lexical_tdz: Vec::new(),
-                            lexical_const: Vec::new(),
-                            scope_boundaries: Vec::new(),
-                            passed_argc: argc_usize,
-                            pc: 0,
-                            stack_base: vm.stack.len(),
-                            prog: func_prog as *const BytecodeProgram,
-                            generator_id: None,
-                            this: Value::from_raw(this_raw),
-                            is_constructor_call: false,
-                            constructed_object: Value::undefined(),
-                            env: func_env,
-                            func_ptr: func_ptr as *mut u8,
-                            private_name_ids: std::ptr::null_mut(),
-                        });
-                        vm.frames[fi].locals.as_mut_ptr() as *mut u64
-                    } else {
-                        vm.jit_locals_buffer.as_mut_ptr() as *mut u64
-                    };
+                    // Universal Frame convention (call-IC fix, #4d/#4e):
+                    // EVERY native callee gets a real Frame. This fixes two
+                    // classes at once:
+                    //  1. jit_locals_buffer aliasing — a frameless leaf held
+                    //     its locals in the shared Vm buffer (or a scratch
+                    //     Vec), unrooted across GC moves and across nested
+                    //     take()/refill cycles; misboxed locals then tripped
+                    //     spurious guard cascades (the fib recursion panic).
+                    //  2. Bailout resumability — every frame in a native
+                    //     chain owns rooted locals, so the interpreter can
+                    //     resume any of them after a propagated bailout.
+                    // The pc is stamped with the CALLER's call-site index so
+                    // that if this frame is resumed interpreted after a
+                    // deeper unit's bailout propagated through it, the
+                    // eventual Return's `pc += 1` lands just past that call.
+                    // (Direct bailouts overwrite pc with bailout_bc_pc.)
+                    let func_env = unsafe { Func::env_ptr(func_ptr) };
+                    let callee_locals = std::mem::take(&mut vm.jit_locals_buffer);
+                    let frame_fi = vm.frames.len();
+                    vm.frames.push(Frame {
+                        locals: callee_locals,
+                        lexical_slots: Vec::new(),
+                        lexical_tdz: Vec::new(),
+                        lexical_const: Vec::new(),
+                        scope_boundaries: Vec::new(),
+                        passed_argc: argc_usize,
+                        pc: bc_idx as usize,
+                        stack_base: vm.stack.len(),
+                        prog: func_prog as *const BytecodeProgram,
+                        generator_id: None,
+                        this: Value::from_raw(this_raw),
+                        is_constructor_call: false,
+                        constructed_object: Value::undefined(),
+                        env: func_env,
+                        func_ptr: func_ptr as *mut u8,
+                        private_name_ids: std::ptr::null_mut(),
+                    });
+                    let locals_ptr = vm.frames[frame_fi].locals.as_mut_ptr() as *mut u64;
 
                     // Call JIT entry
                     vm.jit_entry_count += 1;
@@ -11229,28 +11159,22 @@ pub unsafe extern "C" fn rune_jit_call_helper(
                     let result_raw = unsafe { func(vm_ptr, gc_ptr, locals_ptr) };
                     JIT_CALL_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
 
-                    // Pop callee Frame if one was pushed.
-                    if needs_frame {
-                        vm.frames.pop();
-                    }
-                    // nested-native scratch drops automatically (Rust stack)
-
-                    // If callee bailed out, set the bailout flag for the
-                    // caller.
+                    // Pending bailout: KEEP this frame on the chain. Each
+                    // enclosing native caller sees the flag via its post-BLR
+                    // check and propagates without popping either; the
+                    // interpreter unwinds the stacked frames (top first)
+                    // once control returns to it.
                     if vm.jit_bailout.pending {
-                        if !needs_frame {
-                            vm.jit_locals_buffer.clear();
-                        }
                         unsafe {
-                            let flag_ptr = vm_ptr.add(504) as *mut u64;
+                            let flag_ptr =
+                                vm_ptr.add(rune_jit_baseline::JIT_FLAG_OFFSET as usize) as *mut u64;
                             *flag_ptr = 1;
                         }
                         return result_raw;
                     }
 
-                    if !needs_frame {
-                        vm.jit_locals_buffer.clear();
-                    }
+                    // Normal completion: pop the callee frame.
+                    vm.frames.pop();
                     return result_raw;
                 }
             }
@@ -11260,11 +11184,18 @@ pub unsafe extern "C" fn rune_jit_call_helper(
     // Callee not JIT-compiled or not a function: set bailout flag.
     // The JIT codegen checks this flag after BLR and exits via bailout_helper.
     unsafe {
-        let flag_ptr = vm_ptr.add(504) as *mut u64;
+        let flag_ptr = vm_ptr.add(rune_jit_baseline::JIT_FLAG_OFFSET as usize) as *mut u64;
         *flag_ptr = 1;
     }
-    // Record bailout state for the interpreter
-    let base = vm.jit_stack_base as usize;
+    // Record bailout state for the interpreter. FRAME-RELATIVE snapshot:
+    // from the caller's frame base (convention v2) so its length equals the
+    // caller model's recorded pre-Call depth even when ancestors are live
+    // below this frame's region.
+    let base = if fb.is_null() {
+        vm.jit_stack_base as usize
+    } else {
+        fb as usize
+    };
     let current = args_ptr as usize;
     let count = if current >= base {
         (current - base) / 8

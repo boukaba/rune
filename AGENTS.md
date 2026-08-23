@@ -92,6 +92,16 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ### Goal
 Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8× vs Node) with enough stdlib to run real workloads. v0.4 = stdlib breadth (14 builtins). v0.5 = Promise + async patterns.
 
+### Done — v0.9.3 / Stability#5 (call-IC fix + convention v2-lite: regions + frame-chain + exact model)
+- **fib(6..24) ALL EXACT** — the tier-up-mid-recursion panic ("call-ic: snapshot != recorded") is gone; workspace 820/0, clippy/fmt/no-default clean, built-ins/Function spot-check unchanged (70/509)
+- **Universal Frames everywhere** — call_helper AND interpreter call-IC/tier-up sites always push a callee Frame (leaf fast-path + nested-scratch branch deleted): kills jit_locals_buffer dangling (misboxed locals → guard cascades) and makes every native chain interpreter-resumable; call-site pc stamped on every pushed frame (Return's `pc+=1` invariant lands past the Call); frame chain KEPT on pending (call_helper sets flag, no pop)
+- **Call-arm re-record stripped** — post-BLR bail path is a straight epilogue; innermost origin owns (bc_pc, snapshot)
+- **Model exactness** — fix A: branch-target depth override map (kills phantom +1 from untaken ternary branches — the "pc16 residual +2"); fix B: binop helper slow-path `push_raw` (kills +1/site drift). Records now match runtime exactly under validation
+- **Convention v2-lite** — jit_stack [u64;2048] split into per-frame REGIONS (budget 256 slots) claimed from a monotonic cursor (@16456, VM-relative): nested natives start above ancestor slots (shared-stack clobber class structurally dead); helpers @16384+, base @16448, **flag 504→16464**; x27/x28 saved pair (FB=absolute base, CUR=entry offset); **frame-relative snapshots** (bailout_helper/call_helper take fb); overflow exit = BailOnEntry@pc0 → >8-deep native chains gracefully re-run interpreted from entry
+- **Implementation traps hit+fixed**: B.AL typo (0x5400000E unconditional → everything returned 0), CUR_REG mutation leak (cursor never shrank), sentinel patch with instr=0 zeroed opcode bits (SIGILL), neutralized limit restored-over (helper-table clobber SIGSEGV)
+- **NEW pre-existing repro (on fd5dd12, no JIT)**: top-level `function name(){}` declaration referenced as a free identifier inside another function → undefined (`f(5)` TypeError). var-form + nested-decl forms work; named-slot self-reference masks it. NEXT-TARGET
+- **Known gaps**: >8 simultaneous native frames overflow-bail per level (correct, interpreted fallback); abandoned-intermediate resume still relies on stamped-pc re-execute-at-call semantics; x86-64 codegen.rs updated textually only (dead code)
+
 ### Done — v0.9.2 / J1 (JIT whitelist: JumpIfNullOrUndefined + Div/Exp/In/Instanceof)
 - **Div/Exp native** — `jit_binop_helper` replaces `JitHelpers._reserved` (layout size UNCHANGED, VM offset 568) + `rune_jit_float64_div_exp_helper(vm,gc,op,a,b)`; codegen arms = Add-style helper calls, zero bailout paths
 - **JumpIfNullOrUndefined native** — exact: `(raw>>48)!=0x7FF8` excludes f64s, tag∈{2,3} → branch; optional chaining runs natively

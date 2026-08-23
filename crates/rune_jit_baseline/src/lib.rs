@@ -9,6 +9,10 @@ pub mod templates;
 pub use codegen::{CodeGen, JitEntryFn};
 #[cfg(target_arch = "aarch64")]
 pub use codegen_aarch64::Aarch64CodeGen;
+pub use codegen_aarch64::{
+    JIT_CURSOR_OFFSET, JIT_FLAG_OFFSET, JIT_FRAME_BUDGET, JIT_HELPERS_OFFSET,
+    JIT_STACK_BASE_OFFSET, JIT_STACK_SIZE,
+};
 
 // ---------------------------------------------------------------------------
 // Bailout infrastructure

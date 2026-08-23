@@ -40,8 +40,41 @@ const LEX_RESTORE_ENV: u64 = 9;
 const LEX_LOAD_CAPTURED: u64 = 10;
 const LEX_STORE_CAPTURED: u64 = 11;
 
-/// Number of u64 slots reserved for the trace value stack.
-pub const JIT_STACK_SIZE: usize = 64;
+/// Number of u64 slots in the JIT value-stack area at VM offset 0.
+///
+/// Convention v2 (#4e-lite): the stack is divided into per-frame REGIONS.
+/// Every native entry (function tier-up, call-IC hit, trace, or nested
+/// `rune_jit_call_helper` dispatch) reserves one region by bumping
+/// `jit_stack_cursor`; the frame's base lands ABOVE every ancestor's live
+/// slots, so a callee can never clobber caller operands (`f(x)+g(y)` class)
+/// and bailout snapshots are FRAME-relative (`fb..sp`) — matching the
+/// compile-time model exactly.
+pub const JIT_STACK_SIZE: usize = 2048;
+/// Slots reserved per native frame region. Bounds native-call nesting:
+/// deeper chains overflow-guard to a BailOnEntry (interpreter takes over).
+pub const JIT_FRAME_BUDGET: usize = 8;
+
+/// Byte offset of the helper fn-pointer table (after the value-stack area).
+pub const JIT_HELPERS_OFFSET: u32 = (JIT_STACK_SIZE * 8) as u32; // 16384
+/// Byte offset of jit_stack_base (global stack start; kept for diagnostics).
+pub const JIT_STACK_BASE_OFFSET: u32 = JIT_HELPERS_OFFSET + 64; // 16448
+/// Byte offset of the monotonic region cursor (byte offset from vm base).
+pub const JIT_CURSOR_OFFSET: u32 = JIT_STACK_BASE_OFFSET + 8; // 16456
+/// Byte offset of the pending-bailout flag (was jit_stack[63] @ 504).
+pub const JIT_FLAG_OFFSET: u32 = JIT_CURSOR_OFFSET + 8; // 16464
+
+// Helper table entries (offsets from VM_REG). Must match JitHelpers order.
+const H_LEXICAL: u32 = JIT_HELPERS_OFFSET; // 16384
+#[allow(dead_code)]
+const H_BAILOUT: u32 = JIT_HELPERS_OFFSET + 8; // 16392
+#[allow(dead_code)]
+const H_TYPEOF: u32 = JIT_HELPERS_OFFSET + 16; // 16400
+const H_STRING: u32 = JIT_HELPERS_OFFSET + 24; // 16408
+const H_GLOBAL: u32 = JIT_HELPERS_OFFSET + 32; // 16416
+#[allow(dead_code)]
+const H_FLOAT64_ADD: u32 = JIT_HELPERS_OFFSET + 40; // 16424
+const H_CALL: u32 = JIT_HELPERS_OFFSET + 48; // 16432
+const H_BINOP: u32 = JIT_HELPERS_OFFSET + 56; // 16440
 
 /// Smi i31 range constants for overflow detection.
 pub const MAX_I31: u64 = 0x3FFFFFFF; // 2^30 − 1
@@ -69,6 +102,8 @@ pub struct JitVmState {
     pub jit_stack: [u64; JIT_STACK_SIZE],
     pub jit_helpers: JitHelpers,
     pub jit_stack_base: u64,
+    /// Monotonic bump cursor for per-frame stack regions (byte offset).
+    pub jit_stack_cursor: u64,
 }
 
 /// Register assignments for the trace compiler.
@@ -76,6 +111,14 @@ const VM_REG: u32 = 19; // callee-saved, holds Vm pointer
 const GC_REG: u32 = 20; // callee-saved, holds GC pointer
 const LOC_REG: u32 = 21; // callee-saved, holds locals pointer
 const JIT_STACK_REG: u32 = 22; // callee-saved, holds JIT value-stack pointer
+/// Frame base register (ABSOLUTE region start of THIS native frame,
+/// callee-saved). Passed to bailout_helper / call_helper as the frame-
+/// relative snapshot base argument.
+const FB_REG: u32 = 27;
+/// Entry cursor register (RELATIVE byte offset claimed at entry,
+/// callee-saved). Stored back at JIT_CURSOR_OFFSET by epilogue/overflow
+/// exit to release this frame's region.
+const CUR_REG: u32 = 28;
 
 /// Emit a full 32-bit instruction.
 fn emit(mem: &mut ExecutableMemory, instr: u32) {
@@ -243,10 +286,12 @@ fn push_callee_saved(mem: &mut ExecutableMemory) {
     stp(21, 22);
     stp(23, 24);
     stp(25, 26);
+    stp(27, 28); // FB_REG pair (convention v2)
 }
 
 fn pop_callee_saved(mem: &mut ExecutableMemory) {
     let mut ldp = |rt: u32, rt2: u32| emit(mem, 0xA8C10000 | (rt2 << 10) | (31 << 5) | rt);
+    ldp(27, 28);
     ldp(25, 26);
     ldp(23, 24);
     ldp(21, 22);
@@ -299,6 +344,18 @@ pub struct Aarch64CodeGen {
     inline_plan: InlinePlan,
     /// If true, use stencil-based code emission for supported opcodes.
     stencil_jit: bool,
+    /// Native offset of the prologue overflow-exit block (convention v2).
+    overflow_exit_site: Option<usize>,
+    /// Branch-target depth override map (model fix A): target pc → model
+    /// depth recorded at the branch source. When the linear walk lands on a
+    /// recorded target straight after an unconditional jump/terminator, the
+    /// counter is reset to the recorded value — kills phantom depth from
+    /// UNTAKEN branches (e.g. ternary then-blocks).
+    tgt_depths: std::collections::HashMap<usize, u32>,
+    /// Temp instrumentation: opcode currently being emitted (RUNE_MODEL_DUMP).
+    cur_op: Option<rune_bytecode::opcode::Opcode>,
+    /// Previous instruction's opcode (for target-override decisions).
+    prev_op: Option<rune_bytecode::opcode::Opcode>,
 }
 
 impl Aarch64CodeGen {
@@ -316,6 +373,10 @@ impl Aarch64CodeGen {
             inline_profiles: Vec::new(),
             inline_plan: InlinePlan::default(),
             stencil_jit: false,
+            cur_op: None,
+            overflow_exit_site: None,
+            tgt_depths: std::collections::HashMap::new(),
+            prev_op: None,
         }
     }
 
@@ -418,6 +479,12 @@ impl Aarch64CodeGen {
     /// exactly (validated in vm.rs). Guard sites must therefore record AFTER
     /// restoring the JIT stack to its pre-opcode state.
     fn record_bailout_point(&mut self, bc_pc: usize, reason: BailoutReason) {
+        if std::env::var_os("RUNE_MODEL_DUMP").is_some() {
+            eprintln!(
+                "[model] record pc={} depth={} reason={:?} op={:?}",
+                bc_pc, self.stack_depth, reason, self.cur_op
+            );
+        }
         self.bailout_table.push(BailoutPoint {
             bc_pc,
             stack_depth: self.stack_depth,
@@ -430,6 +497,12 @@ impl Aarch64CodeGen {
     /// `self.stack_depth` (e.g. `emit_inline_bailout` restores the pre-call
     /// depth by subtracting a delta directly from x22).
     fn record_bailout_point_at(&mut self, bc_pc: usize, reason: BailoutReason, depth: u32) {
+        if std::env::var_os("RUNE_MODEL_DUMP").is_some() {
+            eprintln!(
+                "[model] record@ pc={} depth={} reason={:?} op={:?}",
+                bc_pc, depth, reason, self.cur_op
+            );
+        }
         self.bailout_table.push(BailoutPoint {
             bc_pc,
             stack_depth: depth,
@@ -481,7 +554,8 @@ impl Aarch64CodeGen {
         mov_reg(&mut self.mem, 2, JIT_STACK_REG);
         mov_imm64(&mut self.mem, 1, bc_idx as u64);
         mov_reg(&mut self.mem, 0, VM_REG);
-        ldr_off(&mut self.mem, 15, VM_REG, 520);
+        mov_reg(&mut self.mem, 3, FB_REG); // x3 = frame base
+        ldr_off(&mut self.mem, 15, VM_REG, H_BAILOUT);
         emit(&mut self.mem, 0xD63F01E0); // BLR x15
         movz(&mut self.mem, 0, 0);
         self.push_raw();
@@ -513,15 +587,20 @@ impl Aarch64CodeGen {
     }
 
     /// J2 slow path: call jit_binop_helper(op, a=x8, b=x9) and push.
+    ///
+    /// The push is RAW (compile-time counter untouched): the fast path above
+    /// already counted this opcode's net effect; this branch only executes
+    /// at runtime when the guard failed, and counting it too made the model
+    /// drift +1 per J2-style binop (the fib pc16 residual).
     fn emit_binop_helper_slow(&mut self, op_id: u64) {
         mov_reg(&mut self.mem, 0, VM_REG);
         mov_reg(&mut self.mem, 1, GC_REG);
         mov_imm64(&mut self.mem, 2, op_id);
         mov_reg(&mut self.mem, 3, 8); // a_raw
         mov_reg(&mut self.mem, 4, 9); // b_raw
-        ldr_off(&mut self.mem, 15, VM_REG, 568); // jit_binop_helper
+        ldr_off(&mut self.mem, 15, VM_REG, H_BINOP);
         emit(&mut self.mem, 0xD63F01E0); // BLR x15
-        self.push();
+        self.push_raw();
     }
 
     fn emit_smi_check(&mut self, bc_idx: usize, saved: &[u8]) {
@@ -546,7 +625,8 @@ impl Aarch64CodeGen {
         mov_reg(&mut self.mem, 2, JIT_STACK_REG);
         mov_imm64(&mut self.mem, 1, bc_idx as u64);
         mov_reg(&mut self.mem, 0, VM_REG);
-        ldr_off(&mut self.mem, 15, VM_REG, 520);
+        mov_reg(&mut self.mem, 3, FB_REG); // x3 = frame base
+        ldr_off(&mut self.mem, 15, VM_REG, H_BAILOUT);
         emit(&mut self.mem, 0xD63F01E0); // BLR x15
         movz(&mut self.mem, 0, 0);
         self.push_raw();
@@ -566,13 +646,66 @@ impl Aarch64CodeGen {
         mov_reg(&mut self.mem, VM_REG, 0);
         mov_reg(&mut self.mem, GC_REG, 1);
         mov_reg(&mut self.mem, LOC_REG, 2);
-        add_imm(&mut self.mem, JIT_STACK_REG, VM_REG, self.jit_stack_offset);
-        // Store initial JIT stack pointer as jit_stack_base (offset 576 from vm_ptr).
-        // jit_stack[64] (512) + jit_helpers[8] (64) = 576
-        str_off(&mut self.mem, JIT_STACK_REG, VM_REG, 576);
+        // Convention v2: claim a per-frame region from the monotonic
+        // cursor. The cursor stores a VM-RELATIVE byte offset.
+        //   x28 (CUR) = [VM + JIT_CURSOR_OFFSET]        (entry offset)
+        //   x27 (FB)  = VM + x28                        (absolute base)
+        //   x22 (SP)  = x27
+        //   [VM + JIT_CURSOR_OFFSET] = x28 + FRAME_BUDGET bytes
+        ldr_off(&mut self.mem, CUR_REG, VM_REG, JIT_CURSOR_OFFSET);
+        add_reg(&mut self.mem, FB_REG, VM_REG, CUR_REG);
+        mov_reg(&mut self.mem, JIT_STACK_REG, FB_REG);
+        // Candidate end in x1 (scratch): entry + budget bytes. CUR_REG keeps
+        // the ENTRY value untouched so epilogue / overflow exit can release.
+        add_imm(&mut self.mem, 1, CUR_REG, (JIT_FRAME_BUDGET * 8) as u32);
+        // Overflow guard: if the claimed end exceeds the stack area, bail
+        // on entry WITHOUT claiming — the interpreter takes over this
+        // frame instead of letting a deeper region corrupt the array.
+        mov_imm64(&mut self.mem, 3, (JIT_STACK_SIZE * 8) as u64);
+        cmp_reg(&mut self.mem, 1, 3);
+        let patch_ov = self.mem.current_offset();
+        // NOTE: 0xC = cond GT (12). 0xE would be AL — an unconditional
+        // branch that sent EVERY native entry straight to the exit.
+        emit(&mut self.mem, 0x5400000C); // B.GT +0 (patched to overflow exit)
+        // Commit the claim only on the non-overflow path.
+        str_off(&mut self.mem, 1, VM_REG, JIT_CURSOR_OFFSET);
+        // Keep jit_stack_base written for diagnostics/fallbacks.
+        str_off(&mut self.mem, JIT_STACK_REG, VM_REG, JIT_STACK_BASE_OFFSET);
+        // Remember the patch site for resolve at end of compile().
+        // original_instr carries the REAL B.GT encoding — resolve_patches
+        // rebuilds the instruction from it (a 0 here zeroed the opcode bits
+        // and produced illegal instructions).
+        self.pending_patches
+            .push((patch_ov, usize::MAX, 0x5400000C));
+    }
+
+    /// Overflow exit block emitted after all instructions; patched from the
+    /// prologue guard. Releases the claimed region and signals BailOnEntry
+    /// via bailout_helper(bc_pc=0, empty snapshot) so the caller propagates
+    /// a bailout instead of consuming a bogus 0 return — the interpreter
+    /// then runs this frame from its entry (pc 0), which is exactly correct
+    /// since the function has executed nothing yet.
+    fn emit_overflow_exit(&mut self) -> usize {
+        let site = self.mem.current_offset();
+        // Release the region we just claimed: restore the ENTRY cursor.
+        str_off(&mut self.mem, CUR_REG, VM_REG, JIT_CURSOR_OFFSET);
+        // bailout_helper(vm=x0, bc_pc=0, jit_sp=fb, fb) → pending=true, [].
+        mov_reg(&mut self.mem, 0, VM_REG);
+        movz(&mut self.mem, 1, 0);
+        mov_reg(&mut self.mem, 2, FB_REG);
+        mov_reg(&mut self.mem, 3, FB_REG);
+        ldr_off(&mut self.mem, 15, VM_REG, H_BAILOUT);
+        emit(&mut self.mem, 0xD63F01E0); // BLR x15
+        movz(&mut self.mem, 0, 0);
+        pop_callee_saved(&mut self.mem);
+        ret(&mut self.mem);
+        site
     }
 
     fn emit_epilogue(&mut self) {
+        // Release this frame's region BEFORE restoring callee-saved regs:
+        // the entry-relative cursor (CUR_REG) is the pre-claim value.
+        str_off(&mut self.mem, CUR_REG, VM_REG, JIT_CURSOR_OFFSET);
         sub_imm(&mut self.mem, JIT_STACK_REG, JIT_STACK_REG, 8);
         ldr_off(&mut self.mem, 0, JIT_STACK_REG, 0);
         pop_callee_saved(&mut self.mem);
@@ -599,7 +732,13 @@ impl Aarch64CodeGen {
 
     fn resolve_patches(&mut self) {
         for &(patch_offset, bc_target, original_instr) in &self.pending_patches {
-            let native_target = self.bc_to_native[bc_target];
+            // Sentinel target usize::MAX = the prologue overflow-exit block.
+            let native_target = if bc_target == usize::MAX {
+                self.overflow_exit_site
+                    .expect("overflow exit emitted before resolve_patches")
+            } else {
+                self.bc_to_native[bc_target]
+            };
             let from_addr = patch_offset as i64;
             let to_addr = native_target as i64;
             let instr = if (original_instr & 0xFF000000) == 0x14000000 {
@@ -769,7 +908,7 @@ impl Aarch64CodeGen {
                     mov_reg(&mut self.mem, 1, GC_REG);
                     mov_reg(&mut self.mem, 2, 8);
                     mov_reg(&mut self.mem, 3, 9);
-                    ldr_off(&mut self.mem, 15, VM_REG, 552);
+                    ldr_off(&mut self.mem, 15, VM_REG, H_FLOAT64_ADD);
                     emit(&mut self.mem, 0xD63F01E0); // BLR x15
 
                     let done_label = self.mem.current_offset();
@@ -850,7 +989,8 @@ impl Aarch64CodeGen {
                     mov_reg(&mut self.mem, 2, JIT_STACK_REG);
                     mov_imm64(&mut self.mem, 1, call_bc_idx as u64);
                     mov_reg(&mut self.mem, 0, VM_REG);
-                    ldr_off(&mut self.mem, 15, VM_REG, 520);
+                    mov_reg(&mut self.mem, 3, FB_REG); // x3 = frame base
+                    ldr_off(&mut self.mem, 15, VM_REG, H_BAILOUT);
                     emit(&mut self.mem, 0xD63F01E0); // BLR x15
                     movz(&mut self.mem, 0, 0);
                     self.push_raw();
@@ -882,7 +1022,8 @@ impl Aarch64CodeGen {
         mov_reg(&mut self.mem, 2, JIT_STACK_REG);
         mov_imm64(&mut self.mem, 1, call_bc_idx as u64);
         mov_reg(&mut self.mem, 0, VM_REG);
-        ldr_off(&mut self.mem, 15, VM_REG, 520);
+        mov_reg(&mut self.mem, 3, FB_REG); // x3 = frame base
+        ldr_off(&mut self.mem, 15, VM_REG, H_BAILOUT);
         emit(&mut self.mem, 0xD63F01E0);
         movz(&mut self.mem, 0, 0);
         self.push_raw();
@@ -898,6 +1039,19 @@ impl Aarch64CodeGen {
 
         for (bc_idx, instr) in program.instructions.iter().enumerate() {
             self.bc_to_native[bc_idx] = self.mem.current_offset();
+            self.cur_op = Some(instr.opcode);
+            // Model fix A: arriving at a recorded branch target right after
+            // an unconditional Jump / Return means the linear walk just
+            // crossed an UNTAKEN region — restore the depth the branch
+            // source expects instead of accumulating phantom pushes.
+            if matches!(
+                self.prev_op,
+                Some(Opcode::Jump) | Some(Opcode::Return) | Some(Opcode::Throw)
+            ) {
+                if let Some(&d) = self.tgt_depths.get(&bc_idx) {
+                    self.stack_depth = d;
+                }
+            }
             match instr.opcode {
                 Opcode::LoadSmi => {
                     let raw = Value::smi(instr.operands[0] as i32).raw();
@@ -943,7 +1097,7 @@ impl Aarch64CodeGen {
                     mov_imm64(&mut self.mem, 2, prog_ptr);
                     mov_imm64(&mut self.mem, 3, string_idx);
                     // Load string_helper from [x19 + 536] into x15
-                    ldr_off(&mut self.mem, 15, VM_REG, 536);
+                    ldr_off(&mut self.mem, 15, VM_REG, H_STRING);
                     emit(&mut self.mem, 0xD63F01E0); // BLR x15
                     self.push(); // push result (x0)
                 }
@@ -989,7 +1143,7 @@ impl Aarch64CodeGen {
                     mov_reg(&mut self.mem, 1, GC_REG);
                     mov_reg(&mut self.mem, 2, 8); // a_raw
                     mov_reg(&mut self.mem, 3, 9); // b_raw
-                    ldr_off(&mut self.mem, 15, VM_REG, 552); // float64_add_helper
+                    ldr_off(&mut self.mem, 15, VM_REG, H_FLOAT64_ADD); // float64_add_helper
                     emit(&mut self.mem, 0xD63F01E0); // BLR x15
 
                     self.push();
@@ -1131,7 +1285,8 @@ impl Aarch64CodeGen {
                     mov_reg(&mut self.mem, 2, JIT_STACK_REG);
                     mov_imm64(&mut self.mem, 1, bc_idx as u64);
                     mov_reg(&mut self.mem, 0, VM_REG);
-                    ldr_off(&mut self.mem, 15, VM_REG, 520);
+                    mov_reg(&mut self.mem, 3, FB_REG); // x3 = frame base
+                    ldr_off(&mut self.mem, 15, VM_REG, H_BAILOUT);
                     emit(&mut self.mem, 0xD63F01E0); // BLR x15
                     movz(&mut self.mem, 0, 0);
                     self.push_raw();
@@ -1172,7 +1327,7 @@ impl Aarch64CodeGen {
                     mov_imm64(&mut self.mem, 2, op_id);
                     mov_reg(&mut self.mem, 3, 8);
                     mov_reg(&mut self.mem, 4, 9);
-                    ldr_off(&mut self.mem, 15, VM_REG, 568); // jit_binop_helper
+                    ldr_off(&mut self.mem, 15, VM_REG, H_BINOP); // jit_binop_helper
                     emit(&mut self.mem, 0xD63F01E0); // BLR x15
                     self.push();
                 }
@@ -1534,6 +1689,10 @@ impl Aarch64CodeGen {
                 }
                 Opcode::Jump => {
                     let target = instr.operands[0] as usize;
+                    // Model fix A: the branch source's depth is authoritative
+                    // for the target (linear walk may have crossed an
+                    // untaken region with unbalanced phantom effects).
+                    self.tgt_depths.insert(target, self.stack_depth);
                     self.emit_b(target);
                 }
                 Opcode::JumpIfNullOrUndefined => {
@@ -1542,6 +1701,8 @@ impl Aarch64CodeGen {
                     // values are excluded by the QNAN top-16 check.
                     let target = instr.operands[0] as usize;
                     self.pop(); // x0 = value
+                    // Model fix A: target depth = post-pop (see Jump).
+                    self.tgt_depths.entry(target).or_insert(self.stack_depth);
                     // Step 1: if (raw >> 48) != 0x7FF8 → not NaN-boxed →
                     // it's a plain f64, never nullish → fall through.
                     movz(&mut self.mem, 1, 48);
@@ -1591,7 +1752,8 @@ impl Aarch64CodeGen {
                     mov_reg(&mut self.mem, 2, JIT_STACK_REG);
                     mov_imm64(&mut self.mem, 1, bc_idx as u64);
                     mov_reg(&mut self.mem, 0, VM_REG);
-                    ldr_off(&mut self.mem, 15, VM_REG, 520); // bailout_helper
+                    mov_reg(&mut self.mem, 3, FB_REG); // x3 = frame base
+                    ldr_off(&mut self.mem, 15, VM_REG, H_BAILOUT); // bailout_helper
                     emit(&mut self.mem, 0xD63F01E0); // BLR x15
                     movz(&mut self.mem, 0, 0);
                     self.push_raw();
@@ -1600,6 +1762,8 @@ impl Aarch64CodeGen {
                 Opcode::JumpIfFalse => {
                     let target = instr.operands[0] as usize;
                     self.pop(); // x0 = condition (NaN-encoded Value)
+                    // Model fix A: target depth = post-pop (see Jump).
+                    self.tgt_depths.entry(target).or_insert(self.stack_depth);
                     // NaN-aware falsy check.
                     // Falsy: undefined (tag=2), null (tag=3), false (tag=4), Smi(0)
                     //
@@ -1650,6 +1814,8 @@ impl Aarch64CodeGen {
                 Opcode::JumpIfTrue => {
                     let target = instr.operands[0] as usize;
                     self.pop(); // x0 = condition (NaN-encoded Value)
+                    // Model fix A: target depth = post-pop (see Jump).
+                    self.tgt_depths.entry(target).or_insert(self.stack_depth);
                     // NaN-aware truthy check — no float64 bailout (unnecessary for NaN-encoding).
                     // Step 2: extract tag
                     movz(&mut self.mem, 1, 45);
@@ -1778,7 +1944,8 @@ impl Aarch64CodeGen {
                     mov_reg(&mut self.mem, 2, JIT_STACK_REG);
                     mov_imm64(&mut self.mem, 1, bc_idx as u64);
                     mov_reg(&mut self.mem, 0, VM_REG);
-                    ldr_off(&mut self.mem, 15, VM_REG, 520);
+                    mov_reg(&mut self.mem, 3, FB_REG); // x3 = frame base
+                    ldr_off(&mut self.mem, 15, VM_REG, H_BAILOUT);
                     emit(&mut self.mem, 0xD63F01E0); // BLR x15
                     movz(&mut self.mem, 0, 0);
                     self.push_raw();
@@ -1925,7 +2092,8 @@ impl Aarch64CodeGen {
                     mov_reg(&mut self.mem, 2, JIT_STACK_REG);
                     mov_imm64(&mut self.mem, 1, bc_idx as u64);
                     mov_reg(&mut self.mem, 0, VM_REG);
-                    ldr_off(&mut self.mem, 15, VM_REG, 520);
+                    mov_reg(&mut self.mem, 3, FB_REG); // x3 = frame base
+                    ldr_off(&mut self.mem, 15, VM_REG, H_BAILOUT);
                     emit(&mut self.mem, 0xD63F01E0);
                     movz(&mut self.mem, 0, 0);
                     self.push_raw();
@@ -2042,7 +2210,8 @@ impl Aarch64CodeGen {
                     mov_reg(&mut self.mem, 2, JIT_STACK_REG);
                     mov_imm64(&mut self.mem, 1, bc_idx as u64);
                     mov_reg(&mut self.mem, 0, VM_REG);
-                    ldr_off(&mut self.mem, 15, VM_REG, 520);
+                    mov_reg(&mut self.mem, 3, FB_REG); // x3 = frame base
+                    ldr_off(&mut self.mem, 15, VM_REG, H_BAILOUT);
                     emit(&mut self.mem, 0xD63F01E0);
                     movz(&mut self.mem, 0, 0);
                     self.push_raw();
@@ -2127,7 +2296,7 @@ impl Aarch64CodeGen {
                     // Call lexical helper with LEX_LOAD_THIS
                     movz(&mut self.mem, 2, 0); // x2 = 0 (unused arg1)
                     movz(&mut self.mem, 1, LEX_LOAD_THIS as u16); // x1 = op
-                    ldr_off(&mut self.mem, 15, VM_REG, 512);
+                    ldr_off(&mut self.mem, 15, VM_REG, H_LEXICAL);
                     mov_reg(&mut self.mem, 0, VM_REG);
                     movz(&mut self.mem, 3, 0);
                     emit(&mut self.mem, 0xD63F01E0); // BLR x15
@@ -2149,7 +2318,7 @@ impl Aarch64CodeGen {
                     mov_reg(&mut self.mem, 3, 0); // x3 = value (arg2)
                     mov_imm64(&mut self.mem, 2, slot); // x2 = slot (arg1)
                     mov_imm64(&mut self.mem, 1, LEX_DECLARE_LET); // x1 = op
-                    ldr_off(&mut self.mem, 15, VM_REG, 512); // x15 = helper addr
+                    ldr_off(&mut self.mem, 15, VM_REG, H_LEXICAL); // x15 = helper addr
                     mov_reg(&mut self.mem, 0, VM_REG); // x0 = vm_ptr
                     movz(&mut self.mem, 4, 0); // x4 = arg3 = 0
                     mov_reg(&mut self.mem, 5, GC_REG); // x5 = gc_ptr
@@ -2162,7 +2331,7 @@ impl Aarch64CodeGen {
                     mov_reg(&mut self.mem, 3, 0); // x3 = value (arg2)
                     mov_imm64(&mut self.mem, 2, slot); // x2 = slot (arg1)
                     mov_imm64(&mut self.mem, 1, LEX_DECLARE_CONST); // x1 = op
-                    ldr_off(&mut self.mem, 15, VM_REG, 512); // x15 = helper addr
+                    ldr_off(&mut self.mem, 15, VM_REG, H_LEXICAL); // x15 = helper addr
                     mov_reg(&mut self.mem, 0, VM_REG); // x0 = vm_ptr
                     movz(&mut self.mem, 4, 0); // x4 = arg3 = 0
                     mov_reg(&mut self.mem, 5, GC_REG); // x5 = gc_ptr
@@ -2189,7 +2358,7 @@ impl Aarch64CodeGen {
                     mov_imm64(&mut self.mem, 2, depth); // x2 = depth (arg1)
                     mov_imm64(&mut self.mem, 3, slot); // x3 = slot (arg2)
                     mov_imm64(&mut self.mem, 1, LEX_LOAD_CAPTURED); // x1 = op
-                    ldr_off(&mut self.mem, 15, VM_REG, 512);
+                    ldr_off(&mut self.mem, 15, VM_REG, H_LEXICAL);
                     mov_reg(&mut self.mem, 0, VM_REG);
                     movz(&mut self.mem, 4, 0);
                     mov_reg(&mut self.mem, 5, GC_REG);
@@ -2204,7 +2373,7 @@ impl Aarch64CodeGen {
                     mov_imm64(&mut self.mem, 2, depth); // x2 = depth (arg1)
                     mov_imm64(&mut self.mem, 3, slot); // x3 = slot (arg2)
                     mov_imm64(&mut self.mem, 1, LEX_STORE_CAPTURED); // x1 = op
-                    ldr_off(&mut self.mem, 15, VM_REG, 512);
+                    ldr_off(&mut self.mem, 15, VM_REG, H_LEXICAL);
                     mov_reg(&mut self.mem, 0, VM_REG);
                     mov_reg(&mut self.mem, 5, GC_REG);
                     emit(&mut self.mem, 0xD63F01E0); // BLR x15
@@ -2215,7 +2384,7 @@ impl Aarch64CodeGen {
                     // Set up args: x0=vm_ptr, x1=op(LEX_LOAD), x2=slot, x3=0
                     mov_imm64(&mut self.mem, 2, slot);
                     mov_imm64(&mut self.mem, 1, LEX_LOAD);
-                    ldr_off(&mut self.mem, 15, VM_REG, 512);
+                    ldr_off(&mut self.mem, 15, VM_REG, H_LEXICAL);
                     mov_reg(&mut self.mem, 0, VM_REG);
                     movz(&mut self.mem, 3, 0); // x3 = 0
                     emit(&mut self.mem, 0xD63F01E0); // BLR x15
@@ -2229,7 +2398,7 @@ impl Aarch64CodeGen {
                     mov_reg(&mut self.mem, 3, 0); // x3 = value (arg2)
                     mov_imm64(&mut self.mem, 2, slot); // x2 = slot (arg1)
                     mov_imm64(&mut self.mem, 1, LEX_STORE); // x1 = op
-                    ldr_off(&mut self.mem, 15, VM_REG, 512); // x15 = helper addr
+                    ldr_off(&mut self.mem, 15, VM_REG, H_LEXICAL); // x15 = helper addr
                     mov_reg(&mut self.mem, 0, VM_REG); // x0 = vm_ptr
                     emit(&mut self.mem, 0xD63F01E0); // BLR x15
                     // helper returns val back in x0
@@ -2240,7 +2409,7 @@ impl Aarch64CodeGen {
                     self.pop(); // x0 = value
                     mov_reg(&mut self.mem, 1, 0); // x1 = value_raw (second arg)
                     mov_reg(&mut self.mem, 0, VM_REG); // x0 = vm_ptr (first arg)
-                    ldr_off(&mut self.mem, 15, VM_REG, 528); // typeof_helper at offset 528
+                    ldr_off(&mut self.mem, 15, VM_REG, H_TYPEOF); // typeof_helper at offset 528
                     emit(&mut self.mem, 0xD63F01E0); // BLR x15
                     self.push(); // push result (x0)
                 }
@@ -2250,7 +2419,8 @@ impl Aarch64CodeGen {
                     mov_reg(&mut self.mem, 2, JIT_STACK_REG);
                     mov_imm64(&mut self.mem, 1, bc_idx as u64);
                     mov_reg(&mut self.mem, 0, VM_REG);
-                    ldr_off(&mut self.mem, 15, VM_REG, 520);
+                    mov_reg(&mut self.mem, 3, FB_REG); // x3 = frame base
+                    ldr_off(&mut self.mem, 15, VM_REG, H_BAILOUT);
                     emit(&mut self.mem, 0xD63F01E0);
                     movz(&mut self.mem, 0, 0);
                     self.push_raw();
@@ -2271,30 +2441,33 @@ impl Aarch64CodeGen {
                     }
                     // Clear bailout flag at jit_stack[63] (offset 63*8=504)
                     movz(&mut self.mem, 0, 0);
-                    str_off(&mut self.mem, 0, VM_REG, 504);
+                    str_off(&mut self.mem, 0, VM_REG, JIT_FLAG_OFFSET);
                     // Call helper: x0=vm_ptr, x1=gc_ptr, x2=argc, x3=bc_idx, x4=jit_sp
                     mov_reg(&mut self.mem, 0, VM_REG);
                     mov_reg(&mut self.mem, 1, GC_REG);
                     mov_imm64(&mut self.mem, 2, argc as u64);
                     mov_imm64(&mut self.mem, 3, bc_idx as u64);
                     mov_reg(&mut self.mem, 4, JIT_STACK_REG);
-                    ldr_off(&mut self.mem, 15, VM_REG, 560); // call_helper
+                    mov_reg(&mut self.mem, 5, FB_REG); // x5 = frame base
+                    ldr_off(&mut self.mem, 15, VM_REG, H_CALL); // call_helper
                     emit(&mut self.mem, 0xD63F01E0); // BLR x15
                     // Check bailout flag at [VM_REG + 504]
-                    ldr_off(&mut self.mem, 1, VM_REG, 504); // x1 = flag
+                    ldr_off(&mut self.mem, 1, VM_REG, JIT_FLAG_OFFSET); // x1 = flag
                     movz(&mut self.mem, 2, 1); // x2 = 1
                     cmp_reg(&mut self.mem, 1, 2); // flag == 1?
                     let bail_path = self.mem.current_offset();
                     emit(&mut self.mem, 0x54000001); // B.NE +0 (skip bailout if flag != 1)
-                    // Bailout path: call bailout_helper and return from JIT
-                    self.record_bailout_point(bc_idx, BailoutReason::BailOnEntry);
-                    mov_reg(&mut self.mem, 2, JIT_STACK_REG);
-                    mov_imm64(&mut self.mem, 1, bc_idx as u64);
-                    mov_reg(&mut self.mem, 0, VM_REG);
-                    ldr_off(&mut self.mem, 15, VM_REG, 520); // bailout_helper
-                    emit(&mut self.mem, 0xD63F01E0); // BLR x15
+                    // Bailout path: do NOT re-record here. When pending is
+                    // set, the ORIGIN guard/helper already recorded the
+                    // (bc_pc, snapshot) for the innermost bailed unit — a
+                    // second record_bailout_point + bailout_helper BLR at
+                    // this site would overwrite it with caller-relative
+                    // data (the fib recursion cascade: snapshot/record
+                    // divergence across nested native frames). Straight
+                    // epilogue: return 0 with the flag still set so OUR
+                    // caller propagates; frames stay stacked for the
+                    // interpreter (call_helper keeps them on pending).
                     movz(&mut self.mem, 0, 0);
-                    self.push_raw();
                     self.emit_epilogue();
                     // Normal path: pop argc+2 (args+callee+this) and push result
                     let done_path = self.mem.current_offset();
@@ -2326,7 +2499,7 @@ impl Aarch64CodeGen {
                     mov_imm64(&mut self.mem, 4, name_idx);
                     mov_imm64(&mut self.mem, 5, 0);
                     // Load global_helper from [x19 + 544] into x15
-                    ldr_off(&mut self.mem, 15, VM_REG, 544);
+                    ldr_off(&mut self.mem, 15, VM_REG, H_GLOBAL);
                     emit(&mut self.mem, 0xD63F01E0); // BLR x15
                     self.push(); // push result (x0)
                 }
@@ -2346,7 +2519,7 @@ impl Aarch64CodeGen {
                     // x4 = name_idx, x5 = value_raw (already set)
                     mov_imm64(&mut self.mem, 4, name_idx);
                     // Load global_helper from [x19 + 544] into x15
-                    ldr_off(&mut self.mem, 15, VM_REG, 544);
+                    ldr_off(&mut self.mem, 15, VM_REG, H_GLOBAL);
                     emit(&mut self.mem, 0xD63F01E0); // BLR x15
                     self.push(); // push result (stored value)
                 }
@@ -2370,7 +2543,7 @@ impl Aarch64CodeGen {
                     mov_imm64(&mut self.mem, 4, name_idx);
                     mov_imm64(&mut self.mem, 5, is_prefix as u64);
                     // Load global_helper from [x19 + 544] into x15
-                    ldr_off(&mut self.mem, 15, VM_REG, 544);
+                    ldr_off(&mut self.mem, 15, VM_REG, H_GLOBAL);
                     emit(&mut self.mem, 0xD63F01E0); // BLR x15
                     self.push(); // push result (new or old value)
                 }
@@ -2379,7 +2552,10 @@ impl Aarch64CodeGen {
                     emit(&mut self.mem, 0xD4200000); // BRK #0
                 }
             }
+            self.prev_op = Some(instr.opcode);
         }
+
+        self.overflow_exit_site = Some(self.emit_overflow_exit());
 
         self.resolve_patches();
 
@@ -2418,7 +2594,7 @@ impl Aarch64CodeGen {
     /// Registers: x0=vm_ptr, x1=op, x2=arg1, x3=arg2, x4=arg3(0), x5=gc_ptr.
     fn emit_lexical_call(&mut self, op: u64, arg1: u64, arg2: u64) {
         // Load helper address from [x19 + 512] (offset of JitHelpers in Vm)
-        ldr_off(&mut self.mem, 15, VM_REG, 512);
+        ldr_off(&mut self.mem, 15, VM_REG, H_LEXICAL);
         // Set up arguments: x0=vm_ptr, x1=op, x2=arg1, x3=arg2
         mov_reg(&mut self.mem, 0, VM_REG);
         mov_imm64(&mut self.mem, 1, op);

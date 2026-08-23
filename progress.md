@@ -3777,6 +3777,102 @@ Hard constraint discovered: helper offsets are PINNED (jit_stack@0..512, helpers
 5. Depth guard (#4c scratch work) stays — orthogonal protection for buffer aliasing
 Acceptance: fib(8/10/15/20) exact; full jit suite; workspace 820+; conformance spot-check Array/String unchanged
 
+## Stability #5 — call-IC fix + JIT convention v2-lite: regions, frame-chain, model exactness (2026-08-23)
+
+The prepared 4-part frame-chain patch (see previous section) is APPLIED and went
+through four additional root-cause fixes to reach the fib acceptance. Workspace
+**820 passed / 0 failed**, clippy (`-D warnings` CI flags) + fmt + `--no-default-features`
+clean, conformance spot-check built-ins/Function unchanged at **70/509**.
+
+### What landed
+
+1. **Universal Frame convention (call_helper AND both interpreter sites)** —
+   `rune_jit_call_helper` always pushes a real callee Frame (the `needs_frame()`
+   leaf fast-path and the nested-native scratch branch are gone); the interpreter
+   call-IC and tier-up sites do the same. The spec's edit-1 alone was NOT enough:
+   a frameless leaf entered from the interpreter held its locals in the shared
+   `jit_locals_buffer`, and the first nested helper call `mem::take`d the buffer
+   out from under its raw pointer → freed-on-pop → garbage locals → spurious
+   guard cascades. Frames make every native unit's locals rooted and every chain
+   interpreter-resumable.
+2. **Call-site pc stamping** — frames pushed by call_helper get `pc = bc_idx`
+   (the caller's Call instruction); the interpreter sites stamp their callee
+   frames with `pc`. Combined with the kept-frame chain (below) and the existing
+   `Return` handler invariant (`frames[new_fi].pc += 1`; handlers leave pc AT the
+   executing instruction), a propagated bailout unwinds one interpreted frame at
+   a time with each Return landing just past its Call.
+3. **Frame chain kept on pending** — call_helper no longer pops the callee frame
+   when `jit_bailout.pending`; it sets flag[JIT_FLAG_OFFSET]=1 and returns. Each
+   enclosing native caller propagates via its post-BLR check; the interpreter
+   resumes from the TOP (innermost bailed) frame.
+4. **Call arm re-record stripped** (codegen_aarch64.rs) — the post-BLR bail path
+   no longer re-calls bailout_helper/record_bailout_point; the innermost origin
+   owns the (bc_pc, snapshot). BailOnEntry points for Call sites are gone from
+   tables (helper-fallback still records them at runtime).
+5. **Model fix A — branch-target depth override map**: the linear compile-time
+   walk counted UNTAKEN branches (fib's ternary then-block: phantom +1 → the
+   documented "pc16 residual +2"). Jump/JumpIfFalse/JumpIfTrue/JumpIfNullOrUndefined
+   now record `tgt_depths[target]`; when the walk lands on a recorded target right
+   after Jump/Return/Throw the counter resets to the recorded depth.
+6. **Model fix B — binop slow-path double-push**: `emit_binop_helper_slow` ended
+   in `push()` after the fast path already pushed; every J2-style binop drifted
+   the model +1 per site. Now `push_raw`.
+7. **Convention v2-LITE — monotonic region cursor** (#4e-lite): `jit_stack`
+   enlarged to `[u64; 2048]` divided into per-frame REGIONS of
+   `JIT_FRAME_BUDGET=256` slots. Prologue claims via `jit_stack_cursor`
+   (VM-relative byte offset @16456): x28=entry offset, x27=absolute frame base,
+   x22=x27; commit only after an overflow guard (`entry+budget > stack bytes`).
+   Epilogue restores the entry offset (region released). Nested natives start
+   ABOVE all ancestor slots — the shared-stack clobber class (#4d-a,
+   `f(x)+g(y)` reading dead operands) is structurally gone.
+   - Helpers moved: table @16384 (+idx*8), base @16448, cursor @16456,
+     **flag moved 504 → JIT_FLAG_OFFSET=16464** (old flag lived in jit_stack[63],
+     which is now frame data). x86-64 codegen.rs offsets updated textually.
+   - push/pop_callee_saved save x27/x28 too.
+   - **Frame-relative snapshots**: bailout_helper/call_helper take fb (x3/x5);
+     snapshot = fb..sp, exactly matching the (now-exact) model depths.
+   - **Overflow exit = BailOnEntry@pc0**: when >8 native frames nest, the guard
+     jumps to an exit block that releases the region and calls
+     bailout_helper(bc_pc=0, empty snapshot) — callers propagate a real bailout
+     and the interpreter runs that frame FROM ENTRY interpreted (correct: nothing
+     executed yet). Deep recursion degrades gracefully instead of corrupting.
+
+### Bugs hit during implementation (all fixed)
+- **B.AL typo**: prologue guard emitted `0x5400000E` (cond 14 = AL — UNCONDITIONAL)
+  instead of `0x5400000C` (GT): every native entry instantly returned 0. Found by
+  decoding the emitted words (`B.14`).
+- **CUR_REG mutation leak**: prologue bumped x28 in place, so epilogue stored
+  entry+BUDGET — cursor never shrank. Fixed by bumping scratch x1 and committing
+  only past the guard.
+- **Sentinel patch zeroed opcode bits**: pushing `(site, usize::MAX, 0)` made
+  resolve_patches rebuild a B.cond from original_instr=0 → illegal instruction
+  (SIGILL, exit 132). Sentinel carries the real `0x5400000C`.
+- **Neutralized limit left in**: the debug `0x000F_FFFF_FFFF_FFFF` compare was
+  restored over once, so deep claims wrote PAST the array onto the helper table
+  (cursor "values" were clobbering Values; BLR through a Value = SIGSEGV).
+
+### Acceptance
+- `fib(6/8/10/12/15/18/20/24)` ALL EXACT (was: panic at tier-up mid-recursion on main).
+- Cross-call operand survival: `f(x){return add(x,1)+add(x,2)}` ×300 and
+  `h(x){return mul(x,3)+mul(x+1,4)-2}` ×300 → exact (main: "undefined is not a
+  function"/garbage even before this slice's changes).
+- Var-fn self-recursion `rf(n)` tiers up, rf(20)=6765 exact.
+- RUNE_MODEL_DUMP diagnostics retained in record_bailout_point(_at) (compile-time only).
+
+### NEW pre-existing repro found (NOT caused by this slice — proven on fd5dd12)
+A top-level `function name() {}` DECLARATION referenced as a free variable from
+inside another function resolves to undefined:
+`function add(a,b){return a+b;} function f(x){return add(x,1);} f(5)` →
+"TypeError: undefined is not a function" ON MAIN, no JIT involved. Var-form
+(`var add = function…`) and nested sibling declarations work. Self-reference via
+the named-function slot (fib) masks it. Likely explains a chunk of the
+language/function-code suite failures (40%). NEXT-TARGET candidate.
+
+
+## RESOLVED (was NEXT SESSION) — call-IC 4-part patch: applied + extended, see Stability #5 above
+
+The original 4-part patch spec below is SUPERSEDED by Stability #5 (which also covers model fixes A/B and convention v2-lite).
+
 ## ⚡ NEXT SESSION START HERE — call-IC fix: apply the prepared 4-part patch
 
 The convention-v2 region/cursor attempt was REVERTED (it traded the panic for silent post-bail skips — worse). The correct fix, fully designed and partially validated (pc10 validates with model unwind; pc16 residual +2 traced to ternary ops), is a FRAME-CHAIN patch. An earlier application attempt failed only on formatting mismatches in vm.rs — re-derive against current text.

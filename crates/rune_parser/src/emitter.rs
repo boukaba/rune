@@ -57,6 +57,13 @@ pub struct Emitter {
     /// `loop_exit_stack`/`loop_cont_stack` because its cond position is only
     /// known after the body is emitted).
     pending_loop_jumps: Vec<Vec<(usize, LoopJumpKind)>>,
+    /// Labels attached to each active loop frame (parallel to
+    /// pending_loop_jumps / loop_exit_stack / loop_cont_stack). `break lbl`
+    /// / `continue lbl` resolve against these, innermost-first.
+    active_loop_labels: Vec<Vec<String>>,
+    /// Labels seen between a `Stmt::Labeled` wrapper and its body; consumed
+    /// by the next loop frame pushed (supports `a: b: for(...)`).
+    pending_labels: Vec<String>,
     switch_exit_stack: Vec<usize>,
     switch_break_jumps: Vec<usize>,
     /// Private field names declared by the enclosing class (for #name → slot index resolution).
@@ -100,6 +107,8 @@ impl Emitter {
             loop_exit_stack: Vec::new(),
             loop_cont_stack: Vec::new(),
             pending_loop_jumps: Vec::new(),
+            active_loop_labels: Vec::new(),
+            pending_labels: Vec::new(),
             switch_exit_stack: Vec::new(),
             switch_break_jumps: Vec::new(),
             private_field_names: Vec::new(),
@@ -1623,7 +1632,10 @@ impl Emitter {
                 self.loop_exit_stack.push(usize::MAX);
                 self.loop_cont_stack.push(loop_start);
                 self.pending_loop_jumps.push(Vec::new());
+                let labels = std::mem::take(&mut self.pending_labels);
+                self.active_loop_labels.push(labels);
                 self.emit_statement(body);
+                self.active_loop_labels.pop();
                 self.loop_cont_stack.pop();
                 self.loop_exit_stack.pop();
                 self.emit(Opcode::Jump, vec![loop_start as i64]);
@@ -1646,7 +1658,10 @@ impl Emitter {
                 self.loop_exit_stack.push(usize::MAX);
                 self.loop_cont_stack.push(usize::MAX);
                 self.pending_loop_jumps.push(Vec::new());
+                let labels = std::mem::take(&mut self.pending_labels);
+                self.active_loop_labels.push(labels);
                 self.emit_statement(body);
+                self.active_loop_labels.pop();
                 self.loop_exit_stack.pop();
                 self.loop_cont_stack.pop();
                 // `continue` re-checks the condition.
@@ -1752,7 +1767,10 @@ impl Emitter {
                 // patch the continues to the update tail.
                 self.loop_cont_stack.push(usize::MAX);
                 self.pending_loop_jumps.push(Vec::new());
+                let labels = std::mem::take(&mut self.pending_labels);
+                self.active_loop_labels.push(labels);
                 self.emit_statement(body);
+                self.active_loop_labels.pop();
                 self.loop_cont_stack.pop();
                 self.loop_exit_stack.pop();
                 let continue_target = self.current();
@@ -1905,7 +1923,29 @@ impl Emitter {
                     }
                 }
             },
-            Stmt::Break(_label, _) => {
+            Stmt::Break(label, _) => {
+                // Labeled break binds to the NEAREST enclosing labeled loop
+                // (bypassing any intervening switch); unlabeled keeps the
+                // switch-then-innermost-loop precedence.
+                if let Some(l) = label.as_ref().map(|s| s.to_string()) {
+                    if let Some(i) = self
+                        .active_loop_labels
+                        .iter()
+                        .rposition(|ls| ls.contains(&l))
+                    {
+                        let exit = self.loop_exit_stack[i];
+                        // Matches the existing UNLABELED sentinel-break
+                        // behaviour: jump straight to the exit paths.
+                        if exit == usize::MAX {
+                            let pos = self.current();
+                            self.emit(Opcode::Jump, vec![0]);
+                            self.pending_loop_jumps[i].push((pos, LoopJumpKind::Break));
+                        } else {
+                            self.emit(Opcode::Jump, vec![exit as i64]);
+                        }
+                        return; // inside emit_statement wrapper
+                    }
+                }
                 if self.switch_exit_stack.last().is_some() {
                     // Inside a switch — emit Jump with placeholder, track for patching
                     let pos = self.current();
@@ -1923,7 +1963,27 @@ impl Emitter {
                     }
                 }
             }
-            Stmt::Continue(_label, _) => {
+            Stmt::Continue(label, _) => {
+                if let Some(l) = label.as_ref().map(|s| s.to_string()) {
+                    if let Some(i) = self
+                        .active_loop_labels
+                        .iter()
+                        .rposition(|ls| ls.contains(&l))
+                    {
+                        let cont = self.loop_cont_stack[i];
+                        // The continue_target already contains the loop's own
+                        // RestoreEnv/copy-back/BlockLeave sequence — emitting
+                        // it here too would double-execute it.
+                        if cont == usize::MAX {
+                            let pos = self.current();
+                            self.emit(Opcode::Jump, vec![0]);
+                            self.pending_loop_jumps[i].push((pos, LoopJumpKind::Continue));
+                        } else {
+                            self.emit(Opcode::Jump, vec![cont as i64]);
+                        }
+                        return;
+                    }
+                }
                 if let Some(cont) = self.loop_cont_stack.last() {
                     if *cont == usize::MAX {
                         let pos = self.current();
@@ -2045,6 +2105,14 @@ impl Emitter {
                     }
                 }
             }
+            Stmt::Labeled(label, body, _) => {
+                // Attach the label to the next loop frame pushed while
+                // emitting the body. Non-loop bodies simply emit (a label on
+                // them is inert today).
+                self.pending_labels.push(label.to_string());
+                self.emit_statement(body);
+                self.pending_labels.pop();
+            }
             Stmt::Empty(_) => {}
             Stmt::ForIn(lhs, obj, body, _) => {
                 // for (var key in obj) { body }
@@ -2056,8 +2124,7 @@ impl Emitter {
                 }
                 self.emit_expression(obj);
                 self.emit(Opcode::ForInInit, vec![]);
-                let loop_start = self.current();
-                let exit_jump = self.current();
+                let next_pos = self.current();
                 self.emit(Opcode::ForInNext, vec![0]); // patched below
                 // Store the key into the loop variable
                 if let Expr::Identifier(name, _) = lhs.as_ref() {
@@ -2071,9 +2138,23 @@ impl Emitter {
                     // assignment-expression semantics, but here we only need it stored)
                     self.emit(Opcode::Pop, vec![]);
                 }
+                // Sentinel frame: `continue` re-runs ForInNext (next key),
+                // `break` exits after the loop. Previously break/continue
+                // inside a for-in body fell through to enclosing scopes.
+                self.loop_exit_stack.push(usize::MAX);
+                self.loop_cont_stack.push(next_pos);
+                self.pending_loop_jumps.push(Vec::new());
+                let labels = std::mem::take(&mut self.pending_labels);
+                self.active_loop_labels.push(labels);
                 self.emit_statement(body);
-                self.emit(Opcode::Jump, vec![loop_start as i64]);
-                self.patch(exit_jump, self.current());
+                self.active_loop_labels.pop();
+                self.pending_loop_jumps.pop();
+                self.loop_cont_stack.pop();
+                self.loop_exit_stack.pop();
+                self.emit(Opcode::Jump, vec![next_pos as i64]);
+                let exit = self.current();
+                // Done case of ForInNext lands here.
+                self.patch(next_pos, exit);
             }
             Stmt::ForOf(lhs, iterable, body, _) => {
                 // for (x of iterable) { body }
@@ -2091,6 +2172,8 @@ impl Emitter {
                 self.loop_exit_stack.push(usize::MAX);
                 self.loop_cont_stack.push(usize::MAX);
                 self.pending_loop_jumps.push(Vec::new());
+                let labels = std::mem::take(&mut self.pending_labels);
+                self.active_loop_labels.push(labels);
                 // Member LHS: push obj + key BELOW the loop state so the value
                 // lands on top for StoreProperty ([.., obj, key, value]).
                 let lhs_prefix = match lhs.as_ref() {
@@ -2131,6 +2214,7 @@ impl Emitter {
                     }
                 }
                 self.emit_statement(body);
+                self.active_loop_labels.pop();
                 self.loop_cont_stack.pop();
                 self.loop_exit_stack.pop();
                 self.emit(Opcode::Jump, vec![loop_start as i64]);
@@ -3642,6 +3726,7 @@ fn contains_inner_function_stmt(stmt: &Stmt) -> bool {
                     .as_deref()
                     .is_some_and(|stmts| stmts.iter().any(contains_inner_function_stmt))
         }
+        Stmt::Labeled(_, body, _) => contains_inner_function_stmt(body),
         Stmt::Function(_, _) => true,
         Stmt::Class(_, _) => true,
         Stmt::Break(_, _) | Stmt::Continue(_, _) | Stmt::Return(None, _) | Stmt::Empty(_) => false,
@@ -3754,6 +3839,7 @@ fn collect_var_names_stmt(stmt: &Stmt, names: &mut Vec<String>) {
                 stmts.iter().for_each(|s| collect_var_names_stmt(s, names));
             }
         }
+        Stmt::Labeled(_, body, _) => collect_var_names_stmt(body, names),
         _ => {}
     }
 }
@@ -3825,6 +3911,7 @@ fn collect_decl_names_stmt(stmt: &Stmt, names: &mut Vec<String>) {
                 f.iter().for_each(|s| collect_decl_names_stmt(s, names));
             }
         }
+        Stmt::Labeled(_, body, _) => collect_decl_names_stmt(body, names),
         _ => {}
     }
 }
@@ -3893,6 +3980,7 @@ fn collect_script_decl_names_stmt(stmt: &Stmt, names: &mut Vec<String>) {
                     .for_each(|s| collect_script_decl_names_stmt(s, names));
             }
         }
+        Stmt::Labeled(_, body, _) => collect_script_decl_names_stmt(body, names),
         _ => {}
     }
 }
@@ -3939,6 +4027,7 @@ fn uses_arguments_stmt(stmt: &Stmt) -> bool {
             .map(|e| uses_arguments_expr(e))
             .unwrap_or(false),
         Stmt::Throw(expr, _) => uses_arguments_expr(expr),
+        Stmt::Labeled(_, body, _) => uses_arguments_stmt(body),
         Stmt::Break(_, _) | Stmt::Continue(_, _) => false,
         Stmt::Try(body, catch, finally, _) => {
             body.iter().any(uses_arguments_stmt)

@@ -22,6 +22,28 @@
 - [x] 18 new integration tests (basic/default/namespace/reexport/star/star-as/rename/circular/self-cycle/let-mutation/own-bindings/TDZ-cycle-throw/duplicate-export/imported-assignment/missing-import/hoisted-in-cycle/bare-let) + CLI probes (`main.mjs`/`check.mjs`/`fib.mjs` loop + bench) — **613 integration tests pass, 3 ignored (workspace 774)**; cargo fmt + clippy clean (CI flags); `--no-default-features` probe clean
 - **Known gaps**: no dynamic `import()` / `import.meta`; resolver is a callback (no node_modules algorithm); module programs + module functions don't JIT (documented — interpreter-only); exception carry is via string-encoded Error message (no error objects across module boundaries); module `func_idx` resolution assumes a single program per `compile_module` call
 
+## Labeled statements + for-in break/continue (2026-08-23)
+
+- **`label: stmt` implemented** (§13.13): parser production `Identifier :` →
+  `Stmt::Labeled`; emitter attaches pending labels to the next loop frame
+  (`a: b: for(;;)` stacking works). `break lbl` / `continue lbl` resolve the
+  NEAREST enclosing labeled loop, bypassing intervening switches for labeled
+  breaks; unlabeled behaviour unchanged. All Stmt walker fns recurse into the
+  new variant.
+- **for-in loops gained break/continue machinery** (they had none — breaks
+  silently fell to enclosing scopes): sentinel frames like do-while;
+  `continue` re-runs ForInNext (next key), `break` exits after the loop.
+- **Known interaction (pre-existing family)**: labeled jumps crossing let-
+  bound `for` iterations reach the documented let-for-continue corruption
+  class (SEGV trio) via more shapes — e.g. `for(let x=0;x<3;)` whose only
+  update happens inside an inner `while` through the per-iteration env.
+  Contained by the subprocess runner (PANIC/TIMEOUT failures), same as the
+  existing trio. Root-causing let-for per-iteration env/slot sync is a
+  follow-up.
+- **Suite deltas**: statements/labeled 0→2 (+2), statements/break 1→7 (+6),
+  statements/continue 1→3 (+2); while/do-while/if/block unchanged-to-better
+  via fixed for-in exits. Workspace **820/0**; clippy/fmt/no-default/x86 clean.
+
 ## Zombie-resume FIXED — unwind-to-outermost restored, budget 256 (2026-08-23)
 
 - **Root cause of the fib(19+)-NaN dance corruption**: the kept-frame chain

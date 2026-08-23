@@ -216,6 +216,9 @@ pub enum Stmt {
     Class(Box<ClassNode>, Span),
     Import(Box<ImportDecl>, Span),
     Export(Box<ExportDecl>, Span),
+    /// `label: stmt` (§13.13). Only loops consume the label today; on any
+    /// other statement kind it is parsed and attached for completeness.
+    Labeled(Box<str>, Box<Stmt>, Span),
 }
 
 /// `import` declaration (module goal only).

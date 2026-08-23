@@ -136,6 +136,14 @@ impl Parser {
             }
             TokenKind::Import if self.module => self.parse_import(),
             TokenKind::Export if self.module => self.parse_export(),
+            TokenKind::Identifier if self.lexer.peek_token().kind == TokenKind::Colon => {
+                // Labeled statement (§13.13): Identifier ':' Statement
+                let name: Box<str> = self.tok.value.clone().into();
+                self.advance(); // identifier
+                self.advance(); // ':'
+                let body = Box::new(self.parse_statement());
+                Stmt::Labeled(name, body, self.span())
+            }
             _ => {
                 let expr = self.parse_expr_comma();
                 self.consume_semicolon();

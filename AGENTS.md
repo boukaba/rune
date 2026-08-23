@@ -92,6 +92,9 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ### Goal
 Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8× vs Node) with enough stdlib to run real workloads. v0.4 = stdlib breadth (14 builtins). v0.5 = Promise + async patterns.
 
+### Done — v0.9.6 / labeled statements + for-in jump machinery
+- **`label: stmt`** parsed (Stmt::Labeled) and bound to loop frames; `break lbl`/`continue lbl` resolve nearest labeled loop, bypassing switches; label stacking works. **for-in got sentinel break/continue frames** (continue=next key) — previously breaks fell through to enclosing scopes. Walkers updated. Net: statements/labeled 0→2, break 1→7, continue 1→3. Known: labeled jumps into let-for shapes hit the pre-existing per-iteration-env corruption family (contained). 820/0 workspace; clippy/fmt/no-default/x86 clean
+
 ### Done — v0.9.5 / zombie-resume fix (unwind-to-outermost)
 - **Overflow/resume dance CORRUPTION ROOT-CAUSED + FIXED** — kept-frame zombies (Stability#5 edit 3) resumed at stamped pcs against released JIT-stack windows → fib(19+) NaN at budget ≥128. Fix: helpers on pending OVERWRITE the record with their own (call-site, fb..args_ptr caller-window), pop their callee frame, propagate the flag — OUTERMOST record survives; direct site resumes the outermost native frame with its full pre-call window pushed and the sub-computation re-runs interpreted (Phase-E-T2 semantics, sound cross-function thanks to frame-relative windows + stripped re-records). **JIT_FRAME_BUDGET 8→256**; fib(6..30) all exact; deep/mutual/float chains verified; 820/0 workspace; clippy/fmt/no-default/x86 clean; Function suite 70 (61 was load flakiness)
 

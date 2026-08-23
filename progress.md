@@ -22,6 +22,33 @@
 - [x] 18 new integration tests (basic/default/namespace/reexport/star/star-as/rename/circular/self-cycle/let-mutation/own-bindings/TDZ-cycle-throw/duplicate-export/imported-assignment/missing-import/hoisted-in-cycle/bare-let) + CLI probes (`main.mjs`/`check.mjs`/`fib.mjs` loop + bench) — **613 integration tests pass, 3 ignored (workspace 774)**; cargo fmt + clippy clean (CI flags); `--no-default-features` probe clean
 - **Known gaps**: no dynamic `import()` / `import.meta`; resolver is a callback (no node_modules algorithm); module programs + module functions don't JIT (documented — interpreter-only); exception carry is via string-encoded Error message (no error objects across module boundaries); module `func_idx` resolution assumes a single program per `compile_module` call
 
+## CI fix + deep-recorder forensics (2026-08-23, post-#5 push)
+
+- **CI red on 51ada16 — three gaps, all fixed**: (1) `pub use codegen_aarch64::*`
+  in rune_jit_baseline/lib.rs was not arch-gated (x86-64/clippy/MSRV jobs);
+  (2) `Vm.jit_stack` referenced the crate under `--no-default-features` where
+  it is not a dependency (mirrored const fallback added); (3) moving the
+  layout constants to lib.rs unconditionally (they are Vm-layout facts).
+  Cross-checked with `cargo check --target x86_64-apple-darwin`.
+- **Debug-value leak caught**: JIT_FRAME_BUDGET=8 (a mid-session experiment)
+  had shipped in 51ada16; restoring 256/128 exposed that the overflow/resume
+  dance corrupts at scale: fib(19+) returns NaN. Forensics: every
+  floor-scoped interpreted resolution returns CORRECT values (arg/exit pairs
+  verified against fib), float64_add_helper never sees non-Smis, frame-stack
+  dumps show kept-frame zombies from earlier aborts sitting between the
+  resolved frame and later IC-dispatched frames — the nested run_loop's
+  Return cascade resumes those zombies at their stamped pcs, where their
+  call windows live only in (released) JIT-stack regions, so operands read
+  garbage. Budget=8 masks this for fib-class code (live depth ≤5 slots fits
+  the region; overflow never fires). **Budget stays 8** (matches shipped
+  v0.9.3 behavior); root-causing the zombie-resume semantics is the NEXT
+  TARGET — likely fix: on propagation, each helper level must either resolve
+  locally (floor-scoped) or invalidate its zombie instead of leaving it
+  resumable.
+- Region sizing note for the follow-up: helper-table offsets must stay under
+  the imm12 encoding limit (byte_offset ≤ 32760), capping JIT_STACK_SIZE at
+  ~4000 slots unless ldr_off/str_off grow a wide-offset form.
+
 ## Classes completion (v1.0 checklist item) (2026-08-20)**
 
 ## Classes completion (v1.0 checklist item) (2026-08-20)

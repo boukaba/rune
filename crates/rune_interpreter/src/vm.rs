@@ -28,7 +28,13 @@ use rune_core::value::Value;
 #[cfg(all(feature = "jit", target_arch = "aarch64"))]
 use rune_jit_baseline::Aarch64CodeGen;
 #[cfg(feature = "jit")]
+use rune_jit_baseline::JIT_STACK_SIZE;
+#[cfg(feature = "jit")]
 use rune_jit_baseline::JitEntryFn;
+// Without the `jit` feature rune_jit_baseline is not a dependency; mirror the
+// constant so the Vm layout stays byte-identical across feature sets.
+#[cfg(not(feature = "jit"))]
+const JIT_STACK_SIZE: usize = 2048;
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -500,7 +506,7 @@ pub struct Vm {
     /// `rune_jit_baseline::JIT_FRAME_BUDGET`). Nested native frames start
     /// ABOVE their caller's live slots — a callee can no longer clobber
     /// caller operands, and bailout snapshots are frame-relative.
-    pub jit_stack: [u64; rune_jit_baseline::JIT_STACK_SIZE],
+    pub jit_stack: [u64; JIT_STACK_SIZE],
     /// JIT helper function pointer table. Must follow jit_stack immediately;
     /// emitted code loads helpers at `JIT_HELPERS_OFFSET` (= 2048*8) + idx*8.
     pub jit_helpers: JitHelpers,
@@ -707,7 +713,7 @@ impl Default for Vm {
 impl Vm {
     pub fn new() -> Self {
         Vm {
-            jit_stack: [0; rune_jit_baseline::JIT_STACK_SIZE],
+            jit_stack: [0; JIT_STACK_SIZE],
             jit_helpers: JitHelpers {
                 lexical_helper: rune_jit_lexical_helper as *const () as usize,
                 #[cfg(feature = "jit")]

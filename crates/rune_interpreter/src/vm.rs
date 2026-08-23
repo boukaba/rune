@@ -11205,9 +11205,8 @@ pub unsafe extern "C" fn rune_jit_call_helper(
                             reason: rune_jit_baseline::BailoutReason::BailOnEntry,
                         };
                         unsafe {
-                            let flag_ptr = vm_ptr
-                                .add(rune_jit_baseline::JIT_FLAG_OFFSET as usize)
-                                as *mut u64;
+                            let flag_ptr =
+                                vm_ptr.add(rune_jit_baseline::JIT_FLAG_OFFSET as usize) as *mut u64;
                             *flag_ptr = 1;
                         }
                         return result_raw;

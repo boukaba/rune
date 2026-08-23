@@ -3759,3 +3759,10 @@ Fix session plan: (a) dump n/locals at pc16 guard entry, (b) audit nested-bailou
 
 - BailOnEntry@bc11 snapshot decoded: `[denormal-bits≈0x506, Smi(2), 0.0-bits]` — NOT this/callee/arg values; the runtime JIT-stack pointer sits ABOVE the live data reading stale slots, while the model claims depth 10. Both sides wrong ⟹ sp/model drift begins EARLIER in the unit (likely at first Call's helper-vs-model mismatch), and the Sub "overflow" at pc16 is a downstream symptom of computing on stale slots
 - Confirms: fix = full Call-arm stack-contract re-derivation against rune_jit_call_helper (who consumes what, when), not spot patches. Session closed here; plan in #4b stands
+
+## Stability #4d — ROOT CAUSE (design): JIT frames share/alias one global stack (2026-08-22)
+
+- Bytecode dump (RUNE_DUMP now recurses into functions) enabled exact model trace: with unwind fix, pc10 validates (recorded 5 == runtime 5); pc16 residual +2 traced to ternary op conventions
+- **Definitive root cause**: emit_prologue sets `JIT_STACK_REG = vm_base + jit_stack_offset(0)` on EVERY native entry — i.e., all native frames share ONE contiguous stack starting at the same base. Consequences: (a) nested native callees overwrite ancestor live slots (accidentally harmless only when ancestors don't re-read); (b) bailout snapshots taken from the GLOBAL base while bailout tables record FRAME-relative depths → snapshot length ≠ recorded depth whenever any ancestor values are live (fib recursion)
+- **Fix design (next session, ~focused slice)**: JIT calling convention v2 — either (a) per-frame regions via a vm.jit_stack_cursor maintained at native entry/exit (prologue: sp = cursor; epilogue: restore), or (b) pass entry-sp through the existing args_ptr mechanism and make records/snapshots frame-relative. Option (a) is smallest: one field + prologue/epilogue/call_helper updates, no ABI change
+- RUNE_DUMP kept (env-gated, recurses into function programs — broadly useful)

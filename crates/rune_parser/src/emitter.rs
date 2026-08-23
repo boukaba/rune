@@ -44,6 +44,12 @@ pub struct Emitter {
     /// Captured_names of enclosing functions, ordered closest-first.
     /// Used by inner functions to resolve free variables via LoadCaptured(depth, slot).
     env_scope_stack: Vec<Vec<String>>,
+    /// Index of the SCRIPT env entry in `env_scope_stack` (Some only after
+    /// emit_program pushed one). While `env_scope_stack.len() == depth + 1`
+    /// we are still emitting into the script frame itself — top-level var
+    /// bindings must keep flowing to globals (cross-`eval` persistence), so
+    /// only function/class DECLARATIONS are captured at this level.
+    script_scope_depth: Option<usize>,
     loop_exit_stack: Vec<usize>,
     loop_cont_stack: Vec<usize>,
     /// Pending `break`/`continue` jump positions of the innermost do-while loop,
@@ -90,6 +96,7 @@ impl Emitter {
             captured_names: Vec::new(),
             captured_env_size: 0,
             env_scope_stack: Vec::new(),
+            script_scope_depth: None,
             loop_exit_stack: Vec::new(),
             loop_cont_stack: Vec::new(),
             pending_loop_jumps: Vec::new(),
@@ -145,6 +152,36 @@ impl Emitter {
             self.emit(Opcode::LoadUndefined, vec![]);
             self.emit(Opcode::Return, vec![]);
             return;
+        }
+        // --- Escape analysis at SCRIPT level ---
+        // A top-level function/class declaration stored only in a Frame local
+        // is invisible to inner functions (they resolve free identifiers via
+        // an env chain, falling through to global → undefined). When the
+        // program contains any inner function, create the script env and
+        // capture all top-level bindings so inner closures share them.
+        // Unlike compile_function there is no copy-in: nothing has been
+        // stored yet, and every subsequent binding store routes through
+        // StoreCaptured because the captured names shadow the locals.
+        let has_inner = prog.body.iter().any(contains_inner_function_stmt);
+        if has_inner {
+            // Capture ONLY function/class declaration names: top-level vars
+            // must keep flowing to globals (subsequent Context::eval calls
+            // read them there). Inner functions resolve the declarations via
+            // the env because they are never globals.
+            let mut decl_names: Vec<String> = Vec::new();
+            for stmt in &prog.body {
+                collect_script_decl_names_stmt(stmt, &mut decl_names);
+            }
+            for name in &decl_names {
+                if !self.locals.contains(name) {
+                    self.locals.push(name.clone());
+                }
+            }
+            self.captured_names = decl_names.clone();
+            self.captured_env_size = self.captured_names.len();
+            self.emit(Opcode::MakeEnv, vec![self.captured_env_size as i64]);
+            self.env_scope_stack.push(self.captured_names.clone());
+            self.script_scope_depth = Some(self.env_scope_stack.len() - 1);
         }
         // Wrap program body in an implicit lexical scope for let/const/TDZ
         let lexical_count = self.count_lexicals(&prog.body);
@@ -513,6 +550,7 @@ impl Emitter {
     fn compile_function(&mut self, func: &FnNode) -> usize {
         let mut sub = Emitter::new();
         sub.env_scope_stack = self.env_scope_stack.clone();
+        sub.script_scope_depth = self.script_scope_depth;
         sub.private_field_names = self.private_field_names.clone();
         sub.module_mode = self.module_mode;
         sub.module_imports = self.module_imports.clone();
@@ -573,9 +611,13 @@ impl Emitter {
             }
         }
         // --- Escape analysis: does this function contain any inner function? ---
-        // Pre-scan: collect all var declaration names so locals is complete before capture
+        // Pre-scan: collect all var declaration names AND nested function/
+        // class declaration names so locals is complete before capture.
+        // Function/class names must be captured too — an inner sibling that
+        // references them resolves through the env chain (they are never
+        // globals).
         let mut all_var_names: Vec<String> = Vec::new();
-        collect_var_names_stmt(&func.body, &mut all_var_names);
+        collect_decl_names_stmt(&func.body, &mut all_var_names);
         for name in &all_var_names {
             if !sub.locals.contains(name) {
                 sub.locals.push(name.clone());
@@ -633,6 +675,7 @@ impl Emitter {
     fn compile_function_into(&mut self, func: &FnNode) -> BytecodeProgram {
         let mut sub = Emitter::new();
         sub.env_scope_stack = self.env_scope_stack.clone();
+        sub.script_scope_depth = self.script_scope_depth;
         sub.private_field_names = self.private_field_names.clone();
         sub.module_mode = self.module_mode;
         sub.module_imports = self.module_imports.clone();
@@ -1116,6 +1159,16 @@ impl Emitter {
         };
         if let Some(idx) = save_slot {
             self.emit(Opcode::StoreLocal, vec![idx as i64]);
+            // Sync the class binding into the ENCLOSING capture env when the
+            // name is captured there (script-level or outer function), so
+            // sibling/inner functions resolve it. StoreLocal pushed the
+            // value back; Dup feeds the popping StoreCaptured.
+            if let Some(ref cname) = class.name {
+                if let Some((depth, cslot)) = self.env_captured_slot(cname) {
+                    self.emit(Opcode::Dup, vec![]);
+                    self.emit(Opcode::StoreCaptured, vec![depth as i64, cslot as i64]);
+                }
+            }
         }
         // 5-pre. Bind the class name inside the capture env (slot filled any
         // time before the first method call — closures hold the env object).
@@ -1457,8 +1510,10 @@ impl Emitter {
                 self.emit_assign_store(name);
             }
             DestructureStore::Decl(VarKind::Var) => {
-                let is_top_level =
-                    self.env_scope_stack.is_empty() && self.captured_names.is_empty();
+                let is_top_level = match self.script_scope_depth {
+                    Some(d) => self.env_scope_stack.len() == d + 1,
+                    None => self.env_scope_stack.is_empty() && self.captured_names.is_empty(),
+                };
                 if !is_top_level && !self.locals.contains(&name.to_string()) {
                     self.locals.push(name.to_string());
                 }
@@ -1784,8 +1839,13 @@ impl Emitter {
                                 );
                             }
                         } else {
-                            let is_top_level =
-                                self.env_scope_stack.is_empty() && self.captured_names.is_empty();
+                            let is_top_level = match self.script_scope_depth {
+                                Some(d) => self.env_scope_stack.len() == d + 1,
+                                None => {
+                                    self.env_scope_stack.is_empty()
+                                        && self.captured_names.is_empty()
+                                }
+                            };
                             if !is_top_level && !self.locals.contains(&decl.name.to_string()) {
                                 self.locals.push(decl.name.to_string());
                             }
@@ -1885,6 +1945,15 @@ impl Emitter {
                     self.emit(Opcode::MakeFunction, vec![func_idx]);
                     if let Some(idx) = self.local_index(name) {
                         self.emit(Opcode::StoreLocal, vec![idx as i64]);
+                    }
+                    // Sync the binding into the capture env when the name is
+                    // captured (script-level or enclosing function): inner
+                    // functions resolve this identifier through the env, not
+                    // the frame local. StoreLocal pushed the value back, so
+                    // Dup before the popping StoreCaptured keeps balance.
+                    if let Some((depth, slot)) = self.env_captured_slot(name) {
+                        self.emit(Opcode::Dup, vec![]);
+                        self.emit(Opcode::StoreCaptured, vec![depth as i64, slot as i64]);
                     }
                     self.emit(Opcode::Pop, vec![]);
                 }
@@ -3683,6 +3752,145 @@ fn collect_var_names_stmt(stmt: &Stmt, names: &mut Vec<String>) {
             }
             if let Some(stmts) = finally {
                 stmts.iter().for_each(|s| collect_var_names_stmt(s, names));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collect names bound by var declarations AND function/class declarations,
+/// recursively through block/branch/loop/try structure. Function and class
+/// declaration names must be captured alongside vars: they are never globals,
+/// so inner functions referencing them resolve through the env chain.
+fn collect_decl_names_stmt(stmt: &Stmt, names: &mut Vec<String>) {
+    match stmt {
+        Stmt::Function(f, _) => {
+            if let Some(name) = &f.name {
+                if !names.contains(&name.to_string()) {
+                    names.push(name.to_string());
+                }
+            }
+            return; // body belongs to the function's own scope
+        }
+        Stmt::Class(c, _) => {
+            if let Some(name) = &c.name {
+                if !names.contains(&name.to_string()) {
+                    names.push(name.to_string());
+                }
+            }
+            return; // body belongs to the class's own scope
+        }
+        _ => {}
+    }
+    collect_var_names_stmt(stmt, names);
+    // Recurse structurally for declaration arms that collect_var_names_stmt
+    // skips (its `_ => {}` swallows Function/Class without descent).
+    match stmt {
+        Stmt::Function(_, _) | Stmt::Class(_, _) => {}
+        Stmt::Block(stmts, _) => stmts.iter().for_each(|s| collect_decl_names_stmt(s, names)),
+        Stmt::If(_, then, else_, _) => {
+            collect_decl_names_stmt(then, names);
+            if let Some(s) = else_ {
+                collect_decl_names_stmt(s, names);
+            }
+        }
+        Stmt::While(_, body, _) => collect_decl_names_stmt(body, names),
+        Stmt::DoWhile(_, body, _) => collect_decl_names_stmt(body, names),
+        Stmt::For(init, _, _, body, _) => {
+            if let Some(s) = init {
+                collect_decl_names_stmt(s, names);
+            }
+            collect_decl_names_stmt(body, names);
+        }
+        Stmt::ForIn(_, _, body, _) => collect_decl_names_stmt(body, names),
+        Stmt::ForOf(_, _, body, _) => collect_decl_names_stmt(body, names),
+        Stmt::Switch(_, cases, default, _) => {
+            for c in cases {
+                c.body
+                    .iter()
+                    .for_each(|s| collect_decl_names_stmt(s, names));
+            }
+            if let Some(stmts) = default {
+                stmts.iter().for_each(|s| collect_decl_names_stmt(s, names));
+            }
+        }
+        Stmt::Try(body, catch, finally, _) => {
+            body.iter().for_each(|s| collect_decl_names_stmt(s, names));
+            if let Some(c) = catch {
+                c.body
+                    .iter()
+                    .for_each(|s| collect_decl_names_stmt(s, names));
+            }
+            if let Some(f) = finally {
+                f.iter().for_each(|s| collect_decl_names_stmt(s, names));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collect ONLY function/class declaration names, recursively through
+/// block/branch/loop/try structure without descending into function/class
+/// bodies. Used at SCRIPT level where vars stay global and only declarations
+/// need capture.
+fn collect_script_decl_names_stmt(stmt: &Stmt, names: &mut Vec<String>) {
+    match stmt {
+        Stmt::Function(f, _) => {
+            if let Some(name) = &f.name {
+                if !names.contains(&name.to_string()) {
+                    names.push(name.to_string());
+                }
+            }
+        }
+        Stmt::Class(c, _) => {
+            if let Some(name) = &c.name {
+                if !names.contains(&name.to_string()) {
+                    names.push(name.to_string());
+                }
+            }
+        }
+        Stmt::Block(stmts, _) => stmts
+            .iter()
+            .for_each(|s| collect_script_decl_names_stmt(s, names)),
+        Stmt::If(_, then, else_, _) => {
+            collect_script_decl_names_stmt(then, names);
+            if let Some(s) = else_ {
+                collect_script_decl_names_stmt(s, names);
+            }
+        }
+        Stmt::While(_, body, _) => collect_script_decl_names_stmt(body, names),
+        Stmt::DoWhile(_, body, _) => collect_script_decl_names_stmt(body, names),
+        Stmt::For(init, _, _, body, _) => {
+            if let Some(s) = init {
+                collect_script_decl_names_stmt(s, names);
+            }
+            collect_script_decl_names_stmt(body, names);
+        }
+        Stmt::ForIn(_, _, body, _) => collect_script_decl_names_stmt(body, names),
+        Stmt::ForOf(_, _, body, _) => collect_script_decl_names_stmt(body, names),
+        Stmt::Switch(_, cases, default, _) => {
+            for c in cases {
+                c.body
+                    .iter()
+                    .for_each(|s| collect_script_decl_names_stmt(s, names));
+            }
+            if let Some(stmts) = default {
+                stmts
+                    .iter()
+                    .for_each(|s| collect_script_decl_names_stmt(s, names));
+            }
+        }
+        Stmt::Try(body, catch, finally, _) => {
+            body.iter()
+                .for_each(|s| collect_script_decl_names_stmt(s, names));
+            if let Some(c) = catch {
+                c.body
+                    .iter()
+                    .for_each(|s| collect_script_decl_names_stmt(s, names));
+            }
+            if let Some(f) = finally {
+                f.iter()
+                    .for_each(|s| collect_script_decl_names_stmt(s, names));
             }
         }
         _ => {}

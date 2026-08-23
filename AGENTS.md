@@ -92,6 +92,9 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ### Goal
 Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8× vs Node) with enough stdlib to run real workloads. v0.4 = stdlib breadth (14 builtins). v0.5 = Promise + async patterns.
 
+### Done — v0.9.4 / top-level declaration capture
+- **Top-level & sibling function/class declaration resolution FIXED** — `function add(){}; function f(){ return add(); } f()` no longer throws ("undefined is not a function"): emit_program now creates a script env capturing ONLY fn/class declaration names (vars stay global — cross-eval persistence kept via a script_scope_depth marker on the two is_top_level gates); Stmt::Function/emit_class step-5 bindings Dup+StoreCaptured into the enclosing capture env when captured; compile_function's pre-scan uses collect_decl_names_stmt (vars + fn/class names, no body descent) so sibling decls inside functions work too. **language/function-code 87→103 (+19%)**; 820/0 workspace; clippy/fmt/no-default/x86 clean; fib(20) + cross-call JIT pattern with top-level decls exact
+
 ### Done — v0.9.3 / Stability#5 (call-IC fix + convention v2-lite: regions + frame-chain + exact model)
 - **fib(6..24) ALL EXACT** — the tier-up-mid-recursion panic ("call-ic: snapshot != recorded") is gone; workspace 820/0, clippy/fmt/no-default clean, built-ins/Function spot-check unchanged (70/509)
 - **Universal Frames everywhere** — call_helper AND interpreter call-IC/tier-up sites always push a callee Frame (leaf fast-path + nested-scratch branch deleted): kills jit_locals_buffer dangling (misboxed locals → guard cascades) and makes every native chain interpreter-resumable; call-site pc stamped on every pushed frame (Return's `pc+=1` invariant lands past the Call); frame chain KEPT on pending (call_helper sets flag, no pop)

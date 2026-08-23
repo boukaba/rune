@@ -22,6 +22,36 @@
 - [x] 18 new integration tests (basic/default/namespace/reexport/star/star-as/rename/circular/self-cycle/let-mutation/own-bindings/TDZ-cycle-throw/duplicate-export/imported-assignment/missing-import/hoisted-in-cycle/bare-let) + CLI probes (`main.mjs`/`check.mjs`/`fib.mjs` loop + bench) — **613 integration tests pass, 3 ignored (workspace 774)**; cargo fmt + clippy clean (CI flags); `--no-default-features` probe clean
 - **Known gaps**: no dynamic `import()` / `import.meta`; resolver is a callback (no node_modules algorithm); module programs + module functions don't JIT (documented — interpreter-only); exception carry is via string-encoded Error message (no error objects across module boundaries); module `func_idx` resolution assumes a single program per `compile_module` call
 
+## Top-level function/class declaration capture FIXED (2026-08-23)
+
+- **Bug (pre-existing, found during Stability#5 validation)**: a top-level
+  `function name(){}` / `class Name{}` declaration stored only in a Frame
+  local was invisible to inner functions — they resolve free identifiers via
+  the env chain and fall through to global (`LoadGlobal` → undefined →
+  "TypeError: undefined is not a function"). Repro:
+  `function add(a,b){return a+b;} function f(x){return add(x,1);} f(5)`.
+  Also hit sibling declarations inside functions
+  (`function outer(){ function inner(){} function caller(){ return inner(); } }`),
+  which is why language/function-code sat at 40%.
+- **Root cause**: `emit_program` had no escape-analysis pass (only
+  `compile_function` creates envs), and `compile_function`'s pre-scan
+  collected var names but NOT nested function/class declaration names.
+- **Fix** (emitter only): (1) `collect_decl_names_stmt` — vars + fn/class
+  decl names, recursive, never descending into fn/class bodies — now feeds
+  `compile_function`'s captured set; (2) `emit_program` pushes a script env
+  capturing ONLY top-level fn/class declarations; (3) `Stmt::Function` and
+  `emit_class` step-5 bindings Dup-sync into the capture env via
+  StoreCaptured when the name is captured; (4) new `script_scope_depth`
+  marker so the two `is_top_level` gates keep TOP-LEVEL VARS flowing to
+  **globals** while the script env exists — cross-`eval` persistence
+  (`ctx.eval("var x=1")` then `eval("x")`) preserved (first cut captured all
+  names and broke 4 tests that rely on it).
+- **Results**: repro + all four shapes exact; fib(20), cross-call JIT
+  pattern `add(x,1)+add(x,2)` ×300 with top-level decls exact;
+  **820 workspace passed / 0 failed**; clippy/fmt/no-default/x86-check clean.
+  Conformance: **language/function-code 87→103 passed (+18.7%, 40%→47%)**;
+  expressions/call unchanged (26→25, noise).
+
 ## CI fix + deep-recorder forensics (2026-08-23, post-#5 push)
 
 - **CI red on 51ada16 — three gaps, all fixed**: (1) `pub use codegen_aarch64::*`

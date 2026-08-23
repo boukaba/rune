@@ -22,6 +22,36 @@
 - [x] 18 new integration tests (basic/default/namespace/reexport/star/star-as/rename/circular/self-cycle/let-mutation/own-bindings/TDZ-cycle-throw/duplicate-export/imported-assignment/missing-import/hoisted-in-cycle/bare-let) + CLI probes (`main.mjs`/`check.mjs`/`fib.mjs` loop + bench) — **613 integration tests pass, 3 ignored (workspace 774)**; cargo fmt + clippy clean (CI flags); `--no-default-features` probe clean
 - **Known gaps**: no dynamic `import()` / `import.meta`; resolver is a callback (no node_modules algorithm); module programs + module functions don't JIT (documented — interpreter-only); exception carry is via string-encoded Error message (no error objects across module boundaries); module `func_idx` resolution assumes a single program per `compile_module` call
 
+## Zombie-resume FIXED — unwind-to-outermost restored, budget 256 (2026-08-23)
+
+- **Root cause of the fib(19+)-NaN dance corruption**: the kept-frame chain
+  (Stability#5 edit 3) left intermediate native frames resumable at their
+  STAMPED call-site pcs, but their operand windows live only in JIT-stack
+  regions that are RELEASED on exit — a resumed zombie pops garbage from
+  vm.stack. Fine-grained resume is unsound by construction.
+- **Fix — UNWIND-TO-OUTERMOST** (the original Phase-E-T2 semantics, now made
+  sound): on pending, `rune_jit_call_helper` REPLACES the pending record with
+  its own `(bc_idx, snapshot = fb..args_ptr)` — the caller's full pre-call
+  window — pops its callee frame, sets the flag and returns. Each enclosing
+  level overwrites again, so the OUTERMOST record survives; the direct site
+  resumes the outermost native frame at ITS call site with the complete
+  pre-call window pushed (exactly the state the Call opcode expects), and the
+  sub-computation re-runs interpreted. Sound across functions (bc_idx always
+  belongs to the frame's own prog). Edit-4's stripped re-records are what keep
+  the outermost overwrite intact. Cost: inner completed work below a bailout
+  is recomputed interpreted — correctness first, and rare.
+- **JIT_FRAME_BUDGET 8 → 256** (16 MiB Vm total unchanged): overflow now means
+  >8 simultaneous native frames, handled soundly by the above.
+- **Validation**: fib(6..30) ALL EXACT (19/20/24/28/30 previously NaN);
+  cross-call `add(x,1)+add(x,2)` ×300; mul-chain h(5) ×300; var-fn recursion
+  rf(24); 40-deep float chain deep(40)=20.5; rsum(25)×100; mutual recursion
+  isEven/isOdd(15) ✓; **820 workspace / 0 failed**; clippy/fmt/no-default/
+  x86-check clean. built-ins/Function 70/509 (baseline; a transient 61 was
+  load-flakiness from parallel builds — per-test names diffed clean).
+- Note for future region sizing: helper-table byte offsets must stay ≤ 32760
+  (ldr_off imm12 field limit) — JIT_STACK_SIZE ≤ ~4000 slots without a
+  wide-offset encoding.
+
 ## Top-level function/class declaration capture FIXED (2026-08-23)
 
 - **Bug (pre-existing, found during Stability#5 validation)**: a top-level

@@ -92,6 +92,9 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ### Goal
 Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8× vs Node) with enough stdlib to run real workloads. v0.4 = stdlib breadth (14 builtins). v0.5 = Promise + async patterns.
 
+### Done — v0.9.5 / zombie-resume fix (unwind-to-outermost)
+- **Overflow/resume dance CORRUPTION ROOT-CAUSED + FIXED** — kept-frame zombies (Stability#5 edit 3) resumed at stamped pcs against released JIT-stack windows → fib(19+) NaN at budget ≥128. Fix: helpers on pending OVERWRITE the record with their own (call-site, fb..args_ptr caller-window), pop their callee frame, propagate the flag — OUTERMOST record survives; direct site resumes the outermost native frame with its full pre-call window pushed and the sub-computation re-runs interpreted (Phase-E-T2 semantics, sound cross-function thanks to frame-relative windows + stripped re-records). **JIT_FRAME_BUDGET 8→256**; fib(6..30) all exact; deep/mutual/float chains verified; 820/0 workspace; clippy/fmt/no-default/x86 clean; Function suite 70 (61 was load flakiness)
+
 ### Done — v0.9.4 / top-level declaration capture
 - **Top-level & sibling function/class declaration resolution FIXED** — `function add(){}; function f(){ return add(); } f()` no longer throws ("undefined is not a function"): emit_program now creates a script env capturing ONLY fn/class declaration names (vars stay global — cross-eval persistence kept via a script_scope_depth marker on the two is_top_level gates); Stmt::Function/emit_class step-5 bindings Dup+StoreCaptured into the enclosing capture env when captured; compile_function's pre-scan uses collect_decl_names_stmt (vars + fn/class names, no body descent) so sibling decls inside functions work too. **language/function-code 87→103 (+19%)**; 820/0 workspace; clippy/fmt/no-default/x86 clean; fib(20) + cross-call JIT pattern with top-level decls exact
 

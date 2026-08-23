@@ -11165,15 +11165,49 @@ pub unsafe extern "C" fn rune_jit_call_helper(
                     let result_raw = unsafe { func(vm_ptr, gc_ptr, locals_ptr) };
                     JIT_CALL_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
 
-                    // Pending bailout: KEEP this frame on the chain. Each
-                    // enclosing native caller sees the flag via its post-BLR
-                    // check and propagates without popping either; the
-                    // interpreter unwinds the stacked frames (top first)
-                    // once control returns to it.
+                    // Pending bailout — UNWIND-TO-OUTERMOST (Phase-E-T2
+                    // semantics, made sound by frame-relative windows).
+                    //
+                    // An intermediate native frame CANNOT resume
+                    // interpreted at its stamped call-site: its operand
+                    // window lives in its JIT-stack region, which is
+                    // released on exit — resuming it pops garbage from
+                    // vm.stack (the fib(19+) NaN class). Instead, each
+                    // helper level REPLACES the pending record with its own
+                    // (call-site, caller-window) so the OUTERMOST record
+                    // survives, pops the callee frame (it will not resume),
+                    // and lets the flag propagate. The direct-site caller
+                    // then resumes the outermost native frame at ITS call
+                    // site with the full pre-call window pushed — exactly
+                    // the state the Call opcode expects.
                     if vm.jit_bailout.pending {
+                        vm.frames.pop();
+                        let base = if fb.is_null() {
+                            vm.jit_stack_base as usize
+                        } else {
+                            fb as usize
+                        };
+                        let current = args_ptr as usize;
+                        let count = if current >= base {
+                            (current - base) / 8
+                        } else {
+                            0
+                        };
+                        let base_ptr = base as *const u64;
+                        let mut snapshot = Vec::with_capacity(count);
+                        for i in 0..count {
+                            snapshot.push(unsafe { *base_ptr.add(i) });
+                        }
+                        vm.jit_bailout = JitBailoutState {
+                            bc_pc: bc_idx as usize,
+                            pending: true,
+                            stack_snapshot: snapshot,
+                            reason: rune_jit_baseline::BailoutReason::BailOnEntry,
+                        };
                         unsafe {
-                            let flag_ptr =
-                                vm_ptr.add(rune_jit_baseline::JIT_FLAG_OFFSET as usize) as *mut u64;
+                            let flag_ptr = vm_ptr
+                                .add(rune_jit_baseline::JIT_FLAG_OFFSET as usize)
+                                as *mut u64;
                             *flag_ptr = 1;
                         }
                         return result_raw;

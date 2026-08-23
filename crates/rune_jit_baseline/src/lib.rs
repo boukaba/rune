@@ -29,16 +29,9 @@ pub use codegen_aarch64::Aarch64CodeGen;
 /// compile-time model exactly.
 pub const JIT_STACK_SIZE: usize = 2048;
 /// Slots reserved per native frame region. Bounds native-call nesting:
-/// deeper chains overflow-guard to a BailOnEntry (interpreter takes over).
-///
-/// KNOWN LIMITATION (Stability#5 follow-up): larger budgets (128/256) expose
-/// a corruption in the overflow/resume dance — fib(19+) returns NaN because
-/// kept-frame zombies from earlier aborts get resumed by nested run_loops
-/// with stale operand expectations. Budget 8 keeps fib-class recursion fully
-/// native (live depth ≤ ~5 slots fits the 64-byte region; claims are LIFO so
-/// unused region slack is harmless) and matches shipped v0.9.3 behavior.
-/// Root-causing the dance is the documented NEXT TARGET.
-pub const JIT_FRAME_BUDGET: usize = 8;
+/// deeper chains overflow-guard to a BailOnEntry (interpreter takes over
+/// via UNWIND-TO-OUTERMOST — see rune_jit_call_helper).
+pub const JIT_FRAME_BUDGET: usize = 256;
 
 /// Byte offset of the helper fn-pointer table (after the value-stack area).
 pub const JIT_HELPERS_OFFSET: u32 = (JIT_STACK_SIZE * 8) as u32; // 16384

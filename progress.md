@@ -87,6 +87,37 @@
   (ldr_off imm12 field limit) — JIT_STACK_SIZE ≤ ~4000 slots without a
   wide-offset encoding.
 
+## let-for rewrite LANDED (2026-08-24)
+
+The documented single-slice rewrite from the deep-dive dossier is in —
+emitter-only, natives stay gated (GC-safe lexical helpers remain the
+follow-up for re-enabling).
+
+- **Wrap-up reorder (§14.7.4.9)**: truncate env scope FIRST → the update
+  expression resolves LEXICALLY (invisible to iteration closures, f[0]()===0
+  ✓); body writes live in the ENV and are carried across iterations by a
+  conditional tail copy-back: `update.is_some()` → CopyLexical shadow→outer
+  (slot is authoritative), else LoadCaptured[0,k]+StoreLexical[outer] (env is
+  authoritative). The old unconditional CopyLexical of a STALE shadow slot
+  was the lost-update hang behind the continue-SEGV trio.
+- **Shadowing-flag lockstep**: lexical_scope_shadowing pops now pair with
+  EVERY lexical_scopes.pop (the For-arm direct pop missed its flag; one
+  stale `true` made outer-loop updates resolve lexically in nested loops →
+  infinite).
+- **Sync discriminator**: the DeclareLet export-to-env sync fires only when
+  NOT shadows_per_iter_env(name) (env_scope_is_per_iter marker stack) —
+  `{ let x = "h"; }` no longer clobbers the loop variable's env slot, while
+  function-level captures (`const inc = ...`) still sync for closures.
+- **Labeled jumps across let-for levels** emit one RestoreEnv per crossed
+  per-iteration env (active_loop_has_env stack) so the target wrap-up reads
+  ITS OWN env — fixed `continue outer` from an inner let-for reading y into
+  x (infinite oscillation).
+- **Validation**: five-shape matrix all exact (A update / B body / C
+  closures / D nested / E body-only); continue trio + labeled variants all
+  exit 0; shadow repro = 3; **workspace 820/0**; clippy/fmt/no-default/
+  x86-check clean. Suites: continue 10/24 (was 1 at campaign start), labeled
+  2, break 7.
+
 ## let-for deep-dive: root causes mapped, rewrite deferred (2026-08-23 night)
 
 Session attempted the let-for per-iteration rewrite. Emitter fixes REACHED

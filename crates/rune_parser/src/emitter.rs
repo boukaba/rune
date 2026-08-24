@@ -44,6 +44,20 @@ pub struct Emitter {
     /// Captured_names of enclosing functions, ordered closest-first.
     /// Used by inner functions to resolve free variables via LoadCaptured(depth, slot).
     env_scope_stack: Vec<Vec<String>>,
+    /// Parallel to env_scope_stack: marks entries pushed by a `for` head's
+    /// per-iteration env (vs function-level capture envs). Drives the
+    /// declaration→env export-sync discriminator (block-shadowing a loop
+    /// variable must not clobber its env slot).
+    env_scope_is_per_iter: Vec<bool>,
+    /// Parallel to lexical_scopes: marks the per-iteration carrier scope of
+    /// let-bound `for` heads. Popped in LOCKSTEP with lexical_scopes — a
+    /// missed pair desynchronizes name resolution (nested-loop hang).
+    lexical_scope_shadowing: Vec<bool>,
+    /// Whether each active loop frame owns a per-iteration ENV (true only
+    /// for `for` with let-bound init). A LABELED jump crossing such levels
+    /// must emit one RestoreEnv per crossed env so the target loop's wrap-up
+    /// reads ITS OWN env, not a deeper leftover one.
+    active_loop_has_env: Vec<bool>,
     /// Index of the SCRIPT env entry in `env_scope_stack` (Some only after
     /// emit_program pushed one). While `env_scope_stack.len() == depth + 1`
     /// we are still emitting into the script frame itself — top-level var
@@ -103,11 +117,14 @@ impl Emitter {
             captured_names: Vec::new(),
             captured_env_size: 0,
             env_scope_stack: Vec::new(),
+            env_scope_is_per_iter: Vec::new(),
+            lexical_scope_shadowing: Vec::new(),
             script_scope_depth: None,
             loop_exit_stack: Vec::new(),
             loop_cont_stack: Vec::new(),
             pending_loop_jumps: Vec::new(),
             active_loop_labels: Vec::new(),
+            active_loop_has_env: Vec::new(),
             pending_labels: Vec::new(),
             switch_exit_stack: Vec::new(),
             switch_break_jumps: Vec::new(),
@@ -559,6 +576,8 @@ impl Emitter {
     fn compile_function(&mut self, func: &FnNode) -> usize {
         let mut sub = Emitter::new();
         sub.env_scope_stack = self.env_scope_stack.clone();
+        sub.env_scope_is_per_iter = self.env_scope_is_per_iter.clone();
+        sub.lexical_scope_shadowing = self.lexical_scope_shadowing.clone();
         sub.script_scope_depth = self.script_scope_depth;
         sub.private_field_names = self.private_field_names.clone();
         sub.module_mode = self.module_mode;
@@ -637,6 +656,7 @@ impl Emitter {
             // Conservative approach: capture ALL local variables into the env
             sub.captured_names = sub.locals.clone();
             sub.captured_env_size = sub.locals.len();
+            sub.env_scope_is_per_iter.push(false);
             sub.emit(Opcode::MakeEnv, vec![sub.captured_env_size as i64]);
             // Copy each local's initial value from Frame.locals into the env slot.
             // StoreCaptured pops the value, so NO Pop after it.
@@ -684,6 +704,8 @@ impl Emitter {
     fn compile_function_into(&mut self, func: &FnNode) -> BytecodeProgram {
         let mut sub = Emitter::new();
         sub.env_scope_stack = self.env_scope_stack.clone();
+        sub.env_scope_is_per_iter = self.env_scope_is_per_iter.clone();
+        sub.lexical_scope_shadowing = self.lexical_scope_shadowing.clone();
         sub.script_scope_depth = self.script_scope_depth;
         sub.private_field_names = self.private_field_names.clone();
         sub.module_mode = self.module_mode;
@@ -1634,7 +1656,9 @@ impl Emitter {
                 self.pending_loop_jumps.push(Vec::new());
                 let labels = std::mem::take(&mut self.pending_labels);
                 self.active_loop_labels.push(labels);
+                self.active_loop_has_env.push(false);
                 self.emit_statement(body);
+                self.active_loop_has_env.pop();
                 self.active_loop_labels.pop();
                 self.loop_cont_stack.pop();
                 self.loop_exit_stack.pop();
@@ -1660,7 +1684,9 @@ impl Emitter {
                 self.pending_loop_jumps.push(Vec::new());
                 let labels = std::mem::take(&mut self.pending_labels);
                 self.active_loop_labels.push(labels);
+                self.active_loop_has_env.push(false);
                 self.emit_statement(body);
+                self.active_loop_has_env.pop();
                 self.active_loop_labels.pop();
                 self.loop_exit_stack.pop();
                 self.loop_cont_stack.pop();
@@ -1729,6 +1755,7 @@ impl Emitter {
                     }
                     self.lexical_slot_count += per_iteration_count;
                     self.lexical_scopes.push(shadow_bindings);
+                    self.lexical_scope_shadowing.push(true);
                 }
                 // ── Per-iteration env for closure capture ──
                 // Create a child env per iteration so closures capture the
@@ -1738,6 +1765,7 @@ impl Emitter {
                     let per_iter_names: Vec<String> =
                         per_iteration_vars.iter().map(|(n, _)| n.clone()).collect();
                     self.env_scope_stack.push(per_iter_names);
+                    self.env_scope_is_per_iter.push(true);
                     self.emit(Opcode::MakeEnv, vec![per_iteration_count as i64]);
                     for (i, (_, inner_slot)) in per_iteration_vars.iter().enumerate() {
                         self.emit(Opcode::LoadLexical, vec![*inner_slot as i64]);
@@ -1769,32 +1797,60 @@ impl Emitter {
                 self.pending_loop_jumps.push(Vec::new());
                 let labels = std::mem::take(&mut self.pending_labels);
                 self.active_loop_labels.push(labels);
+                self.active_loop_has_env.push(per_iteration_count > 0);
                 self.emit_statement(body);
+                self.active_loop_has_env.pop();
                 self.active_loop_labels.pop();
                 self.loop_cont_stack.pop();
                 self.loop_exit_stack.pop();
                 let continue_target = self.current();
-                // ── Restore env after body ──
+                // ── Per-iteration wrap-up (§14.7.4.9 semantics) ──
+                //
+                // A captured let-binding lives in TWO storages: the frame's
+                // lexical slot and the per-iteration EnvObject. Which one a
+                // write lands in depends on whether env_scope_stack still
+                // contains the per-iteration entry at emission time:
+                //   • BODY writes (emitted while it is pushed) → ENV —
+                //     visible to same-iteration closures created afterwards.
+                //   • UPDATE writes emitted after truncate → LEXICAL shadow
+                //     slot — invisible to those closures (f[0]()===0).
+                // The tail therefore:
+                //   1. truncates the compiler scope FIRST (update resolves
+                //      lexically),
+                //   2. carries body-side mutations from the ENV to the outer
+                //      binding BEFORE RestoreEnv (env is gone after), but only
+                //      when there is no update expression — with one, the
+                //      update's slot value is authoritative and copying the
+                //      (older) env value would REWIND the loop,
+                //   3. pops every parallel stack in lockstep.
                 if per_iteration_count > 0 {
-                    self.emit(Opcode::RestoreEnv, vec![]);
                     self.env_scope_stack.truncate(saved_env_depth);
-                }
-                if let Some(upd) = update {
-                    self.emit_expression(upd);
-                    self.emit(Opcode::Pop, vec![]);
-                }
-                // Pop per-iteration scope and copy back (inner → outer)
-                if per_iteration_count > 0 {
-                    for (i, (_, outer_slot)) in per_iteration_vars.iter().enumerate() {
-                        let inner_slot = shadow_start_slot + i;
-                        self.emit(
-                            Opcode::CopyLexical,
-                            vec![inner_slot as i64, *outer_slot as i64],
-                        );
+                    self.env_scope_is_per_iter.truncate(saved_env_depth);
+                    if update.is_none() {
+                        for (k, (_, outer_slot)) in per_iteration_vars.iter().enumerate() {
+                            self.emit(Opcode::LoadCaptured, vec![0, k as i64]);
+                            self.emit(Opcode::StoreLexical, vec![*outer_slot as i64]);
+                        }
+                    }
+                    self.emit(Opcode::RestoreEnv, vec![]);
+                    if let Some(upd) = update {
+                        self.emit_expression(upd);
+                        self.emit(Opcode::Pop, vec![]);
+                        for (i, (_, outer_slot)) in per_iteration_vars.iter().enumerate() {
+                            let inner_slot = shadow_start_slot + i;
+                            self.emit(
+                                Opcode::CopyLexical,
+                                vec![inner_slot as i64, *outer_slot as i64],
+                            );
+                        }
                     }
                     self.emit(Opcode::BlockLeave, vec![]);
                     self.lexical_scopes.pop();
+                    self.lexical_scope_shadowing.pop();
                     self.lexical_slot_count -= per_iteration_count;
+                } else if let Some(upd) = update {
+                    self.emit_expression(upd);
+                    self.emit(Opcode::Pop, vec![]);
                 }
                 self.emit(Opcode::Jump, vec![loop_start as i64]);
                 // Exit path (JumpIfFalse lands here): restore env before leaving.
@@ -1912,9 +1968,13 @@ impl Emitter {
                             };
                             self.emit(op, vec![slot as i64]);
                             // If this lexical binding is captured in a block env,
-                            // copy from lexical slot to env slot so closures see it
+                            // copy from lexical slot to env slot so closures see it.
+                            // EXCEPTION: when the shadowed env entry is a LOOP'S
+                            // PER-ITERATION scope, this declaration genuinely
+                            // block-shadows the loop variable — its value must
+                            // NOT leak into the loop env (that clobbered `x`).
                             if let Some((depth, env_slot)) = self.env_captured_slot(&decl.name) {
-                                if depth == 0 {
+                                if depth == 0 && !self.shadows_per_iter_env(&decl.name) {
                                     self.emit(Opcode::LoadLexical, vec![slot as i64]);
                                     self.emit(Opcode::StoreCaptured, vec![0, env_slot as i64]);
                                 }
@@ -1933,6 +1993,13 @@ impl Emitter {
                         .iter()
                         .rposition(|ls| ls.contains(&l))
                     {
+                        // Pop one per-iteration env per crossed env-owning
+                        // loop so the target's wrap-up reads ITS OWN env.
+                        for frame in ((i + 1)..self.active_loop_has_env.len()).rev() {
+                            if self.active_loop_has_env[frame] {
+                                self.emit(Opcode::RestoreEnv, vec![]);
+                            }
+                        }
                         let exit = self.loop_exit_stack[i];
                         // Matches the existing UNLABELED sentinel-break
                         // behaviour: jump straight to the exit paths.
@@ -1970,6 +2037,13 @@ impl Emitter {
                         .iter()
                         .rposition(|ls| ls.contains(&l))
                     {
+                        // Pop one per-iteration env per crossed env-owning
+                        // loop so the target's wrap-up reads ITS OWN env.
+                        for frame in ((i + 1)..self.active_loop_has_env.len()).rev() {
+                            if self.active_loop_has_env[frame] {
+                                self.emit(Opcode::RestoreEnv, vec![]);
+                            }
+                        }
                         let cont = self.loop_cont_stack[i];
                         // The continue_target already contains the loop's own
                         // RestoreEnv/copy-back/BlockLeave sequence — emitting
@@ -2146,7 +2220,9 @@ impl Emitter {
                 self.pending_loop_jumps.push(Vec::new());
                 let labels = std::mem::take(&mut self.pending_labels);
                 self.active_loop_labels.push(labels);
+                self.active_loop_has_env.push(false);
                 self.emit_statement(body);
+                self.active_loop_has_env.pop();
                 self.active_loop_labels.pop();
                 self.pending_loop_jumps.pop();
                 self.loop_cont_stack.pop();
@@ -3569,6 +3645,7 @@ impl Emitter {
         }
         self.lexical_slot_count += bindings.len();
         self.lexical_scopes.push(bindings);
+        self.lexical_scope_shadowing.push(false);
     }
 
     /// Collect all binding names from a pattern into the bindings vector.
@@ -3617,8 +3694,21 @@ impl Emitter {
     /// Leave the current lexical scope.
     fn leave_lexical_scope(&mut self) {
         if let Some(scope) = self.lexical_scopes.pop() {
+            self.lexical_scope_shadowing.pop();
             self.lexical_slot_count -= scope.len();
         }
+    }
+
+    /// True when `name` resolves to a LOOP PER-ITERATION env entry (the
+    /// closest hit), i.e. a live loop variable that nested declarations must
+    /// not clobber via the declaration→env export sync.
+    fn shadows_per_iter_env(&self, name: &str) -> bool {
+        for (i, names) in self.env_scope_stack.iter().enumerate().rev() {
+            if names.iter().any(|n| n == name) {
+                return self.env_scope_is_per_iter.get(i).copied().unwrap_or(false);
+            }
+        }
+        false
     }
 
     /// Look up a name in the lexical scope stack.

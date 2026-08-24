@@ -92,6 +92,9 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ### Goal
 Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8× vs Node) with enough stdlib to run real workloads. v0.4 = stdlib breadth (14 builtins). v0.5 = Promise + async patterns.
 
+### Done — v0.10.0 / let-for rewrite landed (2026-08-24)
+- **Per-iteration semantics correct**: wrap-up reorder per dossier — truncate-first makes updates resolve lexically (closure-invisible); conditional tail copy-back carries BODY mutations via env only when no update exists (else slot wins); shadowing-flag lockstep pops; sync discriminator (env_scope_is_per_iter) stops block-shadow clobber of loop vars; labeled jumps emit RestoreEnv per crossed per-iteration env. Five-shape matrix exact; SEGV trio + labeled variants exit 0; continue suite 1→10 since campaign start. Workspace 820/0; clippy/fmt/no-default/x86 clean. Natives stay gated for MakeEnv functions until GC-safe lexical helpers land (dossier follow-up).
+
 ### NEXT SESSION — let-for rewrite dossier (2026-08-23 night)
 - let-for per-iteration rewrite attempted & REVERTED (kept main green); FULL design + root-cause map in progress.md ("let-for deep-dive"): dual-storage split-brain (body→env vs update→slot, stale CopyLexical tail), per-position closure semantics, block-shadow env clobber, JIT StoreLexical stray-push (FIXED+kept), GC-unsafe MakeEnv-under-natives (traces/AOT/tier-up all GATED+kept; 3 tests pin correctness sans native entry). Land the documented emitter slice + GC-safe lexical helpers, then re-enable natives.
 

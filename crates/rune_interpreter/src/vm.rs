@@ -547,6 +547,11 @@ pub struct Vm {
     /// Run-loop exit floor: a `Return` exits the loop when the frame count
     /// drops to this value (used for nested module evaluation).
     pub return_frame_floor: usize,
+    /// While a generator's nested run_loop is active: the frame index the
+    /// generator frame occupies. Return inside it must NOT run the module-
+    /// style caller-stack truncation (the real caller lives outside this
+    /// nested loop); the value travels via Exit::Return.
+    nested_gen_floor: Option<usize>,
     /// Call-site ICs for monomorphic Call caching (Opcode::Call fast path).
     pub call_ics: Vec<CallIcEntry>,
     /// Reusable buffer for JIT locals Vec to avoid per-call heap allocation.
@@ -660,6 +665,9 @@ pub struct Vm {
     /// Registry id of the hidden symbol used to store iterator state on
     /// iterator objects (not exposed to JS code).
     pub(crate) iter_state_symbol: u32,
+    /// Hidden slot symbol on generator instances ("__rune_gen") carrying the
+    /// internal Generator id.
+    pub(crate) gen_state_symbol: u32,
     /// Pre-allocated property keys used by the iteration protocol ("done",
     /// "value", "next").
     pub(crate) done_key: Value,
@@ -749,6 +757,7 @@ impl Vm {
             module_stack: Vec::new(),
             globals_override: None,
             return_frame_floor: 0,
+            nested_gen_floor: None,
             jit_locals_buffer: Vec::new(),
             ics: Vec::new(),
             ic_entries: Vec::new(),
@@ -807,6 +816,7 @@ impl Vm {
             pending_collection_ctor: None,
             pending_collection_foreach: None,
             iter_state_symbol: rune_core::symbol::symbol_for("__rune_iter_state"),
+            gen_state_symbol: rune_core::symbol::symbol_for("__rune_gen"),
             done_key: Value::undefined(),
             value_key: Value::undefined(),
             next_key: Value::undefined(),
@@ -1479,6 +1489,7 @@ impl Vm {
         // hidden symbol (excluded from enumeration) on each iterator object.
         {
             self.iter_state_symbol = rune_core::symbol::symbol_for("__rune_iter_state");
+            self.gen_state_symbol = rune_core::symbol::symbol_for("__rune_gen");
             self.done_key = Value::from_heap_ptr(HeapString::allocate(gc, "done") as *mut u8);
             self.value_key = Value::from_heap_ptr(HeapString::allocate(gc, "value") as *mut u8);
             self.next_key = Value::from_heap_ptr(HeapString::allocate(gc, "next") as *mut u8);
@@ -3040,8 +3051,20 @@ impl Vm {
         gen_id: usize,
         arg: Value,
     ) -> Result<Value, Value> {
+        // Legacy semantics: Yield and Return both flatten to the value
+        // (used by Context::resume and the async machinery).
+        self.resume_generator_inner(gc, gen_id, arg)
+            .map(|(v, _done)| v)
+    }
+
+    fn resume_generator_inner(
+        &mut self,
+        gc: &mut SemiSpace,
+        gen_id: usize,
+        arg: Value,
+    ) -> Result<(Value, bool), Value> {
         if self.generators[gen_id].done {
-            return Ok(Value::undefined());
+            return Ok((Value::undefined(), true));
         }
         self.try_stack.clear();
 
@@ -3068,6 +3091,15 @@ impl Vm {
             )
         };
 
+        // Scope the nested run_loop to THIS frame: without a floor, once the
+        // generator Returns the loop would continue executing the PARENT
+        // (caller) frame inside the nested call and only stop when the whole
+        // script ran out of frames.
+        let floor_base = self.frames.len();
+        let saved_floor = self.return_frame_floor;
+        let saved_gen_floor = self.nested_gen_floor;
+        self.return_frame_floor = floor_base;
+        self.nested_gen_floor = Some(floor_base);
         self.frames.push(Frame {
             locals,
             lexical_slots,
@@ -3092,9 +3124,15 @@ impl Vm {
         }
         self.generators[gen_id].started = true;
 
-        match self.run_loop(gc) {
-            Exit::Return(v) => Ok(v),
-            Exit::Yield(v) => Ok(v),
+        let exit = self.run_loop(gc);
+        self.return_frame_floor = saved_floor;
+        self.nested_gen_floor = saved_gen_floor;
+        match exit {
+            Exit::Return(v) => {
+                self.generators[gen_id].done = true;
+                Ok((v, true))
+            }
+            Exit::Yield(v) => Ok((v, false)),
             Exit::Throw(v) => Err(v),
         }
     }
@@ -4274,6 +4312,22 @@ impl Vm {
                     let len = self.stack.len();
                     let next = self.stack[len - 1 - prefix];
                     let iter = self.stack[len - 2 - prefix];
+                    if std::env::var_os("RMD").is_some() {
+                        let t = if next.as_smi().is_some() {
+                            format!("smi{}", next.as_smi().unwrap())
+                        } else if next.heap_ptr().is_some() {
+                            format!("tag{:?}", unsafe {
+                                (*(next.heap_ptr().unwrap() as *const GcHeader)).tag()
+                            })
+                        } else {
+                            "raw".into()
+                        };
+                        eprintln!(
+                            "[fon] prefix={prefix} next={t} frames={} pc={}",
+                            self.frames.len(),
+                            pc
+                        );
+                    }
                     if next.as_smi().is_some_and(|s| s < 0) {
                         let result = match call_builtin_sync(self, gc, next, iter, &[]) {
                             Ok(v) => v,
@@ -5469,6 +5523,15 @@ impl Vm {
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::StoreLexical => {
+                    if std::env::var_os("RMD").is_some() {
+                        eprintln!(
+                            "[sl] op={:?} pc={} frames={} top={:?}",
+                            instr.opcode,
+                            pc,
+                            self.frames.len(),
+                            self.stack.last()
+                        );
+                    }
                     let slot = instr.operands[0] as usize;
                     let fi = self.frames.len() - 1;
                     let val = self.pop();
@@ -7483,6 +7546,13 @@ impl Vm {
                     self.frames.pop();
                     self.try_stack
                         .retain(|tf| tf.frame_depth != popped_frame + 1);
+                    // Generator nested-loop return: hand the value to the
+                    // Rust resume caller. Do NOT touch the outside operand
+                    // stack and do NOT continue into parent frames here.
+                    if self.nested_gen_floor == Some(self.frames.len()) {
+                        self.nested_gen_floor = None;
+                        return Exit::Return(result);
+                    }
                     // Check if this return completes a pending array operation callback.
                     if let Some(mut op) = self.pending_array_op.take() {
                         if self.frames.len() == op.source_frame_depth {
@@ -8467,10 +8537,12 @@ impl Vm {
                         self.stack.clear();
                         return Exit::Yield(val);
                     }
-                    let new_fi = self.frames.len() - 1;
+                    // Nested-resume case (generator_next): the frames below
+                    // belong to run_loops OUTSIDE this nested call — pushing
+                    // the yielded value onto them leaked one slot PER YIELD
+                    // into the caller's operand stack and desynchronized any
+                    // enclosing for-of. The value travels via Exit::Yield.
                     self.stack.truncate(callee_base);
-                    self.push(val);
-                    self.frames[new_fi].pc += 1;
                     return Exit::Yield(val);
                 }
                 Opcode::Await => {

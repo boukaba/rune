@@ -92,6 +92,9 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ### Goal
 Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8× vs Node) with enough stdlib to run real workloads. v0.4 = stdlib breadth (14 builtins). v0.5 = Promise + async patterns.
 
+### Generators status (2026-08-24)
+- Real generator-instance surface attempted & REVERTED (Smi-handle API remains); TWO VM resume bugs FIXED+kept: nested run_loop frame escape (return_frame_floor scoping) + Yield stack leak (parent-frame push removed — value travels via Exit::Yield). OPEN: generator Return must bypass module-floor truncation (nested_gen_floor marker half-done); for-of over generators hangs after 2 iterations; spread drains mis-shape. Full notes in progress.md.
+
 ### Done — v0.10.0 / let-for rewrite landed (2026-08-24)
 - **Per-iteration semantics correct**: wrap-up reorder per dossier — truncate-first makes updates resolve lexically (closure-invisible); conditional tail copy-back carries BODY mutations via env only when no update exists (else slot wins); shadowing-flag lockstep pops; sync discriminator (env_scope_is_per_iter) stops block-shadow clobber of loop vars; labeled jumps emit RestoreEnv per crossed per-iteration env. Five-shape matrix exact; SEGV trio + labeled variants exit 0; continue suite 1→10 since campaign start. Workspace 820/0; clippy/fmt/no-default/x86 clean. Natives stay gated for MakeEnv functions until GC-safe lexical helpers land (dossier follow-up).
 

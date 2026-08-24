@@ -87,6 +87,34 @@
   (ldr_off imm12 field limit) — JIT_STACK_SIZE ≤ ~4000 slots without a
   wide-offset encoding.
 
+## Generators: real-object surface attempted, VM resume bugs fixed, feature deferred (2026-08-24)
+
+Attempted to promote generator calls from internal Smi-handles to REAL
+instance objects (next/return/throw + @@iterator on the instance via the
+established hidden-slot shape idiom). Core suspend/resume machinery works;
+three DEEPER VM bugs surfaced and two were fixed and KEPT:
+
+1. **Nested run_loop frame escape (FIXED)**: `resume_generator`'s nested
+   run_loop, once the generator Returned, continued executing the CALLER's
+   frame inside the nested loop (only stopping when the whole script ran out
+   of frames). Old tests passed because nothing followed the resume call.
+   Fix: scope with return_frame_floor like module evaluation.
+2. **Yield stack leak (FIXED)**: Yield's unwind pushed the yielded value and
+   advanced the parent pc — but a resumed generator's parent lives OUTSIDE
+   the nested run_loop, so each yield leaked one operand slot into the
+   caller-visible stack (broke for-of layout instantly). The value travels
+   via Exit::Yield; parent frames are left untouched.
+3. **Generator Return vs module floor truncation (OPEN)**: Return's
+   return_frame_floor branch truncates the caller stack (module semantics) —
+   for generators it must not touch the outside stack at all. Needs a
+   dedicated nested_gen_floor marker; implementation started but the tail of
+   the rabbit hole (for-of hang after two iterations, spread ArrayExtend on
+   non-array) needs a fresh session.
+
+Feature surface (make_generator_instance + 4 builtins) REVERTED — the Smi-
+handle API (Context::resume) remains the only generator entry. Everything
+needed to re-land is in this section + the diff archaeology of this session.
+
 ## let-for rewrite LANDED (2026-08-24)
 
 The documented single-slice rewrite from the deep-dive dossier is in —

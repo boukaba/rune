@@ -92,6 +92,9 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ### Goal
 Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8× vs Node) with enough stdlib to run real workloads. v0.4 = stdlib breadth (14 builtins). v0.5 = Promise + async patterns.
 
+### NEXT SESSION — let-for rewrite dossier (2026-08-23 night)
+- let-for per-iteration rewrite attempted & REVERTED (kept main green); FULL design + root-cause map in progress.md ("let-for deep-dive"): dual-storage split-brain (body→env vs update→slot, stale CopyLexical tail), per-position closure semantics, block-shadow env clobber, JIT StoreLexical stray-push (FIXED+kept), GC-unsafe MakeEnv-under-natives (traces/AOT/tier-up all GATED+kept; 3 tests pin correctness sans native entry). Land the documented emitter slice + GC-safe lexical helpers, then re-enable natives.
+
 ### Done — v0.9.7 / for-in/of bare-identifier LHS
 - **`for (x in obj)` parses** — no-In grammar via Parser.no_in_depth; the parse_expr binary loop breaks on `In` while active (gate must live in the LOOP-EXIT condition, not binary_precedence: returning prec 0 falls into the assignment tier). for-in suite 9→14 (+5); member/declared/var LHS shapes verified; 820/0 workspace
 

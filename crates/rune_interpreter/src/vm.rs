@@ -5587,6 +5587,16 @@ impl Vm {
                                             trace_eligible = false;
                                             break;
                                         }
+                                        // Per-iteration env churn allocates a
+                                        // fresh EnvObject every iteration; the
+                                        // lexical helper's MakeEnv can trigger
+                                        // GC mid-native while the recorded
+                                        // trace holds raw pointers. Same
+                                        // bail-to-interpreter policy.
+                                        Opcode::MakeEnv | Opcode::RestoreEnv => {
+                                            trace_eligible = false;
+                                            break;
+                                        }
                                         _ => {}
                                     }
                                 }
@@ -5934,6 +5944,15 @@ impl Vm {
                 Opcode::CopyLexical => {
                     let src_slot = instr.operands[0] as usize;
                     let dst_slot = instr.operands[1] as usize;
+                    if std::env::var_os("RMD").is_some() && self.frames.len() <= 1 {
+                        let f0 = &self.frames[fi];
+                        let sv = f0
+                            .lexical_slots
+                            .get(src_slot)
+                            .copied()
+                            .unwrap_or(Value::undefined());
+                        eprintln!("[cx] {}->{} pc={} sv={:?}", src_slot, dst_slot, pc, sv);
+                    }
                     let f = &self.frames[fi];
                     let val = if src_slot < f.lexical_slots.len() {
                         f.lexical_slots[src_slot]
@@ -6260,6 +6279,22 @@ impl Vm {
                 Opcode::LoadCaptured => {
                     let depth = instr.operands[0] as usize;
                     let slot = instr.operands[1] as usize;
+                    if std::env::var_os("RMD").is_some() {
+                        let env = self.frames[fi].env as *mut EnvObject;
+                        let v = if env.is_null() {
+                            Value::undefined()
+                        } else {
+                            unsafe { EnvObject::get_slot(env, slot) }
+                        };
+                        eprintln!(
+                            "[lc] d{}s{} pc={} v={:?} env={:?}",
+                            depth,
+                            slot,
+                            pc,
+                            v,
+                            !env.is_null()
+                        );
+                    }
                     let env = self.frames[fi].env as *mut EnvObject;
                     let target = unsafe { EnvObject::ancestor(env, depth) };
                     let val = unsafe { EnvObject::get_slot(target, slot) };
@@ -6270,6 +6305,9 @@ impl Vm {
                     let depth = instr.operands[0] as usize;
                     let slot = instr.operands[1] as usize;
                     let val = self.pop();
+                    if std::env::var_os("RMD").is_some() {
+                        eprintln!("[sc] d{}s{} pc={} v={:?}", depth, slot, pc, val);
+                    }
                     let env = self.frames[fi].env as *mut EnvObject;
                     let target = unsafe { EnvObject::ancestor(env, depth) };
                     unsafe { EnvObject::set_slot(target, slot, val) };
@@ -7219,6 +7257,18 @@ impl Vm {
                                         && count == JIT_THRESHOLD
                                         && large_enough
                                         && rune_jit_baseline::is_jit_compatible(func_prog)
+                                        // Functions whose loops churn
+                                        // per-iteration envs stay interpreted:
+                                        // MakeEnv allocates via the lexical
+                                        // helper, and a GC mid-native with
+                                        // JIT-stack raw values live is not
+                                        // yet GC-safe (see afpc::aot_safe).
+                                        && !func_prog.instructions.iter().any(|i| {
+                                            matches!(
+                                                i.opcode,
+                                                Opcode::MakeEnv | Opcode::RestoreEnv
+                                            )
+                                        })
                                     {
                                         #[cfg(target_arch = "x86_64")]
                                         let compiled = {

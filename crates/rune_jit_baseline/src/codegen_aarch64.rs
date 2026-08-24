@@ -2383,8 +2383,10 @@ impl Aarch64CodeGen {
                     ldr_off(&mut self.mem, 15, VM_REG, H_LEXICAL); // x15 = helper addr
                     mov_reg(&mut self.mem, 0, VM_REG); // x0 = vm_ptr
                     emit(&mut self.mem, 0xD63F01E0); // BLR x15
-                    // helper returns val back in x0
-                    self.push();
+                    // NO push: matches the interpreter's StoreLexical
+                    // (pops the value, stores it, leaves nothing). The old
+                    // push here leaked one JIT-stack slot per iteration in
+                    // native code — unbounded drift across iterations.
                 }
                 Opcode::TypeOf => {
                     // Pop value from JIT stack

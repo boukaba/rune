@@ -2458,11 +2458,12 @@ fn test_jit_let_loop_bailout_preserves_lexicals() {
         "let-loop bailout: expected 114330883345000, got {:?}",
         v
     );
-    assert!(ctx.vm().jit_entry_count > 0, "JIT must have executed f");
-    assert!(
-        ctx.vm().jit_bailout_count > 0,
-        "overflow guard must have bailed"
-    );
+    // NOTE: functions whose loops churn per-iteration envs (MakeEnv per
+    // let-bound for iteration) are currently EXCLUDED from tier-up/AOT — a
+    // GC inside the lexical helper while JIT-stack raw values are live is
+    // not yet GC-safe (f(70000) SEGV'd at teardown). Until native let-for
+    // support lands this pins the interpreted result of that exact shape.
+    assert!(matches!(v, Some(x) if x > 0.0), "execution completed");
 }
 
 /// Trace-key collision regression: two functions whose loops share the same
@@ -2501,10 +2502,9 @@ fn test_jit_same_pc_loops_across_functions() {
         "same-pc loops: expected 45090, got {:?}",
         v
     );
-    assert!(
-        ctx.vm().jit_entry_count > 0,
-        "JIT must have executed f and g"
-    );
+    // NOTE: let-for functions churn per-iteration envs (MakeEnv) and are
+    // currently excluded from tier-up/AOT (GC-inside-lexical-helper is not
+    // yet GC-safe). Correctness pinned; native let-for support = follow-up.
 }
 
 /// Closure capture through the JIT: the outer function's `let` variable lives
@@ -2540,7 +2540,9 @@ fn test_jit_closure_capture_lexical_env() {
         "closure capture: expected 3998000, got {:?}",
         v
     );
-    assert!(ctx.vm().jit_entry_count > 0, "JIT must have executed f");
+    // NOTE: let-for functions (MakeEnv per iteration) are excluded from
+    // tier-up/AOT for now — GC-inside-lexical-helper is not yet GC-safe.
+    // Correctness pinned; native let-for support = follow-up.
 }
 
 /// JIT Smi untagging must sign-extend the NaN-encoded payload:

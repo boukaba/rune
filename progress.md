@@ -87,6 +87,73 @@
   (ldr_off imm12 field limit) — JIT_STACK_SIZE ≤ ~4000 slots without a
   wide-offset encoding.
 
+## let-for deep-dive: root causes mapped, rewrite deferred (2026-08-23 night)
+
+Session attempted the let-for per-iteration rewrite. Emitter fixes REACHED
+working state for all five semantic shapes but exposed three more layers
+(JIT-trace GC unsafety, AOT GC unsafety, closure-vs-update write semantics);
+with interlocking regressions surfacing faster than fixes, the EMITTER
+rewrite was REVERTED to keep main green. What landed instead: safety gates +
+a real JIT bug fix + this dossier so the rewrite lands in one clean slice
+next session.
+
+### Root causes established (all verified empirically)
+
+1. **Dual-storage split-brain**: a captured `for(let i...)` binding lives in
+   TWO storages — the frame's lexical slot (DeclareLet/CopyLexical/
+   LoadLexical/StoreLexical) AND the per-iteration EnvObject (MakeEnv/
+   LoadCaptured/StoreCaptured). Which one a given op-path writes depends on
+   WHERE in the For arm emission happens relative to
+   `env_scope_stack.truncate(saved_env_depth)`:
+     • BODY writes resolve captured → ENV.
+     • UPDATE-clause writes emitted AFTER truncate → LEXICAL shadow slot.
+   The tail `CopyLexical [shadow,outer]` copies the STALE shadow → body
+   updates are silently lost (`for(let i=0;i<3;){ i++; }` never terminates;
+   the continue-SEGV trio + labeled variants are this amplified).
+2. **Per-position write semantics (spec §14.7.4)**: update-position writes go
+   to the LOOP BINDING and must be INVISIBLE to closures created during the
+   iteration (f[0]()===0 not 1); body writes go to the per-iteration binding
+   and ARE visible to same-iteration closures created after them.
+3. **Block-shadow clobber**: `{ let x = "h"; }` inside a let-for body routes
+   its initializer through the declaration→env export sync (name-keyed),
+   overwriting the LOOP variable's env slot (count=1 instead of 3). Needs a
+   shadows-per-iteration-env discriminator on the SYNC site only.
+4. **JIT StoreLexical arm PUSHED its result** (aarch64): interpreter
+   StoreLexical pops-only; the native arm leaked one JIT-stack slot PER
+   ITERATION — unbounded drift. FIXED (kept).
+5. **GC-unsafe allocating helpers under natives**: MakeEnv per iteration
+   allocates via rune_jit_lexical_helper; a GC inside allocate while native
+   frames hold raw env/JIT-stack pointers corrupts the heap (teardown SEGV,
+   `_keep_alive` header class). Fired via TRACES and via AFPC-installed
+   functions once loop shapes shifted. GATED (kept):
+     - trace-recording excludes MakeEnv/RestoreEnv loops (vm.rs eligibility)
+     - afpc::aot_safe() excludes MakeEnv/RestoreEnv functions from install
+     - tier-up excludes them too (vm.rs Call arm)
+   test_jit_let_loop_bailout_preserves_lexicals / same_pc_loops /
+   closure_capture_lexical_env updated to pin correctness without demanding
+   native entry (re-enable when helpers become GC-safe).
+
+### The rewrite design (next session, single slice)
+
+Emitter For-arm tail, per_iteration_count>0:
+  truncate(env_scope_stack) FIRST (update resolves lexically → invisible to
+    iteration closures ✓ spec);
+  RestoreEnv;
+  update expression;
+  copy-back: if update.is_some() { CopyLexical shadow→outer } else {
+    LoadCaptured[0,k]; StoreLexical[outer] }   // carry BODY mutations
+  BlockLeave (+ lexical_scope_shadowing.pop() — flags must pop in lockstep
+    with lexical_scopes EVERYWHERE; a missed pair made outer updates resolve
+    lexically in nested loops → infinite);
+  Jump.
+Sync site (DeclareLet/Let-Const): suppress export-to-env ONLY when
+  shadows_per_iter_env(name) (needs env_scope_is_per_iter marker stack,
+  pushed by for-arm/truncate-paired). Do NOT gate load/store resolution
+  sites — dual-view split returns.
+Then re-enable natives incrementally: GC-safe lexical helpers (resolve
+  frame.env AFTER any allocation; or preallocate per-loop env pools) → drop
+  the three gates → restore the three tests' native assertions.
+
 ## Top-level function/class declaration capture FIXED (2026-08-23)
 
 - **Bug (pre-existing, found during Stability#5 validation)**: a top-level

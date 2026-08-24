@@ -249,13 +249,28 @@ impl InstalledNativeCode {
 /// On x86-64 this uses the existing baseline JIT. On other architectures the
 /// baseline JIT is not available, so this returns an empty list; trace-based
 /// AOT is planned for AArch64.
+/// Whether a function is safe to AOT-compile for the INSTALLED-native path.
+///
+/// Installed code has no VM-rooted GC safety net (unlike tier-up/traces,
+/// which run inside the rooted Vm context), so functions that allocate every
+/// iteration — per-iteration `MakeEnv` of let-bound `for` heads — must stay
+/// interpreted: a GC triggered inside the lexical helper while native
+/// registers hold raw pointers corrupts the heap.
+fn aot_safe(prog: &BytecodeProgram) -> bool {
+    use rune_bytecode::opcode::Opcode;
+    !prog
+        .instructions
+        .iter()
+        .any(|i| matches!(i.opcode, Opcode::MakeEnv | Opcode::RestoreEnv))
+}
+
 pub fn aot_compile_functions(program: &BytecodeProgram) -> Vec<CompiledFunc> {
     #[cfg(target_arch = "x86_64")]
     {
         use rune_jit_baseline::{CodeGen, is_jit_compatible};
         let mut out = Vec::new();
         for (idx, func_prog) in program.functions.iter().enumerate() {
-            if is_jit_compatible(func_prog) {
+            if is_jit_compatible(func_prog) && aot_safe(func_prog) {
                 let codegen = CodeGen::new(func_prog.instructions.len());
                 let compiled = codegen.compile(func_prog);
                 let code = unsafe {
@@ -277,7 +292,7 @@ pub fn aot_compile_functions(program: &BytecodeProgram) -> Vec<CompiledFunc> {
         use rune_jit_baseline::{Aarch64CodeGen, is_jit_compatible};
         let mut out = Vec::new();
         for (idx, func_prog) in program.functions.iter().enumerate() {
-            if is_jit_compatible(func_prog) {
+            if is_jit_compatible(func_prog) && aot_safe(func_prog) {
                 let codegen = Aarch64CodeGen::new(func_prog.instructions.len());
                 let compiled = codegen.compile(func_prog);
                 let code = unsafe {

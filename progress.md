@@ -87,6 +87,46 @@
   (ldr_off imm12 field limit) — JIT_STACK_SIZE ≤ ~4000 slots without a
   wide-offset encoding.
 
+## Generators LANDED — real instances, next/return/throw, for-of, spread, yield* (2026-09-04)
+
+Calling a `function*` now returns a REAL generator object (JSObject with a
+hidden `__rune_gen` id slot + instance-level next/return/throw/@@iterator,
+following the established array-iterator shape idiom) instead of an internal
+Smi handle. Implemented this session:
+
+- **Instance surface** (`builtins.rs`): `make_generator_instance`,
+  `generator_next_builtin` (IterResult `{value,done}` objects with
+  Object.prototype, via `resume_generator_full` which distinguishes
+  Yield vs Return), `generator_return_builtin` (close), `generator_throw_builtin`
+  (close + propagate; resumption-with-throw at the yield site is a gap),
+  `generator_symbol_iterator_builtin` (returns `this`); 4 registrations.
+- **Locals/env restore on resume**: resumed frames dropped saved `this`/`env`,
+  so any lexical op after re-entry deref'd null (SIGSEGV). Both restored from
+  the banked Generator state; named-function callee-slot layout mirrored too.
+- **InitGenerator off-by-one (ROOT CAUSE of the for-of hang)**: the emitter
+  prepended InitGenerator in `into_bytecode` AFTER all branch targets were
+  patched, shifting every pc in generator bodies by one (`JumpIfFalse[16]`
+  landed on the back-edge instead of the exit). InitGenerator is now emitted
+  FIRST in `compile_function`/`compile_function_into`.
+- **Executing-state guard** (§25.3.3.3): reentrant next/return/throw throws
+  TypeError AND completes the generator; abrupt completion (uncaught throw
+  out of a resume) marks done so the stale pc can't re-execute.
+- **Suspended try/catch/finally**: Yield banks the live try_stack into the
+  generator; resume swaps it back in (caller state restored after).
+- **Suspended operand stack**: Yield now saves live operand temps above the
+  frame base into the generator (GC-rooted) and restores them on resume —
+  required for for-of `[iter,next]` pairs (and any live temps) to survive.
+- **for-of drain done-path**: `ForOfNext`'s done branch contract requires the
+  loop end to pop `[iterator, nextMethod]`; the new YieldStar emission does.
+- **yield\***: `Expr::YieldStar` parsed (`yield` followed by `*`) and emitted
+  as an inline ForOfInit/ForOfNext drain loop; delegate return value and
+  sent-value forwarding are documented v1 gaps.
+- **Validation**: 15 generator integration tests (Smi-handle tests migrated);
+  GeneratorPrototype 6→34/61; for-of +8; **831 workspace / 0 failed**;
+  clippy/fmt/no-default/x86-64 clean. Remaining GeneratorPrototype failures:
+  try/finally interaction, Reflect.construct/custom-class harness gaps,
+  GeneratorFunction constructor (dynamic compilation — follow-up).
+
 ## Generators: real-object surface attempted, VM resume bugs fixed, feature deferred (2026-08-24)
 
 Attempted to promote generator calls from internal Smi-handles to REAL

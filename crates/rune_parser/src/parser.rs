@@ -1658,6 +1658,18 @@ impl Parser {
             }
             TokenKind::Yield => {
                 self.advance();
+                // `yield* expr` — delegation (emitted as an inline drain loop).
+                if self.tok.kind == TokenKind::Star {
+                    self.advance();
+                    let inner = Box::new(self.parse_expr(0));
+                    return Expr::YieldStar(
+                        inner,
+                        Span {
+                            start: start.start,
+                            end: self.span().end,
+                        },
+                    );
+                }
                 let has_arg = !self.lexer.had_newline && self.tok_can_start_expr();
                 let arg = if has_arg {
                     Some(Box::new(self.parse_expr(0)))

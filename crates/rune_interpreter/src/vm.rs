@@ -156,7 +156,7 @@ pub enum Exit {
 
 /// Tracks a try-catch-finally block for exception unwinding.
 #[derive(Copy, Clone)]
-struct TryFrame {
+pub struct TryFrame {
     catch_pc: usize,
     finally_pc: usize,
     stack_depth: usize,
@@ -2431,6 +2431,9 @@ impl Vm {
             for slot in &g.lexical_slots {
                 gc.push_root(slot as *const Value as *mut u64);
             }
+            for val in &g.stack {
+                gc.push_root(val as *const Value as *mut u64);
+            }
         }
         // Root builtin prototype objects that are stored as Vm fields
         // (these are not on the stack but are used after GC cycles)
@@ -3057,6 +3060,16 @@ impl Vm {
             .map(|(v, _done)| v)
     }
 
+    /// Resume a generator for `next(arg)` — returns `(value, done)`.
+    pub(crate) fn resume_generator_full(
+        &mut self,
+        gc: &mut SemiSpace,
+        gen_id: usize,
+        arg: Value,
+    ) -> Result<(Value, bool), Value> {
+        self.resume_generator_inner(gc, gen_id, arg)
+    }
+
     fn resume_generator_inner(
         &mut self,
         gc: &mut SemiSpace,
@@ -3066,7 +3079,18 @@ impl Vm {
         if self.generators[gen_id].done {
             return Ok((Value::undefined(), true));
         }
-        self.try_stack.clear();
+        if self.generators[gen_id].executing {
+            return Err(Value::from_heap_ptr(crate::vm::heap_string(
+                gc,
+                "TypeError: generator already running",
+            )));
+        }
+        self.generators[gen_id].executing = true;
+        // Swap in the generator's own try/catch/finally frames; the caller's
+        // stack is restored when the nested run_loop returns. (Yield banks
+        // the live stack back into the generator on suspension.)
+        let caller_try = std::mem::take(&mut self.try_stack);
+        self.try_stack = std::mem::take(&mut self.generators[gen_id].try_frames);
 
         let (
             locals,
@@ -3077,8 +3101,11 @@ impl Vm {
             pc,
             prog,
             started,
+            saved_this,
+            saved_env,
+            saved_stack,
         ) = {
-            let g = &self.generators[gen_id];
+            let g = &mut self.generators[gen_id];
             (
                 g.locals.clone(),
                 g.lexical_slots.clone(),
@@ -3088,6 +3115,9 @@ impl Vm {
                 g.pc,
                 g.prog,
                 g.started,
+                g.this,
+                g.env,
+                std::mem::take(&mut g.stack),
             )
         };
 
@@ -3111,14 +3141,19 @@ impl Vm {
             stack_base: self.stack.len(),
             prog,
             generator_id: Some(gen_id),
-            this: Value::undefined(),
+            this: saved_this,
             is_constructor_call: false,
             constructed_object: Value::undefined(),
-            env: std::ptr::null_mut(),
+            env: saved_env,
             func_ptr: std::ptr::null_mut(),
             private_name_ids: std::ptr::null_mut(),
         });
 
+        // Restore live operand temps saved at suspension, then push the
+        // resume argument on top (the post-Yield continuation consumes it).
+        for v in saved_stack {
+            self.push(v);
+        }
         if started {
             self.push(arg);
         }
@@ -3127,13 +3162,24 @@ impl Vm {
         let exit = self.run_loop(gc);
         self.return_frame_floor = saved_floor;
         self.nested_gen_floor = saved_gen_floor;
+        // Discard any leftover generator-side try frames (Yield banked the
+        // live ones already) and restore the caller's stack.
+        let _ = std::mem::take(&mut self.try_stack);
+        self.try_stack = caller_try;
+        self.generators[gen_id].executing = false;
         match exit {
             Exit::Return(v) => {
                 self.generators[gen_id].done = true;
                 Ok((v, true))
             }
             Exit::Yield(v) => Ok((v, false)),
-            Exit::Throw(v) => Err(v),
+            // Abrupt completion (uncaught throw) completes the generator —
+            // otherwise the stale suspended pc would re-execute the throwing
+            // call on the next resume.
+            Exit::Throw(v) => {
+                self.generators[gen_id].done = true;
+                Err(v)
+            }
         }
     }
 
@@ -4312,22 +4358,7 @@ impl Vm {
                     let len = self.stack.len();
                     let next = self.stack[len - 1 - prefix];
                     let iter = self.stack[len - 2 - prefix];
-                    if std::env::var_os("RMD").is_some() {
-                        let t = if next.as_smi().is_some() {
-                            format!("smi{}", next.as_smi().unwrap())
-                        } else if next.heap_ptr().is_some() {
-                            format!("tag{:?}", unsafe {
-                                (*(next.heap_ptr().unwrap() as *const GcHeader)).tag()
-                            })
-                        } else {
-                            "raw".into()
-                        };
-                        eprintln!(
-                            "[fon] prefix={prefix} next={t} frames={} pc={}",
-                            self.frames.len(),
-                            pc
-                        );
-                    }
+
                     if next.as_smi().is_some_and(|s| s < 0) {
                         let result = match call_builtin_sync(self, gc, next, iter, &[]) {
                             Ok(v) => v,
@@ -7148,11 +7179,26 @@ impl Vm {
                                     continue;
                                 }
                                 if func_prog.is_generator {
-                                    let g =
-                                        Generator::new(args, func_prog as *const BytecodeProgram);
+                                    // Mirror the interpreter's locals layout:
+                                    // named functions reserve slot 0 for the
+                                    // callee (params shift by one).
+                                    let mut gen_locals = if func_prog.named_function {
+                                        vec![callee]
+                                    } else {
+                                        vec![]
+                                    };
+                                    gen_locals.extend(args);
+                                    let mut g = Generator::new(
+                                        gen_locals,
+                                        func_prog as *const BytecodeProgram,
+                                    );
+                                    g.this = this;
+                                    g.env = unsafe { Func::env_ptr(ptr as *mut Func) };
                                     let gen_id = self.generators.len();
                                     self.generators.push(g);
-                                    self.push(Value::smi(gen_id as i32));
+                                    let instance =
+                                        crate::builtins::make_generator_instance(gc, self, gen_id);
+                                    self.push(instance);
                                     self.frames[fi].pc = pc + 1;
                                     continue;
                                 }
@@ -8526,6 +8572,9 @@ impl Vm {
                         g.started = true;
                         g.this = self.frames[fi].this;
                         g.env = self.frames[fi].env;
+                        g.try_frames = std::mem::take(&mut self.try_stack);
+                        let base = self.frames[fi].stack_base;
+                        g.stack = self.stack[base..].to_vec();
                     }
                     let callee_base = self.frames.last().unwrap().stack_base;
                     let popped_frame = self.frames.len() - 1;
@@ -8721,11 +8770,26 @@ impl Vm {
                                     continue;
                                 }
                                 if func_prog.is_generator {
-                                    let g =
-                                        Generator::new(args, func_prog as *const BytecodeProgram);
+                                    // Mirror the interpreter's locals layout:
+                                    // named functions reserve slot 0 for the
+                                    // callee (params shift by one).
+                                    let mut gen_locals = if func_prog.named_function {
+                                        vec![callee]
+                                    } else {
+                                        vec![]
+                                    };
+                                    gen_locals.extend(args);
+                                    let mut g = Generator::new(
+                                        gen_locals,
+                                        func_prog as *const BytecodeProgram,
+                                    );
+                                    g.this = this;
+                                    g.env = unsafe { Func::env_ptr(ptr as *mut Func) };
                                     let gen_id = self.generators.len();
                                     self.generators.push(g);
-                                    self.push(Value::smi(gen_id as i32));
+                                    let instance =
+                                        crate::builtins::make_generator_instance(gc, self, gen_id);
+                                    self.push(instance);
                                     self.frames[fi].pc = pc + 1;
                                     continue;
                                 }

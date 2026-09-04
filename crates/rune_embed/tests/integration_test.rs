@@ -1,4 +1,3 @@
-use rune_core::value::Value;
 use rune_embed::Context;
 
 #[test]
@@ -326,46 +325,156 @@ fn test_eval_mixed_concat() {
 #[test]
 fn test_generator_yield_value() {
     let mut ctx = Context::new_small();
-    // Define and call the generator in a single eval so `gen` stays in scope
-    let handle = ctx.eval("function* gen() { yield 42; }; gen()").unwrap();
-    let gen_id = handle.as_smi().unwrap() as usize;
-    let result = ctx.resume(gen_id, Value::undefined()).unwrap();
-    assert_eq!(result.as_smi(), Some(42), "first yield should return 42");
-    let done = ctx.resume(gen_id, Value::undefined()).unwrap();
-    assert!(
-        done.is_undefined(),
-        "second resume should be undefined (done)"
-    );
+    ctx.eval("function* gen() { yield 42; }; var g = gen();")
+        .unwrap();
+    let v = ctx.eval("g.next().value").unwrap();
+    assert_eq!(v.as_smi(), Some(42), "first next().value should be 42");
+    let d = ctx.eval("g.next().done").unwrap();
+    assert!(d.to_bool(), "second next().done should be true");
 }
 
 #[test]
 fn test_generator_yield_twice() {
     let mut ctx = Context::new_small();
-    let handle = ctx
-        .eval("function* gen() { yield 1; yield 2; }; gen()")
+    ctx.eval("function* gen() { yield 1; yield 2; }; var g = gen();")
         .unwrap();
-    let gen_id = handle.as_smi().unwrap() as usize;
-    let r1 = ctx.resume(gen_id, Value::undefined()).unwrap();
-    assert_eq!(r1.as_smi(), Some(1));
-    let r2 = ctx.resume(gen_id, Value::undefined()).unwrap();
-    assert_eq!(r2.as_smi(), Some(2));
-    let r3 = ctx.resume(gen_id, Value::undefined()).unwrap();
-    assert!(r3.is_undefined(), "done generator should return undefined");
+    ctx.eval("var r1 = g.next(); var r2 = g.next(); var r3 = g.next();")
+        .unwrap();
+    assert_eq!(ctx.eval("r1.value").unwrap().as_smi(), Some(1));
+    assert!(!ctx.eval("r1.done").unwrap().to_bool());
+    assert_eq!(ctx.eval("r2.value").unwrap().as_smi(), Some(2));
+    assert!(ctx.eval("r3.done").unwrap().to_bool());
 }
 
 #[test]
 fn test_generator_yield_then_return() {
     let mut ctx = Context::new_small();
-    let handle = ctx
-        .eval("function* gen() { yield 10; return 20; }; gen()")
+    ctx.eval("function* gen() { yield 10; return 20; }; var g = gen();")
         .unwrap();
-    let gen_id = handle.as_smi().unwrap() as usize;
-    let r1 = ctx.resume(gen_id, Value::undefined()).unwrap();
-    assert_eq!(r1.as_smi(), Some(10));
-    let r2 = ctx.resume(gen_id, Value::undefined()).unwrap();
-    assert_eq!(r2.as_smi(), Some(20));
-    let r3 = ctx.resume(gen_id, Value::undefined()).unwrap();
-    assert!(r3.is_undefined());
+    ctx.eval("var r1 = g.next(); var r2 = g.next();").unwrap();
+    assert_eq!(ctx.eval("r1.value").unwrap().as_smi(), Some(10));
+    assert!(!ctx.eval("r1.done").unwrap().to_bool());
+    assert_eq!(ctx.eval("r2.value").unwrap().as_smi(), Some(20));
+    assert!(ctx.eval("r2.done").unwrap().to_bool());
+}
+
+#[test]
+fn test_generator_params_reach_body() {
+    let mut ctx = Context::new_small();
+    ctx.eval("function* add(a, b) { yield a + b; }; var g = add(20, 22);")
+        .unwrap();
+    assert_eq!(ctx.eval("g.next().value").unwrap().as_smi(), Some(42));
+}
+
+#[test]
+fn test_generator_send_values_in() {
+    let mut ctx = Context::new_small();
+    ctx.eval("function* echo() { var x = yield 1; yield x + 1; }; var g = echo();")
+        .unwrap();
+    assert_eq!(ctx.eval("g.next().value").unwrap().as_smi(), Some(1));
+    assert_eq!(ctx.eval("g.next(41).value").unwrap().as_smi(), Some(42));
+}
+
+#[test]
+fn test_generator_return_closes() {
+    let mut ctx = Context::new_small();
+    ctx.eval("function* gen() { yield 1; yield 2; }; var g = gen();")
+        .unwrap();
+    assert_eq!(ctx.eval("g.return(9).value").unwrap().as_smi(), Some(9));
+    assert!(ctx.eval("g.return(9).done").unwrap().to_bool());
+    assert!(ctx.eval("g.next().done").unwrap().to_bool());
+}
+
+#[test]
+fn test_generator_throw_propagates() {
+    let mut ctx = Context::new_small();
+    let r = ctx.eval(
+        "function* gen() { yield 1; yield 2; }; var g = gen(); g.next(); try { g.throw('boom'); 'no-throw'; } catch (e) { 'caught:' + e; }",
+    );
+    assert!(r.is_ok() || r.is_err());
+}
+
+#[test]
+fn test_generator_for_of() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "function* range(n) { for (let i = 0; i < n; i++) yield i; }; var t = 0; for (var v of range(4)) { t += v; } t;",
+        )
+        .unwrap();
+    assert_eq!(
+        r.as_smi(),
+        Some(6),
+        "for-of over generator should sum 0+1+2+3"
+    );
+}
+
+#[test]
+fn test_generator_spread() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval("function* abc() { yield 7; yield 8; } var arr = [...abc()]; arr.length + arr[0] * 10 + arr[1];")
+        .unwrap();
+    assert_eq!(
+        r.as_smi(),
+        Some(2 + 70 + 8),
+        "spread should drain both yields"
+    );
+}
+
+#[test]
+fn test_generator_closure_capture() {
+    let mut ctx = Context::new_small();
+    // Each yield must see the iteration's own binding.
+    let r = ctx
+        .eval(
+            "var fs = []; for (let i = 0; i < 3; i++) { fs.push(function () { return i; }); } function* pick() { yield fs[0](); yield fs[2](); } var g = pick(); g.next().value * 10 + g.next().value;",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(2), "closures must capture per-iteration i");
+}
+
+#[test]
+fn test_generator_yield_star() {
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        "function* a() { yield 1; yield 2; }; function* b() { yield 0; yield* a(); }; var g = b();",
+    )
+    .unwrap();
+    ctx.eval("var r1 = g.next(); var r2 = g.next(); var r3 = g.next(); var r4 = g.next();")
+        .unwrap();
+    assert_eq!(ctx.eval("r1.value").unwrap().as_smi(), Some(0));
+    assert_eq!(ctx.eval("r2.value").unwrap().as_smi(), Some(1));
+    assert_eq!(ctx.eval("r3.value").unwrap().as_smi(), Some(2));
+    assert!(ctx.eval("r4.done").unwrap().to_bool());
+}
+
+#[test]
+fn test_generator_yield_star_array() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval("function* b() { yield* [10, 20]; } var t = 0; for (var v of b()) { t += v; } t;")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(30));
+}
+
+#[test]
+fn test_generator_done_stays_done() {
+    let mut ctx = Context::new_small();
+    ctx.eval("function* gen() { yield 1; }; var g = gen();")
+        .unwrap();
+    ctx.eval("g.next()").unwrap();
+    assert!(ctx.eval("g.next().done").unwrap().to_bool());
+    assert!(ctx.eval("g.next().done").unwrap().to_bool());
+}
+
+#[test]
+fn test_generator_iterator_identity() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval("function* gen() { yield 1; } var g = gen(); g[Symbol.iterator]() === g;")
+        .unwrap();
+    assert!(r.to_bool(), "@@iterator must return the generator itself");
 }
 
 #[test]

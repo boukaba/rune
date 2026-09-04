@@ -1,3 +1,4 @@
+use crate::vm::TryFrame;
 use rune_bytecode::opcode::BytecodeProgram;
 use rune_core::value::Value;
 
@@ -20,6 +21,13 @@ pub struct Generator {
     pub done: bool,
     pub this: Value,
     pub env: *mut u8,
+    /// Live operand-stack values above the frame base at suspension
+    /// (e.g. for-of [iterator, nextMethod] pairs). Restored on resume.
+    pub stack: Vec<Value>,
+    /// Saved try/catch/finally frames at suspension (restored on resume).
+    pub try_frames: Vec<TryFrame>,
+    /// Reentrancy guard: true while a resume is on the Rust stack.
+    pub executing: bool,
 }
 
 impl Generator {
@@ -36,6 +44,9 @@ impl Generator {
             done: false,
             this: Value::undefined(),
             env: std::ptr::null_mut(),
+            stack: Vec::new(),
+            try_frames: Vec::new(),
+            executing: false,
         }
     }
 }

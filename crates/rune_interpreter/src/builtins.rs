@@ -679,6 +679,164 @@ pub fn array_entries_builtin(
     )
 }
 
+// ─── Generator instances (§27.5) ────────────────────────────────────────
+// A generator call produces a plain JSObject carrying the hidden
+// "__rune_gen" slot (internal Generator id) plus next/return/throw and
+// @@iterator directly on the instance (prototype methods = follow-up).
+
+fn iter_result_object(gc: &mut SemiSpace, value: Value, done: bool) -> Value {
+    let keys = vec![
+        (PropertyKey::from_string("value"), 0),
+        (PropertyKey::from_string("done"), 1),
+    ];
+    let names = vec!["value".to_string(), "done".to_string()];
+    let shape = Shape::intern(keys, names);
+    let obj = JSObject::allocate(gc, shape, &[value, Value::boolean(done)]);
+    Value::from_heap_ptr(obj as *mut u8)
+}
+
+// iter_result_object needs &mut Vm for the prototype; wrapper keeps the
+// plain helper above for arity reasons.
+fn iter_result_with_proto(gc: &mut SemiSpace, vm: &mut Vm, value: Value, done: bool) -> Value {
+    let r = iter_result_object(gc, value, done);
+    if let Some(pp) = r.heap_ptr() {
+        if let Some(proto) = vm.object_prototype.heap_ptr() {
+            unsafe {
+                JSObject::set_prototype(pp as *mut JSObject, proto);
+            }
+        }
+    }
+    r
+}
+
+pub(crate) fn generator_id_of(vm: &Vm, this: Value) -> Option<usize> {
+    let ptr = this.heap_ptr()?;
+    if unsafe { (*(ptr as *const GcHeader)).tag() } != TAG_OBJECT {
+        return None;
+    }
+    let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+    let slot = shape.lookup(&PropertyKey::from_symbol(vm.gen_state_symbol))?;
+    let v = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+    v.as_smi().map(|s| s as usize)
+}
+
+pub fn generator_next_builtin(
+    _gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let arg = args.first().copied().unwrap_or(Value::undefined());
+    let Some(gen_id) = generator_id_of(vm, this) else {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            _gc,
+            "TypeError: next called on non-generator",
+        )));
+        return Value::undefined();
+    };
+    if vm.generators[gen_id].done {
+        return iter_result_with_proto(_gc, vm, Value::undefined(), true);
+    }
+    if vm.generators[gen_id].executing {
+        // §25.3.3.3: resuming an executing generator throws AND completes it.
+        vm.generators[gen_id].done = true;
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            _gc,
+            "TypeError: generator already running",
+        )));
+        return Value::undefined();
+    }
+    match vm.resume_generator_full(_gc, gen_id, arg) {
+        Ok((v, done)) => iter_result_with_proto(_gc, vm, v, done),
+        Err(e) => {
+            vm.set_pending_exception(e);
+            Value::undefined()
+        }
+    }
+}
+
+pub fn generator_return_builtin(
+    _gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let v = args.first().copied().unwrap_or(Value::undefined());
+    let Some(gen_id) = generator_id_of(vm, this) else {
+        return iter_result_with_proto(_gc, vm, v, true);
+    };
+    if vm.generators[gen_id].executing {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            _gc,
+            "TypeError: generator already running",
+        )));
+        return Value::undefined();
+    }
+    // v1: close immediately (finally blocks are not run — documented gap).
+    vm.generators[gen_id].done = true;
+    iter_result_with_proto(_gc, vm, v, true)
+}
+
+pub fn generator_throw_builtin(
+    _gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let e = args.first().copied().unwrap_or(Value::undefined());
+    let Some(gen_id) = generator_id_of(vm, this) else {
+        vm.set_pending_exception(e);
+        return Value::undefined();
+    };
+    if vm.generators[gen_id].executing {
+        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            _gc,
+            "TypeError: generator already running",
+        )));
+        return Value::undefined();
+    }
+    // v1: close + propagate (resumption-with-throw at the yield site, which
+    // would run in-generator catch/finally, is not implemented yet).
+    vm.generators[gen_id].done = true;
+    vm.set_pending_exception(e);
+    Value::undefined()
+}
+
+pub fn generator_symbol_iterator_builtin(
+    _gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    _vm: &mut Vm,
+) -> Value {
+    this
+}
+
+/// Build the instance object returned by calling a generator function.
+pub fn make_generator_instance(gc: &mut SemiSpace, vm: &mut Vm, gen_id: usize) -> Value {
+    let next_h = find_handle(&vm.builtins, "Generator_prototype_next").unwrap();
+    let ret_h = find_handle(&vm.builtins, "Generator_prototype_return").unwrap();
+    let thr_h = find_handle(&vm.builtins, "Generator_prototype_throw").unwrap();
+    let it_h = find_handle(&vm.builtins, "Generator_prototype_symbol_iterator").unwrap();
+    let keys = vec![
+        (PropertyKey::from_string("next"), 0),
+        (PropertyKey::from_string("return"), 1),
+        (PropertyKey::from_string("throw"), 2),
+        (PropertyKey::from_symbol(rune_core::symbol::SYM_ITERATOR), 3),
+        (PropertyKey::from_symbol(vm.gen_state_symbol), 4),
+    ];
+    let key_names = vec![
+        "next".to_string(),
+        "return".to_string(),
+        "throw".to_string(),
+        "\u{0}".to_string(),
+        "\u{0}".to_string(),
+    ];
+    let shape = Shape::intern(keys, key_names);
+    let vals = vec![next_h, ret_h, thr_h, it_h, Value::smi(gen_id as i32)];
+    let obj = JSObject::allocate(gc, shape, &vals);
+    Value::from_heap_ptr(obj as *mut u8)
+}
+
 /// The shared next() for array iterators — reads the hidden state
 /// [iterated array, index, kind] stored on the iterator object.
 pub fn array_iterator_next(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
@@ -8455,6 +8613,26 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 0,
             name: "Array_prototype_values",
             func: array_values_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "Generator_prototype_next",
+            func: generator_next_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "Generator_prototype_return",
+            func: generator_return_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "Generator_prototype_throw",
+            func: generator_throw_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Generator_prototype_symbol_iterator",
+            func: generator_symbol_iterator_builtin,
         },
         Builtin {
             length: 0,

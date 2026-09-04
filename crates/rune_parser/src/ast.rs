@@ -44,6 +44,7 @@ pub enum Expr {
     This(Span),
     Update(UpdateOp, Box<Expr>, bool, Span), // op, argument, is_prefix, span
     Yield(Option<Box<Expr>>, Span),
+    YieldStar(Box<Expr>, Span),
     Await(Box<Expr>, Span),
     RegExp(Box<str>, Box<str>, Span), // pattern, flags, span
     Class(Box<ClassNode>, Span),

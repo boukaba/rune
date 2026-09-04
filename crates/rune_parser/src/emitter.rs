@@ -585,6 +585,13 @@ impl Emitter {
         sub.module_export_renames = self.module_export_renames.clone();
         sub.is_generator = func.is_generator;
         sub.is_async = func.is_async;
+        // Emit InitGenerator FIRST so all subsequent branch targets are
+        // recorded against final indices (into_bytecode must not prepend
+        // post-hoc — that shifted every patched pc by one and broke all
+        // loops inside generator bodies).
+        if func.is_generator {
+            sub.emit(Opcode::InitGenerator, vec![]);
+        }
         let named_offset = if let Some(name) = &func.name {
             sub.named_function = true;
             sub.locals.push(name.to_string());
@@ -713,6 +720,13 @@ impl Emitter {
         sub.module_export_renames = self.module_export_renames.clone();
         sub.is_generator = func.is_generator;
         sub.is_async = func.is_async;
+        // Emit InitGenerator FIRST so all subsequent branch targets are
+        // recorded against final indices (into_bytecode must not prepend
+        // post-hoc — that shifted every patched pc by one and broke all
+        // loops inside generator bodies).
+        if func.is_generator {
+            sub.emit(Opcode::InitGenerator, vec![]);
+        }
         if let Some(name) = &func.name {
             sub.named_function = true;
             sub.locals.push(name.to_string());
@@ -3368,6 +3382,29 @@ impl Emitter {
                 }
                 self.emit(Opcode::Yield, vec![]);
             }
+            Expr::YieldStar(iterable, _) => {
+                // `yield* E`: drain E's iterator, yielding each value. Uses
+                // the same ForOfInit/ForOfNext machinery as for-of (works
+                // with builtin- and JS-function `next`), then leaves
+                // undefined as the expression value (the delegate's return
+                // value and sent-value forwarding are v1 gaps).
+                self.emit_expression(iterable);
+                self.emit(Opcode::ForOfInit, vec![]);
+                let top = self.current();
+                let next_jump = self.current();
+                self.emit(Opcode::ForOfNext, vec![0, 0]);
+                self.emit(Opcode::Yield, vec![]);
+                self.emit(Opcode::Pop, vec![]);
+                self.emit(Opcode::Jump, vec![top as i64]);
+                let end = self.current();
+                self.patch(next_jump, end);
+                // ForOfNext's done path leaves [iterator, nextMethod] on the
+                // stack for the loop end to discard (see
+                // process_for_of_next_result).
+                self.emit(Opcode::Pop, vec![]);
+                self.emit(Opcode::Pop, vec![]);
+                self.emit(Opcode::LoadUndefined, vec![]);
+            }
             Expr::Await(arg, _) => {
                 self.emit_expression(arg);
                 self.emit(Opcode::Await, vec![]);
@@ -3747,11 +3784,7 @@ impl Emitter {
     }
 
     pub fn into_bytecode(self) -> BytecodeProgram {
-        let mut instructions = Vec::new();
-        if self.is_generator {
-            instructions.push(Instruction::new(Opcode::InitGenerator, vec![]));
-        }
-        instructions.extend(self.instructions);
+        let instructions = self.instructions;
         let mut program = BytecodeProgram::new(instructions, self.string_pool, self.nested_funcs);
         program.named_function = self.named_function;
         program.is_generator = self.is_generator;
@@ -3878,6 +3911,7 @@ fn contains_inner_function_expr(expr: &Expr) -> bool {
         | Expr::This(_)
         | Expr::Assign(_, _, _)
         | Expr::Yield(_, _)
+        | Expr::YieldStar(_, _)
         | Expr::RegExp(_, _, _) => false,
         Expr::Super(_) => false,
         Expr::Class(_, _) => true,
@@ -4203,6 +4237,7 @@ fn uses_arguments_expr(expr: &Expr) -> bool {
         Expr::Template { exprs, .. } => exprs.iter().any(uses_arguments_expr),
         Expr::Update(_, expr, _, _) => uses_arguments_expr(expr),
         Expr::Yield(expr, _) => expr.as_ref().is_some_and(|e| uses_arguments_expr(e)),
+        Expr::YieldStar(expr, _) => uses_arguments_expr(expr),
         Expr::Await(expr, _) => uses_arguments_expr(expr),
         Expr::Super(_) => false,
         Expr::RegExp(_, _, _) => false,

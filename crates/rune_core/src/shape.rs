@@ -27,6 +27,10 @@ pub struct Shape {
     /// Attribute byte per entry (parallel to `entries`; see PropAttr).
     /// All-ATTR_DEFAULT until A4's defineProperty writes non-defaults.
     pub attrs: Vec<PropAttr>,
+    /// True when every entry carries ATTR_DEFAULT. Hot store paths (IC fast
+    /// path, do_store) skip attribute checks on such shapes; A4's writers
+    /// transition to non-default shapes which take the checked path.
+    pub all_default_attrs: bool,
     /// Original property key names for for-in enumeration (same order as entries).
     pub key_names: Vec<String>,
     pub parent: Option<u64>,
@@ -78,6 +82,7 @@ lazy_static::lazy_static! {
             slot_count: 0,
             entries,
             attrs: Vec::new(),
+            all_default_attrs: true,
             key_names: Vec::new(),
             parent: None,
             is_dense_array: true,
@@ -111,12 +116,14 @@ impl Shape {
         }
         let slot_count = entries.len();
         let id = shape_id(&entries, &attrs, None, false);
+        let all_default_attrs = attrs.iter().all(|&a| a == ATTR_DEFAULT);
         let shape = Shape {
             id,
             property_count: entries.len(),
             slot_count,
             entries: entries.clone(),
             attrs: attrs.clone(),
+            all_default_attrs,
             key_names,
             parent: None,
             is_dense_array: false,
@@ -129,13 +136,41 @@ impl Shape {
     /// Intern a shape that extends a parent shape with one additional property.
     /// The new property gets the next slot offset with default attributes.
     pub fn intern_with_parent(parent: &Self, key: PropertyKey, key_name: String) -> &'static Self {
+        Self::intern_with_parent_attrs(parent, key, key_name, ATTR_DEFAULT)
+    }
+
+    /// Intern a shape identical to `parent` except entry `index` carries
+    /// `attr` (A4: defineProperty changing an existing property's
+    /// attributes; seal/freeze use intern_with_attrs with mapped vecs).
+    pub fn with_replaced_attr(parent: &Self, index: usize, attr: PropAttr) -> &'static Self {
+        let mut attrs = parent.attrs.clone();
+        while attrs.len() < parent.entries.len() {
+            attrs.push(ATTR_DEFAULT);
+        }
+        if let Some(slot) = attrs.get_mut(index) {
+            *slot = attr;
+        }
+        Self::intern_with_attrs(parent.entries.clone(), parent.key_names.clone(), attrs)
+    }
+
+    /// Intern a parent extension with explicit attributes for the new key
+    /// (A4: defineProperty with non-default descriptors).
+    pub fn intern_with_parent_attrs(
+        parent: &Self,
+        key: PropertyKey,
+        key_name: String,
+        attr: PropAttr,
+    ) -> &'static Self {
         let mut entries = parent.entries.clone();
         let offset = entries.len();
         entries.push((key, offset));
         let mut key_names = parent.key_names.clone();
         key_names.push(key_name);
         let mut attrs = parent.attrs.clone();
-        attrs.push(ATTR_DEFAULT);
+        while attrs.len() < entries.len() - 1 {
+            attrs.push(ATTR_DEFAULT);
+        }
+        attrs.push(attr);
         Self::intern_with_attrs(entries, key_names, attrs)
     }
 
@@ -150,12 +185,14 @@ impl Shape {
         let attrs = vec![ATTR_DEFAULT; entries.len()];
         let id = shape_id(&entries, &attrs, None, false);
         let slot_count = entries.len();
+        let all_default_attrs = attrs.iter().all(|&a| a == ATTR_DEFAULT);
         Box::new(Shape {
             id,
             property_count: entries.len(),
             slot_count,
             entries,
             attrs,
+            all_default_attrs,
             key_names,
             parent: None,
             is_dense_array: false,

@@ -11,9 +11,9 @@ use crate::vm::{Exit, GeneratorResume, call_builtin_sync};
 use rune_core::array::RuneArray;
 use rune_core::date;
 use rune_core::gc::{
-    GcHeader, SemiSpace, TAG_ARRAY, TAG_ARRAY_BUFFER, TAG_DATE, TAG_FLOAT64, TAG_FORWARDED,
-    TAG_FUNC, TAG_MAP, TAG_OBJECT, TAG_PROMISE, TAG_REGEXP, TAG_SET, TAG_STRING, TAG_STRING_OBJ,
-    TAG_TYPED_ARRAY,
+    GcHeader, SemiSpace, TAG_ACCESSOR, TAG_ARRAY, TAG_ARRAY_BUFFER, TAG_DATE, TAG_FLOAT64,
+    TAG_FORWARDED, TAG_FUNC, TAG_MAP, TAG_OBJECT, TAG_PROMISE, TAG_REGEXP, TAG_SET, TAG_STRING,
+    TAG_STRING_OBJ, TAG_TYPED_ARRAY,
 };
 use rune_core::map::{RuneMap, RuneSet};
 use rune_core::object::JSObject;
@@ -5189,6 +5189,10 @@ fn object_own_entries(
                     if shape.entries[i].0.is_symbol() {
                         continue;
                     }
+                    // A4: non-enumerable own properties are excluded.
+                    if shape.attr_at(i) & rune_core::shape::ATTR_ENUMERABLE == 0 {
+                        continue;
+                    }
                     let key = shape.key_name_at(i).unwrap_or("").to_string();
                     let value = unsafe { JSObject::get_slot(ptr as *mut JSObject, i) };
                     entries.push((key, value));
@@ -5570,6 +5574,777 @@ pub fn object_set_prototype_of(
 
 /// Object.create(proto) — creates a new object with the given prototype.
 /// Per §20.1.2.2, throws TypeError if proto is not an Object or null.
+/// A4: parsed property descriptor (§6.1.7.1 lite). `has_*` tracks field
+/// presence (explicit `undefined` differs from absent for defaults).
+struct PropDesc {
+    has_value: bool,
+    value: Value,
+    has_writable: bool,
+    writable: bool,
+    has_get: bool,
+    get: Value,
+    has_set: bool,
+    set: Value,
+    has_enumerable: bool,
+    enumerable: bool,
+    has_configurable: bool,
+    configurable: bool,
+}
+
+impl PropDesc {
+    fn empty() -> Self {
+        PropDesc {
+            has_value: false,
+            value: Value::undefined(),
+            has_writable: false,
+            writable: false,
+            has_get: false,
+            get: Value::undefined(),
+            has_set: false,
+            set: Value::undefined(),
+            has_enumerable: false,
+            enumerable: false,
+            has_configurable: false,
+            configurable: false,
+        }
+    }
+}
+
+/// Read one descriptor field: presence via proto-chain walk + value via the
+/// shared recursive load. Accessor-valued fields are out of scope (sync
+/// builtins can't run getters) — treated as absent, documented gap.
+fn desc_field(desc_obj: Value, name: &str) -> (bool, Value) {
+    let Some(dptr) = desc_obj.heap_ptr() else {
+        return (false, Value::undefined());
+    };
+    let dtag = unsafe { (*(dptr as *const GcHeader)).tag() };
+    // Function descriptors store fields on their extra_props object.
+    let start = if dtag == TAG_FUNC {
+        let ep = unsafe {
+            rune_core::function::Func::extra_props(dptr as *mut rune_core::function::Func)
+        };
+        if ep.is_null() {
+            return (false, Value::undefined());
+        }
+        ep
+    } else if dtag == TAG_OBJECT {
+        dptr
+    } else {
+        return (false, Value::undefined());
+    };
+    let key = PropertyKey::from_string(name);
+    let mut current = start;
+    for _ in 0..64 {
+        let shape = unsafe { JSObject::shape_ptr(current as *mut JSObject) };
+        if let Some(slot) = shape.lookup(&key) {
+            let v = unsafe { JSObject::get_slot(current as *mut JSObject, slot) };
+            // Accessor-held descriptor fields: treated as absent (sync gap).
+            if v.heap_ptr()
+                .is_some_and(|vp| unsafe { (*(vp as *const GcHeader)).tag() == TAG_ACCESSOR })
+            {
+                return (false, Value::undefined());
+            }
+            return (true, v);
+        }
+        let proto = unsafe { JSObject::prototype(current as *mut JSObject) };
+        if proto.is_null() {
+            return (false, Value::undefined());
+        }
+        current = proto;
+    }
+    (false, Value::undefined())
+}
+
+/// ToPropertyDescriptor (§6.1.7.1 + §20.1.2.3 validation): parse a
+/// descriptor object, rejecting data/accessor mixing and non-callable
+/// getters/setters with TypeError values.
+fn to_property_descriptor(gc: &mut SemiSpace, vm: &Vm, desc_obj: Value) -> Result<PropDesc, Value> {
+    // ToPropertyDescriptor requires Type(Obj) = Object — primitives
+    // (including strings) throw; functions count as objects.
+    if !is_object_value(desc_obj) {
+        return Err(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Property descriptor must be an object",
+        ));
+    }
+    let mut d = PropDesc::empty();
+    let (p, v) = desc_field(desc_obj, "enumerable");
+    d.has_enumerable = p;
+    d.enumerable = v.to_bool();
+    let (p, v) = desc_field(desc_obj, "configurable");
+    d.has_configurable = p;
+    d.configurable = v.to_bool();
+    (d.has_value, d.value) = desc_field(desc_obj, "value");
+    let (p, v) = desc_field(desc_obj, "writable");
+    d.has_writable = p;
+    d.writable = v.to_bool();
+    let (has_get, get) = desc_field(desc_obj, "get");
+    let (has_set, set) = desc_field(desc_obj, "set");
+    // Present-but-undefined means absent; present null is NOT callable and
+    // must throw (only undefined is exempt).
+    if has_get && !get.is_undefined() {
+        match classify_method(get) {
+            Ok(Some(_)) => {
+                d.has_get = true;
+                d.get = get;
+            }
+            _ => {
+                return Err(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "Getter must be a function",
+                ));
+            }
+        }
+    }
+    if has_set && !set.is_undefined() {
+        match classify_method(set) {
+            Ok(Some(_)) => {
+                d.has_set = true;
+                d.set = set;
+            }
+            _ => {
+                return Err(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "Setter must be a function",
+                ));
+            }
+        }
+    }
+    if (d.has_value || d.has_writable) && (d.has_get || d.has_set) {
+        return Err(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Invalid property descriptor: cannot mix data and accessor fields",
+        ));
+    }
+    Ok(d)
+}
+
+/// PropertyKey + key_name recovery for definition (§7.1.17 lite): strings,
+/// symbols (empty key_name — excluded from enumeration by tag), Smis and
+/// String wrappers. Other heap values cannot round-trip a name → TypeError.
+fn define_key_and_name(raw_key: Value) -> Result<(PropertyKey, String), ()> {
+    if let Some(id) = raw_key.as_symbol_id() {
+        return Ok((PropertyKey::from_symbol(id), String::new()));
+    }
+    if let Some(ptr) = raw_key.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_STRING {
+            let s = unsafe { HeapString::to_string(ptr as *mut HeapString) };
+            return Ok((PropertyKey::from_string(&s), s));
+        }
+        if tag == TAG_STRING_OBJ {
+            let sptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
+            let s = unsafe { HeapString::to_string(sptr as *mut HeapString) };
+            return Ok((PropertyKey::from_string(&s), s));
+        }
+        return Err(());
+    }
+    if let Some(v) = raw_key.as_smi() {
+        return Ok((PropertyKey::from_string(&v.to_string()), v.to_string()));
+    }
+    Err(())
+}
+
+/// Core [[DefineOwnProperty]] for TAG_OBJECT receivers (A4). Shared by
+/// defineProperty/defineProperties/create-with-properties. Implements
+/// OrdinaryDefineOwnProperty + ValidateAndApplyPropertyDescriptor for data
+/// and accessor descriptors (accessor slot values are AccessorPairs, which
+/// the F3 getter/setter paths already dispatch).
+fn define_own_property(
+    gc: &mut SemiSpace,
+    vm: &Vm,
+    obj_ptr: *mut JSObject,
+    key: PropertyKey,
+    key_name: String,
+    desc: &PropDesc,
+) -> Result<(), Value> {
+    let mut type_err = |msg: &str| {
+        crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            msg,
+        )
+    };
+    let shape = unsafe { JSObject::shape_ptr(obj_ptr) };
+    let is_accessor_desc = desc.has_get || desc.has_set;
+    let attr_for = |d: &PropDesc| -> u8 {
+        let mut a = 0u8;
+        if d.has_enumerable && d.enumerable {
+            a |= rune_core::shape::ATTR_ENUMERABLE;
+        }
+        if d.has_configurable && d.configurable {
+            a |= rune_core::shape::ATTR_CONFIGURABLE;
+        }
+        if !is_accessor_desc && d.has_writable && d.writable {
+            a |= rune_core::shape::ATTR_WRITABLE;
+        }
+        a
+    };
+    match shape.lookup(&key) {
+        None => {
+            // Create with absent fields defaulted (data: value undefined,
+            // writable false; all flags false).
+            if unsafe { !JSObject::is_extensible(obj_ptr) } {
+                return Err(type_err(
+                    "Cannot define property on a non-extensible object",
+                ));
+            }
+            let attr = attr_for(desc);
+            if is_accessor_desc {
+                let pair = rune_core::accessor::AccessorPair::allocate(
+                    gc,
+                    if desc.has_get {
+                        desc.get
+                    } else {
+                        Value::undefined()
+                    },
+                    if desc.has_set {
+                        desc.set
+                    } else {
+                        Value::undefined()
+                    },
+                );
+                unsafe {
+                    JSObject::add_property_with_attrs(
+                        obj_ptr,
+                        key,
+                        key_name,
+                        Value::from_heap_ptr(pair),
+                        attr,
+                    );
+                }
+            } else {
+                unsafe {
+                    JSObject::add_property_with_attrs(
+                        obj_ptr,
+                        key,
+                        key_name,
+                        if desc.has_value {
+                            desc.value
+                        } else {
+                            Value::undefined()
+                        },
+                        attr,
+                    );
+                }
+            }
+            Ok(())
+        }
+        Some(slot) => {
+            let cur_attr = shape.attr_at(slot);
+            let cur_val = unsafe { JSObject::get_slot(obj_ptr, slot) };
+            let cur_is_accessor = cur_val
+                .heap_ptr()
+                .is_some_and(|vp| unsafe { (*(vp as *const GcHeader)).tag() == TAG_ACCESSOR });
+            let cur_configurable = cur_attr & rune_core::shape::ATTR_CONFIGURABLE != 0;
+            if !cur_configurable {
+                // Locked-down property: reject everything but compatible
+                // same-kind, same-value (SameValue) updates.
+                if desc.has_configurable && desc.configurable {
+                    return Err(type_err("Cannot redefine a non-configurable property"));
+                }
+                if desc.has_enumerable
+                    && desc.enumerable != (cur_attr & rune_core::shape::ATTR_ENUMERABLE != 0)
+                {
+                    return Err(type_err("Cannot redefine a non-configurable property"));
+                }
+                if cur_is_accessor != is_accessor_desc
+                    && (desc.has_value || desc.has_writable || desc.has_get || desc.has_set)
+                {
+                    return Err(type_err("Cannot redefine a non-configurable property"));
+                }
+                if !cur_is_accessor && !is_accessor_desc {
+                    let cur_writable = cur_attr & rune_core::shape::ATTR_WRITABLE != 0;
+                    if !cur_writable {
+                        if desc.has_writable && desc.writable {
+                            return Err(type_err("Cannot make a non-writable property writable"));
+                        }
+                        if desc.has_value && !same_value(desc.value, cur_val) {
+                            return Err(type_err("Cannot assign to a non-writable property"));
+                        }
+                    }
+                }
+                if cur_is_accessor && is_accessor_desc {
+                    let (cur_get, cur_set) = unsafe {
+                        let vp = cur_val.heap_ptr().unwrap();
+                        (
+                            rune_core::accessor::AccessorPair::getter(vp),
+                            rune_core::accessor::AccessorPair::setter(vp),
+                        )
+                    };
+                    if desc.has_get && !same_value(desc.get, cur_get) {
+                        return Err(type_err("Cannot redefine a non-configurable property"));
+                    }
+                    if desc.has_set && !same_value(desc.set, cur_set) {
+                        return Err(type_err("Cannot redefine a non-configurable property"));
+                    }
+                }
+            }
+            // Apply: merge descriptor fields over current, keep the rest.
+            // Configurable: provided bits win, absent bits preserved (data
+            // results keep current-writable when unwritten; conversions take
+            // descriptor-or-false). Non-configurable: only writable
+            // true→false may change (validated above).
+            use rune_core::shape::{ATTR_CONFIGURABLE, ATTR_ENUMERABLE, ATTR_WRITABLE};
+            let cur_e = cur_attr & ATTR_ENUMERABLE != 0;
+            let cur_c = cur_attr & ATTR_CONFIGURABLE != 0;
+            let cur_w = cur_attr & ATTR_WRITABLE != 0;
+            let merged_attr = if cur_configurable {
+                let mut a = 0u8;
+                if desc.has_enumerable {
+                    if desc.enumerable {
+                        a |= ATTR_ENUMERABLE;
+                    }
+                } else if cur_e {
+                    a |= ATTR_ENUMERABLE;
+                }
+                if desc.has_configurable {
+                    if desc.configurable {
+                        a |= ATTR_CONFIGURABLE;
+                    }
+                } else if cur_c {
+                    a |= ATTR_CONFIGURABLE;
+                }
+                if !is_accessor_desc {
+                    let w = if desc.has_writable {
+                        desc.writable
+                    } else if !cur_is_accessor {
+                        cur_w
+                    } else {
+                        false
+                    };
+                    if w {
+                        a |= ATTR_WRITABLE;
+                    }
+                }
+                a
+            } else if !cur_is_accessor
+                && !is_accessor_desc
+                && cur_w
+                && desc.has_writable
+                && !desc.writable
+            {
+                cur_attr & !ATTR_WRITABLE
+            } else {
+                cur_attr
+            };
+            let new_shape = rune_core::shape::Shape::with_replaced_attr(shape, slot, merged_attr);
+            unsafe {
+                JSObject::set_shape_ptr(obj_ptr, new_shape);
+            }
+            // Store the value (data) or pair (accessor) when provided.
+            if is_accessor_desc {
+                let (get, set) = if cur_is_accessor && cur_configurable {
+                    let vp = cur_val.heap_ptr().unwrap();
+                    unsafe {
+                        (
+                            if desc.has_get {
+                                desc.get
+                            } else {
+                                rune_core::accessor::AccessorPair::getter(vp)
+                            },
+                            if desc.has_set {
+                                desc.set
+                            } else {
+                                rune_core::accessor::AccessorPair::setter(vp)
+                            },
+                        )
+                    }
+                } else {
+                    (
+                        if desc.has_get {
+                            desc.get
+                        } else {
+                            Value::undefined()
+                        },
+                        if desc.has_set {
+                            desc.set
+                        } else {
+                            Value::undefined()
+                        },
+                    )
+                };
+                let pair = rune_core::accessor::AccessorPair::allocate(gc, get, set);
+                unsafe {
+                    JSObject::set_slot(obj_ptr, slot, Value::from_heap_ptr(pair));
+                }
+            } else if desc.has_value {
+                unsafe {
+                    JSObject::set_slot(obj_ptr, slot, desc.value);
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Require a TAG_OBJECT receiver for definition builtins (arrays and other
+/// exotic receivers are follow-ups; primitives throw per ToObject).
+fn define_target(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    what: &str,
+    target: Value,
+) -> Result<*mut JSObject, Value> {
+    if target.is_null() || target.is_undefined() {
+        return Err(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            &format!("{what} called on null or undefined"),
+        ));
+    }
+    match target.heap_ptr() {
+        Some(ptr) if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_OBJECT => {
+            Ok(ptr as *mut JSObject)
+        }
+        _ => Err(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            &format!("{what} called on non-object"),
+        )),
+    }
+}
+
+/// Object.defineProperty(obj, key, descriptor) — defines or redefines an
+/// own property (§20.1.2.3). Returns obj; failures throw TypeError.
+pub fn object_define_property(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let target = args.first().copied().unwrap_or(Value::undefined());
+    let obj_ptr = match define_target(gc, vm, "Object.defineProperty", target) {
+        Ok(p) => p,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let raw_key = args.get(1).copied().unwrap_or(Value::undefined());
+    let (key, key_name) = match define_key_and_name(raw_key) {
+        Ok(k) => k,
+        Err(()) => {
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Invalid property key",
+            ));
+            return Value::undefined();
+        }
+    };
+    let desc_obj = args.get(2).copied().unwrap_or(Value::undefined());
+    let desc = match to_property_descriptor(gc, vm, desc_obj) {
+        Ok(d) => d,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    if let Err(e) = define_own_property(gc, vm, obj_ptr, key, key_name, &desc) {
+        vm.set_pending_exception(e);
+        return Value::undefined();
+    }
+    target
+}
+
+/// Object.defineProperties(obj, {k: descriptor}) — batch form (§20.1.2.4).
+pub fn object_define_properties(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let target = args.first().copied().unwrap_or(Value::undefined());
+    if let Err(e) = define_target(gc, vm, "Object.defineProperties", target) {
+        vm.set_pending_exception(e);
+        return Value::undefined();
+    }
+    let props = args.get(1).copied().unwrap_or(Value::undefined());
+    if props.is_null() || props.is_undefined() {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Property list must be an object",
+        ));
+        return Value::undefined();
+    }
+    // Collect own enumerable string keys of the properties object, then
+    // define each in order (partial failure leaves earlier ones defined).
+    let keys: Vec<(PropertyKey, String, Value)> = {
+        let shape = match props.heap_ptr() {
+            Some(pptr) if unsafe { (*(pptr as *const GcHeader)).tag() } == TAG_OBJECT => unsafe {
+                JSObject::shape_ptr(pptr as *mut JSObject)
+            },
+            _ => {
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "Property list must be an object",
+                ));
+                return Value::undefined();
+            }
+        };
+        let count = unsafe { JSObject::slot_count(props.heap_ptr().unwrap() as *mut JSObject) };
+        let mut out = Vec::new();
+        for i in 0..count {
+            if shape.entries[i].0.is_symbol()
+                || shape.attr_at(i) & rune_core::shape::ATTR_ENUMERABLE == 0
+            {
+                continue;
+            }
+            let v = unsafe { JSObject::get_slot(props.heap_ptr().unwrap() as *mut JSObject, i) };
+            let name = shape.key_name_at(i).unwrap_or("").to_string();
+            out.push((shape.entries[i].0, name, v));
+        }
+        out
+    };
+    // Root the target on the operand stack: descriptor parsing and object
+    // allocation below may trigger GC, which moves unrooted values (args
+    // live in a plain Rust Vec). Re-derive the raw pointer per iteration.
+    vm.push(target);
+    let target_slot = vm.stack.len() - 1;
+    for (pkey, name, desc_obj) in keys {
+        let desc = match to_property_descriptor(gc, vm, desc_obj) {
+            Ok(d) => d,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                vm.stack.truncate(target_slot);
+                return Value::undefined();
+            }
+        };
+        let live_ptr = vm.stack[target_slot].heap_ptr().unwrap() as *mut JSObject;
+        if let Err(e) = define_own_property(gc, vm, live_ptr, pkey, name, &desc) {
+            vm.set_pending_exception(e);
+            let current = vm.stack[target_slot];
+            vm.stack.truncate(target_slot);
+            return current;
+        }
+    }
+    let result = vm.stack[target_slot];
+    vm.stack.truncate(target_slot);
+    result
+}
+
+/// Object.getOwnPropertyDescriptor(obj, key) — own-property descriptor
+/// object or undefined (§20.1.2.10).
+pub fn object_get_own_property_descriptor(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let target = args.first().copied().unwrap_or(Value::undefined());
+    if target.is_null() || target.is_undefined() {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Cannot convert undefined or null to object",
+        ));
+        return Value::undefined();
+    }
+    let Some(ptr) = target.heap_ptr() else {
+        // Primitives have no own properties to describe.
+        return Value::undefined();
+    };
+    if unsafe { (*(ptr as *const GcHeader)).tag() } != TAG_OBJECT {
+        return Value::undefined();
+    }
+    let raw_key = args.get(1).copied().unwrap_or(Value::undefined());
+    let (key, _) = match define_key_and_name(raw_key) {
+        Ok(k) => k,
+        Err(()) => return Value::undefined(),
+    };
+    let obj = ptr as *mut JSObject;
+    let shape = unsafe { JSObject::shape_ptr(obj) };
+    let Some(slot) = shape.lookup(&key) else {
+        return Value::undefined();
+    };
+    let attr = shape.attr_at(slot);
+    let val = unsafe { JSObject::get_slot(obj, slot) };
+    let pairs: Vec<(&str, Value)> = vec![
+        (
+            "enumerable",
+            Value::boolean(attr & rune_core::shape::ATTR_ENUMERABLE != 0),
+        ),
+        (
+            "configurable",
+            Value::boolean(attr & rune_core::shape::ATTR_CONFIGURABLE != 0),
+        ),
+    ];
+    let (mut names, mut vals): (Vec<String>, Vec<Value>) = (vec![], vec![]);
+    for (k, v) in pairs {
+        names.push(k.to_string());
+        vals.push(v);
+    }
+    if val
+        .heap_ptr()
+        .is_some_and(|vp| unsafe { (*(vp as *const GcHeader)).tag() == TAG_ACCESSOR })
+    {
+        let (get, set) = unsafe {
+            let vp = val.heap_ptr().unwrap();
+            (
+                rune_core::accessor::AccessorPair::getter(vp),
+                rune_core::accessor::AccessorPair::setter(vp),
+            )
+        };
+        names.push("get".to_string());
+        vals.push(get);
+        names.push("set".to_string());
+        vals.push(set);
+    } else {
+        names.push("value".to_string());
+        vals.push(val);
+        names.push("writable".to_string());
+        vals.push(Value::boolean(attr & rune_core::shape::ATTR_WRITABLE != 0));
+    }
+    let entries: Vec<(PropertyKey, usize)> = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (PropertyKey::from_string(n), i))
+        .collect();
+    let shape = Shape::intern(entries, names);
+    let obj = JSObject::allocate(gc, shape, &vals);
+    Value::from_heap_ptr(obj as *mut u8)
+}
+
+/// Shared integrity-level helper: preventExtensions (level 0), seal (1),
+/// freeze (2). Mass-updates attributes via shape transitions and clears the
+/// extensible bit. Returns obj (seal/freeze/preventExtensions) — the
+/// is-checks are separate builtins below.
+fn set_integrity_level(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    what: &str,
+    target: Value,
+    level: u8,
+) -> Result<Value, Value> {
+    let obj_ptr = define_target(gc, vm, what, target)?;
+    let shape = unsafe { JSObject::shape_ptr(obj_ptr) };
+    let mut attrs = shape.attrs.clone();
+    while attrs.len() < shape.entries.len() {
+        attrs.push(rune_core::shape::ATTR_DEFAULT);
+    }
+    for (i, a) in attrs.iter_mut().enumerate() {
+        // seal: configurable → false. freeze: additionally writable → false
+        // for data properties (accessor slots keep no writable bit).
+        *a &= !rune_core::shape::ATTR_CONFIGURABLE;
+        if level >= 2 {
+            let is_accessor = unsafe {
+                JSObject::get_slot(obj_ptr, i)
+                    .heap_ptr()
+                    .is_some_and(|vp| (*(vp as *const GcHeader)).tag() == TAG_ACCESSOR)
+            };
+            if !is_accessor {
+                *a &= !rune_core::shape::ATTR_WRITABLE;
+            }
+        }
+    }
+    let new_shape = rune_core::shape::Shape::intern_with_attrs(
+        shape.entries.clone(),
+        shape.key_names.clone(),
+        attrs,
+    );
+    unsafe {
+        JSObject::set_shape_ptr(obj_ptr, new_shape);
+        JSObject::set_extensible(obj_ptr, false);
+    }
+    Ok(target)
+}
+
+/// Object.preventExtensions / seal / freeze — return the object.
+macro_rules! integrity_builtin {
+    ($name:ident, $what:expr, $level:expr) => {
+        pub fn $name(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+            let target = args.first().copied().unwrap_or(Value::undefined());
+            // Primitives: return as-is (spec ToObject would box, but the
+            // observable result is the primitive itself).
+            if !target.is_heap_object() && !target.is_null() && !target.is_undefined() {
+                return target;
+            }
+            match set_integrity_level(gc, vm, $what, target, $level) {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    Value::undefined()
+                }
+            }
+        }
+    };
+}
+
+integrity_builtin!(object_prevent_extensions, "Object.preventExtensions", 0);
+integrity_builtin!(object_seal, "Object.seal", 1);
+integrity_builtin!(object_freeze, "Object.freeze", 2);
+
+/// Object.isExtensible / isSealed / isFrozen (§20.1.2.9/13/15).
+/// Primitives → isExtensible false, isSealed/isFrozen true (spec).
+macro_rules! integrity_test_builtin {
+    ($name:ident, $kind:expr) => {
+        pub fn $name(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+            let _ = gc;
+            let _ = vm;
+            let target = args.first().copied().unwrap_or(Value::undefined());
+            let Some(ptr) = target.heap_ptr() else {
+                return Value::boolean($kind != 0);
+            };
+            if unsafe { (*(ptr as *const GcHeader)).tag() } != TAG_OBJECT {
+                // Non-plain receivers (arrays, wrappers): always extensible
+                // in this engine's model (no per-object seal tracking there).
+                return Value::boolean($kind == 0);
+            }
+            let obj = ptr as *mut JSObject;
+            Value::boolean(match $kind {
+                0 => unsafe { JSObject::is_extensible(obj) },
+                1 => {
+                    !unsafe { JSObject::is_extensible(obj) }
+                        && unsafe {
+                            JSObject::shape_ptr(obj)
+                                .attrs
+                                .iter()
+                                .all(|&a| a & rune_core::shape::ATTR_CONFIGURABLE == 0)
+                        }
+                }
+                _ => {
+                    let shape = unsafe { JSObject::shape_ptr(obj) };
+                    !unsafe { JSObject::is_extensible(obj) }
+                        && shape
+                            .attrs
+                            .iter()
+                            .all(|&a| a & rune_core::shape::ATTR_CONFIGURABLE == 0)
+                        && (0..shape.entries.len()).all(|i| {
+                            let is_accessor = unsafe {
+                                JSObject::get_slot(obj, i).heap_ptr().is_some_and(|vp| {
+                                    (*(vp as *const GcHeader)).tag() == TAG_ACCESSOR
+                                })
+                            };
+                            is_accessor || shape.attr_at(i) & rune_core::shape::ATTR_WRITABLE == 0
+                        })
+                }
+            })
+        }
+    };
+}
+
+integrity_test_builtin!(object_is_extensible, 0);
+integrity_test_builtin!(object_is_sealed, 1);
+integrity_test_builtin!(object_is_frozen, 2);
+
 pub fn object_create_builtin(
     gc: &mut SemiSpace,
     _this: Value,
@@ -5594,6 +6369,66 @@ pub fn object_create_builtin(
                 "Object.create expects an object or null",
             ));
         }
+    }
+    // A4: Object.create(proto, propertiesObject) — define each own
+    // enumerable property of propertiesObject on the new object (§20.1.2.2
+    // step 2, via the shared defineProperty core).
+    if args.len() >= 2 && !args[1].is_undefined() {
+        let props = args[1];
+        let keys: Vec<(PropertyKey, String, Value)> = match props.heap_ptr() {
+            Some(pptr) if unsafe { (*(pptr as *const GcHeader)).tag() } == TAG_OBJECT => {
+                let shape = unsafe { JSObject::shape_ptr(pptr as *mut JSObject) };
+                let count = unsafe { JSObject::slot_count(pptr as *mut JSObject) };
+                let mut out = Vec::new();
+                for i in 0..count {
+                    if shape.entries[i].0.is_symbol()
+                        || shape.attr_at(i) & rune_core::shape::ATTR_ENUMERABLE == 0
+                    {
+                        continue;
+                    }
+                    let v = unsafe { JSObject::get_slot(pptr as *mut JSObject, i) };
+                    let name = shape.key_name_at(i).unwrap_or("").to_string();
+                    out.push((shape.entries[i].0, name, v));
+                }
+                out
+            }
+            _ => {
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "Property list must be an object",
+                ));
+                return Value::from_heap_ptr(ptr as *mut u8);
+            }
+        };
+        // The new object may move during descriptor parsing allocations —
+        // re-resolve through a rooted stack slot (same discipline as the
+        // error constructor).
+        let obj_val = Value::from_heap_ptr(ptr as *mut u8);
+        vm.push(obj_val);
+        let obj_slot = vm.stack.len() - 1;
+        for (pkey, name, desc_obj) in keys {
+            let desc = match to_property_descriptor(gc, vm, desc_obj) {
+                Ok(d) => d,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    vm.stack.truncate(obj_slot);
+                    return Value::from_heap_ptr(ptr as *mut u8);
+                }
+            };
+            let live = vm.stack[obj_slot].heap_ptr().unwrap() as *mut JSObject;
+            if let Err(e) = define_own_property(gc, vm, live, pkey, name, &desc) {
+                vm.set_pending_exception(e);
+                // Stack slots are GC-updated, so this is the live object.
+                let current = vm.stack[obj_slot];
+                vm.stack.truncate(obj_slot);
+                return current;
+            }
+        }
+        let result = vm.stack[obj_slot];
+        vm.stack.truncate(obj_slot);
+        return result;
     }
     Value::from_heap_ptr(ptr as *mut u8)
 }
@@ -10271,6 +11106,51 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 2,
             name: "Object_setPrototypeOf",
             func: object_set_prototype_of,
+        },
+        Builtin {
+            length: 3,
+            name: "Object_defineProperty",
+            func: object_define_property,
+        },
+        Builtin {
+            length: 2,
+            name: "Object_defineProperties",
+            func: object_define_properties,
+        },
+        Builtin {
+            length: 2,
+            name: "Object_getOwnPropertyDescriptor",
+            func: object_get_own_property_descriptor,
+        },
+        Builtin {
+            length: 1,
+            name: "Object_preventExtensions",
+            func: object_prevent_extensions,
+        },
+        Builtin {
+            length: 1,
+            name: "Object_seal",
+            func: object_seal,
+        },
+        Builtin {
+            length: 1,
+            name: "Object_freeze",
+            func: object_freeze,
+        },
+        Builtin {
+            length: 1,
+            name: "Object_isExtensible",
+            func: object_is_extensible,
+        },
+        Builtin {
+            length: 1,
+            name: "Object_isSealed",
+            func: object_is_sealed,
+        },
+        Builtin {
+            length: 1,
+            name: "Object_isFrozen",
+            func: object_is_frozen,
         },
         Builtin {
             length: 1,

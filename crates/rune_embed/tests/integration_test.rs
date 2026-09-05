@@ -1050,6 +1050,75 @@ fn test_strict_caller_arguments_poison() {
 }
 
 #[test]
+fn test_define_property_basics() {
+    // A4: defineProperty creates with descriptor defaults (non-enumerable,
+    // non-writable, non-configurable when absent).
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval("var o = {}; Object.defineProperty(o, 'x', {value: 42}); o.x;")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(42));
+    // Absent enumerable → excluded from keys.
+    let r = ctx
+        .eval("var o = {}; Object.defineProperty(o, 'x', {value: 1}); Object.keys(o).length;")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(0));
+    // Absent writable → sloppy writes ignored.
+    let r = ctx
+        .eval("var o = {}; Object.defineProperty(o, 'x', {value: 1}); o.x = 2; o.x;")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(1));
+    // Absent configurable → redefinition throws.
+    ctx.eval("var o = {}; Object.defineProperty(o, 'x', {value: 1}); assert.throws(TypeError, function () { Object.defineProperty(o, 'x', {value: 2}); });")
+        .unwrap();
+    // Explicit flags honored.
+    let r = ctx
+        .eval("var o = {}; Object.defineProperty(o, 'x', {value: 3, writable: true, enumerable: true, configurable: true}); o.x = 4; o.x + Object.keys(o).length;")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(5));
+    // Accessor descriptors dispatch getters.
+    let r = ctx
+        .eval("var o = {}; Object.defineProperty(o, 'x', {get: function () { return 7; }}); o.x;")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(7));
+    // Mixing data and accessor fields throws.
+    ctx.eval("assert.throws(TypeError, function () { Object.defineProperty({}, 'x', {value: 1, get: function () {}}); });")
+        .unwrap();
+}
+
+#[test]
+fn test_define_property_seal_freeze() {
+    // A4: integrity levels + observers + getOwnPropertyDescriptor.
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval("var o = {a: 1}; Object.seal(o); Object.isSealed(o);")
+        .unwrap();
+    assert!(r.to_bool());
+    let r = ctx
+        .eval("var o = {a: 1}; Object.seal(o); o.b = 2; o.b;")
+        .unwrap();
+    assert!(r.is_undefined(), "sealed objects reject new keys");
+    let r = ctx
+        .eval("var o = {a: 1}; Object.freeze(o); o.a = 2; o.a;")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(1));
+    let r = ctx.eval("var o = {a: 1}; Object.isFrozen(o);").unwrap();
+    assert!(!r.to_bool());
+    let r = ctx
+        .eval("var o = {a: 1}; Object.preventExtensions(o); Object.isExtensible(o);")
+        .unwrap();
+    assert!(!r.to_bool());
+    // getOwnPropertyDescriptor reflects stored attributes.
+    let r = ctx
+        .eval("var o = {}; Object.defineProperty(o, 'x', {value: 5, enumerable: true}); var d = Object.getOwnPropertyDescriptor(o, 'x'); d.value + (d.writable ? 10 : 0) + (d.enumerable ? 100 : 0) + (d.configurable ? 1000 : 0);")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(105));
+    // Strict-mode write to readonly throws.
+    ctx.eval("assert.throws(TypeError, function () { function f() { 'use strict'; var o = {}; Object.defineProperty(o, 'x', {value: 1}); o.x = 2; } f(); });")
+        .unwrap();
+}
+
+#[test]
 fn test_neg_zero_preserved() {
     let mut ctx = Context::new_small();
     let r = ctx.eval("1 / -0").unwrap();

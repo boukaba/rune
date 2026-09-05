@@ -348,7 +348,8 @@ impl SemiSpace {
                 TAG_FLOAT64 => obj_start.add(size_of::<GcHeader>() + 8),
                 TAG_OBJECT => {
                     let capacity_ptr = obj_start.add(16) as *const u32;
-                    let capacity = *capacity_ptr as usize;
+                    // Mask the object-extensibility bit (object::EXTENSIBLE_BIT).
+                    let capacity = (*capacity_ptr & !crate::object::EXTENSIBLE_BIT) as usize;
                     let total = OBJECT_SLOTS_OFFSET + capacity * size_of::<u64>();
                     obj_start.add(align_up(total, 8))
                 }

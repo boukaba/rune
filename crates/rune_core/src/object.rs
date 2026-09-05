@@ -15,6 +15,12 @@ pub const OBJECT_HEADER_END: usize = 32;
 /// Number of extra slots to reserve beyond the initial shape's property count.
 const RESERVED_SLOTS: usize = 8;
 
+/// Object extensibility (§10.1.9 [[Extensible]]): stored as the top bit of
+/// the capacity word (capacities never approach 2^31). Set by
+/// preventExtensions/seal/freeze (A4); consulted by property definition and
+/// ordinary [[Set]] on new keys. Zero layout change; GC masks it (gc.rs).
+pub const EXTENSIBLE_BIT: u32 = 1 << 31;
+
 /// A GC-allocated JavaScript object.
 pub struct JSObject;
 
@@ -59,7 +65,31 @@ impl JSObject {
         unsafe {
             let ptr = ptr as *mut u8;
             let cap_ptr = ptr.add(16) as *const u32;
-            *cap_ptr as usize
+            // Mask the extensibility bit (see EXTENSIBLE_BIT).
+            (*cap_ptr & !EXTENSIBLE_BIT) as usize
+        }
+    }
+
+    /// Object extensibility (§10.1.9). Fresh objects are extensible.
+    pub unsafe fn is_extensible(ptr: *mut JSObject) -> bool {
+        unsafe {
+            let ptr = ptr as *mut u8;
+            let cap_ptr = ptr.add(16) as *const u32;
+            (*cap_ptr & EXTENSIBLE_BIT) == 0
+        }
+    }
+
+    /// Set object extensibility (A4: preventExtensions/seal/freeze clear it).
+    pub unsafe fn set_extensible(ptr: *mut JSObject, extensible: bool) {
+        unsafe {
+            let ptr = ptr as *mut u8;
+            let cap_ptr = ptr.add(16) as *mut u32;
+            let cap = *cap_ptr;
+            *cap_ptr = if extensible {
+                cap & !EXTENSIBLE_BIT
+            } else {
+                cap | EXTENSIBLE_BIT
+            };
         }
     }
 
@@ -79,7 +109,7 @@ impl JSObject {
         }
     }
 
-    unsafe fn set_shape_ptr(ptr: *mut JSObject, shape: &'static Shape) {
+    pub unsafe fn set_shape_ptr(ptr: *mut JSObject, shape: &'static Shape) {
         unsafe {
             let ptr = ptr as *mut u8;
             let shape_ptr_ptr = ptr.add(8) as *mut *const Shape;
@@ -141,6 +171,8 @@ impl JSObject {
                 let mut new_entries: Vec<(crate::shape::PropertyKey, usize)> =
                     Vec::with_capacity(count - 1);
                 let mut new_key_names: Vec<String> = Vec::with_capacity(count - 1);
+                // A4: sibling attributes survive the removal (parallel vec).
+                let mut new_attrs: Vec<crate::shape::PropAttr> = Vec::with_capacity(count - 1);
                 for i in 0..count {
                     if i == slot {
                         continue;
@@ -148,8 +180,10 @@ impl JSObject {
                     let new_offset = new_entries.len();
                     new_entries.push((shape.entries[i].0, new_offset));
                     new_key_names.push(shape.key_names[i].clone());
+                    new_attrs.push(shape.attr_at(i));
                 }
-                let new_shape = crate::shape::Shape::intern(new_entries, new_key_names);
+                let new_shape =
+                    crate::shape::Shape::intern_with_attrs(new_entries, new_key_names, new_attrs);
                 Self::set_shape_ptr(ptr, new_shape);
                 for i in slot..(count - 1) {
                     Self::set_slot(ptr, i, Self::get_slot(ptr, i + 1));
@@ -172,11 +206,26 @@ impl JSObject {
         val: Value,
     ) -> usize {
         unsafe {
+            Self::add_property_with_attrs(ptr, key, key_name, val, crate::shape::ATTR_DEFAULT)
+        }
+    }
+
+    /// Add a property with explicit attributes (A4: defineProperty with
+    /// non-default descriptors transitions to a non-default shape).
+    pub unsafe fn add_property_with_attrs(
+        ptr: *mut JSObject,
+        key: crate::shape::PropertyKey,
+        key_name: String,
+        val: Value,
+        attr: crate::shape::PropAttr,
+    ) -> usize {
+        unsafe {
             let cap = Self::capacity(ptr);
             let count = Self::slot_count(ptr);
             assert!(count < cap, "JSObject: out of reserved slot capacity");
             let shape = Self::shape_ptr(ptr);
-            let new_shape = Shape::intern_with_parent(shape, key, key_name);
+            let new_shape =
+                crate::shape::Shape::intern_with_parent_attrs(shape, key, key_name, attr);
             Self::set_shape_ptr(ptr, new_shape);
             Self::set_slot(ptr, count, val);
             Self::set_slot_count(ptr, count + 1);

@@ -46,8 +46,42 @@ paths can't match immediates (no JIT change needed).
   exact, retracted in A2.)
 - 860 workspace / 0 failed; clippy/fmt/no-default/x86 clean.
 
-## A3 DONE — unmasked checks: class-call, derived-return, strict poison (2026-09-05)
+## A4 DONE — property-descriptor model (2026-09-05)
 
+The ~2,000-test descriptor cluster, built on the F5 attribute home —
+largest single-suite jump of the campaign (Object 280→1236):
+
+- **Storage**: extensibility bit in the capacity word (zero layout change;
+  GC scan + capacity() mask); `Shape.all_default_attrs` fast-path flag;
+  `add_property_with_attrs`, `with_replaced_attr`,
+  `intern_with_parent_attrs`; `remove_property` preserves sibling attrs;
+  `JSObject::set_shape_ptr` made pub; AFPC untouched (attrs already persist).
+- **Engine**: `PropDesc` + `to_property_descriptor` (presence tracking,
+  no-mix + callable-getter/setter validation, sync-gap documented) +
+  `define_own_property` (ValidateAndApply: configurable locks, writable
+  true→false, SameValue shortcuts, accessor↔data rules, absent-field
+  defaults) + `define_key_and_name`.
+- **Builtins**: defineProperty/defineProperties (stack-rooted target across
+  GC), getOwnPropertyDescriptor, create-with-properties, seal/freeze/
+  preventExtensions/isExtensible/isSealed/isFrozen (macro-generated),
+  registered on the Object wrapper.
+- **Enforcement**: `do_store_property` → bool (writable/extensible checks,
+  TAG_OBJECT only); funnel throws when `PropSetSite.is_strict` (from the
+  executing Func), silent otherwise; StorePropertyIC fast path gated on
+  all-default shapes; enumerable filtering in keys/values/entries + for-in.
+- **Gains (+~1146, ZERO losses)**: Object +956, Array +77, statements +55,
+  expressions +75, String +3, Function +2. Two spec bugs caught by the
+  diffs en route (null getter/setter must throw — only undefined means
+  absent; descriptors may be functions — fixed, +29 more).
+- **Tests**: 2 integration (defineProperty basics incl. accessor + mixing
+  rejection; seal/freeze/descriptor-read/strict-throw). **865 workspace /
+  0**; clippy/fmt/no-default/x86 clean.
+- **Known gaps**: defineProperty on arrays/functions/TypedArrays (non-plain
+  receivers → TypeError for now); array `length` descriptors; sloppy
+  function-caller own-prop interplay untouched; valueOf/getter-valued
+  descriptor fields treated as absent (sync gap).
+
+## A3 DONE — unmasked checks: class-call, derived-return, strict poison (2026-09-05)
 The three checks 7181784 unmasked (Function 70→57 wrong-reason passes),
 built on F1 flags + F2 errors + A2 catchability:
 

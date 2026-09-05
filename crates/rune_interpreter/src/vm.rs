@@ -432,10 +432,13 @@ pub(crate) enum PropSetOut {
 
 /// Patch-site context for `vm_set_property`: the IC index plus the
 /// program/pc of the issuing instruction for the 8-hit IC-patch counter.
+/// `is_strict` selects throw vs silent-ignore when the store is rejected
+/// (non-writable prop / non-extensible receiver, A4).
 pub(crate) struct PropSetSite {
     pub ic_index: i64,
     pub prog_ptr: *const BytecodeProgram,
     pub pc: usize,
+    pub is_strict: bool,
 }
 
 /// Whether a property key is the exact string `name` (A3 poison checks).
@@ -1044,6 +1047,33 @@ impl Vm {
             }
             if let Some(h) = find_handle(&self.builtins, "Object_setPrototypeOf") {
                 obj_entries.push(("setPrototypeOf", h));
+            }
+            if let Some(h) = find_handle(&self.builtins, "Object_defineProperty") {
+                obj_entries.push(("defineProperty", h));
+            }
+            if let Some(h) = find_handle(&self.builtins, "Object_defineProperties") {
+                obj_entries.push(("defineProperties", h));
+            }
+            if let Some(h) = find_handle(&self.builtins, "Object_getOwnPropertyDescriptor") {
+                obj_entries.push(("getOwnPropertyDescriptor", h));
+            }
+            if let Some(h) = find_handle(&self.builtins, "Object_preventExtensions") {
+                obj_entries.push(("preventExtensions", h));
+            }
+            if let Some(h) = find_handle(&self.builtins, "Object_seal") {
+                obj_entries.push(("seal", h));
+            }
+            if let Some(h) = find_handle(&self.builtins, "Object_freeze") {
+                obj_entries.push(("freeze", h));
+            }
+            if let Some(h) = find_handle(&self.builtins, "Object_isExtensible") {
+                obj_entries.push(("isExtensible", h));
+            }
+            if let Some(h) = find_handle(&self.builtins, "Object_isSealed") {
+                obj_entries.push(("isSealed", h));
+            }
+            if let Some(h) = find_handle(&self.builtins, "Object_isFrozen") {
+                obj_entries.push(("isFrozen", h));
             }
             let obj_val = make_object(gc, &obj_entries);
             self.object_constructor = obj_val;
@@ -4239,8 +4269,34 @@ impl Vm {
                 }
             }
         }
-        do_store_property(obj, raw_key, value, gc, self);
-        PropSetOut::Ready(value)
+        if do_store_property(obj, raw_key, value, gc, self) {
+            PropSetOut::Ready(value)
+        } else if site.is_strict {
+            // Strict-mode [[Set]] failure throws (§10.1.8.1);
+            // sloppy failures silently keep the RHS value.
+            let err = crate::errors::error_object(
+                gc,
+                &self.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Cannot assign to read-only property",
+            );
+            match self.handle_throw(gc, err) {
+                Some(exit) => PropSetOut::Bail(Some(exit)),
+                None => PropSetOut::Bail(None),
+            }
+        } else {
+            PropSetOut::Ready(value)
+        }
+    }
+
+    /// Whether the currently executing function is strict (A4: strict-mode
+    /// [[Set]] failures throw instead of silently ignoring). Unknown callers
+    /// (null func_ptr: top level) count as sloppy.
+    fn executing_is_strict(&self, fi: usize) -> bool {
+        let fp = self.frames[fi].func_ptr;
+        !fp.is_null()
+            && unsafe { (*(fp as *const GcHeader)).tag() } == TAG_FUNC
+            && unsafe { Func::is_strict(fp as *mut Func) }
     }
     pub fn run_loop(&mut self, gc: &mut SemiSpace) -> Exit {
         'run: loop {
@@ -5391,9 +5447,13 @@ impl Vm {
                             TAG_OBJECT => {
                                 let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
                                 // §14.7.5.9: symbol-keyed properties are excluded
-                                // from for-in enumeration.
+                                // from for-in enumeration. A4: so are
+                                // non-enumerable own properties.
                                 let mut idx = index;
-                                while idx < shape.property_count && shape.entries[idx].0.is_symbol()
+                                while idx < shape.property_count
+                                    && (shape.entries[idx].0.is_symbol()
+                                        || shape.attr_at(idx) & rune_core::shape::ATTR_ENUMERABLE
+                                            == 0)
                                 {
                                     idx += 1;
                                 }
@@ -5722,6 +5782,7 @@ impl Vm {
                             ic_index: instr.ic_index,
                             prog_ptr,
                             pc,
+                            is_strict: self.executing_is_strict(fi),
                         },
                     ) {
                         PropSetOut::Ready(v) => {
@@ -5742,9 +5803,14 @@ impl Vm {
                     let cached_shape_id = instr.operands.first().copied().unwrap_or(0) as u64;
                     let offset = instr.operands.get(1).copied().unwrap_or(0) as usize;
                     if let Some(ptr) = obj.heap_ptr() {
+                        // A4: the slot fast path is only sound for
+                        // all-default shapes (any non-default attribute takes
+                        // the checked funnel path below).
                         if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_OBJECT
                             && unsafe { JSObject::shape_ptr(ptr as *mut JSObject) }.id
                                 == cached_shape_id
+                            && unsafe { JSObject::shape_ptr(ptr as *mut JSObject) }
+                                .all_default_attrs
                         {
                             unsafe { JSObject::set_slot(ptr as *mut JSObject, offset, value) };
                             self.push(value);
@@ -5767,6 +5833,7 @@ impl Vm {
                             ic_index: instr.ic_index,
                             prog_ptr,
                             pc,
+                            is_strict: self.executing_is_strict(fi),
                         },
                     ) {
                         PropSetOut::Ready(v) => {
@@ -11494,27 +11561,48 @@ fn load_property_recursive_ic(
 }
 
 /// Perform the full store-property logic (modelled after StoreProperty handler body).
+/// Ordinary [[Set]] core (§10.1.8.1 lite). Returns true when the store took
+/// effect, false when rejected (non-writable existing prop or new key on a
+/// non-extensible object — A4). The caller decides strict-throw vs sloppy
+/// silence. Only TAG_OBJECT consults attributes/extensibility; other tags
+/// keep legacy behavior (their exotic semantics live inline below).
 pub(crate) fn do_store_property(
     obj: Value,
     raw_key: Value,
     value: Value,
     gc: &mut SemiSpace,
     vm: &mut Vm,
-) {
+) -> bool {
     if let Some(ptr) = obj.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_OBJECT {
             if is_proto_key(raw_key) {
+                // __proto__ assignment = SetPrototypeOf (fails on
+                // non-extensible receivers).
+                if unsafe { !JSObject::is_extensible(ptr as *mut JSObject) } {
+                    return false;
+                }
                 if let Some(val_ptr) = value.heap_ptr() {
                     unsafe { JSObject::set_prototype(ptr as *mut JSObject, val_ptr) };
                 } else {
                     unsafe { JSObject::set_prototype(ptr as *mut JSObject, std::ptr::null_mut()) };
                 }
+                return true;
             } else if let Some(key) = value_to_prop_key(raw_key) {
                 let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
                 if let Some(slot) = shape.lookup(&key) {
+                    // Fast path: all-default shapes are writable by construction.
+                    if !shape.all_default_attrs
+                        && shape.attr_at(slot) & rune_core::shape::ATTR_WRITABLE == 0
+                    {
+                        return false;
+                    }
                     unsafe { JSObject::set_slot(ptr as *mut JSObject, slot, value) };
+                    return true;
                 } else {
+                    if unsafe { !JSObject::is_extensible(ptr as *mut JSObject) } {
+                        return false;
+                    }
                     let key_name = if key.is_symbol() {
                         // Marker name for symbol-keyed entries (never enumerated —
                         // for-in/Object.keys/JSON.stringify all skip symbol keys).
@@ -11523,8 +11611,10 @@ pub(crate) fn do_store_property(
                         value_to_debug_string(raw_key)
                     };
                     unsafe { JSObject::add_property(ptr as *mut JSObject, key, key_name, value) };
+                    return true;
                 }
             }
+            return true;
         } else if tag == TAG_ARRAY {
             if let Some(index) = value_to_array_index(raw_key) {
                 let len = unsafe { RuneArray::length(ptr as *mut RuneArray) };
@@ -11658,6 +11748,9 @@ pub(crate) fn do_store_property(
             }
         }
     }
+    // Legacy paths above preserve silent no-op behavior (treated as success;
+    // only TAG_OBJECT reports real rejections for now).
+    true
 }
 
 /// Convert a Value to an f64 for numeric operations.

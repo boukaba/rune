@@ -12,8 +12,34 @@
 > regexp advanced classes, class-static-block, top-level-await,
 > iterator-helpers (kept force-skipped).
 
-## F3 DONE — property-access funnel (2026-09-05)
+## F4 DONE — pending-machine centralization (2026-09-05)
 
+Anti-rewrite foundation: the ~20 hand-wired pending machines shared 4
+protocols (depth rebase on callback push, GC rooting, Call skip-list, Return
+cascade) by copy-paste — every new machine risked forgetting one (the v0.8.1
+skip-gate class). Three are now centralized; the Return cascade stays
+per-kind (those arms ARE the continuations, not boilerplate):
+
+- **Catalogued gaps closed**: `pending_accessor_call` +
+  `pending_primitive_conversion` never rebased (stale depth on nested
+  callbacks); `pending_promise_ctor` (3 Values), `pending_finally_op` (2),
+  `pending_primitive_conversion` (1), `pending_async_gen.arg` never rooted
+  (GC-during-callback use-after-collect class). All fixed by construction.
+  Out of scope (documented): microtask-queue rooting (B6's problem).
+- **New**: `rebase_pending_depths()` (all 20, called by push_callback_call),
+  `root_pending_values()` (every machine's Values + GC-heap raw pointers,
+  called by register_roots — old per-machine blocks deleted),
+  `pending_owns_call(fi)` (exact historical 12-member skip-list + membership
+  rationale for future machines). Recipe comment for adding a machine (B6).
+- **Verification**: 1 new integration test (getter + nested map-callback
+  machine interplay → 108); workspace **854/0**; Promise/Map/Set/Array/
+  String suites byte-identical; clippy/fmt/no-default/x86 clean. The
+  primitive-coercion paths the new rooting protects are still largely broken
+  upstream (object Add returns raw objects — pre-existing B1/B2 gap), so the
+  rooting is currently load-bearing mainly for finally/promise/async-gen;
+  it becomes critical when B1/B2 fix coercion — which is why F4 precedes them.
+
+## F3 DONE — property-access funnel (2026-09-05)
 Anti-rewrite foundation: all interpreter property reads/writes now flow
 through one choke point each, so A1 null-checks and B7 Proxy traps each get
 a single insertion point (and JIT fast paths stay untouched):

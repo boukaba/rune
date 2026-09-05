@@ -8525,6 +8525,26 @@ fn test_accessor_getter_result_flows() {
 }
 
 #[test]
+fn test_accessor_getter_nested_callback_machine() {
+    // F4 pin: a getter whose body runs another callback machine (array map
+    // with a JS callback → nested push_callback_call) must still resume the
+    // outer LoadProperty with the getter's value. Exercises the centralized
+    // pending rebase across nested machines.
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            "var log = [];
+             var o = { get x() {
+               var m = [1, 2, 3].map(function (v) { log.push(v); return v * 2; });
+               return 99 + m[2];
+             } };
+             o.x + log.length;",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(108), "99 + m[2]=6 + 3 callbacks");
+}
+
+#[test]
 fn test_optional_chaining_basic() {
     let mut ctx = Context::new_small();
     let r = ctx

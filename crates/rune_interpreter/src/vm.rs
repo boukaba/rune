@@ -2719,7 +2719,18 @@ impl Vm {
         if let Some(ref val) = self.pending_exception {
             gc.push_root(val as *const Value as *mut u64);
         }
-        // Root pending array operation pointers (GC may forward source/result arrays)
+        // F4: every pending machine's roots live in root_pending_values.
+        self.root_pending_values(gc);
+    }
+
+    /// F4: single place that roots every live pending machine's GC-managed
+    /// values. Called at the end of `register_roots`. Rules: root every
+    /// `Value` field (callbacks, receivers, iterators, collections, abrupt
+    /// args, stashes, accumulators, promise handles) and every `*mut u8`
+    /// slot that points into the GC heap (result arrays, snapshots); plain
+    /// data (`usize`, `bool`, `String`, state enums) needs nothing. When
+    /// adding a machine, add its fields here — nowhere else.
+    fn root_pending_values(&self, gc: &mut SemiSpace) {
         if let Some(ref op) = self.pending_array_op {
             gc.push_root(&op.callback as *const Value as *mut u64);
             gc.push_root(&op.this_val as *const Value as *mut u64);
@@ -2730,45 +2741,50 @@ impl Vm {
                 gc.push_root(acc as *const Value as *mut u64);
             }
         }
-        // Root pending assert.throws expected error value
         if let Some(ref pa) = self.pending_assert {
             gc.push_root(&pa.expected_error as *const Value as *mut u64);
         }
-        // Root pending yield* abrupt-forwarding values (may be forwarded
-        // by GC during the delegate JS callback).
+        if let Some(ref ppc) = self.pending_promise_ctor {
+            gc.push_root(&ppc.promise as *const Value as *mut u64);
+            gc.push_root(&ppc.resolve_handle as *const Value as *mut u64);
+            gc.push_root(&ppc.reject_handle as *const Value as *mut u64);
+        }
+        if let Some(ref ppc) = self.pending_primitive_conversion {
+            gc.push_root(&ppc.other_operand as *const Value as *mut u64);
+        }
+        if let Some(ref pfo) = self.pending_finally_op {
+            gc.push_root(&pfo.promise as *const Value as *mut u64);
+            gc.push_root(&pfo.orig_value as *const Value as *mut u64);
+        }
+        if let Some(ref pag) = self.pending_async_gen {
+            gc.push_root(&pag.arg as *const Value as *mut u64);
+        }
         if let Some(ref pa) = self.pending_yield_star_afr {
             gc.push_root(&pa.abrupt_arg as *const Value as *mut u64);
             gc.push_root(&pa.iter as *const Value as *mut u64);
         }
-        // Root pending yield* async-get values.
         if let Some(ref pg) = self.pending_yield_star_get {
             gc.push_root(&pg.abrupt_arg as *const Value as *mut u64);
             gc.push_root(&pg.iter as *const Value as *mut u64);
             gc.push_root(&pg.stash as *const Value as *mut u64);
         }
-        // Root pending spread drain state (iterator/next/receiver values + the
-        // result array, which may be forwarded by GC during JS callbacks)
         if let Some(ref pid) = self.pending_iter_drain {
             gc.push_root(&pid.iter as *const Value as *mut u64);
             gc.push_root(&pid.next as *const Value as *mut u64);
             gc.push_root(&pid.receiver as *const Value as *mut u64);
             gc.push_root(&pid.result as *const *mut u8 as *mut u64);
         }
-        // Root pending Map/Set ctor state (collection/iter/next may be forwarded
-        // during user callbacks)
         if let Some(ref pcc) = self.pending_collection_ctor {
             gc.push_root(&pcc.collection as *const Value as *mut u64);
             gc.push_root(&pcc.iter as *const Value as *mut u64);
             gc.push_root(&pcc.next as *const Value as *mut u64);
         }
-        // Root pending Map/Set forEach state (snapshot array + callback args)
         if let Some(ref pfe) = self.pending_collection_foreach {
             gc.push_root(&pfe.snapshot as *const *mut u8 as *mut u64);
             gc.push_root(&pfe.callback as *const Value as *mut u64);
             gc.push_root(&pfe.this_arg as *const Value as *mut u64);
             gc.push_root(&pfe.collection as *const Value as *mut u64);
         }
-        // Root pending replaceAll callback fn (re-invoked per match)
         if let Some(ref pra) = self.pending_replace_all_op {
             gc.push_root(&pra.fn_val as *const Value as *mut u64);
         }
@@ -2820,64 +2836,137 @@ impl Vm {
             func_ptr: func_ptr as *mut u8,
             private_name_ids: std::ptr::null_mut(),
         });
-        // Update source_frame_depth if pending array op is active
+        // F4: every live machine tracks the newest callback frame (single
+        // place — historically new machines forgot this and fired on the
+        // wrong Return, cf. v0.8.1 skip-gate batch).
+        self.rebase_pending_depths();
+    }
+
+    /// F4: overwrite every live pending machine's `source_frame_depth` with
+    /// the current callback frame index. Called by `push_callback_call`
+    /// after pushing a callback frame. When adding a machine, add one arm
+    /// here — nowhere else.
+    fn rebase_pending_depths(&mut self) {
+        let depth = self.frames.len() - 1;
         if let Some(ref mut state) = self.pending_array_op {
-            state.source_frame_depth = self.frames.len() - 1;
+            state.source_frame_depth = depth;
         }
-        // Update source_frame_depth if pending call is active
         if let Some(ref mut state) = self.pending_call {
-            state.source_frame_depth = self.frames.len() - 1;
+            state.source_frame_depth = depth;
         }
-        // Update source_frame_depth if pending assert is active
         if let Some(ref mut state) = self.pending_assert {
-            state.source_frame_depth = self.frames.len() - 1;
+            state.source_frame_depth = depth;
         }
-        // Update source_frame_depth if pending promise ctor is active
         if let Some(ref mut state) = self.pending_promise_ctor {
-            state.source_frame_depth = self.frames.len() - 1;
+            state.source_frame_depth = depth;
         }
-        // Update source_frame_depth if pending finally op is active
         if let Some(ref mut state) = self.pending_finally_op {
-            state.source_frame_depth = self.frames.len() - 1;
+            state.source_frame_depth = depth;
         }
         if let Some(ref mut state) = self.pending_replace_op {
-            state.source_frame_depth = self.frames.len() - 1;
+            state.source_frame_depth = depth;
         }
         if let Some(ref mut state) = self.pending_replace_all_op {
-            state.source_frame_depth = self.frames.len() - 1;
+            state.source_frame_depth = depth;
         }
         if let Some(ref mut state) = self.pending_symbol_dispatch {
-            state.source_frame_depth = self.frames.len() - 1;
+            state.source_frame_depth = depth;
         }
         if let Some(ref mut state) = self.pending_symbol_coercion {
-            state.source_frame_depth = self.frames.len() - 1;
+            state.source_frame_depth = depth;
         }
         if let Some(ref mut state) = self.pending_for_of_init {
-            state.source_frame_depth = self.frames.len() - 1;
+            state.source_frame_depth = depth;
         }
         if let Some(ref mut state) = self.pending_for_of_next {
-            state.source_frame_depth = self.frames.len() - 1;
+            state.source_frame_depth = depth;
         }
         if let Some(ref mut state) = self.pending_yield_star_next {
-            state.source_frame_depth = self.frames.len() - 1;
+            state.source_frame_depth = depth;
         }
         if let Some(ref mut state) = self.pending_yield_star_afr {
-            state.source_frame_depth = self.frames.len() - 1;
+            state.source_frame_depth = depth;
         }
         if let Some(ref mut state) = self.pending_yield_star_get {
-            state.source_frame_depth = self.frames.len() - 1;
+            state.source_frame_depth = depth;
         }
         if let Some(ref mut state) = self.pending_iter_drain {
-            state.source_frame_depth = self.frames.len() - 1;
+            state.source_frame_depth = depth;
         }
-        // Update source_frame_depth if pending collection ctor is active
         if let Some(ref mut state) = self.pending_collection_ctor {
-            state.source_frame_depth = self.frames.len() - 1;
+            state.source_frame_depth = depth;
         }
-        // Update source_frame_depth if pending collection forEach is active
         if let Some(ref mut state) = self.pending_collection_foreach {
-            state.source_frame_depth = self.frames.len() - 1;
+            state.source_frame_depth = depth;
         }
+        // F4 additions: accessor_call and primitive_conversion never
+        // rebased (stale depth if a nested callback pushed between set and
+        // return). PendingAsyncGen has no depth field (bridge-driven, not
+        // Return-driven) — nothing to rebase.
+        if let Some(ref mut state) = self.pending_accessor_call {
+            state.source_frame_depth = depth;
+        }
+        if let Some(ref mut state) = self.pending_primitive_conversion {
+            state.source_frame_depth = depth;
+        }
+    }
+
+    /// F4: whether a builtin `Call` at frame `fi` must skip its result push
+    /// and pc advance because a pending machine owns the continuation (the
+    /// callback-setup builtin pushed the callback frame itself; the Return
+    /// handler's state machine owns the pc). Membership is exactly the
+    /// historical 12 (machines whose builtins return junk that must not leak
+    /// onto the caller stack); other machines (for_of_*, yield_star_next,
+    /// iter_drain, accessor_call, …) complete through different paths and
+    /// must NOT skip. When adding a machine, decide membership here.
+    fn pending_owns_call(&self, fi: usize) -> bool {
+        self.pending_array_op
+            .as_ref()
+            .is_some_and(|p| fi < p.source_frame_depth)
+            || self
+                .pending_call
+                .as_ref()
+                .is_some_and(|p| fi < p.source_frame_depth)
+            || self
+                .pending_assert
+                .as_ref()
+                .is_some_and(|p| fi < p.source_frame_depth)
+            || self
+                .pending_promise_ctor
+                .as_ref()
+                .is_some_and(|p| fi < p.source_frame_depth)
+            || self
+                .pending_finally_op
+                .as_ref()
+                .is_some_and(|p| fi < p.source_frame_depth)
+            || self
+                .pending_replace_op
+                .as_ref()
+                .is_some_and(|p| fi < p.source_frame_depth)
+            || self
+                .pending_replace_all_op
+                .as_ref()
+                .is_some_and(|p| fi < p.source_frame_depth)
+            || self
+                .pending_symbol_dispatch
+                .as_ref()
+                .is_some_and(|p| fi < p.source_frame_depth)
+            || self
+                .pending_collection_foreach
+                .as_ref()
+                .is_some_and(|p| fi < p.source_frame_depth)
+            || self
+                .pending_collection_ctor
+                .as_ref()
+                .is_some_and(|p| fi < p.source_frame_depth)
+            || self
+                .pending_yield_star_afr
+                .as_ref()
+                .is_some_and(|p| fi < p.source_frame_depth)
+            || self
+                .pending_yield_star_get
+                .as_ref()
+                .is_some_and(|p| fi < p.source_frame_depth)
     }
 
     /// Execute a bytecode program and return its result.
@@ -7377,55 +7466,9 @@ impl Vm {
                                 // below the pending op's callback frame
                                 // (source_frame_depth = the callback's index):
                                 // builtin calls made INSIDE the user callback
-                                // must complete normally.
-                                let skip = self
-                                    .pending_array_op
-                                    .as_ref()
-                                    .is_some_and(|p| fi < p.source_frame_depth)
-                                    || self
-                                        .pending_call
-                                        .as_ref()
-                                        .is_some_and(|p| fi < p.source_frame_depth)
-                                    || self
-                                        .pending_assert
-                                        .as_ref()
-                                        .is_some_and(|p| fi < p.source_frame_depth)
-                                    || self
-                                        .pending_promise_ctor
-                                        .as_ref()
-                                        .is_some_and(|p| fi < p.source_frame_depth)
-                                    || self
-                                        .pending_finally_op
-                                        .as_ref()
-                                        .is_some_and(|p| fi < p.source_frame_depth)
-                                    || self
-                                        .pending_replace_op
-                                        .as_ref()
-                                        .is_some_and(|p| fi < p.source_frame_depth)
-                                    || self
-                                        .pending_replace_all_op
-                                        .as_ref()
-                                        .is_some_and(|p| fi < p.source_frame_depth)
-                                    || self
-                                        .pending_symbol_dispatch
-                                        .as_ref()
-                                        .is_some_and(|p| fi < p.source_frame_depth)
-                                    || self
-                                        .pending_collection_foreach
-                                        .as_ref()
-                                        .is_some_and(|p| fi < p.source_frame_depth)
-                                    || self
-                                        .pending_collection_ctor
-                                        .as_ref()
-                                        .is_some_and(|p| fi < p.source_frame_depth)
-                                    || self
-                                        .pending_yield_star_afr
-                                        .as_ref()
-                                        .is_some_and(|p| fi < p.source_frame_depth)
-                                    || self
-                                        .pending_yield_star_get
-                                        .as_ref()
-                                        .is_some_and(|p| fi < p.source_frame_depth);
+                                // must complete normally. F4: membership lives
+                                // in pending_owns_call (single place).
+                                let skip = self.pending_owns_call(fi);
                                 if skip {
                                     continue;
                                 }

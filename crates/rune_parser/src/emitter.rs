@@ -3383,27 +3383,22 @@ impl Emitter {
                 self.emit(Opcode::Yield, vec![]);
             }
             Expr::YieldStar(iterable, _) => {
-                // `yield* E`: drain E's iterator, yielding each value. Uses
-                // the same ForOfInit/ForOfNext machinery as for-of (works
-                // with builtin- and JS-function `next`), then leaves
-                // undefined as the expression value (the delegate's return
-                // value and sent-value forwarding are v1 gaps).
+                // `yield* E`: drain E's iterator, yielding each value, with
+                // sent-value forwarding (each resumed value becomes the next
+                // `next(sent)` argument) and the delegate's return value as
+                // the expression value. The loop is balanced without extra
+                // pops: ForOfNextStar consumes the sent value; Yield consumes
+                // the yielded value; resume re-pushes the next sent value.
                 self.emit_expression(iterable);
                 self.emit(Opcode::ForOfInit, vec![]);
+                self.emit(Opcode::LoadUndefined, vec![]);
                 let top = self.current();
                 let next_jump = self.current();
-                self.emit(Opcode::ForOfNext, vec![0, 0]);
-                self.emit(Opcode::Yield, vec![]);
-                self.emit(Opcode::Pop, vec![]);
+                self.emit(Opcode::ForOfNextStar, vec![0]);
+                self.emit(Opcode::YieldStarYield, vec![]);
                 self.emit(Opcode::Jump, vec![top as i64]);
                 let end = self.current();
                 self.patch(next_jump, end);
-                // ForOfNext's done path leaves [iterator, nextMethod] on the
-                // stack for the loop end to discard (see
-                // process_for_of_next_result).
-                self.emit(Opcode::Pop, vec![]);
-                self.emit(Opcode::Pop, vec![]);
-                self.emit(Opcode::LoadUndefined, vec![]);
             }
             Expr::Await(arg, _) => {
                 self.emit_expression(arg);

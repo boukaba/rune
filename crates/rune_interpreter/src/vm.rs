@@ -407,6 +407,64 @@ pub(crate) struct PendingForOfNext {
     pub(crate) end_target: usize,
 }
 
+/// Pending `yield*` delegation step whose delegate `next` is a JS function.
+/// Mirrors PendingForOfNext; the delegate return value becomes the yield*
+/// expression value on done.
+pub(crate) struct PendingYieldStarNext {
+    pub(crate) source_frame_depth: usize,
+    pub(crate) end_target: usize,
+    /// Enclosing generator when the drain runs inside one (for divert).
+    pub(crate) gen_id: Option<usize>,
+}
+
+pub(crate) enum YsGetOut {
+    Ready(Value),
+    Wait,
+    Bail(Option<Exit>),
+}
+
+/// What a resumed async yield* property read continues as.
+#[derive(Clone, Copy)]
+pub(crate) enum YsGetPhase {
+    /// Loaded delegate throw/return method → invoke or violation path.
+    AfrMethod { is_throw: bool },
+    /// Loaded IteratorClose return method (throw-violation path).
+    CloseReturn,
+    /// Loaded result.done → branch to value read or done path.
+    StarDone { end_target: usize },
+    /// Loaded result.value on the value path → push, advance.
+    StarValue,
+    /// Loaded result.value on the done path → drop pair, push, jump end.
+    StarValueDone { end_target: usize },
+    /// Loaded result.value in finish_* done path.
+    FinishDone,
+    /// Loaded result.value in finish_* value path.
+    FinishValue { is_throw: bool },
+}
+
+/// Pending async property read for yield* machinery (accessor getters).
+/// All Values are GC-rooted while pending.
+pub(crate) struct PendingYieldStarGet {
+    pub(crate) source_frame_depth: usize,
+    pub(crate) gen_id: usize,
+    pub(crate) phase: YsGetPhase,
+    pub(crate) abrupt_arg: Value,
+    pub(crate) iter: Value,
+    /// Object under inspection (result object for Res phases).
+    pub(crate) stash: Value,
+}
+
+/// Pending delegate throw()/return() call for yield* forwarding, or an
+/// IteratorClose return() call. Values are GC-rooted while pending.
+pub(crate) struct PendingYieldStarAbrupt {
+    pub(crate) source_frame_depth: usize,
+    pub(crate) gen_id: usize,
+    pub(crate) is_throw: bool,
+    pub(crate) abrupt_arg: Value,
+    pub(crate) iter: Value,
+    pub(crate) closing: bool,
+}
+
 /// Phase of a pending spread-drain (ToArrayFromIterable with JS callbacks).
 #[derive(PartialEq, Clone, Copy)]
 pub(crate) enum IterDrainState {
@@ -552,6 +610,18 @@ pub struct Vm {
     /// style caller-stack truncation (the real caller lives outside this
     /// nested loop); the value travels via Exit::Return.
     nested_gen_floor: Option<usize>,
+    /// Raw bits of the in-flight generator-return sentinel (see
+    /// resume_generator_inner Return mode). While set, `handle_throw`
+    /// skips user `catch` clauses for this value — return-completion runs
+    /// `finally` blocks but is invisible to `catch`.
+    generator_return_sentinel: Option<u64>,
+    /// Set by `handle_throw` when it routes an exception into a user
+    /// `catch` block (as opposed to a `finally` or unwinding out). Lets
+    /// generator resumption know its injected abrupt was consumed.
+    throw_routed_to_catch: bool,
+    /// Stashed return value for an in-flight generator Return resumption,
+    /// produced as the completion value when the sentinel unwinds out.
+    generator_return_value: Option<Value>,
     /// Call-site ICs for monomorphic Call caching (Opcode::Call fast path).
     pub call_ics: Vec<CallIcEntry>,
     /// Reusable buffer for JIT locals Vec to avoid per-call heap allocation.
@@ -658,6 +728,9 @@ pub struct Vm {
     /// JS `next` method called — resumed by the Return handler).
     pub(crate) pending_for_of_init: Option<PendingForOfInit>,
     pub(crate) pending_for_of_next: Option<PendingForOfNext>,
+    pub(crate) pending_yield_star_next: Option<PendingYieldStarNext>,
+    pub(crate) pending_yield_star_afr: Option<PendingYieldStarAbrupt>,
+    pub(crate) pending_yield_star_get: Option<PendingYieldStarGet>,
     /// Pending spread drain (ToArrayFromIterable with JS callbacks).
     pub(crate) pending_iter_drain: Option<PendingIterDrain>,
     pub(crate) pending_collection_ctor: Option<PendingCollectionCtor>,
@@ -718,6 +791,26 @@ impl Default for Vm {
     }
 }
 
+/// How a suspended generator is resumed.
+#[derive(Copy, Clone)]
+pub enum GeneratorResume {
+    /// `next(v)`: `v` becomes the suspended yield's value.
+    Next(Value),
+    /// `throw(e)`: unwind from the suspend point with `e`.
+    Throw(Value),
+    /// `return(v)`: run finallys, then complete with `v` (via sentinel).
+    Return(Value),
+}
+
+/// Outcome of a yield* delegation divert.
+#[allow(dead_code)]
+enum DivertOut {
+    /// Fully handled: caller must `continue` the run loop.
+    Handled,
+    /// Unwinding continues with this exit.
+    Throw(Exit),
+}
+
 impl Vm {
     pub fn new() -> Self {
         Vm {
@@ -758,6 +851,9 @@ impl Vm {
             globals_override: None,
             return_frame_floor: 0,
             nested_gen_floor: None,
+            generator_return_sentinel: None,
+            generator_return_value: None,
+            throw_routed_to_catch: false,
             jit_locals_buffer: Vec::new(),
             ics: Vec::new(),
             ic_entries: Vec::new(),
@@ -812,6 +908,9 @@ impl Vm {
             pending_symbol_coercion: None,
             pending_for_of_init: None,
             pending_for_of_next: None,
+            pending_yield_star_next: None,
+            pending_yield_star_afr: None,
+            pending_yield_star_get: None,
             pending_iter_drain: None,
             pending_collection_ctor: None,
             pending_collection_foreach: None,
@@ -2177,6 +2276,19 @@ impl Vm {
         Exit::Throw(self.pop())
     }
 
+    /// Build a TypeError and route it through `handle_throw` so in-frame
+    /// try/catch/finally handlers run (notably inside resumed generators,
+    /// whose try frames are banked and swapped in on resume). Returns `None`
+    /// when a handler took over (caller must `continue`), `Some(Exit)` when
+    /// the error propagates out. Outcome is identical to `throw_type_error`
+    /// when no handler matches.
+    fn throw_routed(&mut self, gc: &mut SemiSpace, msg: &str) -> Option<Exit> {
+        let full_msg = format!("TypeError: {}", msg);
+        let ptr = HeapString::allocate(gc, &full_msg);
+        let val = Value::from_heap_ptr(ptr as *mut u8);
+        self.handle_throw(gc, val)
+    }
+
     /// Whether the thrown value satisfies an `assert.throws(expected, fn)`
     /// expectation. String expectations compare against the error name;
     /// builtin constructor handles compare against the builtin's name.
@@ -2265,6 +2377,62 @@ impl Vm {
         "an error".to_string()
     }
 
+    /// Yield* delegation divert: if the frame being unwound past is a
+    /// delegate callback (next/throw/return/getter invoked on a suspended
+    /// outer generator's behalf — i.e. a live yield* pending state points
+    /// at it), resume the outer generator in Throw mode with the in-flight
+    /// error instead of unwinding past it.
+    /// Returns `Some(outcome)` when diverted, `None` to unwind normally.
+    fn divert_delegate_throw(&mut self, gc: &mut SemiSpace, val: Value) -> Option<DivertOut> {
+        let top = self.frames.len().wrapping_sub(1);
+        let afr_hit = self
+            .pending_yield_star_afr
+            .as_ref()
+            .is_some_and(|p| p.source_frame_depth == top);
+        let nxt_hit = self
+            .pending_yield_star_next
+            .as_ref()
+            .is_some_and(|p| p.source_frame_depth == top && p.gen_id.is_some());
+        let get_hit = self
+            .pending_yield_star_get
+            .as_ref()
+            .is_some_and(|p| p.source_frame_depth == top);
+        if !(afr_hit || nxt_hit || get_hit) {
+            return None;
+        }
+        // Consume the matched state (only one is ever live).
+        let gen_id = if afr_hit {
+            let pa = self.pending_yield_star_afr.take().unwrap();
+            pa.gen_id
+        } else if nxt_hit {
+            self.pending_yield_star_next.take().unwrap().gen_id.unwrap()
+        } else {
+            self.pending_yield_star_get.take().unwrap().gen_id
+        };
+        // Pop the callback frame (mirror the standard pop bookkeeping).
+        let popped_frame = self.frames.len() - 1;
+        self.last_locals = self.frames[popped_frame].locals.clone();
+        self.frames.pop();
+        self.try_stack
+            .retain(|tf| tf.frame_depth != popped_frame + 1);
+        match self.resume_generator_full(gc, gen_id, GeneratorResume::Throw(val)) {
+            Ok((v, done)) => {
+                if done {
+                    self.generators[gen_id].in_delegate = false;
+                }
+                let r = crate::builtins::iter_result_with_proto(gc, self, v, done);
+                self.push(r);
+                let n = self.frames.len();
+                self.frames[n - 1].pc += 1;
+                Some(DivertOut::Handled)
+            }
+            Err(e2) => match self.handle_throw(gc, e2) {
+                Some(exit) => Some(DivertOut::Throw(exit)),
+                None => Some(DivertOut::Handled),
+            },
+        }
+    }
+
     /// Unwind stack for a thrown value, routing to try/catch/finally handlers.
     /// This implements the same logic as the Opcode::Throw handler so that
     /// builtins can route exceptions through the JS try/catch mechanism
@@ -2273,13 +2441,18 @@ impl Vm {
     /// Returns `None` if the exception was handled (caught, finally, or
     /// assert.throws consumed it). Returns `Some(Exit)` if the exception
     /// must propagate up (no handler anywhere).
-    fn handle_throw(&mut self, gc: &mut SemiSpace, val: Value) -> Option<Exit> {
-        // Find in-frame handler
-        let handler_idx = self
-            .try_stack
-            .iter()
-            .rposition(|tf| tf.frame_depth == self.frames.len());
-        if let Some(idx) = handler_idx {
+    pub(crate) fn handle_throw(&mut self, gc: &mut SemiSpace, val: Value) -> Option<Exit> {
+        // Find in-frame handler. Loops: an entry may decline (generator
+        // return-sentinel skipping its catch with no finally of its own) —
+        // discard it and keep scanning outer entries in this frame.
+        loop {
+            let handler_idx = self
+                .try_stack
+                .iter()
+                .rposition(|tf| tf.frame_depth == self.frames.len());
+            let Some(idx) = handler_idx else {
+                break;
+            };
             let (catch_pc, finally_pc, stack_depth, in_catch) = {
                 let tf = &self.try_stack[idx];
                 (tf.catch_pc, tf.finally_pc, tf.stack_depth, tf.in_catch)
@@ -2291,7 +2464,14 @@ impl Vm {
                 self.frames[fi].pc = finally_pc;
                 return None;
             }
-            if catch_pc != 0 && !in_catch {
+            // Generator return-completion sentinel: invisible to user
+            // catch (spec: return runs finallys, not catches). Fall through
+            // to the finally handling below.
+            let is_return_sentinel = self
+                .generator_return_sentinel
+                .is_some_and(|s| s == val.raw());
+            if catch_pc != 0 && !in_catch && !is_return_sentinel {
+                self.throw_routed_to_catch = true;
                 if finally_pc != 0 {
                     self.try_stack[idx].in_catch = true;
                 } else {
@@ -2310,6 +2490,9 @@ impl Vm {
                 self.frames[fi].pc = finally_pc;
                 return None;
             }
+            // Declined: no catch taken (or skipped) and no finally here.
+            // Discard and keep scanning this frame's outer entries.
+            self.try_stack.remove(idx);
         }
         // No handler — pop frame and check caller
         let callee_base = self.frames.last().unwrap().stack_base;
@@ -2349,6 +2532,16 @@ impl Vm {
                 return None;
             }
         }
+        // Yield* delegation: if the frame being popped is a delegate
+        // callback invoked on a suspended outer generator's behalf,
+        // resume the outer generator in Throw mode instead of unwinding
+        // past it.
+        if let Some(outcome) = self.divert_delegate_throw(gc, val) {
+            match outcome {
+                DivertOut::Handled => return None,
+                DivertOut::Throw(exit) => return Some(exit),
+            }
+        }
         self.frames.pop();
         self.try_stack
             .retain(|tf| tf.frame_depth != popped_frame + 1);
@@ -2374,6 +2567,7 @@ impl Vm {
                 return None;
             }
             if catch_pc != 0 && !in_catch {
+                self.throw_routed_to_catch = true;
                 if finally_pc != 0 {
                     self.try_stack[idx].in_catch = true;
                 } else {
@@ -2533,6 +2727,18 @@ impl Vm {
         if let Some(ref pa) = self.pending_assert {
             gc.push_root(&pa.expected_error as *const Value as *mut u64);
         }
+        // Root pending yield* abrupt-forwarding values (may be forwarded
+        // by GC during the delegate JS callback).
+        if let Some(ref pa) = self.pending_yield_star_afr {
+            gc.push_root(&pa.abrupt_arg as *const Value as *mut u64);
+            gc.push_root(&pa.iter as *const Value as *mut u64);
+        }
+        // Root pending yield* async-get values.
+        if let Some(ref pg) = self.pending_yield_star_get {
+            gc.push_root(&pg.abrupt_arg as *const Value as *mut u64);
+            gc.push_root(&pg.iter as *const Value as *mut u64);
+            gc.push_root(&pg.stash as *const Value as *mut u64);
+        }
         // Root pending spread drain state (iterator/next/receiver values + the
         // result array, which may be forwarded by GC during JS callbacks)
         if let Some(ref pid) = self.pending_iter_drain {
@@ -2645,6 +2851,15 @@ impl Vm {
         if let Some(ref mut state) = self.pending_for_of_next {
             state.source_frame_depth = self.frames.len() - 1;
         }
+        if let Some(ref mut state) = self.pending_yield_star_next {
+            state.source_frame_depth = self.frames.len() - 1;
+        }
+        if let Some(ref mut state) = self.pending_yield_star_afr {
+            state.source_frame_depth = self.frames.len() - 1;
+        }
+        if let Some(ref mut state) = self.pending_yield_star_get {
+            state.source_frame_depth = self.frames.len() - 1;
+        }
         if let Some(ref mut state) = self.pending_iter_drain {
             state.source_frame_depth = self.frames.len() - 1;
         }
@@ -2721,6 +2936,82 @@ impl Vm {
             }
         }
         (val, false)
+    }
+
+    /// Load `key` from `obj` with accessor dispatch for the yield*
+    /// machinery. Plain values (and missing/undefined getters) resolve
+    /// synchronously to Ready. A JS-function getter pushes its frame, records
+    /// `pend`, and returns Wait (caller must bail without advancing; resume
+    /// via the PendingYieldStarGet Return arm). A builtin getter is invoked
+    /// synchronously; its abrupt paths surface as a raised pending exception
+    /// for builtin contexts to observe (return undefined, rely on skip-list)
+    /// or as an Exit for handler contexts — reported via Bail so each caller
+    /// translates for its own context.
+    pub(crate) fn yieldstar_get(
+        &mut self,
+        gc: &mut SemiSpace,
+        obj: Value,
+        key: Value,
+        pend: PendingYieldStarGet,
+    ) -> YsGetOut {
+        let raw = load_property_recursive(obj, key, None, gc);
+        let Some(ptr) = raw.heap_ptr() else {
+            return YsGetOut::Ready(raw);
+        };
+        if unsafe { (*(ptr as *const GcHeader)).tag() } != TAG_ACCESSOR {
+            return YsGetOut::Ready(raw);
+        }
+        let getter = unsafe { AccessorPair::getter(ptr) };
+        if getter.is_undefined() {
+            return YsGetOut::Ready(Value::undefined());
+        }
+        if getter.as_smi().is_some_and(|s| s < 0) {
+            return match call_builtin_sync(self, gc, getter, obj, &[]) {
+                Ok(v) => YsGetOut::Ready(v),
+                Err(Some(exit)) => YsGetOut::Bail(Some(exit)),
+                Err(None) => YsGetOut::Bail(None),
+            };
+        }
+        let Some(gptr) = getter.heap_ptr() else {
+            return YsGetOut::Ready(Value::undefined());
+        };
+        if unsafe { (*(gptr as *const GcHeader)).tag() } != TAG_FUNC {
+            return YsGetOut::Ready(Value::undefined());
+        }
+        let func_ptr = gptr;
+        let func_idx = unsafe { Func::func_index(func_ptr as *mut Func) } as usize;
+        let creator_prog =
+            unsafe { &*(Func::prog_ptr(func_ptr as *mut Func) as *const BytecodeProgram) };
+        if func_idx >= creator_prog.functions.len() {
+            return YsGetOut::Ready(Value::undefined());
+        }
+        let func_prog = &creator_prog.functions[func_idx];
+        let func_env = unsafe { Func::env_ptr(func_ptr as *mut Func) };
+        let locals = if func_prog.named_function {
+            vec![getter]
+        } else {
+            vec![]
+        };
+        self.pending_yield_star_get = Some(pend);
+        self.frames.push(Frame {
+            locals,
+            lexical_slots: Vec::new(),
+            lexical_tdz: Vec::new(),
+            lexical_const: Vec::new(),
+            scope_boundaries: Vec::new(),
+            passed_argc: 0,
+            pc: 0,
+            stack_base: self.stack.len(),
+            prog: func_prog as *const BytecodeProgram,
+            generator_id: None,
+            this: obj,
+            is_constructor_call: false,
+            constructed_object: Value::undefined(),
+            env: func_env,
+            func_ptr,
+            private_name_ids: std::ptr::null_mut(),
+        });
+        YsGetOut::Wait
     }
 
     pub fn execute(
@@ -3056,7 +3347,7 @@ impl Vm {
     ) -> Result<Value, Value> {
         // Legacy semantics: Yield and Return both flatten to the value
         // (used by Context::resume and the async machinery).
-        self.resume_generator_inner(gc, gen_id, arg)
+        self.resume_generator_inner(gc, gen_id, GeneratorResume::Next(arg))
             .map(|(v, _done)| v)
     }
 
@@ -3065,16 +3356,16 @@ impl Vm {
         &mut self,
         gc: &mut SemiSpace,
         gen_id: usize,
-        arg: Value,
+        resume: GeneratorResume,
     ) -> Result<(Value, bool), Value> {
-        self.resume_generator_inner(gc, gen_id, arg)
+        self.resume_generator_inner(gc, gen_id, resume)
     }
 
     fn resume_generator_inner(
         &mut self,
         gc: &mut SemiSpace,
         gen_id: usize,
-        arg: Value,
+        resume: GeneratorResume,
     ) -> Result<(Value, bool), Value> {
         if self.generators[gen_id].done {
             return Ok((Value::undefined(), true));
@@ -3085,6 +3376,10 @@ impl Vm {
                 "TypeError: generator already running",
             )));
         }
+        // A suspended abrupt (Throw/Return resume that yielded again,
+        // e.g. inside a `finally`) takes precedence over the new request.
+        let resume = self.generators[gen_id].abrupt.take().unwrap_or(resume);
+        let is_abrupt = !matches!(resume, GeneratorResume::Next(_));
         self.generators[gen_id].executing = true;
         // Swap in the generator's own try/catch/finally frames; the caller's
         // stack is restored when the nested run_loop returns. (Yield banks
@@ -3149,17 +3444,78 @@ impl Vm {
             private_name_ids: std::ptr::null_mut(),
         });
 
+        // Rebase banked try frames onto the fresh frame: TryBegin records
+        // frame_depth as frames.len() at push time, so it must be the
+        // post-push length; stack depths rebase relative to suspension base.
+        {
+            let new_fi = self.frames.len();
+            let new_base = self.stack.len();
+            let old_base = self.generators[gen_id].stack_base_saved;
+            for tf in self.try_stack.iter_mut() {
+                tf.frame_depth = new_fi;
+                let rel = tf.stack_depth.saturating_sub(old_base);
+                tf.stack_depth = new_base + rel;
+            }
+        }
+
         // Restore live operand temps saved at suspension, then push the
         // resume argument on top (the post-Yield continuation consumes it).
         for v in saved_stack {
             self.push(v);
         }
+        // Only Next carries a sent value; Throw/Return inject their
+        // completion below instead of pushing an operand.
+        let sent = match resume {
+            GeneratorResume::Next(v) => Some(v),
+            _ => None,
+        };
         if started {
-            self.push(arg);
+            if let Some(v) = sent {
+                self.push(v);
+            }
         }
         self.generators[gen_id].started = true;
 
-        let exit = self.run_loop(gc);
+        // Throw/Return modes inject an abrupt completion at the suspend
+        // point instead of a sent value. handle_throw unwinds through the
+        // generator's own (swapped-in) try frames, so in-generator
+        // catch/finally blocks run naturally; if nothing handles it, the
+        // Throw exit propagates out.
+        //
+        // If suspended INSIDE a finally region already (suspend pc strictly
+        // past that entry's finally_pc), the new abrupt preempts the rest of
+        // that finally — drop such entries first so the kick doesn't
+        // restart them from the top (which re-yields forever or duplicates
+        // effects). Being inside a catch region is already marked by
+        // in_catch and handled by the normal branches.
+        if !matches!(resume, GeneratorResume::Next(_)) {
+            while let Some(tf) = self.try_stack.last() {
+                if !tf.in_catch && tf.finally_pc != 0 && pc > tf.finally_pc {
+                    self.try_stack.pop();
+                } else {
+                    break;
+                }
+            }
+        }
+        self.throw_routed_to_catch = false;
+        let injected = match resume {
+            GeneratorResume::Next(_) => None,
+            GeneratorResume::Throw(e) => self.handle_throw(gc, e),
+            GeneratorResume::Return(_) => {
+                let sentinel =
+                    Value::from_heap_ptr(crate::vm::heap_string(gc, "\0__rune_gen_return__\0"));
+                self.generator_return_sentinel = Some(sentinel.raw());
+                self.generator_return_value = Some(match resume {
+                    GeneratorResume::Return(v) => v,
+                    _ => unreachable!(),
+                });
+                self.handle_throw(gc, sentinel)
+            }
+        };
+        let exit = match injected {
+            Some(exit) => exit,
+            None => self.run_loop(gc),
+        };
         self.return_frame_floor = saved_floor;
         self.nested_gen_floor = saved_gen_floor;
         // Discard any leftover generator-side try frames (Yield banked the
@@ -3172,13 +3528,29 @@ impl Vm {
                 self.generators[gen_id].done = true;
                 Ok((v, true))
             }
-            Exit::Yield(v) => Ok((v, false)),
+            Exit::Yield(v) => {
+                if is_abrupt && !self.throw_routed_to_catch {
+                    if !matches!(resume, GeneratorResume::Next(_)) {
+                        self.generators[gen_id].abrupt = Some(resume);
+                    }
+                }
+                self.throw_routed_to_catch = false;
+                Ok((v, false))
+            }
             // Abrupt completion (uncaught throw) completes the generator —
             // otherwise the stale suspended pc would re-execute the throwing
             // call on the next resume.
             Exit::Throw(v) => {
                 self.generators[gen_id].done = true;
-                Err(v)
+                // A fully-unwound return sentinel converts to the stashed
+                // return completion (finally blocks already ran).
+                if self.generator_return_sentinel.is_some_and(|s| s == v.raw()) {
+                    self.generator_return_sentinel = None;
+                    let rv = self.generator_return_value.take().unwrap_or(v);
+                    Ok((rv, true))
+                } else {
+                    Err(v)
+                }
             }
         }
     }
@@ -4316,11 +4688,18 @@ impl Vm {
                     let expr_val = self.pop();
                     match get_iter_method(self, gc, expr_val) {
                         SymbolMethodResult::NotFound => {
-                            return self.throw_type_error(gc, "value is not iterable");
+                            if let Some(exit) = self.throw_routed(gc, "value is not iterable") {
+                                return exit;
+                            }
+                            continue;
                         }
                         SymbolMethodResult::NotCallable => {
-                            return self
-                                .throw_type_error(gc, "value[Symbol.iterator] is not a function");
+                            if let Some(exit) =
+                                self.throw_routed(gc, "value[Symbol.iterator] is not a function")
+                            {
+                                return exit;
+                            }
+                            continue;
                         }
                         SymbolMethodResult::Found(method) => {
                             if method.as_smi().is_some_and(|s| s < 0) {
@@ -4344,10 +4723,12 @@ impl Vm {
                                 self.push_callback_call(gc, method, expr_val, vec![]);
                                 // pc NOT advanced — the Return handler resumes.
                             } else {
-                                return self.throw_type_error(
-                                    gc,
-                                    "value[Symbol.iterator] is not a function",
-                                );
+                                if let Some(exit) = self
+                                    .throw_routed(gc, "value[Symbol.iterator] is not a function")
+                                {
+                                    return exit;
+                                }
+                                continue;
                             }
                         }
                     }
@@ -4380,7 +4761,47 @@ impl Vm {
                         self.push_callback_call(gc, next, iter, vec![]);
                         // pc NOT advanced — the Return handler resumes.
                     } else {
-                        return self.throw_type_error(gc, "iterator.next is not a function");
+                        if let Some(exit) = self.throw_routed(gc, "iterator.next is not a function")
+                        {
+                            return exit;
+                        }
+                        continue;
+                    }
+                }
+                Opcode::ForOfNextStar => {
+                    // yield* delegation step: stack [..., iter, next, sent].
+                    let end_target = instr.operands[0] as usize;
+                    let sent = self.pop();
+                    let len = self.stack.len();
+                    let next = self.stack[len - 1];
+                    let iter = self.stack[len - 2];
+                    if next.as_smi().is_some_and(|s| s < 0) {
+                        let result = match call_builtin_sync(self, gc, next, iter, &[sent]) {
+                            Ok(v) => v,
+                            Err(Some(exit)) => return exit,
+                            Err(None) => continue,
+                        };
+                        match process_yieldstar_next_result(self, gc, result, end_target) {
+                            Ok(()) => continue,
+                            Err(exit) => return exit,
+                        }
+                    } else if next.is_heap_object()
+                        && unsafe { (*(next.heap_ptr().unwrap() as *const GcHeader)).tag() }
+                            == TAG_FUNC
+                    {
+                        self.pending_yield_star_next = Some(PendingYieldStarNext {
+                            source_frame_depth: self.frames.len() - 1,
+                            end_target,
+                            gen_id: self.frames[fi].generator_id,
+                        });
+                        self.push_callback_call(gc, next, iter, vec![sent]);
+                        // pc NOT advanced — the Return handler resumes.
+                    } else {
+                        if let Some(exit) = self.throw_routed(gc, "iterator.next is not a function")
+                        {
+                            return exit;
+                        }
+                        continue;
                     }
                 }
                 Opcode::ToArrayFromIterable => {
@@ -4414,11 +4835,18 @@ impl Vm {
                     // Generic iterable: @@iterator → drain.
                     match get_iter_method(self, gc, x) {
                         SymbolMethodResult::NotFound => {
-                            return self.throw_type_error(gc, "value is not iterable");
+                            if let Some(exit) = self.throw_routed(gc, "value is not iterable") {
+                                return exit;
+                            }
+                            continue;
                         }
                         SymbolMethodResult::NotCallable => {
-                            return self
-                                .throw_type_error(gc, "value[Symbol.iterator] is not a function");
+                            if let Some(exit) =
+                                self.throw_routed(gc, "value[Symbol.iterator] is not a function")
+                            {
+                                return exit;
+                            }
+                            continue;
                         }
                         SymbolMethodResult::Found(method) => {
                             if method.as_smi().is_some_and(|s| s < 0) {
@@ -4447,10 +4875,12 @@ impl Vm {
                                 self.push_callback_call(gc, method, x, vec![]);
                                 // pc NOT advanced — the Return handler resumes.
                             } else {
-                                return self.throw_type_error(
-                                    gc,
-                                    "value[Symbol.iterator] is not a function",
-                                );
+                                if let Some(exit) = self
+                                    .throw_routed(gc, "value[Symbol.iterator] is not a function")
+                                {
+                                    return exit;
+                                }
+                                continue;
                             }
                         }
                     }
@@ -6917,6 +7347,14 @@ impl Vm {
                                     || self
                                         .pending_collection_ctor
                                         .as_ref()
+                                        .is_some_and(|p| fi < p.source_frame_depth)
+                                    || self
+                                        .pending_yield_star_afr
+                                        .as_ref()
+                                        .is_some_and(|p| fi < p.source_frame_depth)
+                                    || self
+                                        .pending_yield_star_get
+                                        .as_ref()
                                         .is_some_and(|p| fi < p.source_frame_depth);
                                 if skip {
                                     continue;
@@ -7850,6 +8288,10 @@ impl Vm {
                             }
                             continue;
                         }
+                        // Nested return from inside the thunk (e.g. a setup
+                        // call or `new E()`) — not the thunk itself. Keep
+                        // waiting for the thunk's own return/throw.
+                        self.pending_assert = Some(pa);
                     }
                     // Check if this return completes a pending @@method dispatch
                     // (String.prototype.match/search/split/replace with an object
@@ -7888,6 +8330,48 @@ impl Vm {
                             }
                         }
                         self.pending_for_of_next = Some(pfon);
+                    }
+                    if let Some(pfon) = self.pending_yield_star_next.take() {
+                        if self.frames.len() == pfon.source_frame_depth {
+                            match process_yieldstar_next_result(self, gc, result, pfon.end_target) {
+                                Ok(()) => continue,
+                                Err(exit) => return exit,
+                            }
+                        }
+                        self.pending_yield_star_next = Some(pfon);
+                    }
+                    if let Some(pg) = self.pending_yield_star_get.take() {
+                        if self.frames.len() == pg.source_frame_depth {
+                            match crate::builtins::continue_yieldstar_get(self, gc, &pg, result) {
+                                Ok(()) => continue,
+                                Err(exit) => return exit,
+                            }
+                        }
+                        self.pending_yield_star_get = Some(pg);
+                    }
+                    if let Some(pa) = self.pending_yield_star_afr.take() {
+                        if self.frames.len() == pa.source_frame_depth {
+                            match crate::builtins::finish_yieldstar_afr_result(
+                                self,
+                                gc,
+                                pa.gen_id,
+                                pa.is_throw,
+                                pa.abrupt_arg,
+                                pa.iter,
+                                pa.closing,
+                                result,
+                            ) {
+                                Ok(v) => {
+                                    self.push(v);
+                                    let frames_len = self.frames.len();
+                                    self.frames[frames_len - 1].pc += 1;
+                                    continue;
+                                }
+                                Err(Some(exit)) => return exit,
+                                Err(None) => continue,
+                            }
+                        }
+                        self.pending_yield_star_afr = Some(pa);
                     }
                     // Check if this return completes a pending spread drain
                     // (ToArrayFromIterable with user-defined callbacks).
@@ -8572,8 +9056,10 @@ impl Vm {
                         g.started = true;
                         g.this = self.frames[fi].this;
                         g.env = self.frames[fi].env;
+                        g.in_delegate = false;
                         g.try_frames = std::mem::take(&mut self.try_stack);
                         let base = self.frames[fi].stack_base;
+                        g.stack_base_saved = base;
                         g.stack = self.stack[base..].to_vec();
                     }
                     let callee_base = self.frames.last().unwrap().stack_base;
@@ -8591,6 +9077,42 @@ impl Vm {
                     // the yielded value onto them leaked one slot PER YIELD
                     // into the caller's operand stack and desynchronized any
                     // enclosing for-of. The value travels via Exit::Yield.
+                    self.stack.truncate(callee_base);
+                    return Exit::Yield(val);
+                }
+                Opcode::YieldStarYield => {
+                    // Identical suspension to Yield, but marks the generator
+                    // as suspended inside a yield* delegation (live [iter,
+                    // next] pair is on top of the banked operand stack).
+                    let val = self.pop();
+                    if let Some(gen_id) = self.frames[fi].generator_id {
+                        let g = &mut self.generators[gen_id];
+                        g.locals = self.frames[fi].locals.clone();
+                        g.lexical_slots = self.frames[fi].lexical_slots.clone();
+                        g.lexical_tdz = self.frames[fi].lexical_tdz.clone();
+                        g.lexical_const = self.frames[fi].lexical_const.clone();
+                        g.scope_boundaries = self.frames[fi].scope_boundaries.clone();
+                        g.pc = pc + 1;
+                        g.prog = self.frames[fi].prog;
+                        g.started = true;
+                        g.this = self.frames[fi].this;
+                        g.env = self.frames[fi].env;
+                        g.in_delegate = true;
+                        g.try_frames = std::mem::take(&mut self.try_stack);
+                        let base = self.frames[fi].stack_base;
+                        g.stack_base_saved = base;
+                        g.stack = self.stack[base..].to_vec();
+                    }
+                    let callee_base = self.frames.last().unwrap().stack_base;
+                    let popped_frame = self.frames.len() - 1;
+                    self.last_locals = self.frames[popped_frame].locals.clone();
+                    self.frames.pop();
+                    self.try_stack
+                        .retain(|tf| tf.frame_depth != popped_frame + 1);
+                    if self.frames.is_empty() {
+                        self.stack.clear();
+                        return Exit::Yield(val);
+                    }
                     self.stack.truncate(callee_base);
                     return Exit::Yield(val);
                 }
@@ -8845,6 +9367,24 @@ impl Vm {
 
     pub fn push(&mut self, val: Value) {
         self.stack.push(val);
+    }
+
+    /// Push a value and advance the top frame's pc (shared by pending-state
+    /// continuations in builtins.rs).
+    pub(crate) fn push_and_advance(&mut self, val: Value) {
+        self.push(val);
+        let n = self.frames.len();
+        self.frames[n - 1].pc += 1;
+    }
+
+    /// Pop two values (e.g. [iterator, nextMethod]), push a value, and jump
+    /// the top frame to `target`.
+    pub(crate) fn pop2_push_jump(&mut self, val: Value, target: usize) {
+        self.pop();
+        self.pop();
+        self.push(val);
+        let n = self.frames.len();
+        self.frames[n - 1].pc = target;
     }
 
     pub fn pop(&mut self) -> Value {
@@ -9692,7 +10232,7 @@ pub(crate) fn get_iter_method(vm: &mut Vm, gc: &mut SemiSpace, value: Value) -> 
 /// Call a builtin by its negative-smi handle. Returns Ok(Value) on success.
 /// If the builtin raised an exception: Err(Some(exit)) means it must propagate;
 /// Err(None) means the exception was consumed internally (continue the loop).
-fn call_builtin_sync(
+pub(crate) fn call_builtin_sync(
     vm: &mut Vm,
     gc: &mut SemiSpace,
     handle: Value,
@@ -9736,7 +10276,10 @@ pub(crate) fn new_dense_array(vm: &mut Vm, gc: &mut SemiSpace) -> *mut u8 {
 /// stack (for..of loop head).
 fn complete_for_of_init(vm: &mut Vm, gc: &mut SemiSpace, iterator: Value) -> Result<(), Exit> {
     if !iterator.is_heap_object() {
-        return Err(vm.throw_type_error(gc, "value is not iterable"));
+        if let Some(exit) = vm.throw_routed(gc, "value is not iterable") {
+            return Err(exit);
+        }
+        return Ok(());
     }
     let next = load_property_recursive(iterator, vm.next_key, Some(vm.function_prototype), gc);
     let callable = next.as_smi().is_some_and(|s| s < 0)
@@ -9744,7 +10287,10 @@ fn complete_for_of_init(vm: &mut Vm, gc: &mut SemiSpace, iterator: Value) -> Res
             .heap_ptr()
             .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC });
     if !callable {
-        return Err(vm.throw_type_error(gc, "iterator.next is not a function"));
+        if let Some(exit) = vm.throw_routed(gc, "iterator.next is not a function") {
+            return Err(exit);
+        }
+        return Ok(());
     }
     vm.push(iterator);
     vm.push(next);
@@ -9761,7 +10307,10 @@ fn process_for_of_next_result(
     end_target: usize,
 ) -> Result<(), Exit> {
     if !result.is_heap_object() {
-        return Err(vm.throw_type_error(gc, "Iterator result is not an object"));
+        if let Some(exit) = vm.throw_routed(gc, "Iterator result is not an object") {
+            return Err(exit);
+        }
+        return Ok(());
     }
     let done = load_property_recursive(result, vm.done_key, None, gc).to_bool();
     if done {
@@ -9776,6 +10325,99 @@ fn process_for_of_next_result(
         vm.push(value);
         let frames_len = vm.frames.len();
         vm.frames[frames_len - 1].pc += 1;
+    }
+    Ok(())
+}
+
+/// Process a `yield*` delegation step result: done → drop [iter, next],
+/// push the delegate's return value and jump to the loop end (it becomes
+/// the yield* expression value); otherwise push the yielded value.
+/// The stack must be [..., iterator, nextMethod] when called.
+fn process_yieldstar_next_result(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    result: Value,
+    end_target: usize,
+) -> Result<(), Exit> {
+    if !result.is_heap_object() {
+        if let Some(exit) = vm.throw_routed(gc, "Iterator result is not an object") {
+            return Err(exit);
+        }
+        return Ok(());
+    }
+    // done read (async-capable; result itself is the stash).
+    let done = match crate::builtins::ys_read_gen(
+        vm,
+        gc,
+        0,
+        Value::undefined(),
+        Value::undefined(),
+        result,
+        crate::vm::YsGetPhase::StarDone { end_target },
+        result,
+        vm.done_key,
+    ) {
+        crate::builtins::YsOut::Sync(v) => v.to_bool(),
+        crate::builtins::YsOut::Wait => return Ok(()),
+        crate::builtins::YsOut::Raise(e) => match vm.handle_throw(gc, e) {
+            Some(exit) => return Err(exit),
+            None => return Ok(()),
+        },
+        crate::builtins::YsOut::Bail(Some(exit)) => return Err(exit),
+        crate::builtins::YsOut::Bail(None) => return Ok(()),
+    };
+    if done {
+        match crate::builtins::ys_read_gen(
+            vm,
+            gc,
+            0,
+            Value::undefined(),
+            Value::undefined(),
+            result,
+            crate::vm::YsGetPhase::StarValueDone { end_target },
+            result,
+            vm.value_key,
+        ) {
+            crate::builtins::YsOut::Sync(v) => {
+                vm.pop();
+                vm.pop();
+                vm.push(v);
+                let frames_len = vm.frames.len();
+                vm.frames[frames_len - 1].pc = end_target;
+            }
+            crate::builtins::YsOut::Wait => return Ok(()),
+            crate::builtins::YsOut::Raise(e) => match vm.handle_throw(gc, e) {
+                Some(exit) => return Err(exit),
+                None => return Ok(()),
+            },
+            crate::builtins::YsOut::Bail(Some(exit)) => return Err(exit),
+            crate::builtins::YsOut::Bail(None) => return Ok(()),
+        }
+    } else {
+        match crate::builtins::ys_read_gen(
+            vm,
+            gc,
+            0,
+            Value::undefined(),
+            Value::undefined(),
+            result,
+            crate::vm::YsGetPhase::StarValue,
+            result,
+            vm.value_key,
+        ) {
+            crate::builtins::YsOut::Sync(v) => {
+                vm.push(v);
+                let frames_len = vm.frames.len();
+                vm.frames[frames_len - 1].pc += 1;
+            }
+            crate::builtins::YsOut::Wait => return Ok(()),
+            crate::builtins::YsOut::Raise(e) => match vm.handle_throw(gc, e) {
+                Some(exit) => return Err(exit),
+                None => return Ok(()),
+            },
+            crate::builtins::YsOut::Bail(Some(exit)) => return Err(exit),
+            crate::builtins::YsOut::Bail(None) => return Ok(()),
+        }
     }
     Ok(())
 }

@@ -2,7 +2,7 @@
 
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
-> **Status:** v0.8.1 🚧 (In Progress — 625/625 integration tests Pass, 3 Ignored; workspace 786 tests Pass)
+> **Status:** v0.11.1 🚧 (In Progress — 681/681 integration tests Pass, 3 Ignored; workspace 842 tests Pass)
 > SIDT validated, AFPC bytecode + native-code cache functional (AArch64); x86-64 runs bytecode/IC/shape caching only (JIT codegen disabled there). Cold start 2.8× faster than Node
 
 > **⚠️ CRITICAL RULE — Spec-First Development**
@@ -86,6 +86,49 @@
 - Note for future region sizing: helper-table byte offsets must stay ≤ 32760
   (ldr_off imm12 field limit) — JIT_STACK_SIZE ≤ ~4000 slots without a
   wide-offset encoding.
+
+## Generators COMPLETED — resumption-with-throw, return()-finally, yield* delegation (2026-09-05)
+
+Follow-up slice closing the four documented v1 gaps from the 2026-09-04
+landing (delegate return-values, sent-value forwarding, finally-execution in
+return/throw, resumption-with-throw). All throw/return paths route through
+`handle_throw` so in-generator catch/finally blocks run naturally:
+
+- **Resumption-with-throw** (`GeneratorResume::Throw`): `gen.throw(e)` injects
+  an abrupt completion at the suspend point via `handle_throw` on the banked
+  try frames (rebased onto the fresh frame). Caught → catch body runs (yields
+  again with the abrupt preserved unless a catch took it); uncaught →
+  generator completes + propagates; throw-before-start completes without
+  running the body. `throw_routed_to_catch` tracks consumption.
+- **return()-finally** (`GeneratorResume::Return`): injects a hidden sentinel
+  through `handle_throw` — invisible to user `catch` (skipped by raw-bits
+  comparison) but runs `finally` blocks (a finally may yield again; the
+  original Return abrupt takes precedence on the next resume via
+  `Generator.abrupt`). Fully-unwound sentinel converts to the stashed return
+  completion value.
+- **yield\***: new `ForOfNextStar` (pops sent, calls `next(sent)`) +
+  `YieldStarYield` (suspends with `in_delegate=true`, live `[iter,next]` pair
+  banked) opcodes; done path drops the pair and pushes the delegate's return
+  value as the expression value. Sent-value forwarding falls out of the
+  resume/suspend stack discipline.
+- **Delegate throw/return forwarding** (`forward_to_delegate` + pending
+  machines `PendingYieldStarNext/Abrupt/Get`): outer `throw()`/`return()`
+  while `in_delegate` dispatches to the delegate's `throw`/`return` method
+  (builtin = sync, JS fn = pending state + Return-handler continuation,
+  accessor getters = async-capable `yieldstar_get`/`ys_read_gen` reads of
+  `done`/`value`), incl. IteratorClose violation paths. Delegate-callback
+  throws divert back into the outer (`divert_delegate_throw`). All pending
+  values GC-rooted + depth-rebased.
+- **Validation**: 11 new integration tests (throw-caught/uncaught/before-start,
+  return-finally, delegate-return, sent-forwarding, throw/return forwarding,
+  custom JS-next iterable, JS throw/return methods); **26/26 generator tests,
+  842 workspace / 0 failed**; clippy (CI flags)/fmt/no-default/x86-64 clean.
+  test262: GeneratorPrototype 34→**47/61**; expressions/yield 23/63,
+  statements/generators 74/266 (remaining: destructuring/params harness gaps).
+- **Known gaps**: GeneratorFunction ctor 0/23 — needs runtime
+  source→bytecode compilation, which the engine has no machinery for (the
+  `Function` ctor is likewise absent: `new Function()` → "not a constructor").
+  Deferred as its own slice.
 
 ## Generators LANDED — real instances, next/return/throw, for-of, spread, yield* (2026-09-04)
 

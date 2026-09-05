@@ -459,6 +459,134 @@ fn test_generator_yield_star_array() {
 }
 
 #[test]
+fn test_generator_throw_caught_inside() {
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        "function* gen() { try { yield 1; yield 2; } catch (e) { yield 99; } } var g = gen();",
+    )
+    .unwrap();
+    assert_eq!(ctx.eval("g.next().value").unwrap().as_smi(), Some(1));
+    // throw() resumes at the yield point: the catch runs and yields 99.
+    assert_eq!(
+        ctx.eval("g.throw('boom').value").unwrap().as_smi(),
+        Some(99)
+    );
+    // After the catch's yield, the generator finishes (done, undefined).
+    assert!(ctx.eval("g.next().done").unwrap().to_bool());
+}
+
+#[test]
+fn test_generator_throw_uncaught_completes() {
+    let mut ctx = Context::new_small();
+    ctx.eval("function* gen() { yield 1; yield 2; } var g = gen();")
+        .unwrap();
+    assert_eq!(ctx.eval("g.next().value").unwrap().as_smi(), Some(1));
+    // No catch inside: the throw propagates and completes the generator.
+    assert!(ctx.eval("g.throw('boom')").is_err());
+    assert!(ctx.eval("g.next().done").unwrap().to_bool());
+}
+
+#[test]
+fn test_generator_throw_before_start() {
+    let mut ctx = Context::new_small();
+    ctx.eval("function* gen() { yield 1; } var g = gen();")
+        .unwrap();
+    // Throw before the first next(): body never runs, generator completes.
+    assert!(ctx.eval("g.throw('boom')").is_err());
+    assert!(ctx.eval("g.next().done").unwrap().to_bool());
+}
+
+#[test]
+fn test_generator_return_runs_finally() {
+    let mut ctx = Context::new_small();
+    ctx.eval("function* gen() { try { yield 1; yield 2; } finally { yield 99; } } var g = gen();")
+        .unwrap();
+    assert_eq!(ctx.eval("g.next().value").unwrap().as_smi(), Some(1));
+    // return() runs the finally, which yields first (abrupt still pending).
+    assert_eq!(ctx.eval("g.return(7).value").unwrap().as_smi(), Some(99));
+    // Resuming completes with the return value, then stays done.
+    assert_eq!(ctx.eval("g.next().value").unwrap().as_smi(), Some(7));
+    assert!(ctx.eval("g.next().done").unwrap().to_bool());
+}
+
+#[test]
+fn test_generator_yield_star_delegate_return() {
+    let mut ctx = Context::new_small();
+    ctx.eval("function* inner() { yield 1; return 99; } function* outer() { var x = yield* inner(); return x; } var g = outer();")
+        .unwrap();
+    assert_eq!(ctx.eval("g.next().value").unwrap().as_smi(), Some(1));
+    // Draining the delegate makes its return value the yield* expression value.
+    assert_eq!(ctx.eval("g.next().value").unwrap().as_smi(), Some(99));
+    assert!(ctx.eval("g.next().done").unwrap().to_bool());
+}
+
+#[test]
+fn test_generator_yield_star_sent_forwarding() {
+    let mut ctx = Context::new_small();
+    ctx.eval("function* inner() { var a = yield 1; return a; } function* outer() { var x = yield* inner(); return x; } var g = outer();")
+        .unwrap();
+    assert_eq!(ctx.eval("g.next().value").unwrap().as_smi(), Some(1));
+    // The sent value becomes the delegate next() argument (a === 42).
+    assert_eq!(ctx.eval("g.next(42).value").unwrap().as_smi(), Some(42));
+}
+
+#[test]
+fn test_generator_yield_star_throw_forwarding() {
+    let mut ctx = Context::new_small();
+    ctx.eval("function* inner() { try { yield 1; yield 2; } catch (e) { yield 99; } } function* outer() { yield* inner(); } var g = outer();")
+        .unwrap();
+    assert_eq!(ctx.eval("g.next().value").unwrap().as_smi(), Some(1));
+    // outer.throw() forwards to the delegate's throw (caught inside -> 99).
+    assert_eq!(
+        ctx.eval("g.throw('boom').value").unwrap().as_smi(),
+        Some(99)
+    );
+}
+
+#[test]
+fn test_generator_yield_star_return_forwarding() {
+    let mut ctx = Context::new_small();
+    ctx.eval("function* inner() { try { yield 1; yield 2; } finally { yield 99; } } function* outer() { yield* inner(); } var g = outer();")
+        .unwrap();
+    assert_eq!(ctx.eval("g.next().value").unwrap().as_smi(), Some(1));
+    // outer.return() forwards to the delegate's return (finally yields 99).
+    assert_eq!(ctx.eval("g.return(7).value").unwrap().as_smi(), Some(99));
+}
+
+#[test]
+fn test_generator_yield_star_custom_iterable() {
+    let mut ctx = Context::new_small();
+    ctx.eval("var it2 = { i: 0, next: function () { this.i = this.i + 1; if (this.i > 2) { return { value: 99, done: true }; } return { value: this.i * 10, done: false }; } }; var del = {}; del[Symbol.iterator] = function () { return it2; }; function* outer() { var x = yield* del; return x; } var g = outer();")
+        .unwrap();
+    assert_eq!(ctx.eval("g.next().value").unwrap().as_smi(), Some(10));
+    assert_eq!(ctx.eval("g.next().value").unwrap().as_smi(), Some(20));
+    // Delegate done: its return value (99) is the yield* expression value.
+    assert_eq!(ctx.eval("g.next().value").unwrap().as_smi(), Some(99));
+    assert!(ctx.eval("g.next().done").unwrap().to_bool());
+}
+
+#[test]
+fn test_generator_yield_star_js_throw_method() {
+    let mut ctx = Context::new_small();
+    ctx.eval("var it2 = { next: function () { return { value: 1, done: false }; }, throw: function (e) { return { value: 42, done: true }; } }; var del = {}; del[Symbol.iterator] = function () { return it2; }; function* outer() { var x = yield* del; return x; } var g = outer();")
+        .unwrap();
+    assert_eq!(ctx.eval("g.next().value").unwrap().as_smi(), Some(1));
+    assert_eq!(
+        ctx.eval("g.throw('boom').value").unwrap().as_smi(),
+        Some(42)
+    );
+}
+
+#[test]
+fn test_generator_yield_star_js_return_method() {
+    let mut ctx = Context::new_small();
+    ctx.eval("var it2 = { next: function () { return { value: 1, done: false }; }, return: function (v) { return { value: 43, done: true }; } }; var del = {}; del[Symbol.iterator] = function () { return it2; }; function* outer() { var x = yield* del; return x; } var g = outer();")
+        .unwrap();
+    assert_eq!(ctx.eval("g.next().value").unwrap().as_smi(), Some(1));
+    assert_eq!(ctx.eval("g.return(7).value").unwrap().as_smi(), Some(43));
+}
+
+#[test]
 fn test_generator_done_stays_done() {
     let mut ctx = Context::new_small();
     ctx.eval("function* gen() { yield 1; }; var g = gen();")

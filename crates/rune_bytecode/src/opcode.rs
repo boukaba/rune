@@ -94,6 +94,7 @@ pub enum Opcode {
     Swap,
     // Generators
     Yield,
+    YieldStarYield, // suspend inside yield* delegation (marks Generator.in_delegate)
     YieldStar,
     Resume,
     InitGenerator,
@@ -108,8 +109,11 @@ pub enum Opcode {
     ForInInit,
     ForInNext,
     // for-of (iteration protocol)
-    ForOfInit,           // pop iterable → push [iterator, nextMethod]
-    ForOfNext,           // operands[0] = end target; call next → done ? jump end : push value
+    ForOfInit,     // pop iterable → push [iterator, nextMethod]
+    ForOfNext,     // operands[0] = end target; call next → done ? jump end : push value
+    ForOfNextStar, // operands[0] = end target; pop sent, call next(sent);
+    // done ? drop pair + push result.value + jump end
+    //      : push value (yield* delegation loop)
     ToArrayFromIterable, // pop value → push array (via @@iterator)
     // Environment (closure capture)
     MakeEnv,

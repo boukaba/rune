@@ -1,4 +1,4 @@
-use crate::vm::TryFrame;
+use crate::vm::{GeneratorResume, TryFrame};
 use rune_bytecode::opcode::BytecodeProgram;
 use rune_core::value::Value;
 
@@ -26,8 +26,18 @@ pub struct Generator {
     pub stack: Vec<Value>,
     /// Saved try/catch/finally frames at suspension (restored on resume).
     pub try_frames: Vec<TryFrame>,
+    /// Operand-stack base at suspension, for rebasing banked try frames.
+    pub stack_base_saved: usize,
     /// Reentrancy guard: true while a resume is on the Rust stack.
     pub executing: bool,
+    /// Abrupt completion pending across a suspension: if a Throw/Return
+    /// resume suspends again (e.g. yielding inside a `finally` that runs
+    /// during unwinding), the abrupt takes precedence over whatever the
+    /// next resume requests.
+    pub abrupt: Option<GeneratorResume>,
+    /// True when suspended at a `yield*` drain point (set by YieldStarYield,
+    /// cleared by plain Yield). throw()/return() forward to the delegate.
+    pub in_delegate: bool,
 }
 
 impl Generator {
@@ -46,7 +56,10 @@ impl Generator {
             env: std::ptr::null_mut(),
             stack: Vec::new(),
             try_frames: Vec::new(),
+            stack_base_saved: 0,
             executing: false,
+            abrupt: None,
+            in_delegate: false,
         }
     }
 }

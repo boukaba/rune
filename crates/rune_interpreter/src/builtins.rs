@@ -7,6 +7,7 @@ use crate::vm::to_number;
 use crate::vm::value_to_array_index;
 use crate::vm::value_to_prop_key;
 use crate::vm::{CollectionCtorState, PendingCollectionCtor, PendingCollectionForEach};
+use crate::vm::{Exit, GeneratorResume, call_builtin_sync};
 use rune_core::array::RuneArray;
 use rune_core::date;
 use rune_core::gc::{
@@ -697,7 +698,12 @@ fn iter_result_object(gc: &mut SemiSpace, value: Value, done: bool) -> Value {
 
 // iter_result_object needs &mut Vm for the prototype; wrapper keeps the
 // plain helper above for arity reasons.
-fn iter_result_with_proto(gc: &mut SemiSpace, vm: &mut Vm, value: Value, done: bool) -> Value {
+pub(crate) fn iter_result_with_proto(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    value: Value,
+    done: bool,
+) -> Value {
     let r = iter_result_object(gc, value, done);
     if let Some(pp) = r.heap_ptr() {
         if let Some(proto) = vm.object_prototype.heap_ptr() {
@@ -746,12 +752,648 @@ pub fn generator_next_builtin(
         )));
         return Value::undefined();
     }
-    match vm.resume_generator_full(_gc, gen_id, arg) {
+    match vm.resume_generator_full(_gc, gen_id, crate::vm::GeneratorResume::Next(arg)) {
         Ok((v, done)) => iter_result_with_proto(_gc, vm, v, done),
         Err(e) => {
             vm.set_pending_exception(e);
             Value::undefined()
         }
+    }
+}
+
+/// Outcomes shared by yield* step functions.
+/// - `Sync(v)`: completed synchronously with value `v`.
+/// - `Wait`: an async getter/callback was pushed; the caller must bail
+///   without advancing (opcode arms `continue`; builtins return undefined
+///   relying on the skip-list; Return arms `continue`).
+/// - `Raise(e)`: unwind error value `e` now.
+pub enum YsOut {
+    Sync(Value),
+    Wait,
+    Raise(Value),
+    /// A builtin getter unwound via the callback machinery: propagate the
+    /// exit (or continue if it already redirected). Vanishingly rare.
+    Bail(Option<Exit>),
+}
+
+pub enum AfrOut {
+    Sync(Value),
+    Wait,
+    Raise(Value),
+}
+
+/// Async-capable property read for yield* result processing.
+/// `gen_id`/`abrupt_arg`/`iter` populate the pending state on Wait; plain
+/// iteration paths (no abrupt in flight) pass dummies — Star* resume arms
+/// never touch them.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ys_read_gen(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    gen_id: usize,
+    abrupt_arg: Value,
+    iter: Value,
+    stash: Value,
+    phase: crate::vm::YsGetPhase,
+    target: Value,
+    key: Value,
+) -> YsOut {
+    use crate::vm::{PendingYieldStarGet, YsGetOut};
+    let pend = PendingYieldStarGet {
+        source_frame_depth: vm.frame_depth() - 1,
+        gen_id,
+        phase,
+        abrupt_arg,
+        iter,
+        stash,
+    };
+    match vm.yieldstar_get(gc, target, key, pend) {
+        YsGetOut::Ready(v) => YsOut::Sync(v),
+        YsGetOut::Wait => YsOut::Wait,
+        YsGetOut::Bail(exit) => YsOut::Bail(exit),
+    }
+}
+
+/// Classify a loaded method value: undefined/null → absent.
+fn classify_method(m: Value) -> Result<Option<Value>, ()> {
+    if m.is_undefined() || m.is_null() {
+        Ok(None)
+    } else if m.as_smi().is_some_and(|s| s < 0)
+        || m.heap_ptr()
+            .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC })
+    {
+        Ok(Some(m))
+    } else {
+        Err(())
+    }
+}
+
+fn violation_type_error(_vm: &mut Vm, gc: &mut SemiSpace, is_throw: bool) -> Value {
+    // Throw without a throw method is a yield* protocol violation; return
+    // without one completes directly (unreachable here, kept for symmetry).
+    let _ = is_throw;
+    Value::from_heap_ptr(crate::vm::heap_string(
+        gc,
+        "TypeError: iterator does not have a throw method",
+    ))
+}
+
+/// Continue after a delegate throw/return method value is available
+/// (sync or resumed). Handles invocation, violation paths, and result
+/// processing.
+#[allow(clippy::too_many_arguments)]
+pub fn afr_method_loaded(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    gen_id: usize,
+    is_throw: bool,
+    abrupt_arg: Value,
+    iter: Value,
+    method: Value,
+) -> AfrOut {
+    let loaded = match classify_method(method) {
+        Ok(m) => m,
+        Err(()) => {
+            return AfrOut::Raise(Value::from_heap_ptr(crate::vm::heap_string(
+                gc,
+                &format!(
+                    "TypeError: iterator.{} is not a function",
+                    if is_throw { "throw" } else { "return" }
+                ),
+            )));
+        }
+    };
+    match loaded {
+        None => {
+            if is_throw {
+                // Violation path needs the return method (IteratorClose).
+                let ret_key = method_return_key(gc);
+                match ys_read_gen(
+                    vm,
+                    gc,
+                    gen_id,
+                    abrupt_arg,
+                    iter,
+                    iter,
+                    crate::vm::YsGetPhase::CloseReturn,
+                    iter,
+                    ret_key,
+                ) {
+                    YsOut::Sync(ret) => match classify_method(ret) {
+                        Ok(Some(m)) => forward_call_delegate_method(
+                            vm, gc, gen_id, true, abrupt_arg, iter, m, abrupt_arg, true,
+                        ),
+                        _ => AfrOut::Raise(violation_type_error(vm, gc, true)),
+                    },
+                    YsOut::Wait => AfrOut::Wait,
+                    YsOut::Raise(e) => AfrOut::Raise(e),
+                    YsOut::Bail(_) => AfrOut::Raise(Value::from_heap_ptr(crate::vm::heap_string(
+                        gc,
+                        "TypeError: getter threw",
+                    ))),
+                }
+            } else {
+                vm.generators[gen_id].done = true;
+                vm.generators[gen_id].in_delegate = false;
+                AfrOut::Sync(iter_result_with_proto(gc, vm, abrupt_arg, true))
+            }
+        }
+        Some(m) => forward_call_delegate_method(
+            vm, gc, gen_id, is_throw, abrupt_arg, iter, m, abrupt_arg, false,
+        ),
+    }
+}
+
+fn method_return_key(gc: &mut SemiSpace) -> Value {
+    Value::from_heap_ptr(HeapString::allocate(gc, "return") as *mut u8)
+}
+
+/// GetMethod(delegate, name) for yield* forwarding, async-capable: returns
+/// the method (or absence marker) synchronously, or Wait after pushing a
+/// getter frame (resume via PendingYieldStarGet with an AfrMethod phase).
+/// Non-callable methods surface as a TypeError Raise.
+fn delegate_method(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    gen_id: usize,
+    is_throw: bool,
+    abrupt_arg: Value,
+    iter: Value,
+    name: &str,
+) -> YsOut {
+    let key = Value::from_heap_ptr(HeapString::allocate(gc, name) as *mut u8);
+    let pend = crate::vm::PendingYieldStarGet {
+        source_frame_depth: vm.frame_depth() - 1,
+        gen_id,
+        phase: crate::vm::YsGetPhase::AfrMethod { is_throw },
+        abrupt_arg,
+        iter,
+        stash: iter,
+    };
+    match vm.yieldstar_get(gc, iter, key, pend) {
+        crate::vm::YsGetOut::Ready(m) => YsOut::Sync(m),
+        crate::vm::YsGetOut::Wait => YsOut::Wait,
+        crate::vm::YsGetOut::Bail(_) => YsOut::Raise(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "TypeError: getter threw",
+        ))),
+    }
+}
+
+/// Finish a forwarded delegate throw()/return() call (shared by the sync
+/// path and the async pending-state continuation).
+///
+/// - done + throw → the original exception continues (done=true).
+/// - done + return → complete with the DELEGATE's return value.
+/// - value → suspend the outer again yielding it, carrying the original
+///   abrupt (it resumes on the next next()/throw()/return()).
+fn finish_delegate_afr(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    gen_id: usize,
+    is_throw: bool,
+    abrupt_arg: Value,
+    method_result: Value,
+) -> AfrOut {
+    if !method_result.is_heap_object() {
+        return AfrOut::Raise(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "TypeError: Iterator result is not an object",
+        )));
+    }
+    // done read (async-capable).
+    let done = match ys_read_gen(
+        vm,
+        gc,
+        gen_id,
+        abrupt_arg,
+        method_result,
+        method_result,
+        crate::vm::YsGetPhase::FinishDone,
+        method_result,
+        vm.done_key,
+    ) {
+        YsOut::Sync(v) => v.to_bool(),
+        YsOut::Wait => return AfrOut::Wait,
+        YsOut::Raise(e) => return AfrOut::Raise(e),
+        YsOut::Bail(_) => {
+            // See YsGetOut::Bail: already unwound; surface generically.
+            return AfrOut::Raise(Value::from_heap_ptr(crate::vm::heap_string(
+                gc,
+                "TypeError: getter threw",
+            )));
+        }
+    };
+    // value read (async-capable).
+    let value = match ys_read_gen(
+        vm,
+        gc,
+        gen_id,
+        abrupt_arg,
+        method_result,
+        method_result,
+        crate::vm::YsGetPhase::FinishValue { is_throw },
+        method_result,
+        vm.value_key,
+    ) {
+        YsOut::Sync(v) => v,
+        YsOut::Wait => return AfrOut::Wait,
+        YsOut::Raise(e) => return AfrOut::Raise(e),
+        YsOut::Bail(_) => {
+            // See YsGetOut::Bail: already unwound; surface generically.
+            return AfrOut::Raise(Value::from_heap_ptr(crate::vm::heap_string(
+                gc,
+                "TypeError: getter threw",
+            )));
+        }
+    };
+    if done {
+        vm.generators[gen_id].done = true;
+        vm.generators[gen_id].in_delegate = false;
+        AfrOut::Sync(iter_result_with_proto(gc, vm, value, true))
+    } else {
+        vm.generators[gen_id].abrupt = Some(if is_throw {
+            GeneratorResume::Throw(abrupt_arg)
+        } else {
+            GeneratorResume::Return(abrupt_arg)
+        });
+        AfrOut::Sync(iter_result_with_proto(gc, vm, value, false))
+    }
+}
+
+/// Async completion of a forwarded delegate throw()/return() call (runs
+/// in the Return handler when the delegate JS callback returns). Mirrors
+/// finish_delegate_afr but speaks the handler convention: unwinding goes
+/// through handle_throw directly so no dummy stack slots leak.
+#[allow(clippy::too_many_arguments)]
+pub fn finish_yieldstar_afr_result(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    gen_id: usize,
+    is_throw: bool,
+    abrupt_arg: Value,
+    _iter: Value,
+    closing: bool,
+    method_result: Value,
+) -> Result<Value, Option<Exit>> {
+    if closing {
+        // IteratorClose finished for a throw-violation: the protocol
+        // violation TypeError continues (not the original exception).
+        let e = Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "TypeError: iterator does not have a throw method",
+        ));
+        return match vm.handle_throw(gc, e) {
+            Some(exit) => Err(Some(exit)),
+            None => Err(None),
+        };
+    }
+    if !method_result.is_heap_object() {
+        let e = Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            "TypeError: Iterator result is not an object",
+        ));
+        return match vm.handle_throw(gc, e) {
+            Some(exit) => Err(Some(exit)),
+            None => Err(None),
+        };
+    }
+    let done_key = vm.done_key;
+    let done = match ys_read_gen(
+        vm,
+        gc,
+        gen_id,
+        abrupt_arg,
+        method_result,
+        method_result,
+        crate::vm::YsGetPhase::FinishDone,
+        method_result,
+        done_key,
+    ) {
+        YsOut::Sync(v) => v.to_bool(),
+        YsOut::Wait => return Err(None),
+        YsOut::Raise(e) => match vm.handle_throw(gc, e) {
+            Some(exit) => return Err(Some(exit)),
+            None => return Err(None),
+        },
+        YsOut::Bail(Some(exit)) => return Err(Some(exit)),
+        YsOut::Bail(None) => return Err(None),
+    };
+    let value_key = vm.value_key;
+    let value = match ys_read_gen(
+        vm,
+        gc,
+        gen_id,
+        abrupt_arg,
+        method_result,
+        method_result,
+        crate::vm::YsGetPhase::FinishValue { is_throw },
+        method_result,
+        value_key,
+    ) {
+        YsOut::Sync(v) => v,
+        YsOut::Wait => return Err(None),
+        YsOut::Raise(e) => match vm.handle_throw(gc, e) {
+            Some(exit) => return Err(Some(exit)),
+            None => return Err(None),
+        },
+        YsOut::Bail(Some(exit)) => return Err(Some(exit)),
+        YsOut::Bail(None) => return Err(None),
+    };
+    if done {
+        vm.generators[gen_id].done = true;
+        vm.generators[gen_id].in_delegate = false;
+        Ok(iter_result_with_proto(gc, vm, value, true))
+    } else {
+        vm.generators[gen_id].abrupt = Some(if is_throw {
+            GeneratorResume::Throw(abrupt_arg)
+        } else {
+            GeneratorResume::Return(abrupt_arg)
+        });
+        Ok(iter_result_with_proto(gc, vm, value, false))
+    }
+}
+
+/// Continue a resumed async yield* property read (Return-handler context).
+/// `loaded` is the getter's return value. Advances control exactly like the
+/// synchronous path would have.
+pub(crate) fn continue_yieldstar_get(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    pg: &crate::vm::PendingYieldStarGet,
+    loaded: Value,
+) -> Result<(), Exit> {
+    use crate::vm::YsGetPhase;
+    match pg.phase {
+        YsGetPhase::AfrMethod { is_throw } => {
+            match afr_method_loaded(vm, gc, pg.gen_id, is_throw, pg.abrupt_arg, pg.iter, loaded) {
+                AfrOut::Sync(v) => {
+                    vm.push_and_advance(v);
+                    Ok(())
+                }
+                AfrOut::Wait => Ok(()),
+                AfrOut::Raise(e) => match vm.handle_throw(gc, e) {
+                    Some(exit) => Err(exit),
+                    None => Ok(()),
+                },
+            }
+        }
+        YsGetPhase::CloseReturn => {
+            // Violation-path return method loaded: invoke as closing call.
+            match forward_call_delegate_method(
+                vm,
+                gc,
+                pg.gen_id,
+                true,
+                pg.abrupt_arg,
+                pg.iter,
+                loaded,
+                pg.abrupt_arg,
+                true,
+            ) {
+                AfrOut::Sync(v) => {
+                    vm.push_and_advance(v);
+                    Ok(())
+                }
+                AfrOut::Wait => Ok(()),
+                AfrOut::Raise(e) => match vm.handle_throw(gc, e) {
+                    Some(exit) => Err(exit),
+                    None => Ok(()),
+                },
+            }
+        }
+        YsGetPhase::StarDone { end_target } => {
+            if loaded.to_bool() {
+                PendingYieldStarGetPhase::chain_value_done(vm, gc, pg, end_target)
+            } else {
+                PendingYieldStarGetPhase::chain_value(vm, gc, pg)
+            }
+        }
+        YsGetPhase::StarValue => {
+            vm.push_and_advance(loaded);
+            Ok(())
+        }
+        YsGetPhase::StarValueDone { end_target } => {
+            vm.pop2_push_jump(loaded, end_target);
+            Ok(())
+        }
+        YsGetPhase::FinishDone => {
+            vm.generators[pg.gen_id].done = true;
+            vm.generators[pg.gen_id].in_delegate = false;
+            let r = iter_result_with_proto(gc, vm, loaded, true);
+            vm.push_and_advance(r);
+            Ok(())
+        }
+        YsGetPhase::FinishValue { is_throw } => {
+            vm.generators[pg.gen_id].abrupt = Some(if is_throw {
+                GeneratorResume::Throw(pg.abrupt_arg)
+            } else {
+                GeneratorResume::Return(pg.abrupt_arg)
+            });
+            let r = iter_result_with_proto(gc, vm, loaded, false);
+            vm.push_and_advance(r);
+            Ok(())
+        }
+    }
+}
+
+/// Helper namespace to keep the StarDone chaining readable.
+struct PendingYieldStarGetPhase;
+impl PendingYieldStarGetPhase {
+    fn chain_value(
+        vm: &mut Vm,
+        gc: &mut SemiSpace,
+        pg: &crate::vm::PendingYieldStarGet,
+    ) -> Result<(), Exit> {
+        match ys_read_gen(
+            vm,
+            gc,
+            pg.gen_id,
+            pg.abrupt_arg,
+            pg.iter,
+            pg.stash,
+            crate::vm::YsGetPhase::StarValue,
+            pg.stash,
+            vm.value_key,
+        ) {
+            YsOut::Sync(v) => {
+                vm.push_and_advance(v);
+                Ok(())
+            }
+            YsOut::Wait => Ok(()),
+            YsOut::Raise(e) => match vm.handle_throw(gc, e) {
+                Some(exit) => Err(exit),
+                None => Ok(()),
+            },
+            YsOut::Bail(Some(exit)) => Err(exit),
+            YsOut::Bail(None) => Ok(()),
+        }
+    }
+    fn chain_value_done(
+        vm: &mut Vm,
+        gc: &mut SemiSpace,
+        pg: &crate::vm::PendingYieldStarGet,
+        end_target: usize,
+    ) -> Result<(), Exit> {
+        match ys_read_gen(
+            vm,
+            gc,
+            pg.gen_id,
+            pg.abrupt_arg,
+            pg.iter,
+            pg.stash,
+            crate::vm::YsGetPhase::StarValueDone { end_target },
+            pg.stash,
+            vm.value_key,
+        ) {
+            YsOut::Sync(v) => {
+                vm.pop2_push_jump(v, end_target);
+                Ok(())
+            }
+            YsOut::Wait => Ok(()),
+            YsOut::Raise(e) => match vm.handle_throw(gc, e) {
+                Some(exit) => Err(exit),
+                None => Ok(()),
+            },
+            YsOut::Bail(Some(exit)) => Err(exit),
+            YsOut::Bail(None) => Ok(()),
+        }
+    }
+}
+
+/// Route an outer throw()/return() received while suspended inside `yield*`
+/// to the delegate iterator's throw/return method (or IteratorClose when
+/// absent). Returns the builtin's value, or `None` when an async delegate
+/// call was pushed (the pending state owns the continuation).
+fn forward_to_delegate(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    gen_id: usize,
+    is_throw: bool,
+    abrupt_arg: Value,
+) -> AfrOut {
+    let g = &vm.generators[gen_id];
+    let (iter, _next) = match (g.stack.len().checked_sub(2), g.stack.len().checked_sub(1)) {
+        (Some(i0), Some(i1)) => (g.stack[i0], g.stack[i1]),
+        _ => {
+            // No live pair (shouldn't happen): fall back to plain close.
+            vm.generators[gen_id].done = true;
+            if is_throw {
+                return AfrOut::Raise(abrupt_arg);
+            }
+            return AfrOut::Sync(iter_result_with_proto(gc, vm, abrupt_arg, true));
+        }
+    };
+    let method_name = if is_throw { "throw" } else { "return" };
+    let loaded = match delegate_method(vm, gc, gen_id, is_throw, abrupt_arg, iter, method_name) {
+        YsOut::Sync(m) => m,
+        YsOut::Wait => return AfrOut::Wait,
+        YsOut::Raise(e) => return AfrOut::Raise(e),
+        YsOut::Bail(_) => {
+            // See YsGetOut::Bail: already unwound; surface generically.
+            return AfrOut::Raise(Value::from_heap_ptr(crate::vm::heap_string(
+                gc,
+                "TypeError: getter threw",
+            )));
+        }
+    };
+    match classify_method(loaded) {
+        Err(()) => AfrOut::Raise(Value::from_heap_ptr(crate::vm::heap_string(
+            gc,
+            &format!("TypeError: iterator.{method_name} is not a function"),
+        ))),
+        Ok(None) => {
+            // No throw/return method.
+            if is_throw {
+                // Throw without a throw method is a yield* protocol
+                // violation: IteratorClose first (call return() if present),
+                // then throw a TypeError — NOT the original exception.
+                let ret_loaded =
+                    match delegate_method(vm, gc, gen_id, true, abrupt_arg, iter, "return") {
+                        YsOut::Sync(m) => m,
+                        YsOut::Wait => return AfrOut::Wait,
+                        YsOut::Raise(e) => return AfrOut::Raise(e),
+                        YsOut::Bail(_) => {
+                            // See YsGetOut::Bail: already unwound; surface generically.
+                            return AfrOut::Raise(Value::from_heap_ptr(crate::vm::heap_string(
+                                gc,
+                                "TypeError: getter threw",
+                            )));
+                        }
+                    };
+                match classify_method(ret_loaded) {
+                    Ok(Some(ret)) => forward_call_delegate_method(
+                        vm, gc, gen_id, true, abrupt_arg, iter, ret, abrupt_arg, true,
+                    ),
+                    _ => AfrOut::Raise(Value::from_heap_ptr(crate::vm::heap_string(
+                        gc,
+                        "TypeError: iterator does not have a throw method",
+                    ))),
+                }
+            } else {
+                vm.generators[gen_id].done = true;
+                vm.generators[gen_id].in_delegate = false;
+                AfrOut::Sync(iter_result_with_proto(gc, vm, abrupt_arg, true))
+            }
+        }
+        Ok(Some(m)) => forward_call_delegate_method(
+            vm, gc, gen_id, is_throw, abrupt_arg, iter, m, abrupt_arg, false,
+        ),
+    }
+}
+
+/// Invoke a delegate throw/return method, sync when builtin, async (pending
+/// state) when a JS function. `call_arg` is the method argument; `closing`
+/// marks IteratorClose calls whose value is ignored.
+#[allow(clippy::too_many_arguments)]
+fn forward_call_delegate_method(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    gen_id: usize,
+    is_throw: bool,
+    abrupt_arg: Value,
+    iter: Value,
+    method: Value,
+    call_arg: Value,
+    closing: bool,
+) -> AfrOut {
+    if method.as_smi().is_some_and(|s| s < 0) {
+        match call_builtin_sync(vm, gc, method, iter, &[call_arg]) {
+            Ok(v) => {
+                if closing {
+                    // IteratorClose for a throw-violation: the protocol
+                    // violation TypeError continues (not the original).
+                    return if is_throw {
+                        AfrOut::Raise(violation_type_error(vm, gc, true))
+                    } else {
+                        vm.generators[gen_id].done = true;
+                        vm.generators[gen_id].in_delegate = false;
+                        AfrOut::Sync(iter_result_with_proto(gc, vm, abrupt_arg, true))
+                    };
+                }
+                finish_delegate_afr(vm, gc, gen_id, is_throw, abrupt_arg, v)
+            }
+            Err(Some(crate::vm::Exit::Throw(v))) => AfrOut::Raise(v),
+            Err(_) => {
+                // Redirected or exotic exit already arranged; surface a
+                // generic unwind for the caller to propagate.
+                AfrOut::Raise(Value::from_heap_ptr(crate::vm::heap_string(
+                    gc,
+                    "TypeError: delegate method threw",
+                )))
+            }
+        }
+    } else {
+        vm.pending_yield_star_afr = Some(crate::vm::PendingYieldStarAbrupt {
+            source_frame_depth: vm.frame_depth() - 1,
+            gen_id,
+            is_throw,
+            abrupt_arg,
+            iter,
+            closing,
+        });
+        vm.push_callback_call(gc, method, iter, vec![call_arg]);
+        AfrOut::Wait
     }
 }
 
@@ -772,9 +1414,30 @@ pub fn generator_return_builtin(
         )));
         return Value::undefined();
     }
-    // v1: close immediately (finally blocks are not run — documented gap).
-    vm.generators[gen_id].done = true;
-    iter_result_with_proto(_gc, vm, v, true)
+    if !vm.generators[gen_id].started || vm.generators[gen_id].done {
+        vm.generators[gen_id].done = true;
+        return iter_result_with_proto(_gc, vm, v, true);
+    }
+    // Suspended inside yield* delegation: forward to the delegate's return
+    // (or complete directly when absent).
+    if vm.generators[gen_id].in_delegate {
+        return match forward_to_delegate(vm, _gc, gen_id, false, v) {
+            AfrOut::Sync(rv) => rv,
+            AfrOut::Wait => Value::undefined(),
+            AfrOut::Raise(err) => {
+                vm.set_pending_exception(err);
+                Value::undefined()
+            }
+        };
+    }
+    // Resume in Return mode: finally blocks run, then completion (v, true).
+    match vm.resume_generator_full(_gc, gen_id, crate::vm::GeneratorResume::Return(v)) {
+        Ok((rv, done)) => iter_result_with_proto(_gc, vm, rv, done),
+        Err(e) => {
+            vm.set_pending_exception(e);
+            Value::undefined()
+        }
+    }
 }
 
 pub fn generator_throw_builtin(
@@ -795,11 +1458,37 @@ pub fn generator_throw_builtin(
         )));
         return Value::undefined();
     }
-    // v1: close + propagate (resumption-with-throw at the yield site, which
-    // would run in-generator catch/finally, is not implemented yet).
-    vm.generators[gen_id].done = true;
-    vm.set_pending_exception(e);
-    Value::undefined()
+    if vm.generators[gen_id].done {
+        vm.set_pending_exception(e);
+        return Value::undefined();
+    }
+    if !vm.generators[gen_id].started {
+        // Throw before start: complete abruptly without running the body.
+        vm.generators[gen_id].done = true;
+        vm.set_pending_exception(e);
+        return Value::undefined();
+    }
+    // Suspended inside yield* delegation: forward to the delegate's throw
+    // (with IteratorClose fallback), preserving the outer abrupt.
+    if vm.generators[gen_id].in_delegate {
+        return match forward_to_delegate(vm, _gc, gen_id, true, e) {
+            AfrOut::Sync(v) => v,
+            AfrOut::Wait => Value::undefined(),
+            AfrOut::Raise(err) => {
+                vm.set_pending_exception(err);
+                Value::undefined()
+            }
+        };
+    }
+    // Resume in Throw mode: in-generator catch/finally blocks run; uncaught
+    // throws complete the generator and propagate.
+    match vm.resume_generator_full(_gc, gen_id, crate::vm::GeneratorResume::Throw(e)) {
+        Ok((rv, done)) => iter_result_with_proto(_gc, vm, rv, done),
+        Err(err) => {
+            vm.set_pending_exception(err);
+            Value::undefined()
+        }
+    }
 }
 
 pub fn generator_symbol_iterator_builtin(

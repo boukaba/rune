@@ -46,8 +46,50 @@ paths can't match immediates (no JIT change needed).
   exact, retracted in A2.)
 - 860 workspace / 0 failed; clippy/fmt/no-default/x86 clean.
 
-## A2 DONE — real Error objects (2026-09-05)
+## A3 DONE — unmasked checks: class-call, derived-return, strict poison (2026-09-05)
 
+The three checks 7181784 unmasked (Function 70→57 wrong-reason passes),
+built on F1 flags + F2 errors + A2 catchability:
+
+- **Class-call TypeError** (§10.2.3): `Call`/`CallFromArray` on a Func with
+  the F1 class-ctor bit throws unless the call carries the new super-operand
+  (emitter marks `super()`/`super(...args)` sites; plain + spread forms).
+  Throws never populate call ICs, so no JIT path can bypass the check.
+- **Derived-return check** (§10.2.3): constructor Return with a non-object,
+  non-undefined value throws when the callee Func has a superclass
+  (is_object_value excludes heap strings). Base-class explicit primitives
+  still ignored; super() chains (incl. spread) verified working.
+- **Strict poison** (§15.3.5.4): parser directive-prologue scan
+  (`body_has_use_strict`, both FnNode sites + 2 synth sites) → new
+  `BytecodeProgram.is_strict` (AFPC v4→v5) → Func strict bit. Funnel:
+  strict fn `caller`/`arguments` always throws; sloppy `.caller` throws when
+  the CALLER frame is strict (stack walk via func_ptr + F1 bit) else resolves
+  to the caller function or null; sloppy writes fall through; strict writes
+  throw. Sloppy `.arguments` stays undefined (mapped arguments = future).
+- **Unwind-to-outer fix (the big one)**: `handle_throw` unwound exactly ONE
+  frame then resumed the caller with garbage + exited, so any throw nested
+  2+ deep escaped try/catch AND assert.throws (proven: 2-level nesting
+  failed pre-fix, incl. a double-"Uncaught" wrap artifact). The pop tail is
+  now a loop bounded by return_frame_floor/nested_gen_floor (generator
+  resume semantics preserved — 26/26 generator green; floors keep the old
+  single-check-at-floor behavior).
+- **Gains (+~270, ZERO new failures)**: Function +31 (all poison gs +
+  class-ctor + derived), statements +102 (dstr abrupt, private TypeErrors,
+  class elements, subclass), expressions +135 (compound-assignment 33,
+  object/class/function dstr, super, inc/dec), Promise +1. HONESTY NOTE: the
+  gs poison tests currently pass via nested-assert-unwind of the
+  still-unbound callee (script hoisting missing — B8); the actual poison
+  path is verified by probes + integration tests, and B8 hoisting will route
+  them through it.
+- **Tests**: 3 integration (class-call incl. super/spread, derived incl.
+  base-primitive tolerance, poison incl. sloppy-caller values) + 1 parser
+  directive unit test. **863 workspace / 0**; clippy/fmt/no-default/x86 clean.
+- **Known**: inherited strictness (modules/classes/outer-fn) untracked;
+  direct superclass plain-calls allowed only via the super operand (exact);
+  `.call`/`.apply` with class targets bypass the opcode check (follow-up);
+  try/catch block completions still lost (pre-existing).
+
+## A2 DONE — real Error objects (2026-09-05)
 Engine-raised errors are now real `{name, message}` objects with the
 Error.prototype chain linked (instead of `"Kind: msg"` strings):
 

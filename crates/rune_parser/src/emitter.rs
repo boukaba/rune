@@ -26,6 +26,7 @@ pub struct Emitter {
     pub instructions: Vec<Instruction>,
     pub is_generator: bool,
     pub is_async: bool,
+    pub is_strict: bool,
     pub named_function: bool,
     pub string_pool: Vec<String>,
     pub float_pool: Vec<f64>,
@@ -106,6 +107,7 @@ impl Emitter {
             instructions: Vec::new(),
             is_generator: false,
             is_async: false,
+            is_strict: false,
             named_function: false,
             string_pool: Vec::new(),
             float_pool: Vec::new(),
@@ -585,6 +587,7 @@ impl Emitter {
         sub.module_export_renames = self.module_export_renames.clone();
         sub.is_generator = func.is_generator;
         sub.is_async = func.is_async;
+        sub.is_strict = func.is_strict;
         // Emit InitGenerator FIRST so all subsequent branch targets are
         // recorded against final indices (into_bytecode must not prepend
         // post-hoc — that shifted every patched pc by one and broke all
@@ -720,6 +723,7 @@ impl Emitter {
         sub.module_export_renames = self.module_export_renames.clone();
         sub.is_generator = func.is_generator;
         sub.is_async = func.is_async;
+        sub.is_strict = func.is_strict;
         // Emit InitGenerator FIRST so all subsequent branch targets are
         // recorded against final indices (into_bytecode must not prepend
         // post-hoc — that shifted every patched pc by one and broke all
@@ -1071,6 +1075,8 @@ impl Emitter {
                 is_generator: false,
                 is_async: false,
                 is_arrow: false,
+                // Synthesized bodies never carry a directive prologue.
+                is_strict: false,
                 span: Span { start: 0, end: 0 },
             };
             self.compile_function(&synth)
@@ -1383,6 +1389,7 @@ impl Emitter {
                         is_generator: false,
                         is_async: false,
                         is_arrow: false,
+                        is_strict: false,
                         span: Span { start: 0, end: 0 },
                     };
                     let wrapper_idx = self.compile_function(&synth);
@@ -2803,7 +2810,10 @@ impl Emitter {
             Expr::Call(callee, args, _) => {
                 let has_spread = args.iter().any(|a| a.is_spread);
                 if has_spread {
-                    // Build args array for spread calls
+                    // Build args array for spread calls. Super-spread calls
+                    // are construct-form (A3 super flag, like plain Call).
+                    let is_super_spread = matches!(callee.as_ref(), Expr::Super(_));
+                    // stack: [args_array, callee, this] (or [args_array, method, receiver] after Swap)
                     match callee.as_ref() {
                         Expr::Member(obj, prop, computed, _) => {
                             match obj.as_ref() {
@@ -2885,8 +2895,12 @@ impl Emitter {
                         }
                     }
                     // stack: [args_array, callee, this] (or [args_array, method, receiver] after Swap)
-                    self.emit(Opcode::CallFromArray, vec![]);
+                    self.emit(Opcode::CallFromArray, vec![is_super_spread as i64]);
                 } else {
+                    // Plain Call: operands [argc, is_super]. super() is a
+                    // construct-form call to the parent class (A3: exempt
+                    // from the class-call TypeError check in the VM).
+                    let is_super_call = matches!(callee.as_ref(), Expr::Super(_));
                     match callee.as_ref() {
                         Expr::Member(obj, prop, computed, _) => {
                             match obj.as_ref() {
@@ -2938,7 +2952,7 @@ impl Emitter {
                     for arg in args {
                         self.emit_expression(&arg.expr);
                     }
-                    self.emit(Opcode::Call, vec![args.len() as i64]);
+                    self.emit(Opcode::Call, vec![args.len() as i64, is_super_call as i64]);
                 }
             }
             Expr::New(callee, args, _) => {
@@ -3790,6 +3804,7 @@ impl Emitter {
         program.named_function = self.named_function;
         program.is_generator = self.is_generator;
         program.is_async = self.is_async;
+        program.is_strict = self.is_strict;
         program.local_names = self.locals;
         program.captured_env_size = self.captured_env_size;
         program.float_pool = self.float_pool;

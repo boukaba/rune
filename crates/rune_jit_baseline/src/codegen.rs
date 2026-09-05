@@ -1297,6 +1297,8 @@ mod tests {
             named_function: false,
             is_generator: false,
             is_async: false,
+            is_strict: false,
+            is_strict: false,
             is_class_constructor: false,
             local_names: vec![],
             captured_env_size: 0,

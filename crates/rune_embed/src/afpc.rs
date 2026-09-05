@@ -24,8 +24,8 @@ use std::path::Path;
 /// Magic bytes identifying an AFPC cache file.
 const AFPC_MAGIC: &[u8; 4] = b"AFPC";
 /// Cache format version. Bump when the serialized schema changes.
-/// v4: ShapeEntry gains per-entry attribute bytes (F5 descriptor home).
-const AFPC_VERSION: u32 = 4;
+/// v5: BytecodeProgram gains is_strict (A3 strict poison checks).
+const AFPC_VERSION: u32 = 5;
 
 /// Header written at the start of every cache file.
 #[derive(Copy, Clone, Debug)]

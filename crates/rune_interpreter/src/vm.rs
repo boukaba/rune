@@ -10,7 +10,9 @@ use rune_core::env::EnvObject;
 
 use rune_core::accessor::AccessorPair;
 use rune_core::date::{self, RuneDate};
-use rune_core::function::{FUNC_FLAG_ASYNC, FUNC_FLAG_CLASS_CTOR, FUNC_FLAG_GENERATOR, Func};
+use rune_core::function::{
+    FUNC_FLAG_ASYNC, FUNC_FLAG_CLASS_CTOR, FUNC_FLAG_GENERATOR, FUNC_FLAG_STRICT, Func,
+};
 use rune_core::gc::{
     GcHeader, RootProvider, SemiSpace, TAG_ACCESSOR, TAG_ARRAY, TAG_ARRAY_BUFFER, TAG_DATE,
     TAG_FLOAT64, TAG_FUNC, TAG_MAP, TAG_OBJECT, TAG_PROMISE, TAG_REGEXP, TAG_SET, TAG_STRING,
@@ -434,6 +436,14 @@ pub(crate) struct PropSetSite {
     pub ic_index: i64,
     pub prog_ptr: *const BytecodeProgram,
     pub pc: usize,
+}
+
+/// Whether a property key is the exact string `name` (A3 poison checks).
+pub(crate) fn prop_key_is(raw_key: Value, name: &str) -> bool {
+    raw_key.heap_ptr().is_some_and(|ptr| unsafe {
+        (*(ptr as *const GcHeader)).tag() == TAG_STRING
+            && HeapString::to_string(ptr as *mut HeapString) == name
+    })
 }
 
 /// V8-style message for A1 RequireObjectCoercible failures:
@@ -2492,153 +2502,167 @@ impl Vm {
     /// assert.throws consumed it). Returns `Some(Exit)` if the exception
     /// must propagate up (no handler anywhere).
     pub(crate) fn handle_throw(&mut self, gc: &mut SemiSpace, val: Value) -> Option<Exit> {
-        // Find in-frame handler. Loops: an entry may decline (generator
-        // return-sentinel skipping its catch with no finally of its own) —
-        // discard it and keep scanning outer entries in this frame.
-        loop {
-            let handler_idx = self
-                .try_stack
-                .iter()
-                .rposition(|tf| tf.frame_depth == self.frames.len());
-            let Some(idx) = handler_idx else {
-                break;
-            };
-            let (catch_pc, finally_pc, stack_depth, in_catch) = {
-                let tf = &self.try_stack[idx];
-                (tf.catch_pc, tf.finally_pc, tf.stack_depth, tf.in_catch)
-            };
-            if in_catch && finally_pc != 0 {
-                self.try_stack[idx].saved_exception = Some(val);
-                self.stack.truncate(stack_depth);
-                let fi = self.frames.len() - 1;
-                self.frames[fi].pc = finally_pc;
-                return None;
-            }
-            // Generator return-completion sentinel: invisible to user
-            // catch (spec: return runs finallys, not catches). Fall through
-            // to the finally handling below.
-            let is_return_sentinel = self
-                .generator_return_sentinel
-                .is_some_and(|s| s == val.raw());
-            if catch_pc != 0 && !in_catch && !is_return_sentinel {
-                self.throw_routed_to_catch = true;
-                if finally_pc != 0 {
-                    self.try_stack[idx].in_catch = true;
-                } else {
-                    self.try_stack.remove(idx);
+        // Outer unwind loop: route into the top frame's handlers, else pop
+        // it and repeat for the caller — until handled or frames run out.
+        // (Previously the pop-caller tail ran once and then resumed the
+        // caller with garbage + exited, so any throw nested 2+ frames deep
+        // escaped try/catch and assert.throws.)
+        'unwind: loop {
+            // Find in-frame handler. Loops: an entry may decline (generator
+            // return-sentinel skipping its catch with no finally of its own) —
+            // discard it and keep scanning outer entries in this frame.
+            loop {
+                let handler_idx = self
+                    .try_stack
+                    .iter()
+                    .rposition(|tf| tf.frame_depth == self.frames.len());
+                let Some(idx) = handler_idx else {
+                    break;
+                };
+                let (catch_pc, finally_pc, stack_depth, in_catch) = {
+                    let tf = &self.try_stack[idx];
+                    (tf.catch_pc, tf.finally_pc, tf.stack_depth, tf.in_catch)
+                };
+                if in_catch && finally_pc != 0 {
+                    self.try_stack[idx].saved_exception = Some(val);
+                    self.stack.truncate(stack_depth);
+                    let fi = self.frames.len() - 1;
+                    self.frames[fi].pc = finally_pc;
+                    return None;
                 }
-                self.stack.truncate(stack_depth);
-                self.push(val);
-                let fi = self.frames.len() - 1;
-                self.frames[fi].pc = catch_pc;
-                return None;
+                // Generator return-completion sentinel: invisible to user
+                // catch (spec: return runs finallys, not catches). Fall through
+                // to the finally handling below.
+                let is_return_sentinel = self
+                    .generator_return_sentinel
+                    .is_some_and(|s| s == val.raw());
+                if catch_pc != 0 && !in_catch && !is_return_sentinel {
+                    self.throw_routed_to_catch = true;
+                    if finally_pc != 0 {
+                        self.try_stack[idx].in_catch = true;
+                    } else {
+                        self.try_stack.remove(idx);
+                    }
+                    self.stack.truncate(stack_depth);
+                    self.push(val);
+                    let fi = self.frames.len() - 1;
+                    self.frames[fi].pc = catch_pc;
+                    return None;
+                }
+                if finally_pc != 0 {
+                    self.try_stack[idx].saved_exception = Some(val);
+                    self.stack.truncate(stack_depth);
+                    let fi = self.frames.len() - 1;
+                    self.frames[fi].pc = finally_pc;
+                    return None;
+                }
+                // Declined: no catch taken (or skipped) and no finally here.
+                // Discard and keep scanning this frame's outer entries.
+                self.try_stack.remove(idx);
             }
-            if finally_pc != 0 {
-                self.try_stack[idx].saved_exception = Some(val);
-                self.stack.truncate(stack_depth);
-                let fi = self.frames.len() - 1;
-                self.frames[fi].pc = finally_pc;
-                return None;
+            // No handler — pop frame and check caller
+            // Respect nested-run_loop floors (generator resume, module eval):
+            // the floor frame belongs to the outer loop — unwind to the owner
+            // instead of popping it (matches the old single-pop behavior of
+            // checking the floor frame's handlers exactly once, below).
+            if self.frames.len() <= self.return_frame_floor
+                || self.nested_gen_floor == Some(self.frames.len())
+            {
+                return Some(Exit::Throw(val));
             }
-            // Declined: no catch taken (or skipped) and no finally here.
-            // Discard and keep scanning this frame's outer entries.
-            self.try_stack.remove(idx);
-        }
-        // No handler — pop frame and check caller
-        let callee_base = self.frames.last().unwrap().stack_base;
-        let popped_frame = self.frames.len() - 1;
-        self.last_locals = self.frames[popped_frame].locals.clone();
-        // Check for pending assert.throws before popping frame
-        let assert_depth = self.pending_assert.as_ref().map(|pa| pa.source_frame_depth);
-        if let Some(source_depth) = assert_depth {
-            if self.frames.len() - 1 == source_depth {
-                let pa = self.pending_assert.take().unwrap();
-                if !self.assert_error_matches(pa.expected_error, val) {
-                    // Wrong error type — report a mismatch and propagate it.
-                    let expected = self.describe_expected_error(pa.expected_error);
-                    let actual = crate::builtins::read_error_name(val)
-                        .unwrap_or_else(|| "a non-error value".to_string());
-                    let detail = crate::builtins::read_error_message(val);
-                    let msg = format!(
-                        "assert.throws: expected {} but got {}: {}",
-                        expected,
-                        actual,
-                        detail.unwrap_or_default()
-                    );
-                    let err = crate::builtins::make_error(gc, &self.error_protos, &msg);
+            let callee_base = self.frames.last().unwrap().stack_base;
+            let popped_frame = self.frames.len() - 1;
+            self.last_locals = self.frames[popped_frame].locals.clone();
+            // Check for pending assert.throws before popping frame
+            let assert_depth = self.pending_assert.as_ref().map(|pa| pa.source_frame_depth);
+            if let Some(source_depth) = assert_depth {
+                if self.frames.len() - 1 == source_depth {
+                    let pa = self.pending_assert.take().unwrap();
+                    if !self.assert_error_matches(pa.expected_error, val) {
+                        // Wrong error type — report a mismatch and propagate it.
+                        let expected = self.describe_expected_error(pa.expected_error);
+                        let actual = crate::builtins::read_error_name(val)
+                            .unwrap_or_else(|| "a non-error value".to_string());
+                        let detail = crate::builtins::read_error_message(val);
+                        let msg = format!(
+                            "assert.throws: expected {} but got {}: {}",
+                            expected,
+                            actual,
+                            detail.unwrap_or_default()
+                        );
+                        let err = crate::builtins::make_error(gc, &self.error_protos, &msg);
+                        self.frames.pop();
+                        self.try_stack
+                            .retain(|tf| tf.frame_depth != popped_frame + 1);
+                        self.stack.truncate(callee_base);
+                        return self.handle_throw(gc, err);
+                    }
                     self.frames.pop();
                     self.try_stack
                         .retain(|tf| tf.frame_depth != popped_frame + 1);
                     self.stack.truncate(callee_base);
-                    return self.handle_throw(gc, err);
+                    self.push(Value::undefined());
+                    let new_fi = self.frames.len() - 1;
+                    self.frames[new_fi].pc += 1;
+                    return None;
                 }
-                self.frames.pop();
-                self.try_stack
-                    .retain(|tf| tf.frame_depth != popped_frame + 1);
-                self.stack.truncate(callee_base);
-                self.push(Value::undefined());
-                let new_fi = self.frames.len() - 1;
-                self.frames[new_fi].pc += 1;
-                return None;
             }
-        }
-        // Yield* delegation: if the frame being popped is a delegate
-        // callback invoked on a suspended outer generator's behalf,
-        // resume the outer generator in Throw mode instead of unwinding
-        // past it.
-        if let Some(outcome) = self.divert_delegate_throw(gc, val) {
-            match outcome {
-                DivertOut::Handled => return None,
-                DivertOut::Throw(exit) => return Some(exit),
+            // Yield* delegation: if the frame being popped is a delegate
+            // callback invoked on a suspended outer generator's behalf,
+            // resume the outer generator in Throw mode instead of unwinding
+            // past it.
+            if let Some(outcome) = self.divert_delegate_throw(gc, val) {
+                match outcome {
+                    DivertOut::Handled => return None,
+                    DivertOut::Throw(exit) => return Some(exit),
+                }
             }
-        }
-        self.frames.pop();
-        self.try_stack
-            .retain(|tf| tf.frame_depth != popped_frame + 1);
-        if self.frames.is_empty() {
-            self.stack.clear();
-            return Some(Exit::Throw(val));
-        }
-        // Check for try-catch-finally in the caller frame
-        let new_fi = self.frames.len() - 1;
-        let caller_idx = self
-            .try_stack
-            .iter()
-            .rposition(|tf| tf.frame_depth == self.frames.len());
-        if let Some(idx) = caller_idx {
-            let (catch_pc, finally_pc, stack_depth, in_catch) = {
-                let tf = &self.try_stack[idx];
-                (tf.catch_pc, tf.finally_pc, tf.stack_depth, tf.in_catch)
-            };
-            if in_catch && finally_pc != 0 {
-                self.try_stack[idx].saved_exception = Some(val);
-                self.stack.truncate(stack_depth);
-                self.frames[new_fi].pc = finally_pc;
-                return None;
+            self.frames.pop();
+            self.try_stack
+                .retain(|tf| tf.frame_depth != popped_frame + 1);
+            if self.frames.is_empty() {
+                self.stack.clear();
+                return Some(Exit::Throw(val));
             }
-            if catch_pc != 0 && !in_catch {
-                self.throw_routed_to_catch = true;
+            // Check for try-catch-finally in the caller frame
+            let new_fi = self.frames.len() - 1;
+            let caller_idx = self
+                .try_stack
+                .iter()
+                .rposition(|tf| tf.frame_depth == self.frames.len());
+            if let Some(idx) = caller_idx {
+                let (catch_pc, finally_pc, stack_depth, in_catch) = {
+                    let tf = &self.try_stack[idx];
+                    (tf.catch_pc, tf.finally_pc, tf.stack_depth, tf.in_catch)
+                };
+                if in_catch && finally_pc != 0 {
+                    self.try_stack[idx].saved_exception = Some(val);
+                    self.stack.truncate(stack_depth);
+                    self.frames[new_fi].pc = finally_pc;
+                    return None;
+                }
+                if catch_pc != 0 && !in_catch {
+                    self.throw_routed_to_catch = true;
+                    if finally_pc != 0 {
+                        self.try_stack[idx].in_catch = true;
+                    } else {
+                        self.try_stack.remove(idx);
+                    }
+                    self.stack.truncate(stack_depth);
+                    self.push(val);
+                    self.frames[new_fi].pc = catch_pc;
+                    return None;
+                }
                 if finally_pc != 0 {
-                    self.try_stack[idx].in_catch = true;
-                } else {
-                    self.try_stack.remove(idx);
+                    self.try_stack[idx].saved_exception = Some(val);
+                    self.stack.truncate(stack_depth);
+                    self.frames[new_fi].pc = finally_pc;
+                    return None;
                 }
-                self.stack.truncate(stack_depth);
-                self.push(val);
-                self.frames[new_fi].pc = catch_pc;
-                return None;
-            }
-            if finally_pc != 0 {
-                self.try_stack[idx].saved_exception = Some(val);
-                self.stack.truncate(stack_depth);
-                self.frames[new_fi].pc = finally_pc;
-                return None;
+                // No handler in the caller either — keep unwinding outward.
+                continue 'unwind;
             }
         }
-        self.stack.truncate(callee_base);
-        self.push(val);
-        self.frames[new_fi].pc += 1;
-        Some(Exit::Throw(val))
     }
 
     /// Register all GC root slots (stack, locals, try_stack saved values).
@@ -3701,6 +3725,37 @@ impl Vm {
         }
     }
 
+    /// A3: sloppy `.caller` value — the executing function object of the
+    /// caller frame, or null at top level / when unavailable. Strictness of
+    /// the caller is checked by the caller (poison rule).
+    fn stack_caller(&self) -> Value {
+        if self.frames.len() < 2 {
+            return Value::null();
+        }
+        let caller_fp = self.frames[self.frames.len() - 2].func_ptr;
+        if caller_fp.is_null() {
+            return Value::null();
+        }
+        Value::from_heap_ptr(caller_fp)
+    }
+
+    /// Whether the executing caller frame runs strict code (A3 poison rule:
+    /// reading sloppy `.caller` throws when the caller is strict). Unknown
+    /// / non-function callers count as sloppy.
+    fn caller_is_strict(&self) -> bool {
+        if self.frames.len() < 2 {
+            return false;
+        }
+        let caller_fp = self.frames[self.frames.len() - 2].func_ptr;
+        if caller_fp.is_null() {
+            return false;
+        }
+        unsafe {
+            (*(caller_fp as *const GcHeader)).tag() == TAG_FUNC
+                && Func::is_strict(caller_fp as *mut Func)
+        }
+    }
+
     /// F3: single choke point for interpreter property READS (GetValue).
     /// `Opcode::LoadProperty` and the `LoadPropertyIC` miss path both funnel
     /// here (the IC fast guard stays inline in the arm for speed). Moved
@@ -3734,6 +3789,59 @@ impl Vm {
                 Some(exit) => PropGetOut::Bail(Some(exit)),
                 None => PropGetOut::Bail(None),
             };
+        }
+        // A3: strict-function poison pills + sloppy .caller (§15.3.5.4).
+        // Own data props shadow (a sloppy assignment created them) — only
+        // consulted when absent. Strict functions always throw; sloppy
+        // .caller resolves to the executing caller function (or null at top
+        // level); sloppy .arguments keeps legacy behavior (undefined — mapped
+        // arguments objects are future work).
+        if let Some(fptr) = obj.heap_ptr() {
+            if unsafe { (*(fptr as *const GcHeader)).tag() } == TAG_FUNC
+                && (prop_key_is(raw_key, "caller") || prop_key_is(raw_key, "arguments"))
+            {
+                let is_caller = prop_key_is(raw_key, "caller");
+                let has_own = unsafe {
+                    let ep = Func::extra_props(fptr as *mut Func);
+                    !ep.is_null()
+                        && JSObject::shape_ptr(ep as *mut JSObject)
+                            .lookup(&PropertyKey::from_string(if is_caller {
+                                "caller"
+                            } else {
+                                "arguments"
+                            }))
+                            .is_some()
+                };
+                let strict = unsafe { Func::is_strict(fptr as *mut Func) };
+                // Strict function itself → always throws (unless shadowed by
+                // an own data prop, checked above).
+                // Sloppy .caller → throws when the CALLER is strict
+                // (§15.3.5.4 step 3), else resolves to the caller or null.
+                let caller_strict = !strict && is_caller && self.caller_is_strict();
+                if (strict || caller_strict) && !has_own {
+                    let msg = if strict {
+                        format!(
+                            "Cannot access '{}' of a strict function",
+                            if is_caller { "caller" } else { "arguments" }
+                        )
+                    } else {
+                        "Cannot access caller of a strict function".to_string()
+                    };
+                    let err = crate::errors::error_object(
+                        gc,
+                        &self.error_protos,
+                        crate::errors::ErrorKind::TypeError,
+                        &msg,
+                    );
+                    return match self.handle_throw(gc, err) {
+                        Some(exit) => PropGetOut::Bail(Some(exit)),
+                        None => PropGetOut::Bail(None),
+                    };
+                }
+                if is_caller && !has_own && !strict {
+                    return PropGetOut::Ready(self.stack_caller());
+                }
+            }
         }
         let result = if obj.is_heap_object() {
             let tag = {
@@ -3993,6 +4101,25 @@ impl Vm {
                 Some(exit) => PropSetOut::Bail(Some(exit)),
                 None => PropSetOut::Bail(None),
             };
+        }
+        // A3: strict-function poison pills on write (sloppy writes fall
+        // through to the normal store, creating shadowing own props).
+        if let Some(fptr) = obj.heap_ptr() {
+            if unsafe { (*(fptr as *const GcHeader)).tag() } == TAG_FUNC
+                && (prop_key_is(raw_key, "caller") || prop_key_is(raw_key, "arguments"))
+                && unsafe { Func::is_strict(fptr as *mut Func) }
+            {
+                let err = crate::errors::error_object(
+                    gc,
+                    &self.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "Cannot assign to 'caller'/'arguments' of a strict function",
+                );
+                return match self.handle_throw(gc, err) {
+                    Some(exit) => PropSetOut::Bail(Some(exit)),
+                    None => PropSetOut::Bail(None),
+                };
+            }
         }
         // Check for accessor setter on own or prototype chain
         if let Some(ptr) = obj.heap_ptr() {
@@ -6854,6 +6981,9 @@ impl Vm {
                             if func_prog.is_class_constructor {
                                 kind_flags |= FUNC_FLAG_CLASS_CTOR;
                             }
+                            if func_prog.is_strict {
+                                kind_flags |= FUNC_FLAG_STRICT;
+                            }
                         }
                         if kind_flags != 0 {
                             Func::add_flags(resolved_ptr, kind_flags);
@@ -7849,6 +7979,26 @@ impl Vm {
                     if let Some(ptr) = callee.heap_ptr() {
                         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
                         if tag == TAG_FUNC {
+                            // A3: [[Call]] on a class constructor throws
+                            // (spec §10.2.3 — classes are construct-only).
+                            // super() calls carry operand 1 = 1 (construct
+                            // form) and are exempt. Throws never populate
+                            // call ICs, so no JIT path can bypass this.
+                            if unsafe { Func::is_class_constructor(ptr as *mut Func) } {
+                                let is_super = instr.operands.get(1).copied().unwrap_or(0) != 0;
+                                if !is_super {
+                                    let err = crate::errors::error_object(
+                                        gc,
+                                        &self.error_protos,
+                                        crate::errors::ErrorKind::TypeError,
+                                        "Class constructor cannot be invoked without 'new'",
+                                    );
+                                    if let Some(exit) = self.handle_throw(gc, err) {
+                                        return exit;
+                                    }
+                                    continue;
+                                }
+                            }
                             let func_idx = unsafe { Func::func_index(ptr as *mut Func) } as usize;
                             let creator_prog = unsafe {
                                 &*(Func::prog_ptr(ptr as *mut Func) as *const BytecodeProgram)
@@ -8313,6 +8463,7 @@ impl Vm {
                     let popped_frame = self.frames.len() - 1;
                     let is_constructor = self.frames[popped_frame].is_constructor_call;
                     let constructed_obj = self.frames[popped_frame].constructed_object;
+                    let popped_func = self.frames[popped_frame].func_ptr;
                     self.last_locals = self.frames[popped_frame].locals.clone();
                     self.frames.pop();
                     self.try_stack
@@ -9328,7 +9479,31 @@ impl Vm {
                     self.stack.truncate(callee_base);
                     // §11.2.2 [[Construct]]: if constructor returns a heap object, use it;
                     // otherwise use the originally constructed object.
+                    // A3: derived constructors (§10.2.3) may only return an
+                    // object or undefined — any other value throws a
+                    // TypeError. Derived = the callee Func has a superclass.
+                    // (Only Object-type results count as objects here: heap
+                    // strings/primitives are not Ordinary objects.)
                     if is_constructor {
+                        // Object-typed per is_object_value (heap strings and
+                        // other primitives don't count, even though boxed).
+                        let is_object_result = crate::builtins::is_object_value(result);
+                        if !is_object_result && !result.is_undefined() {
+                            let derived = !popped_func.is_null()
+                                && unsafe { !Func::superclass(popped_func as *mut Func).is_null() };
+                            if derived {
+                                let err = crate::errors::error_object(
+                                    gc,
+                                    &self.error_protos,
+                                    crate::errors::ErrorKind::TypeError,
+                                    "Derived constructors may only return object or undefined",
+                                );
+                                if let Some(exit) = self.handle_throw(gc, err) {
+                                    return exit;
+                                }
+                                continue;
+                            }
+                        }
                         if result.is_heap_object() {
                             self.push(result);
                         } else {
@@ -9537,6 +9712,23 @@ impl Vm {
                     if let Some(ptr) = callee.heap_ptr() {
                         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
                         if tag == TAG_FUNC {
+                            // A3: same class-call check as Opcode::Call;
+                            // operand 0 = 1 marks super(...args) spread form.
+                            if unsafe { Func::is_class_constructor(ptr as *mut Func) } {
+                                let is_super = instr.operands.first().copied().unwrap_or(0) != 0;
+                                if !is_super {
+                                    let err = crate::errors::error_object(
+                                        gc,
+                                        &self.error_protos,
+                                        crate::errors::ErrorKind::TypeError,
+                                        "Class constructor cannot be invoked without 'new'",
+                                    );
+                                    if let Some(exit) = self.handle_throw(gc, err) {
+                                        return exit;
+                                    }
+                                    continue;
+                                }
+                            }
                             let func_idx = unsafe { Func::func_index(ptr as *mut Func) } as usize;
                             let creator_prog = unsafe {
                                 &*(Func::prog_ptr(ptr as *mut Func) as *const BytecodeProgram)

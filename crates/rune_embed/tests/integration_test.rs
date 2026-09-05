@@ -968,6 +968,88 @@ fn test_error_objects_real() {
 }
 
 #[test]
+fn test_class_call_without_new_throws() {
+    // A3: [[Call]] on a class constructor throws (super() exempt).
+    let mut ctx = Context::new_small();
+    ctx.eval("class C { constructor() { this.x = 1; } }")
+        .unwrap();
+    let err = ctx.eval("C();").expect_err("class call should throw");
+    assert!(err.contains("TypeError"), "expected TypeError, got: {err}");
+    ctx.eval("assert.throws(TypeError, function () { C(); });")
+        .unwrap();
+    // new still works; super() chains still work (incl. spread form).
+    let r = ctx.eval("new C().x;").unwrap();
+    assert_eq!(r.as_smi(), Some(1));
+    let r = ctx
+        .eval(
+            "class A { constructor(x) { this.x = x; } }
+             class B extends A { constructor(x) { super(x + 1); } }
+             new B(1).x;",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(2));
+    let r = ctx
+        .eval(
+            "class A { constructor() { this.x = 40; } }
+             class B extends A { constructor(...a) { super(...a); } }
+             new B().x;",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(40));
+}
+
+#[test]
+fn test_derived_constructor_return_check() {
+    // A3: derived ctors may only return objects or undefined.
+    let mut ctx = Context::new_small();
+    ctx.eval("class C extends Object { constructor() { return null; } }")
+        .unwrap();
+    let err = ctx.eval("new C();").expect_err("should throw");
+    assert!(err.contains("TypeError"), "expected TypeError, got: {err}");
+    // Object results flow through; undefined falls back to this.
+    let r = ctx
+        .eval("class D extends Object { constructor() { return { v: 7 }; } } new D().v;")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(7));
+    let r = ctx
+        .eval("class E extends Object { constructor() { this.w = 8; } } new E().w;")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(8));
+    // Base-class explicit primitives are ignored (no throw).
+    let r = ctx
+        .eval("class F { constructor() { return 5; } } new F() instanceof F;")
+        .unwrap();
+    assert!(r.to_bool());
+}
+
+#[test]
+fn test_strict_caller_arguments_poison() {
+    // A3: strict functions throw on caller/arguments access; sloppy .caller
+    // resolves to the caller (null at top level).
+    let mut ctx = Context::new_small();
+    ctx.eval("assert.throws(TypeError, function () { function f() { 'use strict'; } f.caller; });")
+        .unwrap();
+    ctx.eval(
+        "assert.throws(TypeError, function () { function f() { 'use strict'; } f.arguments; });",
+    )
+    .unwrap();
+    // Sloppy .caller is the executing caller, null at top level.
+    let r = ctx
+        .eval("function g() { return g.caller; } g() === null;")
+        .unwrap();
+    assert!(r.to_bool(), "top-level sloppy caller is null");
+    let r = ctx
+        .eval("function inner() { return inner.caller === outer; } function outer() { return inner(); } outer();")
+        .unwrap();
+    assert!(r.to_bool(), "sloppy caller resolves to the caller");
+    // Strict caller poisons sloppy .caller reads.
+    let r = ctx
+        .eval("function g() { return g.caller; } function f() { 'use strict'; return g(); } var threw = false; try { f(); } catch (e) { threw = e instanceof TypeError; } threw;")
+        .unwrap();
+    assert!(r.to_bool(), "strict caller poisons sloppy .caller");
+}
+
+#[test]
 fn test_neg_zero_preserved() {
     let mut ctx = Context::new_small();
     let r = ctx.eval("1 / -0").unwrap();

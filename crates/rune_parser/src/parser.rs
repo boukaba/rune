@@ -844,6 +844,7 @@ impl Parser {
         } else {
             Stmt::Empty(self.span())
         };
+        let is_strict = body_has_use_strict(&body);
         FnNode {
             name,
             params,
@@ -852,6 +853,7 @@ impl Parser {
             is_generator,
             is_async,
             is_arrow: false,
+            is_strict,
             span: Span {
                 start: start.start,
                 end: self.span().end,
@@ -3077,6 +3079,7 @@ impl Parser {
             let expr = self.parse_expr(0);
             Stmt::Expr(expr, self.span())
         };
+        let is_strict = body_has_use_strict(&body);
         Expr::Function(
             Box::new(FnNode {
                 name: None,
@@ -3086,6 +3089,9 @@ impl Parser {
                 is_generator: false,
                 is_async: false,
                 is_arrow: true,
+                // Block bodies can carry a directive prologue; expression
+                // bodies (Stmt::Expr, non-block) never do.
+                is_strict,
                 span: Span {
                     start: start.start,
                     end: self.span().end,
@@ -3286,6 +3292,21 @@ fn export_decl_names(exp: &ExportDecl) -> Vec<String> {
     }
 }
 
+/// Whether a parsed function body opens with a `"use strict"` directive
+/// prologue (§10.2.1, §14.1.1): the body must be a block whose first
+/// statement is exactly the string literal `"use strict"`. Only the
+/// function-body case is detected (script/module prologues and inherited
+/// strictness are follow-ups, documented on FnNode::is_strict).
+pub(crate) fn body_has_use_strict(body: &Stmt) -> bool {
+    let Stmt::Block(stmts, _) = body else {
+        return false;
+    };
+    let Some(Stmt::Expr(Expr::String(s, _), _)) = stmts.first() else {
+        return false;
+    };
+    s.as_ref() == "use strict"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3449,5 +3470,35 @@ mod tests {
     fn test_typeof() {
         let prog = parse("typeof x;");
         assert_eq!(prog.body.len(), 1);
+    }
+
+    /// A3: "use strict" directive prologue marks the function strict.
+    fn first_fn(source: &str) -> FnNode {
+        let prog = parse(source);
+        match &prog.body[0] {
+            Stmt::Function(f, _) => (**f).clone(),
+            Stmt::Expr(Expr::Function(f, _), _) => (**f).clone(),
+            other => panic!("expected function, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_use_strict_directive() {
+        let f = first_fn(r#"function f() { "use strict"; return 1; }"#);
+        assert!(f.is_strict);
+        let f = first_fn(r#"function f() { return 1; }"#);
+        assert!(!f.is_strict);
+        // Not first → not a directive.
+        let f = first_fn(r#"function f() { var x = 1; "use strict"; }"#);
+        assert!(!f.is_strict);
+        // Wrong string → not strict.
+        let f = first_fn(r#"function f() { "use_strict"; }"#);
+        assert!(!f.is_strict);
+        // Expression bodies never carry directives.
+        let f = first_fn("() => 1;");
+        assert!(!f.is_strict);
+        // Arrow block bodies can.
+        let f = first_fn("() => { 'use strict'; };");
+        assert!(f.is_strict);
     }
 }

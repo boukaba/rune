@@ -203,6 +203,10 @@ pub struct BytecodeProgram {
     pub named_function: bool,
     pub is_generator: bool,
     pub is_async: bool,
+    /// True when the function body opens with a "use strict" directive
+    /// (A3: strict caller/arguments poison checks read it via Func flags).
+    /// Inherited strictness (modules/classes/outer functions) untracked.
+    pub is_strict: bool,
     /// True when this program is a class constructor ([[FunctionKind]] ==
     /// classConstructor, §10.2.3). Set by emit_class for the constructor
     /// program (explicit or synthesized); read by MakeFunction into the
@@ -266,6 +270,7 @@ impl BytecodeProgram {
             named_function: false,
             is_generator: false,
             is_async: false,
+            is_strict: false,
             is_class_constructor: false,
             local_names: vec![],
             captured_env_size: 0,

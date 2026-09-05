@@ -153,6 +153,12 @@ pub struct FnNode {
     pub is_generator: bool,
     pub is_async: bool,
     pub is_arrow: bool,
+    /// True when the function body opens with a "use strict" directive
+    /// prologue (§10.2.1). Set by the parser; read by the emitter into the
+    /// compiled-program record and Func flags (A3 strict poison checks).
+    /// Inherited strictness (modules, class bodies, strict outer functions)
+    /// is NOT tracked yet — documented follow-up.
+    pub is_strict: bool,
     pub span: Span,
 }
 

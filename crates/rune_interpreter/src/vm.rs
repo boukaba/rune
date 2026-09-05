@@ -90,27 +90,6 @@ fn property_key_string(val: Value) -> String {
     "[object Object]".to_string()
 }
 
-/// Create a minimal Error object with `name` and `message` properties.
-fn make_error_object(gc: &mut SemiSpace, name: &str, msg: &str) -> Value {
-    let name_str: *mut u8 = HeapString::allocate(gc, name) as *mut u8;
-    let msg_str: *mut u8 = HeapString::allocate(gc, msg) as *mut u8;
-    let entries = vec![
-        (PropertyKey::from_string("name"), 0usize),
-        (PropertyKey::from_string("message"), 1usize),
-    ];
-    let key_names = vec!["name".to_string(), "message".to_string()];
-    let shape = Shape::intern(entries, key_names);
-    let obj = JSObject::allocate(
-        gc,
-        shape,
-        &[
-            Value::from_heap_ptr(name_str),
-            Value::from_heap_ptr(msg_str),
-        ],
-    );
-    Value::from_heap_ptr(obj as *mut u8)
-}
-
 /// Callback for the `eval` builtin: parses and executes JS source, returns result.
 pub type EvalFn = Box<dyn FnMut(&mut SemiSpace, &str) -> Result<Value, String>>;
 
@@ -2260,19 +2239,19 @@ impl Vm {
         }
     }
 
-    /// Throw a ReferenceError from the run loop.
+    /// Throw a ReferenceError from the run loop (F2: string encoding via
+    /// the error factory; A2 flips these paths to error objects).
     fn throw_reference_error(&mut self, gc: &mut SemiSpace, msg: &str) -> Exit {
-        let full_msg = format!("ReferenceError: {}", msg);
-        let ptr = HeapString::allocate(gc, &full_msg);
-        self.push(Value::from_heap_ptr(ptr as *mut u8));
+        let val = crate::errors::error_string(gc, crate::errors::ErrorKind::ReferenceError, msg);
+        self.push(val);
         Exit::Throw(self.pop())
     }
 
-    /// Throw a TypeError from the run loop.
+    /// Throw a TypeError from the run loop (F2: string encoding via the
+    /// error factory; A2 flips these paths to error objects).
     fn throw_type_error(&mut self, gc: &mut SemiSpace, msg: &str) -> Exit {
-        let full_msg = format!("TypeError: {}", msg);
-        let ptr = HeapString::allocate(gc, &full_msg);
-        self.push(Value::from_heap_ptr(ptr as *mut u8));
+        let val = crate::errors::error_string(gc, crate::errors::ErrorKind::TypeError, msg);
+        self.push(val);
         Exit::Throw(self.pop())
     }
 
@@ -2515,7 +2494,7 @@ impl Vm {
                         actual,
                         detail.unwrap_or_default()
                     );
-                    let err = crate::builtins::make_error(gc, &msg);
+                    let err = crate::builtins::make_error(gc, &self.error_protos, &msg);
                     self.frames.pop();
                     self.try_stack
                         .retain(|tf| tf.frame_depth != popped_frame + 1);
@@ -4505,7 +4484,12 @@ impl Vm {
                             self.push(Value::from_heap_ptr(new_arr as *mut u8));
                         }
                     } else {
-                        self.push(make_error_object(gc, "TypeError", "ArrayPush on non-array"));
+                        self.push(crate::errors::error_object(
+                            gc,
+                            &self.error_protos,
+                            crate::errors::ErrorKind::TypeError,
+                            "ArrayPush on non-array",
+                        ));
                         return Exit::Throw(self.pop());
                     }
                     self.frames[fi].pc = pc + 1;
@@ -4527,9 +4511,10 @@ impl Vm {
                         }
                         self.push(Value::from_heap_ptr(tgt_arr as *mut u8));
                     } else {
-                        self.push(make_error_object(
+                        self.push(crate::errors::error_object(
                             gc,
-                            "TypeError",
+                            &self.error_protos,
+                            crate::errors::ErrorKind::TypeError,
                             "ArrayExtend on non-array",
                         ));
                         return Exit::Throw(self.pop());
@@ -6291,9 +6276,10 @@ impl Vm {
                     if val.is_null() || val.is_undefined() {
                         self.pop();
                         self.register_roots(gc);
-                        let exc = make_error_object(
+                        let exc = crate::errors::error_object(
                             gc,
-                            "TypeError",
+                            &self.error_protos,
+                            crate::errors::ErrorKind::TypeError,
                             "Cannot destructure null or undefined",
                         );
                         // Now behave like Opcode::Throw
@@ -6622,9 +6608,10 @@ impl Vm {
                         id
                     } else {
                         self.register_roots(gc);
-                        let err = make_error_object(
+                        let err = crate::errors::error_object(
                             gc,
-                            "TypeError",
+                            &self.error_protos,
+                            crate::errors::ErrorKind::TypeError,
                             "Private field access outside class body",
                         );
                         self.push(err);
@@ -6654,9 +6641,10 @@ impl Vm {
                         id
                     } else {
                         self.register_roots(gc);
-                        let err = make_error_object(
+                        let err = crate::errors::error_object(
                             gc,
-                            "TypeError",
+                            &self.error_protos,
+                            crate::errors::ErrorKind::TypeError,
                             "Private field access outside class body",
                         );
                         self.push(err);
@@ -6671,9 +6659,10 @@ impl Vm {
                     // §7.3.30 PrivateGet: missing private element → TypeError
                     if !has_property(obj, key_val, Some(self.function_prototype)) {
                         self.register_roots(gc);
-                        let err = make_error_object(
+                        let err = crate::errors::error_object(
                             gc,
-                            "TypeError",
+                            &self.error_protos,
+                            crate::errors::ErrorKind::TypeError,
                             "Cannot read private member from object",
                         );
                         self.push(err);
@@ -6708,9 +6697,10 @@ impl Vm {
                         id
                     } else {
                         self.register_roots(gc);
-                        let err = make_error_object(
+                        let err = crate::errors::error_object(
                             gc,
-                            "TypeError",
+                            &self.error_protos,
+                            crate::errors::ErrorKind::TypeError,
                             "Private field access outside class body",
                         );
                         self.push(err);
@@ -6725,9 +6715,10 @@ impl Vm {
                     // §7.3.31 PrivateSet: missing private element → TypeError
                     if !has_property(obj, key_val, Some(self.function_prototype)) {
                         self.register_roots(gc);
-                        let err = make_error_object(
+                        let err = crate::errors::error_object(
                             gc,
-                            "TypeError",
+                            &self.error_protos,
+                            crate::errors::ErrorKind::TypeError,
                             "Cannot write private member to object",
                         );
                         self.push(err);
@@ -8301,7 +8292,7 @@ impl Vm {
                             // Function returned without throwing — assert.throws failed.
                             let expected = self.describe_expected_error(pa.expected_error);
                             let msg = format!("Expected {} to throw an exception", expected);
-                            let err = make_error(gc, &msg);
+                            let err = make_error(gc, &self.error_protos, &msg);
                             self.stack.truncate(callee_base);
                             if let Some(exit) = self.handle_throw(gc, err) {
                                 return exit;

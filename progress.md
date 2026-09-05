@@ -12,8 +12,35 @@
 > regexp advanced classes, class-static-block, top-level-await,
 > iterator-helpers (kept force-skipped).
 
-## F1 DONE — Func flags bit plan (2026-09-05)
+## F2 DONE — central error factory (2026-09-05)
 
+Anti-rewrite foundation: all error creation now flows through one module
+(`rune_interpreter::errors`) with kind as data, so A2 changes the product
+in one place instead of visiting ~160 sites:
+
+- **Factory**: `ErrorKind` (7 kinds, name/parse/proto_index matching
+  `ERROR_TYPE_NAMES`/`error_protos` order) + `error_string` (legacy
+  `"Kind: msg"` encoding, bit-identical) + `error_object` (`{name,message}`
+  own props with [[Prototype]] linked to the kind's `error_protos` entry).
+- **Migrated choke functions** (behavior-preserving): `throw_type_error` /
+  `throw_reference_error` → `error_string` (17 sites via 2 edits);
+  `make_error_object` deleted, 8 sites → `error_object` directly;
+  `make_error` keeps its `(gc, msg)` call shape but takes protos and splits
+  the legacy prefix internally (documented shim for A2 to delete; `message`
+  keeps the FULL prefixed text — splitting it regressed
+  test_regexp_constructor_flags_validation, caught + reverted).
+- **Already paying off**: +22 RegExp tests (382 vs 360 — SyntaxError
+  objects from invalid-pattern paths now carry own `name`, which
+  `assert.throws` ctor-matching reads). All other spot suites byte-identical
+  (Function 57, GeneratorPrototype 47, String 406, Error 32, NativeErrors 38).
+- **Tests**: 6 new factory unit tests (names/indices/parse/split_legacy,
+  string encoding, object product + proto link, empty-proto-table) —
+  **853 workspace / 0 failed**; clippy/fmt/no-default/x86 clean.
+- **A2 backlog**: ~126 inline `heap_string("Kind: ...")` builtin sites still
+  construct strings directly (greppable); they flip to `error_object` one
+  family at a time in A2.
+
+## F1 DONE — Func flags bit plan (2026-09-05)
 Anti-rewrite foundation: the 4-byte Func flags word was full (bit 0 =
 is_arrow + 31 bits of module_mi). Reallocated ahead of the slices that need
 kind bits (A3 class-call/strict checks, B5/B6 generator/async work):

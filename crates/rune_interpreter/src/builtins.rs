@@ -5507,7 +5507,11 @@ fn string_from_value(this: Value) -> String {
 /// RequireObjectCoercible(this) — throws TypeError if this is null or undefined.
 fn require_object_coercible(this: Value, vm: &mut Vm, gc: &mut SemiSpace) -> bool {
     if this.is_null() || this.is_undefined() {
-        let err = make_error(gc, "TypeError: Cannot convert undefined or null to object");
+        let err = make_error(
+            gc,
+            &vm.error_protos,
+            "TypeError: Cannot convert undefined or null to object",
+        );
         vm.set_pending_exception(err);
         return false;
     }
@@ -5883,7 +5887,7 @@ pub fn string_repeat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
     let count = args.first().copied().unwrap_or(Value::undefined());
     let n = to_integer_or_infinity(count);
     if n.is_infinite() || n < 0.0 || n.is_nan() {
-        let err = make_error(gc, "RangeError: Invalid count value");
+        let err = make_error(gc, &vm.error_protos, "RangeError: Invalid count value");
         vm.set_pending_exception(err);
         return Value::undefined();
     }
@@ -5896,7 +5900,7 @@ pub fn string_repeat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
     // (also guards usize overflow on `s.len() * n`).
     let result_units = s.encode_utf16().count() as u64 * n as u64;
     if result_units > 9_007_199_254_740_991 {
-        let err = make_error(gc, "RangeError: Invalid string length");
+        let err = make_error(gc, &vm.error_protos, "RangeError: Invalid string length");
         vm.set_pending_exception(err);
         return Value::undefined();
     }
@@ -5920,7 +5924,7 @@ fn string_pad(gc: &mut SemiSpace, vm: &mut Vm, this: Value, args: &[Value], at_e
     let max_len = args.first().copied().unwrap_or(Value::undefined());
     let target_f = to_integer_or_infinity(max_len);
     if target_f.is_nan() || !target_f.is_finite() || target_f > 9_007_199_254_740_991.0 {
-        let err = make_error(gc, "RangeError: Invalid string length");
+        let err = make_error(gc, &vm.error_protos, "RangeError: Invalid string length");
         vm.set_pending_exception(err);
         return Value::undefined();
     }
@@ -7492,7 +7496,11 @@ pub fn json_stringify(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
             }
             if tag == TAG_ARRAY {
                 if stack.contains(&ptr) {
-                    let err = make_error(gc, "TypeError: Converting circular structure to JSON");
+                    let err = make_error(
+                        gc,
+                        &vm.error_protos,
+                        "TypeError: Converting circular structure to JSON",
+                    );
                     vm.set_pending_exception(err);
                     return Err(());
                 }
@@ -10574,9 +10582,17 @@ fn value_to_debug(v: Value) -> String {
     }
 }
 
-pub(crate) fn make_error(gc: &mut SemiSpace, msg: &str) -> Value {
-    let s = HeapString::allocate(gc, msg);
-    make_simple_object(gc, "message", Value::from_heap_ptr(s as *mut u8))
+pub(crate) fn make_error(gc: &mut SemiSpace, protos: &[Value], msg: &str) -> Value {
+    // F2 legacy shim: `msg` still carries the old `"Kind: rest"` encoding at
+    // most call sites (and no prefix at all for assert failures). The kind is
+    // parsed out for the `name` property, but `message` keeps the FULL
+    // original text — today `e.message` and eval-error rendering both surface
+    // the prefixed text (pinned by test_regexp_constructor_flags_validation),
+    // so splitting the message too would be observable drift. A2 removes the
+    // shim by passing (kind, clean-message) explicitly at each site and
+    // switching rendering to Error.prototype.toString semantics.
+    let (kind, _) = crate::errors::ErrorKind::split_legacy(msg);
+    crate::errors::error_object(gc, protos, kind, msg)
 }
 
 /// Extract a human-readable error message from an exception Value.
@@ -10668,7 +10684,7 @@ pub fn assert_same_value(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: 
                 value_to_debug(actual)
             )
         };
-        let err = make_error(gc, &msg);
+        let err = make_error(gc, &_vm.error_protos, &msg);
         _vm.set_pending_exception(err);
     }
     Value::undefined()
@@ -10698,7 +10714,7 @@ pub fn assert_not_same_value(
                 value_to_debug(actual)
             )
         };
-        let err = make_error(gc, &msg);
+        let err = make_error(gc, &_vm.error_protos, &msg);
         _vm.set_pending_exception(err);
     }
     Value::undefined()
@@ -10715,7 +10731,7 @@ pub fn assert_plain(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut 
         } else {
             format!("assert: {msg}")
         };
-        let err = make_error(gc, &full_msg);
+        let err = make_error(gc, &_vm.error_protos, &full_msg);
         _vm.set_pending_exception(err);
     }
     Value::undefined()
@@ -10744,6 +10760,7 @@ pub fn assert_throws(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut 
     if args.len() < 2 {
         let err = make_error(
             gc,
+            &vm.error_protos,
             "assert.throws: expected errorConstructor and func arguments",
         );
         vm.set_pending_exception(err);
@@ -10938,6 +10955,7 @@ pub fn regexp_constructor(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
             _ => {
                 vm.set_pending_exception(make_error(
                     gc,
+                    &vm.error_protos,
                     "SyntaxError: Invalid regular expression flags",
                 ));
                 return Value::undefined();
@@ -10946,6 +10964,7 @@ pub fn regexp_constructor(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
         if seen & bit != 0 {
             vm.set_pending_exception(make_error(
                 gc,
+                &vm.error_protos,
                 "SyntaxError: Duplicate regular expression flag",
             ));
             return Value::undefined();
@@ -10955,7 +10974,11 @@ pub fn regexp_constructor(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
 
     // §22.2.3.3: pattern must parse, else SyntaxError.
     if rune_regex::parse_regex(&pattern_str).is_err() {
-        vm.set_pending_exception(make_error(gc, "SyntaxError: Invalid regular expression"));
+        vm.set_pending_exception(make_error(
+            gc,
+            &vm.error_protos,
+            "SyntaxError: Invalid regular expression",
+        ));
         return Value::undefined();
     }
 

@@ -599,6 +599,15 @@ pub(crate) struct ArrayOpState {
     pub(crate) source_frame_depth: usize,
     /// Accumulator for reduce (set from initial value, updated per callback result).
     pub(crate) accumulator: Option<Value>,
+    /// B1a: element-getter await — Some(index) while a JS getter frame
+    /// pushed for that element is running (Return arm feeds its result back
+    /// into the callback dispatch instead of processing a callback result).
+    pub(crate) awaiting_element: Option<usize>,
+    /// B1a: the awaited element feeds the reduce accumulator (not a callback
+    /// argument). On resume the arm finishes reduce setup instead of
+    /// dispatching. `index` holds the precomputed next-element index
+    /// (usize::MAX = none remain → complete with the accumulator).
+    pub(crate) awaiting_acc: bool,
 }
 
 /// Stack-based bytecode interpreter with call frame support.
@@ -2942,8 +2951,9 @@ impl Vm {
     /// F4: overwrite every live pending machine's `source_frame_depth` with
     /// the current callback frame index. Called by `push_callback_call`
     /// after pushing a callback frame. When adding a machine, add one arm
-    /// here — nowhere else.
-    fn rebase_pending_depths(&mut self) {
+    /// here — nowhere else. Also used after manual getter-frame pushes
+    /// (B1a array elements), which bypass push_callback_call.
+    pub(crate) fn rebase_pending_depths(&mut self) {
         let depth = self.frames.len() - 1;
         if let Some(ref mut state) = self.pending_array_op {
             state.source_frame_depth = depth;
@@ -8545,6 +8555,69 @@ impl Vm {
                     // Check if this return completes a pending array operation callback.
                     if let Some(mut op) = self.pending_array_op.take() {
                         if self.frames.len() == op.source_frame_depth {
+                            // B1a: element-getter await — `result` is the
+                            // resolved element value, not a callback result.
+                            if let Some(idx) = op.awaiting_element.take() {
+                                // Reduce-accumulator await: finish setup —
+                                // resolve the next element (may await again)
+                                // or complete when none remains.
+                                if op.awaiting_acc {
+                                    op.awaiting_acc = false;
+                                    op.accumulator = Some(result);
+                                    let next = op.index;
+                                    if next == usize::MAX {
+                                        self.stack.truncate(callee_base);
+                                        self.push(result);
+                                        let frames_len = self.frames.len();
+                                        self.frames[frames_len - 1].pc += 1;
+                                        continue;
+                                    }
+                                    match array_element_value(self, gc, op.source_val, next) {
+                                        ArrayElemOut::Ready(v) => {
+                                            let acc = result;
+                                            let cb = op.callback;
+                                            let src = op.source_val;
+                                            op.index = next;
+                                            self.pending_array_op = Some(op);
+                                            self.push_callback_call(
+                                                gc,
+                                                cb,
+                                                Value::undefined(),
+                                                vec![acc, v, Value::smi(next as i32), src],
+                                            );
+                                            continue;
+                                        }
+                                        ArrayElemOut::Wait => {
+                                            op.awaiting_element = Some(next);
+                                            self.pending_array_op = Some(op);
+                                            self.rebase_pending_depths();
+                                            continue;
+                                        }
+                                        ArrayElemOut::SyncErr(e) => {
+                                            if let Some(exit) = self.handle_throw(gc, e) {
+                                                return exit;
+                                            }
+                                            continue;
+                                        }
+                                    }
+                                }
+                                let cb = op.callback;
+                                let cb_this = match op.kind {
+                                    ArrayOpKind::Reduce => Value::undefined(),
+                                    _ => op.this_val,
+                                };
+                                let cb_args = match op.kind {
+                                    ArrayOpKind::Reduce => {
+                                        let acc = op.accumulator.unwrap_or(Value::undefined());
+                                        vec![acc, result, Value::smi(idx as i32), op.source_val]
+                                    }
+                                    _ => vec![result, Value::smi(idx as i32), op.source_val],
+                                };
+                                op.index = idx;
+                                self.pending_array_op = Some(op);
+                                self.push_callback_call(gc, cb, cb_this, cb_args);
+                                continue;
+                            }
                             // This was the callback frame returning. Process result.
                             match op.kind {
                                 // ... existing array callback handling ...
@@ -8706,16 +8779,25 @@ impl Vm {
                                     }
                                 }
                             }
-                            // Re-read source length each iteration (may have been mutated by callback)
-                            let current_len = array_like_length(op.source_val).unwrap_or(0);
-                            op.length = current_len;
+                            // B1a: the loop bound is fixed at entry per spec
+                            // (LengthOfArrayLike runs once); length mutations
+                            // during iteration (e.g. a getter side effect)
+                            // do not change the visited range. HasProperty
+                            // skips deleted indices.
+                            let current_len = op.length;
                             let op_kind = op.kind;
                             op.index += 1;
-                            // Walk forward to the next existing element (HasProperty check)
+                            // Walk forward to the next existing element
+                            // (HasProperty semantics: proto-chain presence,
+                            // so setter-only proto accessors count).
                             let next_index = 'search: {
                                 let mut i = op.index;
                                 while i < current_len as usize {
-                                    if array_like_index(op.source_val, i as u32).is_some() {
+                                    if has_property(
+                                        op.source_val,
+                                        Value::smi(i as i32),
+                                        Some(self.function_prototype),
+                                    ) {
                                         break 'search Some(i);
                                     }
                                     i += 1;
@@ -8724,8 +8806,24 @@ impl Vm {
                             };
                             if let Some(i) = next_index {
                                 op.index = i;
-                                let resolved_val = array_like_index(op.source_val, i as u32)
-                                    .unwrap_or(Value::undefined());
+                                // B1a: accessor elements dispatch getters (the
+                                // walk established presence; this resolves).
+                                let resolved_val =
+                                    match array_element_value(self, gc, op.source_val, i) {
+                                        ArrayElemOut::Ready(v) => v,
+                                        ArrayElemOut::Wait => {
+                                            op.awaiting_element = Some(i);
+                                            self.pending_array_op = Some(op);
+                                            self.rebase_pending_depths();
+                                            continue;
+                                        }
+                                        ArrayElemOut::SyncErr(e) => {
+                                            if let Some(exit) = self.handle_throw(gc, e) {
+                                                return exit;
+                                            }
+                                            continue;
+                                        }
+                                    };
                                 let cb_this = match op_kind {
                                     ArrayOpKind::Filter
                                     | ArrayOpKind::Map
@@ -11873,7 +11971,8 @@ fn ic_cache_key(shape_id: u64, raw_key: Value) -> (u64, u64) {
 
 /// Check if an object has a property (for the `in` operator).
 /// Returns false for non-object values (primitives are not objects).
-fn has_property(obj: Value, raw_key: Value, function_prototype: Option<Value>) -> bool {
+/// HasProperty for hole-skipping (B1a): own or proto-chain presence.
+pub(crate) fn has_property(obj: Value, raw_key: Value, function_prototype: Option<Value>) -> bool {
     // Builtin handles (negative Smis) are function-like: check Function.prototype
     if let Some(smi) = obj.as_smi() {
         if smi < 0 {
@@ -12128,6 +12227,96 @@ pub(crate) fn array_like_index(this: Value, i: u32) -> Option<Value> {
         }
         _ => None,
     }
+}
+
+/// Outcome of B1a array-element resolution with getter dispatch.
+pub(crate) enum ArrayElemOut {
+    /// Synchronous value (data, missing→undefined, undefined/null or
+    /// builtin getter result).
+    Ready(Value),
+    /// A JS getter frame was pushed (pending_array_op carries
+    /// awaiting_element); the caller must bail without advancing.
+    Wait,
+    /// A builtin getter failed synchronously; the error value must be
+    /// routed (setup: pending_exception; Return arm: handle_throw).
+    SyncErr(Value),
+}
+
+/// Resolve an array-iteration element with accessor dispatch (B1a).
+/// Presence was established by HasProperty; this reads the value, running
+/// getters: builtin getters run inline, JS getters push a frame (Wait).
+/// `source` is both lookup start and call receiver.
+pub(crate) fn array_element_value(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    source: Value,
+    index: usize,
+) -> ArrayElemOut {
+    let raw = load_property_recursive(source, Value::smi(index as i32), None, gc);
+    let Some(aptr) = raw.heap_ptr() else {
+        return ArrayElemOut::Ready(raw);
+    };
+    if unsafe { (*(aptr as *const GcHeader)).tag() } != TAG_ACCESSOR {
+        return ArrayElemOut::Ready(raw);
+    }
+    let getter = unsafe { AccessorPair::getter(aptr) };
+    if getter.is_undefined() || getter.is_null() {
+        return ArrayElemOut::Ready(Value::undefined());
+    }
+    if getter.as_smi().is_some_and(|s| s < 0) {
+        return match call_builtin_sync(vm, gc, getter, source, &[]) {
+            Ok(v) => ArrayElemOut::Ready(v),
+            Err(_) => {
+                let err = crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "getter threw",
+                );
+                ArrayElemOut::SyncErr(err)
+            }
+        };
+    }
+    let Some(gptr) = getter.heap_ptr() else {
+        return ArrayElemOut::Ready(Value::undefined());
+    };
+    if unsafe { (*(gptr as *const GcHeader)).tag() } != TAG_FUNC {
+        return ArrayElemOut::Ready(Value::undefined());
+    }
+    // JS getter: mirror resolve_accessor_for_read's frame push, but record
+    // the array-iteration resume (not pending_accessor_call — that would
+    // resume the wrong opcode).
+    let func_idx = unsafe { Func::func_index(gptr as *mut Func) } as usize;
+    let creator_prog = unsafe { &*(Func::prog_ptr(gptr as *mut Func) as *const BytecodeProgram) };
+    if func_idx >= creator_prog.functions.len() {
+        return ArrayElemOut::Ready(Value::undefined());
+    }
+    let func_prog = &creator_prog.functions[func_idx];
+    let func_env = unsafe { Func::env_ptr(gptr as *mut Func) };
+    let locals = if func_prog.named_function {
+        vec![getter]
+    } else {
+        vec![]
+    };
+    vm.frames.push(Frame {
+        locals,
+        lexical_slots: Vec::new(),
+        lexical_tdz: Vec::new(),
+        lexical_const: Vec::new(),
+        scope_boundaries: Vec::new(),
+        passed_argc: 0,
+        pc: 0,
+        stack_base: vm.stack.len(),
+        prog: func_prog as *const BytecodeProgram,
+        generator_id: None,
+        this: source,
+        is_constructor_call: false,
+        constructed_object: Value::undefined(),
+        env: func_env,
+        func_ptr: gptr,
+        private_name_ids: std::ptr::null_mut(),
+    });
+    ArrayElemOut::Wait
 }
 
 /// Lexical operation codes for the JIT callout helper.

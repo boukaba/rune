@@ -1119,6 +1119,50 @@ fn test_define_property_seal_freeze() {
 }
 
 #[test]
+fn test_array_iter_prologue() {
+    // B1a: length→callable order, holes skipped, null receiver throws.
+    let mut ctx = Context::new_small();
+    // Non-callable callback throws even on empty arrays (order matters).
+    ctx.eval("assert.throws(TypeError, function () { [].map(); });")
+        .unwrap();
+    ctx.eval("assert.throws(TypeError, function () { [1, 2].map(5); });")
+        .unwrap();
+    ctx.eval("assert.throws(TypeError, function () { [].forEach(null); });")
+        .unwrap();
+    // Null/undefined receivers throw (no more panics on heap_ptr unwrap).
+    ctx.eval("assert.throws(TypeError, function () { Array.prototype.map.call(null, function (x) { return x; }); });")
+        .unwrap();
+    // Holes in array-likes are skipped (callback not invoked for them).
+    let r = ctx
+        .eval("var seen = []; var o = {length: 3, 0: 'a', 2: 'c'}; Array.prototype.map.call(o, function (x) { seen.push(x); return x; }); seen.length;")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(2));
+    // All-holes with no calls returns the kind default.
+    let r = ctx
+        .eval(
+            "var o = {length: 2}; Array.prototype.map.call(o, function (x) { return 1; }).length;",
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(0));
+    // reduce: first present element seeds; all-holes without initial throws.
+    let r = ctx
+        .eval("[1, 2, 3].reduce(function (a, b) { return a + b; });")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(6));
+    ctx.eval(
+        "assert.throws(TypeError, function () { [].reduce(function (a, b) { return a + b; }); });",
+    )
+    .unwrap();
+    ctx.eval("assert.throws(TypeError, function () { var o = {length: 2}; Array.prototype.reduce.call(o, function (a, b) { return a + b; }); });")
+        .unwrap();
+    // reduce with initial skips holes.
+    let r = ctx
+        .eval("var o = {length: 3, 0: 10, 2: 20}; Array.prototype.reduce.call(o, function (a, b) { return a + b; }, 5);")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(35));
+}
+
+#[test]
 fn test_neg_zero_preserved() {
     let mut ctx = Context::new_small();
     let r = ctx.eval("1 / -0").unwrap();

@@ -46,8 +46,38 @@ paths can't match immediates (no JIT change needed).
   exact, retracted in A2.)
 - 860 workspace / 0 failed; clippy/fmt/no-default/x86 clean.
 
-## A4 DONE — property-descriptor model (2026-09-05)
+## B1a DONE — iterative Array family audit (2026-09-06)
 
+First B1 sub-slice (map/filter/forEach/find/findIndex/some/every/flatMap/
+reduce): shared spec-order prologue + hole semantics + element getters:
+
+- **`array_iter_prologue`** (one place): RequireObjectCoercible →
+  LengthOfArrayLike (data path) → IsCallable check. Fixes: non-callable
+  callbacks throwing even on empty arrays (was silent default), null
+  receivers (was `heap_ptr().unwrap()` panic), primitive receivers.
+- **Holes via HasProperty** (not own-slots): `first/next_existing_index`
+  walk the proto chain, so setter-only proto accessors count as present;
+  setup starts at the first present index; reduce-without-initial seeds
+  from it (all-holes → TypeError) and completes early on a lone element.
+- **Element-getter dispatch**: new `array_element_value` (data sync,
+  undefined/null sync, builtin getters inline, JS getters via pushed frame)
+  + `ArrayOpState.awaiting_element/awaiting_acc` resume in the Return
+  cascade (element re-dispatch or reduce-setup finish). Reduce-acc chaining
+  included. Stale-machine clears on every early path.
+- **Fixed loop bound**: removed the per-iteration length re-read (spec
+  fixes len at entry; a getter side effect shortening length must not cut
+  the range — caught by -9.js family diffs).
+- **Gains (+108 Array, ZERO losses)**: 896→1004. Two flips triaged en route
+  (proto-accessor presence) which motivated the getter dispatch.
+- **Tests**: `test_array_iter_prologue` (order/holes/reduce edges).
+  **866 workspace / 0**; clippy/fmt/no-default-features clean.
+- **Known gaps (rest of B1)**: B1b indexOf/lastIndexOf/includes audit; B1c
+  reduceRight + findLast* (absent); B1d Array ctor/from/of/copyWithin/
+  toSpliced/toSorted/with/sort-comparator; fromAsync → B6; JS-getter
+  `length` (sync gap, -4- series); hole-preserving map results (dense
+  arrays can't represent holes); species.
+
+## A4 DONE — property-descriptor model (2026-09-05)
 The ~2,000-test descriptor cluster, built on the F5 attribute home —
 largest single-suite jump of the campaign (Object 280→1236):
 

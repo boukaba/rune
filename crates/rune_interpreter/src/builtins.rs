@@ -9392,17 +9392,64 @@ pub fn array_includes(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
 }
 
 /// Array.prototype.forEach(callback, thisArg) — same state machine, no result array.
-pub fn array_for_each(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let length = match crate::vm::array_like_length(this) {
-        Some(len) => len,
-        None => return Value::undefined(),
-    };
-    let callback = args.first().copied().unwrap_or(Value::undefined());
-    let this_arg = args.get(1).copied().unwrap_or(Value::undefined());
-    let source_ptr = this.heap_ptr().unwrap();
-    if length == 0 {
-        return Value::undefined();
+/// B1a shared prologue for iterative Array methods (map/filter/forEach/
+/// find/findIndex/some/every/flatMap/reduce). Spec order per method:
+/// RequireObjectCoercible → LengthOfArrayLike (data path) → IsCallable.
+/// Returns (length, callback, this_arg, source heap pointer or null for
+/// primitives). On failure sets a pending TypeError and returns None (the
+/// caller returns its kind-specific default).
+fn array_iter_prologue(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    this: Value,
+    args: &[Value],
+    method: &str,
+) -> Option<(u32, Value, Value, *mut u8)> {
+    if !require_object_coercible(this, vm, gc) {
+        return None;
     }
+    let length = crate::vm::array_like_length(this).unwrap_or(0);
+    let callback = args.first().copied().unwrap_or(Value::undefined());
+    let callable = callback.as_smi().is_some_and(|s| s < 0)
+        || callback
+            .heap_ptr()
+            .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC });
+    if !callable {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            &format!("{method} requires a callback function"),
+        ));
+        return None;
+    }
+    let this_arg = args.get(1).copied().unwrap_or(Value::undefined());
+    let source_ptr = this.heap_ptr().unwrap_or(std::ptr::null_mut());
+    Some((length, callback, this_arg, source_ptr))
+}
+
+/// First present index in [0, len) per HasProperty semantics
+/// (B1a: own slots AND proto chain — a setter-only proto accessor counts as
+/// present, reading as undefined). Dense arrays have no holes
+/// (index < length always present).
+fn first_existing_index(this: Value, len: u32) -> Option<usize> {
+    next_existing_index(this, 0, len)
+}
+
+/// First present index in [from, len) (HasProperty semantics, see above).
+fn next_existing_index(this: Value, from: usize, len: u32) -> Option<usize> {
+    (from..len as usize).find(|&i| crate::vm::has_property(this, Value::smi(i as i32), None))
+}
+
+pub fn array_for_each(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some((length, callback, this_arg, source_ptr)) =
+        array_iter_prologue(gc, vm, this, args, "Array.prototype.forEach")
+    else {
+        return Value::undefined();
+    };
+    let Some(first) = first_existing_index(this, length) else {
+        return Value::undefined();
+    };
     vm.pending_array_op = Some(crate::vm::ArrayOpState {
         kind: crate::vm::ArrayOpKind::ForEach,
         source: source_ptr,
@@ -9410,25 +9457,45 @@ pub fn array_for_each(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
         callback,
         this_val: this_arg,
         source_val: this,
-        index: 0,
+        index: first,
         length,
         source_frame_depth: 0,
         accumulator: None,
+        awaiting_element: None,
+        awaiting_acc: false,
     });
-    let element = crate::vm::array_like_index(this, 0).unwrap_or(Value::undefined());
-    vm.push_callback_call(gc, callback, this_arg, vec![element, Value::smi(0), this]);
+    // B1a: accessor elements dispatch their getter (Wait records the
+    // await; SyncErr routes through the normal pending-exception path).
+    match crate::vm::array_element_value(vm, gc, this, first) {
+        crate::vm::ArrayElemOut::Ready(element) => {
+            vm.push_callback_call(
+                gc,
+                callback,
+                this_arg,
+                vec![element, Value::smi(first as i32), this],
+            );
+        }
+        crate::vm::ArrayElemOut::Wait => {
+            if let Some(ref mut op) = vm.pending_array_op {
+                op.awaiting_element = Some(first);
+            }
+            vm.rebase_pending_depths();
+        }
+        crate::vm::ArrayElemOut::SyncErr(e) => {
+            vm.pending_array_op = None;
+            vm.set_pending_exception(e);
+        }
+    }
     Value::undefined()
 }
 
 /// Array.prototype.filter(callback, thisArg) — set up state machine iteration.
 pub fn array_filter(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let length = match crate::vm::array_like_length(this) {
-        Some(len) => len,
-        None => return Value::undefined(),
+    let Some((length, callback, this_arg, source_ptr)) =
+        array_iter_prologue(gc, vm, this, args, "Array.prototype.filter")
+    else {
+        return Value::undefined();
     };
-    let callback = args.first().copied().unwrap_or(Value::undefined());
-    let this_arg = args.get(1).copied().unwrap_or(Value::undefined());
-    let source_ptr = this.heap_ptr().unwrap();
     let result_arr = RuneArray::allocate(gc, &[]);
     unsafe {
         let ptr = result_arr as *mut u8;
@@ -9438,9 +9505,9 @@ pub fn array_filter(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
             *(ptr.add(24) as *mut *mut u8) = proto;
         }
     }
-    if length == 0 {
+    let Some(first) = first_existing_index(this, length) else {
         return Value::from_heap_ptr(result_arr as *mut u8);
-    }
+    };
     vm.pending_array_op = Some(crate::vm::ArrayOpState {
         kind: crate::vm::ArrayOpKind::Filter,
         source: source_ptr,
@@ -9448,25 +9515,45 @@ pub fn array_filter(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
         callback,
         this_val: this_arg,
         source_val: this,
-        index: 0,
+        index: first,
         length,
         source_frame_depth: 0,
         accumulator: None,
+        awaiting_element: None,
+        awaiting_acc: false,
     });
-    let element = crate::vm::array_like_index(this, 0).unwrap_or(Value::undefined());
-    vm.push_callback_call(gc, callback, this_arg, vec![element, Value::smi(0), this]);
+    // B1a: accessor elements dispatch their getter (Wait records the
+    // await; SyncErr routes through the normal pending-exception path).
+    match crate::vm::array_element_value(vm, gc, this, first) {
+        crate::vm::ArrayElemOut::Ready(element) => {
+            vm.push_callback_call(
+                gc,
+                callback,
+                this_arg,
+                vec![element, Value::smi(first as i32), this],
+            );
+        }
+        crate::vm::ArrayElemOut::Wait => {
+            if let Some(ref mut op) = vm.pending_array_op {
+                op.awaiting_element = Some(first);
+            }
+            vm.rebase_pending_depths();
+        }
+        crate::vm::ArrayElemOut::SyncErr(e) => {
+            vm.pending_array_op = None;
+            vm.set_pending_exception(e);
+        }
+    }
     Value::undefined()
 }
 
 /// Array.prototype.map(callback, thisArg) — set up state machine iteration.
 pub fn array_map(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let length = match crate::vm::array_like_length(this) {
-        Some(len) => len,
-        None => return Value::undefined(),
+    let Some((length, callback, this_arg, source_ptr)) =
+        array_iter_prologue(gc, vm, this, args, "Array.prototype.map")
+    else {
+        return Value::undefined();
     };
-    let callback = args.first().copied().unwrap_or(Value::undefined());
-    let this_arg = args.get(1).copied().unwrap_or(Value::undefined());
-    let source_ptr = this.heap_ptr().unwrap();
     let result_arr = RuneArray::allocate(gc, &[]);
     unsafe {
         let ptr = result_arr as *mut u8;
@@ -9476,9 +9563,9 @@ pub fn array_map(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -
             *(ptr.add(24) as *mut *mut u8) = proto;
         }
     }
-    if length == 0 {
+    let Some(first) = first_existing_index(this, length) else {
         return Value::from_heap_ptr(result_arr as *mut u8);
-    }
+    };
     vm.pending_array_op = Some(crate::vm::ArrayOpState {
         kind: crate::vm::ArrayOpKind::Map,
         source: source_ptr,
@@ -9486,26 +9573,95 @@ pub fn array_map(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -
         callback,
         this_val: this_arg,
         source_val: this,
-        index: 0,
+        index: first,
         length,
         source_frame_depth: 0,
         accumulator: None,
+        awaiting_element: None,
+        awaiting_acc: false,
     });
-    let element = crate::vm::array_like_index(this, 0).unwrap_or(Value::undefined());
-    vm.push_callback_call(gc, callback, this_arg, vec![element, Value::smi(0), this]);
+    // B1a: accessor elements dispatch their getter (Wait records the
+    // await; SyncErr routes through the normal pending-exception path).
+    match crate::vm::array_element_value(vm, gc, this, first) {
+        crate::vm::ArrayElemOut::Ready(element) => {
+            vm.push_callback_call(
+                gc,
+                callback,
+                this_arg,
+                vec![element, Value::smi(first as i32), this],
+            );
+        }
+        crate::vm::ArrayElemOut::Wait => {
+            if let Some(ref mut op) = vm.pending_array_op {
+                op.awaiting_element = Some(first);
+            }
+            vm.rebase_pending_depths();
+        }
+        crate::vm::ArrayElemOut::SyncErr(e) => {
+            vm.pending_array_op = None;
+            vm.set_pending_exception(e);
+        }
+    }
     Value::undefined()
 }
 
-/// Array.prototype.reduce(callback, initialValue) — set up state machine iteration.
+/// Array.prototype.reduce(callback, initialValue) — set up state machine.
+/// Without initialValue the accumulator starts at the first PRESENT element
+/// (holes skipped); no present elements at all → TypeError.
 pub fn array_reduce(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let length = match crate::vm::array_like_length(this) {
-        Some(len) => len,
-        None => return Value::undefined(),
+    let Some((length, callback, _, source_ptr)) =
+        array_iter_prologue(gc, vm, this, args, "Array.prototype.reduce")
+    else {
+        return Value::undefined();
     };
-    let callback = args.first().copied().unwrap_or(Value::undefined());
     let has_initial = args.len() > 1;
     let initial = args.get(1).copied().unwrap_or(Value::undefined());
-    if !has_initial && length == 0 {
+    if has_initial {
+        let Some(first) = first_existing_index(this, length) else {
+            return initial;
+        };
+        vm.pending_array_op = Some(crate::vm::ArrayOpState {
+            kind: crate::vm::ArrayOpKind::Reduce,
+            source: source_ptr,
+            result: std::ptr::null_mut(),
+            callback,
+            this_val: Value::undefined(),
+            source_val: this,
+            index: first,
+            length,
+            source_frame_depth: 0,
+            accumulator: Some(initial),
+            awaiting_element: None,
+            awaiting_acc: false,
+        });
+        // B1a: the first element may itself be an accessor (getter runs).
+        match crate::vm::array_element_value(vm, gc, this, first) {
+            crate::vm::ArrayElemOut::Ready(element) => {
+                vm.push_callback_call(
+                    gc,
+                    callback,
+                    Value::undefined(),
+                    vec![initial, element, Value::smi(first as i32), this],
+                );
+            }
+            crate::vm::ArrayElemOut::Wait => {
+                if let Some(ref mut op) = vm.pending_array_op {
+                    op.awaiting_element = Some(first);
+                }
+                vm.rebase_pending_depths();
+            }
+            crate::vm::ArrayElemOut::SyncErr(e) => {
+                vm.pending_array_op = None;
+                vm.set_pending_exception(e);
+            }
+        }
+        return Value::undefined();
+    }
+    // No initial value: the accumulator is the first present element
+    // (resolved through getters like any element); without any present
+    // element, throw. The next index is precomputed so the await-resume
+    // path can finish setup.
+    let Some(first) = first_existing_index(this, length) else {
         vm.set_pending_exception(crate::errors::error_object(
             gc,
             &vm.error_protos,
@@ -9513,19 +9669,8 @@ pub fn array_reduce(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
             "reduce of empty array with no initial value",
         ));
         return Value::undefined();
-    }
-    let start_index;
-    let accumulator = if has_initial {
-        start_index = 0;
-        initial
-    } else {
-        start_index = 1;
-        crate::vm::array_like_index(this, 0).unwrap_or(Value::undefined())
     };
-    if start_index >= length as usize {
-        return accumulator;
-    }
-    let source_ptr = this.heap_ptr().unwrap();
+    let next = next_existing_index(this, first + 1, length);
     vm.pending_array_op = Some(crate::vm::ArrayOpState {
         kind: crate::vm::ArrayOpKind::Reduce,
         source: source_ptr,
@@ -9533,34 +9678,73 @@ pub fn array_reduce(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
         callback,
         this_val: Value::undefined(),
         source_val: this,
-        index: start_index,
+        index: next.unwrap_or(usize::MAX),
         length,
         source_frame_depth: 0,
-        accumulator: Some(accumulator),
+        accumulator: None,
+        awaiting_element: None,
+        awaiting_acc: false,
     });
-    let element =
-        crate::vm::array_like_index(this, start_index as u32).unwrap_or(Value::undefined());
-    vm.push_callback_call(
-        gc,
-        callback,
-        Value::undefined(),
-        vec![accumulator, element, Value::smi(start_index as i32), this],
-    );
+    match crate::vm::array_element_value(vm, gc, this, first) {
+        crate::vm::ArrayElemOut::Ready(acc) => {
+            let mut op = vm.pending_array_op.take().unwrap();
+            op.accumulator = Some(acc);
+            match next {
+                Some(n) => {
+                    // Resolve the first iterated element (may itself await).
+                    match crate::vm::array_element_value(vm, gc, this, n) {
+                        crate::vm::ArrayElemOut::Ready(element) => {
+                            op.index = n;
+                            vm.pending_array_op = Some(op);
+                            vm.push_callback_call(
+                                gc,
+                                callback,
+                                Value::undefined(),
+                                vec![acc, element, Value::smi(n as i32), this],
+                            );
+                        }
+                        crate::vm::ArrayElemOut::Wait => {
+                            op.awaiting_element = Some(n);
+                            vm.pending_array_op = Some(op);
+                            vm.rebase_pending_depths();
+                        }
+                        crate::vm::ArrayElemOut::SyncErr(e) => {
+                            vm.set_pending_exception(e);
+                        }
+                    }
+                }
+                // Single present element and a sync accumulator: done.
+                None => {
+                    vm.pending_array_op = None;
+                    return acc;
+                }
+            }
+        }
+        crate::vm::ArrayElemOut::Wait => {
+            if let Some(ref mut op) = vm.pending_array_op {
+                op.awaiting_element = Some(first);
+                op.awaiting_acc = true;
+            }
+            vm.rebase_pending_depths();
+        }
+        crate::vm::ArrayElemOut::SyncErr(e) => {
+            vm.pending_array_op = None;
+            vm.set_pending_exception(e);
+        }
+    }
     Value::undefined()
 }
 
 /// Array.prototype.find(callback, thisArg) — set up state machine iteration.
 pub fn array_find(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let length = match crate::vm::array_like_length(this) {
-        Some(len) => len,
-        None => return Value::undefined(),
-    };
-    let callback = args.first().copied().unwrap_or(Value::undefined());
-    let this_arg = args.get(1).copied().unwrap_or(Value::undefined());
-    let source_ptr = this.heap_ptr().unwrap();
-    if length == 0 {
+    let Some((length, callback, this_arg, source_ptr)) =
+        array_iter_prologue(gc, vm, this, args, "Array.prototype.find")
+    else {
         return Value::undefined();
-    }
+    };
+    let Some(first) = first_existing_index(this, length) else {
+        return Value::undefined();
+    };
     vm.pending_array_op = Some(crate::vm::ArrayOpState {
         kind: crate::vm::ArrayOpKind::Find,
         source: source_ptr,
@@ -9568,28 +9752,48 @@ pub fn array_find(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
         callback,
         this_val: this_arg,
         source_val: this,
-        index: 0,
+        index: first,
         length,
         source_frame_depth: 0,
         accumulator: None,
+        awaiting_element: None,
+        awaiting_acc: false,
     });
-    let element = crate::vm::array_like_index(this, 0).unwrap_or(Value::undefined());
-    vm.push_callback_call(gc, callback, this_arg, vec![element, Value::smi(0), this]);
+    // B1a: accessor elements dispatch their getter (Wait records the
+    // await; SyncErr routes through the normal pending-exception path).
+    match crate::vm::array_element_value(vm, gc, this, first) {
+        crate::vm::ArrayElemOut::Ready(element) => {
+            vm.push_callback_call(
+                gc,
+                callback,
+                this_arg,
+                vec![element, Value::smi(first as i32), this],
+            );
+        }
+        crate::vm::ArrayElemOut::Wait => {
+            if let Some(ref mut op) = vm.pending_array_op {
+                op.awaiting_element = Some(first);
+            }
+            vm.rebase_pending_depths();
+        }
+        crate::vm::ArrayElemOut::SyncErr(e) => {
+            vm.pending_array_op = None;
+            vm.set_pending_exception(e);
+        }
+    }
     Value::undefined()
 }
 
 /// Array.prototype.findIndex(callback, thisArg) — set up state machine iteration.
 pub fn array_find_index(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let length = match crate::vm::array_like_length(this) {
-        Some(len) => len,
-        None => return Value::smi(-1),
-    };
-    let callback = args.first().copied().unwrap_or(Value::undefined());
-    let this_arg = args.get(1).copied().unwrap_or(Value::undefined());
-    let source_ptr = this.heap_ptr().unwrap();
-    if length == 0 {
+    let Some((length, callback, this_arg, source_ptr)) =
+        array_iter_prologue(gc, vm, this, args, "Array.prototype.findIndex")
+    else {
         return Value::smi(-1);
-    }
+    };
+    let Some(first) = first_existing_index(this, length) else {
+        return Value::smi(-1);
+    };
     vm.pending_array_op = Some(crate::vm::ArrayOpState {
         kind: crate::vm::ArrayOpKind::FindIndex,
         source: source_ptr,
@@ -9597,13 +9801,35 @@ pub fn array_find_index(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
         callback,
         this_val: this_arg,
         source_val: this,
-        index: 0,
+        index: first,
         length,
         source_frame_depth: 0,
         accumulator: None,
+        awaiting_element: None,
+        awaiting_acc: false,
     });
-    let element = crate::vm::array_like_index(this, 0).unwrap_or(Value::undefined());
-    vm.push_callback_call(gc, callback, this_arg, vec![element, Value::smi(0), this]);
+    // B1a: accessor elements dispatch their getter (Wait records the
+    // await; SyncErr routes through the normal pending-exception path).
+    match crate::vm::array_element_value(vm, gc, this, first) {
+        crate::vm::ArrayElemOut::Ready(element) => {
+            vm.push_callback_call(
+                gc,
+                callback,
+                this_arg,
+                vec![element, Value::smi(first as i32), this],
+            );
+        }
+        crate::vm::ArrayElemOut::Wait => {
+            if let Some(ref mut op) = vm.pending_array_op {
+                op.awaiting_element = Some(first);
+            }
+            vm.rebase_pending_depths();
+        }
+        crate::vm::ArrayElemOut::SyncErr(e) => {
+            vm.pending_array_op = None;
+            vm.set_pending_exception(e);
+        }
+    }
     Value::undefined()
 }
 
@@ -9735,13 +9961,11 @@ pub fn array_sort(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
 
 /// Array.prototype.flatMap(callback, thisArg) — set up state machine iteration, spreading array results.
 pub fn array_flat_map(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let length = match crate::vm::array_like_length(this) {
-        Some(len) => len,
-        None => return Value::undefined(),
+    let Some((length, callback, this_arg, source_ptr)) =
+        array_iter_prologue(gc, vm, this, args, "Array.prototype.flatMap")
+    else {
+        return Value::undefined();
     };
-    let callback = args.first().copied().unwrap_or(Value::undefined());
-    let this_arg = args.get(1).copied().unwrap_or(Value::undefined());
-    let source_ptr = this.heap_ptr().unwrap();
     let result_arr = RuneArray::allocate(gc, &[]);
     unsafe {
         let ptr = result_arr as *mut u8;
@@ -9751,9 +9975,9 @@ pub fn array_flat_map(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
             *(ptr.add(24) as *mut *mut u8) = proto;
         }
     }
-    if length == 0 {
+    let Some(first) = first_existing_index(this, length) else {
         return Value::from_heap_ptr(result_arr as *mut u8);
-    }
+    };
     vm.pending_array_op = Some(crate::vm::ArrayOpState {
         kind: crate::vm::ArrayOpKind::FlatMap,
         source: source_ptr,
@@ -9761,28 +9985,48 @@ pub fn array_flat_map(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
         callback,
         this_val: this_arg,
         source_val: this,
-        index: 0,
+        index: first,
         length,
         source_frame_depth: 0,
         accumulator: None,
+        awaiting_element: None,
+        awaiting_acc: false,
     });
-    let element = crate::vm::array_like_index(this, 0).unwrap_or(Value::undefined());
-    vm.push_callback_call(gc, callback, this_arg, vec![element, Value::smi(0), this]);
+    // B1a: accessor elements dispatch their getter (Wait records the
+    // await; SyncErr routes through the normal pending-exception path).
+    match crate::vm::array_element_value(vm, gc, this, first) {
+        crate::vm::ArrayElemOut::Ready(element) => {
+            vm.push_callback_call(
+                gc,
+                callback,
+                this_arg,
+                vec![element, Value::smi(first as i32), this],
+            );
+        }
+        crate::vm::ArrayElemOut::Wait => {
+            if let Some(ref mut op) = vm.pending_array_op {
+                op.awaiting_element = Some(first);
+            }
+            vm.rebase_pending_depths();
+        }
+        crate::vm::ArrayElemOut::SyncErr(e) => {
+            vm.pending_array_op = None;
+            vm.set_pending_exception(e);
+        }
+    }
     Value::undefined()
 }
 
 /// Array.prototype.some(callback, thisArg) — set up state machine iteration.
 pub fn array_some(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let length = match crate::vm::array_like_length(this) {
-        Some(len) => len,
-        None => return Value::boolean(false),
-    };
-    let callback = args.first().copied().unwrap_or(Value::undefined());
-    let this_arg = args.get(1).copied().unwrap_or(Value::undefined());
-    let source_ptr = this.heap_ptr().unwrap();
-    if length == 0 {
+    let Some((length, callback, this_arg, source_ptr)) =
+        array_iter_prologue(gc, vm, this, args, "Array.prototype.some")
+    else {
         return Value::boolean(false);
-    }
+    };
+    let Some(first) = first_existing_index(this, length) else {
+        return Value::boolean(false);
+    };
     vm.pending_array_op = Some(crate::vm::ArrayOpState {
         kind: crate::vm::ArrayOpKind::Some,
         source: source_ptr,
@@ -9790,28 +10034,48 @@ pub fn array_some(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
         callback,
         this_val: this_arg,
         source_val: this,
-        index: 0,
+        index: first,
         length,
         source_frame_depth: 0,
         accumulator: None,
+        awaiting_element: None,
+        awaiting_acc: false,
     });
-    let element = crate::vm::array_like_index(this, 0).unwrap_or(Value::undefined());
-    vm.push_callback_call(gc, callback, this_arg, vec![element, Value::smi(0), this]);
+    // B1a: accessor elements dispatch their getter (Wait records the
+    // await; SyncErr routes through the normal pending-exception path).
+    match crate::vm::array_element_value(vm, gc, this, first) {
+        crate::vm::ArrayElemOut::Ready(element) => {
+            vm.push_callback_call(
+                gc,
+                callback,
+                this_arg,
+                vec![element, Value::smi(first as i32), this],
+            );
+        }
+        crate::vm::ArrayElemOut::Wait => {
+            if let Some(ref mut op) = vm.pending_array_op {
+                op.awaiting_element = Some(first);
+            }
+            vm.rebase_pending_depths();
+        }
+        crate::vm::ArrayElemOut::SyncErr(e) => {
+            vm.pending_array_op = None;
+            vm.set_pending_exception(e);
+        }
+    }
     Value::undefined()
 }
 
 /// Array.prototype.every(callback, thisArg) — set up state machine iteration.
 pub fn array_every(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let length = match crate::vm::array_like_length(this) {
-        Some(len) => len,
-        None => return Value::boolean(true),
-    };
-    let callback = args.first().copied().unwrap_or(Value::undefined());
-    let this_arg = args.get(1).copied().unwrap_or(Value::undefined());
-    let source_ptr = this.heap_ptr().unwrap();
-    if length == 0 {
+    let Some((length, callback, this_arg, source_ptr)) =
+        array_iter_prologue(gc, vm, this, args, "Array.prototype.every")
+    else {
         return Value::boolean(true);
-    }
+    };
+    let Some(first) = first_existing_index(this, length) else {
+        return Value::boolean(true);
+    };
     vm.pending_array_op = Some(crate::vm::ArrayOpState {
         kind: crate::vm::ArrayOpKind::Every,
         source: source_ptr,
@@ -9819,13 +10083,35 @@ pub fn array_every(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
         callback,
         this_val: this_arg,
         source_val: this,
-        index: 0,
+        index: first,
         length,
         source_frame_depth: 0,
         accumulator: None,
+        awaiting_element: None,
+        awaiting_acc: false,
     });
-    let element = crate::vm::array_like_index(this, 0).unwrap_or(Value::undefined());
-    vm.push_callback_call(gc, callback, this_arg, vec![element, Value::smi(0), this]);
+    // B1a: accessor elements dispatch their getter (Wait records the
+    // await; SyncErr routes through the normal pending-exception path).
+    match crate::vm::array_element_value(vm, gc, this, first) {
+        crate::vm::ArrayElemOut::Ready(element) => {
+            vm.push_callback_call(
+                gc,
+                callback,
+                this_arg,
+                vec![element, Value::smi(first as i32), this],
+            );
+        }
+        crate::vm::ArrayElemOut::Wait => {
+            if let Some(ref mut op) = vm.pending_array_op {
+                op.awaiting_element = Some(first);
+            }
+            vm.rebase_pending_depths();
+        }
+        crate::vm::ArrayElemOut::SyncErr(e) => {
+            vm.pending_array_op = None;
+            vm.set_pending_exception(e);
+        }
+    }
     Value::undefined()
 }
 

@@ -12,8 +12,34 @@
 > regexp advanced classes, class-static-block, top-level-await,
 > iterator-helpers (kept force-skipped).
 
-## F2 DONE — central error factory (2026-09-05)
+## F3 DONE — property-access funnel (2026-09-05)
 
+Anti-rewrite foundation: all interpreter property reads/writes now flow
+through one choke point each, so A1 null-checks and B7 Proxy traps each get
+a single insertion point (and JIT fast paths stay untouched):
+
+- **New**: `PropGetOut::{Ready,Wait}` / `PropSetOut::{Ready,Wait}` +
+  `Vm::vm_get_property` (the ~250-line LoadProperty tag dispatch, moved
+  verbatim: strings/symbols/primitives/builtin-handles + IC branch +
+  accessor-tail) + `Vm::vm_set_property` (setter scan + 8-hit IC-patch
+  counting + `do_store_property`, via a `PropSetSite` patch context to stay
+  under the arg-count lint). Async getter/setter protocols preserved
+  (`Wait` = frame pushed, arm continues without advancing).
+- **Arms rewired**: LoadProperty, LoadPropertyIC-miss, StoreProperty,
+  StorePropertyIC-miss. One deliberate semantic note: the old store-IC-miss
+  called `do_store_property` directly (skipping setter scan + patch
+  counting); the funnel runs both — verified neutral (see below).
+- **Verification (zero-drift bar)**: workspace 853/0; Array 824 + Object 279
+  identical; statements/class FAIL lists byte-identical pre/post (2591,
+  via stash A/B); accessors/class integration green. One Array delta
+  (`some/15.4.4.17-7-c-ii-2`) proven a load TIMEOUT flake (passes solo,
+  1M-element iteration near the 2s budget). clippy/fmt/no-default/x86 clean.
+- **Design rules recorded at the funnel tops**: A1 null-check goes first;
+  B7 Proxy gets its OWN heap tag (never TAG_OBJECT) so IC shape guards can
+  never bypass traps. `In`/`DeleteProperty` intentionally untouched (own
+  paths; Proxy has/delete traps land with B7).
+
+## F2 DONE — central error factory (2026-09-05)
 Anti-rewrite foundation: all error creation now flows through one module
 (`rune_interpreter::errors`) with kind as data, so A2 changes the product
 in one place instead of visiting ~160 sites:

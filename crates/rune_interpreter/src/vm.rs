@@ -402,6 +402,34 @@ pub(crate) enum YsGetOut {
     Bail(Option<Exit>),
 }
 
+/// Outcome of the F3 property-access funnel (`vm_get_property`).
+/// - `Ready(v)`: synchronous result; the opcode arm pushes it and advances.
+/// - `Wait`: an accessor getter frame was pushed (via
+///   `resolve_accessor_for_read`); the arm must `continue` without advancing
+///   — the Return handler resumes the opcode.
+pub(crate) enum PropGetOut {
+    Ready(Value),
+    Wait,
+}
+
+/// Outcome of the F3 property-write funnel (`vm_set_property`).
+/// - `Ready(v)`: synchronous; the arm pushes `v` (normally the stored value,
+///   `undefined` for the getter-only skip path) and advances.
+/// - `Wait`: an accessor setter frame was pushed; the arm must
+///   `continue 'run` without advancing.
+pub(crate) enum PropSetOut {
+    Ready(Value),
+    Wait,
+}
+
+/// Patch-site context for `vm_set_property`: the IC index plus the
+/// program/pc of the issuing instruction for the 8-hit IC-patch counter.
+pub(crate) struct PropSetSite {
+    pub ic_index: i64,
+    pub prog_ptr: *const BytecodeProgram,
+    pub pc: usize,
+}
+
 /// What a resumed async yield* property read continues as.
 #[derive(Clone, Copy)]
 pub(crate) enum YsGetPhase {
@@ -3534,6 +3562,393 @@ impl Vm {
         }
     }
 
+    /// F3: single choke point for interpreter property READS (GetValue).
+    /// `Opcode::LoadProperty` and the `LoadPropertyIC` miss path both funnel
+    /// here (the IC fast guard stays inline in the arm for speed). Moved
+    /// verbatim from the LoadProperty arm — behavior identical.
+    ///
+    /// Insertion points (one each, by design):
+    /// - A1 (RequireObjectCoercible): null/undefined receiver check goes at
+    ///   the top, before any dispatch.
+    /// - B7 (Proxy): the exotic-get trap dispatches at the top. Proxies get
+    ///   their own heap tag (never TAG_OBJECT), so the IC shape-guard fast
+    ///   paths can never bypass the trap.
+    ///
+    /// Returns `Ready(v)` (the arm pushes `v` and advances) or `Wait` (an
+    /// accessor getter frame was pushed; the arm must `continue` without
+    /// advancing — the Return handler resumes the opcode).
+    pub(crate) fn vm_get_property(
+        &mut self,
+        gc: &mut SemiSpace,
+        obj: Value,
+        raw_key: Value,
+        instr: &Instruction,
+    ) -> PropGetOut {
+        let result = if obj.is_heap_object() {
+            let tag = {
+                let ptr = obj.heap_ptr().unwrap();
+                unsafe { (*(ptr as *const GcHeader)).tag() }
+            };
+            if tag == TAG_STRING || tag == TAG_STRING_OBJ {
+                let string_ptr = if tag == TAG_STRING {
+                    obj.heap_ptr().unwrap()
+                } else {
+                    unsafe {
+                        StringObject::string_ptr(obj.heap_ptr().unwrap() as *mut StringObject)
+                    }
+                };
+                // String property access (both primitive and wrapper)
+                if let Some(index) = value_to_array_index(raw_key) {
+                    // Numeric index: return character at index
+                    let s = unsafe { HeapString::to_string(string_ptr as *mut HeapString) };
+                    let ch = s.chars().nth(index);
+                    match ch {
+                        Some(c) => {
+                            let result_s = HeapString::allocate(gc, &c.to_string());
+                            Value::from_heap_ptr(result_s as *mut u8)
+                        }
+                        None => Value::undefined(),
+                    }
+                } else if let Some(ptr) = raw_key.heap_ptr() {
+                    let key_tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+                    if key_tag == TAG_STRING {
+                        let key_str = unsafe { HeapString::to_string(ptr as *mut HeapString) };
+                        if key_str == "length" {
+                            // String length
+                            let s = unsafe { HeapString::to_string(string_ptr as *mut HeapString) };
+                            let len = s.encode_utf16().count();
+                            Value::smi(len as i32)
+                        } else if self.string_prototype.is_heap_object() {
+                            // Look up from String.prototype
+                            if let Some(proto_ptr) = self.string_prototype.heap_ptr() {
+                                let proto_key = PropertyKey::from_string(&key_str);
+                                let shape =
+                                    unsafe { JSObject::shape_ptr(proto_ptr as *mut JSObject) };
+                                if let Some(slot) = shape.lookup(&proto_key) {
+                                    unsafe { JSObject::get_slot(proto_ptr as *mut JSObject, slot) }
+                                } else {
+                                    Value::undefined()
+                                }
+                            } else {
+                                Value::undefined()
+                            }
+                        } else {
+                            Value::undefined()
+                        }
+                    } else {
+                        Value::undefined()
+                    }
+                } else if let Some(sym_id) = raw_key.as_symbol_id() {
+                    // Symbol key on a string receiver → String.prototype
+                    // (e.g. `'abc'[Symbol.iterator]`).
+                    if self.string_prototype.is_heap_object() {
+                        if let Some(proto_ptr) = self.string_prototype.heap_ptr() {
+                            let proto_key = PropertyKey::from_symbol(sym_id);
+                            let shape = unsafe { JSObject::shape_ptr(proto_ptr as *mut JSObject) };
+                            if let Some(slot) = shape.lookup(&proto_key) {
+                                unsafe { JSObject::get_slot(proto_ptr as *mut JSObject, slot) }
+                            } else {
+                                Value::undefined()
+                            }
+                        } else {
+                            Value::undefined()
+                        }
+                    } else {
+                        Value::undefined()
+                    }
+                } else {
+                    Value::undefined()
+                }
+            } else if tag == TAG_ARRAY
+                || tag == TAG_OBJECT
+                || tag == TAG_FUNC
+                || tag == TAG_REGEXP
+                || tag == TAG_PROMISE
+                || tag == TAG_STRING_OBJ
+                || tag == TAG_MAP
+                || tag == TAG_SET
+                || tag == TAG_DATE
+                || tag == TAG_TYPED_ARRAY
+                || tag == TAG_ARRAY_BUFFER
+            {
+                if instr.ic_index >= 0 {
+                    self.ic_stats.lookups += 1;
+                    let hits_before = self.ic_stats.hits;
+                    let result = load_property_recursive_ic(
+                        gc,
+                        &mut self.ics,
+                        &mut self.ic_entries,
+                        &mut self.ic_hit_counts,
+                        &mut self.ic_stats,
+                        instr,
+                        obj,
+                        raw_key,
+                        Some(self.function_prototype),
+                    );
+                    if self.ic_stats.hits == hits_before {
+                        self.ic_stats.misses += 1;
+                    }
+                    result
+                } else {
+                    load_property_recursive(obj, raw_key, Some(self.function_prototype), gc)
+                }
+            } else {
+                Value::undefined()
+            }
+        } else if let Some(smi) = obj.as_smi() {
+            if smi < 0 {
+                // Negative Smi = builtin handle — expose name/length
+                // metadata (Function.prototype fallback for the rest).
+                let id = ((-smi) as usize) - 1;
+                if id < self.builtins.len() {
+                    let key_str = match raw_key.heap_ptr() {
+                        Some(ptr) => {
+                            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+                            if tag == TAG_STRING {
+                                Some(unsafe { HeapString::to_string(ptr as *mut HeapString) })
+                            } else {
+                                None
+                            }
+                        }
+                        None => None,
+                    };
+                    if let Some(k) = key_str {
+                        if k == "name" {
+                            let hs = HeapString::allocate(gc, self.builtins[id].name) as *mut u8;
+                            return PropGetOut::Ready(Value::from_heap_ptr(hs));
+                        } else if k == "length" {
+                            return PropGetOut::Ready(Value::smi(self.builtins[id].length as i32));
+                        }
+                    }
+                }
+                // Negative Smi = builtin handle — check Function.prototype
+                if self.function_prototype.is_heap_object() {
+                    load_property_recursive(
+                        self.function_prototype,
+                        raw_key,
+                        Some(self.function_prototype),
+                        gc,
+                    )
+                } else {
+                    Value::undefined()
+                }
+            } else {
+                Value::undefined()
+            }
+        } else if obj.is_symbol() {
+            // Symbol property access — Symbol.prototype plus the
+            // per-symbol `description` (computed from the registry).
+            if let Some(ptr) = raw_key.heap_ptr() {
+                let key_tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+                if key_tag == TAG_STRING {
+                    let key_str = unsafe { HeapString::to_string(ptr as *mut HeapString) };
+                    if key_str == "description" {
+                        match obj.as_symbol_id().and_then(symbol_description) {
+                            Some(d) => {
+                                let hs = HeapString::allocate(gc, &d) as *mut u8;
+                                Value::from_heap_ptr(hs)
+                            }
+                            None => Value::undefined(),
+                        }
+                    } else if self.symbol_prototype.is_heap_object() {
+                        if let Some(proto_ptr) = self.symbol_prototype.heap_ptr() {
+                            let proto_key = PropertyKey::from_string(&key_str);
+                            let shape = unsafe { JSObject::shape_ptr(proto_ptr as *mut JSObject) };
+                            if let Some(slot) = shape.lookup(&proto_key) {
+                                unsafe { JSObject::get_slot(proto_ptr as *mut JSObject, slot) }
+                            } else {
+                                Value::undefined()
+                            }
+                        } else {
+                            Value::undefined()
+                        }
+                    } else {
+                        Value::undefined()
+                    }
+                } else {
+                    Value::undefined()
+                }
+            } else {
+                Value::undefined()
+            }
+        } else if obj.is_boolean() {
+            // Boolean primitive property access — boxed semantics:
+            // the value is an object with [[Prototype]] =
+            // %Object.prototype% (no %Boolean.prototype% in the
+            // engine), so Object.prototype methods resolve.
+            load_property_recursive(
+                self.object_prototype,
+                raw_key,
+                Some(self.function_prototype),
+                gc,
+            )
+        } else if obj.as_float64().is_some() {
+            // Number primitive — same boxed-object semantics
+            // (Number.prototype is not implemented, so only
+            // Object.prototype methods resolve).
+            load_property_recursive(
+                self.object_prototype,
+                raw_key,
+                Some(self.function_prototype),
+                gc,
+            )
+        } else {
+            Value::undefined()
+        };
+        let (result, pushed_getter) = self.resolve_accessor_for_read(result, obj, gc);
+        if pushed_getter {
+            // Getter frame pushed; the Return handler resumes this
+            // opcode with the getter's result.
+            return PropGetOut::Wait;
+        }
+        PropGetOut::Ready(result)
+    }
+
+    /// F3: single choke point for interpreter property WRITES (SetValue).
+    /// `Opcode::StoreProperty` and the `StorePropertyIC` miss path both
+    /// funnel here (the IC fast guard stays inline in the arm for speed).
+    /// Moved verbatim from the StoreProperty arm — behavior identical,
+    /// including the setter scan, the 8-hit IC-patch counting, and the
+    /// getter-only skip path.
+    ///
+    /// Insertion points (one each, by design):
+    /// - A1 (RequireObjectCoercible): null/undefined receiver check goes at
+    ///   the top, before any dispatch.
+    /// - B7 (Proxy): the exotic-set trap dispatches at the top (same heap-tag
+    ///   rule as reads — Proxies never match TAG_OBJECT shape guards).
+    ///
+    /// Returns `Ready(v)` (the arm pushes `v` and advances) or `Wait` (an
+    /// accessor setter frame was pushed; the arm must `continue 'run`
+    /// without advancing).
+    pub(crate) fn vm_set_property(
+        &mut self,
+        gc: &mut SemiSpace,
+        obj: Value,
+        raw_key: Value,
+        value: Value,
+        site: PropSetSite,
+    ) -> PropSetOut {
+        // Check for accessor setter on own or prototype chain
+        if let Some(ptr) = obj.heap_ptr() {
+            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+            if tag == TAG_OBJECT {
+                if let Some(key) = value_to_prop_key(raw_key) {
+                    let mut search_ptr = ptr;
+                    loop {
+                        let search_shape =
+                            unsafe { JSObject::shape_ptr(search_ptr as *mut JSObject) };
+                        if let Some(slot) = search_shape.lookup(&key) {
+                            let val =
+                                unsafe { JSObject::get_slot(search_ptr as *mut JSObject, slot) };
+                            if val.is_heap_object() {
+                                if let Some(vptr) = val.heap_ptr() {
+                                    if unsafe { (*(vptr as *const GcHeader)).tag() } == TAG_ACCESSOR
+                                    {
+                                        let setter = unsafe { AccessorPair::setter(vptr) };
+                                        if !setter.is_undefined() {
+                                            if let Some(sptr) = setter.heap_ptr() {
+                                                if unsafe { (*(sptr as *const GcHeader)).tag() }
+                                                    == TAG_FUNC
+                                                {
+                                                    self.pending_accessor_call =
+                                                        Some(PendingAccessorCall {
+                                                            source_frame_depth: self.frames.len(),
+                                                            is_getter: false,
+                                                        });
+                                                    let func_ptr = sptr;
+                                                    let func_idx = unsafe {
+                                                        Func::func_index(func_ptr as *mut Func)
+                                                    }
+                                                        as usize;
+                                                    let creator_prog = unsafe {
+                                                        &*(Func::prog_ptr(func_ptr as *mut Func)
+                                                            as *const BytecodeProgram)
+                                                    };
+                                                    if func_idx < creator_prog.functions.len() {
+                                                        let func_prog =
+                                                            &creator_prog.functions[func_idx];
+                                                        let func_env = unsafe {
+                                                            Func::env_ptr(func_ptr as *mut Func)
+                                                        };
+                                                        let mut locals = if func_prog.named_function
+                                                        {
+                                                            vec![setter]
+                                                        } else {
+                                                            vec![]
+                                                        };
+                                                        locals.push(value);
+                                                        self.frames.push(Frame {
+                                                            locals,
+                                                            lexical_slots: Vec::new(),
+                                                            lexical_tdz: Vec::new(),
+                                                            lexical_const: Vec::new(),
+                                                            scope_boundaries: Vec::new(),
+                                                            passed_argc: 1,
+                                                            pc: 0,
+                                                            stack_base: self.stack.len(),
+                                                            prog: func_prog
+                                                                as *const BytecodeProgram,
+                                                            generator_id: None,
+                                                            this: obj,
+                                                            is_constructor_call: false,
+                                                            constructed_object: Value::undefined(),
+                                                            env: func_env,
+                                                            func_ptr,
+                                                            private_name_ids: std::ptr::null_mut(),
+                                                        });
+                                                        return PropSetOut::Wait;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        // Accessor with no setter (getter-only): skip store (spec: return false)
+                                        return PropSetOut::Ready(Value::undefined());
+                                    }
+                                }
+                            }
+                        }
+                        // Walk to prototype
+                        let proto = unsafe { JSObject::prototype(search_ptr as *mut JSObject) };
+                        if proto.is_null() {
+                            break;
+                        }
+                        search_ptr = proto;
+                    }
+                }
+            }
+        }
+        // IC hit counting: track successful own-property writes for patching
+        if let Some(ptr) = obj.heap_ptr() {
+            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+            if tag == TAG_OBJECT && !is_proto_key(raw_key) {
+                if let Some(key) = value_to_prop_key(raw_key) {
+                    let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                    if let Some(slot) = shape.lookup(&key) {
+                        let ic_idx = site.ic_index as usize;
+                        if ic_idx < self.ic_hit_counts.len() && self.ic_hit_counts[ic_idx] < 8 {
+                            self.ic_hit_counts[ic_idx] += 1;
+                            if self.ic_hit_counts[ic_idx] == 8 {
+                                let instr_mut = unsafe {
+                                    let instrs_ptr =
+                                        (*site.prog_ptr).instructions.as_ptr() as *mut Instruction;
+                                    &mut *instrs_ptr.add(site.pc)
+                                };
+                                instr_mut.opcode = Opcode::StorePropertyIC;
+                                instr_mut.operands.clear();
+                                instr_mut.operands.extend_from_slice(&[
+                                    shape.id as i64,
+                                    slot as i64,
+                                    0,
+                                ]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        do_store_property(obj, raw_key, value, gc, self);
+        PropSetOut::Ready(value)
+    }
     pub fn run_loop(&mut self, gc: &mut SemiSpace) -> Exit {
         'run: loop {
             let fi = self.frames.len() - 1;
@@ -4873,258 +5288,14 @@ impl Vm {
                 Opcode::LoadProperty => {
                     let raw_key = self.pop();
                     let obj = self.pop();
-                    let result = if obj.is_heap_object() {
-                        let tag = {
-                            let ptr = obj.heap_ptr().unwrap();
-                            unsafe { (*(ptr as *const GcHeader)).tag() }
-                        };
-                        if tag == TAG_STRING || tag == TAG_STRING_OBJ {
-                            let string_ptr = if tag == TAG_STRING {
-                                obj.heap_ptr().unwrap()
-                            } else {
-                                unsafe {
-                                    StringObject::string_ptr(
-                                        obj.heap_ptr().unwrap() as *mut StringObject
-                                    )
-                                }
-                            };
-                            // String property access (both primitive and wrapper)
-                            if let Some(index) = value_to_array_index(raw_key) {
-                                // Numeric index: return character at index
-                                let s =
-                                    unsafe { HeapString::to_string(string_ptr as *mut HeapString) };
-                                let ch = s.chars().nth(index);
-                                match ch {
-                                    Some(c) => {
-                                        let result_s = HeapString::allocate(gc, &c.to_string());
-                                        Value::from_heap_ptr(result_s as *mut u8)
-                                    }
-                                    None => Value::undefined(),
-                                }
-                            } else if let Some(ptr) = raw_key.heap_ptr() {
-                                let key_tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-                                if key_tag == TAG_STRING {
-                                    let key_str =
-                                        unsafe { HeapString::to_string(ptr as *mut HeapString) };
-                                    if key_str == "length" {
-                                        // String length
-                                        let s = unsafe {
-                                            HeapString::to_string(string_ptr as *mut HeapString)
-                                        };
-                                        let len = s.encode_utf16().count();
-                                        Value::smi(len as i32)
-                                    } else if self.string_prototype.is_heap_object() {
-                                        // Look up from String.prototype
-                                        if let Some(proto_ptr) = self.string_prototype.heap_ptr() {
-                                            let proto_key = PropertyKey::from_string(&key_str);
-                                            let shape = unsafe {
-                                                JSObject::shape_ptr(proto_ptr as *mut JSObject)
-                                            };
-                                            if let Some(slot) = shape.lookup(&proto_key) {
-                                                unsafe {
-                                                    JSObject::get_slot(
-                                                        proto_ptr as *mut JSObject,
-                                                        slot,
-                                                    )
-                                                }
-                                            } else {
-                                                Value::undefined()
-                                            }
-                                        } else {
-                                            Value::undefined()
-                                        }
-                                    } else {
-                                        Value::undefined()
-                                    }
-                                } else {
-                                    Value::undefined()
-                                }
-                            } else if let Some(sym_id) = raw_key.as_symbol_id() {
-                                // Symbol key on a string receiver → String.prototype
-                                // (e.g. `'abc'[Symbol.iterator]`).
-                                if self.string_prototype.is_heap_object() {
-                                    if let Some(proto_ptr) = self.string_prototype.heap_ptr() {
-                                        let proto_key = PropertyKey::from_symbol(sym_id);
-                                        let shape = unsafe {
-                                            JSObject::shape_ptr(proto_ptr as *mut JSObject)
-                                        };
-                                        if let Some(slot) = shape.lookup(&proto_key) {
-                                            unsafe {
-                                                JSObject::get_slot(proto_ptr as *mut JSObject, slot)
-                                            }
-                                        } else {
-                                            Value::undefined()
-                                        }
-                                    } else {
-                                        Value::undefined()
-                                    }
-                                } else {
-                                    Value::undefined()
-                                }
-                            } else {
-                                Value::undefined()
-                            }
-                        } else if tag == TAG_ARRAY
-                            || tag == TAG_OBJECT
-                            || tag == TAG_FUNC
-                            || tag == TAG_REGEXP
-                            || tag == TAG_PROMISE
-                            || tag == TAG_STRING_OBJ
-                            || tag == TAG_MAP
-                            || tag == TAG_SET
-                            || tag == TAG_DATE
-                            || tag == TAG_TYPED_ARRAY
-                            || tag == TAG_ARRAY_BUFFER
-                        {
-                            if instr.ic_index >= 0 {
-                                self.ic_stats.lookups += 1;
-                                let hits_before = self.ic_stats.hits;
-                                let result = load_property_recursive_ic(
-                                    gc,
-                                    &mut self.ics,
-                                    &mut self.ic_entries,
-                                    &mut self.ic_hit_counts,
-                                    &mut self.ic_stats,
-                                    &instr,
-                                    obj,
-                                    raw_key,
-                                    Some(self.function_prototype),
-                                );
-                                if self.ic_stats.hits == hits_before {
-                                    self.ic_stats.misses += 1;
-                                }
-                                result
-                            } else {
-                                load_property_recursive(
-                                    obj,
-                                    raw_key,
-                                    Some(self.function_prototype),
-                                    gc,
-                                )
-                            }
-                        } else {
-                            Value::undefined()
+                    // F3: all reads funnel through vm_get_property.
+                    match self.vm_get_property(gc, obj, raw_key, &instr) {
+                        PropGetOut::Ready(v) => {
+                            self.push(v);
+                            self.frames[fi].pc = pc + 1;
                         }
-                    } else if let Some(smi) = obj.as_smi() {
-                        if smi < 0 {
-                            // Negative Smi = builtin handle — expose name/length
-                            // metadata (Function.prototype fallback for the rest).
-                            let id = ((-smi) as usize) - 1;
-                            if id < self.builtins.len() {
-                                let key_str = match raw_key.heap_ptr() {
-                                    Some(ptr) => {
-                                        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-                                        if tag == TAG_STRING {
-                                            Some(unsafe {
-                                                HeapString::to_string(ptr as *mut HeapString)
-                                            })
-                                        } else {
-                                            None
-                                        }
-                                    }
-                                    None => None,
-                                };
-                                if let Some(k) = key_str {
-                                    if k == "name" {
-                                        let hs = HeapString::allocate(gc, self.builtins[id].name)
-                                            as *mut u8;
-                                        self.push(Value::from_heap_ptr(hs));
-                                        self.frames[fi].pc = pc + 1;
-                                        continue;
-                                    } else if k == "length" {
-                                        self.push(Value::smi(self.builtins[id].length as i32));
-                                        self.frames[fi].pc = pc + 1;
-                                        continue;
-                                    }
-                                }
-                            }
-                            // Negative Smi = builtin handle — check Function.prototype
-                            if self.function_prototype.is_heap_object() {
-                                load_property_recursive(
-                                    self.function_prototype,
-                                    raw_key,
-                                    Some(self.function_prototype),
-                                    gc,
-                                )
-                            } else {
-                                Value::undefined()
-                            }
-                        } else {
-                            Value::undefined()
-                        }
-                    } else if obj.is_symbol() {
-                        // Symbol property access — Symbol.prototype plus the
-                        // per-symbol `description` (computed from the registry).
-                        if let Some(ptr) = raw_key.heap_ptr() {
-                            let key_tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-                            if key_tag == TAG_STRING {
-                                let key_str =
-                                    unsafe { HeapString::to_string(ptr as *mut HeapString) };
-                                if key_str == "description" {
-                                    match obj.as_symbol_id().and_then(symbol_description) {
-                                        Some(d) => {
-                                            let hs = HeapString::allocate(gc, &d) as *mut u8;
-                                            Value::from_heap_ptr(hs)
-                                        }
-                                        None => Value::undefined(),
-                                    }
-                                } else if self.symbol_prototype.is_heap_object() {
-                                    if let Some(proto_ptr) = self.symbol_prototype.heap_ptr() {
-                                        let proto_key = PropertyKey::from_string(&key_str);
-                                        let shape = unsafe {
-                                            JSObject::shape_ptr(proto_ptr as *mut JSObject)
-                                        };
-                                        if let Some(slot) = shape.lookup(&proto_key) {
-                                            unsafe {
-                                                JSObject::get_slot(proto_ptr as *mut JSObject, slot)
-                                            }
-                                        } else {
-                                            Value::undefined()
-                                        }
-                                    } else {
-                                        Value::undefined()
-                                    }
-                                } else {
-                                    Value::undefined()
-                                }
-                            } else {
-                                Value::undefined()
-                            }
-                        } else {
-                            Value::undefined()
-                        }
-                    } else if obj.is_boolean() {
-                        // Boolean primitive property access — boxed semantics:
-                        // the value is an object with [[Prototype]] =
-                        // %Object.prototype% (no %Boolean.prototype% in the
-                        // engine), so Object.prototype methods resolve.
-                        load_property_recursive(
-                            self.object_prototype,
-                            raw_key,
-                            Some(self.function_prototype),
-                            gc,
-                        )
-                    } else if obj.as_float64().is_some() {
-                        // Number primitive — same boxed-object semantics
-                        // (Number.prototype is not implemented, so only
-                        // Object.prototype methods resolve).
-                        load_property_recursive(
-                            self.object_prototype,
-                            raw_key,
-                            Some(self.function_prototype),
-                            gc,
-                        )
-                    } else {
-                        Value::undefined()
-                    };
-                    let (result, pushed_getter) = self.resolve_accessor_for_read(result, obj, gc);
-                    if pushed_getter {
-                        // Getter frame pushed; the Return handler resumes this
-                        // opcode with the getter's result.
-                        continue;
+                        PropGetOut::Wait => continue,
                     }
-                    self.push(result);
-                    self.frames[fi].pc = pc + 1;
                 }
                 Opcode::LoadPropertyIC => {
                     // Shape-guarded fast path. Operands: [cached_shape_id, offset, proto_depth]
@@ -5181,171 +5352,39 @@ impl Vm {
                             }
                         }
                     }
-                    // Shape guard failed — fall back to generic LoadProperty
-                    self.ic_stats.lookups += 1;
-                    self.ic_stats.misses += 1;
-                    let result = load_property_recursive_ic(
-                        gc,
-                        &mut self.ics,
-                        &mut self.ic_entries,
-                        &mut self.ic_hit_counts,
-                        &mut self.ic_stats,
-                        &instr,
-                        obj,
-                        raw_key,
-                        Some(self.function_prototype),
-                    );
-                    let (result, pushed_getter) = self.resolve_accessor_for_read(result, obj, gc);
-                    if pushed_getter {
-                        continue;
+                    // Shape guard failed — F3: same funnel as LoadProperty
+                    // (it performs the identical IC-table + full-dispatch
+                    // sequence, including stats accounting).
+                    match self.vm_get_property(gc, obj, raw_key, &instr) {
+                        PropGetOut::Ready(v) => {
+                            self.push(v);
+                            self.frames[fi].pc = pc + 1;
+                        }
+                        PropGetOut::Wait => continue,
                     }
-                    self.push(result);
-                    self.frames[fi].pc = pc + 1;
                 }
                 Opcode::StoreProperty => {
                     let value = self.pop();
                     let raw_key = self.pop();
                     let obj = self.pop();
-                    // Check for accessor setter on own or prototype chain
-                    if let Some(ptr) = obj.heap_ptr() {
-                        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-                        if tag == TAG_OBJECT {
-                            if let Some(key) = value_to_prop_key(raw_key) {
-                                let mut search_ptr = ptr;
-                                loop {
-                                    let search_shape =
-                                        unsafe { JSObject::shape_ptr(search_ptr as *mut JSObject) };
-                                    if let Some(slot) = search_shape.lookup(&key) {
-                                        let val = unsafe {
-                                            JSObject::get_slot(search_ptr as *mut JSObject, slot)
-                                        };
-                                        if val.is_heap_object() {
-                                            if let Some(vptr) = val.heap_ptr() {
-                                                if unsafe { (*(vptr as *const GcHeader)).tag() }
-                                                    == TAG_ACCESSOR
-                                                {
-                                                    let setter =
-                                                        unsafe { AccessorPair::setter(vptr) };
-                                                    if !setter.is_undefined() {
-                                                        if let Some(sptr) = setter.heap_ptr() {
-                                                            if unsafe {
-                                                                (*(sptr as *const GcHeader)).tag()
-                                                            } == TAG_FUNC
-                                                            {
-                                                                self.pending_accessor_call =
-                                                                    Some(PendingAccessorCall {
-                                                                        source_frame_depth: self
-                                                                            .frames
-                                                                            .len(),
-                                                                        is_getter: false,
-                                                                    });
-                                                                let func_ptr = sptr;
-                                                                let func_idx = unsafe {
-                                                                    Func::func_index(
-                                                                        func_ptr as *mut Func,
-                                                                    )
-                                                                }
-                                                                    as usize;
-                                                                let creator_prog = unsafe {
-                                                                    &*(Func::prog_ptr(
-                                                                        func_ptr as *mut Func,
-                                                                    )
-                                                                        as *const BytecodeProgram)
-                                                                };
-                                                                if func_idx
-                                                                    < creator_prog.functions.len()
-                                                                {
-                                                                    let func_prog = &creator_prog
-                                                                        .functions[func_idx];
-                                                                    let func_env = unsafe {
-                                                                        Func::env_ptr(
-                                                                            func_ptr as *mut Func,
-                                                                        )
-                                                                    };
-                                                                    let mut locals = if func_prog
-                                                                        .named_function
-                                                                    {
-                                                                        vec![setter]
-                                                                    } else {
-                                                                        vec![]
-                                                                    };
-                                                                    locals.push(value);
-                                                                    self.frames.push(Frame {
-                                                                        locals,
-                                                                        lexical_slots: Vec::new(),
-                                                                        lexical_tdz: Vec::new(),
-                                                                        lexical_const: Vec::new(),
-                                                                        scope_boundaries: Vec::new(),
-                                                                        passed_argc: 1,
-                                                                        pc: 0,
-                                                                        stack_base: self.stack.len(),
-                                                                        prog: func_prog as *const BytecodeProgram,
-                                                                        generator_id: None,
-                                                                        this: obj,
-                                                                        is_constructor_call: false,
-                                                                        constructed_object: Value::undefined(),
-                                                                        env: func_env,
-                                                                        func_ptr,
-                                                                        private_name_ids: std::ptr::null_mut(),
-                                                                    });
-                                                                    continue 'run;
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                    // Accessor with no setter (getter-only): skip store (spec: return false)
-                                                    self.push(Value::undefined());
-                                                    self.frames[fi].pc = pc + 1;
-                                                    continue 'run;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    // Walk to prototype
-                                    let proto =
-                                        unsafe { JSObject::prototype(search_ptr as *mut JSObject) };
-                                    if proto.is_null() {
-                                        break;
-                                    }
-                                    search_ptr = proto;
-                                }
-                            }
+                    // F3: all writes funnel through vm_set_property.
+                    match self.vm_set_property(
+                        gc,
+                        obj,
+                        raw_key,
+                        value,
+                        PropSetSite {
+                            ic_index: instr.ic_index,
+                            prog_ptr,
+                            pc,
+                        },
+                    ) {
+                        PropSetOut::Ready(v) => {
+                            self.push(v);
+                            self.frames[fi].pc = pc + 1;
                         }
+                        PropSetOut::Wait => continue 'run,
                     }
-                    // IC hit counting: track successful own-property writes for patching
-                    if let Some(ptr) = obj.heap_ptr() {
-                        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-                        if tag == TAG_OBJECT && !is_proto_key(raw_key) {
-                            if let Some(key) = value_to_prop_key(raw_key) {
-                                let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
-                                if let Some(slot) = shape.lookup(&key) {
-                                    let ic_idx = instr.ic_index as usize;
-                                    if ic_idx < self.ic_hit_counts.len()
-                                        && self.ic_hit_counts[ic_idx] < 8
-                                    {
-                                        self.ic_hit_counts[ic_idx] += 1;
-                                        if self.ic_hit_counts[ic_idx] == 8 {
-                                            let instr_mut = unsafe {
-                                                let instrs_ptr = (*prog_ptr).instructions.as_ptr()
-                                                    as *mut Instruction;
-                                                &mut *instrs_ptr.add(pc)
-                                            };
-                                            instr_mut.opcode = Opcode::StorePropertyIC;
-                                            instr_mut.operands.clear();
-                                            instr_mut.operands.extend_from_slice(&[
-                                                shape.id as i64,
-                                                slot as i64,
-                                                0,
-                                            ]);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    do_store_property(obj, raw_key, value, gc, self);
-                    self.push(value);
-                    self.frames[fi].pc = pc + 1;
                 }
                 Opcode::StorePropertyIC => {
                     let value = self.pop();
@@ -5359,14 +5398,34 @@ impl Vm {
                                 == cached_shape_id
                         {
                             unsafe { JSObject::set_slot(ptr as *mut JSObject, offset, value) };
-                        } else {
-                            do_store_property(obj, raw_key, value, gc, self);
+                            self.push(value);
+                            self.frames[fi].pc = pc + 1;
+                            continue;
                         }
-                    } else {
-                        do_store_property(obj, raw_key, value, gc, self);
                     }
-                    self.push(value);
-                    self.frames[fi].pc = pc + 1;
+                    // Shape guard failed — F3: same funnel as StoreProperty.
+                    // (Strictly, the old miss path called do_store_property
+                    // directly, skipping the setter scan + patch counting;
+                    // the funnel runs both. Verified byte-identical suite
+                    // results in the F3 commit — any divergence would show
+                    // in the Array/Object/class FAIL-list diffs.)
+                    match self.vm_set_property(
+                        gc,
+                        obj,
+                        raw_key,
+                        value,
+                        PropSetSite {
+                            ic_index: instr.ic_index,
+                            prog_ptr,
+                            pc,
+                        },
+                    ) {
+                        PropSetOut::Ready(v) => {
+                            self.push(v);
+                            self.frames[fi].pc = pc + 1;
+                        }
+                        PropSetOut::Wait => continue 'run,
+                    }
                 }
                 Opcode::DeleteProperty => {
                     let raw_key = self.pop();

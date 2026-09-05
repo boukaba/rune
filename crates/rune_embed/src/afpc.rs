@@ -24,8 +24,8 @@ use std::path::Path;
 /// Magic bytes identifying an AFPC cache file.
 const AFPC_MAGIC: &[u8; 4] = b"AFPC";
 /// Cache format version. Bump when the serialized schema changes.
-/// v3: BytecodeProgram gains is_class_constructor (F1 flags bit plan).
-const AFPC_VERSION: u32 = 3;
+/// v4: ShapeEntry gains per-entry attribute bytes (F5 descriptor home).
+const AFPC_VERSION: u32 = 4;
 
 /// Header written at the start of every cache file.
 #[derive(Copy, Clone, Debug)]
@@ -65,6 +65,8 @@ pub struct ShapeEntry {
     pub key_names: Vec<String>,
     /// Slot offset for each key name (usually 0..n, stored explicitly for fidelity).
     pub offsets: Vec<u64>,
+    /// Per-entry attribute bytes (F5 PropAttr; all-default until A4).
+    pub attrs: Vec<u8>,
     /// Dense-array sentinel shape.
     pub is_dense_array: bool,
 }
@@ -84,6 +86,7 @@ impl ShapeEntry {
             shape_id: shape.id,
             key_names,
             offsets,
+            attrs: shape.attrs.clone(),
             is_dense_array: shape.is_dense_array,
         }
     }
@@ -100,7 +103,7 @@ impl ShapeEntry {
             .zip(self.offsets.iter())
             .map(|(name, offset)| (PropertyKey::from_string(name), *offset as usize))
             .collect();
-        Shape::intern(entries, self.key_names.clone())
+        Shape::intern_with_attrs(entries, self.key_names.clone(), self.attrs.clone())
     }
 }
 

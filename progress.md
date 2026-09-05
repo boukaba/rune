@@ -12,8 +12,31 @@
 > regexp advanced classes, class-static-block, top-level-await,
 > iterator-helpers (kept force-skipped).
 
-## F4 DONE — pending-machine centralization (2026-09-05)
+## F5 DONE — attribute-storage design in SIDT shapes (2026-09-05)
 
+Anti-rewrite foundation: property attributes (writable/enumerable/
+configurable, §6.1.7.1) now have a decided home BEFORE A4 needs them, so
+descriptors don't force a shape/IC redesign later:
+
+- **Decision (Option A)**: attributes live IN the shape as a parallel
+  `attrs: Vec<u8>` (bit flags W=1/E=2/C=4, default 7) and are part of the
+  content-addressed identity (`shape_id` hashes them; interning table keyed
+  by entries+attrs). Same keys/offsets with different attrs = different
+  shapes, so IC `shape.id → slot` caches stay sound when A4 writes
+  non-defaults. All current producers go through `intern()` (defaults) —
+  zero behavior change; `intern_with_attrs` awaits A4; `attr_at` reads with
+  defensive default. Accessor-vs-data stays structural (TAG_ACCESSOR slots).
+- **AFPC**: ShapeEntry persists attrs + restore re-interns with them (A4
+  needs no cache change); version 3→4 (old caches fall back per the rule).
+- **Tests**: 4 new shape unit tests (defaults, attrs-fork-identity incl. id
+  inequality + re-intern stability, parent extension, flag bits) —
+  **858 workspace / 0 failed**; clippy (type-alias for the table key),
+  fmt, no-default, x86 clean; Object 279 + Array 823/824 (two known 1M-elem
+  TIMEOUT flakes, LC_COLLATE lesson: use LC_ALL=C for FAIL diffs) identical.
+- **Known**: nothing writes non-default attrs yet (A4); symbol-keyed shapes
+  still unrestorable across AFPC round-trips (pre-existing from_string limit).
+
+## F4 DONE — pending-machine centralization (2026-09-05)
 Anti-rewrite foundation: the ~20 hand-wired pending machines shared 4
 protocols (depth rebase on callback push, GC rooting, Call skip-list, Return
 cascade) by copy-paste — every new machine risked forgetting one (the v0.8.1

@@ -410,6 +410,10 @@ pub(crate) enum YsGetOut {
 pub(crate) enum PropGetOut {
     Ready(Value),
     Wait,
+    /// An abrupt completion was raised inside the funnel (A1 null-check):
+    /// `Some(exit)` propagates, `None` means handle_throw redirected to a
+    /// catch/finally — the arm must `continue` without advancing.
+    Bail(Option<Exit>),
 }
 
 /// Outcome of the F3 property-write funnel (`vm_set_property`).
@@ -420,6 +424,8 @@ pub(crate) enum PropGetOut {
 pub(crate) enum PropSetOut {
     Ready(Value),
     Wait,
+    /// Same contract as `PropGetOut::Bail`.
+    Bail(Option<Exit>),
 }
 
 /// Patch-site context for `vm_set_property`: the IC index plus the
@@ -428,6 +434,31 @@ pub(crate) struct PropSetSite {
     pub ic_index: i64,
     pub prog_ptr: *const BytecodeProgram,
     pub pc: usize,
+}
+
+/// V8-style message for A1 RequireObjectCoercible failures:
+/// "Cannot read/set properties of null/undefined (reading/setting key)".
+/// test262 never asserts the text (only the TypeError), but quality matters.
+pub(crate) fn null_prop_message(is_set: bool, obj_is_null: bool, key: Value) -> String {
+    let recv = if obj_is_null { "null" } else { "undefined" };
+    let (verb, gerund) = if is_set {
+        ("set", "setting")
+    } else {
+        ("read", "reading")
+    };
+    let key_str = if let Some(ptr) = key.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_STRING {
+            format!("'{}'", unsafe {
+                HeapString::to_string(ptr as *mut HeapString)
+            })
+        } else {
+            value_to_debug_string(key)
+        }
+    } else {
+        value_to_debug_string(key)
+    };
+    format!("Cannot {verb} properties of {recv} ({gerund} {key_str})")
 }
 
 /// What a resumed async yield* property read continues as.
@@ -3656,16 +3687,12 @@ impl Vm {
     /// here (the IC fast guard stays inline in the arm for speed). Moved
     /// verbatim from the LoadProperty arm — behavior identical.
     ///
-    /// Insertion points (one each, by design):
-    /// - A1 (RequireObjectCoercible): null/undefined receiver check goes at
-    ///   the top, before any dispatch.
-    /// - B7 (Proxy): the exotic-get trap dispatches at the top. Proxies get
-    ///   their own heap tag (never TAG_OBJECT), so the IC shape-guard fast
-    ///   paths can never bypass the trap.
+    /// A1: the RequireObjectCoercible null/undefined check below is the
+    /// single place all read paths throw from (B7 Proxy trap goes above it).
     ///
-    /// Returns `Ready(v)` (the arm pushes `v` and advances) or `Wait` (an
-    /// accessor getter frame was pushed; the arm must `continue` without
-    /// advancing — the Return handler resumes the opcode).
+    /// Returns `Ready(v)` (the arm pushes `v` and advances), `Wait` (getter
+    /// pushed — arm must `continue`), or `Bail` (abrupt — propagate/continue
+    /// per the payload).
     pub(crate) fn vm_get_property(
         &mut self,
         gc: &mut SemiSpace,
@@ -3673,6 +3700,17 @@ impl Vm {
         raw_key: Value,
         instr: &Instruction,
     ) -> PropGetOut {
+        // A1: RequireObjectCoercible (§7.2.1) — property reads on null /
+        // undefined throw a catchable TypeError (routed through handle_throw
+        // so in-frame try/catch + assert.throws observe it).
+        if obj.is_null() || obj.is_undefined() {
+            let msg = null_prop_message(false, obj.is_null(), raw_key);
+            let err = crate::errors::error_string(gc, crate::errors::ErrorKind::TypeError, &msg);
+            return match self.handle_throw(gc, err) {
+                Some(exit) => PropGetOut::Bail(Some(exit)),
+                None => PropGetOut::Bail(None),
+            };
+        }
         let result = if obj.is_heap_object() {
             let tag = {
                 let ptr = obj.heap_ptr().unwrap();
@@ -3901,14 +3939,14 @@ impl Vm {
     /// getter-only skip path.
     ///
     /// Insertion points (one each, by design):
-    /// - A1 (RequireObjectCoercible): null/undefined receiver check goes at
-    ///   the top, before any dispatch.
+    /// - A1 (RequireObjectCoercible): null/undefined receiver check below is
+    ///   the single place all write paths throw from. DONE.
     /// - B7 (Proxy): the exotic-set trap dispatches at the top (same heap-tag
     ///   rule as reads — Proxies never match TAG_OBJECT shape guards).
     ///
-    /// Returns `Ready(v)` (the arm pushes `v` and advances) or `Wait` (an
-    /// accessor setter frame was pushed; the arm must `continue 'run`
-    /// without advancing).
+    /// Returns `Ready(v)` (the arm pushes `v` and advances), `Wait` (setter
+    /// pushed — arm must `continue 'run`), or `Bail` (abrupt — propagate /
+    /// continue per the payload).
     pub(crate) fn vm_set_property(
         &mut self,
         gc: &mut SemiSpace,
@@ -3917,6 +3955,16 @@ impl Vm {
         value: Value,
         site: PropSetSite,
     ) -> PropSetOut {
+        // A1: RequireObjectCoercible (§7.2.1) — property writes on null /
+        // undefined throw a catchable TypeError (same routing as reads).
+        if obj.is_null() || obj.is_undefined() {
+            let msg = null_prop_message(true, obj.is_null(), raw_key);
+            let err = crate::errors::error_string(gc, crate::errors::ErrorKind::TypeError, &msg);
+            return match self.handle_throw(gc, err) {
+                Some(exit) => PropSetOut::Bail(Some(exit)),
+                None => PropSetOut::Bail(None),
+            };
+        }
         // Check for accessor setter on own or prototype chain
         if let Some(ptr) = obj.heap_ptr() {
             let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
@@ -5384,6 +5432,10 @@ impl Vm {
                             self.frames[fi].pc = pc + 1;
                         }
                         PropGetOut::Wait => continue,
+                        PropGetOut::Bail(exit) => match exit {
+                            Some(e) => return e,
+                            None => continue,
+                        },
                     }
                 }
                 Opcode::LoadPropertyIC => {
@@ -5450,6 +5502,10 @@ impl Vm {
                             self.frames[fi].pc = pc + 1;
                         }
                         PropGetOut::Wait => continue,
+                        PropGetOut::Bail(exit) => match exit {
+                            Some(e) => return e,
+                            None => continue,
+                        },
                     }
                 }
                 Opcode::StoreProperty => {
@@ -5473,6 +5529,10 @@ impl Vm {
                             self.frames[fi].pc = pc + 1;
                         }
                         PropSetOut::Wait => continue 'run,
+                        PropSetOut::Bail(exit) => match exit {
+                            Some(e) => return e,
+                            None => continue,
+                        },
                     }
                 }
                 Opcode::StorePropertyIC => {
@@ -5514,6 +5574,10 @@ impl Vm {
                             self.frames[fi].pc = pc + 1;
                         }
                         PropSetOut::Wait => continue 'run,
+                        PropSetOut::Bail(exit) => match exit {
+                            Some(e) => return e,
+                            None => continue,
+                        },
                     }
                 }
                 Opcode::DeleteProperty => {

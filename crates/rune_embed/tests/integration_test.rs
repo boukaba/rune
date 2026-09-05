@@ -895,6 +895,47 @@ fn test_null_plus_one() {
 }
 
 #[test]
+fn test_null_undefined_property_read_throws() {
+    // A1: RequireObjectCoercible — reads on null/undefined throw a
+    // catchable TypeError (previously silent undefined).
+    let mut ctx = Context::new_small();
+    for src in ["null.x", "undefined.x", "null[0]", "var a = {}; a.b.c"] {
+        let err = ctx.eval(src).expect_err(&format!("{src} should throw"));
+        assert!(err.contains("TypeError"), "expected TypeError, got: {err}");
+    }
+    // Catchable in-frame + visible to assert.throws.
+    ctx.eval("var caught = 'no'; try { null.x; } catch (e) { caught = 'yes'; }")
+        .unwrap();
+    let r = ctx.eval("caught;").unwrap();
+    let s = unsafe {
+        rune_core::string::HeapString::to_string(
+            r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
+        )
+    };
+    assert_eq!(s, "yes", "catch block must run");
+    ctx.eval("assert.throws(TypeError, function () { undefined.foo; });")
+        .unwrap();
+    // Optional chaining still short-circuits (no throw).
+    assert!(ctx.eval("var x = null; x?.y;").unwrap().is_undefined());
+    assert!(ctx.eval("var u; u?.y;").unwrap().is_undefined());
+}
+
+#[test]
+fn test_null_undefined_property_write_throws() {
+    // A1: writes on null/undefined throw a catchable TypeError.
+    let mut ctx = Context::new_small();
+    for src in ["null.x = 1", "undefined.x = 1", "null[0] = 1"] {
+        let err = ctx.eval(src).expect_err(&format!("{src} should throw"));
+        assert!(err.contains("TypeError"), "expected TypeError, got: {err}");
+    }
+    ctx.eval("assert.throws(TypeError, function () { null.x = 1; });")
+        .unwrap();
+    // Ordinary writes still work and return the stored value.
+    let r = ctx.eval("var o = {}; o.x = 41; o.x;").unwrap();
+    assert_eq!(r.as_smi(), Some(41));
+}
+
+#[test]
 fn test_neg_zero_preserved() {
     let mut ctx = Context::new_small();
     let r = ctx.eval("1 / -0").unwrap();

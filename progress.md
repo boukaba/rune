@@ -12,8 +12,39 @@
 > regexp advanced classes, class-static-block, top-level-await,
 > iterator-helpers (kept force-skipped).
 
-## F5 DONE — attribute-storage design in SIDT shapes (2026-09-05)
+## A1 DONE — RequireObjectCoercible at the funnel tops (2026-09-05)
 
+First multiplier slice: property reads/writes on null/undefined now throw a
+catchable TypeError instead of silently yielding undefined (2 integration
+tests; V8-style messages). Implementation: null/undefined check at the top
+of `vm_get_property` + `vm_set_property` (F3 insertion points, as designed),
+new `Bail(Option<Exit>)` funnel variants, all 4 arms translate Bail, error
+via F2 `error_string` + `handle_throw` (catchable in-frame, assert.throws
+visible). Optional chaining untouched (`null?.x` still undefined); IC fast
+paths can't match immediates (no JIT change needed).
+
+- **Gains (+6, all direct)**: assignment target-member null/undefined ×2,
+  computed member null-or-undefined, obj-prop-name-evaluation-error,
+  call/11.2.3-3_3, Proxy no-prototype-throw (statements).
+- **Losses (13, EVERY one triaged — all correct-new-behavior unmaskings)**:
+  sloppy-this family (some/filter/forEach -5- ×5, try/12.14-13, call
+  11.2.3-3_8: `this` is undefined instead of globalThis/boxed → NEW B8);
+  globalThis missing (import-defer fixtures → B8); script fn hoisting
+  (`foo.p = …` before decl → B8) + bind missing (→ B8); missing builtins as
+  receivers (lastIndexOf/localeCompare/toLocale* ×4 → B2, toLocaleString →
+  B1/B2 audit); extends-null heritage (→ B3 class follow-up); top-level let
+  capture (simple-complex-* ×2, 7181784 follow-up → B8); S15.4_A1.1_T8 =
+  pre-existing flaky hang (same 5/6-hang profile pre/post A1, filed under C).
+- **Counts**: Array 825→824±flake, Object 279→278, String 406→402, Function
+  57→56, statements 1116→1115, expressions 1301→1299 (8 suites diffed with
+  LC_ALL=C; every delta above is listed here).
+- **Pre-existing bugs found (NOT A1, verified via stash)**: thrown
+  heap-string values misdelivered to catch bindings (`catch(e){r=e}` gets
+  garbage; Smi fine) + try/catch statement completion values lost — both
+  A2-adjacent; arrow concise-body + top-level-let capture broken (B8).
+- 860 workspace / 0 failed; clippy/fmt/no-default/x86 clean.
+
+## F5 DONE — attribute-storage design in SIDT shapes (2026-09-05)
 Anti-rewrite foundation: property attributes (writable/enumerable/
 configurable, §6.1.7.1) now have a decided home BEFORE A4 needs them, so
 descriptors don't force a shape/IC redesign later:

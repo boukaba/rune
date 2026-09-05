@@ -10,7 +10,7 @@ use rune_core::env::EnvObject;
 
 use rune_core::accessor::AccessorPair;
 use rune_core::date::{self, RuneDate};
-use rune_core::function::Func;
+use rune_core::function::{FUNC_FLAG_ASYNC, FUNC_FLAG_CLASS_CTOR, FUNC_FLAG_GENERATOR, Func};
 use rune_core::gc::{
     GcHeader, RootProvider, SemiSpace, TAG_ACCESSOR, TAG_ARRAY, TAG_ARRAY_BUFFER, TAG_DATE,
     TAG_FLOAT64, TAG_FUNC, TAG_MAP, TAG_OBJECT, TAG_PROMISE, TAG_REGEXP, TAG_SET, TAG_STRING,
@@ -6542,6 +6542,26 @@ impl Vm {
                         }
                         if !ids.is_null() {
                             Func::set_private_name_ids(resolved_ptr, ids);
+                        }
+                        // F1: mirror the compiled-program kind bits into the Func
+                        // flags word (generator/async/class-constructor). The
+                        // arrow bit already arrived via the instruction
+                        // operand + allocate; record lookup is fallible so
+                        // malformed indices degrade to no kind bits.
+                        let mut kind_flags = 0u32;
+                        if let Some(func_prog) = prog.functions.get(func_idx as usize) {
+                            if func_prog.is_generator {
+                                kind_flags |= FUNC_FLAG_GENERATOR;
+                            }
+                            if func_prog.is_async {
+                                kind_flags |= FUNC_FLAG_ASYNC;
+                            }
+                            if func_prog.is_class_constructor {
+                                kind_flags |= FUNC_FLAG_CLASS_CTOR;
+                            }
+                        }
+                        if kind_flags != 0 {
+                            Func::add_flags(resolved_ptr, kind_flags);
                         }
                         // Record the owning module (if created during module
                         // evaluation) so LoadGlobal/StoreGlobal inside this

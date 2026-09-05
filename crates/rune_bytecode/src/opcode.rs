@@ -203,6 +203,11 @@ pub struct BytecodeProgram {
     pub named_function: bool,
     pub is_generator: bool,
     pub is_async: bool,
+    /// True when this program is a class constructor ([[FunctionKind]] ==
+    /// classConstructor, §10.2.3). Set by emit_class for the constructor
+    /// program (explicit or synthesized); read by MakeFunction into the
+    /// Func flags word for the A3 call-without-new check.
+    pub is_class_constructor: bool,
     pub local_names: Vec<String>,
     /// Number of slots in this function's lexical environment object (0 = no env).
     /// Set by the emitter when escape analysis detects that variables in this
@@ -261,6 +266,7 @@ impl BytecodeProgram {
             named_function: false,
             is_generator: false,
             is_async: false,
+            is_class_constructor: false,
             local_names: vec![],
             captured_env_size: 0,
             regex_pool: vec![],

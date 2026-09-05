@@ -2,7 +2,44 @@
 
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
-> **Status:** v0.11.1 🚧 (In Progress — 681/681 integration tests Pass, 3 Ignored; workspace 842 tests Pass)
+> **Status:** v0.11.1 🚧 (In Progress — 681/681 integration tests Pass, 3 Ignored; workspace 847 tests Pass)
+
+> **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
+> cluster map + root causes in AGENTS.md Next Steps). Execution order:
+> foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →
+> robustness C → J3 D → exit E. Out-of-scope for 1.0: Temporal, BigInt,
+> Proxy-full, SharedArrayBuffer/Atomics, ShadowRealm, WeakRef family,
+> regexp advanced classes, class-static-block, top-level-await,
+> iterator-helpers (kept force-skipped).
+
+## F1 DONE — Func flags bit plan (2026-09-05)
+
+Anti-rewrite foundation: the 4-byte Func flags word was full (bit 0 =
+is_arrow + 31 bits of module_mi). Reallocated ahead of the slices that need
+kind bits (A3 class-call/strict checks, B5/B6 generator/async work):
+
+- **New layout** (`rune_core::function`, constants exported): bit 0 arrow,
+  bit 1 strict (reserved — no producer yet, parser tracks no strictness),
+  bit 2 class-constructor, bit 3 generator, bit 4 async, bits 5..=31
+  module_mi+1 (27 bits ≈ 134M modules; old shift was 1). `set_module_mi`
+  preserves the low 5 bits; `add_flags` masks to kind bits only.
+- **Producers**: `BytecodeProgram` gains `is_class_constructor` (set by
+  emit_class for explicit AND synthesized ctors at the single ctor_idx choke
+  point); generator/async already lived in the record and are now mirrored.
+  VM `MakeFunction` ORs record bits into Func (fallible record lookup —
+  malformed indices degrade to no kind bits, no new panic path). Arrow path
+  untouched.
+- **Consumers**: none yet (bits stored, behavior identical — verified:
+  GeneratorPrototype 47/61 and module-code 20/157 unchanged, module
+  resolution transparent across the shift change).
+- **Schema**: `AFPC_VERSION` 2→3 (BytecodeProgram gained a field; old caches
+  fall back gracefully per the file's own rule).
+- **Tests**: 5 new `rune_core` layout tests (defaults, arrow alloc,
+  independence, module round-trip −1..1M preserving flags, add_flags
+  masking) — **847 workspace / 0 failed**; clippy/fmt/no-default/x86 clean.
+- **Known gaps**: strict bit has no producer (needs directive-prologue scan —
+  A3); generator/async Func flags mirror the record but nothing reads them
+  yet (A3/B5/B6 will).
 > SIDT validated, AFPC bytecode + native-code cache functional (AArch64); x86-64 runs bytecode/IC/shape caching only (JIT codegen disabled there). Cold start 2.8× faster than Node
 
 > **⚠️ CRITICAL RULE — Spec-First Development**

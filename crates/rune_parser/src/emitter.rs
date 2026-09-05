@@ -1077,6 +1077,12 @@ impl Emitter {
         });
         self.emit(Opcode::MakeFunction, vec![ctor_idx as i64]);
 
+        // F1: mark the constructor program [[FunctionKind]] ==
+        // classConstructor so MakeFunction records it in the Func flags word
+        // (read by the A3 call-without-new check). Covers both the explicit
+        // and the synthesized default constructor above.
+        self.nested_funcs[ctor_idx].is_class_constructor = true;
+
         // 4.5 Inject private element initialization into the constructor body.
         //     Instance private fields/methods are defined on `this` before the
         //     constructor body runs (InitializeInstanceElements, §7.3.33):

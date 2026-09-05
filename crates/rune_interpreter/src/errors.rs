@@ -1,19 +1,10 @@
-//! F2: single choke point for all error-value creation.
+//! F2: single choke point for all error-value creation (completed in A2).
 //!
 //! Every error the engine raises — VM TypeErrors/ReferenceErrors, builtin
-//! pending exceptions, assert failures — is built by one of the two
-//! constructors here, with the error kind as data instead of baked into
-//! ad-hoc `"Kind: message"` strings at ~160 scattered sites:
-//!
-//! - [`error_string`]: legacy string encoding (`"TypeError: msg"`). Used by
-//!   the VM `throw_*` paths today; A2 flips these families to objects.
-//! - [`error_object`]: `{name, message}` object with its [[Prototype]]
-//!   linked to the matching `error_protos` entry (Error.prototype chain is
-//!   built at init). Used by `make_error*` paths today.
-//!
-//! A2 backlog (still constructing strings inline, greppable via
-//! `heap_string` + `"Kind: "` literals): builtin pending-exception sites.
-//! They flip to [`error_object`] one family at a time.
+//! pending exceptions, assert failures — is built by [`error_object`], with
+//! the error kind as data instead of baked into ad-hoc `"Kind: message"`
+//! strings. User `throw` of arbitrary values (strings, objects) still flows
+//! through untouched — only engine-raised errors come from here.
 
 use rune_core::gc::{GcHeader, SemiSpace, TAG_OBJECT};
 use rune_core::object::JSObject;
@@ -89,13 +80,6 @@ impl ErrorKind {
     }
 }
 
-/// Legacy string-encoded error (`"TypeError: msg"`). Bit-identical product
-/// to the old inline `HeapString::allocate(gc, &format!(...))` sites.
-pub fn error_string(gc: &mut SemiSpace, kind: ErrorKind, msg: &str) -> Value {
-    let full = format!("{}: {}", kind.name(), msg);
-    Value::from_heap_ptr(HeapString::allocate(gc, &full) as *mut u8)
-}
-
 /// Canonical error object: own `name` + `message` string properties with
 /// [[Prototype]] linked to the kind's `error_protos` entry (when available).
 /// Same own-properties as the old `make_error_object`; the prototype link
@@ -132,23 +116,6 @@ pub fn error_object(
         }
     }
     Value::from_heap_ptr(obj as *mut u8)
-}
-
-/// Whether a thrown string value carries the legacy `"Kind: "` encoding
-/// (used by readers that accept both strings and error objects).
-pub fn legacy_kind_of(val: Value) -> Option<ErrorKind> {
-    let ptr = val.heap_ptr()?;
-    unsafe {
-        if (*(ptr as *const GcHeader)).tag() != rune_core::gc::TAG_STRING {
-            return None;
-        }
-        let s = HeapString::to_string(ptr as *mut HeapString);
-        let idx = s.find(": ")?;
-        if idx >= 64 || s[..idx].is_empty() {
-            return None;
-        }
-        ErrorKind::parse(&s[..idx])
-    }
 }
 
 /// TAG_OBJECT check helper for readers shared by both encodings.
@@ -214,20 +181,6 @@ mod tests {
     }
 
     #[test]
-    fn test_error_string_encoding() {
-        let mut ss = SemiSpace::new();
-        let v = error_string(&mut ss, ErrorKind::TypeError, "bad thing");
-        let ptr = v.heap_ptr().unwrap();
-        unsafe {
-            assert_eq!((*(ptr as *const GcHeader)).tag(), rune_core::gc::TAG_STRING);
-            assert_eq!(
-                HeapString::to_string(ptr as *mut HeapString),
-                "TypeError: bad thing"
-            );
-        }
-    }
-
-    #[test]
     fn test_error_object_product() {
         let mut ss = SemiSpace::new();
         // Fake prototype stand-in (linkage stores the pointer, no deref).
@@ -261,15 +214,5 @@ mod tests {
             assert!(JSObject::prototype(ptr).is_null());
         }
         assert!(is_error_object(v));
-        assert_eq!(legacy_kind_of(v), None);
-    }
-
-    #[test]
-    fn test_legacy_kind_of() {
-        let mut ss = SemiSpace::new();
-        let v = error_string(&mut ss, ErrorKind::SyntaxError, "oops");
-        assert_eq!(legacy_kind_of(v), Some(ErrorKind::SyntaxError));
-        assert!(!is_error_object(v));
-        assert_eq!(legacy_kind_of(Value::undefined()), None);
     }
 }

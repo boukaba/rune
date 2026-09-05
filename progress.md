@@ -38,11 +38,52 @@ paths can't match immediates (no JIT change needed).
 - **Counts**: Array 825→824±flake, Object 279→278, String 406→402, Function
   57→56, statements 1116→1115, expressions 1301→1299 (8 suites diffed with
   LC_ALL=C; every delta above is listed here).
-- **Pre-existing bugs found (NOT A1, verified via stash)**: thrown
-  heap-string values misdelivered to catch bindings (`catch(e){r=e}` gets
-  garbage; Smi fine) + try/catch statement completion values lost — both
-  A2-adjacent; arrow concise-body + top-level-let capture broken (B8).
+- **Pre-existing bugs found (NOT A1, verified via stash)**: try/catch
+  statement completion values lost (general gap, TBD after B3); arrow
+  concise-body + top-level-let capture broken (B8).
+  (An earlier draft also claimed thrown heap-string catch corruption — that
+  was a display artifact of heap strings printing as `<object>`; delivery is
+  exact, retracted in A2.)
 - 860 workspace / 0 failed; clippy/fmt/no-default/x86 clean.
+
+## A2 DONE — real Error objects (2026-09-05)
+
+Engine-raised errors are now real `{name, message}` objects with the
+Error.prototype chain linked (instead of `"Kind: msg"` strings):
+
+- **Flipped families**: `throw_type_error`/`throw_reference_error` (now
+  objects + `handle_throw`-routed, so `new Symbol()`/TDZ/const-assignment
+  throws are catchable in-frame — previously uncatchable direct `Exit`s);
+  funnel A1 sites; `throw_routed` (~15 for-of/iteration sites, one edit);
+  all ~100 builtin inline sites (mechanical, incl. a no-`self` JIT-helper
+  fix); instanceof ×3 (product + routing); arrow/new/call/map + tdz_error;
+  2 dead helpers deleted (`to_number_checked`, `to_number_builtin_checked`).
+- **Rendering**: new `error_to_string` (Error.prototype.toString semantics)
+  drives all 4 Context eval-error paths — uncaught objects print
+  `"Kind: message"`, raw strings print whole (texts byte-identical);
+  `make_error` shim now clean-splits (message without prefix).
+- **String coercion**: `to_primitive_string{,_sync}` walk the proto chain
+  for toString/valueOf (own-only before) — `String(err)`, `e + ""`, and
+  template literals on error objects work; user-JS-fn dispatch unchanged
+  (pending protocol in async, skipped in sync as documented).
+- **Already correct, untouched**: `new TypeError("x")` (message/name/
+  instanceof verified), assert.throws matching (objects + strings).
+- **Gains (+~65, ZERO losses, 10 suites diffed)**: String +11 (A7 receiver
+  checks), Function +9 (apply/call), RegExp +11 (lastIndex/exec/test
+  receivers), Object +2, statements +9 (TDZ const/let, function, with),
+  expressions +24 (call/new/instanceof/property-accessors/super/yield*).
+- **Tests fixed to object semantics** (were asserting legacy string text):
+  date-invalid-toISOString catch read, symbol-message error test. **861→859
+  workspace / 0 failed** (net: +1 A2 integration test, −2 removed factory
+  tests); clippy/fmt/no-default/x86 clean.
+- **CORRECTION to the A1 entry below**: the claimed "thrown heap-string
+  catch delivery" bug was a FALSE finding — heap strings display as
+  `<object>` in Debug/CLI output, and `r === "boom"` proves delivery is
+  exact. Retracted. What REMAINS real and pre-existing: try/catch BLOCK
+  completion values are lost (`try{1}catch{42}` → undefined — general
+  statement-completion gap, owner TBD after B3).
+- **A2 tests**: `test_error_objects_real` (name/instanceof/String(err)/
+  catchable-new-Symbol/uncaught text).
 
 ## F5 DONE — attribute-storage design in SIDT shapes (2026-09-05)
 Anti-rewrite foundation: property attributes (writable/enumerable/

@@ -2298,20 +2298,29 @@ impl Vm {
         }
     }
 
-    /// Throw a ReferenceError from the run loop (F2: string encoding via
-    /// the error factory; A2 flips these paths to error objects).
-    fn throw_reference_error(&mut self, gc: &mut SemiSpace, msg: &str) -> Exit {
-        let val = crate::errors::error_string(gc, crate::errors::ErrorKind::ReferenceError, msg);
-        self.push(val);
-        Exit::Throw(self.pop())
+    /// Throw a ReferenceError from the run loop (A2: real error object via
+    /// the factory, routed through handle_throw so in-frame try/catch +
+    /// assert.throws observe it). Returns `None` when a handler took over
+    /// (caller must `continue`), `Some(Exit)` when it propagates out.
+    fn throw_reference_error(&mut self, gc: &mut SemiSpace, msg: &str) -> Option<Exit> {
+        let val = crate::errors::error_object(
+            gc,
+            &self.error_protos,
+            crate::errors::ErrorKind::ReferenceError,
+            msg,
+        );
+        self.handle_throw(gc, val)
     }
 
-    /// Throw a TypeError from the run loop (F2: string encoding via the
-    /// error factory; A2 flips these paths to error objects).
-    fn throw_type_error(&mut self, gc: &mut SemiSpace, msg: &str) -> Exit {
-        let val = crate::errors::error_string(gc, crate::errors::ErrorKind::TypeError, msg);
-        self.push(val);
-        Exit::Throw(self.pop())
+    /// Throw a TypeError from the run loop (A2: same contract as above).
+    fn throw_type_error(&mut self, gc: &mut SemiSpace, msg: &str) -> Option<Exit> {
+        let val = crate::errors::error_object(
+            gc,
+            &self.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            msg,
+        );
+        self.handle_throw(gc, val)
     }
 
     /// Build a TypeError and route it through `handle_throw` so in-frame
@@ -2321,9 +2330,12 @@ impl Vm {
     /// the error propagates out. Outcome is identical to `throw_type_error`
     /// when no handler matches.
     fn throw_routed(&mut self, gc: &mut SemiSpace, msg: &str) -> Option<Exit> {
-        let full_msg = format!("TypeError: {}", msg);
-        let ptr = HeapString::allocate(gc, &full_msg);
-        let val = Value::from_heap_ptr(ptr as *mut u8);
+        let val = crate::errors::error_object(
+            gc,
+            &self.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            msg,
+        );
         self.handle_throw(gc, val)
     }
 
@@ -3334,8 +3346,13 @@ impl Vm {
 
     /// A catchable ReferenceError for a TDZ module-binding read.
     fn tdz_error(&self, gc: &mut SemiSpace, name: &str) -> Value {
-        let msg = format!("ReferenceError: Cannot access '{name}' before initialization");
-        Value::from_heap_ptr(heap_string(gc, &msg))
+        let msg = format!("Cannot access '{name}' before initialization");
+        crate::errors::error_object(
+            gc,
+            &self.error_protos,
+            crate::errors::ErrorKind::ReferenceError,
+            &msg,
+        )
     }
 
     /// Resolve an exported name of a module to its current value, following
@@ -3498,10 +3515,12 @@ impl Vm {
             return Ok((Value::undefined(), true));
         }
         if self.generators[gen_id].executing {
-            return Err(Value::from_heap_ptr(crate::vm::heap_string(
+            return Err(crate::errors::error_object(
                 gc,
-                "TypeError: generator already running",
-            )));
+                &self.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "generator already running",
+            ));
         }
         // A suspended abrupt (Throw/Return resume that yielded again,
         // e.g. inside a `finally`) takes precedence over the new request.
@@ -3705,7 +3724,12 @@ impl Vm {
         // so in-frame try/catch + assert.throws observe it).
         if obj.is_null() || obj.is_undefined() {
             let msg = null_prop_message(false, obj.is_null(), raw_key);
-            let err = crate::errors::error_string(gc, crate::errors::ErrorKind::TypeError, &msg);
+            let err = crate::errors::error_object(
+                gc,
+                &self.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                &msg,
+            );
             return match self.handle_throw(gc, err) {
                 Some(exit) => PropGetOut::Bail(Some(exit)),
                 None => PropGetOut::Bail(None),
@@ -3959,7 +3983,12 @@ impl Vm {
         // undefined throw a catchable TypeError (same routing as reads).
         if obj.is_null() || obj.is_undefined() {
             let msg = null_prop_message(true, obj.is_null(), raw_key);
-            let err = crate::errors::error_string(gc, crate::errors::ErrorKind::TypeError, &msg);
+            let err = crate::errors::error_object(
+                gc,
+                &self.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                &msg,
+            );
             return match self.handle_throw(gc, err) {
                 Some(exit) => PropSetOut::Bail(Some(exit)),
                 None => PropSetOut::Bail(None),
@@ -4368,10 +4397,12 @@ impl Vm {
                     let a = self.pop();
                     // §13.5.3: Return ToNumber(UnaryExpression)
                     if a.is_symbol() {
-                        let err = Value::from_heap_ptr(heap_string(
+                        let err = crate::errors::error_object(
                             gc,
-                            "TypeError: Cannot convert a Symbol value to a number",
-                        ));
+                            &self.error_protos,
+                            crate::errors::ErrorKind::TypeError,
+                            "Cannot convert a Symbol value to a number",
+                        );
                         if let Some(exit) = self.handle_throw(gc, err) {
                             return exit;
                         }
@@ -4398,10 +4429,12 @@ impl Vm {
                         Value::from_float64(-v)
                     } else {
                         if a.is_symbol() {
-                            let err = Value::from_heap_ptr(heap_string(
+                            let err = crate::errors::error_object(
                                 gc,
-                                "TypeError: Cannot convert a Symbol value to a number",
-                            ));
+                                &self.error_protos,
+                                crate::errors::ErrorKind::TypeError,
+                                "Cannot convert a Symbol value to a number",
+                            );
                             if let Some(exit) = self.handle_throw(gc, err) {
                                 return exit;
                             }
@@ -4425,10 +4458,12 @@ impl Vm {
                 Opcode::BitNot => {
                     let a = self.pop();
                     if a.is_symbol() {
-                        let err = Value::from_heap_ptr(heap_string(
+                        let err = crate::errors::error_object(
                             gc,
-                            "TypeError: Cannot convert a Symbol value to a number",
-                        ));
+                            &self.error_protos,
+                            crate::errors::ErrorKind::TypeError,
+                            "Cannot convert a Symbol value to a number",
+                        );
                         if let Some(exit) = self.handle_throw(gc, err) {
                             return exit;
                         }
@@ -4479,10 +4514,12 @@ impl Vm {
                     let result = if a_is_str || b_is_str {
                         // §7.1.12.1 ToString(Symbol) throws TypeError
                         if a.is_symbol() || b.is_symbol() {
-                            let err = Value::from_heap_ptr(heap_string(
+                            let err = crate::errors::error_object(
                                 gc,
-                                "TypeError: Cannot convert a Symbol value to a string",
-                            ));
+                                &self.error_protos,
+                                crate::errors::ErrorKind::TypeError,
+                                "Cannot convert a Symbol value to a string",
+                            );
                             if let Some(exit) = self.handle_throw(gc, err) {
                                 return exit;
                             }
@@ -4495,10 +4532,12 @@ impl Vm {
                         Value::from_heap_ptr(ptr as *mut u8)
                     } else {
                         if a.is_symbol() || b.is_symbol() {
-                            let err = Value::from_heap_ptr(heap_string(
+                            let err = crate::errors::error_object(
                                 gc,
-                                "TypeError: Cannot convert a Symbol value to a number",
-                            ));
+                                &self.error_protos,
+                                crate::errors::ErrorKind::TypeError,
+                                "Cannot convert a Symbol value to a number",
+                            );
                             if let Some(exit) = self.handle_throw(gc, err) {
                                 return exit;
                             }
@@ -4526,10 +4565,12 @@ impl Vm {
                         }
                     } else {
                         if a.is_symbol() || b.is_symbol() {
-                            let err = Value::from_heap_ptr(heap_string(
+                            let err = crate::errors::error_object(
                                 gc,
-                                "TypeError: Cannot convert a Symbol value to a number",
-                            ));
+                                &self.error_protos,
+                                crate::errors::ErrorKind::TypeError,
+                                "Cannot convert a Symbol value to a number",
+                            );
                             if let Some(exit) = self.handle_throw(gc, err) {
                                 return exit;
                             }
@@ -4557,10 +4598,12 @@ impl Vm {
                         }
                     } else {
                         if a.is_symbol() || b.is_symbol() {
-                            let err = Value::from_heap_ptr(heap_string(
+                            let err = crate::errors::error_object(
                                 gc,
-                                "TypeError: Cannot convert a Symbol value to a number",
-                            ));
+                                &self.error_protos,
+                                crate::errors::ErrorKind::TypeError,
+                                "Cannot convert a Symbol value to a number",
+                            );
                             if let Some(exit) = self.handle_throw(gc, err) {
                                 return exit;
                             }
@@ -4577,10 +4620,12 @@ impl Vm {
                     let b = self.pop();
                     let a = self.pop();
                     if a.is_symbol() || b.is_symbol() {
-                        let err = Value::from_heap_ptr(heap_string(
+                        let err = crate::errors::error_object(
                             gc,
-                            "TypeError: Cannot convert a Symbol value to a number",
-                        ));
+                            &self.error_protos,
+                            crate::errors::ErrorKind::TypeError,
+                            "Cannot convert a Symbol value to a number",
+                        );
                         if let Some(exit) = self.handle_throw(gc, err) {
                             return exit;
                         }
@@ -4608,10 +4653,12 @@ impl Vm {
                         }
                     } else {
                         if a.is_symbol() || b.is_symbol() {
-                            let err = Value::from_heap_ptr(heap_string(
+                            let err = crate::errors::error_object(
                                 gc,
-                                "TypeError: Cannot convert a Symbol value to a number",
-                            ));
+                                &self.error_protos,
+                                crate::errors::ErrorKind::TypeError,
+                                "Cannot convert a Symbol value to a number",
+                            );
                             if let Some(exit) = self.handle_throw(gc, err) {
                                 return exit;
                             }
@@ -4640,10 +4687,12 @@ impl Vm {
                         }
                     } else {
                         if a.is_symbol() || b.is_symbol() {
-                            let err = Value::from_heap_ptr(heap_string(
+                            let err = crate::errors::error_object(
                                 gc,
-                                "TypeError: Cannot convert a Symbol value to a number",
-                            ));
+                                &self.error_protos,
+                                crate::errors::ErrorKind::TypeError,
+                                "Cannot convert a Symbol value to a number",
+                            );
                             if let Some(exit) = self.handle_throw(gc, err) {
                                 return exit;
                             }
@@ -4662,10 +4711,12 @@ impl Vm {
                     let b = self.pop();
                     let a = self.pop();
                     if a.is_symbol() || b.is_symbol() {
-                        let err = Value::from_heap_ptr(heap_string(
+                        let err = crate::errors::error_object(
                             gc,
-                            "TypeError: Cannot convert a Symbol value to a number",
-                        ));
+                            &self.error_protos,
+                            crate::errors::ErrorKind::TypeError,
+                            "Cannot convert a Symbol value to a number",
+                        );
                         if let Some(exit) = self.handle_throw(gc, err) {
                             return exit;
                         }
@@ -4685,10 +4736,12 @@ impl Vm {
                     let b = self.pop();
                     let a = self.pop();
                     if a.is_symbol() || b.is_symbol() {
-                        let err = Value::from_heap_ptr(heap_string(
+                        let err = crate::errors::error_object(
                             gc,
-                            "TypeError: Cannot convert a Symbol value to a number",
-                        ));
+                            &self.error_protos,
+                            crate::errors::ErrorKind::TypeError,
+                            "Cannot convert a Symbol value to a number",
+                        );
                         if let Some(exit) = self.handle_throw(gc, err) {
                             return exit;
                         }
@@ -4703,10 +4756,12 @@ impl Vm {
                     let b = self.pop();
                     let a = self.pop();
                     if a.is_symbol() || b.is_symbol() {
-                        let err = Value::from_heap_ptr(heap_string(
+                        let err = crate::errors::error_object(
                             gc,
-                            "TypeError: Cannot convert a Symbol value to a number",
-                        ));
+                            &self.error_protos,
+                            crate::errors::ErrorKind::TypeError,
+                            "Cannot convert a Symbol value to a number",
+                        );
                         if let Some(exit) = self.handle_throw(gc, err) {
                             return exit;
                         }
@@ -4726,10 +4781,12 @@ impl Vm {
                     let b = self.pop();
                     let a = self.pop();
                     if a.is_symbol() || b.is_symbol() {
-                        let err = Value::from_heap_ptr(heap_string(
+                        let err = crate::errors::error_object(
                             gc,
-                            "TypeError: Cannot convert a Symbol value to a number",
-                        ));
+                            &self.error_protos,
+                            crate::errors::ErrorKind::TypeError,
+                            "Cannot convert a Symbol value to a number",
+                        );
                         if let Some(exit) = self.handle_throw(gc, err) {
                             return exit;
                         }
@@ -4749,10 +4806,12 @@ impl Vm {
                     let b = self.pop();
                     let a = self.pop();
                     if a.is_symbol() || b.is_symbol() {
-                        let err = Value::from_heap_ptr(heap_string(
+                        let err = crate::errors::error_object(
                             gc,
-                            "TypeError: Cannot convert a Symbol value to a number",
-                        ));
+                            &self.error_protos,
+                            crate::errors::ErrorKind::TypeError,
+                            "Cannot convert a Symbol value to a number",
+                        );
                         if let Some(exit) = self.handle_throw(gc, err) {
                             return exit;
                         }
@@ -4772,10 +4831,12 @@ impl Vm {
                     let b = self.pop();
                     let a = self.pop();
                     if a.is_symbol() || b.is_symbol() {
-                        let err = Value::from_heap_ptr(heap_string(
+                        let err = crate::errors::error_object(
                             gc,
-                            "TypeError: Cannot convert a Symbol value to a number",
-                        ));
+                            &self.error_protos,
+                            crate::errors::ErrorKind::TypeError,
+                            "Cannot convert a Symbol value to a number",
+                        );
                         if let Some(exit) = self.handle_throw(gc, err) {
                             return exit;
                         }
@@ -4936,12 +4997,16 @@ impl Vm {
                     let lhs = self.pop();
                     // §13.10.1: If Type(rhs) is not Object → TypeError
                     if !rhs.is_heap_object() {
-                        let msg = HeapString::allocate(
+                        let err = crate::errors::error_object(
                             gc,
-                            "TypeError: invalid 'instanceof' operand (RHS is not an object)",
+                            &self.error_protos,
+                            crate::errors::ErrorKind::TypeError,
+                            "invalid 'instanceof' operand (RHS is not an object)",
                         );
-                        self.push(Value::from_heap_ptr(msg as *mut u8));
-                        return Exit::Throw(self.pop());
+                        if let Some(exit) = self.handle_throw(gc, err) {
+                            return exit;
+                        }
+                        continue;
                     }
                     let rhs_ptr = rhs.heap_ptr().unwrap();
                     let rhs_tag = unsafe { (*(rhs_ptr as *const GcHeader)).tag() };
@@ -4960,20 +5025,28 @@ impl Vm {
                             std::ptr::null_mut()
                         }
                     } else {
-                        let msg = HeapString::allocate(
+                        let err = crate::errors::error_object(
                             gc,
-                            "TypeError: RHS of 'instanceof' is not callable",
+                            &self.error_protos,
+                            crate::errors::ErrorKind::TypeError,
+                            "RHS of 'instanceof' is not callable",
                         );
-                        self.push(Value::from_heap_ptr(msg as *mut u8));
-                        return Exit::Throw(self.pop());
+                        if let Some(exit) = self.handle_throw(gc, err) {
+                            return exit;
+                        }
+                        continue;
                     };
                     if rhs_proto_ptr.is_null() {
-                        let msg = HeapString::allocate(
+                        let err = crate::errors::error_object(
                             gc,
-                            "TypeError: function 'prototype' is not an object",
+                            &self.error_protos,
+                            crate::errors::ErrorKind::TypeError,
+                            "function 'prototype' is not an object",
                         );
-                        self.push(Value::from_heap_ptr(msg as *mut u8));
-                        return Exit::Throw(self.pop());
+                        if let Some(exit) = self.handle_throw(gc, err) {
+                            return exit;
+                        }
+                        continue;
                     }
                     // Walk lhs prototype chain
                     let result = ordinary_has_instance(lhs, rhs_proto_ptr);
@@ -5978,7 +6051,12 @@ impl Vm {
                     let value = self.pop();
                     self.push(value);
                     self.frames[fi].pc = pc + 1;
-                    return self.throw_type_error(gc, "Assignment to constant variable.");
+                    if let Some(exit) =
+                        self.throw_type_error(gc, "Assignment to constant variable.")
+                    {
+                        return exit;
+                    }
+                    continue;
                 }
                 Opcode::ExportSync => {
                     let name_idx = instr.operands[0] as usize;
@@ -6012,10 +6090,12 @@ impl Vm {
                         Value::undefined()
                     };
                     if old_val.is_symbol() {
-                        let err = Value::from_heap_ptr(heap_string(
+                        let err = crate::errors::error_object(
                             gc,
-                            "TypeError: Cannot convert a Symbol value to a number",
-                        ));
+                            &self.error_protos,
+                            crate::errors::ErrorKind::TypeError,
+                            "Cannot convert a Symbol value to a number",
+                        );
                         if let Some(exit) = self.handle_throw(gc, err) {
                             return exit;
                         }
@@ -6039,10 +6119,12 @@ impl Vm {
                         Value::undefined()
                     };
                     if old_val.is_symbol() {
-                        let err = Value::from_heap_ptr(heap_string(
+                        let err = crate::errors::error_object(
                             gc,
-                            "TypeError: Cannot convert a Symbol value to a number",
-                        ));
+                            &self.error_protos,
+                            crate::errors::ErrorKind::TypeError,
+                            "Cannot convert a Symbol value to a number",
+                        );
                         if let Some(exit) = self.handle_throw(gc, err) {
                             return exit;
                         }
@@ -6069,10 +6151,12 @@ impl Vm {
                             .or_else(|| self.get_builtin(&name))
                             .unwrap_or(Value::undefined());
                         if old_val.is_symbol() {
-                            let err = Value::from_heap_ptr(heap_string(
+                            let err = crate::errors::error_object(
                                 gc,
-                                "TypeError: Cannot convert a Symbol value to a number",
-                            ));
+                                &self.error_protos,
+                                crate::errors::ErrorKind::TypeError,
+                                "Cannot convert a Symbol value to a number",
+                            );
                             if let Some(exit) = self.handle_throw(gc, err) {
                                 return exit;
                             }
@@ -6099,10 +6183,12 @@ impl Vm {
                             .or_else(|| self.get_builtin(&name))
                             .unwrap_or(Value::undefined());
                         if old_val.is_symbol() {
-                            let err = Value::from_heap_ptr(heap_string(
+                            let err = crate::errors::error_object(
                                 gc,
-                                "TypeError: Cannot convert a Symbol value to a number",
-                            ));
+                                &self.error_protos,
+                                crate::errors::ErrorKind::TypeError,
+                                "Cannot convert a Symbol value to a number",
+                            );
                             if let Some(exit) = self.handle_throw(gc, err) {
                                 return exit;
                             }
@@ -6169,10 +6255,13 @@ impl Vm {
                     let f = &self.frames[fi];
                     if slot < f.lexical_slots.len() {
                         if f.lexical_tdz[slot] {
-                            return self.throw_reference_error(
+                            if let Some(exit) = self.throw_reference_error(
                                 gc,
                                 &format!("Cannot access '{}' before initialization", slot),
-                            );
+                            ) {
+                                return exit;
+                            }
+                            continue;
                         }
                         self.push(f.lexical_slots[slot]);
                     } else {
@@ -6197,13 +6286,21 @@ impl Vm {
                     // throws ReferenceError if binding is uninitialized)
                     if slot < self.frames[fi].lexical_slots.len() {
                         if self.frames[fi].lexical_tdz[slot] {
-                            return self.throw_reference_error(
+                            if let Some(exit) = self.throw_reference_error(
                                 gc,
                                 &format!("Cannot access '{}' before initialization", slot),
-                            );
+                            ) {
+                                return exit;
+                            }
+                            continue;
                         }
                         if self.frames[fi].lexical_const[slot] {
-                            return self.throw_type_error(gc, "Assignment to constant variable");
+                            if let Some(exit) =
+                                self.throw_type_error(gc, "Assignment to constant variable")
+                            {
+                                return exit;
+                            }
+                            continue;
                         }
                         self.frames[fi].lexical_slots[slot] = val;
                     }
@@ -7090,7 +7187,11 @@ impl Vm {
                     }
                     // §20.4.1.1: `new Symbol()` throws a TypeError — Symbol is not a constructor.
                     if constructor == self.symbol_ctor {
-                        return self.throw_type_error(gc, "Symbol is not a constructor");
+                        if let Some(exit) = self.throw_type_error(gc, "Symbol is not a constructor")
+                        {
+                            return exit;
+                        }
+                        continue;
                     }
                     // §20.1.1.1: `new Object(...)` — fresh empty object with
                     // %Object.prototype% as [[Prototype]].
@@ -7301,13 +7402,12 @@ impl Vm {
                                 // so `new Error.prototype.toString()` returned an
                                 // object instead of throwing).
                                 if self.builtins[id].name != "Test262Error" {
-                                    let exc = Value::from_heap_ptr(crate::vm::heap_string(
+                                    let exc = crate::errors::error_object(
                                         gc,
-                                        &format!(
-                                            "TypeError: {} is not a constructor",
-                                            self.builtins[id].name
-                                        ),
-                                    ));
+                                        &self.error_protos,
+                                        crate::errors::ErrorKind::TypeError,
+                                        &format!("{} is not a constructor", self.builtins[id].name),
+                                    );
                                     if let Some(exit) = self.handle_throw(gc, exc) {
                                         return exit;
                                     }
@@ -7367,11 +7467,13 @@ impl Vm {
                         if tag == TAG_FUNC {
                             // §16.2.1.1.1: Arrow functions have [[Construct]]: undefined
                             if unsafe { Func::is_arrow(ptr as *mut Func) } {
-                                let msg = HeapString::allocate(
+                                let msg = crate::errors::error_object(
                                     gc,
-                                    "TypeError: Arrow function is not a constructor",
+                                    &self.error_protos,
+                                    crate::errors::ErrorKind::TypeError,
+                                    "Arrow function is not a constructor",
                                 );
-                                self.push(Value::from_heap_ptr(msg as *mut u8));
+                                self.push(msg);
                                 let val = self.pop();
                                 // Manually unwind through try_stack like Opcode::Throw does
                                 let handler_idx = self
@@ -7494,10 +7596,12 @@ impl Vm {
                     // §13.3.5.1: `new` on a non-constructor throws a TypeError
                     // (previously returned a bare object — a miscompile).
                     let desc = crate::builtins::value_to_js_string(constructor);
-                    let exc = Value::from_heap_ptr(crate::vm::heap_string(
+                    let exc = crate::errors::error_object(
                         gc,
-                        &format!("TypeError: {} is not a constructor", desc),
-                    ));
+                        &self.error_protos,
+                        crate::errors::ErrorKind::TypeError,
+                        &format!("{desc} is not a constructor"),
+                    );
                     if let Some(exit) = self.handle_throw(gc, exc) {
                         return exit;
                     }
@@ -7632,10 +7736,12 @@ impl Vm {
                     // §27.1.1.1 / §27.2.1.1: Map/Set are constructors only — a
                     // plain call throws a TypeError.
                     if callee == self.map_constructor || callee == self.set_constructor {
-                        let exc = Value::from_heap_ptr(crate::vm::heap_string(
+                        let exc = crate::errors::error_object(
                             gc,
-                            "TypeError: Constructor Map requires 'new'",
-                        ));
+                            &self.error_protos,
+                            crate::errors::ErrorKind::TypeError,
+                            "Constructor Map requires 'new'",
+                        );
                         if let Some(exit) = self.handle_throw(gc, exc) {
                             return exit;
                         }
@@ -7648,10 +7754,12 @@ impl Vm {
                     if callee == self.array_buffer_constructor
                         || self.typed_array_ctors.contains(&callee)
                     {
-                        let exc = Value::from_heap_ptr(crate::vm::heap_string(
+                        let exc = crate::errors::error_object(
                             gc,
-                            "TypeError: Constructor requires 'new'",
-                        ));
+                            &self.error_protos,
+                            crate::errors::ErrorKind::TypeError,
+                            "Constructor requires 'new'",
+                        );
                         if let Some(exit) = self.handle_throw(gc, exc) {
                             return exit;
                         }
@@ -8162,10 +8270,12 @@ impl Vm {
                     // §13.3.6.1: calling a non-callable throws a TypeError
                     // (previously a silent `undefined` — a miscompile).
                     let desc = crate::builtins::value_to_js_string(callee);
-                    let exc = Value::from_heap_ptr(crate::vm::heap_string(
+                    let exc = crate::errors::error_object(
                         gc,
-                        &format!("TypeError: {} is not a function", desc),
-                    ));
+                        &self.error_protos,
+                        crate::errors::ErrorKind::TypeError,
+                        &format!("{desc} is not a function"),
+                    );
                     if let Some(exit) = self.handle_throw(gc, exc) {
                         return exit;
                     }
@@ -8576,10 +8686,13 @@ impl Vm {
                                 IterDrainState::AwaitNext => {
                                     if !result.is_heap_object() {
                                         self.stack.truncate(callee_base);
-                                        return self.throw_type_error(
+                                        if let Some(exit) = self.throw_type_error(
                                             gc,
                                             "Iterator result is not an object",
-                                        );
+                                        ) {
+                                            return exit;
+                                        }
+                                        continue;
                                     }
                                     let done =
                                         load_property_recursive(result, self.done_key, None, gc)
@@ -8624,7 +8737,12 @@ impl Vm {
                                 CollectionCtorState::AwaitFactory => {
                                     if !result.is_heap_object() {
                                         self.stack.truncate(pcc.root_base);
-                                        return self.throw_type_error(gc, "value is not iterable");
+                                        if let Some(exit) =
+                                            self.throw_type_error(gc, "value is not iterable")
+                                        {
+                                            return exit;
+                                        }
+                                        continue;
                                     }
                                     self.stack.truncate(pcc.root_base);
                                     let base = self.stack.len();
@@ -8656,10 +8774,13 @@ impl Vm {
                                 CollectionCtorState::AwaitNext => {
                                     if !result.is_heap_object() {
                                         self.stack.truncate(pcc.root_base);
-                                        return self.throw_type_error(
+                                        if let Some(exit) = self.throw_type_error(
                                             gc,
                                             "Iterator result is not an object",
-                                        );
+                                        ) {
+                                            return exit;
+                                        }
+                                        continue;
                                     }
                                     let done =
                                         load_property_recursive(result, self.done_key, None, gc)
@@ -8675,10 +8796,12 @@ impl Vm {
                                         load_property_recursive(result, self.value_key, None, gc);
                                     if pcc.is_map && !crate::builtins::is_object_value(value) {
                                         self.stack.truncate(pcc.root_base);
-                                        return self.throw_type_error(
-                                            gc,
-                                            "Iterator value is not an object",
-                                        );
+                                        if let Some(exit) = self
+                                            .throw_type_error(gc, "Iterator value is not an object")
+                                        {
+                                            return exit;
+                                        }
+                                        continue;
                                     }
                                     self.stack.truncate(pcc.root_base);
                                     let base = self.stack.len();
@@ -10428,7 +10551,7 @@ pub(crate) fn call_builtin_sync(
             }
         }
     }
-    Err(Some(vm.throw_type_error(gc, "not a function")))
+    Err(vm.throw_type_error(gc, "not a function"))
 }
 
 /// Allocate a dense array with DENSE_ARRAY_SHAPE and Array.prototype
@@ -10611,7 +10734,7 @@ fn drain_iterator(
     arr: *mut u8,
 ) -> Result<*mut u8, Option<Exit>> {
     if !iterator.is_heap_object() {
-        return Err(Some(vm.throw_type_error(gc, "value is not iterable")));
+        return Err(vm.throw_type_error(gc, "value is not iterable"));
     }
     let next = load_property_recursive(iterator, vm.next_key, Some(vm.function_prototype), gc);
     if next.as_smi().is_some_and(|s| s < 0) {
@@ -10624,9 +10747,7 @@ fn drain_iterator(
                 Err(None) => return Err(None),
             };
             if !result.is_heap_object() {
-                return Err(Some(
-                    vm.throw_type_error(gc, "Iterator result is not an object"),
-                ));
+                return Err(vm.throw_type_error(gc, "Iterator result is not an object"));
             }
             let done = load_property_recursive(result, vm.done_key, None, gc).to_bool();
             if done {
@@ -10649,9 +10770,7 @@ fn drain_iterator(
         vm.push_callback_call(gc, next, iterator, vec![]);
         Err(None)
     } else {
-        Err(Some(
-            vm.throw_type_error(gc, "iterator.next is not a function"),
-        ))
+        Err(vm.throw_type_error(gc, "iterator.next is not a function"))
     }
 }
 
@@ -11418,29 +11537,6 @@ pub(crate) fn to_number(v: Value) -> f64 {
     }
 }
 
-/// Checked ToNumber that throws TypeError for Symbol (preserve Value tag 6).
-/// For VM opcode paths that return Exit, use this to bail correctly.
-#[allow(dead_code)]
-pub(crate) fn to_number_checked(v: Value, vm: &mut Vm, gc: &mut SemiSpace) -> Result<f64, Exit> {
-    if v.is_symbol() {
-        return Err(vm.throw_type_error(gc, "Cannot convert a Symbol value to a number"));
-    }
-    Ok(to_number(v))
-}
-
-/// Checked ToNumber for builtin paths that set pending_exception.
-#[allow(dead_code)]
-pub(crate) fn to_number_builtin_checked(v: Value, vm: &mut Vm, gc: &mut SemiSpace) -> Option<f64> {
-    if v.is_symbol() {
-        vm.set_pending_exception(Value::from_heap_ptr(heap_string(
-            gc,
-            "TypeError: Cannot convert a Symbol value to a number",
-        )));
-        return None;
-    }
-    Some(to_number(v))
-}
-
 /// §7.1.6 ToInt32: Convert a Value to a signed 32-bit integer.
 fn to_int32(v: Value) -> i32 {
     let n = to_number(v);
@@ -12021,10 +12117,12 @@ pub extern "C" fn rune_jit_float64_add_helper(
     if value_is_string(a2) || value_is_string(b2) {
         // §7.1.12.1: ToString(Symbol) throws TypeError
         if a.is_symbol() || b.is_symbol() {
-            let err = Value::from_heap_ptr(heap_string(
+            let err = crate::errors::error_object(
                 gc,
-                "TypeError: Cannot convert a Symbol value to a string",
-            ));
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Cannot convert a Symbol value to a string",
+            );
             vm.set_pending_exception(err);
             return Value::undefined().raw();
         }

@@ -118,11 +118,32 @@ pub(crate) fn to_primitive_string(gc: &mut SemiSpace, val: Value, vm: &mut Vm) -
         return Some(date::to_date_string(unsafe { date::RuneDate::tv(ptr) }));
     }
     if tag == TAG_OBJECT {
-        // §7.1.1 ToPrimitive with string hint: call toString(), then valueOf()
+        // §7.1.1 ToPrimitive with string hint: call toString(), then valueOf().
+        // A2: GetMethod walks the prototype chain — previously only OWN
+        // properties dispatched, so inherited methods (notably
+        // Error.prototype.toString on error objects) fell through to
+        // "[object Object]". Depth-capped; cycles terminate.
+        let find_method = |key: &PropertyKey| -> Option<Value> {
+            let mut current = val;
+            for _ in 0..64 {
+                let cptr = current.heap_ptr()?;
+                if unsafe { (*(cptr as *const GcHeader)).tag() } != TAG_OBJECT {
+                    return None;
+                }
+                let shape = unsafe { JSObject::shape_ptr(cptr as *mut JSObject) };
+                if let Some(slot) = shape.lookup(key) {
+                    return Some(unsafe { JSObject::get_slot(cptr as *mut JSObject, slot) });
+                }
+                let proto = unsafe { JSObject::prototype(cptr as *mut JSObject) };
+                if proto.is_null() {
+                    return None;
+                }
+                current = Value::from_heap_ptr(proto);
+            }
+            None
+        };
         let key = PropertyKey::from_string("toString");
-        let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
-        if let Some(slot) = shape.lookup(&key) {
-            let to_string_val = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+        if let Some(to_string_val) = find_method(&key) {
             if let Some(smi) = to_string_val.as_smi() {
                 if smi < 0 {
                     // Builtin toString — call it directly
@@ -161,8 +182,7 @@ pub(crate) fn to_primitive_string(gc: &mut SemiSpace, val: Value, vm: &mut Vm) -
         }
         // Fall through to valueOf if no toString or toString didn't return a primitive
         let value_of_key = PropertyKey::from_string("valueOf");
-        if let Some(slot) = shape.lookup(&value_of_key) {
-            let value_of_val = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+        if let Some(value_of_val) = find_method(&value_of_key) {
             if let Some(smi) = value_of_val.as_smi() {
                 if smi < 0 {
                     let id = ((-smi) as usize) - 1;
@@ -212,10 +232,30 @@ pub(crate) fn to_primitive_string_sync(val: Value, gc: &mut SemiSpace, vm: &mut 
         return date::to_date_string(unsafe { date::RuneDate::tv(ptr) });
     }
     if tag == TAG_OBJECT {
+        // A2: chain-walk like the async version so inherited BUILTIN methods
+        // (Error.prototype.toString) dispatch; user-defined (JS-func) methods
+        // are still skipped — no pending protocol in sync contexts.
+        let find_method = |key: &PropertyKey| -> Option<Value> {
+            let mut current = val;
+            for _ in 0..64 {
+                let cptr = current.heap_ptr()?;
+                if unsafe { (*(cptr as *const GcHeader)).tag() } != TAG_OBJECT {
+                    return None;
+                }
+                let shape = unsafe { JSObject::shape_ptr(cptr as *mut JSObject) };
+                if let Some(slot) = shape.lookup(key) {
+                    return Some(unsafe { JSObject::get_slot(cptr as *mut JSObject, slot) });
+                }
+                let proto = unsafe { JSObject::prototype(cptr as *mut JSObject) };
+                if proto.is_null() {
+                    return None;
+                }
+                current = Value::from_heap_ptr(proto);
+            }
+            None
+        };
         let key = PropertyKey::from_string("toString");
-        let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
-        if let Some(slot) = shape.lookup(&key) {
-            let to_string_val = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+        if let Some(to_string_val) = find_method(&key) {
             if let Some(smi) = to_string_val.as_smi() {
                 if smi < 0 {
                     let id = ((-smi) as usize) - 1;
@@ -241,8 +281,7 @@ pub(crate) fn to_primitive_string_sync(val: Value, gc: &mut SemiSpace, vm: &mut 
             // User-defined or non-callable toString — skip
         }
         let value_of_key = PropertyKey::from_string("valueOf");
-        if let Some(slot) = shape.lookup(&value_of_key) {
-            let value_of_val = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+        if let Some(value_of_val) = find_method(&value_of_key) {
             if let Some(smi) = value_of_val.as_smi() {
                 if smi < 0 {
                     let id = ((-smi) as usize) - 1;
@@ -321,10 +360,12 @@ pub fn number_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
         None => return Value::smi(0),
     };
     if val.is_symbol() {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             gc,
-            "TypeError: Cannot convert a Symbol value to a number",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Cannot convert a Symbol value to a number",
+        ));
         return Value::undefined();
     }
     if val.is_undefined() {
@@ -373,10 +414,12 @@ pub fn string_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
     let arg = args.first().copied().unwrap_or(Value::undefined());
     // §7.1.12.1 ToString(Symbol) throws TypeError.
     if arg.is_symbol() {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             gc,
-            "TypeError: Cannot convert a Symbol value to a string",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Cannot convert a Symbol value to a string",
+        ));
         return Value::undefined();
     }
     match to_primitive_string(gc, arg, vm) {
@@ -401,10 +444,12 @@ pub fn symbol_ctor_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm:
         Some(v) if v.is_undefined() => Value::symbol(register_symbol(None)),
         Some(v) if v.is_symbol() => {
             // §7.1.12.1 ToString(Symbol) throws TypeError.
-            vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            vm.set_pending_exception(crate::errors::error_object(
                 gc,
-                "TypeError: Cannot convert a Symbol value to a string",
-            )));
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Cannot convert a Symbol value to a string",
+            ));
             Value::undefined()
         }
         Some(v) => match to_primitive_string(gc, v, vm) {
@@ -426,10 +471,12 @@ pub fn symbol_ctor_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm:
 pub fn symbol_for_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let key = args.first().copied().unwrap_or(Value::undefined());
     if key.is_symbol() {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             gc,
-            "TypeError: Cannot convert a Symbol value to a string",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Cannot convert a Symbol value to a string",
+        ));
         return Value::undefined();
     }
     match to_primitive_string(gc, key, vm) {
@@ -461,10 +508,12 @@ pub fn symbol_key_for_builtin(
             None => Value::undefined(),
         },
         None => {
-            vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            vm.set_pending_exception(crate::errors::error_object(
                 gc,
-                "TypeError: Symbol.keyFor requires that the argument be a symbol",
-            )));
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Symbol.keyFor requires that the argument be a symbol",
+            ));
             Value::undefined()
         }
     }
@@ -484,10 +533,12 @@ pub fn symbol_prototype_to_string(
             Value::from_heap_ptr(ptr as *mut u8)
         }
         None => {
-            vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            vm.set_pending_exception(crate::errors::error_object(
                 gc,
-                "TypeError: Symbol.prototype.toString requires that 'this' be a Symbol",
-            )));
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Symbol.prototype.toString requires that 'this' be a Symbol",
+            ));
             Value::undefined()
         }
     }
@@ -503,10 +554,12 @@ pub fn symbol_prototype_value_of(
     if this.is_symbol() {
         this
     } else {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             _gc,
-            "TypeError: Symbol.prototype.valueOf requires that 'this' be a Symbol",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Symbol.prototype.valueOf requires that 'this' be a Symbol",
+        ));
         Value::undefined()
     }
 }
@@ -521,10 +574,12 @@ pub fn symbol_prototype_to_primitive(
     if this.is_symbol() {
         this
     } else {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             gc,
-            "TypeError: Symbol.prototype[Symbol.toPrimitive] requires that 'this' be a Symbol",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Symbol.prototype[Symbol.toPrimitive] requires that 'this' be a Symbol",
+        ));
         Value::undefined()
     }
 }
@@ -618,10 +673,12 @@ pub fn array_values_builtin(
         .heap_ptr()
         .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_ARRAY });
     if !ok {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             gc,
-            "TypeError: Array.prototype.values requires an array receiver",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Array.prototype.values requires an array receiver",
+        ));
         return Value::undefined();
     }
     make_iterator_object(
@@ -639,10 +696,12 @@ pub fn array_keys_builtin(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: 
         .heap_ptr()
         .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_ARRAY });
     if !ok {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             gc,
-            "TypeError: Array.prototype.keys requires an array receiver",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Array.prototype.keys requires an array receiver",
+        ));
         return Value::undefined();
     }
     make_iterator_object(
@@ -665,10 +724,12 @@ pub fn array_entries_builtin(
         .heap_ptr()
         .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_ARRAY });
     if !ok {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             gc,
-            "TypeError: Array.prototype.entries requires an array receiver",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Array.prototype.entries requires an array receiver",
+        ));
         return Value::undefined();
     }
     make_iterator_object(
@@ -734,10 +795,12 @@ pub fn generator_next_builtin(
 ) -> Value {
     let arg = args.first().copied().unwrap_or(Value::undefined());
     let Some(gen_id) = generator_id_of(vm, this) else {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             _gc,
-            "TypeError: next called on non-generator",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "next called on non-generator",
+        ));
         return Value::undefined();
     };
     if vm.generators[gen_id].done {
@@ -746,10 +809,12 @@ pub fn generator_next_builtin(
     if vm.generators[gen_id].executing {
         // §25.3.3.3: resuming an executing generator throws AND completes it.
         vm.generators[gen_id].done = true;
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             _gc,
-            "TypeError: generator already running",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "generator already running",
+        ));
         return Value::undefined();
     }
     match vm.resume_generator_full(_gc, gen_id, crate::vm::GeneratorResume::Next(arg)) {
@@ -828,14 +893,16 @@ fn classify_method(m: Value) -> Result<Option<Value>, ()> {
     }
 }
 
-fn violation_type_error(_vm: &mut Vm, gc: &mut SemiSpace, is_throw: bool) -> Value {
+fn violation_type_error(vm: &mut Vm, gc: &mut SemiSpace, is_throw: bool) -> Value {
     // Throw without a throw method is a yield* protocol violation; return
     // without one completes directly (unreachable here, kept for symmetry).
     let _ = is_throw;
-    Value::from_heap_ptr(crate::vm::heap_string(
+    crate::errors::error_object(
         gc,
-        "TypeError: iterator does not have a throw method",
-    ))
+        &vm.error_protos,
+        crate::errors::ErrorKind::TypeError,
+        "iterator does not have a throw method",
+    )
 }
 
 /// Continue after a delegate throw/return method value is available
@@ -854,13 +921,15 @@ pub fn afr_method_loaded(
     let loaded = match classify_method(method) {
         Ok(m) => m,
         Err(()) => {
-            return AfrOut::Raise(Value::from_heap_ptr(crate::vm::heap_string(
+            return AfrOut::Raise(crate::errors::error_object(
                 gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
                 &format!(
-                    "TypeError: iterator.{} is not a function",
+                    "iterator.{} is not a function",
                     if is_throw { "throw" } else { "return" }
                 ),
-            )));
+            ));
         }
     };
     match loaded {
@@ -887,10 +956,12 @@ pub fn afr_method_loaded(
                     },
                     YsOut::Wait => AfrOut::Wait,
                     YsOut::Raise(e) => AfrOut::Raise(e),
-                    YsOut::Bail(_) => AfrOut::Raise(Value::from_heap_ptr(crate::vm::heap_string(
+                    YsOut::Bail(_) => AfrOut::Raise(crate::errors::error_object(
                         gc,
-                        "TypeError: getter threw",
-                    ))),
+                        &vm.error_protos,
+                        crate::errors::ErrorKind::TypeError,
+                        "getter threw",
+                    )),
                 }
             } else {
                 vm.generators[gen_id].done = true;
@@ -933,10 +1004,12 @@ fn delegate_method(
     match vm.yieldstar_get(gc, iter, key, pend) {
         crate::vm::YsGetOut::Ready(m) => YsOut::Sync(m),
         crate::vm::YsGetOut::Wait => YsOut::Wait,
-        crate::vm::YsGetOut::Bail(_) => YsOut::Raise(Value::from_heap_ptr(crate::vm::heap_string(
+        crate::vm::YsGetOut::Bail(_) => YsOut::Raise(crate::errors::error_object(
             gc,
-            "TypeError: getter threw",
-        ))),
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "getter threw",
+        )),
     }
 }
 
@@ -956,10 +1029,12 @@ fn finish_delegate_afr(
     method_result: Value,
 ) -> AfrOut {
     if !method_result.is_heap_object() {
-        return AfrOut::Raise(Value::from_heap_ptr(crate::vm::heap_string(
+        return AfrOut::Raise(crate::errors::error_object(
             gc,
-            "TypeError: Iterator result is not an object",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Iterator result is not an object",
+        ));
     }
     // done read (async-capable).
     let done = match ys_read_gen(
@@ -978,10 +1053,12 @@ fn finish_delegate_afr(
         YsOut::Raise(e) => return AfrOut::Raise(e),
         YsOut::Bail(_) => {
             // See YsGetOut::Bail: already unwound; surface generically.
-            return AfrOut::Raise(Value::from_heap_ptr(crate::vm::heap_string(
+            return AfrOut::Raise(crate::errors::error_object(
                 gc,
-                "TypeError: getter threw",
-            )));
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "getter threw",
+            ));
         }
     };
     // value read (async-capable).
@@ -1001,10 +1078,12 @@ fn finish_delegate_afr(
         YsOut::Raise(e) => return AfrOut::Raise(e),
         YsOut::Bail(_) => {
             // See YsGetOut::Bail: already unwound; surface generically.
-            return AfrOut::Raise(Value::from_heap_ptr(crate::vm::heap_string(
+            return AfrOut::Raise(crate::errors::error_object(
                 gc,
-                "TypeError: getter threw",
-            )));
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "getter threw",
+            ));
         }
     };
     if done {
@@ -1039,20 +1118,24 @@ pub fn finish_yieldstar_afr_result(
     if closing {
         // IteratorClose finished for a throw-violation: the protocol
         // violation TypeError continues (not the original exception).
-        let e = Value::from_heap_ptr(crate::vm::heap_string(
+        let e = crate::errors::error_object(
             gc,
-            "TypeError: iterator does not have a throw method",
-        ));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "iterator does not have a throw method",
+        );
         return match vm.handle_throw(gc, e) {
             Some(exit) => Err(Some(exit)),
             None => Err(None),
         };
     }
     if !method_result.is_heap_object() {
-        let e = Value::from_heap_ptr(crate::vm::heap_string(
+        let e = crate::errors::error_object(
             gc,
-            "TypeError: Iterator result is not an object",
-        ));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Iterator result is not an object",
+        );
         return match vm.handle_throw(gc, e) {
             Some(exit) => Err(Some(exit)),
             None => Err(None),
@@ -1291,17 +1374,21 @@ fn forward_to_delegate(
         YsOut::Raise(e) => return AfrOut::Raise(e),
         YsOut::Bail(_) => {
             // See YsGetOut::Bail: already unwound; surface generically.
-            return AfrOut::Raise(Value::from_heap_ptr(crate::vm::heap_string(
+            return AfrOut::Raise(crate::errors::error_object(
                 gc,
-                "TypeError: getter threw",
-            )));
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "getter threw",
+            ));
         }
     };
     match classify_method(loaded) {
-        Err(()) => AfrOut::Raise(Value::from_heap_ptr(crate::vm::heap_string(
+        Err(()) => AfrOut::Raise(crate::errors::error_object(
             gc,
-            &format!("TypeError: iterator.{method_name} is not a function"),
-        ))),
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            &format!("iterator.{method_name} is not a function"),
+        )),
         Ok(None) => {
             // No throw/return method.
             if is_throw {
@@ -1315,20 +1402,24 @@ fn forward_to_delegate(
                         YsOut::Raise(e) => return AfrOut::Raise(e),
                         YsOut::Bail(_) => {
                             // See YsGetOut::Bail: already unwound; surface generically.
-                            return AfrOut::Raise(Value::from_heap_ptr(crate::vm::heap_string(
+                            return AfrOut::Raise(crate::errors::error_object(
                                 gc,
-                                "TypeError: getter threw",
-                            )));
+                                &vm.error_protos,
+                                crate::errors::ErrorKind::TypeError,
+                                "getter threw",
+                            ));
                         }
                     };
                 match classify_method(ret_loaded) {
                     Ok(Some(ret)) => forward_call_delegate_method(
                         vm, gc, gen_id, true, abrupt_arg, iter, ret, abrupt_arg, true,
                     ),
-                    _ => AfrOut::Raise(Value::from_heap_ptr(crate::vm::heap_string(
+                    _ => AfrOut::Raise(crate::errors::error_object(
                         gc,
-                        "TypeError: iterator does not have a throw method",
-                    ))),
+                        &vm.error_protos,
+                        crate::errors::ErrorKind::TypeError,
+                        "iterator does not have a throw method",
+                    )),
                 }
             } else {
                 vm.generators[gen_id].done = true;
@@ -1377,10 +1468,12 @@ fn forward_call_delegate_method(
             Err(_) => {
                 // Redirected or exotic exit already arranged; surface a
                 // generic unwind for the caller to propagate.
-                AfrOut::Raise(Value::from_heap_ptr(crate::vm::heap_string(
+                AfrOut::Raise(crate::errors::error_object(
                     gc,
-                    "TypeError: delegate method threw",
-                )))
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "delegate method threw",
+                ))
             }
         }
     } else {
@@ -1408,10 +1501,12 @@ pub fn generator_return_builtin(
         return iter_result_with_proto(_gc, vm, v, true);
     };
     if vm.generators[gen_id].executing {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             _gc,
-            "TypeError: generator already running",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "generator already running",
+        ));
         return Value::undefined();
     }
     if !vm.generators[gen_id].started || vm.generators[gen_id].done {
@@ -1452,10 +1547,12 @@ pub fn generator_throw_builtin(
         return Value::undefined();
     };
     if vm.generators[gen_id].executing {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             _gc,
-            "TypeError: generator already running",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "generator already running",
+        ));
         return Value::undefined();
     }
     if vm.generators[gen_id].done {
@@ -1605,17 +1702,21 @@ pub fn string_iterator_builtin(
         } else if tag == TAG_STRING_OBJ {
             unsafe { StringObject::string_ptr(ptr as *mut StringObject) }
         } else {
-            vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            vm.set_pending_exception(crate::errors::error_object(
                 gc,
-                "TypeError: String.prototype[Symbol.iterator] requires a string receiver",
-            )));
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "String.prototype[Symbol.iterator] requires a string receiver",
+            ));
             return Value::undefined();
         }
     } else {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             gc,
-            "TypeError: String.prototype[Symbol.iterator] requires a string receiver",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "String.prototype[Symbol.iterator] requires a string receiver",
+        ));
         return Value::undefined();
     };
     make_iterator_object(
@@ -1824,10 +1925,12 @@ fn map_receiver(gc: &mut SemiSpace, this: Value, vm: &mut Vm) -> Option<*mut u8>
             return Some(ptr);
         }
     }
-    vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+    vm.set_pending_exception(crate::errors::error_object(
         gc,
-        "TypeError: Map.prototype method called on incompatible receiver",
-    )));
+        &vm.error_protos,
+        crate::errors::ErrorKind::TypeError,
+        "Map.prototype method called on incompatible receiver",
+    ));
     None
 }
 
@@ -1837,10 +1940,12 @@ fn set_receiver(gc: &mut SemiSpace, this: Value, vm: &mut Vm) -> Option<*mut u8>
             return Some(ptr);
         }
     }
-    vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+    vm.set_pending_exception(crate::errors::error_object(
         gc,
-        "TypeError: Set.prototype method called on incompatible receiver",
-    )));
+        &vm.error_protos,
+        crate::errors::ErrorKind::TypeError,
+        "Set.prototype method called on incompatible receiver",
+    ));
     None
 }
 
@@ -2279,10 +2384,12 @@ fn date_receiver(gc: &mut SemiSpace, this: Value, vm: &mut Vm) -> Option<*mut u8
             return Some(ptr);
         }
     }
-    vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+    vm.set_pending_exception(crate::errors::error_object(
         gc,
-        "TypeError: Date.prototype method called on incompatible receiver",
-    )));
+        &vm.error_protos,
+        crate::errors::ErrorKind::TypeError,
+        "Date.prototype method called on incompatible receiver",
+    ));
     None
 }
 
@@ -2536,10 +2643,12 @@ pub fn date_to_iso_string_builtin(
         Some(s) => Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8),
         None => {
             // §21.4.4.36: throw a RangeError for NaN or unrepresentable years.
-            vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            vm.set_pending_exception(crate::errors::error_object(
                 gc,
-                "RangeError: Invalid time value",
-            )));
+                &vm.error_protos,
+                crate::errors::ErrorKind::RangeError,
+                "Invalid time value",
+            ));
             Value::undefined()
         }
     }
@@ -3083,10 +3192,12 @@ fn to_index_typed(gc: &mut SemiSpace, vm: &mut Vm, v: Value) -> Result<usize, ()
         n.trunc()
     };
     if !(0.0..=9007199254740991.0).contains(&i) {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             gc,
-            "RangeError: Invalid typed array length",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::RangeError,
+            "Invalid typed array length",
+        ));
         return Err(());
     }
     Ok(i as usize)
@@ -3132,10 +3243,12 @@ fn typed_array_receiver(gc: &mut SemiSpace, this: Value, vm: &mut Vm) -> Option<
             return Some(ptr);
         }
     }
-    vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+    vm.set_pending_exception(crate::errors::error_object(
         gc,
-        "TypeError: Method called on incompatible receiver",
-    )));
+        &vm.error_protos,
+        crate::errors::ErrorKind::TypeError,
+        "Method called on incompatible receiver",
+    ));
     None
 }
 
@@ -3146,10 +3259,12 @@ fn array_buffer_receiver(gc: &mut SemiSpace, this: Value, vm: &mut Vm) -> Option
             return Some(ptr);
         }
     }
-    vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+    vm.set_pending_exception(crate::errors::error_object(
         gc,
-        "TypeError: Method called on incompatible receiver",
-    )));
+        &vm.error_protos,
+        crate::errors::ErrorKind::TypeError,
+        "Method called on incompatible receiver",
+    ));
     None
 }
 
@@ -3216,26 +3331,32 @@ fn typed_array_ctor_impl(
                 Err(()) => return Value::undefined(),
             };
             if offset % size != 0 {
-                vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+                vm.set_pending_exception(crate::errors::error_object(
                     gc,
-                    "RangeError: Start offset of Uint8Array should be a multiple of 1",
-                )));
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::RangeError,
+                    "Start offset of Uint8Array should be a multiple of 1",
+                ));
                 return Value::undefined();
             }
             let buf_len = unsafe { typedarray::RuneArrayBuffer::byte_length(fp) };
             let (new_byte_len, new_len) = if length_arg.is_undefined() {
                 if buf_len % size != 0 {
-                    vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+                    vm.set_pending_exception(crate::errors::error_object(
                         gc,
-                        "RangeError: Attempting to construct an invalid TypedArray",
-                    )));
+                        &vm.error_protos,
+                        crate::errors::ErrorKind::RangeError,
+                        "Attempting to construct an invalid TypedArray",
+                    ));
                     return Value::undefined();
                 }
                 if buf_len < offset {
-                    vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+                    vm.set_pending_exception(crate::errors::error_object(
                         gc,
-                        "RangeError: Start offset is outside the bounds of the buffer",
-                    )));
+                        &vm.error_protos,
+                        crate::errors::ErrorKind::RangeError,
+                        "Start offset is outside the bounds of the buffer",
+                    ));
                     return Value::undefined();
                 }
                 (buf_len - offset, (buf_len - offset) / size)
@@ -3246,10 +3367,12 @@ fn typed_array_ctor_impl(
                 };
                 let nb = new_len * size;
                 if offset + nb > buf_len {
-                    vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+                    vm.set_pending_exception(crate::errors::error_object(
                         gc,
-                        "RangeError: Invalid typed array length",
-                    )));
+                        &vm.error_protos,
+                        crate::errors::ErrorKind::RangeError,
+                        "Invalid typed array length",
+                    ));
                     return Value::undefined();
                 }
                 (nb, new_len)
@@ -3636,10 +3759,12 @@ pub fn typed_array_set_builtin(
         }
     };
     if target_offset < 0.0 {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             gc,
-            "RangeError: Offset is out of bounds",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::RangeError,
+            "Offset is out of bounds",
+        ));
         return Value::undefined();
     }
     let target_offset = target_offset as usize;
@@ -3681,18 +3806,22 @@ pub fn typed_array_set_builtin(
         }
     } else {
         // Primitives are not array-like.
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             gc,
-            "TypeError: Cannot convert undefined or null to object",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Cannot convert undefined or null to object",
+        ));
         return Value::undefined();
     };
 
     if src_len + target_offset > target_len {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             gc,
-            "RangeError: Offset is out of bounds",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::RangeError,
+            "Offset is out of bounds",
+        ));
         return Value::undefined();
     }
     // Snapshot the source values first (spec §23.2.3.26.2 clones the buffer
@@ -3777,10 +3906,12 @@ pub fn typed_array_values_builtin(
         .heap_ptr()
         .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_TYPED_ARRAY });
     if !ok {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             gc,
-            "TypeError: requires a typed array receiver",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "requires a typed array receiver",
+        ));
         return Value::undefined();
     }
     make_iterator_object(
@@ -3803,10 +3934,12 @@ pub fn typed_array_keys_builtin(
         .heap_ptr()
         .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_TYPED_ARRAY });
     if !ok {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             gc,
-            "TypeError: requires a typed array receiver",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "requires a typed array receiver",
+        ));
         return Value::undefined();
     }
     make_iterator_object(
@@ -3829,10 +3962,12 @@ pub fn typed_array_entries_builtin(
         .heap_ptr()
         .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_TYPED_ARRAY });
     if !ok {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             gc,
-            "TypeError: requires a typed array receiver",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "requires a typed array receiver",
+        ));
         return Value::undefined();
     }
     make_iterator_object(
@@ -3851,10 +3986,12 @@ pub fn map_foreach_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: 
     };
     let callback = args.first().copied().unwrap_or(Value::undefined());
     if !is_callable_value(callback) {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             gc,
-            "TypeError: callback is not a function",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "callback is not a function",
+        ));
         return Value::undefined();
     }
     let this_arg = args.get(1).copied().unwrap_or(Value::undefined());
@@ -3923,10 +4060,12 @@ pub fn set_foreach_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: 
     };
     let callback = args.first().copied().unwrap_or(Value::undefined());
     if !is_callable_value(callback) {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             gc,
-            "TypeError: callback is not a function",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "callback is not a function",
+        ));
         return Value::undefined();
     }
     let this_arg = args.get(1).copied().unwrap_or(Value::undefined());
@@ -4005,10 +4144,12 @@ fn process_collection_result(
     result: Value,
 ) -> Result<bool, ()> {
     if !result.is_heap_object() {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             gc,
-            "TypeError: Iterator result is not an object",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Iterator result is not an object",
+        ));
         return Err(());
     }
     let done = load_property_recursive(result, vm.done_key, None, gc).to_bool();
@@ -4020,10 +4161,12 @@ fn process_collection_result(
         // §27.1.1.1 step 10.b: each iterator value must be an Object (the
         // [key, value] pair); a Set adds the raw value instead.
         if !is_object_value(value) {
-            vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            vm.set_pending_exception(crate::errors::error_object(
                 gc,
-                "TypeError: Iterator value is not an object",
-            )));
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Iterator value is not an object",
+            ));
             return Err(());
         }
         let k = load_property_recursive(value, Value::smi(0), None, gc);
@@ -4049,10 +4192,12 @@ pub(crate) fn fill_collection_from_iterator(
     let mut collection = vm.stack[collection_idx];
     let mut iterator = vm.stack[iterator_idx];
     if !iterator.is_heap_object() {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             gc,
-            "TypeError: value is not iterable",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "value is not iterable",
+        ));
         return FillOutcome::Threw;
     }
     let next = load_property_recursive(iterator, vm.next_key, Some(vm.function_prototype), gc);
@@ -4066,10 +4211,12 @@ pub(crate) fn fill_collection_from_iterator(
                 }
                 r
             } else {
-                vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+                vm.set_pending_exception(crate::errors::error_object(
                     gc,
-                    "TypeError: iterator.next is not a function",
-                )));
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "iterator.next is not a function",
+                ));
                 return FillOutcome::Threw;
             };
             collection = vm.stack[collection_idx];
@@ -4095,10 +4242,12 @@ pub(crate) fn fill_collection_from_iterator(
         vm.push_callback_call(gc, next, iterator, vec![]);
         FillOutcome::Pending
     } else {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             gc,
-            "TypeError: iterator.next is not a function",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "iterator.next is not a function",
+        ));
         FillOutcome::Threw
     }
 }
@@ -4164,17 +4313,21 @@ fn fill_collection_from_iterable(
     let method = match get_iter_method(vm, gc, iterable) {
         SymbolMethodResult::Found(m) => m,
         SymbolMethodResult::NotCallable => {
-            vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            vm.set_pending_exception(crate::errors::error_object(
                 gc,
-                "TypeError: value[Symbol.iterator] is not callable",
-            )));
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "value[Symbol.iterator] is not callable",
+            ));
             return FillOutcome::Threw;
         }
         SymbolMethodResult::NotFound => {
-            vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            vm.set_pending_exception(crate::errors::error_object(
                 gc,
-                "TypeError: value is not iterable",
-            )));
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "value is not iterable",
+            ));
             return FillOutcome::Threw;
         }
     };
@@ -4187,10 +4340,12 @@ fn fill_collection_from_iterable(
             }
             r
         } else {
-            vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            vm.set_pending_exception(crate::errors::error_object(
                 gc,
-                "TypeError: value is not iterable",
-            )));
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "value is not iterable",
+            ));
             return FillOutcome::Threw;
         };
         vm.stack.push(iterator);
@@ -4213,10 +4368,12 @@ fn fill_collection_from_iterable(
         vm.push_callback_call(gc, method, iterable, vec![]);
         FillOutcome::Pending
     } else {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             gc,
-            "TypeError: value[Symbol.iterator] is not callable",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "value[Symbol.iterator] is not callable",
+        ));
         FillOutcome::Threw
     }
 }
@@ -4259,10 +4416,12 @@ fn dispatch_symbol_method(
                         SYM_SPLIT => "@@split",
                         _ => "@@method",
                     };
-                    vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+                    vm.set_pending_exception(crate::errors::error_object(
                         gc,
-                        &format!("TypeError: {name} method called on an object with a non-callable @@method property"),
-                    )));
+                        &vm.error_protos,
+                        crate::errors::ErrorKind::TypeError,
+                        &format!("{name} method called on an object with a non-callable @@method property"),
+                    ));
                     Err(())
                 }
                 SymbolMethodResult::NotFound => Ok(Some(())),
@@ -4329,10 +4488,12 @@ enum ErrorMessageToString {
 /// (§7.1.1 ToPrimitive with string hint).
 fn to_string_for_error(val: Value, gc: &mut SemiSpace, vm: &mut Vm) -> ErrorMessageToString {
     if val.is_symbol() {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             gc,
-            "TypeError: Cannot convert a Symbol value to a string",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Cannot convert a Symbol value to a string",
+        ));
         return ErrorMessageToString::Throw;
     }
     if !val.is_heap_object() {
@@ -4386,10 +4547,12 @@ fn to_string_for_error(val: Value, gc: &mut SemiSpace, vm: &mut Vm) -> ErrorMess
         }
         vm.stack.truncate(depth);
         if matches!(outcome, ErrorMessageToString::Throw) && vm.pending_exception.is_none() {
-            vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+            vm.set_pending_exception(crate::errors::error_object(
                 gc,
-                "TypeError: Cannot convert object to primitive value",
-            )));
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Cannot convert object to primitive value",
+            ));
         }
         return outcome;
     }
@@ -4590,10 +4753,12 @@ pub fn error_prototype_to_string(
     vm: &mut Vm,
 ) -> Value {
     if !this.is_heap_object() {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             gc,
-            "TypeError: Error.prototype.toString requires that 'this' be an Object",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Error.prototype.toString requires that 'this' be an Object",
+        ));
         return Value::undefined();
     }
     // Push `this` onto the operand stack: register_roots re-forwards it on
@@ -4718,10 +4883,12 @@ pub fn object_prototype_has_own_property(
     vm: &mut Vm,
 ) -> Value {
     if this.is_undefined() || this.is_null() {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             gc,
-            "TypeError: Cannot convert undefined or null to object",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Cannot convert undefined or null to object",
+        ));
         return Value::undefined();
     }
     let key = args.first().copied().unwrap_or(Value::undefined());
@@ -4782,10 +4949,12 @@ pub fn object_prototype_property_is_enumerable(
     vm: &mut Vm,
 ) -> Value {
     if this.is_undefined() || this.is_null() {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             gc,
-            "TypeError: Cannot convert undefined or null to object",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Cannot convert undefined or null to object",
+        ));
         return Value::undefined();
     }
     let key = args.first().copied().unwrap_or(Value::undefined());
@@ -4842,10 +5011,12 @@ pub fn object_prototype_value_of(
     vm: &mut Vm,
 ) -> Value {
     if !this.is_heap_object() {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             gc,
-            "TypeError: Object.prototype.valueOf called on non-object",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Object.prototype.valueOf called on non-object",
+        ));
         return Value::undefined();
     }
     this
@@ -4860,10 +5031,12 @@ pub fn object_get_prototype_of(
 ) -> Value {
     let obj = args.first().copied().unwrap_or(Value::undefined());
     let Some(ptr) = obj.heap_ptr() else {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             gc,
-            "TypeError: Object.getPrototypeOf called on non-object",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Object.getPrototypeOf called on non-object",
+        ));
         return Value::undefined();
     };
     let proto = unsafe { JSObject::prototype(ptr as *mut JSObject) };
@@ -4882,10 +5055,12 @@ pub fn object_prototype_is_prototype_of(
     vm: &mut Vm,
 ) -> Value {
     let Some(this_ptr) = this.heap_ptr() else {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             gc,
-            "TypeError: Object.prototype.isPrototypeOf called on non-object",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Object.prototype.isPrototypeOf called on non-object",
+        ));
         return Value::undefined();
     };
     let target = args.first().copied().unwrap_or(Value::undefined());
@@ -4992,8 +5167,13 @@ fn object_own_entries(
     vm: &mut Vm,
 ) -> Result<Vec<(String, Value)>, ()> {
     if val.is_null() || val.is_undefined() {
-        let msg = crate::vm::heap_string(gc, "TypeError: Object.keys called on null or undefined");
-        vm.set_pending_exception(Value::from_heap_ptr(msg));
+        let msg = crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Object.keys called on null or undefined",
+        );
+        vm.set_pending_exception(msg);
         return Err(());
     }
     if let Some(ptr) = val.heap_ptr() {
@@ -5140,9 +5320,12 @@ pub fn object_assign(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut 
     // Step 1: ToObject(target) — null/undefined throw; primitives become
     // fresh empty objects (engine ToObject-lite).
     let target_obj = if target.is_null() || target.is_undefined() {
-        let msg =
-            crate::vm::heap_string(gc, "TypeError: Cannot convert undefined or null to object");
-        vm.set_pending_exception(Value::from_heap_ptr(msg));
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Cannot convert undefined or null to object",
+        ));
         return Value::undefined();
     } else if target.heap_ptr().is_none() {
         let shape = Shape::empty();
@@ -5222,11 +5405,12 @@ pub fn object_get_own_property_names(
 pub fn object_from_entries(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let iterable = args.first().copied().unwrap_or(Value::undefined());
     if iterable.is_null() || iterable.is_undefined() {
-        let msg = crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             gc,
-            "TypeError: Object.fromEntries called on null or undefined",
-        );
-        vm.set_pending_exception(Value::from_heap_ptr(msg));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Object.fromEntries called on null or undefined",
+        ));
         return Value::undefined();
     }
     // Step 2: fresh ordinary object
@@ -5283,9 +5467,12 @@ pub fn object_from_entries(gc: &mut SemiSpace, _this: Value, args: &[Value], vm:
 pub fn object_has_own(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let target = args.first().copied().unwrap_or(Value::undefined());
     if target.is_null() || target.is_undefined() {
-        let msg =
-            crate::vm::heap_string(gc, "TypeError: Cannot convert undefined or null to object");
-        vm.set_pending_exception(Value::from_heap_ptr(msg));
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Cannot convert undefined or null to object",
+        ));
         return Value::undefined();
     }
     let key = args.get(1).copied().unwrap_or(Value::undefined());
@@ -5337,9 +5524,12 @@ pub fn object_set_prototype_of(
     let proto = args.get(1).copied().unwrap_or(Value::undefined());
     // Step 1: RequireObjectCoercible(obj)
     if obj.is_null() || obj.is_undefined() {
-        let msg =
-            crate::vm::heap_string(gc, "TypeError: Cannot convert undefined or null to object");
-        vm.set_pending_exception(Value::from_heap_ptr(msg));
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Cannot convert undefined or null to object",
+        ));
         return Value::undefined();
     }
     // Step 2: proto must be Object or null
@@ -5352,8 +5542,12 @@ pub fn object_set_prototype_of(
             })
             .unwrap_or(false);
     if !proto_ok {
-        let msg = crate::vm::heap_string(gc, "TypeError: prototype must be an Object or null");
-        vm.set_pending_exception(Value::from_heap_ptr(msg));
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "prototype must be an Object or null",
+        ));
         return Value::undefined();
     }
     // Step 3: non-object obj returned as-is
@@ -5393,9 +5587,12 @@ pub fn object_create_builtin(
             }
         } else {
             // proto is not an object and not null — TypeError per §20.1.2.2
-            let msg =
-                crate::vm::heap_string(gc, "TypeError: Object.create expects an object or null");
-            vm.set_pending_exception(Value::from_heap_ptr(msg));
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Object.create expects an object or null",
+            ));
         }
     }
     Value::from_heap_ptr(ptr as *mut u8)
@@ -7496,10 +7693,11 @@ pub fn json_stringify(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
             }
             if tag == TAG_ARRAY {
                 if stack.contains(&ptr) {
-                    let err = make_error(
+                    let err = crate::errors::error_object(
                         gc,
                         &vm.error_protos,
-                        "TypeError: Converting circular structure to JSON",
+                        crate::errors::ErrorKind::TypeError,
+                        "Converting circular structure to JSON",
                     );
                     vm.set_pending_exception(err);
                     return Err(());
@@ -7518,11 +7716,12 @@ pub fn json_stringify(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
             }
             if tag == TAG_OBJECT {
                 if stack.contains(&ptr) {
-                    let msg = HeapString::allocate(
+                    vm.set_pending_exception(crate::errors::error_object(
                         gc,
-                        "TypeError: Converting circular structure to JSON",
-                    );
-                    vm.set_pending_exception(Value::from_heap_ptr(msg as *mut u8));
+                        &vm.error_protos,
+                        crate::errors::ErrorKind::TypeError,
+                        "Converting circular structure to JSON",
+                    ));
                     return Err(());
                 }
                 stack.push(ptr);
@@ -7612,11 +7811,12 @@ pub fn apply_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
         .map(|ptr| unsafe { (*(ptr as *const GcHeader)).tag() } == rune_core::gc::TAG_FUNC)
         .unwrap_or(false);
     if !(target_smi.is_some() || is_js_func) {
-        let msg = crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             gc,
-            "TypeError: Function.prototype.apply called on non-function",
-        );
-        vm.set_pending_exception(Value::from_heap_ptr(msg));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Function.prototype.apply called on non-function",
+        ));
         return Value::undefined();
     }
 
@@ -7629,11 +7829,12 @@ pub fn apply_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
                 .map(|i| crate::vm::array_like_index(arg_array, i).unwrap_or(Value::undefined()))
                 .collect(),
             None => {
-                let msg = crate::vm::heap_string(
+                vm.set_pending_exception(crate::errors::error_object(
                     gc,
-                    "TypeError: CreateListFromArrayLike called on non-object",
-                );
-                vm.set_pending_exception(Value::from_heap_ptr(msg));
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "CreateListFromArrayLike called on non-object",
+                ));
                 return Value::undefined();
             }
         }
@@ -7705,10 +7906,12 @@ pub fn array_slice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
 /// Array.prototype.reverse — §23.1.3.31, reverses elements in place and returns this.
 pub fn array_reverse(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
     let Some(length) = crate::vm::array_like_length(this) else {
-        vm.set_pending_exception(Value::from_heap_ptr(crate::vm::heap_string(
+        vm.set_pending_exception(crate::errors::error_object(
             gc,
-            "TypeError: Array.prototype.reverse called on null or undefined",
-        )));
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Array.prototype.reverse called on null or undefined",
+        ));
         return Value::undefined();
     };
     if length <= 1 {
@@ -8468,9 +8671,12 @@ pub fn array_reduce(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
     let has_initial = args.len() > 1;
     let initial = args.get(1).copied().unwrap_or(Value::undefined());
     if !has_initial && length == 0 {
-        let msg =
-            HeapString::allocate(gc, "TypeError: reduce of empty array with no initial value");
-        vm.set_pending_exception(Value::from_heap_ptr(msg as *mut u8));
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "reduce of empty array with no initial value",
+        ));
         return Value::undefined();
     }
     let start_index;
@@ -8639,8 +8845,12 @@ pub fn array_flat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
 /// Array.prototype.sort(compareFn) — default lexicographic sort (no comparator). Throws TypeError if comparator is passed.
 pub fn array_sort(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if args.first().filter(|c| !c.is_undefined()).is_some() {
-        let msg = HeapString::allocate(gc, "TypeError: comparator sort is not yet supported");
-        vm.set_pending_exception(Value::from_heap_ptr(msg as *mut u8));
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "comparator sort is not yet supported",
+        ));
         return Value::undefined();
     }
     if !require_object_coercible(this, vm, gc) {
@@ -10583,16 +10793,11 @@ fn value_to_debug(v: Value) -> String {
 }
 
 pub(crate) fn make_error(gc: &mut SemiSpace, protos: &[Value], msg: &str) -> Value {
-    // F2 legacy shim: `msg` still carries the old `"Kind: rest"` encoding at
-    // most call sites (and no prefix at all for assert failures). The kind is
-    // parsed out for the `name` property, but `message` keeps the FULL
-    // original text — today `e.message` and eval-error rendering both surface
-    // the prefixed text (pinned by test_regexp_constructor_flags_validation),
-    // so splitting the message too would be observable drift. A2 removes the
-    // shim by passing (kind, clean-message) explicitly at each site and
-    // switching rendering to Error.prototype.toString semantics.
-    let (kind, _) = crate::errors::ErrorKind::split_legacy(msg);
-    crate::errors::error_object(gc, protos, kind, msg)
+    // A2: all call sites now pass clean (prefix-free) messages — the legacy
+    // `"Kind: rest"` split stays as a safety net for any missed caller, and
+    // uncaught-error rendering (error_to_string) reattaches the kind name.
+    let (kind, rest) = crate::errors::ErrorKind::split_legacy(msg);
+    crate::errors::error_object(gc, protos, kind, rest)
 }
 
 /// Extract a human-readable error message from an exception Value.
@@ -10661,6 +10866,42 @@ pub fn read_error_name(val: Value) -> Option<String> {
         }
         Some("Error".to_string())
     }
+}
+
+/// Render a thrown value for uncaught-error output, following
+/// Error.prototype.toString (§20.5.3.4): strings render whole; objects
+/// render `name: message` (either part defaulting per spec). Used by the
+/// Context eval-error paths so flipped error objects print with their kind.
+pub fn error_to_string(gc: &mut SemiSpace, val: Value) -> Option<String> {
+    let ptr = val.heap_ptr()?;
+    unsafe {
+        if (*(ptr as *const GcHeader)).tag() == TAG_STRING {
+            return Some(HeapString::to_string(ptr as *mut HeapString));
+        }
+    }
+    // Error.prototype.toString needs name/message reads with proto-chain
+    // lookup (name usually lives on the prototype, message own).
+    let name_key = Value::from_heap_ptr(HeapString::allocate(gc, "name") as *mut u8);
+    let msg_key = Value::from_heap_ptr(HeapString::allocate(gc, "message") as *mut u8);
+    let name_val = load_property_recursive(val, name_key, None, gc);
+    let msg_val = load_property_recursive(val, msg_key, None, gc);
+    let name_str = if name_val.is_undefined() {
+        "Error".to_string()
+    } else {
+        value_to_js_string(name_val)
+    };
+    let msg_str = if msg_val.is_undefined() {
+        String::new()
+    } else {
+        value_to_js_string(msg_val)
+    };
+    Some(if name_str.is_empty() {
+        msg_str
+    } else if msg_str.is_empty() {
+        name_str
+    } else {
+        format!("{name_str}: {msg_str}")
+    })
 }
 
 /// assert.sameValue(actual, expected, description) — uses SameValue semantics.

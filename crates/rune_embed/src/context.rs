@@ -109,7 +109,7 @@ impl Context {
         let prog_ref: &BytecodeProgram = &self.programs.last().unwrap().as_ref();
 
         self.vm.execute(&mut self.gc, prog_ref).map_err(|v| {
-            let msg = rune_interpreter::builtins::read_error_message(v)
+            let msg = rune_interpreter::builtins::error_to_string(&mut self.gc, v)
                 .unwrap_or_else(|| format!("Uncaught: {v:?}"));
             format!("Uncaught: {msg}")
         })
@@ -121,7 +121,7 @@ impl Context {
         self.programs.push(pinned);
         let prog_ref: &BytecodeProgram = &self.programs.last().unwrap().as_ref();
         self.vm.execute(&mut self.gc, prog_ref).map_err(|v| {
-            let msg = rune_interpreter::builtins::read_error_message(v)
+            let msg = rune_interpreter::builtins::error_to_string(&mut self.gc, v)
                 .unwrap_or_else(|| format!("Uncaught: {v:?}"));
             format!("Uncaught: {msg}")
         })
@@ -221,7 +221,7 @@ impl Context {
         self.vm
             .evaluate_module(&mut self.gc, "<entry>")
             .map_err(|v| {
-                let msg = rune_interpreter::builtins::read_error_message(v)
+                let msg = rune_interpreter::builtins::error_to_string(&mut self.gc, v)
                     .unwrap_or_else(|| format!("Uncaught: {v:?}"));
                 format!("Uncaught: {msg}")
             })?;
@@ -256,7 +256,7 @@ impl Context {
         match self.vm.run_loop(&mut self.gc) {
             rune_interpreter::vm::Exit::Return(v) => Ok(v),
             rune_interpreter::vm::Exit::Throw(v) => {
-                Err(rune_interpreter::builtins::read_error_message(v)
+                Err(rune_interpreter::builtins::error_to_string(&mut self.gc, v)
                     .unwrap_or_else(|| format!("Uncaught: {v:?}")))
             }
             _ => Ok(Value::undefined()),

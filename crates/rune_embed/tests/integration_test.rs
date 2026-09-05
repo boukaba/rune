@@ -936,6 +936,38 @@ fn test_null_undefined_property_write_throws() {
 }
 
 #[test]
+fn test_error_objects_real() {
+    // A2: engine-raised errors are real Error objects — name/message own
+    // props, instanceof, string coercion — not legacy strings.
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval("var n = ''; try { null.x; } catch (e) { n = e.name; } n === 'TypeError';")
+        .unwrap();
+    assert!(r.to_bool(), "caught error name is TypeError");
+    let r = ctx
+        .eval("var ok = false; try { null.x; } catch (e) { ok = e instanceof TypeError; } ok;")
+        .unwrap();
+    assert!(r.to_bool(), "caught error instanceof TypeError");
+    let r = ctx
+        .eval("var s = ''; try { null.x; } catch (e) { s = String(e); } s === 'TypeError: Cannot read properties of null (reading \'x\')';")
+        .unwrap();
+    assert!(r.to_bool(), "String(err) uses name: message");
+    // Throw paths are catchable in-frame with identity intact.
+    let r = ctx
+        .eval(
+            "var ok = false; try { new Symbol(); } catch (e) { ok = e instanceof TypeError; } ok;",
+        )
+        .unwrap();
+    assert!(r.to_bool(), "new Symbol() TypeError catchable");
+    // Uncaught rendering keeps the kind.
+    let err = ctx.eval("null.y;").expect_err("should throw");
+    assert!(
+        err.contains("TypeError: Cannot read properties of null"),
+        "unexpected uncaught text: {err}"
+    );
+}
+
+#[test]
 fn test_neg_zero_preserved() {
     let mut ctx = Context::new_small();
     let r = ctx.eval("1 / -0").unwrap();
@@ -10084,16 +10116,9 @@ fn test_date_edge_cases() {
     assert!(r.as_float64().unwrap().is_nan());
     // toISOString on invalid throws
     let r = ctx
-        .eval("var x; try { new Date('bad').toISOString(); } catch (e) { x = e; } x")
+        .eval("var x = ''; try { new Date('bad').toISOString(); } catch (e) { x = e.name; } x === 'RangeError';")
         .unwrap();
-    assert_eq!(
-        unsafe {
-            rune_core::string::HeapString::to_string(
-                r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
-            )
-        },
-        "RangeError: Invalid time value"
-    );
+    assert!(r.to_bool(), "invalid toISOString throws RangeError");
     // coercion: Date is a value in comparisons/arithmetic via [[DateValue]]
     let r = ctx.eval("new Date(0) - new Date(0);").unwrap();
     assert_eq!(r.as_smi(), Some(0));
@@ -11280,16 +11305,15 @@ fn test_error_family_plain_call() {
 #[test]
 fn test_error_family_symbol_message_throws() {
     let mut ctx = Context::new_small();
-    let s = eval_str(
-        &mut ctx,
-        r#"var r; try { new TypeError(Symbol("s")); } catch (e) { r = e; } r;"#,
-    );
-    assert_eq!(s, "TypeError: Cannot convert a Symbol value to a string");
-    let s2 = eval_str(
-        &mut ctx,
-        r#"var r; try { new Error(Symbol("s")); } catch (e) { r = e; } r;"#,
-    );
-    assert_eq!(s2, "TypeError: Cannot convert a Symbol value to a string");
+    // A2: the ToString(Symbol) failure surfaces as a real TypeError object.
+    let r = ctx
+        .eval(r#"var n = ''; try { new TypeError(Symbol("s")); } catch (e) { n = e.name; } n === 'TypeError';"#)
+        .unwrap();
+    assert!(r.to_bool());
+    let r = ctx
+        .eval(r#"var n = ''; try { new Error(Symbol("s")); } catch (e) { n = e.name; } n === 'TypeError';"#)
+        .unwrap();
+    assert!(r.to_bool());
 }
 
 #[test]

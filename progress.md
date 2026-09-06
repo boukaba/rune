@@ -46,8 +46,35 @@ paths can't match immediates (no JIT change needed).
   exact, retracted in A2.)
 - 860 workspace / 0 failed; clippy/fmt/no-default/x86 clean.
 
-## B1c DONE — reduceRight + findLast/findLastIndex (2026-09-06)
+## B1d DONE — Array ctor/from-of/copyWithin/new-methods (2026-09-06)
 
+Fourth B1 sub-slice (constructor + small methods; from/sort split out):
+
+- **Array constructor**: `array_constructor` builtin (0 args → [], single
+  Number → ToUint32-checked length form with RangeError, else elements;
+  >1M lengths allocate empty + set_length, mirroring `length=`) + New/Call
+  arms + `array_constructor` Vm field (rooted) + wrapper statics (from
+  later, of now, length 1, name). Plain `Array()` ≡ new.
+- **`Array.of`** (trivial collect) + **copyWithin** (spec-order abrupt
+  checks via throwing clamp + length-symbol check, HasProperty presence
+  with delete-on-missing incl. non-configurable throw, snapshotted for
+  overlap) + **toSpliced** (self-contained index math) + **`with`**
+  (negative indices, RangeError on OOB). Shared
+  `clamp_index_throwing`/`checked_array_length` helpers.
+- **Parser**: `of` allowed as a property name after `.` in all three
+  member-tail lists (`Array.of`/`o.of` previously a parse error).
+- **Gains (+131 Array, ZERO losses)**: 1283→1412 (plus the 2 known 1M
+  TIMEOUT flakes dancing). No new failures vs B1c.
+- **Tests**: `test_array_ctor_copywithin_tospliced_with` (forms, RangeErrors,
+  non-mutation, negative with). **869 workspace / 0**; clippy/fmt/
+  no-default/x86 clean.
+- **Deferred with measurements**: `Array.from` → B1f (needs iterable drain
+  + mapfn + ctor dispatch); sort comparator + toSorted → B1e; copyWithin
+  getter/setter/has-trap dispatch (~10 tests, needs a CopyWithin machine);
+  `length=` beyond-capacity reads (pre-existing); hex fromIndex (ToNumber
+  gap).
+
+## B1c DONE — reduceRight + findLast/findLastIndex (2026-09-06)
 Third B1 sub-slice: backward iteration mirrors on the array machine:
 
 - **New kinds + builtins**: `ReduceRight/FindLast/FindLastIndex` (registered

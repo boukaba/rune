@@ -775,6 +775,7 @@ pub struct Vm {
     /// Symbol constructor object (`Symbol` global) with well-known symbol statics.
     pub symbol_ctor: Value,
     pub map_constructor: Value,
+    pub array_constructor: Value,
     pub set_constructor: Value,
     pub map_prototype: Value,
     pub set_prototype: Value,
@@ -968,6 +969,7 @@ impl Vm {
             regexp_prototype: Value::undefined(),
             symbol_ctor: Value::undefined(),
             map_constructor: Value::undefined(),
+            array_constructor: Value::undefined(),
             set_constructor: Value::undefined(),
             map_prototype: Value::undefined(),
             set_prototype: Value::undefined(),
@@ -1202,6 +1204,15 @@ impl Vm {
             if let Some(sp) = splice_handle {
                 proto_entries.push(("splice", sp));
             }
+            if let Some(h) = find_handle(&self.builtins, "Array_prototype_copyWithin") {
+                proto_entries.push(("copyWithin", h));
+            }
+            if let Some(h) = find_handle(&self.builtins, "Array_prototype_toSpliced") {
+                proto_entries.push(("toSpliced", h));
+            }
+            if let Some(h) = find_handle(&self.builtins, "Array_prototype_with") {
+                proto_entries.push(("with", h));
+            }
             if let Some(sh) = find_handle(&self.builtins, "Array_prototype_sort") {
                 proto_entries.push(("sort", sh));
             }
@@ -1326,8 +1337,21 @@ impl Vm {
                 .get("Array.prototype")
                 .copied()
                 .unwrap_or(Value::undefined());
-            let arr_ctor = make_object(gc, &[("isArray", handle), ("prototype", arr_proto_val)]);
+            let len_val = Value::smi(1);
+            let name_val = Value::from_heap_ptr(HeapString::allocate(gc, "Array") as *mut u8);
+            let mut ctor_entries: Vec<(&str, Value)> =
+                vec![("isArray", handle), ("prototype", arr_proto_val)];
+            if let Some(h) = find_handle(&self.builtins, "Array_from") {
+                ctor_entries.push(("from", h));
+            }
+            if let Some(h) = find_handle(&self.builtins, "Array_of") {
+                ctor_entries.push(("of", h));
+            }
+            ctor_entries.push(("length", len_val));
+            ctor_entries.push(("name", name_val));
+            let arr_ctor = make_object(gc, &ctor_entries);
             self.builtin_wrappers.insert("Array".to_string(), arr_ctor);
+            self.array_constructor = arr_ctor;
         }
 
         // String constructor with .fromCharCode() and .prototype
@@ -2806,6 +2830,7 @@ impl Vm {
         gc.push_root(&self.number_constructor as *const Value as *mut u64);
         gc.push_root(&self.promise_constructor as *const Value as *mut u64);
         gc.push_root(&self.map_constructor as *const Value as *mut u64);
+        gc.push_root(&self.array_constructor as *const Value as *mut u64);
         gc.push_root(&self.set_constructor as *const Value as *mut u64);
         gc.push_root(&self.map_prototype as *const Value as *mut u64);
         gc.push_root(&self.set_prototype as *const Value as *mut u64);
@@ -7526,6 +7551,21 @@ impl Vm {
                         self.frames[fi].pc = pc + 1;
                         continue;
                     }
+                    // B1d: Array constructor [[Construct]]: 0 args → [],
+                    // single Number → length form, else elements.
+                    if constructor == self.array_constructor {
+                        let result =
+                            crate::builtins::array_constructor(gc, Value::undefined(), &args, self);
+                        if let Some(exc) = self.pending_exception.take() {
+                            if let Some(exit) = self.handle_throw(gc, exc) {
+                                return exit;
+                            }
+                            continue;
+                        }
+                        self.push(result);
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    }
                     // Date constructor [[Construct]]: allocate the tagged
                     // RuneDate and compute its time value from the arguments.
                     if constructor == self.date_constructor {
@@ -7947,6 +7987,21 @@ impl Vm {
                     // Number constructor called as a function (not new)
                     if callee == self.number_constructor {
                         let result = number_builtin(gc, this, &args, self);
+                        if let Some(exc) = self.pending_exception.take() {
+                            if let Some(exit) = self.handle_throw(gc, exc) {
+                                return exit;
+                            }
+                            continue;
+                        }
+                        self.push(result);
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    }
+
+                    // B1d: Array() called as a function behaves as new Array().
+                    if callee == self.array_constructor {
+                        let result =
+                            crate::builtins::array_constructor(gc, Value::undefined(), &args, self);
                         if let Some(exc) = self.pending_exception.take() {
                             if let Some(exit) = self.handle_throw(gc, exc) {
                                 return exit;

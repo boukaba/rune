@@ -6441,13 +6441,318 @@ pub fn eval_builtin(_gc: &mut SemiSpace, _this: Value, _args: &[Value], _vm: &mu
 /// Array.isArray(arg) — returns true if arg is a dense array.
 pub fn array_is_array(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     let val = args.first().copied().unwrap_or(Value::undefined());
-    if let Some(ptr) = val.heap_ptr() {
-        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-        if tag == TAG_ARRAY {
-            return Value::boolean(true);
+    Value::boolean(
+        val.heap_ptr()
+            .is_some_and(|ptr| unsafe { (*(ptr as *const GcHeader)).tag() == TAG_ARRAY }),
+    )
+}
+
+/// Array constructor body, shared by `new Array()` and plain `Array()` calls
+/// (§22.1.1.1): no args → []; single Number arg → length form (ToUint32 must
+/// round-trip, else RangeError); otherwise the args are the elements.
+/// Dense arrays cannot represent very large sparse tails: lengths above
+/// 1M allocate empty with the length set (mirrors `length=` assignment).
+pub fn array_constructor(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if args.is_empty() {
+        return build_array(gc, &[], vm);
+    }
+    if args.len() == 1 {
+        let n = args[0];
+        let is_number = n.as_smi().is_some() || n.as_float64().is_some();
+        if is_number {
+            let num = n
+                .as_smi()
+                .map(|v| v as f64)
+                .or_else(|| n.as_float64())
+                .unwrap();
+            let uint = num as u32 as f64;
+            if !(0.0..=4294967295.0).contains(&num) || uint != num {
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::RangeError,
+                    "Invalid array length",
+                ));
+                return Value::undefined();
+            }
+            let len = uint as usize;
+            if len > 1_000_000 {
+                let arr = RuneArray::allocate(gc, &[]);
+                wire_array_proto(gc, vm, arr);
+                unsafe {
+                    RuneArray::set_length(arr, len as u32);
+                }
+                return Value::from_heap_ptr(arr as *mut u8);
+            }
+            let elems = vec![Value::undefined(); len];
+            return build_array(gc, &elems, vm);
         }
     }
-    Value::boolean(false)
+    build_array(gc, args, vm)
+}
+
+/// Wire Array.prototype onto a freshly allocated dense array (shared with
+/// build_array for paths that allocate directly).
+fn wire_array_proto(_gc: &mut SemiSpace, vm: &Vm, arr: *mut RuneArray) {
+    unsafe {
+        let ptr = arr as *mut u8;
+        *(ptr.add(8) as *mut *const rune_core::shape::Shape) =
+            *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
+        if let Some(proto) = vm.array_prototype.heap_ptr() {
+            *(ptr.add(24) as *mut *mut u8) = proto;
+        }
+    }
+}
+
+/// Array.of(...items) — collects arguments into a fresh array (§22.1.3.1).
+pub fn array_of(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    // Generic over `this` ctor in spec; engine always builds dense arrays.
+    build_array(gc, args, vm)
+}
+
+/// Array.prototype.copyWithin(target, start, end?) — in-place block copy
+/// (§23.1.3.4). Missing source indices DELETE the target (throwing on
+/// non-configurable own targets); symbol index/length arguments throw.
+/// Element reads are sync data-path (getter dispatch is future work, as in
+/// B1a length getters). The source range is snapshotted first, which is
+/// overlap-safe by construction.
+pub fn array_copy_within(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let length = match checked_array_length(gc, vm, this) {
+        Ok(len) => len as i64,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    // Spec order: target, then start, then end.
+    let to = match clamp_index_throwing(gc, vm, args.first().copied(), length, 0) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let from = match clamp_index_throwing(gc, vm, args.get(1).copied(), length, 0) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let end = match clamp_index_throwing(gc, vm, args.get(2).copied(), length, length) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let count = (end - from).max(0).min(length - to) as usize;
+    let (to, from) = (to as usize, from as usize);
+    // Presence-aware snapshot: None marks a hole (deletes the target).
+    let snapshot: Vec<Option<Value>> = (0..count)
+        .map(|k| {
+            let key = Value::smi((from + k) as i32);
+            if crate::vm::has_property(this, key, None) {
+                Some(
+                    crate::vm::array_like_index(this, (from + k) as u32)
+                        .unwrap_or(Value::undefined()),
+                )
+            } else {
+                None
+            }
+        })
+        .collect();
+    for (k, slot) in snapshot.into_iter().enumerate() {
+        let to_key = Value::smi((to + k) as i32);
+        match slot {
+            Some(v) => {
+                crate::vm::do_store_property(this, to_key, v, gc, vm);
+            }
+            None => {
+                // DeletePropertyOrThrow on the target index.
+                if let Some(ptr) = this.heap_ptr() {
+                    let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+                    if tag == TAG_OBJECT {
+                        if let Some(key) = crate::vm::value_to_prop_key(to_key) {
+                            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                            if let Some(s) = shape.lookup(&key) {
+                                if shape.attr_at(s) & rune_core::shape::ATTR_CONFIGURABLE == 0 {
+                                    vm.set_pending_exception(crate::errors::error_object(
+                                        gc,
+                                        &vm.error_protos,
+                                        crate::errors::ErrorKind::TypeError,
+                                        "Cannot delete a non-configurable property",
+                                    ));
+                                    return Value::undefined();
+                                }
+                                unsafe { JSObject::remove_property(ptr as *mut JSObject, &key) };
+                            }
+                        }
+                    } else if tag == TAG_ARRAY {
+                        // Dense arrays have no holes: clear to undefined.
+                        unsafe {
+                            RuneArray::set_element(
+                                ptr as *mut RuneArray,
+                                to + k,
+                                Value::undefined(),
+                            )
+                        };
+                    }
+                }
+            }
+        }
+    }
+    this
+}
+
+/// Clamp an index argument per ToIntegerOrInfinity + relative clamping:
+/// negative counts from len, out-of-range clamps to [0, len]. `def` is the
+/// default when the argument is missing.
+fn clamp_index_arg(arg: Option<Value>, len: i64, def: i64) -> i64 {
+    let Some(v) = arg else { return def };
+    let n = to_integer_or_infinity(v);
+    if n.is_infinite() {
+        return if n > 0.0 { len } else { 0 };
+    }
+    let n = n as i64;
+    if n < 0 { (len + n).max(0) } else { n.min(len) }
+}
+
+/// Throwing clamp (B1d): symbols fail ToIntegerOrInfinity with TypeError.
+/// Used by copyWithin/toSpliced/with index arguments (return-abrupt-from-*
+/// tests). Value-coercion via valueOf stays a sync gap (0 fallback).
+fn clamp_index_throwing(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    arg: Option<Value>,
+    len: i64,
+    def: i64,
+) -> Result<i64, Value> {
+    if let Some(v) = arg {
+        if v.is_symbol() {
+            return Err(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Cannot convert a Symbol value to a number",
+            ));
+        }
+    }
+    Ok(clamp_index_arg(arg, len, def))
+}
+
+/// LengthOfArrayLike with the symbol abrupt (B1d): a symbol `length`
+/// throws via ToNumber. Ok(length) or Err(error value to raise).
+fn checked_array_length(gc: &mut SemiSpace, vm: &mut Vm, this: Value) -> Result<u32, Value> {
+    if let Some(ptr) = this.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_OBJECT {
+            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+            if let Some(slot) = shape.lookup(&PropertyKey::from_string("length")) {
+                let lv = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+                if lv.is_symbol() {
+                    return Err(crate::errors::error_object(
+                        gc,
+                        &vm.error_protos,
+                        crate::errors::ErrorKind::TypeError,
+                        "Cannot convert a Symbol value to a number",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(crate::vm::array_like_length(this).unwrap_or(0))
+}
+/// Array.prototype.toSpliced(start, deleteCount, ...items) — non-mutating
+/// splice (§23.1.3.33 lite): copies the receiver, applies splice index
+/// math on the copy, returns it. Holes copy as undefined (dense model).
+pub fn array_to_spliced(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let len = match checked_array_length(gc, vm, this) {
+        Ok(len) => len as i64,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let start = match clamp_index_throwing(gc, vm, args.first().copied(), len, 0) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let delete = if args.len() < 2 {
+        len - start
+    } else if args[1].is_symbol() {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Cannot convert a Symbol value to a number",
+        ));
+        return Value::undefined();
+    } else {
+        let n = to_integer_or_infinity(args[1]);
+        (n.max(0.0) as i64).min(len - start)
+    };
+    let items: &[Value] = if args.len() > 2 { &args[2..] } else { &[] };
+    let mut out: Vec<Value> = Vec::with_capacity(len as usize + items.len());
+    for i in 0..start as usize {
+        out.push(crate::vm::array_like_index(this, i as u32).unwrap_or(Value::undefined()));
+    }
+    out.extend_from_slice(items);
+    for i in (start + delete) as usize..len as usize {
+        out.push(crate::vm::array_like_index(this, i as u32).unwrap_or(Value::undefined()));
+    }
+    build_array(gc, &out, vm)
+}
+
+/// Array.prototype.with(index, value) — copy with one element replaced
+/// (§23.1.3.36 lite). Negative index counts from the end; out of range
+/// (incl. -0?) throws RangeError.
+pub fn array_with(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let len = match checked_array_length(gc, vm, this) {
+        Ok(len) => len as usize,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let value = args.get(1).copied().unwrap_or(Value::undefined());
+    let rel = args.first().copied().unwrap_or(Value::undefined());
+    if rel.is_symbol() {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Cannot convert a Symbol value to a number",
+        ));
+        return Value::undefined();
+    }
+    let idx = to_integer_or_infinity(rel) as i64;
+    let actual = if idx < 0 { len as i64 + idx } else { idx };
+    if actual < 0 || actual >= len as i64 {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::RangeError,
+            "Invalid array index",
+        ));
+        return Value::undefined();
+    }
+    let mut elems: Vec<Value> = (0..len)
+        .map(|i| crate::vm::array_like_index(this, i as u32).unwrap_or(Value::undefined()))
+        .collect();
+    elems[actual as usize] = value;
+    build_array(gc, &elems, vm)
 }
 
 /// Array.prototype.push(value) — pushes value to the array, returns new length.
@@ -11754,6 +12059,31 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 2,
             name: "Array_prototype_splice",
             func: array_splice,
+        },
+        Builtin {
+            length: 2,
+            name: "Array_prototype_copyWithin",
+            func: array_copy_within,
+        },
+        Builtin {
+            length: 2,
+            name: "Array_prototype_toSpliced",
+            func: array_to_spliced,
+        },
+        Builtin {
+            length: 2,
+            name: "Array_prototype_with",
+            func: array_with,
+        },
+        Builtin {
+            length: 1,
+            name: "Array_of",
+            func: array_of,
+        },
+        Builtin {
+            length: 1,
+            name: "Array_constructor",
+            func: array_constructor,
         },
         Builtin {
             length: 2,

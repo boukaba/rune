@@ -2631,6 +2631,9 @@ impl Parser {
                     | TokenKind::Break
                     | TokenKind::Continue
                     | TokenKind::Super
+                    // B1d: `of` is a contextual keyword (for-of) but a valid
+                    // property name (`Array.of`, `o.of`).
+                    | TokenKind::Of
             )
         {
             let t = self.tok.clone();
@@ -2934,6 +2937,7 @@ impl Parser {
                                     | TokenKind::Break
                                     | TokenKind::Continue
                                     | TokenKind::Super
+                                    | TokenKind::Of
                             ) {
                             let t = self.tok.clone();
                             self.advance();
@@ -3038,6 +3042,7 @@ impl Parser {
                                     | TokenKind::Break
                                     | TokenKind::Continue
                                     | TokenKind::Super
+                                    | TokenKind::Of
                             ) {
                             let t = self.tok.clone();
                             self.advance();

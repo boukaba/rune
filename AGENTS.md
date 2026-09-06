@@ -94,6 +94,8 @@ Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8�
 
 ### Done — F1 / Func flags bit plan (2026-09-05)
 - **Anti-rewrite foundation**: 4-byte Func flags word reallocated (was bit0 arrow + 31-bit module_mi) → bits 0-4 kind flags (arrow/strict-reserved/class-ctor/generator/async) + 27-bit module_mi; `BytecodeProgram.is_class_constructor` set at the single ctor choke point (explicit + synthesized); MakeFunction mirrors record bits into Func (fallible lookup, no new panic path); AFPC v2→v3. 5 new layout unit tests; 847/0 workspace; behavior identical (GeneratorPrototype 47/61, module-code 20/157 unchanged). Known: strict bit producerless (needs directive scan — A3); nothing reads the new bits yet.
+### Done — B1d / ctor + copyWithin + new methods (2026-09-06)
+- **Array constructor** (`new`/plain, length-form RangeError, 1M sparse cap) + `of` + **copyWithin** (spec-order abrupts, presence-aware delete w/ non-configurable throw) + **toSpliced** + **`with`** (negative/OOB RangeError); shared throwing-clamp helpers; parser allows `.of` in all member lists. Array 1283→1412 (+131), ZERO losses (2 known flakes). 1 integration test; 869/0 workspace; clippy/fmt/no-default/x86 clean. Deferred: from→B1f, sort/toSorted→B1e, copyWithin accessor dispatch, hex fromIndex.
 ### Done — B1c / reduceRight + findLast/findLastIndex (2026-09-06)
 - **Backward mirrors**: 3 new kinds + builtins (registered); `array_op_is_backward` downward walk; shared acc/completion paths extended; symbol lengths throw in both prologues. Array 1140→1283 (+143), ZERO losses. 1 integration test; 868/0 workspace; clippy/fmt/no-default/x86 clean. Remaining B1: B1d ctor/from/of/copyWithin/new-methods/sort.
 ### Done — B1b / indexOf-family audit (2026-09-06)

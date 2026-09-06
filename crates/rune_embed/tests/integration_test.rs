@@ -1198,6 +1198,48 @@ fn test_array_iter_prologue() {
 }
 
 #[test]
+fn test_array_ctor_copywithin_tospliced_with() {
+    // B1d: Array constructor forms, copyWithin, toSpliced, with, Array.of.
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("new Array().length;").unwrap();
+    assert_eq!(r.as_smi(), Some(0));
+    let r = ctx.eval("new Array(3).length;").unwrap();
+    assert_eq!(r.as_smi(), Some(3));
+    let r = ctx.eval("new Array(1, 2).join() === '1,2';").unwrap();
+    assert!(r.to_bool());
+    let r = ctx.eval("Array(7).length;").unwrap();
+    assert_eq!(r.as_smi(), Some(7));
+    ctx.eval("assert.throws(RangeError, function () { new Array(2.5); });")
+        .unwrap();
+    ctx.eval("assert.throws(RangeError, function () { new Array(-1); });")
+        .unwrap();
+    let r = ctx.eval("Array.of(4, 5, 6).join() === '4,5,6';").unwrap();
+    assert!(r.to_bool());
+    let r = ctx
+        .eval("[1, 2, 3, 4, 5].copyWithin(0, 3).join() === '4,5,3,4,5';")
+        .unwrap();
+    assert!(r.to_bool());
+    let r = ctx
+        .eval("[1, 2, 3, 4, 5].copyWithin(0, 3, 4).join() === '4,2,3,4,5';")
+        .unwrap();
+    assert!(r.to_bool());
+    let r = ctx
+        .eval("var a = [1, 2, 3]; var b = a.toSpliced(1, 1, 9); (a.join() === '1,2,3') && (b.join() === '1,9,3');")
+        .unwrap();
+    assert!(r.to_bool(), "toSpliced must not mutate");
+    let r = ctx
+        .eval("[1, 2, 3].with(1, 9).join() === '1,9,3';")
+        .unwrap();
+    assert!(r.to_bool());
+    let r = ctx
+        .eval("[1, 2, 3].with(-1, 9).join() === '1,2,9';")
+        .unwrap();
+    assert!(r.to_bool());
+    ctx.eval("assert.throws(RangeError, function () { [1, 2, 3].with(3, 9); });")
+        .unwrap();
+}
+
+#[test]
 fn test_array_index_search_family() {
     // B1b: indexOf/lastIndexOf/includes with spec equality + fromIndex.
     let mut ctx = Context::new_small();

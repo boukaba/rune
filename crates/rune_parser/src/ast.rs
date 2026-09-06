@@ -11,6 +11,8 @@ pub struct Span {
 pub struct ArrayElement {
     pub expr: Expr,
     pub is_spread: bool,
+    /// B1e: array elision (`[1, , 3]`) — a hole, not an undefined element.
+    pub is_hole: bool,
     pub span: Span,
 }
 

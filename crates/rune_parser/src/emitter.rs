@@ -1051,6 +1051,7 @@ impl Emitter {
                                     Span { start: 0, end: 0 },
                                 ),
                                 is_spread: true,
+                                is_hole: false,
                                 span: Span { start: 0, end: 0 },
                             }],
                             Span { start: 0, end: 0 },
@@ -3294,7 +3295,11 @@ impl Emitter {
             Expr::Array(elems, _) => {
                 self.emit(Opcode::NewArray, vec![0]);
                 for elem in elems {
-                    if elem.is_spread {
+                    if elem.is_hole {
+                        // B1e: elision pushes the empty sentinel (a real
+                        // hole — HasProperty is false, Get falls to proto).
+                        self.emit(Opcode::ArrayPushHole, vec![]);
+                    } else if elem.is_spread {
                         self.emit_expression(&elem.expr);
                         self.emit(Opcode::ToArrayFromIterable, vec![]);
                         self.emit(Opcode::ArrayExtend, vec![]);

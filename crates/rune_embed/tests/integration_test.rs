@@ -1240,6 +1240,91 @@ fn test_array_ctor_copywithin_tospliced_with() {
 }
 
 #[test]
+fn test_array_sort_tosorted() {
+    // B1e: comparator sort + toSorted (stable, observable, spec-ordered).
+    let mut ctx = Context::new_small();
+    // Default is lexicographic; undefined sorts last.
+    let r = ctx.eval("[10, 2, 1].sort().join() === '1,10,2';").unwrap();
+    assert!(r.to_bool());
+    let r = ctx.eval("[3, undefined, 1].sort().length === 3;").unwrap();
+    assert!(r.to_bool());
+    let r = ctx
+        .eval("[3, undefined, 1].sort()[2] === undefined;")
+        .unwrap();
+    assert!(r.to_bool());
+    // Numeric comparator, both directions.
+    let r = ctx
+        .eval("[3, 1, 2].sort(function (a, b) { return a - b; }).join() === '1,2,3';")
+        .unwrap();
+    assert!(r.to_bool());
+    let r = ctx
+        .eval("[3, 1, 2].sort(function (a, b) { return b - a; }).join() === '3,2,1';")
+        .unwrap();
+    assert!(r.to_bool());
+    // Non-callable comparator throws (before any length read).
+    ctx.eval("assert.throws(TypeError, function () { [1].sort(null); });")
+        .unwrap();
+    // Sort returns the same object.
+    let r = ctx.eval("var s = [2, 1]; s.sort() === s;").unwrap();
+    assert!(r.to_bool());
+    // Stability: equal keys keep insertion order.
+    let r = ctx
+        .eval("var st = [{k: 1, i: 0}, {k: 1, i: 1}, {k: 1, i: 2}]; st.sort(function (a, b) { return a.k - b.k; }); st[0].i === 0 && st[1].i === 1 && st[2].i === 2;")
+        .unwrap();
+    assert!(r.to_bool());
+    // toSorted copies; the source is untouched; holes densify.
+    let r = ctx
+        .eval("var t = [3, 1, 2]; var u = t.toSorted(); (t.join() === '3,1,2') && (u.join() === '1,2,3') && (t !== u);")
+        .unwrap();
+    assert!(r.to_bool());
+    let r = ctx
+        .eval("var h = [3, , 1]; var s2 = h.toSorted(); (s2.length === 3) && (s2[2] === undefined) && (1 in h) === false && (s2.join() === '1,3,');")
+        .unwrap();
+    assert!(r.to_bool());
+    // toSorted length overflow throws RangeError before any read.
+    ctx.eval("assert.throws(RangeError, function () { Array.prototype.toSorted.call({length: 4294967296}); });")
+        .unwrap();
+    // Element getter/setter access is observable (var-bound; B8 owns let).
+    let r = ctx
+        .eval("var g = [3, 1, 2]; var n = 0; Object.defineProperty(g, '0', { get: function () { n = n + 1; return 3; }, set: function (v) {} }); g.sort(); n >= 1;")
+        .unwrap();
+    assert!(r.to_bool());
+}
+
+#[test]
+fn test_array_holes() {
+    // B1e: elisions are real holes (sentinel), not undefined elements.
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("[1, , 3].length;").unwrap();
+    assert_eq!(r.as_smi(), Some(3));
+    let r = ctx.eval("1 in [1, , 3];").unwrap();
+    assert!(!r.to_bool());
+    let r = ctx.eval("[1, , 3].hasOwnProperty(1);").unwrap();
+    assert!(!r.to_bool());
+    let r = ctx.eval("[1, , 3][1] === undefined;").unwrap();
+    assert!(r.to_bool());
+    let r = ctx.eval("[1, 2, ].length;").unwrap();
+    assert_eq!(r.as_smi(), Some(2));
+    let r = ctx.eval("[, ].length;").unwrap();
+    assert_eq!(r.as_smi(), Some(1));
+    // delete makes a real hole.
+    let r = ctx
+        .eval("var d = [1, 2, 3]; delete d[1]; (1 in d) === false && d.length === 3;")
+        .unwrap();
+    assert!(r.to_bool());
+    // Holes join as empty and spread as undefined.
+    let r = ctx.eval("[1, , 3].join() === '1,,3';").unwrap();
+    assert!(r.to_bool());
+    let r = ctx
+        .eval("var sp = [1, , 3]; var q = [0, ...sp]; q.length === 4 && q[2] === undefined;")
+        .unwrap();
+    assert!(r.to_bool());
+    // Proto serves holes and shrunk tails.
+    let r = ctx.eval("Object.prototype[5] = 'p'; var ph = [1, , 3]; var v = ph[5]; delete Object.prototype[5]; v === 'p';").unwrap();
+    assert!(r.to_bool());
+}
+
+#[test]
 fn test_array_index_search_family() {
     // B1b: indexOf/lastIndexOf/includes with spec equality + fromIndex.
     let mut ctx = Context::new_small();

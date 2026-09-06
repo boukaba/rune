@@ -1631,6 +1631,7 @@ impl Parser {
                         a.push(ArrayElement {
                             expr,
                             is_spread,
+                            is_hole: false,
                             span: Span {
                                 start: arg_start.start,
                                 end: self.span().end,
@@ -1975,6 +1976,21 @@ impl Parser {
                 self.advance();
                 let mut elems = Vec::new();
                 while self.tok.kind != TokenKind::RBracket && self.tok.kind != TokenKind::Eof {
+                    // B1e: elision — a Comma where an element is expected
+                    // is a hole (`[1, , 3]`, `[,]`, `[,,]`). A trailing
+                    // comma after an element is NOT a hole: the loop exits
+                    // at `]` after the element's comma is consumed below.
+                    if self.tok.kind == TokenKind::Comma {
+                        let hspan = self.span();
+                        self.advance();
+                        elems.push(ArrayElement {
+                            expr: Expr::Number(0.0, hspan),
+                            is_spread: false,
+                            is_hole: true,
+                            span: hspan,
+                        });
+                        continue;
+                    }
                     let estart = self.span();
                     let is_spread = self.tok.kind == TokenKind::Ellipsis;
                     if is_spread {
@@ -1985,6 +2001,7 @@ impl Parser {
                     elems.push(ArrayElement {
                         expr,
                         is_spread,
+                        is_hole: false,
                         span: Span {
                             start: estart.start,
                             end: eend.end,
@@ -2579,6 +2596,7 @@ impl Parser {
             args.push(ArrayElement {
                 expr,
                 is_spread,
+                is_hole: false,
                 span: Span {
                     start: arg_start.start,
                     end: self.span().end,

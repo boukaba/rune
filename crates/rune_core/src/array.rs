@@ -78,6 +78,11 @@ impl RuneArray {
 
     pub unsafe fn get_element(arr: *mut RuneArray, index: usize) -> Value {
         unsafe {
+            // Beyond-capacity reads are holes (a length-extended array has
+            // length > capacity; its tail is unallocated). Never read OOB.
+            if index >= Self::capacity(arr) as usize {
+                return Value::empty_sentinel();
+            }
             let elems_ptr = (arr as *mut u8).add(ARRAY_HEADER_END) as *const Value;
             *elems_ptr.add(index)
         }
@@ -143,13 +148,17 @@ impl RuneArray {
             std::ptr::copy_nonoverlapping(src, new_ptr, ARRAY_HEADER_END);
             // Update capacity in new header
             *(new_ptr.add(20) as *mut u32) = new_cap as u32;
-            // Copy elements
+            // Copy elements (only the allocated window is readable;
+            // a length-extended array may have length > capacity).
+            // Everything past the copied window is a hole (empty sentinel),
+            // never undefined: reserved slots are unread and extended
+            // windows must read as holes.
+            let copied = old_len.min(old_cap);
             let old_elems = src.add(ARRAY_HEADER_END) as *const Value;
             let new_elems = new_ptr.add(ARRAY_HEADER_END) as *mut Value;
-            std::ptr::copy_nonoverlapping(old_elems, new_elems, old_len);
-            // Zero out new element slots
-            for i in old_len..new_cap {
-                *new_elems.add(i) = Value::undefined();
+            std::ptr::copy_nonoverlapping(old_elems, new_elems, copied);
+            for i in copied..new_cap {
+                *new_elems.add(i) = Value::empty_sentinel();
             }
             (src, new_ptr as *mut RuneArray)
         }

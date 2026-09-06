@@ -55,6 +55,9 @@ pub enum Opcode {
     NewObject,
     NewArray,
     ArrayPush,
+    /// B1e: push a hole (empty sentinel) for an array elision (`[1, , 3]`).
+    /// Stays out of the JIT whitelist (bail-to-interpreter is correct).
+    ArrayPushHole,
     ArrayExtend,
     ArraySlice,
     SpreadIntoObject,

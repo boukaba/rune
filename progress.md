@@ -46,6 +46,80 @@ paths can't match immediates (no JIT change needed).
   exact, retracted in A2.)
 - 860 workspace / 0 failed; clippy/fmt/no-default/x86 clean.
 
+## B1e DONE — sort/toSorted + holes + observable access (2026-09-06)
+
+Fifth B1 sub-slice (comparator sort; `from` and the push/pop/shift/unshift/
+splice/slice/concat/reverse audit stay in B1f):
+
+- **Elisions are real holes**: parser accepts `[1, , 3]`/`[,]`/`[1,2,]`
+  (`ArrayElement.is_hole`), new `Opcode::ArrayPushHole` (default-deny JIT
+  whitelist, no JIT work), VM arm pushes `Value::empty_sentinel()`.
+  `delete arr[i]` now punches holes (was: undefined elements).
+- **Hole semantics across the funnels**: `has_property`/`load_property_
+  recursive` treat in-bounds holes as absent (proto fallthrough — incl.
+  OOB indices, which serve shrunken arrays from Array.prototype);
+  `array_like_index` reads holes as undefined; `hasOwnProperty`/`hasOwn`/
+  `propertyIsEnumerable` exclude holes but include the overlay;
+  `join`→`""`, JSON→`null`, `Object.keys` skips, iterators yield
+  `undefined`, spread/flat densify to `undefined`, `value_to_js_string`
+  maps strays to `"undefined"`.
+- **Capacity discipline (memory-safety fix)**: length-extension
+  (`arr.length = N`) leaves capacity behind — `RuneArray::grow` now copies
+  `min(len, cap)` + sentinel-fills, `get_element` returns sentinel past
+  capacity (central OOB-read guard), `do_store_property` grows before
+  writing past capacity (OOB-write guard); all property paths treat
+  unallocated tail slots as holes. (Pre-existing OOB read/write class —
+  sparse `new Array(>1M)` included.)
+- **`defineProperty` on arrays**: index keys (data → dense with
+  hole-preserving growth; accessor → extra_props overlay pair with
+  ValidateAndApply-lite incl. non-configurable rejection); named keys
+  (not `length`) define on extra_props. `vm_set_property`'s setter scan
+  covers dense arrays (own overlay + proto chain, tag-guarded walk).
+- **Array.prototype now chains to Object.prototype** (arrays reach
+  hasOwnProperty/toString/valueOf; previously missing).
+- **Sort machine** (`PendingSortOp` + F4 sites + Return arm): snapshot
+  reads (HasProperty+Get, skip-holes vs read-through-holes), stable
+  bottom-up merge (O(n log n) comparisons — stability-2048 passes inside
+  the 2 s budget), user comparators via callback frames, default
+  comparator with lazy cached UTF-16 keys + user-toString/valueOf
+  dispatch (A2.1_T3 needs it), CompareArrayElements undefined-first
+  BEFORE the comparator call, LengthOfArrayLike with valueOf/length-
+  getter dispatch, writeback with setter dispatch + trailing
+  DeletePropertyOrThrow, toSorted densifying copy + pre-read
+  `> 2^32-1` RangeError. Callee-identity guard on the Return arm
+  (nested foreign pushes share depths after rebase but never callees —
+  `String()` inside a comparator is exact).
+- **Gains (+286 Array, ZERO losses)**: 1412→1698. sort 10→28, toSorted
+  1→15. All 17 precise-* tests pass with `const`→`var` (i.e. the sort
+  machinery is exact; they are B8-blocked — see below).
+- **Tests**: `test_array_sort_tosorted` + `test_array_holes`. **871
+  workspace / 0**; clippy/fmt/no-default/x86 clean.
+- **En-route fixes** (silent miscompiles/gaps found by the suites):
+  `2 ** 32 === 0` (interpreter Exp `wrapping_pow` destroyed overflow
+  evidence → `checked_pow` i64; JIT helper already float-correct);
+  `isNaN`/`isFinite` globals; `assert.compareArray` in the builtin assert
+  (unblocked +9 toSorted alone); `PendingCallCont` (pending_call resume
+  stringifies ToPrimitive results + valueOf round-trip — `String(obj)`
+  with evil toString returned the raw value everywhere); `with`
+  `> 2^32-1` RangeError (unmasked by the Exp fix).
+- **Deferred with measurements**: 17 precise-* sort tests → B8
+  (top-level let/const capture: closures see a split binding; proven
+  pre-existing, minimal repro `let o={};()=>o!==o`); sort A8 → B8
+  (needs a `global` global); toSorted comparefn-not-a-function → BigInt
+  literal lexing (out of scope); frozen/immutable → array integrity
+  levels (freeze/seal on arrays still reject); this-value-boolean →
+  ToObject wrappers (B1f/B2); TA/resizable sort ×4 → resizable buffers
+  (out of scope); re-entrant sort via builtin callbacks (inner machine
+  clobbers the outer slot — pathological, documented); `do_store` grow
+  leaves the caller's Value stale (pre-existing family, noted for C);
+  map/filter result shapes with holes (length/positions — B1f audit);
+  nested-pending_call depth clobber for UNGUARDED machines (proven on
+  main: forEach+String(obj)+push corrupts; sort is guarded, others → C).
+- **Process lesson**: the edit tool does not reliably bump file mtimes —
+  `touch` edited crates before EVERY build and verify `Compiling
+  rune_interpreter` in the output, else the binary is stale (this slice
+  lost time triaging phantom failures from a stale binary).
+
 ## B1d DONE — Array ctor/from-of/copyWithin/new-methods (2026-09-06)
 
 Fourth B1 sub-slice (constructor + small methods; from/sort split out):

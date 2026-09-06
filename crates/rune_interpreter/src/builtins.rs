@@ -41,6 +41,11 @@ pub type BuiltinFn = fn(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
 
 /// Format a Value into its JS string representation.
 pub fn value_to_js_string(v: Value) -> String {
+    // B1e: holes stringify as undefined (defense in depth — all known
+    // paths map holes first, but a stray sentinel must never surface).
+    if v == Value::empty_sentinel() {
+        return "undefined".to_string();
+    }
     if v.is_undefined() {
         "undefined".to_string()
     } else if v.is_null() {
@@ -98,6 +103,92 @@ pub fn print_builtin(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mu
 /// For objects with a user-defined toString function, sets up the pending_call
 /// callback pattern and returns None (the caller must return immediately).
 /// For all other values, returns Some(string).
+/// Raw ToPrimitive method lookup (TAG_OBJECT chain walk, depth-capped).
+/// Extracted from to_primitive_string for the pending_call resume path —
+/// behavior identical.
+pub(crate) fn toprim_find_method(val: Value, key: &PropertyKey) -> Option<Value> {
+    let mut current = val;
+    for _ in 0..64 {
+        let cptr = current.heap_ptr()?;
+        if unsafe { (*(cptr as *const GcHeader)).tag() } != TAG_OBJECT {
+            return None;
+        }
+        let shape = unsafe { JSObject::shape_ptr(cptr as *mut JSObject) };
+        if let Some(slot) = shape.lookup(key) {
+            return Some(unsafe { JSObject::get_slot(cptr as *mut JSObject, slot) });
+        }
+        let proto = unsafe { JSObject::prototype(cptr as *mut JSObject) };
+        if proto.is_null() {
+            return None;
+        }
+        current = Value::from_heap_ptr(proto);
+    }
+    None
+}
+
+/// One valueOf round-trip for a pending ToPrimitive resume (B1e).
+pub(crate) enum ToprimResumeOut {
+    Ready(Value),
+    WaitPushed,
+    Raise(Value),
+}
+
+/// Run the valueOf stage of a pending ToPrimitive resume: builtin valueOf
+/// runs inline, JS valueOf re-arms pending_call (caller: continue without
+/// advancing), anything else raises TypeError.
+pub(crate) fn toprim_resume_valueof(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    value: Value,
+) -> ToprimResumeOut {
+    let key = PropertyKey::from_string("valueOf");
+    let Some(method) = toprim_find_method(value, &key) else {
+        return ToprimResumeOut::Raise(sort_type_error(
+            gc,
+            vm,
+            "Cannot convert object to primitive value",
+        ));
+    };
+    if let Some(smi) = method.as_smi() {
+        if smi < 0 {
+            let id = ((-smi) as usize) - 1;
+            if id < vm.builtins.len() {
+                let result = (vm.builtins[id].func)(gc, value, &[], vm);
+                if let Some(exc) = vm.pending_exception.take() {
+                    return ToprimResumeOut::Raise(exc);
+                }
+                if toprim_is_primitive(result) {
+                    return ToprimResumeOut::Ready(result);
+                }
+            }
+        }
+        return ToprimResumeOut::Raise(sort_type_error(
+            gc,
+            vm,
+            "Cannot convert object to primitive value",
+        ));
+    }
+    if method
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC)
+    {
+        vm.pending_call = Some(crate::vm::PendingCall {
+            source_frame_depth: vm.frame_depth(),
+            cont: crate::vm::PendingCallCont::ToPrimString {
+                value,
+                tried_valueof: true,
+            },
+        });
+        vm.push_callback_call(gc, method, value, vec![]);
+        return ToprimResumeOut::WaitPushed;
+    }
+    ToprimResumeOut::Raise(sort_type_error(
+        gc,
+        vm,
+        "Cannot convert object to primitive value",
+    ))
+}
+
 pub(crate) fn to_primitive_string(gc: &mut SemiSpace, val: Value, vm: &mut Vm) -> Option<String> {
     // Fast path: non-object values
     if !val.is_heap_object() {
@@ -123,25 +214,7 @@ pub(crate) fn to_primitive_string(gc: &mut SemiSpace, val: Value, vm: &mut Vm) -
         // properties dispatched, so inherited methods (notably
         // Error.prototype.toString on error objects) fell through to
         // "[object Object]". Depth-capped; cycles terminate.
-        let find_method = |key: &PropertyKey| -> Option<Value> {
-            let mut current = val;
-            for _ in 0..64 {
-                let cptr = current.heap_ptr()?;
-                if unsafe { (*(cptr as *const GcHeader)).tag() } != TAG_OBJECT {
-                    return None;
-                }
-                let shape = unsafe { JSObject::shape_ptr(cptr as *mut JSObject) };
-                if let Some(slot) = shape.lookup(key) {
-                    return Some(unsafe { JSObject::get_slot(cptr as *mut JSObject, slot) });
-                }
-                let proto = unsafe { JSObject::prototype(cptr as *mut JSObject) };
-                if proto.is_null() {
-                    return None;
-                }
-                current = Value::from_heap_ptr(proto);
-            }
-            None
-        };
+        let find_method = |key: &PropertyKey| toprim_find_method(val, key);
         let key = PropertyKey::from_string("toString");
         if let Some(to_string_val) = find_method(&key) {
             if let Some(smi) = to_string_val.as_smi() {
@@ -174,6 +247,10 @@ pub(crate) fn to_primitive_string(gc: &mut SemiSpace, val: Value, vm: &mut Vm) -
                     let depth = vm.frame_depth();
                     vm.pending_call = Some(crate::vm::PendingCall {
                         source_frame_depth: depth,
+                        cont: crate::vm::PendingCallCont::ToPrimString {
+                            value: val,
+                            tried_valueof: false,
+                        },
                     });
                     vm.push_callback_call(gc, to_string_val, val, vec![]);
                     return None; // caller must return immediately
@@ -345,7 +422,12 @@ fn array_to_string(arr: *mut RuneArray) -> String {
         let mut parts: Vec<String> = Vec::with_capacity(len as usize);
         for i in 0..len as usize {
             let elem = RuneArray::get_element(arr, i);
-            parts.push(value_to_js_string(elem));
+            // B1e: holes (and unallocated tail slots) join as "".
+            if elem == Value::empty_sentinel() {
+                parts.push(String::new());
+            } else {
+                parts.push(value_to_js_string(elem));
+            }
         }
         parts.join(",")
     }
@@ -1655,7 +1737,16 @@ pub fn array_iterator_next(gc: &mut SemiSpace, this: Value, _args: &[Value], vm:
                                 return make_iter_result(gc, Value::undefined(), true);
                             }
                             let value = if arr_tag == TAG_ARRAY {
-                                unsafe { RuneArray::get_element(arr_ptr as *mut RuneArray, index) }
+                                let v = unsafe {
+                                    RuneArray::get_element(arr_ptr as *mut RuneArray, index)
+                                };
+                                // B1e: holes yield undefined (Get semantics;
+                                // the iterator does not skip them).
+                                if v == Value::empty_sentinel() {
+                                    Value::undefined()
+                                } else {
+                                    v
+                                }
                             } else {
                                 unsafe { typedarray::read_element(arr_ptr, index) }
                             };
@@ -4907,16 +4998,42 @@ pub fn object_prototype_has_own_property(
     let found = match tag {
         TAG_ARRAY => {
             if let Some(index) = value_to_array_index(key) {
+                // B1e: an own accessor overlay counts as present.
+                if crate::vm::array_overlay_accessor(ptr as *mut rune_core::array::RuneArray, index)
+                    .is_some()
+                {
+                    return Value::boolean(true);
+                }
                 let len = unsafe {
                     rune_core::array::RuneArray::length(ptr as *mut rune_core::array::RuneArray)
                 };
+                // B1e: holes (and unallocated length-extended tail
+                // slots) are not own properties.
                 index < len as usize
+                    && index
+                        < unsafe {
+                            rune_core::array::RuneArray::capacity(
+                                ptr as *mut rune_core::array::RuneArray,
+                            )
+                        } as usize
+                    && unsafe {
+                        rune_core::array::RuneArray::get_element(
+                            ptr as *mut rune_core::array::RuneArray,
+                            index,
+                        )
+                    } != Value::empty_sentinel()
             } else {
                 key_is_str("length")
             }
         }
         TAG_TYPED_ARRAY => {
             if let Some(index) = value_to_array_index(key) {
+                // B1e: an own accessor overlay counts as present.
+                if crate::vm::array_overlay_accessor(ptr as *mut rune_core::array::RuneArray, index)
+                    .is_some()
+                {
+                    return Value::boolean(true);
+                }
                 let len = unsafe { rune_core::typedarray::RuneTypedArray::length(ptr) };
                 index < len
             } else {
@@ -4972,10 +5089,45 @@ pub fn object_prototype_property_is_enumerable(
     let found = match tag {
         TAG_ARRAY => {
             if let Some(index) = value_to_array_index(key) {
+                // B1e: an own accessor overlay is own; enumerability
+                // comes from its stored attributes.
+                let overlay = unsafe {
+                    rune_core::array::RuneArray::extra_props(
+                        ptr as *mut rune_core::array::RuneArray,
+                    )
+                };
+                if !overlay.is_null() {
+                    let okey = rune_core::shape::PropertyKey::from_string(&index.to_string());
+                    let oshape = unsafe { JSObject::shape_ptr(overlay as *mut JSObject) };
+                    if let Some(oslot) = oshape.lookup(&okey) {
+                        let ov = unsafe { JSObject::get_slot(overlay as *mut JSObject, oslot) };
+                        if ov.heap_ptr().is_some_and(|vp| unsafe {
+                            (*(vp as *const GcHeader)).tag() == TAG_ACCESSOR
+                        }) {
+                            return Value::boolean(
+                                oshape.attr_at(oslot) & rune_core::shape::ATTR_ENUMERABLE != 0,
+                            );
+                        }
+                    }
+                }
                 let len = unsafe {
                     rune_core::array::RuneArray::length(ptr as *mut rune_core::array::RuneArray)
                 };
+                // B1e: holes (and unallocated length-extended tail
+                // slots) are not own properties.
                 index < len as usize
+                    && index
+                        < unsafe {
+                            rune_core::array::RuneArray::capacity(
+                                ptr as *mut rune_core::array::RuneArray,
+                            )
+                        } as usize
+                    && unsafe {
+                        rune_core::array::RuneArray::get_element(
+                            ptr as *mut rune_core::array::RuneArray,
+                            index,
+                        )
+                    } != Value::empty_sentinel()
             } else {
                 key_is_str("length")
             }
@@ -5204,6 +5356,11 @@ fn object_own_entries(
                 let mut entries = Vec::with_capacity(len + 4);
                 for i in 0..len {
                     let value = unsafe { RuneArray::get_element(ptr as *mut RuneArray, i) };
+                    // B1e: holes are not own properties (keys/values/
+                    // entries/for-in all skip them).
+                    if value == Value::empty_sentinel() {
+                        continue;
+                    }
                     entries.push((i.to_string(), value));
                 }
                 // Named properties (e.g. "index"/"input" on match-result arrays,
@@ -5495,8 +5652,18 @@ pub fn object_has_own(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
         }
         TAG_ARRAY => {
             if let Some(idx) = crate::vm::value_to_array_index(key) {
+                // B1e: an own accessor overlay counts as present.
+                if crate::vm::array_overlay_accessor(ptr as *mut RuneArray, idx).is_some() {
+                    return Value::boolean(true);
+                }
                 let len = unsafe { RuneArray::length(ptr as *mut RuneArray) };
-                Value::boolean((idx as u32) < len)
+                // B1e: holes are not own properties.
+                Value::boolean(
+                    (idx as u32) < len
+                        && idx < unsafe { RuneArray::capacity(ptr as *mut RuneArray) } as usize
+                        && unsafe { RuneArray::get_element(ptr as *mut RuneArray, idx) }
+                            != Value::empty_sentinel(),
+                )
             } else if let Some(pk) = crate::vm::value_to_prop_key(key) {
                 if pk.as_u64() == PropertyKey::from_string("length").as_u64() {
                     return Value::boolean(true);
@@ -6016,6 +6183,199 @@ fn define_target(
     }
 }
 
+fn define_array_type_err(gc: &mut SemiSpace, vm: &Vm, msg: &str) -> Value {
+    crate::errors::error_object(
+        gc,
+        &vm.error_protos,
+        crate::errors::ErrorKind::TypeError,
+        msg,
+    )
+}
+
+/// B1e: `Object.defineProperty` on a dense-array index. Data descriptors
+/// write the dense element (growing with holes when past the end);
+/// accessor descriptors live in the extra_props overlay (dense elements
+/// can't hold AccessorPairs inline) with the dense slot left a hole.
+/// Non-configurable overlay entries validate like ValidateAndApply.
+fn define_array_index_property(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    arr: Value,
+    arr_ptr: *mut RuneArray,
+    idx: usize,
+    key_name: String,
+    desc: &PropDesc,
+) -> Result<(), Value> {
+    let is_accessor_desc = desc.has_get || desc.has_set;
+    let overlay_key = PropertyKey::from_string(&idx.to_string());
+    // Fetch (and lazily allocate) the overlay object.
+    let overlay = unsafe {
+        let mut props = RuneArray::extra_props(arr_ptr);
+        if props.is_null() {
+            let new_obj = JSObject::allocate(gc, Shape::empty(), &[]);
+            // Re-resolve: allocation may have moved the array.
+            let moved = arr.heap_ptr().unwrap();
+            RuneArray::set_extra_props(moved as *mut RuneArray, new_obj as *mut u8);
+            props = new_obj as *mut u8;
+        }
+        props
+    };
+    let arr_ptr = arr.heap_ptr().unwrap() as *mut RuneArray;
+    let overlay_shape = unsafe { JSObject::shape_ptr(overlay as *mut JSObject) };
+    let existing = overlay_shape.lookup(&overlay_key).map(|slot| {
+        let attr = overlay_shape.attr_at(slot);
+        let cur = unsafe { JSObject::get_slot(overlay as *mut JSObject, slot) };
+        (slot, attr, cur)
+    });
+    if let Some((_, attr, _)) = existing {
+        use rune_core::shape::{ATTR_CONFIGURABLE, ATTR_ENUMERABLE};
+        if attr & ATTR_CONFIGURABLE == 0 {
+            if desc.has_configurable && desc.configurable {
+                return Err(define_array_type_err(
+                    gc,
+                    vm,
+                    "Cannot redefine a non-configurable property",
+                ));
+            }
+            if desc.has_enumerable && desc.enumerable != (attr & ATTR_ENUMERABLE != 0) {
+                return Err(define_array_type_err(
+                    gc,
+                    vm,
+                    "Cannot redefine a non-configurable property",
+                ));
+            }
+            // Overlay entries are always accessors; any data fields or
+            // changed get/set on a locked entry reject.
+            if desc.has_value || desc.has_writable {
+                return Err(define_array_type_err(
+                    gc,
+                    vm,
+                    "Cannot redefine a non-configurable property",
+                ));
+            }
+            if is_accessor_desc {
+                let vp = existing.unwrap().2.heap_ptr().unwrap();
+                let (cur_get, cur_set) = unsafe {
+                    (
+                        rune_core::accessor::AccessorPair::getter(vp),
+                        rune_core::accessor::AccessorPair::setter(vp),
+                    )
+                };
+                if desc.has_get && !same_value(desc.get, cur_get) {
+                    return Err(define_array_type_err(
+                        gc,
+                        vm,
+                        "Cannot redefine a non-configurable property",
+                    ));
+                }
+                if desc.has_set && !same_value(desc.set, cur_set) {
+                    return Err(define_array_type_err(
+                        gc,
+                        vm,
+                        "Cannot redefine a non-configurable property",
+                    ));
+                }
+            }
+        }
+    }
+    if is_accessor_desc {
+        // Merge get/set over the current pair when redefining.
+        let (get, set) = match existing {
+            Some((_, _, cur))
+                if cur.heap_ptr().is_some_and(|vp| unsafe {
+                    (*(vp as *const GcHeader)).tag() == TAG_ACCESSOR
+                }) =>
+            {
+                let vp = cur.heap_ptr().unwrap();
+                unsafe {
+                    (
+                        if desc.has_get {
+                            desc.get
+                        } else {
+                            rune_core::accessor::AccessorPair::getter(vp)
+                        },
+                        if desc.has_set {
+                            desc.set
+                        } else {
+                            rune_core::accessor::AccessorPair::setter(vp)
+                        },
+                    )
+                }
+            }
+            _ => (
+                if desc.has_get {
+                    desc.get
+                } else {
+                    Value::undefined()
+                },
+                if desc.has_set {
+                    desc.set
+                } else {
+                    Value::undefined()
+                },
+            ),
+        };
+        let pair = rune_core::accessor::AccessorPair::allocate(gc, get, set);
+        let pair_val = Value::from_heap_ptr(pair);
+        let mut attr = 0u8;
+        if desc.has_enumerable && desc.enumerable {
+            attr |= rune_core::shape::ATTR_ENUMERABLE;
+        }
+        if desc.has_configurable && desc.configurable {
+            attr |= rune_core::shape::ATTR_CONFIGURABLE;
+        }
+        // Re-resolve after the pair allocation (GC may have moved things).
+        let overlay = unsafe { RuneArray::extra_props(arr.heap_ptr().unwrap() as *mut RuneArray) };
+        let overlay_shape = unsafe { JSObject::shape_ptr(overlay as *mut JSObject) };
+        if let Some(slot) = overlay_shape.lookup(&overlay_key) {
+            let new_shape = Shape::with_replaced_attr(overlay_shape, slot, attr);
+            unsafe {
+                JSObject::set_shape_ptr(overlay as *mut JSObject, new_shape);
+                JSObject::set_slot(overlay as *mut JSObject, slot, pair_val);
+            }
+        } else {
+            unsafe {
+                JSObject::add_property_with_attrs(
+                    overlay as *mut JSObject,
+                    overlay_key,
+                    key_name,
+                    pair_val,
+                    attr,
+                );
+            }
+        }
+        // The dense slot stays a hole (the accessor shadows it).
+        let arr_ptr = arr.heap_ptr().unwrap() as *mut RuneArray;
+        let len = unsafe { RuneArray::length(arr_ptr) } as usize;
+        if idx < len {
+            unsafe { RuneArray::set_element(arr_ptr, idx, Value::empty_sentinel()) };
+        } else {
+            // Defining past the end extends length (holes fill the gap).
+            crate::vm::do_store_property(
+                arr,
+                Value::smi(idx as i32),
+                Value::empty_sentinel(),
+                gc,
+                vm,
+            );
+        }
+    } else {
+        // Data descriptor: drop any overlay accessor, write dense.
+        if existing.is_some() {
+            unsafe { JSObject::remove_property(overlay as *mut JSObject, &overlay_key) };
+        }
+        let value = if desc.has_value {
+            desc.value
+        } else {
+            Value::undefined()
+        };
+        crate::vm::do_store_property(arr, Value::smi(idx as i32), value, gc, vm);
+    }
+    // Silence unused-mut on arr_ptr in case the optimizer disagrees.
+    let _ = arr_ptr;
+    Ok(())
+}
+
 /// Object.defineProperty(obj, key, descriptor) — defines or redefines an
 /// own property (§20.1.2.3). Returns obj; failures throw TypeError.
 pub fn object_define_property(
@@ -6025,13 +6385,6 @@ pub fn object_define_property(
     vm: &mut Vm,
 ) -> Value {
     let target = args.first().copied().unwrap_or(Value::undefined());
-    let obj_ptr = match define_target(gc, vm, "Object.defineProperty", target) {
-        Ok(p) => p,
-        Err(e) => {
-            vm.set_pending_exception(e);
-            return Value::undefined();
-        }
-    };
     let raw_key = args.get(1).copied().unwrap_or(Value::undefined());
     let (key, key_name) = match define_key_and_name(raw_key) {
         Ok(k) => k,
@@ -6048,6 +6401,57 @@ pub fn object_define_property(
     let desc_obj = args.get(2).copied().unwrap_or(Value::undefined());
     let desc = match to_property_descriptor(gc, vm, desc_obj) {
         Ok(d) => d,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    // B1e: dense-array definitions. Index keys go to the array-index
+    // path (data → dense element with hole-preserving growth; accessor →
+    // extra_props overlay pair). Other named keys (not "length") define on
+    // the extra_props object (match-result "index"/"input" precedent).
+    if let Some(tptr) = target.heap_ptr() {
+        if unsafe { (*(tptr as *const GcHeader)).tag() } == TAG_ARRAY {
+            if let Some(idx) = value_to_array_index(raw_key) {
+                if let Err(e) = define_array_index_property(
+                    gc,
+                    vm,
+                    target,
+                    tptr as *mut RuneArray,
+                    idx,
+                    key_name,
+                    &desc,
+                ) {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+                return target;
+            }
+            if let Some(pk) = value_to_prop_key(raw_key) {
+                if pk.as_u64() != PropertyKey::from_string("length").as_u64() {
+                    let overlay = unsafe {
+                        let mut props = RuneArray::extra_props(tptr as *mut RuneArray);
+                        if props.is_null() {
+                            let new_obj = JSObject::allocate(gc, Shape::empty(), &[]);
+                            let moved = target.heap_ptr().unwrap();
+                            RuneArray::set_extra_props(moved as *mut RuneArray, new_obj as *mut u8);
+                            props = new_obj as *mut u8;
+                        }
+                        props
+                    };
+                    if let Err(e) =
+                        define_own_property(gc, vm, overlay as *mut JSObject, pk, key_name, &desc)
+                    {
+                        vm.set_pending_exception(e);
+                        return Value::undefined();
+                    }
+                    return target;
+                }
+            }
+        }
+    }
+    let obj_ptr = match define_target(gc, vm, "Object.defineProperty", target) {
+        Ok(p) => p,
         Err(e) => {
             vm.set_pending_exception(e);
             return Value::undefined();
@@ -6592,14 +6996,10 @@ pub fn array_copy_within(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &m
                             }
                         }
                     } else if tag == TAG_ARRAY {
-                        // Dense arrays have no holes: clear to undefined.
-                        unsafe {
-                            RuneArray::set_element(
-                                ptr as *mut RuneArray,
-                                to + k,
-                                Value::undefined(),
-                            )
-                        };
+                        // B1e: a missing source DELETES the target (hole),
+                        // routed through do_store_property (grow-safe for
+                        // length-extended tails).
+                        crate::vm::do_store_property(this, to_key, Value::empty_sentinel(), gc, vm);
                     }
                 }
             }
@@ -6726,6 +7126,30 @@ pub fn array_with(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
             return Value::undefined();
         }
     };
+    // B1e (unmasked by the Exp fix): ArrayCreate(len) throws RangeError for
+    // len > 2^32-1, before any element Get (with/length-exceeding-...).
+    if let Some(lptr) = this.heap_ptr() {
+        if unsafe { (*(lptr as *const GcHeader)).tag() } == TAG_OBJECT {
+            let shape = unsafe { JSObject::shape_ptr(lptr as *mut JSObject) };
+            if let Some(slot) = shape.lookup(&PropertyKey::from_string("length")) {
+                let lv = unsafe { JSObject::get_slot(lptr as *mut JSObject, slot) };
+                let n = lv
+                    .as_smi()
+                    .map(|v| v as f64)
+                    .or_else(|| lv.as_float64())
+                    .unwrap_or(f64::NAN);
+                if n > 4_294_967_295.0 {
+                    vm.set_pending_exception(crate::errors::error_object(
+                        gc,
+                        &vm.error_protos,
+                        crate::errors::ErrorKind::RangeError,
+                        "Invalid array length",
+                    ));
+                    return Value::undefined();
+                }
+            }
+        }
+    }
     let value = args.get(1).copied().unwrap_or(Value::undefined());
     let rel = args.first().copied().unwrap_or(Value::undefined());
     if rel.is_symbol() {
@@ -8460,6 +8884,37 @@ pub fn parse_int_builtin(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm:
 
 /// parseFloat(string) — parses a string argument and returns a floating point number.
 /// Per §21.1.2.10.
+/// isNaN(number) — ToNumber coercion, then a NaN check (§21.1.2.5).
+/// Symbol arguments throw (ToNumber abrupt), like the numeric ops (C5).
+pub fn is_nan_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let v = args.first().copied().unwrap_or(Value::undefined());
+    if v.is_symbol() {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Cannot convert a Symbol value to a number",
+        ));
+        return Value::undefined();
+    }
+    Value::boolean(crate::vm::to_number(v).is_nan())
+}
+
+/// isFinite(number) — ToNumber coercion, then a finiteness check (§21.1.2.4).
+pub fn is_finite_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let v = args.first().copied().unwrap_or(Value::undefined());
+    if v.is_symbol() {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Cannot convert a Symbol value to a number",
+        ));
+        return Value::undefined();
+    }
+    Value::boolean(crate::vm::to_number(v).is_finite())
+}
+
 pub fn parse_float_builtin(
     _gc: &mut SemiSpace,
     _this: Value,
@@ -8876,6 +9331,12 @@ pub fn json_stringify(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
                 let mut parts: Vec<String> = Vec::with_capacity(len);
                 for i in 0..len {
                     let elem = unsafe { RuneArray::get_element(ptr as *mut RuneArray, i) };
+                    // B1e: holes (and unallocated tail slots) stringify
+                    // as null.
+                    if elem == Value::empty_sentinel() {
+                        parts.push("null".to_string());
+                        continue;
+                    }
                     parts.push(
                         stringify_val(gc, elem, stack, vm).unwrap_or_else(|_| "null".to_string()),
                     );
@@ -8958,6 +9419,7 @@ pub fn call_builtin(_gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
         if tag == rune_core::gc::TAG_FUNC {
             vm.pending_call = Some(crate::vm::PendingCall {
                 source_frame_depth: 0,
+                cont: crate::vm::PendingCallCont::Raw,
             });
             vm.push_callback_call(_gc, target, new_this, call_args);
             return Value::undefined();
@@ -9018,6 +9480,7 @@ pub fn apply_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
     }
     vm.pending_call = Some(crate::vm::PendingCall {
         source_frame_depth: 0,
+        cont: crate::vm::PendingCallCont::Raw,
     });
     vm.push_callback_call(gc, target, new_this, call_args);
     Value::undefined()
@@ -10468,6 +10931,12 @@ pub fn array_flat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
                     for j in 0..flat_len {
                         let flat_elem =
                             RuneArray::get_element(flattened as *mut RuneArray, j as usize);
+                        // B1e: holes read as undefined (Get semantics).
+                        let flat_elem = if flat_elem == Value::empty_sentinel() {
+                            Value::undefined()
+                        } else {
+                            flat_elem
+                        };
                         let new_ptr = RuneArray::push(gc, result_ptr as *mut RuneArray, flat_elem);
                         result_ptr = new_ptr as *mut u8;
                     }
@@ -10485,60 +10954,1005 @@ pub fn array_flat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
     Value::from_heap_ptr(result_ptr)
 }
 
-/// Array.prototype.sort(compareFn) — default lexicographic sort (no comparator). Throws TypeError if comparator is passed.
-pub fn array_sort(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    if args.first().filter(|c| !c.is_undefined()).is_some() {
-        vm.set_pending_exception(crate::errors::error_object(
+/// ================= B1e: sort / toSorted =================
+///
+/// Array.prototype.sort + Array.prototype.toSorted (§23.1.3.30/.34) on the
+/// PendingSortOp machine (vm.rs): snapshot reads (SortIndexedProperties —
+/// HasProperty+Get per index with getter dispatch), stable bottom-up merge
+/// with one comparator round-trip per comparison, then writeback with
+/// setter dispatch (sort) or into a fresh dense array (toSorted).
+/// Comparator/length/key errors follow spec order; the Call skip-list,
+/// rebase, rooting and unwind-drop sites treat the machine like the
+/// array-iteration one (F4).
+/// Outcome of one sort-machine step.
+pub(crate) enum SortStepOut {
+    /// Made synchronous progress; the driver loops again.
+    Progress,
+    /// A JS frame was pushed; store the op and bail (Call skip-list owns pc).
+    Wait,
+    /// Sort complete with the final value.
+    Done(Value),
+    /// Raise this error value (setup: pending_exception; Return: handle_throw).
+    Raise(Value),
+}
+
+/// Record the just-pushed frame's callee as this machine's awaited
+/// callee (the Return arm only fires on a callee match — nested foreign
+/// pushes share depths after rebase but never callees).
+fn sort_arm_await(vm: &Vm, sop: &mut crate::vm::PendingSortOp) {
+    sop.await_callee = vm.last_pushed_callee;
+}
+
+/// ToPrimitive outcome for sort keys/lengths.
+enum SortPrimOut {
+    Ready(Value),
+    Wait(Value, Value),
+    Raise(Value),
+}
+
+fn sort_type_error(gc: &mut SemiSpace, vm: &Vm, msg: &str) -> Value {
+    crate::errors::error_object(
+        gc,
+        &vm.error_protos,
+        crate::errors::ErrorKind::TypeError,
+        msg,
+    )
+}
+
+fn sort_range_error(gc: &mut SemiSpace, vm: &Vm, msg: &str) -> Value {
+    crate::errors::error_object(
+        gc,
+        &vm.error_protos,
+        crate::errors::ErrorKind::RangeError,
+        msg,
+    )
+}
+
+/// Primitive for ToPrimitive purposes (heap strings count as primitive).
+/// Shared by the sort machine and the pending_call ToPrimitive resume.
+pub(crate) fn toprim_is_primitive(v: Value) -> bool {
+    if !v.is_heap_object() {
+        return true;
+    }
+    let tag = unsafe { (*(v.heap_ptr().unwrap() as *const GcHeader)).tag() };
+    tag == TAG_STRING || tag == TAG_STRING_OBJ
+}
+
+/// ToPrimitive(value, hint) with synchronous builtin dispatch. `tried_other`
+/// selects the second method (after the first returned non-primitive). Raw
+/// method lookup: an accessor in method position counts as absent
+/// (sync-gap policy, documented).
+fn sort_to_prim(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    value: Value,
+    string_hint: bool,
+    tried_other: bool,
+) -> SortPrimOut {
+    if toprim_is_primitive(value) {
+        return SortPrimOut::Ready(value);
+    }
+    let tag = unsafe { (*(value.heap_ptr().unwrap() as *const GcHeader)).tag() };
+    // Dates default to the string hint (matches value_to_js_string).
+    let string_first = string_hint || tag == TAG_DATE;
+    let name = match (string_first, tried_other) {
+        (true, false) => "toString",
+        (false, false) => "valueOf",
+        (true, true) => "valueOf",
+        (false, true) => "toString",
+    };
+    let name_val = Value::from_heap_ptr(HeapString::allocate(gc, name) as *mut u8);
+    let method = crate::vm::load_property_recursive(value, name_val, None, gc);
+    if let Some(smi) = method.as_smi() {
+        if smi < 0 {
+            let id = ((-smi) as usize) - 1;
+            if id < vm.builtins.len() {
+                let result = (vm.builtins[id].func)(gc, value, &[], vm);
+                if let Some(exc) = vm.pending_exception.take() {
+                    return SortPrimOut::Raise(exc);
+                }
+                if toprim_is_primitive(result) {
+                    return SortPrimOut::Ready(result);
+                }
+                if !tried_other {
+                    return sort_to_prim(vm, gc, value, string_hint, true);
+                }
+                return SortPrimOut::Raise(sort_type_error(
+                    gc,
+                    vm,
+                    "Cannot convert object to primitive value",
+                ));
+            }
+        }
+    }
+    if method
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC)
+    {
+        return SortPrimOut::Wait(method, value);
+    }
+    if !tried_other {
+        return sort_to_prim(vm, gc, value, string_hint, true);
+    }
+    SortPrimOut::Raise(sort_type_error(
+        gc,
+        vm,
+        "Cannot convert object to primitive value",
+    ))
+}
+
+/// Default-comparator key of an already-primitive value: UTF-16 code units
+/// (spec CompareArrayElements compares code units — byte order differs for
+/// astral text). ToString(symbol) throws (§7.1.19).
+fn sort_key_of_primitive(v: Value) -> Result<Vec<u16>, ()> {
+    if v.is_symbol() {
+        return Err(());
+    }
+    Ok(string_from_value(v).encode_utf16().collect())
+}
+
+/// ToLength of a primitive for sort lengths (§7.1.22; callers convert
+/// objects via sort_to_prim first). Symbol → Err (ToNumber abrupt).
+fn sort_length_of_primitive(v: Value) -> Result<u64, ()> {
+    if v.is_symbol() {
+        return Err(());
+    }
+    let n = crate::vm::to_number(v);
+    if n.is_nan() || n <= 0.0 {
+        return Ok(0);
+    }
+    Ok(n.min(9_007_199_254_740_991.0) as u64)
+}
+
+/// LengthOfArrayLike value step shared by data lengths and length-getter
+/// results (B1e). May arm a valueOf await (Wait).
+fn sort_length_of_value(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    sop: &mut crate::vm::PendingSortOp,
+    v: Value,
+) -> SortStepOut {
+    if v.is_symbol() {
+        return SortStepOut::Raise(sort_type_error(
             gc,
-            &vm.error_protos,
-            crate::errors::ErrorKind::TypeError,
-            "comparator sort is not yet supported",
+            vm,
+            "Cannot convert a Symbol value to a number",
+        ));
+    }
+    if toprim_is_primitive(v) {
+        match sort_length_of_primitive(v) {
+            Ok(len) => {
+                sop.len = len;
+                sop.len_pending = false;
+                SortStepOut::Progress
+            }
+            Err(()) => SortStepOut::Raise(sort_type_error(
+                gc,
+                vm,
+                "Cannot convert a Symbol value to a number",
+            )),
+        }
+    } else {
+        match sort_to_prim(vm, gc, v, false, false) {
+            SortPrimOut::Ready(p) => {
+                if p.is_symbol() {
+                    return SortStepOut::Raise(sort_type_error(
+                        gc,
+                        vm,
+                        "Cannot convert a Symbol value to a number",
+                    ));
+                }
+                match sort_length_of_primitive(p) {
+                    Ok(len) => {
+                        sop.len = len;
+                        sop.len_pending = false;
+                        SortStepOut::Progress
+                    }
+                    Err(()) => SortStepOut::Raise(sort_type_error(
+                        gc,
+                        vm,
+                        "Cannot convert a Symbol value to a number",
+                    )),
+                }
+            }
+            SortPrimOut::Wait(f, recv) => {
+                crate::vm::push_accessor_frame(vm, f, recv, None);
+                sort_arm_await(vm, sop);
+                sop.await_prim = true;
+                sop.prim_value = v;
+                sop.prim_tried_other = false;
+                sop.prim_purpose = crate::vm::SortPrimPurpose::Length;
+                SortStepOut::Wait
+            }
+            SortPrimOut::Raise(e) => SortStepOut::Raise(e),
+        }
+    }
+}
+
+/// LengthOfArrayLike for sort/toSorted: fixed once, symbol lengths throw,
+/// object lengths coerce via valueOf, length getters dispatch. Sets sop.len
+/// or arms a prim await (Wait).
+fn sort_begin_length(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    sop: &mut crate::vm::PendingSortOp,
+) -> SortStepOut {
+    let obj = sop.source_val;
+    // Dense arrays: magic length, always data.
+    if let Some(ptr) = obj.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_ARRAY {
+            sop.len = unsafe { RuneArray::length(ptr as *mut RuneArray) } as u64;
+            return SortStepOut::Progress;
+        }
+    }
+    let name_val = Value::from_heap_ptr(HeapString::allocate(gc, "length") as *mut u8);
+    let raw = crate::vm::load_property_recursive(obj, name_val, None, gc);
+    if let Some(aptr) = raw.heap_ptr() {
+        if unsafe { (*(aptr as *const GcHeader)).tag() } == TAG_ACCESSOR {
+            let getter = unsafe { rune_core::accessor::AccessorPair::getter(aptr) };
+            if getter.is_undefined() || getter.is_null() {
+                sop.len = 0;
+                return SortStepOut::Progress;
+            }
+            if let Some(smi) = getter.as_smi() {
+                if smi < 0 {
+                    let id = ((-smi) as usize) - 1;
+                    if id < vm.builtins.len() {
+                        let result = (vm.builtins[id].func)(gc, obj, &[], vm);
+                        if let Some(exc) = vm.pending_exception.take() {
+                            return SortStepOut::Raise(exc);
+                        }
+                        return sort_length_of_value(vm, gc, sop, result);
+                    }
+                }
+                sop.len = 0;
+                return SortStepOut::Progress;
+            }
+            if getter
+                .heap_ptr()
+                .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC)
+            {
+                crate::vm::push_accessor_frame(vm, getter, obj, None);
+                sort_arm_await(vm, sop);
+                sop.await_prim = true;
+                sop.prim_value = obj;
+                sop.prim_tried_other = false;
+                sop.prim_purpose = crate::vm::SortPrimPurpose::LengthGet;
+                return SortStepOut::Wait;
+            }
+            sop.len = 0;
+            return SortStepOut::Progress;
+        }
+    }
+    sort_length_of_value(vm, gc, sop, raw)
+}
+
+/// Resume a ToPrimitive round-trip (length coercion or string-key).
+fn sort_prim_resume(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    sop: &mut crate::vm::PendingSortOp,
+    result: Value,
+) -> SortStepOut {
+    let purpose = std::mem::replace(&mut sop.prim_purpose, crate::vm::SortPrimPurpose::Length);
+    match purpose {
+        crate::vm::SortPrimPurpose::LengthGet => sort_length_of_value(vm, gc, sop, result),
+        crate::vm::SortPrimPurpose::Length => {
+            if !toprim_is_primitive(result) {
+                if !sop.prim_tried_other {
+                    match sort_to_prim(vm, gc, sop.prim_value, false, true) {
+                        SortPrimOut::Ready(p) => {
+                            return sort_length_of_value(vm, gc, sop, p);
+                        }
+                        SortPrimOut::Wait(f, recv) => {
+                            crate::vm::push_accessor_frame(vm, f, recv, None);
+                            sort_arm_await(vm, sop);
+                            sop.await_prim = true;
+                            sop.prim_tried_other = true;
+                            sop.prim_purpose = crate::vm::SortPrimPurpose::Length;
+                            return SortStepOut::Wait;
+                        }
+                        SortPrimOut::Raise(e) => return SortStepOut::Raise(e),
+                    }
+                }
+                return SortStepOut::Raise(sort_type_error(
+                    gc,
+                    vm,
+                    "Cannot convert object to primitive value",
+                ));
+            }
+            sort_length_of_value(vm, gc, sop, result)
+        }
+        crate::vm::SortPrimPurpose::Key { is_left } => {
+            if !toprim_is_primitive(result) {
+                if !sop.prim_tried_other {
+                    match sort_to_prim(vm, gc, sop.prim_value, true, true) {
+                        SortPrimOut::Ready(p) => {
+                            return sort_key_resume(gc, vm, sop, is_left, p);
+                        }
+                        SortPrimOut::Wait(f, recv) => {
+                            crate::vm::push_accessor_frame(vm, f, recv, None);
+                            sort_arm_await(vm, sop);
+                            sop.await_prim = true;
+                            sop.prim_tried_other = true;
+                            sop.prim_purpose = crate::vm::SortPrimPurpose::Key { is_left };
+                            return SortStepOut::Wait;
+                        }
+                        SortPrimOut::Raise(e) => return SortStepOut::Raise(e),
+                    }
+                }
+                return SortStepOut::Raise(sort_type_error(
+                    gc,
+                    vm,
+                    "Cannot convert object to primitive value",
+                ));
+            }
+            sort_key_resume(gc, vm, sop, is_left, result)
+        }
+    }
+}
+
+/// Store a resolved key primitive for one merge side.
+fn sort_key_resume(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    sop: &mut crate::vm::PendingSortOp,
+    is_left: bool,
+    p: Value,
+) -> SortStepOut {
+    match sort_key_of_primitive(p) {
+        Ok(k) => {
+            let idx = if is_left { sop.i } else { sop.j };
+            sop.items[idx].key = Some(k);
+            SortStepOut::Progress
+        }
+        Err(()) => SortStepOut::Raise(sort_type_error(
+            gc,
+            vm,
+            "Cannot convert a Symbol value to a string",
+        )),
+    }
+}
+
+/// Resolve (and cache) the default-comparator key for one merge side.
+/// Keys are computed lazily: with 0/1 elements no ToString ever runs.
+fn sort_key_step(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    sop: &mut crate::vm::PendingSortOp,
+    is_left: bool,
+) -> SortStepOut {
+    let idx = if is_left { sop.i } else { sop.j };
+    if sop.items[idx].key.is_some() {
+        return SortStepOut::Progress;
+    }
+    let value = sop.items[idx].value;
+    match sort_to_prim(vm, gc, value, true, false) {
+        SortPrimOut::Ready(p) => sort_key_resume(gc, vm, sop, is_left, p),
+        SortPrimOut::Wait(f, recv) => {
+            crate::vm::push_accessor_frame(vm, f, recv, None);
+            sort_arm_await(vm, sop);
+            sop.await_prim = true;
+            sop.prim_value = value;
+            sop.prim_tried_other = false;
+            sop.prim_purpose = crate::vm::SortPrimPurpose::Key { is_left };
+            SortStepOut::Wait
+        }
+        SortPrimOut::Raise(e) => SortStepOut::Raise(e),
+    }
+}
+
+/// Comparator result → f64 (ToNumber; NaN → +0 per CompareArrayElements;
+/// symbol → abrupt).
+fn sort_cmp_number(v: Value) -> Result<f64, ()> {
+    if v.is_symbol() {
+        return Err(());
+    }
+    let n = crate::vm::to_number(v);
+    Ok(if n.is_nan() { 0.0 } else { n })
+}
+
+/// Place one merge element by ordering (Equal takes LEFT — stability).
+fn sort_merge_place(sop: &mut crate::vm::PendingSortOp, ord: std::cmp::Ordering) {
+    let take_left = !matches!(ord, std::cmp::Ordering::Greater);
+    let from = if take_left { sop.i } else { sop.j };
+    let moved = std::mem::replace(
+        &mut sop.items[from],
+        crate::vm::SortItem {
+            value: Value::undefined(),
+            key: None,
+        },
+    );
+    sop.aux[sop.k] = moved;
+    if take_left {
+        sop.i += 1;
+    } else {
+        sop.j += 1;
+    }
+    sop.k += 1;
+    if sop.k >= sop.pair_end {
+        sop.base = sop.pair_end;
+        if !sort_advance(sop) {
+            sop.phase = crate::vm::SortPhase::Write;
+            sop.write_idx = 0;
+        }
+    }
+}
+
+/// Set up the next merge pair (or next pass). False = sorting complete.
+fn sort_advance(sop: &mut crate::vm::PendingSortOp) -> bool {
+    let n = sop.items.len();
+    loop {
+        if sop.base >= n {
+            std::mem::swap(&mut sop.items, &mut sop.aux);
+            sop.width *= 2;
+            if sop.width >= n {
+                return false;
+            }
+            sop.base = 0;
+        }
+        let mid = (sop.base + sop.width).min(n);
+        let end = (sop.base + 2 * sop.width).min(n);
+        if mid >= end {
+            // No right run: carry the left run over verbatim.
+            for t in sop.base..mid {
+                let moved = std::mem::replace(
+                    &mut sop.items[t],
+                    crate::vm::SortItem {
+                        value: Value::undefined(),
+                        key: None,
+                    },
+                );
+                sop.aux[t] = moved;
+            }
+            sop.base = end;
+            continue;
+        }
+        sop.i = sop.base;
+        sop.j = mid;
+        sop.k = sop.base;
+        sop.left_end = mid;
+        sop.right_end = end;
+        sop.pair_end = end;
+        return true;
+    }
+}
+
+/// One merge comparison (or exhaustion drain): places exactly one element
+/// synchronously, or pushes a comparator/key frame (Wait).
+fn sort_compare_step(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    sop: &mut crate::vm::PendingSortOp,
+) -> SortStepOut {
+    let x = sop.items[sop.i].value;
+    let y = sop.items[sop.j].value;
+    if !sop.comparator.is_undefined() {
+        // CompareArrayElements steps 1-3 precede the comparator Call:
+        // undefined sorts after everything without invoking it.
+        let xu = x.is_undefined();
+        let yu = y.is_undefined();
+        if xu && yu {
+            sort_merge_place(sop, std::cmp::Ordering::Equal);
+            return SortStepOut::Progress;
+        } else if xu {
+            sort_merge_place(sop, std::cmp::Ordering::Greater);
+            return SortStepOut::Progress;
+        } else if yu {
+            sort_merge_place(sop, std::cmp::Ordering::Less);
+            return SortStepOut::Progress;
+        }
+        let cmp = sop.comparator;
+        if let Some(smi) = cmp.as_smi() {
+            if smi < 0 {
+                let id = ((-smi) as usize) - 1;
+                if id < vm.builtins.len() {
+                    let result = (vm.builtins[id].func)(gc, Value::undefined(), &[x, y], vm);
+                    if let Some(exc) = vm.pending_exception.take() {
+                        return SortStepOut::Raise(exc);
+                    }
+                    match sort_cmp_number(result) {
+                        Ok(n) => {
+                            sort_merge_place(
+                                sop,
+                                n.partial_cmp(&0.0).unwrap_or(std::cmp::Ordering::Equal),
+                            );
+                            return SortStepOut::Progress;
+                        }
+                        Err(()) => {
+                            return SortStepOut::Raise(sort_type_error(
+                                gc,
+                                vm,
+                                "Cannot convert a Symbol value to a number",
+                            ));
+                        }
+                    }
+                }
+            }
+            return SortStepOut::Raise(sort_type_error(
+                gc,
+                vm,
+                "sort comparator is not a function",
+            ));
+        }
+        if cmp
+            .heap_ptr()
+            .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC)
+        {
+            vm.push_callback_call(gc, cmp, Value::undefined(), vec![x, y]);
+            sort_arm_await(vm, sop);
+            sop.await_cmp = true;
+            return SortStepOut::Wait;
+        }
+        return SortStepOut::Raise(sort_type_error(gc, vm, "sort comparator is not a function"));
+    }
+    // Default comparator: undefined sorts last (CompareArrayElements 1-3),
+    // else UTF-16 lexicographic by lazily resolved keys.
+    let xu = x.is_undefined();
+    let yu = y.is_undefined();
+    if xu && yu {
+        sort_merge_place(sop, std::cmp::Ordering::Equal);
+    } else if xu {
+        sort_merge_place(sop, std::cmp::Ordering::Greater);
+    } else if yu {
+        sort_merge_place(sop, std::cmp::Ordering::Less);
+    } else {
+        match sort_key_step(vm, gc, sop, true) {
+            SortStepOut::Progress => {}
+            other => return other,
+        }
+        match sort_key_step(vm, gc, sop, false) {
+            SortStepOut::Progress => {}
+            other => return other,
+        }
+        let ord = sop.items[sop.i]
+            .key
+            .as_ref()
+            .unwrap()
+            .cmp(sop.items[sop.j].key.as_ref().unwrap());
+        sort_merge_place(sop, ord);
+    }
+    SortStepOut::Progress
+}
+
+/// One merge step: drain exhausted runs, then compare.
+fn sort_merge_step(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    sop: &mut crate::vm::PendingSortOp,
+) -> SortStepOut {
+    loop {
+        if sop.k >= sop.pair_end {
+            sop.base = sop.pair_end;
+            if !sort_advance(sop) {
+                sop.phase = crate::vm::SortPhase::Write;
+                sop.write_idx = 0;
+            }
+            return SortStepOut::Progress;
+        }
+        if sop.i < sop.left_end && sop.j < sop.right_end {
+            break;
+        }
+        // One side exhausted: carry the other over (no comparison).
+        let from = if sop.i >= sop.left_end {
+            let t = sop.j;
+            sop.j += 1;
+            t
+        } else {
+            let t = sop.i;
+            sop.i += 1;
+            t
+        };
+        let moved = std::mem::replace(
+            &mut sop.items[from],
+            crate::vm::SortItem {
+                value: Value::undefined(),
+                key: None,
+            },
+        );
+        sop.aux[sop.k] = moved;
+        sop.k += 1;
+    }
+    sort_compare_step(vm, gc, sop)
+}
+
+/// Snapshot reads (SortIndexedProperties): HasProperty+Get per index with
+/// getter dispatch; toSorted reads through holes. Length fixed at entry.
+fn sort_read_step(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    sop: &mut crate::vm::PendingSortOp,
+) -> SortStepOut {
+    let walk = sop.len.min(u32::MAX as u64);
+    while sop.read_idx < walk {
+        let idx = sop.read_idx;
+        if !sop.read_all && !crate::vm::has_property(sop.source_val, Value::smi(idx as i32), None) {
+            sop.read_idx += 1;
+            continue;
+        }
+        match crate::vm::array_element_value(vm, gc, sop.source_val, idx as usize) {
+            crate::vm::ArrayElemOut::Ready(v) => {
+                sop.items.push(crate::vm::SortItem {
+                    value: v,
+                    key: None,
+                });
+                sop.read_idx += 1;
+            }
+            crate::vm::ArrayElemOut::Wait => {
+                sop.await_read = true;
+                sort_arm_await(vm, sop);
+                return SortStepOut::Wait;
+            }
+            crate::vm::ArrayElemOut::SyncErr(e) => return SortStepOut::Raise(e),
+        }
+    }
+    let n = sop.items.len();
+    if n > 1 {
+        sop.aux = (0..n)
+            .map(|_| crate::vm::SortItem {
+                value: Value::undefined(),
+                key: None,
+            })
+            .collect();
+        sop.width = 1;
+        sop.base = 0;
+        sop.phase = crate::vm::SortPhase::Merge;
+        sort_advance(sop);
+    } else {
+        sop.phase = crate::vm::SortPhase::Write;
+        sop.write_idx = 0;
+    }
+    SortStepOut::Progress
+}
+
+/// Setter-scan outcome for one sort write.
+enum SortStoreOut {
+    Done,
+    WaitSetter(Value),
+    Raise(Value),
+}
+
+/// Find the own-or-inherited accessor pair governing a sort write index
+/// (dense overlay for arrays, shape slots for objects, then the proto
+/// chain — tags guarded, unlike the legacy funnel loop).
+fn sort_find_accessor(obj: Value, idx: usize) -> Option<Value> {
+    let mut current = obj;
+    let mut depth = 0;
+    loop {
+        if depth >= crate::vm::MAX_PROTOTYPE_DEPTH {
+            return None;
+        }
+        depth += 1;
+        let ptr = current.heap_ptr()?;
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_ARRAY {
+            if let Some(pair) = crate::vm::array_overlay_accessor(ptr as *mut RuneArray, idx) {
+                return Some(pair);
+            }
+            let proto = unsafe { JSObject::prototype(ptr as *mut JSObject) };
+            if proto.is_null() {
+                return None;
+            }
+            current = Value::from_heap_ptr(proto);
+        } else if tag == TAG_OBJECT {
+            if let Some(key) = crate::vm::value_to_prop_key(Value::smi(idx as i32)) {
+                let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                if let Some(slot) = shape.lookup(&key) {
+                    let v = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+                    if v.heap_ptr().is_some_and(|vp| unsafe {
+                        (*(vp as *const GcHeader)).tag() == TAG_ACCESSOR
+                    }) {
+                        return Some(v);
+                    }
+                }
+            }
+            let proto = unsafe { JSObject::prototype(ptr as *mut JSObject) };
+            if proto.is_null() {
+                return None;
+            }
+            current = Value::from_heap_ptr(proto);
+        } else {
+            return None;
+        }
+    }
+}
+
+/// One mutating write for sort writeback (spec Set with throw=true):
+/// setter dispatch (builtin inline, JS via frame), else a raw store with
+/// strict failure reporting. Never calls handle_throw (setup-safe).
+fn sort_store_one(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    obj: Value,
+    idx: usize,
+    val: Value,
+) -> SortStoreOut {
+    if let Some(pair) = sort_find_accessor(obj, idx) {
+        let aptr = pair.heap_ptr().unwrap();
+        let setter = unsafe { rune_core::accessor::AccessorPair::setter(aptr) };
+        if setter.is_undefined() || setter.is_null() {
+            return SortStoreOut::Raise(sort_type_error(
+                gc,
+                vm,
+                "Cannot set property with only a getter",
+            ));
+        }
+        if let Some(smi) = setter.as_smi() {
+            if smi < 0 {
+                let id = ((-smi) as usize) - 1;
+                if id < vm.builtins.len() {
+                    (vm.builtins[id].func)(gc, obj, &[val], vm);
+                    if let Some(exc) = vm.pending_exception.take() {
+                        return SortStoreOut::Raise(exc);
+                    }
+                    return SortStoreOut::Done;
+                }
+            }
+            return SortStoreOut::Raise(sort_type_error(gc, vm, "setter is not a function"));
+        }
+        if setter
+            .heap_ptr()
+            .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC)
+        {
+            return SortStoreOut::WaitSetter(setter);
+        }
+        return SortStoreOut::Raise(sort_type_error(gc, vm, "setter is not a function"));
+    }
+    if crate::vm::do_store_property(obj, Value::smi(idx as i32), val, gc, vm) {
+        SortStoreOut::Done
+    } else {
+        // Strict Set failure. SameValue stores succeed silently (spec
+        // ValidateAndApply); anything else throws.
+        let cur = crate::vm::array_like_index(obj, idx as u32).unwrap_or(Value::undefined());
+        if same_value(cur, val) {
+            SortStoreOut::Done
+        } else {
+            SortStoreOut::Raise(sort_type_error(
+                gc,
+                vm,
+                "Cannot assign to read-only property",
+            ))
+        }
+    }
+}
+
+/// One trailing delete for sort writeback (DeletePropertyOrThrow):
+/// dense arrays punch holes, objects remove configurable props.
+fn sort_delete_one(gc: &mut SemiSpace, vm: &Vm, obj: Value, idx: u64) -> Result<(), Value> {
+    let ptr = match obj.heap_ptr() {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+    let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+    if tag == TAG_ARRAY {
+        let len = unsafe { RuneArray::length(ptr as *mut RuneArray) } as u64;
+        let cap = unsafe { RuneArray::capacity(ptr as *mut RuneArray) } as u64;
+        if idx < len && idx < cap {
+            unsafe {
+                RuneArray::set_element(ptr as *mut RuneArray, idx as usize, Value::empty_sentinel())
+            };
+        }
+        Ok(())
+    } else if tag == TAG_OBJECT {
+        if let Some(key) = crate::vm::value_to_prop_key(Value::smi(idx as i32)) {
+            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+            if let Some(s) = shape.lookup(&key) {
+                if shape.attr_at(s) & rune_core::shape::ATTR_CONFIGURABLE == 0 {
+                    return Err(sort_type_error(
+                        gc,
+                        vm,
+                        "Cannot delete a non-configurable property",
+                    ));
+                }
+                unsafe { JSObject::remove_property(ptr as *mut JSObject, &key) };
+            }
+        }
+        Ok(())
+    } else {
+        Ok(())
+    }
+}
+
+/// Writeback: toSorted densifies into a fresh array; sort Sets each present
+/// index (setter dispatch) then deletes the trailing range.
+fn sort_write_step(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    sop: &mut crate::vm::PendingSortOp,
+) -> SortStepOut {
+    if sop.is_copy {
+        let vals: Vec<Value> = sop.items.iter().map(|it| it.value).collect();
+        return SortStepOut::Done(build_array(gc, &vals, vm));
+    }
+    while sop.write_idx < sop.items.len() {
+        let idx = sop.write_idx;
+        let val = sop.items[idx].value;
+        match sort_store_one(vm, gc, sop.source_val, idx, val) {
+            SortStoreOut::Done => sop.write_idx += 1,
+            SortStoreOut::WaitSetter(setter) => {
+                crate::vm::push_accessor_frame(vm, setter, sop.source_val, Some(val));
+                sort_arm_await(vm, sop);
+                sop.await_set = true;
+                return SortStepOut::Wait;
+            }
+            SortStoreOut::Raise(e) => return SortStepOut::Raise(e),
+        }
+    }
+    let n = sop.items.len() as u64;
+    let walk = sop.len.min(u32::MAX as u64);
+    let mut j = n;
+    while j < walk {
+        if let Err(e) = sort_delete_one(gc, vm, sop.source_val, j) {
+            return SortStepOut::Raise(e);
+        }
+        j += 1;
+    }
+    SortStepOut::Done(sop.source_val)
+}
+
+/// Drive the machine synchronously until it waits, finishes, or raises.
+/// Never returns Progress (loops internally).
+pub(crate) fn sort_drive(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    sop: &mut crate::vm::PendingSortOp,
+) -> SortStepOut {
+    loop {
+        if sop.len_pending {
+            match sort_begin_length(vm, gc, sop) {
+                SortStepOut::Progress => {
+                    // toSorted ArrayCreates up front: the RangeError precedes
+                    // every element Get (length-exceeding-array-length-limit).
+                    if sop.is_copy && sop.len > u32::MAX as u64 {
+                        return SortStepOut::Raise(sort_range_error(
+                            gc,
+                            vm,
+                            "Invalid array length",
+                        ));
+                    }
+                    sop.len_pending = false;
+                }
+                other => return other,
+            }
+        }
+        match sop.phase {
+            crate::vm::SortPhase::Read => match sort_read_step(vm, gc, sop) {
+                SortStepOut::Progress => {}
+                other => return other,
+            },
+            crate::vm::SortPhase::Merge => match sort_merge_step(vm, gc, sop) {
+                SortStepOut::Progress => {}
+                other => return other,
+            },
+            crate::vm::SortPhase::Write => return sort_write_step(vm, gc, sop),
+        }
+    }
+}
+
+/// Resume the machine with a JS frame's return value (getter element,
+/// ToPrimitive value, comparator number, or ignored setter result).
+pub(crate) fn sort_resume(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    sop: &mut crate::vm::PendingSortOp,
+    result: Value,
+) -> SortStepOut {
+    if sop.await_read {
+        sop.await_read = false;
+        sop.items.push(crate::vm::SortItem {
+            value: result,
+            key: None,
+        });
+        sop.read_idx += 1;
+        SortStepOut::Progress
+    } else if sop.await_cmp {
+        sop.await_cmp = false;
+        match sort_cmp_number(result) {
+            Ok(n) => {
+                sort_merge_place(
+                    sop,
+                    n.partial_cmp(&0.0).unwrap_or(std::cmp::Ordering::Equal),
+                );
+                SortStepOut::Progress
+            }
+            Err(()) => SortStepOut::Raise(sort_type_error(
+                gc,
+                vm,
+                "Cannot convert a Symbol value to a number",
+            )),
+        }
+    } else if sop.await_set {
+        sop.await_set = false;
+        sop.write_idx += 1;
+        SortStepOut::Progress
+    } else if sop.await_prim {
+        sop.await_prim = false;
+        sort_prim_resume(vm, gc, sop, result)
+    } else {
+        // No await armed — a foreign nested return at our depth. Re-drive
+        // (every step advances or terminates, so this cannot spin).
+        SortStepOut::Progress
+    }
+}
+
+/// Shared sort/toSorted entry: spec-order comparator check, RequireObject-
+/// Coercible, then the machine. `is_copy` selects toSorted writeback.
+fn array_sort_entry(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+    is_copy: bool,
+) -> Value {
+    // Step 1 precedes ToObject/LengthOfArrayLike (comparefn-not-a-function).
+    let comparator = args.first().copied().unwrap_or(Value::undefined());
+    if !comparator.is_undefined() && !is_callable_value(comparator) {
+        vm.set_pending_exception(sort_type_error(
+            gc,
+            vm,
+            "The comparison function must be either a function or undefined",
         ));
         return Value::undefined();
     }
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let length = match crate::vm::array_like_length(this) {
-        Some(len) => len,
-        None => return this,
+    let mut sop = crate::vm::PendingSortOp {
+        source_frame_depth: 0,
+        source_val: this,
+        write_val: Value::undefined(),
+        comparator,
+        is_copy,
+        read_all: is_copy,
+        len: 0,
+        len_pending: true,
+        phase: crate::vm::SortPhase::Read,
+        read_idx: 0,
+        await_read: false,
+        await_prim: false,
+        prim_value: Value::undefined(),
+        prim_tried_other: false,
+        prim_purpose: crate::vm::SortPrimPurpose::Length,
+        items: Vec::new(),
+        aux: Vec::new(),
+        width: 1,
+        base: 0,
+        i: 0,
+        j: 0,
+        k: 0,
+        left_end: 0,
+        right_end: 0,
+        pair_end: 0,
+        await_cmp: false,
+        write_idx: 0,
+        await_set: false,
+        await_callee: Value::undefined(),
     };
-    if length <= 1 {
-        return this;
-    }
-    let mut elements: Vec<Value> = Vec::with_capacity(length as usize);
-    for i in 0..length {
-        elements.push(crate::vm::array_like_index(this, i).unwrap_or(Value::undefined()));
-    }
-    elements.sort_by_key(|a| string_from_value(*a));
-    // Write back sorted elements in-place
-    if let Some(ptr) = this.heap_ptr() {
-        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-        if tag == TAG_ARRAY {
-            unsafe {
-                RuneArray::set_length(ptr as *mut RuneArray, 0);
-            }
-            let mut cur_ptr = ptr;
-            for elem in &elements {
-                unsafe {
-                    let new_ptr = RuneArray::push(gc, cur_ptr as *mut RuneArray, *elem);
-                    if new_ptr as *mut u8 != cur_ptr {
-                        let resolved = if (*(cur_ptr as *const GcHeader)).is_forwarded() {
-                            (*(cur_ptr as *const GcHeader)).forwarding_addr()
-                        } else {
-                            cur_ptr
-                        };
-                        if resolved != new_ptr as *mut u8 {
-                            vm.update_heap_reference(resolved, new_ptr as *mut u8);
-                        }
-                        cur_ptr = new_ptr as *mut u8;
-                    }
-                }
-            }
-            return Value::from_heap_ptr(cur_ptr);
+    match sort_drive(vm, gc, &mut sop) {
+        SortStepOut::Wait => {
+            // A frame was pushed (rebase missed the local op): stamp its
+            // index manually, mirroring the collection-foreach arm.
+            sop.source_frame_depth = vm.frame_depth() - 1;
+            vm.pending_sort_op = Some(sop);
+            Value::undefined()
         }
+        SortStepOut::Done(v) => v,
+        SortStepOut::Raise(e) => {
+            vm.set_pending_exception(e);
+            Value::undefined()
+        }
+        SortStepOut::Progress => unreachable!("sort_drive never returns Progress"),
     }
-    this
+}
+
+/// Array.prototype.sort(comparator) — stable, observable (§23.1.3.30).
+pub fn array_sort(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    array_sort_entry(gc, this, args, vm, false)
+}
+
+/// Array.prototype.toSorted(comparator) — stable copy (§23.1.3.34).
+pub fn array_to_sorted(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    array_sort_entry(gc, this, args, vm, true)
 }
 
 /// Array.prototype.flatMap(callback, thisArg) — set up state machine iteration, spreading array results.
@@ -12351,6 +13765,16 @@ pub fn default_builtins() -> Vec<Builtin> {
             name: "parseFloat",
             func: parse_float_builtin,
         },
+        Builtin {
+            length: 1,
+            name: "isNaN",
+            func: is_nan_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "isFinite",
+            func: is_finite_builtin,
+        },
         // JSON
         Builtin {
             length: 2,
@@ -12460,6 +13884,11 @@ pub fn default_builtins() -> Vec<Builtin> {
         },
         Builtin {
             length: 1,
+            name: "Array_prototype_toSorted",
+            func: array_to_sorted,
+        },
+        Builtin {
+            length: 1,
             name: "Function_prototype_call",
             func: call_builtin,
         },
@@ -12478,6 +13907,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 2,
             name: "assert_notSameValue",
             func: assert_not_same_value,
+        },
+        Builtin {
+            length: 2,
+            name: "assert_compareArray",
+            func: assert_compare_array,
         },
         Builtin {
             length: 2,
@@ -12750,6 +14184,65 @@ pub fn assert_not_same_value(
         };
         let err = make_error(gc, &_vm.error_protos, &msg);
         _vm.set_pending_exception(err);
+    }
+    Value::undefined()
+}
+
+/// assert.compareArray(actual, expected, message) — length equality plus
+/// SameValue per index (mirrors test262's assert.js; the builtin assert
+/// lacked it, failing every suite test that compares array results).
+/// Reads go through load_property_recursive (proto consult like Get; JS
+/// element getters don't dispatch — sync gap, no suite test needs it).
+pub fn assert_compare_array(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    vm.assert_called = true;
+    let actual = args.first().copied().unwrap_or(Value::undefined());
+    let expected = args.get(1).copied().unwrap_or(Value::undefined());
+    let desc = args.get(2).map(|v| value_to_debug(*v)).unwrap_or_default();
+    let prefix = if desc.is_empty() {
+        String::new()
+    } else {
+        format!("{desc} ")
+    };
+    macro_rules! fail {
+        ($detail:expr) => {{
+            vm.set_pending_exception(make_error(
+                gc,
+                &vm.error_protos,
+                &format!("{prefix}assert.compareArray: {}", $detail),
+            ));
+            return Value::undefined();
+        }};
+    }
+    let is_prim = |v: Value| {
+        if !v.is_heap_object() {
+            return true;
+        }
+        v.heap_ptr()
+            .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_STRING })
+    };
+    if is_prim(actual) || is_prim(expected) {
+        fail!("arguments shouldn't be primitive");
+    }
+    let len_of = |v: Value| crate::vm::array_like_length(v).unwrap_or(0) as usize;
+    let (alen, blen) = (len_of(actual), len_of(expected));
+    if alen != blen {
+        fail!(format!("lengths differ ({alen} vs {blen})"));
+    }
+    for i in 0..alen {
+        let a = crate::vm::load_property_recursive(actual, Value::smi(i as i32), None, gc);
+        let b = crate::vm::load_property_recursive(expected, Value::smi(i as i32), None, gc);
+        if !same_value(a, b) {
+            fail!(format!(
+                "index {i} differs ({} vs {})",
+                value_to_debug(a),
+                value_to_debug(b)
+            ));
+        }
     }
     Value::undefined()
 }

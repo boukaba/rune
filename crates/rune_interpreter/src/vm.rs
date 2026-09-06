@@ -283,9 +283,14 @@ pub(crate) enum ArrayOpKind {
     Filter,
     Map,
     Reduce,
+    /// B1c: reduceRight — same as Reduce, iterated backward.
+    ReduceRight,
     ForEach,
     Find,
     FindIndex,
+    /// B1c: findLast/findLastIndex — same as Find/FindIndex, backward.
+    FindLast,
+    FindLastIndex,
     Some,
     Every,
     FlatMap,
@@ -294,6 +299,15 @@ pub(crate) enum ArrayOpKind {
     IndexOf,
     LastIndexOf,
     Includes,
+}
+
+/// True for backward-iterated callback kinds (B1c). (LastIndexOf also
+/// walks backward but through the search step, not the callback walk.)
+pub(crate) fn array_op_is_backward(kind: ArrayOpKind) -> bool {
+    matches!(
+        kind,
+        ArrayOpKind::ReduceRight | ArrayOpKind::FindLast | ArrayOpKind::FindLastIndex
+    )
 }
 
 /// Pending Promise.prototype.finally operation.
@@ -1128,6 +1142,9 @@ impl Vm {
             if let Some(r) = reduce_handle {
                 proto_entries.push(("reduce", r));
             }
+            if let Some(rr) = find_handle(&self.builtins, "Array_prototype_reduceRight") {
+                proto_entries.push(("reduceRight", rr));
+            }
             if let Some(fe) = for_each_handle {
                 proto_entries.push(("forEach", fe));
             }
@@ -1151,6 +1168,12 @@ impl Vm {
             }
             if let Some(fi) = find_index_h {
                 proto_entries.push(("findIndex", fi));
+            }
+            if let Some(fl) = find_handle(&self.builtins, "Array_prototype_findLast") {
+                proto_entries.push(("findLast", fl));
+            }
+            if let Some(fli) = find_handle(&self.builtins, "Array_prototype_findLastIndex") {
+                proto_entries.push(("findLastIndex", fli));
             }
             if let Some(sm) = some_h {
                 proto_entries.push(("some", sm));
@@ -8665,11 +8688,13 @@ impl Vm {
                                 }
                                 let cb = op.callback;
                                 let cb_this = match op.kind {
-                                    ArrayOpKind::Reduce => Value::undefined(),
+                                    ArrayOpKind::Reduce | ArrayOpKind::ReduceRight => {
+                                        Value::undefined()
+                                    }
                                     _ => op.this_val,
                                 };
                                 let cb_args = match op.kind {
-                                    ArrayOpKind::Reduce => {
+                                    ArrayOpKind::Reduce | ArrayOpKind::ReduceRight => {
                                         let acc = op.accumulator.unwrap_or(Value::undefined());
                                         vec![acc, result, Value::smi(idx as i32), op.source_val]
                                     }
@@ -8820,14 +8845,17 @@ impl Vm {
                                         op.result = new_arr as *mut u8;
                                     }
                                 }
-                                ArrayOpKind::Reduce => {
+                                ArrayOpKind::Reduce | ArrayOpKind::ReduceRight => {
                                     op.accumulator = Some(result);
                                 }
                                 ArrayOpKind::ForEach => {}
-                                ArrayOpKind::Find | ArrayOpKind::FindIndex => {
+                                ArrayOpKind::Find
+                                | ArrayOpKind::FindIndex
+                                | ArrayOpKind::FindLast
+                                | ArrayOpKind::FindLastIndex => {
                                     if result.to_bool() {
                                         let found = match op.kind {
-                                            ArrayOpKind::Find => {
+                                            ArrayOpKind::Find | ArrayOpKind::FindLast => {
                                                 array_like_index(op.source_val, op.index as u32)
                                                     .unwrap_or(Value::undefined())
                                             }
@@ -8863,14 +8891,35 @@ impl Vm {
                             // (LengthOfArrayLike runs once); length mutations
                             // during iteration (e.g. a getter side effect)
                             // do not change the visited range. HasProperty
-                            // skips deleted indices.
+                            // skips deleted indices. B1c: backward kinds walk
+                            // down from below the current index.
                             let current_len = op.length;
                             let op_kind = op.kind;
-                            op.index += 1;
-                            // Walk forward to the next existing element
-                            // (HasProperty semantics: proto-chain presence,
-                            // so setter-only proto accessors count).
+                            let backward = array_op_is_backward(op_kind);
                             let next_index = 'search: {
+                                if backward {
+                                    if op.index == 0 {
+                                        break 'search None::<usize>;
+                                    }
+                                    let mut i = op.index - 1;
+                                    loop {
+                                        if has_property(
+                                            op.source_val,
+                                            Value::smi(i as i32),
+                                            Some(self.function_prototype),
+                                        ) {
+                                            break 'search Some(i);
+                                        }
+                                        if i == 0 {
+                                            break 'search None::<usize>;
+                                        }
+                                        i -= 1;
+                                    }
+                                }
+                                op.index += 1;
+                                // Walk forward to the next existing element
+                                // (HasProperty semantics: proto-chain presence,
+                                // so setter-only proto accessors count).
                                 let mut i = op.index;
                                 while i < current_len as usize {
                                     if has_property(
@@ -8910,10 +8959,14 @@ impl Vm {
                                     | ArrayOpKind::ForEach
                                     | ArrayOpKind::Find
                                     | ArrayOpKind::FindIndex
+                                    | ArrayOpKind::FindLast
+                                    | ArrayOpKind::FindLastIndex
                                     | ArrayOpKind::Some
                                     | ArrayOpKind::Every
                                     | ArrayOpKind::FlatMap => op.this_val,
-                                    ArrayOpKind::Reduce => Value::undefined(),
+                                    ArrayOpKind::Reduce | ArrayOpKind::ReduceRight => {
+                                        Value::undefined()
+                                    }
                                     ArrayOpKind::IndexOf
                                     | ArrayOpKind::LastIndexOf
                                     | ArrayOpKind::Includes => Value::undefined(),
@@ -8924,12 +8977,14 @@ impl Vm {
                                     | ArrayOpKind::ForEach
                                     | ArrayOpKind::Find
                                     | ArrayOpKind::FindIndex
+                                    | ArrayOpKind::FindLast
+                                    | ArrayOpKind::FindLastIndex
                                     | ArrayOpKind::Some
                                     | ArrayOpKind::Every
                                     | ArrayOpKind::FlatMap => {
                                         vec![resolved_val, Value::smi(i as i32), op.source_val]
                                     }
-                                    ArrayOpKind::Reduce => {
+                                    ArrayOpKind::Reduce | ArrayOpKind::ReduceRight => {
                                         let acc = op.accumulator.unwrap_or(Value::undefined());
                                         vec![acc, resolved_val, Value::smi(i as i32), op.source_val]
                                     }
@@ -8952,10 +9007,14 @@ impl Vm {
                                 ArrayOpKind::Filter | ArrayOpKind::Map | ArrayOpKind::FlatMap => {
                                     Value::from_heap_ptr(op.result)
                                 }
-                                ArrayOpKind::Reduce => op.accumulator.unwrap_or(Value::undefined()),
+                                ArrayOpKind::Reduce | ArrayOpKind::ReduceRight => {
+                                    op.accumulator.unwrap_or(Value::undefined())
+                                }
                                 ArrayOpKind::ForEach => Value::undefined(),
-                                ArrayOpKind::Find => Value::undefined(),
-                                ArrayOpKind::FindIndex => Value::smi(-1),
+                                ArrayOpKind::Find | ArrayOpKind::FindLast => Value::undefined(),
+                                ArrayOpKind::FindIndex | ArrayOpKind::FindLastIndex => {
+                                    Value::smi(-1)
+                                }
                                 ArrayOpKind::Some => Value::boolean(false),
                                 ArrayOpKind::Every => Value::boolean(true),
                                 // B1b: search completions return from the

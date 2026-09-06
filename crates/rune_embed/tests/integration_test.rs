@@ -1119,6 +1119,41 @@ fn test_define_property_seal_freeze() {
 }
 
 #[test]
+fn test_array_reduce_right_find_last() {
+    // B1c: backward iteration mirrors (seeds from the end, walks down).
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval("[1, 2, 3, 4].reduceRight(function (a, b) { return a + b; });")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(10));
+    // Order observable via subtraction.
+    let r = ctx
+        .eval("[1, 2, 3].reduceRight(function (a, b) { return a - b; });")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(0));
+    // No-initial seeds from the last present element.
+    let r = ctx
+        .eval("var o = {length: 3, 0: 10, 2: 20}; Array.prototype.reduceRight.call(o, function (a, b) { return a + b; });")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(30));
+    ctx.eval("assert.throws(TypeError, function () { [].reduceRight(function (a, b) { return a + b; }); });")
+        .unwrap();
+    // findLast / findLastIndex search from the end.
+    let r = ctx
+        .eval("[1, 2, 3].findLast(function (x) { return x < 3; });")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(2));
+    let r = ctx
+        .eval("[1, 2, 3].findLastIndex(function (x) { return x < 3; });")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(1));
+    let r = ctx
+        .eval("[1, 2, 3].findLastIndex(function (x) { return x > 9; });")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(-1));
+}
+
+#[test]
 fn test_array_iter_prologue() {
     // B1a: length→callable order, holes skipped, null receiver throws.
     let mut ctx = Context::new_small();

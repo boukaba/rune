@@ -46,8 +46,25 @@ paths can't match immediates (no JIT change needed).
   exact, retracted in A2.)
 - 860 workspace / 0 failed; clippy/fmt/no-default/x86 clean.
 
-## B1b DONE — indexOf-family audit (2026-09-06)
+## B1c DONE — reduceRight + findLast/findLastIndex (2026-09-06)
 
+Third B1 sub-slice: backward iteration mirrors on the array machine:
+
+- **New kinds + builtins**: `ReduceRight/FindLast/FindLastIndex` (registered
+  on Array.prototype) with `last/prev_existing_index` seeds;
+  `array_op_is_backward` drives the cascade's downward walk; all
+  callback/result/done matches extended (shared accumulator/completion
+  paths). ReduceRight acc chaining reuses the awaiting_acc resume.
+- **Symbol lengths throw** in both prologues (LengthOfArrayLike abrupt via
+  ToNumber(symbol) — return-abrupt-from-this-length-as-symbol ×2).
+- **Gains (+143 Array, ZERO losses)**: 1140→1283. No new failures vs B1b.
+- **Tests**: `test_array_reduce_right_find_last` (order via subtraction,
+  no-initial seeds, findLast/Index incl. -1). **868 workspace / 0**;
+  clippy/fmt/no-default/x86 clean.
+- **Remaining B1**: B1d Array ctor/from/of/copyWithin/new-methods/
+  sort-comparator/push-pop-audit/length-subdir; fromAsync → B6.
+
+## B1b DONE — indexOf-family audit (2026-09-06)
 Second B1 sub-slice (indexOf/lastIndexOf/includes): new lastIndexOf builtin
 + resumable search with spec equality + stale-machine hygiene:
 

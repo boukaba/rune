@@ -9286,6 +9286,24 @@ fn array_index_search(
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
+    // B1c: symbol lengths throw (see array_iter_prologue).
+    if let Some(ptr) = this.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_OBJECT {
+            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+            if let Some(slot) = shape.lookup(&PropertyKey::from_string("length")) {
+                let lv = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+                if lv.is_symbol() {
+                    vm.set_pending_exception(crate::errors::error_object(
+                        gc,
+                        &vm.error_protos,
+                        crate::errors::ErrorKind::TypeError,
+                        "Cannot convert a Symbol value to a number",
+                    ));
+                    return Value::undefined();
+                }
+            }
+        }
+    }
     let search = args.first().copied().unwrap_or(Value::undefined());
     let len = crate::vm::array_like_length(this).unwrap_or(0);
     let backward = kind == crate::vm::ArrayOpKind::LastIndexOf;
@@ -9414,6 +9432,26 @@ fn array_iter_prologue(
     if !require_object_coercible(this, vm, gc) {
         return None;
     }
+    // B1c: LengthOfArrayLike abrupt — a symbol length throws via
+    // ToNumber(symbol) (e.g. return-abrupt-from-this-length-as-symbol).
+    // Accessor lengths stay sync-gap (read as data below).
+    if let Some(ptr) = this.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_OBJECT {
+            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+            if let Some(slot) = shape.lookup(&PropertyKey::from_string("length")) {
+                let lv = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+                if lv.is_symbol() {
+                    vm.set_pending_exception(crate::errors::error_object(
+                        gc,
+                        &vm.error_protos,
+                        crate::errors::ErrorKind::TypeError,
+                        "Cannot convert a Symbol value to a number",
+                    ));
+                    return None;
+                }
+            }
+        }
+    }
     let length = crate::vm::array_like_length(this).unwrap_or(0);
     let callback = args.first().copied().unwrap_or(Value::undefined());
     let callable = callback.as_smi().is_some_and(|s| s < 0)
@@ -9445,6 +9483,18 @@ fn first_existing_index(this: Value, len: u32) -> Option<usize> {
 /// First present index in [from, len) (HasProperty semantics, see above).
 fn next_existing_index(this: Value, from: usize, len: u32) -> Option<usize> {
     (from..len as usize).find(|&i| crate::vm::has_property(this, Value::smi(i as i32), None))
+}
+
+/// Last present index in [0, len) (B1c: backward iteration seeds).
+fn last_existing_index(this: Value, len: u32) -> Option<usize> {
+    prev_existing_index(this, len as usize)
+}
+
+/// Last present index in [0, before) (B1c).
+fn prev_existing_index(this: Value, before: usize) -> Option<usize> {
+    (0..before)
+        .rev()
+        .find(|&i| crate::vm::has_property(this, Value::smi(i as i32), None))
 }
 
 pub fn array_for_each(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
@@ -9730,6 +9780,227 @@ pub fn array_reduce(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
             if let Some(ref mut op) = vm.pending_array_op {
                 op.awaiting_element = Some(first);
                 op.awaiting_acc = true;
+            }
+            vm.rebase_pending_depths();
+        }
+        crate::vm::ArrayElemOut::SyncErr(e) => {
+            vm.pending_array_op = None;
+            vm.set_pending_exception(e);
+        }
+    }
+    Value::undefined()
+}
+
+/// Array.prototype.reduceRight(callback, initialValue) — backward mirror
+/// of reduce (B1c): seeds from the last present element, iterates down.
+pub fn array_reduce_right(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some((length, callback, _, source_ptr)) =
+        array_iter_prologue(gc, vm, this, args, "Array.prototype.reduceRight")
+    else {
+        return Value::undefined();
+    };
+    let has_initial = args.len() > 1;
+    let initial = args.get(1).copied().unwrap_or(Value::undefined());
+    if has_initial {
+        let Some(last) = last_existing_index(this, length) else {
+            return initial;
+        };
+        vm.pending_array_op = Some(crate::vm::ArrayOpState {
+            kind: crate::vm::ArrayOpKind::ReduceRight,
+            source: source_ptr,
+            result: std::ptr::null_mut(),
+            callback,
+            this_val: Value::undefined(),
+            source_val: this,
+            index: last,
+            length,
+            source_frame_depth: 0,
+            accumulator: Some(initial),
+            awaiting_element: None,
+            awaiting_acc: false,
+        });
+        match crate::vm::array_element_value(vm, gc, this, last) {
+            crate::vm::ArrayElemOut::Ready(element) => {
+                vm.push_callback_call(
+                    gc,
+                    callback,
+                    Value::undefined(),
+                    vec![initial, element, Value::smi(last as i32), this],
+                );
+            }
+            crate::vm::ArrayElemOut::Wait => {
+                if let Some(ref mut op) = vm.pending_array_op {
+                    op.awaiting_element = Some(last);
+                }
+                vm.rebase_pending_depths();
+            }
+            crate::vm::ArrayElemOut::SyncErr(e) => {
+                vm.pending_array_op = None;
+                vm.set_pending_exception(e);
+            }
+        }
+        return Value::undefined();
+    }
+    // No initial value: seed from the last present element (resolved
+    // through getters like any element), then iterate downward.
+    let Some(last) = last_existing_index(this, length) else {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "reduce of empty array with no initial value",
+        ));
+        return Value::undefined();
+    };
+    let prev = prev_existing_index(this, last);
+    vm.pending_array_op = Some(crate::vm::ArrayOpState {
+        kind: crate::vm::ArrayOpKind::ReduceRight,
+        source: source_ptr,
+        result: std::ptr::null_mut(),
+        callback,
+        this_val: Value::undefined(),
+        source_val: this,
+        index: prev.unwrap_or(usize::MAX),
+        length,
+        source_frame_depth: 0,
+        accumulator: None,
+        awaiting_element: None,
+        awaiting_acc: false,
+    });
+    match crate::vm::array_element_value(vm, gc, this, last) {
+        crate::vm::ArrayElemOut::Ready(acc) => {
+            let mut op = vm.pending_array_op.take().unwrap();
+            op.accumulator = Some(acc);
+            match prev {
+                Some(n) => match crate::vm::array_element_value(vm, gc, this, n) {
+                    crate::vm::ArrayElemOut::Ready(element) => {
+                        op.index = n;
+                        vm.pending_array_op = Some(op);
+                        vm.push_callback_call(
+                            gc,
+                            callback,
+                            Value::undefined(),
+                            vec![acc, element, Value::smi(n as i32), this],
+                        );
+                    }
+                    crate::vm::ArrayElemOut::Wait => {
+                        op.awaiting_element = Some(n);
+                        vm.pending_array_op = Some(op);
+                        vm.rebase_pending_depths();
+                    }
+                    crate::vm::ArrayElemOut::SyncErr(e) => {
+                        vm.set_pending_exception(e);
+                    }
+                },
+                None => {
+                    vm.pending_array_op = None;
+                    return acc;
+                }
+            }
+        }
+        crate::vm::ArrayElemOut::Wait => {
+            if let Some(ref mut op) = vm.pending_array_op {
+                op.awaiting_element = Some(last);
+                op.awaiting_acc = true;
+            }
+            vm.rebase_pending_depths();
+        }
+        crate::vm::ArrayElemOut::SyncErr(e) => {
+            vm.pending_array_op = None;
+            vm.set_pending_exception(e);
+        }
+    }
+    Value::undefined()
+}
+
+/// Array.prototype.findLast(callback, thisArg) — backward find (B1c).
+pub fn array_find_last(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some((length, callback, this_arg, source_ptr)) =
+        array_iter_prologue(gc, vm, this, args, "Array.prototype.findLast")
+    else {
+        return Value::undefined();
+    };
+    let Some(last) = last_existing_index(this, length) else {
+        return Value::undefined();
+    };
+    vm.pending_array_op = Some(crate::vm::ArrayOpState {
+        kind: crate::vm::ArrayOpKind::FindLast,
+        source: source_ptr,
+        result: std::ptr::null_mut(),
+        callback,
+        this_val: this_arg,
+        source_val: this,
+        index: last,
+        length,
+        source_frame_depth: 0,
+        accumulator: None,
+        awaiting_element: None,
+        awaiting_acc: false,
+    });
+    match crate::vm::array_element_value(vm, gc, this, last) {
+        crate::vm::ArrayElemOut::Ready(element) => {
+            vm.push_callback_call(
+                gc,
+                callback,
+                this_arg,
+                vec![element, Value::smi(last as i32), this],
+            );
+        }
+        crate::vm::ArrayElemOut::Wait => {
+            if let Some(ref mut op) = vm.pending_array_op {
+                op.awaiting_element = Some(last);
+            }
+            vm.rebase_pending_depths();
+        }
+        crate::vm::ArrayElemOut::SyncErr(e) => {
+            vm.pending_array_op = None;
+            vm.set_pending_exception(e);
+        }
+    }
+    Value::undefined()
+}
+
+/// Array.prototype.findLastIndex(callback, thisArg) — backward findIndex (B1c).
+pub fn array_find_last_index(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some((length, callback, this_arg, source_ptr)) =
+        array_iter_prologue(gc, vm, this, args, "Array.prototype.findLastIndex")
+    else {
+        return Value::smi(-1);
+    };
+    let Some(last) = last_existing_index(this, length) else {
+        return Value::smi(-1);
+    };
+    vm.pending_array_op = Some(crate::vm::ArrayOpState {
+        kind: crate::vm::ArrayOpKind::FindLastIndex,
+        source: source_ptr,
+        result: std::ptr::null_mut(),
+        callback,
+        this_val: this_arg,
+        source_val: this,
+        index: last,
+        length,
+        source_frame_depth: 0,
+        accumulator: None,
+        awaiting_element: None,
+        awaiting_acc: false,
+    });
+    match crate::vm::array_element_value(vm, gc, this, last) {
+        crate::vm::ArrayElemOut::Ready(element) => {
+            vm.push_callback_call(
+                gc,
+                callback,
+                this_arg,
+                vec![element, Value::smi(last as i32), this],
+            );
+        }
+        crate::vm::ArrayElemOut::Wait => {
+            if let Some(ref mut op) = vm.pending_array_op {
+                op.awaiting_element = Some(last);
             }
             vm.rebase_pending_depths();
         }
@@ -11779,6 +12050,11 @@ pub fn default_builtins() -> Vec<Builtin> {
         },
         Builtin {
             length: 1,
+            name: "Array_prototype_reduceRight",
+            func: array_reduce_right,
+        },
+        Builtin {
+            length: 1,
             name: "Array_prototype_forEach",
             func: array_for_each,
         },
@@ -11816,6 +12092,16 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 1,
             name: "Array_prototype_findIndex",
             func: array_find_index,
+        },
+        Builtin {
+            length: 1,
+            name: "Array_prototype_findLast",
+            func: array_find_last,
+        },
+        Builtin {
+            length: 1,
+            name: "Array_prototype_findLastIndex",
+            func: array_find_last_index,
         },
         Builtin {
             length: 1,

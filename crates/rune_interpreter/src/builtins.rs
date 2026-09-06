@@ -6732,7 +6732,12 @@ pub fn string_ends_with(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
     Value::boolean(units[..end].ends_with(&search_units))
 }
 
-fn to_integer_or_infinity(v: Value) -> f64 {
+/// ToIntegerOrInfinity lite (B1b: shared with vm.rs search stepping).
+/// Handles undefined/null/bool/Smi/float directly; numeric strings
+/// (incl. exponents and Infinity) parse per ToNumber-lite; anything else
+/// (objects with valueOf, hex, unparseable) yields 0 — documented gap
+/// shared with the string repeat/pad paths that also use this helper.
+pub(crate) fn to_integer_or_infinity(v: Value) -> f64 {
     if v.is_undefined() || v.is_null() {
         return 0.0;
     }
@@ -6747,6 +6752,30 @@ fn to_integer_or_infinity(v: Value) -> f64 {
             return 0.0;
         }
         return f.trunc();
+    }
+    // Numeric strings (fromIndex "2"/"3E0", repeat counts, pad lengths).
+    if let Some(ptr) = v.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_STRING {
+            let s = unsafe { HeapString::to_string(ptr as *mut HeapString) };
+            let t = s.trim();
+            if t.is_empty() {
+                return 0.0;
+            }
+            if t.eq_ignore_ascii_case("infinity") || t == "+Infinity" {
+                return f64::INFINITY;
+            }
+            if t == "-Infinity" {
+                return f64::NEG_INFINITY;
+            }
+            if let Ok(n) = t.parse::<f64>() {
+                if n.is_nan() {
+                    return 0.0;
+                }
+                return n.trunc();
+            }
+            return 0.0;
+        }
     }
     0.0
 }
@@ -9239,99 +9268,97 @@ fn coerce_integer_arg(v: Value) -> Option<f64> {
     None
 }
 
-/// Convert a Value to an integer for use as fromIndex in array methods.
-/// Approximates ToInteger (omits valueOf/getter callbacks for objects).
-fn to_index(v: Value, length: u32) -> u32 {
-    if v.is_undefined() || v.is_null() {
-        return 0;
-    }
-    if let Some(b) = v.to_boolean() {
-        let n: i32 = if b { 1 } else { 0 };
-        return if n < 0 {
-            length.saturating_sub(n.unsigned_abs())
-        } else {
-            (n as u32).min(length)
-        };
-    }
-    if let Some(smi) = v.as_smi() {
-        if smi < 0 {
-            let tmp = length as i64 + smi as i64;
-            if tmp < 0 { 0 } else { tmp as u32 }
-        } else {
-            smi as u32
-        }
-    } else if let Some(f) = v.as_float64() {
-        if f.is_nan() || f < 0.0 {
-            let tmp = length as f64 + f;
-            if tmp < 0.0 { 0 } else { tmp as u32 }
-        } else {
-            (f as u32).min(length)
-        }
-    } else if let Some(ptr) = v.heap_ptr() {
-        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-        if tag == TAG_STRING || tag == TAG_STRING_OBJ {
-            let s = if tag == TAG_STRING {
-                unsafe { HeapString::to_string(ptr as *mut HeapString) }
-            } else {
-                let str_ptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
-                unsafe { HeapString::to_string(str_ptr as *mut HeapString) }
-            };
-            let n: f64 = s.parse().unwrap_or(0.0);
-            if n.is_nan() || n < 0.0 {
-                0
-            } else {
-                (n as u32).min(length)
-            }
-        } else {
-            0
-        }
-    } else {
-        0
-    }
-}
-
 /// Array.prototype.indexOf(searchElement, fromIndex) — returns index of first match, -1 if not found.
 pub fn array_index_of(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    array_index_search(gc, vm, this, args, crate::vm::ArrayOpKind::IndexOf)
+}
+
+/// B1b shared setup for indexOf/lastIndexOf/includes: coercible → length →
+/// clamped start → resumable search step. Direction and found/not-found
+/// values come from the kind.
+fn array_index_search(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    this: Value,
+    args: &[Value],
+    kind: crate::vm::ArrayOpKind,
+) -> Value {
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
     let search = args.first().copied().unwrap_or(Value::undefined());
-    let len = crate::vm::array_like_length(this).unwrap_or(0) as usize;
-    let from = to_index(args.get(1).copied().unwrap_or(Value::smi(0)), len as u32) as usize;
-    if from >= len {
-        return Value::smi(-1);
-    }
-    for i in from..len {
-        if let Some(elem) = crate::vm::array_like_index(this, i as u32) {
-            #[allow(unused_assignments)]
-            let mut eq = false;
-            if elem.is_smi() && search.is_smi() {
-                eq = elem.as_smi() == search.as_smi();
-            } else if let (Some(ep), Some(sp)) = (elem.heap_ptr(), search.heap_ptr()) {
-                let et = unsafe { (*(ep as *const GcHeader)).tag() };
-                let st = unsafe { (*(sp as *const GcHeader)).tag() };
-                if et == TAG_STRING && st == TAG_STRING {
-                    let es = unsafe { HeapString::to_string(ep as *mut HeapString) };
-                    let ss = unsafe { HeapString::to_string(sp as *mut HeapString) };
-                    eq = es == ss;
-                } else {
-                    eq = ep == sp;
-                }
-            } else if let (Some(ef), Some(sf)) = (elem.as_float64(), search.as_float64()) {
-                eq = ef.to_bits() == sf.to_bits();
+    let len = crate::vm::array_like_length(this).unwrap_or(0);
+    let backward = kind == crate::vm::ArrayOpKind::LastIndexOf;
+    // Clamp the start index (§23.1.3.16-kanon: indexOf/includes forward
+    // from max(n,0)/immediate miss; lastIndexOf backward from min(n,len-1)).
+    let start: Option<usize> = if backward {
+        if len == 0 {
+            None
+        } else if args.len() < 2 || args[1].is_undefined() {
+            Some(len as usize - 1)
+        } else {
+            let n = to_integer_or_infinity(args[1]);
+            if n >= 0.0 {
+                Some((n as usize).min(len as usize - 1))
             } else {
-                eq = (elem.is_undefined() && search.is_undefined())
-                    || (elem.is_null() && search.is_null())
-                    || (elem.is_boolean()
-                        && search.is_boolean()
-                        && elem.as_smi() == search.as_smi());
-            }
-            if eq {
-                return Value::smi(i as i32);
+                let k = len as f64 + n;
+                if k < 0.0 { None } else { Some(k as usize) }
             }
         }
+    } else {
+        let n = if args.len() < 2 {
+            0.0
+        } else {
+            to_integer_or_infinity(args[1])
+        };
+        if n >= len as f64 {
+            None
+        } else if n < 0.0 {
+            Some((len as f64 + n).max(0.0) as usize)
+        } else {
+            Some(n as usize)
+        }
+    };
+    let Some(start) = start else {
+        // Empty range: immediate miss without starting a machine.
+        return match kind {
+            crate::vm::ArrayOpKind::Includes => Value::boolean(false),
+            _ => Value::smi(-1),
+        };
+    };
+    let mut op = crate::vm::ArrayOpState {
+        kind,
+        source: this.heap_ptr().unwrap_or(std::ptr::null_mut()),
+        result: std::ptr::null_mut(),
+        callback: Value::undefined(),
+        this_val: Value::undefined(),
+        source_val: this,
+        index: start,
+        length: len,
+        source_frame_depth: 0,
+        accumulator: Some(search),
+        awaiting_element: None,
+        awaiting_acc: false,
+    };
+    // First step runs inline; only a JS element getter parks the machine.
+    match crate::vm::array_search_step(vm, gc, &mut op, None) {
+        crate::vm::SearchStepOut::Done(v) => v,
+        crate::vm::SearchStepOut::Wait => {
+            vm.pending_array_op = Some(op);
+            vm.rebase_pending_depths();
+            Value::undefined()
+        }
+        crate::vm::SearchStepOut::SyncErr(e) => {
+            vm.set_pending_exception(e);
+            Value::undefined()
+        }
     }
-    Value::smi(-1)
+}
+
+/// Array.prototype.lastIndexOf(search, fromIndex) — reverse search (B1b).
+/// Strict equality, holes included, getters dispatched via the search step.
+pub fn array_last_index_of(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    array_index_search(gc, vm, this, args, crate::vm::ArrayOpKind::LastIndexOf)
 }
 
 /// Array.prototype.join(separator) — §23.1.3.17. Concatenates the array
@@ -9367,28 +9394,7 @@ pub fn array_join(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
 
 /// Array.prototype.includes(searchElement, fromIndex) — SameValueZero search.
 pub fn array_includes(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    if !require_object_coercible(this, vm, gc) {
-        return Value::undefined();
-    }
-    let length = match crate::vm::array_like_length(this) {
-        Some(len) => len,
-        None => return Value::boolean(false),
-    };
-    let search = args.first().copied().unwrap_or(Value::undefined());
-    let from_idx = args.get(1).copied().unwrap_or(Value::undefined());
-
-    let k = to_index(from_idx, length);
-    if k >= length {
-        return Value::boolean(false);
-    }
-
-    for i in k..length {
-        let element = crate::vm::array_like_index(this, i).unwrap_or(Value::undefined());
-        if same_value_zero(element, search) {
-            return Value::boolean(true);
-        }
-    }
-    Value::boolean(false)
+    array_index_search(gc, vm, this, args, crate::vm::ArrayOpKind::Includes)
 }
 
 /// Array.prototype.forEach(callback, thisArg) — same state machine, no result array.
@@ -11790,6 +11796,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 2,
             name: "Array_prototype_indexOf",
             func: array_index_of,
+        },
+        Builtin {
+            length: 2,
+            name: "Array_prototype_lastIndexOf",
+            func: array_last_index_of,
         },
         Builtin {
             length: 1,

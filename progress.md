@@ -46,8 +46,37 @@ paths can't match immediates (no JIT change needed).
   exact, retracted in A2.)
 - 860 workspace / 0 failed; clippy/fmt/no-default/x86 clean.
 
-## B1a DONE — iterative Array family audit (2026-09-06)
+## B1b DONE — indexOf-family audit (2026-09-06)
 
+Second B1 sub-slice (indexOf/lastIndexOf/includes): new lastIndexOf builtin
++ resumable search with spec equality + stale-machine hygiene:
+
+- **New**: `array_last_index_of` (registered on Array.prototype) +
+  `ArrayOpKind::{IndexOf,LastIndexOf,Includes}` riding the existing machine
+  (search value in `accumulator`, direction from kind) + `array_search_step`
+  (fixed bounds, strict-===/SameValueZero compare, injected-value resume so
+  getters run once) + `strict_equal` helper + string fromIndex coercion in
+  `to_integer_or_infinity` (exponents/Infinity). Deleted now-unused `to_index`.
+- **Holes INCLUDED** (no presence walk — indexOf visits the full range),
+  fromIndex clamps per method, length fixed at entry, proto-chain + getter
+  elements via the B1a await shape (new cascade resume branch).
+- **Robustness fixes found by diffs**: (1) array machines whose
+  callback/getter frame unwinds past are now dropped at EVERY handle_throw
+  pop site (`drop_dead_array_op` — a stale op poisoned the Call skip-list:
+  "undefined is not a function" after getter throws); (2) assert-consume
+  paths truncated to a stale base (kept popped-frame base — the "fix" to new
+  top broke enclosing for-of loop state; reverted, proven by n1 repro).
+- **Gains (+140 Array, ZERO losses)**: 1004→1140. Deltas all classified:
+  3 proven flakes (S15.4_A1.1_T8 hang, 2× 1M TIMEOUTs), 1 real gap
+  (lastIndexOf-5-30: LENGTH getters need setup re-entrancy — deferred,
+  documented; element getters done).
+- **Tests**: `test_array_index_search_family` (lastIndexOf/NaN/fromIndex/
+  proto/getter). **867 workspace / 0**; clippy/fmt/no-default/x86 clean.
+- **Remaining B1**: B1c reduceRight + findLast* (absent); B1d Array
+  ctor/from/of/copyWithin/new-methods/sort-comparator; fromAsync → B6;
+  length-getter dispatch; Boolean.prototype (B2).
+
+## B1a DONE — iterative Array family audit (2026-09-06)
 First B1 sub-slice (map/filter/forEach/find/findIndex/some/every/flatMap/
 reduce): shared spec-order prologue + hole semantics + element getters:
 

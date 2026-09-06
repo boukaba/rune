@@ -289,6 +289,11 @@ pub(crate) enum ArrayOpKind {
     Some,
     Every,
     FlatMap,
+    /// B1b: indexOf/lastIndexOf/includes search (no user callback; the
+    /// search value rides in `accumulator`, direction from the kind).
+    IndexOf,
+    LastIndexOf,
+    Includes,
 }
 
 /// Pending Promise.prototype.finally operation.
@@ -1134,6 +1139,9 @@ impl Vm {
             }
             if let Some(iof) = index_of_handle {
                 proto_entries.push(("indexOf", iof));
+            }
+            if let Some(lh) = find_handle(&self.builtins, "Array_prototype_lastIndexOf") {
+                proto_entries.push(("lastIndexOf", lh));
             }
             if let Some(jh) = find_handle(&self.builtins, "Array_prototype_join") {
                 proto_entries.push(("join", jh));
@@ -2532,6 +2540,21 @@ impl Vm {
         }
     }
 
+    /// B1b: drop a live array-iteration machine whose callback/getter
+    /// frame is being unwound past (its depth would otherwise point beyond
+    /// the stack and misfire on depth coincidence — proven via the Call
+    /// skip-list poisoning after getter throws). Called at every frame-pop
+    /// site in the unwind paths below.
+    fn drop_dead_array_op(&mut self, popped_frame: usize) {
+        if self
+            .pending_array_op
+            .as_ref()
+            .is_some_and(|op| op.source_frame_depth == popped_frame)
+        {
+            self.pending_array_op = None;
+        }
+    }
+
     /// Unwind stack for a thrown value, routing to try/catch/finally handlers.
     /// This implements the same logic as the Opcode::Throw handler so that
     /// builtins can route exceptions through the JS try/catch mechanism
@@ -2609,9 +2632,13 @@ impl Vm {
             {
                 return Some(Exit::Throw(val));
             }
-            let callee_base = self.frames.last().unwrap().stack_base;
             let popped_frame = self.frames.len() - 1;
             self.last_locals = self.frames[popped_frame].locals.clone();
+            // Truncation target for the assert-consume paths below: the
+            // popped (thunk/callback) frame's base — drops exactly its temps
+            // while preserving live state below (e.g. an enclosing for-of's
+            // [iter, next] pair in the caller frame).
+            let callee_base = self.frames.last().unwrap().stack_base;
             // Check for pending assert.throws before popping frame
             let assert_depth = self.pending_assert.as_ref().map(|pa| pa.source_frame_depth);
             if let Some(source_depth) = assert_depth {
@@ -2633,12 +2660,14 @@ impl Vm {
                         self.frames.pop();
                         self.try_stack
                             .retain(|tf| tf.frame_depth != popped_frame + 1);
+                        self.drop_dead_array_op(popped_frame);
                         self.stack.truncate(callee_base);
                         return self.handle_throw(gc, err);
                     }
                     self.frames.pop();
                     self.try_stack
                         .retain(|tf| tf.frame_depth != popped_frame + 1);
+                    self.drop_dead_array_op(popped_frame);
                     self.stack.truncate(callee_base);
                     self.push(Value::undefined());
                     let new_fi = self.frames.len() - 1;
@@ -2659,6 +2688,8 @@ impl Vm {
             self.frames.pop();
             self.try_stack
                 .retain(|tf| tf.frame_depth != popped_frame + 1);
+            // B1b: drop array machines unwound past (see helper docs).
+            self.drop_dead_array_op(popped_frame);
             if self.frames.is_empty() {
                 self.stack.clear();
                 return Some(Exit::Throw(val));
@@ -8558,6 +8589,37 @@ impl Vm {
                             // B1a: element-getter await — `result` is the
                             // resolved element value, not a callback result.
                             if let Some(idx) = op.awaiting_element.take() {
+                                // B1b: search-kind awaits resume the search
+                                // (no user callback involved).
+                                if matches!(
+                                    op.kind,
+                                    ArrayOpKind::IndexOf
+                                        | ArrayOpKind::LastIndexOf
+                                        | ArrayOpKind::Includes
+                                ) {
+                                    match array_search_step(self, gc, &mut op, Some((idx, result)))
+                                    {
+                                        SearchStepOut::Done(v) => {
+                                            self.pending_array_op = None;
+                                            self.stack.truncate(callee_base);
+                                            self.push(v);
+                                            let frames_len = self.frames.len();
+                                            self.frames[frames_len - 1].pc += 1;
+                                            continue;
+                                        }
+                                        SearchStepOut::Wait => {
+                                            self.pending_array_op = Some(op);
+                                            self.rebase_pending_depths();
+                                            continue;
+                                        }
+                                        SearchStepOut::SyncErr(e) => {
+                                            if let Some(exit) = self.handle_throw(gc, e) {
+                                                return exit;
+                                            }
+                                            continue;
+                                        }
+                                    }
+                                }
                                 // Reduce-accumulator await: finish setup —
                                 // resolve the next element (may await again)
                                 // or complete when none remains.
@@ -8619,8 +8681,26 @@ impl Vm {
                                 continue;
                             }
                             // This was the callback frame returning. Process result.
+                            // B1b: search kinds never dispatch callbacks (their
+                            // awaits resume via the branch above); dropping is
+                            // safe even if somehow reached.
+                            if matches!(
+                                op.kind,
+                                ArrayOpKind::IndexOf
+                                    | ArrayOpKind::LastIndexOf
+                                    | ArrayOpKind::Includes
+                            ) {
+                                continue;
+                            }
                             match op.kind {
                                 // ... existing array callback handling ...
+                                // B1b: search kinds are filtered by the guard
+                                // above; these arms only satisfy exhaustiveness.
+                                ArrayOpKind::IndexOf
+                                | ArrayOpKind::LastIndexOf
+                                | ArrayOpKind::Includes => {
+                                    continue;
+                                }
                                 ArrayOpKind::Filter => {
                                     if result.to_bool() {
                                         let src_val =
@@ -8834,6 +8914,9 @@ impl Vm {
                                     | ArrayOpKind::Every
                                     | ArrayOpKind::FlatMap => op.this_val,
                                     ArrayOpKind::Reduce => Value::undefined(),
+                                    ArrayOpKind::IndexOf
+                                    | ArrayOpKind::LastIndexOf
+                                    | ArrayOpKind::Includes => Value::undefined(),
                                 };
                                 let cb_args = match op_kind {
                                     ArrayOpKind::Filter
@@ -8849,6 +8932,13 @@ impl Vm {
                                     ArrayOpKind::Reduce => {
                                         let acc = op.accumulator.unwrap_or(Value::undefined());
                                         vec![acc, resolved_val, Value::smi(i as i32), op.source_val]
+                                    }
+                                    // B1b: search kinds never reach callback
+                                    // dispatch (see the guard above).
+                                    ArrayOpKind::IndexOf
+                                    | ArrayOpKind::LastIndexOf
+                                    | ArrayOpKind::Includes => {
+                                        continue;
                                     }
                                 };
                                 let callback_func = op.callback;
@@ -8868,6 +8958,11 @@ impl Vm {
                                 ArrayOpKind::FindIndex => Value::smi(-1),
                                 ArrayOpKind::Some => Value::boolean(false),
                                 ArrayOpKind::Every => Value::boolean(true),
+                                // B1b: search completions return from the
+                                // awaiting branch above, never here.
+                                ArrayOpKind::IndexOf
+                                | ArrayOpKind::LastIndexOf
+                                | ArrayOpKind::Includes => Value::undefined(),
                             };
                             let frames_len = self.frames.len();
                             self.stack.truncate(callee_base);
@@ -12317,6 +12412,143 @@ pub(crate) fn array_element_value(
         private_name_ids: std::ptr::null_mut(),
     });
     ArrayElemOut::Wait
+}
+
+/// Outcome of one B1b index-search step.
+pub(crate) enum SearchStepOut {
+    /// Search complete with the result (index Smi or -1; includes boolean).
+    Done(Value),
+    /// A JS element getter was pushed (op carries awaiting_element);
+    /// the caller must bail (storing the op first where needed).
+    Wait,
+    /// A builtin element getter failed; route the error value
+    /// (setup: pending_exception; Return arm: handle_throw).
+    SyncErr(Value),
+}
+
+/// Strict Equality Comparison (§7.2.15 lite): numbers compare numerically
+/// (+0 == -0, NaN != NaN), strings by content, booleans/null/undefined by
+/// identity, objects (incl. symbols/functions) by identity. Cross-type is
+/// always false.
+pub(crate) fn strict_equal(a: Value, b: Value) -> bool {
+    let a_num = a.as_smi().map(|v| v as f64).or_else(|| a.as_float64());
+    let b_num = b.as_smi().map(|v| v as f64).or_else(|| b.as_float64());
+    match (a_num, b_num) {
+        (Some(x), Some(y)) => x == y,
+        (None, None) => {
+            if a.is_undefined() && b.is_undefined() {
+                return true;
+            }
+            if a.is_null() && b.is_null() {
+                return true;
+            }
+            if let (Some(x), Some(y)) = (a.to_boolean(), b.to_boolean()) {
+                return x == y;
+            }
+            if a.is_symbol() && b.is_symbol() {
+                return a.as_symbol_id() == b.as_symbol_id();
+            }
+            match (a.heap_ptr(), b.heap_ptr()) {
+                (Some(ap), Some(bp)) => {
+                    if ap == bp {
+                        return true;
+                    }
+                    let at = unsafe { (*(ap as *const GcHeader)).tag() };
+                    let bt = unsafe { (*(bp as *const GcHeader)).tag() };
+                    if at == TAG_STRING && bt == TAG_STRING {
+                        let sa = unsafe { HeapString::to_string(ap as *mut HeapString) };
+                        let sb = unsafe { HeapString::to_string(bp as *mut HeapString) };
+                        return sa == sb;
+                    }
+                    false
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+/// One resumable step of indexOf/lastIndexOf/includes (B1b). Walks
+/// op.index in the kind's direction over [0, op.length), resolving each
+/// element (getters dispatch via array_element_value, which may push a
+/// frame and report Wait). `injected` carries an already-resolved
+/// (index, value) from a getter resume (skips re-resolution, so getter
+/// side effects run exactly once). Bounds are fixed at setup.
+pub(crate) fn array_search_step(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    op: &mut ArrayOpState,
+    injected: Option<(usize, Value)>,
+) -> SearchStepOut {
+    let backward = op.kind == ArrayOpKind::LastIndexOf;
+    let same_zero = op.kind == ArrayOpKind::Includes;
+    let search = op.accumulator.unwrap_or(Value::undefined());
+    // Found-value constructor per kind.
+    let found = |i: usize| -> Value {
+        match op.kind {
+            ArrayOpKind::Includes => Value::boolean(true),
+            _ => Value::smi(i as i32),
+        }
+    };
+    let not_found = || -> Value {
+        match op.kind {
+            ArrayOpKind::Includes => Value::boolean(false),
+            _ => Value::smi(-1),
+        }
+    };
+    if let Some((i, v)) = injected {
+        if element_matches(search, v, same_zero) {
+            return SearchStepOut::Done(found(i));
+        }
+        op.index = if backward { i.wrapping_sub(1) } else { i + 1 };
+    }
+    loop {
+        let i = op.index;
+        let in_range = if backward {
+            (i as i64) >= 0 && (i as i64) < op.length as i64
+        } else {
+            i < op.length as usize
+        };
+        if !in_range {
+            return SearchStepOut::Done(not_found());
+        }
+        match array_element_value(vm, gc, op.source_val, i) {
+            ArrayElemOut::Ready(v) => {
+                if element_matches(search, v, same_zero) {
+                    return SearchStepOut::Done(found(i));
+                }
+                op.index = if backward { i.wrapping_sub(1) } else { i + 1 };
+            }
+            ArrayElemOut::Wait => {
+                op.awaiting_element = Some(i);
+                return SearchStepOut::Wait;
+            }
+            ArrayElemOut::SyncErr(e) => return SearchStepOut::SyncErr(e),
+        }
+    }
+}
+
+/// Single-element comparison for the search step: strict equality, or
+/// SameValueZero for includes (NaN matches NaN).
+fn element_matches(search: Value, v: Value, same_zero: bool) -> bool {
+    if strict_equal(search, v) {
+        return true;
+    }
+    if same_zero {
+        if let (Some(a), Some(b)) = (
+            search
+                .as_smi()
+                .map(|x| x as f64)
+                .or_else(|| search.as_float64()),
+            v.as_smi().map(|x| x as f64).or_else(|| v.as_float64()),
+        ) {
+            if a.is_nan() && b.is_nan() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Lexical operation codes for the JIT callout helper.

@@ -1163,6 +1163,38 @@ fn test_array_iter_prologue() {
 }
 
 #[test]
+fn test_array_index_search_family() {
+    // B1b: indexOf/lastIndexOf/includes with spec equality + fromIndex.
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("[1, 2, 3, 2].lastIndexOf(2);").unwrap();
+    assert_eq!(r.as_smi(), Some(3));
+    let r = ctx.eval("[1, 2, 3, 2].lastIndexOf(2, 2);").unwrap();
+    assert_eq!(r.as_smi(), Some(1));
+    let r = ctx.eval("[1, 2, 3].lastIndexOf(9);").unwrap();
+    assert_eq!(r.as_smi(), Some(-1));
+    // includes uses SameValueZero (NaN matches).
+    let r = ctx.eval("[1, NaN].includes(NaN);").unwrap();
+    assert!(r.to_bool());
+    let r = ctx.eval("[1, 2, 3].includes(2, 2);").unwrap();
+    assert!(!r.to_bool());
+    // indexOf uses strict equality (NaN never matches, -0/+0 equal).
+    let r = ctx.eval("[1, NaN].indexOf(NaN);").unwrap();
+    assert_eq!(r.as_smi(), Some(-1));
+    let r = ctx.eval("[1, 2, 3].indexOf(2, 5);").unwrap();
+    assert_eq!(r.as_smi(), Some(-1));
+    // Proto-chain elements are found (holes included in the range).
+    let r = ctx
+        .eval("var o = {length: 3}; Object.prototype[1] = 9; var i = Array.prototype.indexOf.call(o, 9); delete Object.prototype[1]; i;")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(1));
+    // Getter elements run during search.
+    let r = ctx
+        .eval("var o = {length: 2, 0: 1}; Object.defineProperty(o, '1', {get: function () { return 6; }, configurable: true}); Array.prototype.indexOf.call(o, 6);")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(1));
+}
+
+#[test]
 fn test_neg_zero_preserved() {
     let mut ctx = Context::new_small();
     let r = ctx.eval("1 / -0").unwrap();

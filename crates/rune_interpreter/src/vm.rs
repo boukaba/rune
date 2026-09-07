@@ -12436,8 +12436,7 @@ pub(crate) fn do_store_property(
                                 props = new_obj as *mut u8;
                             }
                             if let Some(key) = key {
-                                let eshape =
-                                    JSObject::shape_ptr(props as *mut JSObject);
+                                let eshape = JSObject::shape_ptr(props as *mut JSObject);
                                 if let Some(slot) = eshape.lookup(&key) {
                                     JSObject::set_slot(props as *mut JSObject, slot, value);
                                 } else {
@@ -12507,23 +12506,15 @@ pub(crate) fn do_store_property(
                             let extra = unsafe { RuneArray::extra_props(arr) };
                             let mut blocker: Option<u64> = None;
                             if !extra.is_null() {
-                                let eshape = unsafe {
-                                    JSObject::shape_ptr(extra as *mut JSObject)
-                                };
-                                let count = unsafe {
-                                    JSObject::slot_count(extra as *mut JSObject)
-                                };
+                                let eshape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                                let count = unsafe { JSObject::slot_count(extra as *mut JSObject) };
                                 for i in 0..count {
                                     if let Some(name) = eshape.key_name_at(i) {
                                         if let Some(k) = canonical_index_name(name) {
                                             if k >= new_len as u64 {
                                                 let attr = eshape.attr_at(i);
-                                                if attr
-                                                    & rune_core::shape::ATTR_CONFIGURABLE
-                                                    == 0
-                                                {
-                                                    blocker =
-                                                        Some(blocker.map_or(k, |b| b.max(k)));
+                                                if attr & rune_core::shape::ATTR_CONFIGURABLE == 0 {
+                                                    blocker = Some(blocker.map_or(k, |b| b.max(k)));
                                                 }
                                             }
                                         }
@@ -12535,69 +12526,48 @@ pub(crate) fn do_store_property(
                                 // (spec deletes descending until the block),
                                 // lower slots keep their values, length stays.
                                 Some(b) => {
-                                    let upto =
-                                        (old_len as usize).min(cap as usize);
+                                    let upto = (old_len as usize).min(cap as usize);
                                     for i in (b as usize + 1)..upto {
                                         unsafe {
-                                            RuneArray::set_element(
-                                                arr,
-                                                i,
-                                                Value::empty_sentinel(),
-                                            )
+                                            RuneArray::set_element(arr, i, Value::empty_sentinel())
                                         };
                                     }
-                                    let eshape = unsafe {
-                                        JSObject::shape_ptr(extra as *mut JSObject)
-                                    };
-                                    let count = unsafe {
-                                        JSObject::slot_count(extra as *mut JSObject)
-                                    };
-                                    let mut doomed: Vec<(u64, PropertyKey)> =
-                                        Vec::new();
+                                    let eshape =
+                                        unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                                    let count =
+                                        unsafe { JSObject::slot_count(extra as *mut JSObject) };
+                                    let mut doomed: Vec<(u64, PropertyKey)> = Vec::new();
                                     for i in 0..count {
                                         if let Some(name) = eshape.key_name_at(i) {
                                             if let Some(k) = canonical_index_name(name) {
                                                 if k > b {
-                                                    doomed.push((
-                                                        k,
-                                                        PropertyKey::from_string(name),
-                                                    ));
+                                                    doomed
+                                                        .push((k, PropertyKey::from_string(name)));
                                                 }
                                             }
                                         }
                                     }
-                                    doomed.sort_by(|a, b| b.0.cmp(&a.0));
+                                    doomed.sort_by_key(|entry| std::cmp::Reverse(entry.0));
                                     for (_, pk) in doomed {
                                         unsafe {
-                                            JSObject::remove_property(
-                                                extra as *mut JSObject,
-                                                &pk,
-                                            )
+                                            JSObject::remove_property(extra as *mut JSObject, &pk)
                                         };
                                     }
                                     return false;
                                 }
                                 None => {
-                                    let upto =
-                                        (old_len as usize).min(cap as usize);
+                                    let upto = (old_len as usize).min(cap as usize);
                                     for i in new_len as usize..upto {
                                         unsafe {
-                                            RuneArray::set_element(
-                                                arr,
-                                                i,
-                                                Value::empty_sentinel(),
-                                            )
+                                            RuneArray::set_element(arr, i, Value::empty_sentinel())
                                         };
                                     }
                                     if !extra.is_null() {
-                                        let eshape = unsafe {
-                                            JSObject::shape_ptr(extra as *mut JSObject)
-                                        };
-                                        let count = unsafe {
-                                            JSObject::slot_count(extra as *mut JSObject)
-                                        };
-                                        let mut doomed: Vec<(u64, PropertyKey)> =
-                                            Vec::new();
+                                        let eshape =
+                                            unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                                        let count =
+                                            unsafe { JSObject::slot_count(extra as *mut JSObject) };
+                                        let mut doomed: Vec<(u64, PropertyKey)> = Vec::new();
                                         for i in 0..count {
                                             if let Some(name) = eshape.key_name_at(i) {
                                                 if let Some(k) = canonical_index_name(name) {
@@ -12610,7 +12580,7 @@ pub(crate) fn do_store_property(
                                                 }
                                             }
                                         }
-                                        doomed.sort_by(|a, b| b.0.cmp(&a.0));
+                                        doomed.sort_by_key(|entry| std::cmp::Reverse(entry.0));
                                         for (_, pk) in doomed {
                                             unsafe {
                                                 JSObject::remove_property(
@@ -12960,8 +12930,7 @@ pub(crate) fn has_property(obj: Value, raw_key: Value, function_prototype: Optio
                     if let Some(key) = value_to_prop_key(raw_key) {
                         let extra = unsafe { RuneArray::extra_props(ptr as *mut RuneArray) };
                         if !extra.is_null() {
-                            let eshape =
-                                unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                            let eshape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
                             if eshape.lookup(&key).is_some() {
                                 return true;
                             }
@@ -12972,8 +12941,7 @@ pub(crate) fn has_property(obj: Value, raw_key: Value, function_prototype: Optio
                     if let Some(key) = value_to_prop_key(raw_key) {
                         let extra = unsafe { RuneArray::extra_props(ptr as *mut RuneArray) };
                         if !extra.is_null() {
-                            let eshape =
-                                unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                            let eshape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
                             if eshape.lookup(&key).is_some() {
                                 return true;
                             }

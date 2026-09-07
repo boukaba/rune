@@ -1329,13 +1329,19 @@ fn test_array_push_pop_shift_unshift_reverse() {
     // B1f-1: stack/queue mutators audit (generic, holes, lengths, overflow).
     let mut ctx = Context::new_small();
     // push appends ALL args (not just the first) and returns the length.
-    let r = ctx.eval("var p = []; p.push(1, 2, 3) === 3 && p.join() === '1,2,3';").unwrap();
+    let r = ctx
+        .eval("var p = []; p.push(1, 2, 3) === 3 && p.join() === '1,2,3';")
+        .unwrap();
     assert!(r.to_bool());
     // push() with no args appends nothing.
-    let r = ctx.eval("var p0 = [1]; p0.push() === 1 && p0.length === 1;").unwrap();
+    let r = ctx
+        .eval("var p0 = [1]; p0.push() === 1 && p0.length === 1;")
+        .unwrap();
     assert!(r.to_bool());
     // pop removes and returns the last; empty pops to undefined.
-    let r = ctx.eval("var q = [1, 2, 3]; var v = q.pop(); v === 3 && q.join() === '1,2';").unwrap();
+    let r = ctx
+        .eval("var q = [1, 2, 3]; var v = q.pop(); v === 3 && q.join() === '1,2';")
+        .unwrap();
     assert!(r.to_bool());
     let r = ctx.eval("[].pop() === undefined;").unwrap();
     assert!(r.to_bool());
@@ -1343,7 +1349,9 @@ fn test_array_push_pop_shift_unshift_reverse() {
     let r = ctx.eval("var s = [1, , 3]; var f = s.shift(); f === 1 && s.length === 2 && s[0] === undefined && (0 in s) === false && s[1] === 3;").unwrap();
     assert!(r.to_bool());
     // unshift prepends in order and returns the new length.
-    let r = ctx.eval("var u = [3]; u.unshift(1, 2) === 3 && u.join() === '1,2,3';").unwrap();
+    let r = ctx
+        .eval("var u = [3]; u.unshift(1, 2) === 3 && u.join() === '1,2,3';")
+        .unwrap();
     assert!(r.to_bool());
     // reverse swaps with hole preservation and returns the receiver.
     let r = ctx.eval("var r = [1, , 3]; var s = r.reverse(); s === r && r.length === 3 && r[0] === 3 && (1 in r) === false && r[1] === undefined && r[2] === 1;").unwrap();

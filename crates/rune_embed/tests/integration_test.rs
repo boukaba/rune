@@ -1371,6 +1371,62 @@ fn test_array_push_pop_shift_unshift_reverse() {
 }
 
 #[test]
+fn test_array_slice_splice_concat() {
+    // B1f-2: slice/splice/concat audit (generic, holes, clamps, overflow).
+    let mut ctx = Context::new_small();
+    // slice truncates float start/end (ToIntegerOrInfinity).
+    let r = ctx.eval("var sa = [0, 1, 2, 3, 4].slice(2.5, 4); sa.length === 2 && sa[0] === 2 && sa[1] === 3;").unwrap();
+    assert!(r.to_bool());
+    // slice preserves holes (sentinel, not undefined).
+    let r = ctx.eval("var sh = [1, , 3].slice(0); sh.length === 3 && (1 in sh) === false && sh.hasOwnProperty('1') === false && sh[1] === undefined;").unwrap();
+    assert!(r.to_bool());
+    // slice serves proto elements as OWN result entries (A4_T1).
+    let r = ctx.eval("Array.prototype[1] = 1; var qx = [0]; qx.length = 2; var qr = qx.slice(); var qok = qr[1] === 1 && qr.hasOwnProperty('1'); delete Array.prototype[1]; qok;").unwrap();
+    assert!(r.to_bool());
+    // slice on boolean primitives boxes to length 0.
+    let r = ctx.eval("Array.prototype.slice.call(true).length === 0 && Array.prototype.slice.call(false).length === 0;").unwrap();
+    assert!(r.to_bool());
+    // slice clamps huge lengths (ToLength) with u64 walks over named keys.
+    let r = ctx.eval("var al = {'9007199254740989': 'a', '9007199254740990': 'b', length: 9007199254740992}; var ar = Array.prototype.slice.call(al, 9007199254740989); ar.length === 2 && ar[0] === 'a' && ar[1] === 'b';").unwrap();
+    assert!(r.to_bool());
+    // slice past 2^32-1 throws RangeError before any copy (was ENGINE PANIC).
+    ctx.eval("assert.throws(RangeError, function () { Array.prototype.slice.call({length: 4294967296}); });")
+        .unwrap();
+    // splice deletes + returns them, shifts left with hole punch-through.
+    let r = ctx.eval("var xd = [0, 1, 2, 3]; var dd = xd.splice(1, 2, 'a'); dd.join() === '1,2' && xd.join() === '0,a,3';").unwrap();
+    assert!(r.to_bool());
+    // splice inserts without deletes (shifts right).
+    let r = ctx
+        .eval("var xi = [1, 2]; xi.splice(1, 0, 'a', 'b'); xi.join() === '1,a,b,2';")
+        .unwrap();
+    assert!(r.to_bool());
+    // splice with no args deletes nothing (plain data object).
+    let r = ctx.eval("var xo = {length: 3, 0: 'a'}; var xd0 = Array.prototype.splice.call(xo); xd0.length === 0 && xo.length === 3;").unwrap();
+    assert!(r.to_bool());
+    // splice overflow past 2^53-1 throws TypeError before mutation.
+    ctx.eval("assert.throws(TypeError, function () { Array.prototype.splice.call({length: 9007199254740991}, 0, 0, null); });")
+        .unwrap();
+    // splice huge named keys (u64, named-overflow model — A3_T1).
+    let r = ctx.eval("var xh = {}; xh[0] = 'x'; xh[4294967295] = 'y'; xh.length = 4294967296; var ah = Array.prototype.splice.call(xh, 4294967295, 1); ah.length === 1 && ah[0] === 'y' && xh.length === 4294967295 && xh[0] === 'x' && xh[4294967295] === undefined;").unwrap();
+    assert!(r.to_bool());
+    // splice getter-only length throws on the length Set (A6.1_T3).
+    ctx.eval("assert.throws(TypeError, function () { var gl = {get length() { return 0; }}; Array.prototype.splice.call(gl, 1, 2, 4); });")
+        .unwrap();
+    // concat spreads arrays, singles objects (identity preserved).
+    let r = ctx.eval("var co = {}; var cc = [1].concat([2, 3], co, 4); cc.length === 5 && cc[0] === 1 && cc[1] === 2 && cc[2] === 3 && cc[3] === co && cc[4] === 4;").unwrap();
+    assert!(r.to_bool());
+    // concat honors own @@isConcatSpreadable.
+    let r = ctx.eval("var so = {length: 1, 0: 'a'}; so[Symbol.isConcatSpreadable] = true; [].concat(so).join() === 'a';").unwrap();
+    assert!(r.to_bool());
+    // concat overflow past 2^53-1 throws TypeError (was ENGINE PANIC).
+    ctx.eval("assert.throws(TypeError, function () { [1].concat({length: 9007199254740991, [Symbol.isConcatSpreadable]: true}); });")
+        .unwrap();
+    // concat holes in spread ranges stay holes.
+    let r = ctx.eval("var ch = [1, , 3]; ch[Symbol.isConcatSpreadable] = true; var cx = [0].concat(ch); cx.length === 4 && (2 in cx) === false && cx[3] === 3;").unwrap();
+    assert!(r.to_bool());
+}
+
+#[test]
 fn test_array_index_search_family() {
     // B1b: indexOf/lastIndexOf/includes with spec equality + fromIndex.
     let mut ctx = Context::new_small();

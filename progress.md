@@ -46,6 +46,65 @@ paths can't match immediates (no JIT change needed).
   exact, retracted in A2.)
 - 860 workspace / 0 failed; clippy/fmt/no-default/x86 clean.
 
+## B1f-2 DONE — slice/splice/concat audit (2026-09-07)
+
+Second B1f sub-slice (copy family; map/filter shapes → B1f-3, from → B1f-4,
+length-descriptors/freeze → B1f-5, observable-access machine → B1f-6):
+
+- **Rewrites** (§23.1.3.28/.31/.2): generic over heap receivers (dense
+  discipline + plain-object HasProperty/Get/Set/Delete, hole preservation with
+  proto fallthrough — A4_T1 proto elements land own), u64 walks with ToLength
+  clamping, ToIntegerOrInfinity start/end/deleteCount (floats truncate —
+  A2.1_T1/A2.2_T1), IsConcatSpreadable via Get (own+proto flags, ToBoolean,
+  IsArray fallback — Get, NOT GetMethod), 2^53-1 overflow TypeErrors BEFORE
+  mutation (spec order), 2^32-1 RangeError before result materialization
+  (species ArrayCreate), species-plain results (fresh dense + explicit length
+  set), primitive/String-object UTF-16 unit reads, TypedArray spread reads,
+  discarded-box primitives, spec k-order shifts with quiet-skip.
+- **Shared helpers**: to_integer_sync (bool + builtin-inline valueOf, symbols
+  throw, JS → 0), to_clamped_index_checked, fresh_dense_array, result_push /
+  result_fill_holes (2^32-1 valve), seq_length (TA + String-object exotics),
+  seq_has / seq_read (string-unit fast paths around the missing
+  load_property_recursive primitive-string arm), is_concat_spreadable_sync (JS
+  getters read as absent), sparse_present_in + sparse_key_in_range (O(entries)
+  reads incl. huge named indices — the arg-length-near 2^53 walk),
+  copy_range_to_result / copy_sparse_to_result (positional, holes stay holes,
+  Gets ascending).
+- **Funnel-adjacent fixes** (shared with B1f-1, no regressions):
+  move_range_is_quiet now counts huge named indices (sparse_key_in_range, not
+  canonical-only — splice A3_T1's trailing delete was skipped as "quiet");
+  set_length_checked dispatches accessor-pair lengths (builtin inline,
+  getter-only throws — splice A6.1_T3 fixed; JS setters quiet-skip → B1f-6).
+  Object 1293 exact, workspace 873/0.
+- **Gains (+25, ZERO regressions, 7 panics gone)**: slice 37→47, splice 46→57,
+  concat 18→22 (FAIL lists diffed line-by-line; the 2 "new" concat lines are
+  the same tests downgraded PANIC→regular-fail). Array 1767→1792. ENGINE PANICs
+  in the three suites 7→0 (S15.4_A1.1_T10 dense-huge-named panic proven
+  pre-existing via stash+rebuild — v0.7 4-slot extra_props limit, filed under
+  C; B1f-1 grow wiring doesn't cover that store path).
+- **Tests**: `test_array_slice_splice_concat` (14 asserts). **873 workspace /
+  0**; stable clippy (exact CI flags)/stable fmt/no-default clean (x86 target
+  not installed locally — arch-independent interpreter code, no JIT touched).
+- **Deferred with measurements** (every remainder bucketed): species dispatch
+  (slice 7 + splice 9 + concat ~12 create-*/property-traps → B1f-6 Construct
+  machine); Proxy (3+2+~4 + arg-length-exceeding part 2 → B7); JS
+  valueOf/length/element getters + get-order + null-method ToPrimitive
+  (A2.2_T5 ×2, set_length_no_args, create-non-array-invalid-len,
+  is-concat-spreadable-get-*, array-like-*-throws, arg-length-near fast
+  RangeError meanwhile → B1f-6); frozen/sealed + length-redefine +
+  non-writable length (target-array-* ×4, A6.1_T2, sloppy/strict-arguments
+  tails → B1f-5); resizable/coerced-start-end (out of scope); Boolean/String
+  wrapper identity + lone surrogates + Array.apply linkage (call-with-boolean,
+  spreadable-*-wrapper, non-array, small/large-typed-array tails → B2); TA
+  named stores + fake-length override (→ B4).
+- **Process lessons**: (1) bare `cargo clippy -D warnings` is STRICTER than CI
+  (CI passes `-A collapsible_if/match` — 24 pre-existing hits in untouched
+  files); always use the exact CI flag line, on stable. (2)
+  clippy::empty_line_after_doc_comments fires on `///` section banners — use
+  `//`. (3) stable fmt after every batch, then re-run key suites. (4)
+  Failure-MODE changes (PANIC→regular) fake "new" lines in comm diffs — compare
+  test IDs, and confirm panics count 7→0 separately.
+
 ## B1f-1 DONE — push/pop/shift/unshift/reverse audit (2026-09-07)
 
 First B1f sub-slice (stack/queue mutators; slice/splice/concat → B1f-2,

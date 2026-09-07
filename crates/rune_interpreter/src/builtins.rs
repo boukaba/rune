@@ -7586,12 +7586,15 @@ fn ensure_dense_capacity(gc: &mut SemiSpace, vm: &mut Vm, obj: &mut Value, need:
     *obj = Value::from_heap_ptr(arr as *mut u8);
 }
 
-/// Spec Set(obj, "length") for mutators (B1f-1): dense sets the magic
+/// Spec Set(obj, "length") for mutators (B1f-1 + B1f-2): dense sets the magic
 /// length (past 2^32-1 throws RangeError — the array-exotic length
 /// invariant, §23.1.4.1); plain objects set the slot when present; strings
 /// always throw (getter-only model); non-string primitives are
-/// discarded-box no-ops. Non-writable/frozen length states cannot be
-/// constructed yet (B1f-5), so no attribute checks run here.
+/// discarded-box no-ops. B1f-2: an accessor-pair length dispatches the setter
+/// (builtin inline) and throws getter-only/invalid (splice A6.1_T3); a JS
+/// setter is quiet-skipped (B1f-6 runs it through the machine —
+/// set_length_no_args stays failing). Non-writable/frozen length states cannot
+/// be constructed yet (B1f-5), so no attribute checks run here.
 fn set_length_checked(
     gc: &mut SemiSpace,
     vm: &mut Vm,
@@ -7626,6 +7629,38 @@ fn set_length_checked(
     }
     let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
     if let Some(slot) = shape.lookup(&PropertyKey::from_string("length")) {
+        let cur = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+        if let Some(aptr) = cur.heap_ptr() {
+            if unsafe { (*(aptr as *const GcHeader)).tag() } == TAG_ACCESSOR {
+                let setter = unsafe { rune_core::accessor::AccessorPair::setter(aptr) };
+                if setter.is_undefined() || setter.is_null() {
+                    return Err(sort_type_error(
+                        gc,
+                        vm,
+                        "Cannot set property length which has only a getter",
+                    ));
+                }
+                if let Some(smi) = setter.as_smi() {
+                    if smi < 0 {
+                        let id = ((-smi) as usize) - 1;
+                        if id < vm.builtins.len() {
+                            (vm.builtins[id].func)(gc, *obj, &[length_value(len)], vm);
+                            *obj = refresh_value(*obj);
+                            if let Some(exc) = vm.pending_exception.take() {
+                                return Err(exc);
+                            }
+                            return Ok(());
+                        }
+                        return Err(sort_type_error(gc, vm, "setter is not a function"));
+                    }
+                    return Err(sort_type_error(gc, vm, "setter is not a function"));
+                }
+                // JS setter: B1f-6 dispatches it; the sync audit leaves the
+                // slot untouched rather than corrupting it.
+                *obj = refresh_value(*obj);
+                return Ok(());
+            }
+        }
         unsafe { JSObject::set_slot(ptr as *mut JSObject, slot, length_value(len)) };
         return Ok(());
     }
@@ -7663,11 +7698,13 @@ fn move_range_is_quiet(obj: Value, lo: u64, hi: u64) -> bool {
             let Some(name) = shape.key_name_at(i) else {
                 continue;
             };
-            // Any indexed entry in span (data or accessor) is observable.
-            if let Some(k) = crate::vm::canonical_index_name(name) {
-                if k >= lo && k < hi {
-                    return false;
-                }
+            // Any indexed entry in span (data or accessor) is observable:
+            // canonical indices AND huge named-overflow indices (B1f-1 key
+            // model: index_key emits `k.to_string()`, so exact string equality
+            // is the membership test — B1f-2 splice A3_T1 needs "4294967295"
+            // to count, which canonical_index_name excludes).
+            if sparse_key_in_range(name, lo, hi).is_some() {
+                return false;
             }
             // Any accessor anywhere could serve an index in span via the
             // pair path... pairs serve only their own key, which the
@@ -10263,326 +10300,778 @@ pub fn apply_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
     Value::undefined()
 }
 
-/// Array.prototype.slice(start, end) — returns a new dense array with elements from [start, end).
-pub fn array_slice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let length = match crate::vm::array_like_length(this) {
-        Some(len) => len,
-        None => return Value::undefined(),
-    };
-    let relative_start = args.first().and_then(|v| v.as_smi()).unwrap_or(0) as i64;
-    let k = if relative_start < 0 {
-        (length as i64 + relative_start).max(0) as u32
+// ---------- B1f-2 shared helpers (slice/splice/concat audit) ----------
+
+/// Array exotic length limit (2^32-1): result materialization past it throws
+/// RangeError like ArrayCreate (S15.4.4.10_A3_T1).
+const MAX_ARRAY_LENGTH: u64 = 4_294_967_295;
+/// ToLength clamp (2^53-1): LengthOfArrayLike saturates here, overflow past it
+/// throws TypeError (splice step 9, concat spread/single arms).
+const MAX_SAFE_INTEGER_U64: u64 = 9_007_199_254_740_991;
+
+/// ToIntegerOrInfinity with builtin-inline object coercion (B1f-2 sync audit):
+/// booleans/Smis/floats direct; symbols throw; strings + String objects parse;
+/// heap objects try builtin valueOf/toString inline (length_to_number). Every
+/// other value (incl. JS-driven methods) reads as 0 — B1f-6 dispatches those
+/// through the machine (splice A2.2_T5 valueOf-deleteCount stays failing).
+fn to_integer_sync(gc: &mut SemiSpace, vm: &mut Vm, v: Value) -> Result<f64, Value> {
+    if let Some(b) = v.to_boolean() {
+        return Ok(if b { 1.0 } else { 0.0 });
+    }
+    let n = length_to_number(gc, vm, v)?;
+    if n.is_nan() || n == 0.0 {
+        Ok(0.0)
+    } else if n.is_infinite() {
+        Ok(n)
     } else {
-        (relative_start as u32).min(length)
-    };
-    let final_idx = if args.len() > 1 {
-        if let Some(relative_end) = args.get(1).and_then(|v| v.as_smi()) {
-            let re = relative_end as i64;
-            if re < 0 {
-                ((length as i64 + re).max(0) as u32).min(length)
-            } else {
-                (re as u32).min(length)
-            }
-        } else {
-            length
-        }
+        Ok(n.trunc())
+    }
+}
+
+/// ToClampedIndex lite (§7.1.26 over ToIntegerOrInfinity): negative counts from
+/// `len`, result clamped to [0, len]. Pure u64/f64 math — never iterates.
+fn to_clamped_index_checked(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    v: Value,
+    len: u64,
+) -> Result<u64, Value> {
+    let n = to_integer_sync(gc, vm, v)?;
+    if n.is_nan() || n == 0.0 {
+        Ok(0)
+    } else if n < 0.0 {
+        Ok(((len as f64 + n).max(0.0).min(len as f64)) as u64)
     } else {
-        length
-    };
-    let count = final_idx.saturating_sub(k) as usize;
-    let result_arr = RuneArray::allocate(gc, &[]);
+        Ok(n.min(len as f64) as u64)
+    }
+}
+
+/// Fresh dense array with %Array.prototype% (B1f-2): the plain ArrayCreate all
+/// three copy methods share. Species dispatch (custom ctors) is a documented
+/// gap — B1f-6 runs user ctors through the machine (all create-species* stay
+/// failing, counted there).
+fn fresh_dense_array(gc: &mut SemiSpace, vm: &Vm) -> Value {
+    let arr = RuneArray::allocate(gc, &[]);
     unsafe {
-        let ptr = result_arr as *mut u8;
-        *(ptr.add(8) as *mut *const rune_core::shape::Shape) =
-            *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
+        let ptr = arr as *mut u8;
+        *(ptr.add(8) as *mut *const Shape) = *DENSE_ARRAY_SHAPE as *const Shape;
         if let Some(proto) = vm.array_prototype.heap_ptr() {
             *(ptr.add(24) as *mut *mut u8) = proto;
         }
     }
-    let mut result_ptr = result_arr as *mut u8;
-    for i in 0..count {
-        let element = crate::vm::array_like_index(this, k + i as u32).unwrap_or(Value::undefined());
-        unsafe {
-            let new_ptr = RuneArray::push(gc, result_ptr as *mut RuneArray, element);
-            if new_ptr as *mut u8 != result_ptr {
-                result_ptr = new_ptr as *mut u8;
+    Value::from_heap_ptr(arr as *mut u8)
+}
+
+/// Push onto a fresh result array under the Array length invariant (B1f-2):
+/// indices stop at 2^32-1 — anything past throws RangeError like ArrayCreate.
+/// Refreshes both sides across the growing allocation (B1f-1 discipline).
+fn result_push(gc: &mut SemiSpace, vm: &Vm, result: &mut Value, val: Value) -> Result<(), Value> {
+    *result = refresh_value(*result);
+    let rptr = match result.heap_ptr() {
+        Some(p) => p as *mut RuneArray,
+        None => return Err(sort_range_error(gc, vm, "Invalid array length")),
+    };
+    if unsafe { RuneArray::length(rptr) } as u64 >= MAX_ARRAY_LENGTH {
+        return Err(sort_range_error(gc, vm, "Invalid array length"));
+    }
+    let val = refresh_value(val);
+    unsafe {
+        let np = RuneArray::push(gc, rptr, val);
+        *result = Value::from_heap_ptr(np as *mut u8);
+    }
+    Ok(())
+}
+
+/// Fill `count` holes at the result tail (B1f-2): positional gaps between
+/// sparse-candidate reads stay holes. A gap that would carry the result past
+/// 2^32-1 throws RangeError up front — the fills are provably silent (no indexed
+/// entries anywhere in the gap, same proof as move_range_is_quiet), so no
+/// observable Get is skipped. Caveat (B1f-6): a far throwing getter past the
+/// limit would surface RangeError instead of its own throw.
+fn result_fill_holes(
+    gc: &mut SemiSpace,
+    vm: &Vm,
+    result: &mut Value,
+    count: u64,
+) -> Result<(), Value> {
+    if count == 0 {
+        return Ok(());
+    }
+    *result = refresh_value(*result);
+    let cur = result
+        .heap_ptr()
+        .map(|p| unsafe { RuneArray::length(p as *mut RuneArray) } as u64)
+        .unwrap_or(0);
+    if cur + count > MAX_ARRAY_LENGTH {
+        return Err(sort_range_error(gc, vm, "Invalid array length"));
+    }
+    for _ in 0..count {
+        result_push(gc, vm, result, Value::empty_sentinel())?;
+    }
+    Ok(())
+}
+
+/// LengthOfArrayLike for the copy family (B1f-2): B1f-1 chain-aware lengths
+/// plus TypedArray exotic lengths (integer-indexed count, read-only) plus
+/// String-object exotic lengths (inner-string units — the spreadable-string
+/// content reads). JS length getters read as pair values (B1f-6 dispatches them
+/// — same sync-gap as B1f-1, e.g. slice create-non-array-invalid-len stays
+/// failing).
+fn seq_length(gc: &mut SemiSpace, vm: &mut Vm, this: Value) -> Result<(u64, f64), Value> {
+    if let Some(ptr) = this.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_TYPED_ARRAY {
+            let len = unsafe { typedarray::RuneTypedArray::length(ptr) } as u64;
+            return Ok((len, len as f64));
+        }
+        if tag == TAG_STRING_OBJ {
+            let sptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
+            let units = unsafe { HeapString::to_string(sptr as *mut HeapString) }
+                .encode_utf16()
+                .count() as u64;
+            return Ok((units, units as f64));
+        }
+    }
+    mutator_length(gc, vm, this)
+}
+
+/// HasProperty for the copy family (B1f-2): the funnel check plus String-object
+/// exotic indices (own shape first, else inner-string units — the funnel has no
+/// TAG_STRING_OBJ presence arm). Primitive strings and TypedArrays ride the
+/// funnel directly.
+fn seq_has(obj: Value, key: Value) -> bool {
+    if crate::vm::has_property(obj, key, None) {
+        return true;
+    }
+    if let Some(ptr) = obj.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_STRING_OBJ {
+            if let Some(idx) = value_to_array_index(key) {
+                let sptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
+                let units = unsafe { HeapString::to_string(sptr as *mut HeapString) }
+                    .encode_utf16()
+                    .count();
+                return idx < units;
             }
         }
     }
-    Value::from_heap_ptr(result_ptr)
+    false
 }
 
-/// Array.prototype.concat — §23.1.3.4, concatenates arrays/values, respects @@isConcatSpreadable
+/// Get for the copy family (B1f-2): primitive-string and String-object indices
+/// serve UTF-16 units (load_property_recursive has no primitive-string arm);
+/// everything else rides mutator_read (builtin-inline, JS gap → undefined).
+fn seq_read(gc: &mut SemiSpace, vm: &mut Vm, obj: &mut Value, idx: u64) -> Result<Value, Value> {
+    if let Some(ptr) = obj.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_STRING || tag == TAG_STRING_OBJ {
+            let s = if tag == TAG_STRING {
+                unsafe { HeapString::to_string(ptr as *mut HeapString) }
+            } else {
+                let sptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
+                unsafe { HeapString::to_string(sptr as *mut HeapString) }
+            };
+            *obj = refresh_value(*obj);
+            let units: Vec<u16> = s.encode_utf16().collect();
+            if idx < units.len() as u64 {
+                let u = units[idx as usize];
+                let ch = char::decode_utf16(std::iter::once(u))
+                    .next()
+                    .unwrap()
+                    .unwrap_or(char::REPLACEMENT_CHARACTER);
+                let hs = HeapString::allocate(gc, &ch.to_string());
+                *obj = refresh_value(*obj);
+                return Ok(Value::from_heap_ptr(hs as *mut u8));
+            }
+            return Ok(Value::undefined());
+        }
+    }
+    mutator_read(gc, vm, obj, idx)
+}
+
+/// IsConcatSpreadable (§23.1.3.2.1, B1f-2 sync audit): non-Objects (primitives
+/// incl. primitive strings) are never spreadable; otherwise Get
+/// @@isConcatSpreadable (proto walk via the funnel, builtin-inline) with
+/// ToBoolean on non-undefined, else the IsArray fallback. Uses Get, not
+/// GetMethod — any non-undefined value boolean-coerces, never throws. JS
+/// getters read as absent (B1f-6: is-concat-spreadable-get-err/get-order stay
+/// failing).
+fn is_concat_spreadable_sync(gc: &mut SemiSpace, vm: &mut Vm, item: Value) -> Result<bool, Value> {
+    let Some(ptr) = item.heap_ptr() else {
+        return Ok(false);
+    };
+    let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+    if tag == TAG_STRING {
+        return Ok(false);
+    }
+    let raw = load_property_recursive(
+        item,
+        Value::symbol(rune_core::symbol::SYM_IS_CONCAT_SPREADABLE),
+        None,
+        gc,
+    );
+    // Resolve accessor pairs exactly like mutator_read (builtin inline, JS gap).
+    let v = match raw.heap_ptr() {
+        Some(aptr) if unsafe { (*(aptr as *const GcHeader)).tag() } == TAG_ACCESSOR => {
+            let getter = unsafe { rune_core::accessor::AccessorPair::getter(aptr) };
+            if getter.is_undefined() || getter.is_null() {
+                Value::undefined()
+            } else if let Some(smi) = getter.as_smi() {
+                if smi < 0 {
+                    let id = ((-smi) as usize) - 1;
+                    if id < vm.builtins.len() {
+                        let r = (vm.builtins[id].func)(gc, item, &[], vm);
+                        if let Some(exc) = vm.pending_exception.take() {
+                            return Err(exc);
+                        }
+                        r
+                    } else {
+                        Value::undefined()
+                    }
+                } else {
+                    Value::undefined()
+                }
+            } else {
+                Value::undefined()
+            }
+        }
+        _ => raw,
+    };
+    if v.is_undefined() {
+        return Ok(tag == TAG_ARRAY);
+    }
+    Ok(v.to_bool())
+}
+
+/// Strict numeric key membership (B1f-2): all digits, no leading zeros (unless
+/// the key is exactly "0"), value in [lo, hi). Unlike canonical_index_name this
+/// admits huge named indices (the B1f-1 named-overflow model) — index_key only
+/// ever emits `k.to_string()`, so exact string equality is the membership test.
+fn sparse_key_in_range(name: &str, lo: u64, hi: u64) -> Option<u64> {
+    if name.is_empty() || !name.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    if name.len() > 1 && name.starts_with('0') {
+        return None;
+    }
+    let n: u64 = name.parse().ok()?;
+    if n.to_string() != name {
+        return None;
+    }
+    (lo <= n && n < hi).then_some(n)
+}
+
+/// Sorted indexed keys present (own or inherited) in [lo, hi) (B1f-2): lets huge
+/// sparse ranges walk in O(entries) — gaps are provably silent (no indexed
+/// entries anywhere in the gap, same proof as move_range_is_quiet), so readers
+/// and shifts visit only these. Returns None when an exotic link (non-plain
+/// proto, e.g. a dense-array proto serving indices) cannot be enumerated —
+/// the caller falls back to a direct walk.
+fn sparse_present_in(obj: Value, lo: u64, hi: u64) -> Option<Vec<u64>> {
+    if lo >= hi {
+        return Some(Vec::new());
+    }
+    let mut out = Vec::new();
+    let mut current = obj;
+    for _ in 0..crate::vm::MAX_PROTOTYPE_DEPTH {
+        let Some(cptr) = current.heap_ptr() else {
+            return Some(out);
+        };
+        let tag = unsafe { (*(cptr as *const GcHeader)).tag() };
+        if tag == TAG_OBJECT {
+            let shape = unsafe { JSObject::shape_ptr(cptr as *mut JSObject) };
+            let count = unsafe { JSObject::slot_count(cptr as *mut JSObject) };
+            for i in 0..count {
+                if let Some(name) = shape.key_name_at(i) {
+                    if let Some(n) = sparse_key_in_range(name, lo, hi) {
+                        out.push(n);
+                    }
+                }
+            }
+            let proto = unsafe { JSObject::prototype(cptr as *mut JSObject) };
+            if proto.is_null() {
+                break;
+            }
+            current = Value::from_heap_ptr(proto);
+        } else if tag == TAG_ARRAY {
+            // Named overflow (huge indices) + accessor overlay pairs live in
+            // extra_props; materialized elements are walked directly by the
+            // caller, and the proto chain below is enumerated by the loop.
+            let extra = unsafe { RuneArray::extra_props(cptr as *mut RuneArray) };
+            if !extra.is_null() {
+                let eshape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                let ecount = unsafe { JSObject::slot_count(extra as *mut JSObject) };
+                for i in 0..ecount {
+                    if let Some(name) = eshape.key_name_at(i) {
+                        if let Some(n) = sparse_key_in_range(name, lo, hi) {
+                            out.push(n);
+                        }
+                    }
+                }
+            }
+            let proto = unsafe { JSObject::prototype(cptr as *mut JSObject) };
+            if proto.is_null() {
+                break;
+            }
+            current = Value::from_heap_ptr(proto);
+        } else {
+            // Exotic link (typed array, string object, regexp, ...): indices
+            // may be served without shape entries — cannot enumerate.
+            return None;
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    Some(out)
+}
+
+/// Copy [lo, hi) from `obj` onto the fresh `result` positionally (B1f-2):
+/// holes stay holes (sentinel pushes), present elements are Get-pushed as own
+/// (CreateDataPropertyOrThrow — no setter dispatch on a fresh array, so the
+/// A4_T1 proto-served element lands own). Dense receivers walk the
+/// materialized window directly (bounded by capacity — tails past capacity are
+/// holes by construction) plus sparse tail candidates; plain objects walk
+/// sparse candidates only (O(entries) — the 2^53 clamps ranges); exotics walk
+/// directly (memory-bounded: strings/typed arrays). Returns Err on abrupt Gets
+/// or the 2^32-1 RangeError valve.
+fn copy_range_to_result(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    obj: &mut Value,
+    result: &mut Value,
+    lo: u64,
+    hi: u64,
+) -> Result<(), Value> {
+    if lo >= hi {
+        return Ok(());
+    }
+    *obj = refresh_value(*obj);
+    let is_dense = obj
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_ARRAY);
+    if is_dense {
+        let (dlen, cap) = obj
+            .heap_ptr()
+            .map(|p| unsafe {
+                (
+                    RuneArray::length(p as *mut RuneArray) as u64,
+                    RuneArray::capacity(p as *mut RuneArray) as u64,
+                )
+            })
+            .unwrap_or((0, 0));
+        let win_end = hi.min(dlen.min(cap)).max(lo);
+        let mut k = lo;
+        while k < win_end {
+            let key = index_key(gc, k);
+            *obj = refresh_value(*obj);
+            if seq_has(*obj, key) {
+                let mut o = *obj;
+                let v = seq_read(gc, vm, &mut o, k)?;
+                *obj = o;
+                result_push(gc, vm, result, v)?;
+            } else {
+                result_push(gc, vm, result, Value::empty_sentinel())?;
+            }
+            k += 1;
+        }
+        // Tail past the materialized window: holes except sparse candidates
+        // (named overflow, overlay pairs, proto entries).
+        if win_end < hi {
+            let tail_cands = sparse_present_in(*obj, win_end, hi).unwrap_or_default();
+            copy_sparse_to_result(gc, vm, obj, result, tail_cands, win_end, hi)?;
+        }
+        return Ok(());
+    }
+    if let Some(cands) = sparse_present_in(*obj, lo, hi) {
+        return copy_sparse_to_result(gc, vm, obj, result, cands, lo, hi);
+    }
+    // Exotic fallback: direct walk (bounded in practice).
+    let mut k = lo;
+    while k < hi {
+        let key = index_key(gc, k);
+        *obj = refresh_value(*obj);
+        if seq_has(*obj, key) {
+            let mut o = *obj;
+            let v = seq_read(gc, vm, &mut o, k)?;
+            *obj = o;
+            result_push(gc, vm, result, v)?;
+        } else {
+            result_push(gc, vm, result, Value::empty_sentinel())?;
+        }
+        k += 1;
+    }
+    Ok(())
+}
+
+/// Sparse positional copy (B1f-2): visit only the given `sparse_present_in`
+/// candidates in [lo, hi), filling every gap with holes. Order-preserving —
+/// Gets run in ascending index order exactly like the spec loop; gaps are
+/// provably silent.
+fn copy_sparse_to_result(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    obj: &mut Value,
+    result: &mut Value,
+    cands: Vec<u64>,
+    lo: u64,
+    hi: u64,
+) -> Result<(), Value> {
+    let mut pos = lo;
+    for c in cands {
+        if c < pos || c >= hi {
+            continue;
+        }
+        let key = index_key(gc, c);
+        *obj = refresh_value(*obj);
+        if seq_has(*obj, key) {
+            result_fill_holes(gc, vm, result, c - pos)?;
+            let mut o = *obj;
+            let v = seq_read(gc, vm, &mut o, c)?;
+            *obj = o;
+            result_push(gc, vm, result, v)?;
+            pos = c + 1;
+        } else {
+            // Vanished between collect and walk (builtin-getter shape motion):
+            // treat the whole span as holes.
+            result_fill_holes(gc, vm, result, c - pos + 1)?;
+            pos = c + 1;
+        }
+    }
+    result_fill_holes(gc, vm, result, hi - pos)?;
+    Ok(())
+}
+
+/// Array.prototype.slice(start, end) — §23.1.3.28 audit (B1f-2): generic over
+/// heap receivers with hole preservation and proto fallthrough (A4_T1), u64
+/// walks with ToLength clamping, ToIntegerOrInfinity start/end (floats truncate
+/// — A2.1_T1/A2.2_T1), species-plain result (create-species* → B1f-6), 2^32-1
+/// RangeError before any copy (A3_T1/T2, was ENGINE PANIC). Observable
+/// length/element getters (create-non-array-invalid-len) + Proxy/resizable →
+/// B1f-6/B7/out-of-scope.
+pub fn array_slice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let (len, _) = match seq_length(gc, vm, this) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let start_v = args.first().copied().unwrap_or(Value::undefined());
+    let k = match to_clamped_index_checked(gc, vm, start_v, len) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let end_v = args.get(1).copied().unwrap_or(Value::undefined());
+    let fin = if end_v.is_undefined() {
+        len
+    } else {
+        match to_clamped_index_checked(gc, vm, end_v, len) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
+    };
+    let count = fin.saturating_sub(k);
+    // Species ArrayCreate throws before any element Get past 2^32-1.
+    if count > MAX_ARRAY_LENGTH {
+        vm.set_pending_exception(sort_range_error(gc, vm, "Invalid array length"));
+        return Value::undefined();
+    }
+    let mut result = fresh_dense_array(gc, vm);
+    let mut obj = this;
+    if let Err(e) = copy_range_to_result(gc, vm, &mut obj, &mut result, k, fin) {
+        vm.set_pending_exception(e);
+        return Value::undefined();
+    }
+    // Length is exact by construction (holes pushed as sentinel); set
+    // explicitly per spec step 9 (covers non-Array species — plain here).
+    result = refresh_value(result);
+    if let Some(rptr) = result.heap_ptr() {
+        unsafe { RuneArray::set_length(rptr as *mut RuneArray, count as u32) };
+    }
+    result
+}
+
+/// Array.prototype.concat — §23.1.3.2 audit (B1f-2): species-plain result,
+/// IsConcatSpreadable via Get (own + proto flags dispatch now — the
+/// Boolean/String-prototype flag reads work; lone-surrogate content stays B2),
+/// LengthOfArrayLike per spreadable AFTER the spreadable check (spec order),
+/// 2^53-1 overflow TypeErrors on both arms (arg-length-exceeding, was ENGINE
+/// PANIC), hole preservation on spread ranges (sloppy-arguments tail). Single
+/// items push as-is; the ToObject-boxed `this` identity is B2 (call-with-boolean
+/// stays failing — no %Boolean.prototype% exists yet). TypedArray spread reads
+/// ride the integer-indexed exotic (length + elements); TA named stores
+/// (the spreadable flag itself) depend on B4 named-prop support.
 pub fn array_concat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let result_arr = RuneArray::allocate(gc, &[]);
-    unsafe {
-        let ptr = result_arr as *mut u8;
-        *(ptr.add(8) as *mut *const rune_core::shape::Shape) =
-            *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
-        if let Some(proto) = vm.array_prototype.heap_ptr() {
-            *(ptr.add(24) as *mut *mut u8) = proto;
-        }
-    }
-    let mut result_ptr = result_arr as *mut u8;
-    let mut all = Vec::with_capacity(1 + args.len());
-    all.push(this);
-    all.extend_from_slice(args);
-    for item in all {
-        let spreadable = if let Some(ptr) = item.heap_ptr() {
-            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-            // Check Symbol.isConcatSpreadable if present
-            let sym_key = PropertyKey::from_symbol(rune_core::symbol::SYM_IS_CONCAT_SPREADABLE);
-            let spread_val = if tag == TAG_ARRAY {
-                // Arrays store named props in extra_props
-                let extra = unsafe { RuneArray::extra_props(ptr as *mut RuneArray) };
-                if extra.is_null() {
-                    None
-                } else {
-                    let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
-                    shape
-                        .lookup(&sym_key)
-                        .map(|slot| unsafe { JSObject::get_slot(extra as *mut JSObject, slot) })
-                }
-            } else if tag == TAG_OBJECT {
-                let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
-                shape
-                    .lookup(&sym_key)
-                    .map(|slot| unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) })
-            } else {
-                None
-            };
-            if let Some(v) = spread_val {
-                // If present, ToBoolean determines spreadability
-                v.to_bool()
-            } else {
-                // Default: arrays are spreadable, others not
-                tag == TAG_ARRAY
+    let mut result = fresh_dense_array(gc, vm);
+    let mut next: u64 = 0;
+    // Operands: `this` first, then the args — each refreshed at use (pushes may
+    // GC-move them; B1f-1 discipline). Never pre-collect into a Vec (stale).
+    let total = 1 + args.len();
+    let mut n = 0usize;
+    while n < total {
+        let raw = if n == 0 { this } else { args[n - 1] };
+        let item = refresh_value(raw);
+        let spreadable = match is_concat_spreadable_sync(gc, vm, item) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
             }
-        } else {
-            false
         };
+        // The spreadable Get may have allocated (builtin getter): refresh.
+        let mut obj = refresh_value(item);
         if spreadable {
-            if let Some(len) = crate::vm::array_like_length(item) {
-                for k in 0..len {
-                    let v = crate::vm::array_like_index(item, k).unwrap_or(Value::undefined());
-                    unsafe {
-                        let new_ptr = RuneArray::push(gc, result_ptr as *mut RuneArray, v);
-                        if new_ptr as *mut u8 != result_ptr {
-                            result_ptr = new_ptr as *mut u8;
-                        }
-                    }
+            let (ilen, _) = match seq_length(gc, vm, obj) {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
                 }
+            };
+            if next + ilen > MAX_SAFE_INTEGER_U64 {
+                vm.set_pending_exception(sort_type_error(
+                    gc,
+                    vm,
+                    "Concat spread exceeds the maximum array length",
+                ));
+                return Value::undefined();
             }
+            // Append [0, ilen) positionally (result length == next here).
+            if let Err(e) = copy_range_to_result(gc, vm, &mut obj, &mut result, 0, ilen) {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+            next += ilen;
         } else {
-            unsafe {
-                let new_ptr =
-                    RuneArray::push(gc, result_ptr as *mut RuneArray, refresh_value(item));
-                if new_ptr as *mut u8 != result_ptr {
-                    result_ptr = new_ptr as *mut u8;
-                }
+            if next >= MAX_SAFE_INTEGER_U64 {
+                vm.set_pending_exception(sort_type_error(
+                    gc,
+                    vm,
+                    "Concat spread exceeds the maximum array length",
+                ));
+                return Value::undefined();
             }
+            if let Err(e) = result_push(gc, vm, &mut result, obj) {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+            next += 1;
         }
+        n += 1;
     }
-    Value::from_heap_ptr(result_ptr)
+    // Final length set explicitly (spec step 6 — trailing holes/non-Array
+    // species; plain here, exact by construction).
+    result = refresh_value(result);
+    if let Some(rptr) = result.heap_ptr() {
+        unsafe { RuneArray::set_length(rptr as *mut RuneArray, next as u32) };
+    }
+    result
 }
 
 /// Array.prototype.unshift — §23.1.3.35, inserts elements at start and returns new length
-/// Array.prototype.splice — §23.1.3.32
-pub fn array_splice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+/// Array.prototype.splice — §23.1.3.31 audit (B1f-2): spec-order abrupts
+/// (clamped start → integer deleteCount → 2^53-1 overflow TypeError BEFORE any
+/// mutation — throws-if-integer-limit-exceeded), presence-aware deleted copy
+/// (holes stay holes) and presence-aware shifts (move-or-delete with the
+/// non-configurable throw — A4_T1), u64 index math with ToLength clamping (the
+/// length-near/exceeding families, was u32-wrap ENGINE PANIC), O(entries)
+/// sparse walks for plain objects, dense pre-grow + refresh discipline.
+/// Object deleteCount valueOf (A2.2_T5) + observable length accessors
+/// (set_length_no_args) + frozen/sealed (target-array-*) + species/Proxy →
+/// B1f-6/B1f-5/B7 (documented, counted).
+pub fn array_splice(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let Some(length) = crate::vm::array_like_length(this) else {
-        return Value::undefined();
+    let (len, _) = match seq_length(gc, vm, this) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
     };
-    // §23.1.3.32 step 3: actualStart = ToClampedIndex(start, length)
-    let relative_start = args
-        .first()
-        .and_then(|&v| coerce_integer_arg(v))
-        .unwrap_or(0.0);
-    let actual_start: u32 = if relative_start < 0.0 {
-        ((length as f64) + relative_start).max(0.0) as u32
-    } else if relative_start >= (length as f64) {
-        length
-    } else {
-        relative_start as u32
+    // Step 3: actualStart (start absent → undefined → 0, same value).
+    let start_v = args.first().copied().unwrap_or(Value::undefined());
+    let actual_start = match to_clamped_index_checked(gc, vm, start_v, len) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
     };
-    // Steps 5-7: start absent → 0 deletes; deleteCount absent → to the end;
-    // else ToIntegerOrInfinity clamped to [0, length - actualStart]
-    let delete_count: u32 = if args.is_empty() {
+    // Steps 5-8: no args → 0 deletes; one arg → to the end; else
+    // ToIntegerOrInfinity clamped to [0, len - actualStart] (symbols throw).
+    let item_count: u64 = args.len().saturating_sub(2) as u64;
+    let actual_delete: u64 = if args.is_empty() {
         0
     } else if args.len() == 1 {
-        length - actual_start
+        len.saturating_sub(actual_start)
     } else {
-        let max_dc = (length - actual_start) as f64;
-        match coerce_integer_arg(args[1]) {
-            Some(dc) => dc.clamp(0.0, max_dc) as u32,
-            None => 0,
+        match to_integer_sync(gc, vm, args[1]) {
+            Ok(dc) => dc.clamp(0.0, len.saturating_sub(actual_start) as f64) as u64,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
         }
     };
-    let item_count = if args.len() > 2 {
-        (args.len() - 2) as u32
-    } else {
-        0
-    };
-    let new_len = length - delete_count + item_count;
-
-    // Create array of deleted elements
-    let deleted_arr = RuneArray::allocate(gc, &[]);
-    unsafe {
-        let ptr = deleted_arr as *mut u8;
-        *(ptr.add(8) as *mut *const rune_core::shape::Shape) =
-            *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
-        if let Some(proto) = vm.array_prototype.heap_ptr() {
-            *(ptr.add(24) as *mut *mut u8) = proto;
-        }
+    // Step 9: overflow BEFORE any mutation (u64 — the old u32 wrap PANICKED).
+    // Exact: del ≤ len - actual_start ≤ len, so no saturation triggers.
+    let new_len = len.saturating_add(item_count).saturating_sub(actual_delete);
+    if new_len > MAX_SAFE_INTEGER_U64 {
+        vm.set_pending_exception(sort_type_error(
+            gc,
+            vm,
+            "Splice exceeds the maximum array length",
+        ));
+        return Value::undefined();
     }
-    let mut deleted_ptr = deleted_arr as *mut u8;
-    for k in 0..delete_count {
-        let v = crate::vm::array_like_index(this, actual_start + k).unwrap_or(Value::undefined());
-        unsafe {
-            let new_ptr = RuneArray::push(gc, deleted_ptr as *mut RuneArray, v);
-            if new_ptr as *mut u8 != deleted_ptr {
-                deleted_ptr = new_ptr as *mut u8;
-            }
-        }
+    // Species ArrayCreate throws past 2^32-1 before the deleted copy.
+    if actual_delete > MAX_ARRAY_LENGTH {
+        vm.set_pending_exception(sort_range_error(gc, vm, "Invalid array length"));
+        return Value::undefined();
     }
-
-    // Re-resolve the receiver after deleted-array allocations — a GC during a
-    // push may have moved it (local `this` copy holds the stale from-space
-    // address; roots were already rewritten by the collector).
-    let this = refresh_value(this);
-
-    // Handle dense array in place
-    if let Some(ptr) = this.heap_ptr() {
-        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-        if tag == TAG_ARRAY {
-            let mut arr = ptr as *mut RuneArray;
-            // Shift tail
-            if item_count != delete_count {
-                if item_count > delete_count {
-                    // Need to grow and shift right; re-read capacity after each
-                    // grow (each grow may move the array / trigger a GC).
-                    unsafe {
-                        while (new_len as usize) > RuneArray::capacity(arr) as usize {
-                            arr = grow_dense_array(gc, vm, arr);
-                        }
-                    }
-                    for i in (actual_start + delete_count..length).rev() {
-                        let v = unsafe { RuneArray::get_element(arr, i as usize) };
-                        unsafe {
-                            RuneArray::set_element(arr, (i + item_count - delete_count) as usize, v)
-                        };
-                    }
-                } else {
-                    for i in actual_start + delete_count..length {
-                        let v = unsafe { RuneArray::get_element(arr, i as usize) };
-                        unsafe {
-                            RuneArray::set_element(arr, (i + item_count - delete_count) as usize, v)
-                        };
-                    }
-                }
-            }
-            for (i, &item) in args.iter().skip(2).enumerate() {
-                unsafe {
-                    RuneArray::set_element(
-                        arr,
-                        (actual_start + i as u32) as usize,
-                        refresh_value(item),
-                    )
-                };
-            }
-            unsafe { RuneArray::set_length(arr, new_len) };
-            return Value::from_heap_ptr(deleted_ptr);
-        }
+    // Steps 10-13: deleted copy (fresh array, holes preserved).
+    let mut deleted = fresh_dense_array(gc, vm);
+    let mut ro = this;
+    if let Err(e) = copy_range_to_result(
+        gc,
+        vm,
+        &mut ro,
+        &mut deleted,
+        actual_start,
+        actual_start + actual_delete,
+    ) {
+        vm.set_pending_exception(e);
+        return Value::undefined();
     }
-    // Generic object fallback — use delete/insert via helpers
-    // Shift tail
-    if item_count != delete_count {
-        if item_count > delete_count {
-            for i in (actual_start + delete_count..length).rev() {
-                let v = crate::vm::array_like_index(this, i).unwrap_or(Value::undefined());
-                let exists = crate::vm::array_like_index(this, i).is_some();
-                let new_idx = i + item_count - delete_count;
-                if exists {
-                    set_array_like_index(this, new_idx, v, gc);
-                } else {
-                    delete_array_like_index(this, new_idx);
-                }
-            }
+    this = refresh_value(ro);
+    deleted = refresh_value(deleted);
+    if let Some(dptr) = deleted.heap_ptr() {
+        unsafe { RuneArray::set_length(dptr as *mut RuneArray, actual_delete as u32) };
+    }
+    // Discarded-box primitives: the boxed temp is thrown away (spec ToObject).
+    if this.heap_ptr().is_none() {
+        return deleted;
+    }
+    let is_dense = this
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_ARRAY);
+    if is_dense && item_count > actual_delete {
+        ensure_dense_capacity(gc, vm, &mut this, new_len);
+    }
+    // Steps 14-15: shifts in spec k-order (B1f-1 idiom verbatim): per-k
+    // presence-checked move-or-delete via the funnels (holes/OOB/cap all read
+    // absent with proto fallthrough, so no window math is needed for
+    // correctness); huge sparse quiet spans skip entirely (the 2^53 clamps
+    // ranges — same proof as move_range_is_quiet). Dense receivers always walk
+    // (their elements live outside shapes); test spans are small, and the
+    // theoretical huge-dense-tail walk is C-hardening shared with B1f-1 shift.
+    if item_count != actual_delete {
+        let left = item_count < actual_delete;
+        let (lo, hi) = (actual_start, len.saturating_sub(actual_delete));
+        // Union span of touched positions for the quiet check.
+        let (ulo, uhi) = if left {
+            (actual_start + item_count, len)
         } else {
-            for i in actual_start + delete_count..length {
-                let v = crate::vm::array_like_index(this, i).unwrap_or(Value::undefined());
-                let exists = crate::vm::array_like_index(this, i).is_some();
-                let new_idx = i + item_count - delete_count;
-                if exists {
-                    set_array_like_index(this, new_idx, v, gc);
-                } else {
-                    delete_array_like_index(this, new_idx);
+            (actual_start + actual_delete, new_len)
+        };
+        let skip = !is_dense && move_range_is_quiet(this, ulo, uhi);
+        if !skip {
+            // Per-k move-or-delete body, inlined per direction (B1f-1 shape).
+            if left {
+                let mut k = lo;
+                while k < hi {
+                    let from = k + actual_delete;
+                    let to = k + item_count;
+                    let key = index_key(gc, from);
+                    this = refresh_value(this);
+                    if seq_has(this, key) {
+                        let mut o = this;
+                        match seq_read(gc, vm, &mut o, from) {
+                            Ok(v) => {
+                                this = o;
+                                if let Err(e) = mutator_store(gc, vm, &mut this, to, v) {
+                                    vm.set_pending_exception(e);
+                                    return Value::undefined();
+                                }
+                            }
+                            Err(e) => {
+                                vm.set_pending_exception(e);
+                                return Value::undefined();
+                            }
+                        }
+                    } else if let Err(e) = mutator_delete(gc, vm, &mut this, to) {
+                        vm.set_pending_exception(e);
+                        return Value::undefined();
+                    }
+                    k += 1;
+                }
+                // Trailing deletes [new_len, len) — inside the quiet span.
+                let mut t = new_len;
+                while t < len {
+                    if let Err(e) = mutator_delete(gc, vm, &mut this, t) {
+                        vm.set_pending_exception(e);
+                        return Value::undefined();
+                    }
+                    t += 1;
+                }
+            } else {
+                let mut k = hi;
+                while k > lo {
+                    k -= 1;
+                    let from = k + actual_delete;
+                    let to = k + item_count;
+                    let key = index_key(gc, from);
+                    this = refresh_value(this);
+                    if seq_has(this, key) {
+                        let mut o = this;
+                        match seq_read(gc, vm, &mut o, from) {
+                            Ok(v) => {
+                                this = o;
+                                if let Err(e) = mutator_store(gc, vm, &mut this, to, v) {
+                                    vm.set_pending_exception(e);
+                                    return Value::undefined();
+                                }
+                            }
+                            Err(e) => {
+                                vm.set_pending_exception(e);
+                                return Value::undefined();
+                            }
+                        }
+                    } else if let Err(e) = mutator_delete(gc, vm, &mut this, to) {
+                        vm.set_pending_exception(e);
+                        return Value::undefined();
+                    }
                 }
             }
-            for i in new_len..length {
-                delete_array_like_index(this, i);
-            }
         }
     }
-    for (i, &item) in args.iter().skip(2).enumerate() {
-        set_array_like_index(this, actual_start + i as u32, item, gc);
-    }
-    // Update length for generic
-    if let Some(ptr) = this.heap_ptr() {
-        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-        if tag == TAG_OBJECT {
-            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
-            if let Some(slot) = shape.lookup(&PropertyKey::from_string("length")) {
-                unsafe {
-                    JSObject::set_slot(ptr as *mut JSObject, slot, Value::smi(new_len as i32))
-                };
-            }
+    // Step 17: items via Set (throw=true — strings reject here).
+    for (i, &raw_item) in args.iter().skip(2).enumerate() {
+        let item = refresh_value(raw_item);
+        if let Err(e) = mutator_store(gc, vm, &mut this, actual_start + i as u64, item) {
+            vm.set_pending_exception(e);
+            return Value::undefined();
         }
     }
-    Value::from_heap_ptr(deleted_ptr)
-}
-
-fn set_array_like_index(this: Value, index: u32, val: Value, _gc: &mut SemiSpace) {
-    if let Some(ptr) = this.heap_ptr() {
-        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-        match tag {
-            TAG_ARRAY => unsafe {
-                RuneArray::set_element(ptr as *mut RuneArray, index as usize, val)
-            },
-            TAG_OBJECT => unsafe {
-                let key = index.to_string();
-                let shape = JSObject::shape_ptr(ptr as *mut JSObject);
-                if let Some(slot) = shape.lookup(&PropertyKey::from_string(&key)) {
-                    JSObject::set_slot(ptr as *mut JSObject, slot, val);
-                } else {
-                    JSObject::add_property(
-                        ptr as *mut JSObject,
-                        PropertyKey::from_string(&key),
-                        key,
-                        val,
-                    );
-                }
-            },
-            _ => {}
-        }
+    // Step 18: length (dense RangeError past 2^32-1 = array exotic invariant).
+    if let Err(e) = set_length_checked(gc, vm, &mut this, new_len) {
+        vm.set_pending_exception(e);
+        return Value::undefined();
     }
-}
-
-fn delete_array_like_index(this: Value, index: u32) {
-    if let Some(ptr) = this.heap_ptr() {
-        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-        if tag == TAG_OBJECT {
-            unsafe {
-                let key = PropertyKey::from_string(&index.to_string());
-                JSObject::remove_property(ptr as *mut JSObject, &key);
-            }
-        }
-    }
+    deleted
 }
 
 /// Resolve a possibly-forwarded GC pointer to its current address (single hop).
@@ -10626,32 +11115,6 @@ unsafe fn grow_dense_array(gc: &mut SemiSpace, vm: &mut Vm, cur: *mut RuneArray)
         }
         new_arr
     }
-}
-
-/// ToIntegerOrInfinity-lite for splice start/deleteCount: Smis, floats,
-/// numeric strings, booleans, null/undefined. Objects without valueOf
-/// dispatch coerce via truthiness fallback of None → 0 (documented gap).
-fn coerce_integer_arg(v: Value) -> Option<f64> {
-    if v.is_undefined() || v.is_null() {
-        return Some(0.0);
-    }
-    if let Some(smi) = v.as_smi() {
-        return Some(smi as f64);
-    }
-    if let Some(f) = v.as_float64() {
-        return Some(if f.is_nan() { 0.0 } else { f.trunc() });
-    }
-    if let Some(b) = v.to_boolean() {
-        return Some(if b { 1.0 } else { 0.0 });
-    }
-    if let Some(ptr) = v.heap_ptr() {
-        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-        if tag == TAG_STRING {
-            let s = unsafe { HeapString::to_string(ptr as *mut HeapString) };
-            return s.trim().parse::<f64>().ok().map(|n| n.trunc());
-        }
-    }
-    None
 }
 
 /// Array.prototype.indexOf(searchElement, fromIndex) — returns index of first match, -1 if not found.

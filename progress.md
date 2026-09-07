@@ -115,6 +115,10 @@ observable-access machine → B1f-6):
   (the length A3_T4 "pass" was exit=101 hidden by 2>&1 plumbing).
   (3) `git stash` + rebuild is the ground-truth check for
   "pre-existing vs regressed" (settled the map-shape question).
+  (4) CI runs the STABLE toolchain — local nightly clippy/fmt clean is
+  not sufficient; always run `cargo +stable clippy` and
+  `cargo +stable fmt --check` before pushing (B1f-1 CI caught a
+  sort_by_key lint + rustfmt layout drift that nightly missed).
 
 ## B1e DONE — sort/toSorted + holes + observable access (2026-09-06)
 

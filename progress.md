@@ -46,6 +46,70 @@ paths can't match immediates (no JIT change needed).
   exact, retracted in A2.)
 - 860 workspace / 0 failed; clippy/fmt/no-default/x86 clean.
 
+## B1f-3 DONE — map/filter result shapes (2026-09-07)
+
+Third B1f sub-slice (iterative results; from → B1f-4, length-descriptors/
+freeze → B1f-5, observable-access machine → B1f-6):
+
+- **Rewrites**: map writes CreateDataProperty at the SOURCE index (holes stay
+  holes — the owned 8-c-i-18 loss: accessor presence counts, result length =
+  source length incl. all-holes presize, trailing set_length at completion);
+  filter pushes the pre-call kValue (packed `to`); flatMap skips holes on
+  spread (FlattenIntoArray HasProperty gate — [[1,,3]] → [1,3]); prologue reads
+  chain-aware LengthOfArrayLike (inherited data lengths — 2-6 — via
+  mutator_length, subsuming the old own-slot symbol check) with a map-only
+  2^32-1 RangeError up front (species ArrayCreate — 3-28, was u32-saturation
+  hang); `new Array(n)` creates holes (was undefined-fill — the 8-5/8-b visit
+  families); primitive strings stay 0 in the machine (revert — full
+  String-exotics are B2; serving lengths exposed unboxed receivers).
+- **Shared/funnel**: has_property OBJECT-arm delegates exotic proto links to
+  the funnel (dense-array protos serve elements — 9-3; `in` agrees with load);
+  array_like_length + length_to_number coerce booleans (ToLength(true) = 1 —
+  3-2); array_result_push helper factors the op.result grow dance (Map uses
+  it; Filter/FlatMap arms keep their inline shape); Context::new_large (64MB)
+  for the test262 runner only (product default stays 16MB).
+- **Gains (+94 Array, ZERO new failures)**: map 126→155 (+29), filter 147→169
+  (+22), flatMap unchanged (no covering test262 test — behavior pinned by the
+  integration test); siblings via shared fixes — some/reduceRight/reduce/
+  forEach/every +8..9 each (same Sputnik families), indexOf/lastIndexOf +1.
+  Array 1792→1886. Object/String/Function/statements/expressions counts
+  byte-identical to stash baselines. 874/0 workspace; stable clippy (CI
+  flags)/fmt/no-default clean.
+- **Tests**: `test_array_map_filter_result_shapes` (8 asserts); B1a legacy
+  update (all-holes map length 0→2 — the old test pinned the bug, corrected
+  per object-semantics precedent).
+- **Scale saga (measured, filed under C)**: spec-correct 1M positional map
+  needs ~8MB source + ~8MB result + 1.5× grow transient > 16MB — 8-c-ii-1
+  OOM-panicked (it never observes the result, only callback args). Runner heap
+  16→64MB reclaims it deterministically (no flips at that headroom).
+  Adjacent finding: dense-500K map content rots (NaN sum) — proven WORSE on
+  baseline (length 220754 + NaN vs ours length-right + NaN), i.e. pre-existing
+  machine-window GC unsoundness at multi-MB, not B1f-3's. T9 TIMEOUT proven
+  flaky on baseline solo runs (124/139/124/1 — the T8 family).
+- **Key lesson**: first cut resolved getters at filter-push via mutator_read —
+  broke 6 passing tests (9-b-4: pairs must be pushed RAW so getters dispatch
+  at read time, exactly like the source). The funnel returns raw; dispatch
+  lives at read. Reverted to load_property_recursive (also fixes proto-served
+  data the old own-only re-read dropped).
+- **Deferred with measurements**: species dispatch (~10+8 create-* →
+  B1f-6 Construct machine); Proxy (→ B7); JS valueOf/length/getters + get-order
+  + length side effects (2-7/8/9/10/18/19, 4-8, 8-b-2, set_length-type gaps →
+  B1f-6); stale overlay after delete (8-b-9) + dense index descriptors
+  (8-c-iii/9-c-iii) + freeze/seal/length-redefine (target-*, A6.1_T2,
+  sloppy/strict-arguments tails → B1f-5 array descriptors+integrity); Boolean/
+  Number wrappers + `new Boolean` + toString tags + hex lengths + primitive
+  this/methods + string exotics (1-*, 5-12/22/23, 8-c-ii-16/17, call-`
+  variants, concat-non-array Array.apply linkage → B2); sloppy-this/undeclared/
+  hoisting (4-*, 5-1, 6-2/3, 9-3, 10-3 → B8); resizable (oos); u64 machine
+  lengths + sparse machine walks + smi-key wraps past 2^31 +
+  mutation-during-callback divergence + multi-MB rooting (→ B1f-6-machine/C).
+- **Process lessons**: (1) mode-change artifacts again — PANIC→fail AND
+  fail→TIMEOUT both fake comm "new" lines; always confirm counts + panics +
+  flakes separately. (2) A "fixed" test that never observes the fix (8-c-ii-1
+  checks callbacks, not results) still validates the walk — but its
+  heap cost is real; size the runner, not the product. (3) Length printouts
+  prove nothing about content at scale — always sum/checksum large arrays.
+
 ## B1f-2 DONE — slice/splice/concat audit (2026-09-07)
 
 Second B1f sub-slice (copy family; map/filter shapes → B1f-3, from → B1f-4,

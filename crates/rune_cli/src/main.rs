@@ -103,11 +103,13 @@ fn main() {
                 let result =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match mode {
                         "parse" => {
-                            let ctx = rune_embed::Context::new();
+                            let ctx = rune_embed::Context::new_large();
                             ctx.compile(&src).map(|_| ())
                         }
                         _ => {
-                            let mut ctx = rune_embed::Context::new();
+                            // 64 MiB heap: spec-correct multi-MB results (B1f-3
+                            // 1M-element maps) don't fit the 16 MiB default.
+                            let mut ctx = rune_embed::Context::new_large();
                             ctx.eval(&src).map(|_| ())
                         }
                     }));

@@ -1172,13 +1172,13 @@ fn test_array_iter_prologue() {
         .eval("var seen = []; var o = {length: 3, 0: 'a', 2: 'c'}; Array.prototype.map.call(o, function (x) { seen.push(x); return x; }); seen.length;")
         .unwrap();
     assert_eq!(r.as_smi(), Some(2));
-    // All-holes with no calls returns the kind default.
+    // All-holes map presizes the species length (B1f-3: holes stay holes).
     let r = ctx
         .eval(
             "var o = {length: 2}; Array.prototype.map.call(o, function (x) { return 1; }).length;",
         )
         .unwrap();
-    assert_eq!(r.as_smi(), Some(0));
+    assert_eq!(r.as_smi(), Some(2));
     // reduce: first present element seeds; all-holes without initial throws.
     let r = ctx
         .eval("[1, 2, 3].reduce(function (a, b) { return a + b; });")
@@ -1423,6 +1423,36 @@ fn test_array_slice_splice_concat() {
         .unwrap();
     // concat holes in spread ranges stay holes.
     let r = ctx.eval("var ch = [1, , 3]; ch[Symbol.isConcatSpreadable] = true; var cx = [0].concat(ch); cx.length === 4 && (2 in cx) === false && cx[3] === 3;").unwrap();
+    assert!(r.to_bool());
+}
+
+#[test]
+fn test_array_map_filter_result_shapes() {
+    // B1f-3: hole-preserving map results, packed filter kValues, flatMap skip.
+    let mut ctx = Context::new_small();
+    // Map writes at source indices (8-c-i-18: accessor presence counts).
+    let r = ctx.eval("function cb1(val, idx, obj) { if (idx === 1) { return typeof val === 'undefined'; } return false; } var ma = []; Object.defineProperty(ma, '1', { set: function () {}, configurable: true }); var mt = ma.map(cb1); mt[1] === true && mt.length === 2;").unwrap();
+    assert!(r.to_bool());
+    // Map holes stay holes positionally with species length.
+    let r = ctx.eval("var mh = [1, , 3].map(function (v) { return v * 10; }); mh.length === 3 && mh[0] === 10 && (1 in mh) === false && mh[2] === 30;").unwrap();
+    assert!(r.to_bool());
+    // Map serves proto elements (presence delegates to array protos).
+    let r = ctx.eval("function foo() {} foo.prototype = new Array(1, 2, 3); var ff = new foo(); ff.length = 1; var fa = ff.map(function () {}); Array.isArray(fa) && fa.length === 1;").unwrap();
+    assert!(r.to_bool());
+    // Boolean lengths coerce (ToLength(true) === 1).
+    let r = ctx.eval("Array.prototype.map.call({0: 11, length: true}, function (v) { return v > 10; }).length === 1;").unwrap();
+    assert!(r.to_bool());
+    // Inherited data lengths serve (2-6).
+    let r = ctx.eval("var proto = {length: 2}; function Con() {} Con.prototype = proto; var chd = new Con(); chd[0] = 12; chd[1] = 11; chd[2] = 9; Array.prototype.map.call(chd, function (v) { return v > 10; }).length === 2;").unwrap();
+    assert!(r.to_bool());
+    // Map past 2^32-1 throws RangeError before walking (was saturation hang).
+    ctx.eval("assert.throws(RangeError, function () { Array.prototype.map.call({0: 12, length: 4294967296}, function (v) { return v; }); });")
+        .unwrap();
+    // Filter packs kept kValues densely.
+    let r = ctx.eval("var fl = [1, 2, 3, 4].filter(function (v) { return v % 2 === 0; }); fl.length === 2 && fl[0] === 2 && fl[1] === 4;").unwrap();
+    assert!(r.to_bool());
+    // FlatMap skips holes when spreading ([[1,,3]] → [1,3]).
+    let r = ctx.eval("var fm = [[1, , 3]].flatMap(function (x) { return x; }); fm.length === 2 && fm[0] === 1 && fm[1] === 3;").unwrap();
     assert!(r.to_bool());
 }
 

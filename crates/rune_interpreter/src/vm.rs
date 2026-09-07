@@ -9117,57 +9117,42 @@ impl Vm {
                                 }
                                 ArrayOpKind::Filter => {
                                     if result.to_bool() {
-                                        let src_val =
-                                            array_like_index(op.source_val, op.index as u32)
-                                                .unwrap_or(Value::undefined());
-                                        let old_ptr = op.result;
-                                        let new_arr = unsafe {
-                                            RuneArray::push(gc, old_ptr as *mut RuneArray, src_val)
-                                        };
-                                        if new_arr as *mut u8 != old_ptr {
-                                            let resolved = if unsafe {
-                                                (*(old_ptr as *const GcHeader)).is_forwarded()
-                                            } {
-                                                unsafe {
-                                                    (*(old_ptr as *const GcHeader))
-                                                        .forwarding_addr()
-                                                }
-                                            } else {
-                                                old_ptr
-                                            };
-                                            if resolved != new_arr as *mut u8 {
-                                                self.update_heap_reference(
-                                                    resolved,
-                                                    new_arr as *mut u8,
-                                                );
-                                            }
-                                        }
-                                        op.result = new_arr as *mut u8;
+                                        // B1f-3: push the raw present value via
+                                        // the funnel (pairs stay pairs — getters
+                                        // dispatch at read time, exactly like
+                                        // the source; own-only slot reads
+                                        // dropped proto-served elements to
+                                        // undefined). load never dispatches or
+                                        // pushes frames, so no abrupt path.
+                                        let src_val = load_property_recursive(
+                                            op.source_val,
+                                            Value::smi(op.index as i32),
+                                            None,
+                                            gc,
+                                        );
+                                        op.result = array_result_push(gc, self, op.result, src_val);
                                     }
                                 }
                                 ArrayOpKind::Map => {
-                                    let old_ptr = op.result;
-                                    let new_arr = unsafe {
-                                        RuneArray::push(gc, old_ptr as *mut RuneArray, result)
-                                    };
-                                    if new_arr as *mut u8 != old_ptr {
-                                        let resolved = if unsafe {
-                                            (*(old_ptr as *const GcHeader)).is_forwarded()
-                                        } {
-                                            unsafe {
-                                                (*(old_ptr as *const GcHeader)).forwarding_addr()
-                                            }
-                                        } else {
-                                            old_ptr
-                                        };
-                                        if resolved != new_arr as *mut u8 {
-                                            self.update_heap_reference(
-                                                resolved,
-                                                new_arr as *mut u8,
-                                            );
+                                    // B1f-3 positional CreateDataProperty at the
+                                    // SOURCE index (holes stay holes — 8-c-i-18):
+                                    // fill sentinel up to op.index, push mapped.
+                                    let mut cur = op.result;
+                                    loop {
+                                        let cur_len =
+                                            unsafe { RuneArray::length(cur as *mut RuneArray) }
+                                                as usize;
+                                        if cur_len >= op.index {
+                                            break;
                                         }
+                                        cur = array_result_push(
+                                            gc,
+                                            self,
+                                            cur,
+                                            Value::empty_sentinel(),
+                                        );
                                     }
-                                    op.result = new_arr as *mut u8;
+                                    op.result = array_result_push(gc, self, cur, result);
                                 }
                                 ArrayOpKind::FlatMap => {
                                     let old_ptr = op.result;
@@ -9185,6 +9170,13 @@ impl Vm {
                                                     k as usize,
                                                 )
                                             };
+                                            // B1f-3: mapped holes don't spread
+                                            // (FlattenIntoArray HasProperty
+                                            // gate — [[1,,3]].flatMap(x=>x)
+                                            // is [1,3], not [1,,3]).
+                                            if elem == Value::empty_sentinel() {
+                                                continue;
+                                            }
                                             let new_arr = unsafe {
                                                 RuneArray::push(gc, cur_ptr as *mut RuneArray, elem)
                                             };
@@ -9393,7 +9385,19 @@ impl Vm {
                             }
                             // Done: push result and advance pc.
                             let final_result = match op_kind {
-                                ArrayOpKind::Filter | ArrayOpKind::Map | ArrayOpKind::FlatMap => {
+                                ArrayOpKind::Filter | ArrayOpKind::FlatMap => {
+                                    Value::from_heap_ptr(op.result)
+                                }
+                                ArrayOpKind::Map => {
+                                    // B1f-3: positional writes leave trailing
+                                    // holes — set the species length explicitly
+                                    // (tail past capacity reads as holes).
+                                    unsafe {
+                                        RuneArray::set_length(
+                                            op.result as *mut RuneArray,
+                                            op.length,
+                                        )
+                                    };
                                     Value::from_heap_ptr(op.result)
                                 }
                                 ArrayOpKind::Reduce | ArrayOpKind::ReduceRight => {
@@ -12846,7 +12850,10 @@ pub(crate) fn has_property(obj: Value, raw_key: Value, function_prototype: Optio
                 if shape.lookup(&key).is_some() {
                     return true;
                 }
-                // Walk prototype chain
+                // Walk prototype chain. B1f-3: non-plain links (e.g. a dense
+                // array serving elements to a plain object — 9-3) delegate to
+                // the funnel instead of reading absent (load already serves
+                // them; `in` must agree).
                 let mut current = obj;
                 let mut depth = 0;
                 loop {
@@ -12871,7 +12878,11 @@ pub(crate) fn has_property(obj: Value, raw_key: Value, function_prototype: Optio
                                     return true;
                                 }
                             } else {
-                                return false;
+                                // B1f-3: delegate exotic links (dense arrays,
+                                // typed arrays, ...) to the funnel — their own
+                                // arms know holes/overlays/exotics and continue
+                                // up the chain from there.
+                                return has_property(current, raw_key, function_prototype);
                             }
                         } else {
                             return false;
@@ -13111,6 +13122,9 @@ pub(crate) fn array_like_length(this: Value) -> Option<u32> {
                     n.max(0) as u32
                 } else if let Some(f) = val.as_float64() {
                     f.max(0.0) as u32
+                } else if val.to_boolean().is_some_and(|b| b) {
+                    // B1f-3: ToLength(true) is 1 ({length: true} — 3-2).
+                    1
                 } else {
                     0
                 }
@@ -13271,6 +13285,29 @@ pub(crate) fn array_element_value(
         return ArrayElemOut::Ready(Value::undefined());
     }
     ArrayElemOut::Wait
+}
+
+/// Push onto a pending machine result array, repairing roots on grow (B1f-3).
+/// Factors the op.result forwarding dance previously copy-pasted per arm:
+/// on grow the array moves — resolve forwarding and retarget VM roots.
+pub(crate) fn array_result_push(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    old_ptr: *mut u8,
+    val: Value,
+) -> *mut u8 {
+    let new_arr = unsafe { RuneArray::push(gc, old_ptr as *mut RuneArray, val) };
+    if new_arr as *mut u8 != old_ptr {
+        let resolved = if unsafe { (*(old_ptr as *const GcHeader)).is_forwarded() } {
+            unsafe { (*(old_ptr as *const GcHeader)).forwarding_addr() }
+        } else {
+            old_ptr
+        };
+        if resolved != new_arr as *mut u8 {
+            vm.update_heap_reference(resolved, new_arr as *mut u8);
+        }
+    }
+    new_arr as *mut u8
 }
 
 /// Outcome of one B1b index-search step.

@@ -38,6 +38,15 @@ impl Context {
         Self::new_with_semispace(1024 * 1024) // 1 MiB for parallel tests
     }
 
+    /// Like `new()` but with a large semispace (64 MiB) for conformance
+    /// workloads with multi-MB live sets (e.g. 1M-element map results need
+    /// ~8MB source + ~8MB result + grow transient — over 16 MiB; B1f-3).
+    /// The library default stays 16 MiB (cold-start/memory story intact);
+    /// only the test262 runner uses this.
+    pub fn new_large() -> Self {
+        Self::new_with_semispace(64 * 1024 * 1024) // 64 MiB for conformance
+    }
+
     fn new_with_semispace(size: usize) -> Self {
         let mut ctx = Context {
             gc: SemiSpace::with_size(size),

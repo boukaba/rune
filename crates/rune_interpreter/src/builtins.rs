@@ -6906,7 +6906,10 @@ pub fn array_constructor(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &
                 }
                 return Value::from_heap_ptr(arr as *mut u8);
             }
-            let elems = vec![Value::undefined(); len];
+            // B1f-3: Array(len) creates holes, not undefined elements
+            // (the 8-5/8-b visitation families; reads still yield undefined
+            // via the hole funnels — only presence changes).
+            let elems = vec![Value::empty_sentinel(); len];
             return build_array(gc, &elems, vm);
         }
     }
@@ -7284,6 +7287,10 @@ fn length_walk_value(this: Value) -> Value {
 fn length_to_number(gc: &mut SemiSpace, vm: &mut Vm, v: Value) -> Result<f64, Value> {
     if let Some(n) = v.as_smi().map(|v| v as f64).or_else(|| v.as_float64()) {
         return Ok(n);
+    }
+    // B1f-3: ToNumber(true) is 1 (boolean lengths: {length: true} → 1).
+    if let Some(b) = v.to_boolean() {
+        return Ok(if b { 1.0 } else { 0.0 });
     }
     if v.is_symbol() {
         return Err(sort_type_error(
@@ -11281,27 +11288,35 @@ fn array_iter_prologue(
     if !require_object_coercible(this, vm, gc) {
         return None;
     }
-    // B1c: LengthOfArrayLike abrupt — a symbol length throws via
-    // ToNumber(symbol) (e.g. return-abrupt-from-this-length-as-symbol).
-    // Accessor lengths stay sync-gap (read as data below).
-    if let Some(ptr) = this.heap_ptr() {
-        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_OBJECT {
-            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
-            if let Some(slot) = shape.lookup(&PropertyKey::from_string("length")) {
-                let lv = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
-                if lv.is_symbol() {
-                    vm.set_pending_exception(crate::errors::error_object(
-                        gc,
-                        &vm.error_protos,
-                        crate::errors::ErrorKind::TypeError,
-                        "Cannot convert a Symbol value to a number",
-                    ));
-                    return None;
-                }
+    // B1f-3: LengthOfArrayLike via the B1f-1 chain reader (own + inherited data
+    // lengths, ToLength-clamped u64; symbol lengths throw anywhere on the chain
+    // — subsumes the old inline own-slot symbol check). JS-driven lengths read
+    // as pair values → 0 (B1f-6 dispatches them). Primitive strings stay 0
+    // (baseline): full String-exotic iteration (lengths, char reads, boxed
+    // callback receivers) is B2 — serving lengths here exposed broken reads
+    // and unboxed receivers (reduce 1-7).
+    let is_prim_string = this
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_STRING);
+    let (len_u64, _) = if is_prim_string {
+        (0, 0.0)
+    } else {
+        match mutator_length(gc, vm, this) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return None;
             }
         }
+    };
+    // B1f-3: map species-creates with `length` (spec step 4, before the walk),
+    // so ArrayCreate throws RangeError past 2^32-1 (3-28 — the old u32
+    // saturation hung instead). Other kinds species-create empty / walk.
+    if method == "Array.prototype.map" && len_u64 > MAX_ARRAY_LENGTH {
+        vm.set_pending_exception(sort_range_error(gc, vm, "Invalid array length"));
+        return None;
     }
-    let length = crate::vm::array_like_length(this).unwrap_or(0);
+    let length = len_u64.min(u32::MAX as u64) as u32;
     let callback = args.first().copied().unwrap_or(Value::undefined());
     let callable = callback.as_smi().is_some_and(|s| s < 0)
         || callback
@@ -11469,6 +11484,10 @@ pub fn array_map(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -
         }
     }
     let Some(first) = first_existing_index(this, length) else {
+        // B1f-3: map presizes the species length (holes stay holes — the walk
+        // never visits them). Unallocated tail slots read as holes by
+        // construction (B1e capacity discipline), so no fill is needed.
+        unsafe { RuneArray::set_length(result_arr, length) };
         return Value::from_heap_ptr(result_arr as *mut u8);
     };
     vm.pending_array_op = Some(crate::vm::ArrayOpState {

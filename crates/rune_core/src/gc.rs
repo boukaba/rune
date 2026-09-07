@@ -146,7 +146,7 @@ impl SemiSpace {
     /// insufficient space. The caller must have registered roots via `push_root()`
     /// before any allocation that may trigger GC.
     pub fn alloc(&mut self, size: usize) -> *mut u8 {
-        let aligned = align_up(size, 8);
+        let aligned = align_up(size, 16);
         let ptr = self.bump;
         let next = unsafe { ptr.add(aligned) };
         if next > self.limit {
@@ -337,43 +337,45 @@ impl SemiSpace {
                     let len_ptr = obj_start.add(8) as *const u32;
                     let len = *len_ptr as usize;
                     let total = size_of::<GcHeader>() + 4 + len * 2;
-                    obj_start.add(align_up(total, 8))
+                    obj_start.add(align_up(total, 16))
                 }
                 TAG_FUNC => {
                     // Func layout: GcHeader(8) + func_idx(8) + prog_ptr(8) + prototype(8)
                     //   + call_count(4) + flags(4) + env_ptr(8) + jit_entry(8)
                     //   + superclass(8) + extra_props(8) + private_name_ids(8) = 80 bytes
-                    obj_start.add(80)
+                    obj_start.add(align_up(80, 16))
                 }
-                TAG_FLOAT64 => obj_start.add(size_of::<GcHeader>() + 8),
+                TAG_FLOAT64 => obj_start.add(align_up(size_of::<GcHeader>() + 8, 16)),
                 TAG_OBJECT => {
                     let capacity_ptr = obj_start.add(16) as *const u32;
                     // Mask the object-extensibility bit (object::EXTENSIBLE_BIT).
                     let capacity = (*capacity_ptr & !crate::object::EXTENSIBLE_BIT) as usize;
                     let total = OBJECT_SLOTS_OFFSET + capacity * size_of::<u64>();
-                    obj_start.add(align_up(total, 8))
+                    obj_start.add(align_up(total, 16))
                 }
                 TAG_ARRAY => {
                     // Array layout: offset +20 = capacity
                     let capacity_ptr = obj_start.add(20) as *const u32;
                     let capacity = *capacity_ptr as usize;
                     let total = crate::array::ARRAY_HEADER_END + capacity * size_of::<u64>();
-                    obj_start.add(align_up(total, 8))
+                    obj_start.add(align_up(total, 16))
                 }
                 TAG_ENV => {
                     let count = *(obj_start.add(size_of::<GcHeader>()) as *const u32) as usize;
                     let total = 24 + count * size_of::<u64>();
-                    obj_start.add(align_up(total, 8))
+                    obj_start.add(align_up(total, 16))
                 }
-                TAG_STRING_OBJ => obj_start.add(STRING_OBJ_TOTAL_SIZE),
-                TAG_PROMISE => obj_start.add(crate::promise::PROMISE_SIZE),
-                TAG_REGEXP => obj_start.add(32),
-                TAG_ACCESSOR => obj_start.add(crate::accessor::ACCESSOR_SIZE),
-                TAG_MAP => obj_start.add(crate::map::MAP_SIZE),
-                TAG_SET => obj_start.add(crate::map::SET_SIZE),
-                TAG_DATE => obj_start.add(crate::date::DATE_SIZE),
-                TAG_ARRAY_BUFFER => obj_start.add(crate::typedarray::ARRAY_BUFFER_SIZE),
-                TAG_TYPED_ARRAY => obj_start.add(crate::typedarray::TYPED_ARRAY_SIZE),
+                TAG_STRING_OBJ => obj_start.add(align_up(STRING_OBJ_TOTAL_SIZE, 16)),
+                TAG_PROMISE => obj_start.add(align_up(crate::promise::PROMISE_SIZE, 16)),
+                TAG_REGEXP => obj_start.add(align_up(32, 16)),
+                TAG_ACCESSOR => obj_start.add(align_up(crate::accessor::ACCESSOR_SIZE, 16)),
+                TAG_MAP => obj_start.add(align_up(crate::map::MAP_SIZE, 16)),
+                TAG_SET => obj_start.add(align_up(crate::map::SET_SIZE, 16)),
+                TAG_DATE => obj_start.add(align_up(crate::date::DATE_SIZE, 16)),
+                TAG_ARRAY_BUFFER => {
+                    obj_start.add(align_up(crate::typedarray::ARRAY_BUFFER_SIZE, 16))
+                }
+                TAG_TYPED_ARRAY => obj_start.add(align_up(crate::typedarray::TYPED_ARRAY_SIZE, 16)),
                 _ => obj_start.add(8),
             }
         }
@@ -423,7 +425,7 @@ impl SemiSpace {
             let obj_addr = obj as *mut u8;
             let tag = (*obj).tag();
             let obj_size = self.scan_end(obj_addr, tag) as usize - obj_addr as usize;
-            let aligned = align_up(obj_size, 8);
+            let aligned = align_up(obj_size, 16);
 
             let to_addr = self.bump;
             let end = to_addr.add(aligned);

@@ -18,7 +18,7 @@ impl EnvObject {
         slot_count: usize,
         parent: *mut EnvObject,
     ) -> *mut EnvObject {
-        let total = align_up(24 + slot_count * 8, 8);
+        let total = align_up(24 + slot_count * 8, 16);
         let ptr = ss.alloc(total);
         unsafe {
             let header = &mut *(ptr as *mut GcHeader);

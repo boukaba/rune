@@ -117,6 +117,42 @@ impl JSObject {
         }
     }
 
+    /// Grow the object to ~2x capacity, copying header + all slots.
+    /// Returns (resolved_old_ptr, new_object). The old header is marked
+    /// forwarded (single hop — callers must refresh immediately and rewrite
+    /// roots, mirroring RuneArray::grow). The extensibility bit survives;
+    /// new tail slots read undefined.
+    pub unsafe fn grow(ss: &mut SemiSpace, ptr: *mut JSObject) -> (*mut u8, *mut JSObject) {
+        unsafe {
+            let old_cap = Self::capacity(ptr);
+            let count = Self::slot_count(ptr);
+            let new_cap = (old_cap * 2).max(old_cap + 8);
+            let total = OBJECT_HEADER_END + new_cap * size_of::<Value>();
+            let new_ptr = ss.alloc(total);
+            // GC during alloc may have moved `ptr` (from-space, forwarded).
+            let src = if (*(ptr as *const GcHeader)).is_forwarded() {
+                (*(ptr as *const GcHeader)).forwarding_addr()
+            } else {
+                ptr as *mut u8
+            };
+            // Copy header (GcHeader + shape + capacity + count + prototype).
+            std::ptr::copy_nonoverlapping(src, new_ptr, OBJECT_HEADER_END);
+            // Capacity word carries EXTENSIBLE_BIT — preserve the flag.
+            let old_word = *(src.add(16) as *const u32);
+            *(new_ptr.add(16) as *mut u32) = (new_cap as u32) | (old_word & EXTENSIBLE_BIT);
+            // Copy live slots; fresh tail reads undefined.
+            let old_slots = src.add(OBJECT_HEADER_END) as *const Value;
+            let new_slots = new_ptr.add(OBJECT_HEADER_END) as *mut Value;
+            std::ptr::copy_nonoverlapping(old_slots, new_slots, count.min(old_cap));
+            for i in count.min(old_cap)..new_cap {
+                *new_slots.add(i) = Value::undefined();
+            }
+            // Mark the old location forwarded so stragglers resolve.
+            (*(src as *const GcHeader)).set_forwarding(new_ptr);
+            (src, new_ptr as *mut JSObject)
+        }
+    }
+
     pub unsafe fn prototype(ptr: *mut JSObject) -> *mut u8 {
         unsafe {
             let ptr_bytes = ptr as *mut u8;
@@ -198,7 +234,9 @@ impl JSObject {
 
     /// Add a new property to the object in place, extending the shape and slot array.
     /// Returns the slot index of the new property.
-    /// Panics if the object has no reserved capacity left.
+    /// Panics if the object has no reserved capacity left (callers that grow
+    /// beyond reserve must JSObject::grow first — see do_store_property and
+    /// define_own_property).
     pub unsafe fn add_property(
         ptr: *mut JSObject,
         key: crate::shape::PropertyKey,

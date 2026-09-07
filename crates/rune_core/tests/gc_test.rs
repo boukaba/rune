@@ -67,7 +67,7 @@ fn test_gc_reclaims_space() {
     let shape = Shape::empty();
 
     for cycle in 0..5 {
-        while ss.remaining() > 64 {
+        while ss.remaining() > 1024 {
             let vals = vec![Value::smi(cycle)];
             let _obj = JSObject::allocate(&mut ss, shape, &vals);
         }

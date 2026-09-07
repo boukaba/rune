@@ -1325,6 +1325,44 @@ fn test_array_holes() {
 }
 
 #[test]
+fn test_array_push_pop_shift_unshift_reverse() {
+    // B1f-1: stack/queue mutators audit (generic, holes, lengths, overflow).
+    let mut ctx = Context::new_small();
+    // push appends ALL args (not just the first) and returns the length.
+    let r = ctx.eval("var p = []; p.push(1, 2, 3) === 3 && p.join() === '1,2,3';").unwrap();
+    assert!(r.to_bool());
+    // push() with no args appends nothing.
+    let r = ctx.eval("var p0 = [1]; p0.push() === 1 && p0.length === 1;").unwrap();
+    assert!(r.to_bool());
+    // pop removes and returns the last; empty pops to undefined.
+    let r = ctx.eval("var q = [1, 2, 3]; var v = q.pop(); v === 3 && q.join() === '1,2';").unwrap();
+    assert!(r.to_bool());
+    let r = ctx.eval("[].pop() === undefined;").unwrap();
+    assert!(r.to_bool());
+    // shift slides down with hole preservation.
+    let r = ctx.eval("var s = [1, , 3]; var f = s.shift(); f === 1 && s.length === 2 && s[0] === undefined && (0 in s) === false && s[1] === 3;").unwrap();
+    assert!(r.to_bool());
+    // unshift prepends in order and returns the new length.
+    let r = ctx.eval("var u = [3]; u.unshift(1, 2) === 3 && u.join() === '1,2,3';").unwrap();
+    assert!(r.to_bool());
+    // reverse swaps with hole preservation and returns the receiver.
+    let r = ctx.eval("var r = [1, , 3]; var s = r.reverse(); s === r && r.length === 3 && r[0] === 3 && (1 in r) === false && r[1] === undefined && r[2] === 1;").unwrap();
+    assert!(r.to_bool());
+    // Generic objects work (length created when absent).
+    let r = ctx.eval("var o = {}; o.push = Array.prototype.push; o.push(-1) === 1 && o.length === 1 && o[0] === -1;").unwrap();
+    assert!(r.to_bool());
+    // Overflow past 2^53-1 throws TypeError.
+    ctx.eval("assert.throws(TypeError, function () { Array.prototype.push.call({length: 9007199254740991}, 1); });")
+        .unwrap();
+    // Dense length past 2^32-1 throws RangeError on update (array exotic).
+    ctx.eval("assert.throws(RangeError, function () { var a = []; a.length = 4294967295; a.push('x'); });")
+        .unwrap();
+    // Non-callable length slot reads as 0; holes in objects are skipped.
+    let r = ctx.eval("var g = {length: 2, 1: 'b'}; Array.prototype.reverse.call(g) === g && g[0] === 'b' && (1 in g) === false;").unwrap();
+    assert!(r.to_bool());
+}
+
+#[test]
 fn test_array_index_search_family() {
     // B1b: indexOf/lastIndexOf/includes with spec equality + fromIndex.
     let mut ctx = Context::new_small();

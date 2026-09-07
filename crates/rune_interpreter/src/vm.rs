@@ -1475,9 +1475,30 @@ impl Vm {
             self.builtin_wrappers.insert("String".to_string(), str_ctor);
         }
 
-        // Number constructor with .prototype
+        // Number constructor with .prototype + numeric constants (§21.1.2).
+        // B1f-1: POSITIVE_INFINITY (and friends) unblock the S15 length
+        // families, which assign them to .length and compare against them.
         if find_handle(&self.builtins, "Number").is_some() {
-            let num_ctor = make_object(gc, &[("prototype", Value::undefined())]);
+            let num_ctor = make_object(
+                gc,
+                &[
+                    ("prototype", Value::undefined()),
+                    ("EPSILON", Value::from_float64(f64::EPSILON)),
+                    (
+                        "MAX_SAFE_INTEGER",
+                        Value::from_float64(9_007_199_254_740_991.0),
+                    ),
+                    (
+                        "MIN_SAFE_INTEGER",
+                        Value::from_float64(-9_007_199_254_740_991.0),
+                    ),
+                    ("MAX_VALUE", Value::from_float64(f64::MAX)),
+                    ("MIN_VALUE", Value::from_float64(f64::MIN_POSITIVE)),
+                    ("NaN", Value::from_float64(f64::NAN)),
+                    ("NEGATIVE_INFINITY", Value::from_float64(f64::NEG_INFINITY)),
+                    ("POSITIVE_INFINITY", Value::from_float64(f64::INFINITY)),
+                ],
+            );
             self.number_constructor = num_ctor;
             self.builtin_wrappers.insert("Number".to_string(), num_ctor);
         }
@@ -4591,6 +4612,35 @@ impl Vm {
         None
     }
 
+    /// Ensure a JSObject has room for one more property, growing (with root
+    /// updates + forwarding) when full. Returns the live pointer; callers
+    /// must refresh any locals holding the old address (same discipline as
+    /// array grow). Resolves GC-forwarded pointers on entry.
+    pub(crate) fn ensure_object_capacity(
+        &mut self,
+        gc: &mut SemiSpace,
+        obj: *mut JSObject,
+    ) -> *mut JSObject {
+        unsafe {
+            let live = {
+                let h = obj as *const GcHeader;
+                if (*h).is_forwarded() {
+                    (*h).forwarding_addr() as *mut JSObject
+                } else {
+                    obj
+                }
+            };
+            if JSObject::slot_count(live) < JSObject::capacity(live) {
+                return live;
+            }
+            let (old, new_obj) = JSObject::grow(gc, live);
+            if old != new_obj as *mut u8 {
+                self.update_heap_reference(old, new_obj as *mut u8);
+            }
+            new_obj
+        }
+    }
+
     /// Whether the currently executing function is strict (A4: strict-mode
     /// [[Set]] failures throw instead of silently ignoring). Unknown callers
     /// (null func_ptr: top level) count as sloppy.
@@ -6219,7 +6269,8 @@ impl Vm {
                     } else {
                         None
                     };
-                    let obj = self.pop();
+                    // B1f: may grow below (refresh on push).
+                    let mut obj = self.pop();
                     let key_str = if let Some(kv) = key_val {
                         // Computed key: popped from the stack
                         Some(property_key_string(kv))
@@ -6239,14 +6290,17 @@ impl Vm {
                                         JSObject::set_slot(ptr as *mut JSObject, slot, value)
                                     };
                                 } else {
+                                    let live =
+                                        self.ensure_object_capacity(gc, ptr as *mut JSObject);
                                     unsafe {
                                         JSObject::add_property(
-                                            ptr as *mut JSObject,
+                                            live,
                                             key,
                                             key_str.to_string(),
                                             value,
                                         )
                                     };
+                                    obj = Value::from_heap_ptr(live as *mut u8);
                                 }
                             } else if tag == TAG_FUNC {
                                 // For functions, delegate to do_store_property
@@ -6269,7 +6323,8 @@ impl Vm {
                     } else {
                         None
                     };
-                    let obj = self.pop();
+                    // B1f: may grow below (refresh on push).
+                    let mut obj = self.pop();
                     let key_str = if let Some(kv) = key_val {
                         // Computed key: popped from the stack
                         Some(property_key_string(kv))
@@ -6301,14 +6356,17 @@ impl Vm {
                                             JSObject::set_slot(ptr as *mut JSObject, slot, acc_val)
                                         };
                                     } else {
+                                        let live =
+                                            self.ensure_object_capacity(gc, ptr as *mut JSObject);
                                         unsafe {
                                             JSObject::add_property(
-                                                ptr as *mut JSObject,
+                                                live,
                                                 key,
                                                 key_str.to_string(),
                                                 acc_val,
                                             )
                                         };
+                                        obj = Value::from_heap_ptr(live as *mut u8);
                                     }
                                 } else {
                                     // TAG_FUNC (after re-resolution tag may have changed)
@@ -6326,11 +6384,15 @@ impl Vm {
                 }
                 Opcode::SpreadIntoObject => {
                     let source = self.pop();
-                    let tgt = self.pop();
+                    // B1f: may grow below (refresh on push).
+                    let mut tgt = self.pop();
                     // §13.2.6.5 step 4: null/undefined → no-op
                     if !source.is_null() && !source.is_undefined() {
-                        if let (Some(src_ptr), Some(tgt_ptr)) = (source.heap_ptr(), tgt.heap_ptr())
+                        if let (Some(src_ptr), Some(tgt_ptr0)) = (source.heap_ptr(), tgt.heap_ptr())
                         {
+                            // B1f: the target may grow below — refresh both
+                            // handles together after every add.
+                            let mut tgt_ptr = tgt_ptr0;
                             let tag = unsafe { (*(src_ptr as *const GcHeader)).tag() };
                             if tag == TAG_OBJECT {
                                 let src_shape =
@@ -6348,14 +6410,11 @@ impl Vm {
                                             JSObject::set_slot(tgt_ptr as *mut JSObject, slot, val)
                                         };
                                     } else {
-                                        unsafe {
-                                            JSObject::add_property(
-                                                tgt_ptr as *mut JSObject,
-                                                key,
-                                                key_name,
-                                                val,
-                                            )
-                                        };
+                                        let live = self
+                                            .ensure_object_capacity(gc, tgt_ptr as *mut JSObject);
+                                        unsafe { JSObject::add_property(live, key, key_name, val) };
+                                        tgt = Value::from_heap_ptr(live as *mut u8);
+                                        tgt_ptr = live as *mut u8;
                                     }
                                 }
                             } else if tag == TAG_ARRAY {
@@ -6374,14 +6433,11 @@ impl Vm {
                                             JSObject::set_slot(tgt_ptr as *mut JSObject, slot, elem)
                                         };
                                     } else {
-                                        unsafe {
-                                            JSObject::add_property(
-                                                tgt_ptr as *mut JSObject,
-                                                key,
-                                                key_str,
-                                                elem,
-                                            )
-                                        };
+                                        let live = self
+                                            .ensure_object_capacity(gc, tgt_ptr as *mut JSObject);
+                                        unsafe { JSObject::add_property(live, key, key_str, elem) };
+                                        tgt = Value::from_heap_ptr(live as *mut u8);
+                                        tgt_ptr = live as *mut u8;
                                     }
                                 }
                                 let len_str = "length".to_string();
@@ -6397,14 +6453,17 @@ impl Vm {
                                         )
                                     };
                                 } else {
+                                    let live =
+                                        self.ensure_object_capacity(gc, tgt_ptr as *mut JSObject);
                                     unsafe {
                                         JSObject::add_property(
-                                            tgt_ptr as *mut JSObject,
+                                            live,
                                             len_key,
                                             len_str,
                                             Value::smi(src_len as i32),
                                         )
                                     };
+                                    tgt = Value::from_heap_ptr(live as *mut u8);
                                 }
                             }
                         }
@@ -7726,6 +7785,24 @@ impl Vm {
                         {
                             return exit;
                         }
+                        continue;
+                    }
+                    // B1f-1: `new Number(x)` returns the number primitive.
+                    // (Real Number wrapper objects are B2 work; the S15
+                    // length families only extract the primitive. Returning
+                    // the primitive keeps them green without regressing the
+                    // Number suite, which already fails without wrappers.)
+                    if constructor == self.number_constructor {
+                        let result =
+                            crate::builtins::number_builtin(gc, Value::undefined(), &args, self);
+                        if let Some(exc) = self.pending_exception.take() {
+                            if let Some(exit) = self.handle_throw(gc, exc) {
+                                return exit;
+                            }
+                            continue;
+                        }
+                        self.push(result);
+                        self.frames[fi].pc = pc + 1;
                         continue;
                     }
                     // §20.1.1.1: `new Object(...)` — fresh empty object with
@@ -11349,6 +11426,14 @@ pub(crate) fn value_to_prop_key(val: Value) -> Option<PropertyKey> {
     if let Some(v) = val.as_smi() {
         return Some(PropertyKey::from_string(&v.to_string()));
     }
+    // B1f: integral floats are property keys by their canonical string
+    // (obj[4294967295] must hit the "4294967295" slot, not miss).
+    if let Some(f) = val.as_float64() {
+        if !f.is_nan() && f.is_finite() && f.fract() == 0.0 && f.abs() < 9.0e15 {
+            return Some(PropertyKey::from_string(&format!("{}", f as i64)));
+        }
+        return None;
+    }
     None
 }
 
@@ -11792,7 +11877,7 @@ pub(crate) fn load_property_recursive(
                         let key_str = unsafe { HeapString::to_string(key_ptr as *mut HeapString) };
                         if key_str == "length" {
                             let len = unsafe { RuneArray::length(ptr as *mut RuneArray) };
-                            return Value::smi(len as i32);
+                            return crate::builtins::length_value(len as u64);
                         }
                     }
                 }
@@ -12284,7 +12369,11 @@ pub(crate) fn do_store_property(
                     } else {
                         value_to_debug_string(raw_key)
                     };
-                    unsafe { JSObject::add_property(ptr as *mut JSObject, key, key_name, value) };
+                    // B1f: grow beyond reserve (with root updates) instead of
+                    // hitting the capacity assert — the local `ptr` may be
+                    // stale afterwards, but this path returns immediately.
+                    let live = vm.ensure_object_capacity(gc, ptr as *mut JSObject);
+                    unsafe { JSObject::add_property(live, key, key_name, value) };
                     return true;
                 }
             }
@@ -12295,9 +12384,13 @@ pub(crate) fn do_store_property(
                 if (index as u32) < len {
                     // B1e: the slot may be unallocated (length-extended
                     // arrays have length > capacity) — grow first, never
-                    // write OOB.
+                    // write OOB. Absurd indices stay holes (same 1M bound
+                    // as ensure_dense_capacity — materializing them OOMs).
                     let cap = unsafe { RuneArray::capacity(ptr as *mut RuneArray) };
                     if index >= cap as usize {
+                        if index > 1_000_000 {
+                            return true;
+                        }
                         unsafe {
                             let (resolved_old, new_arr) =
                                 RuneArray::grow(gc, ptr as *mut RuneArray);
@@ -12315,15 +12408,58 @@ pub(crate) fn do_store_property(
                 } else {
                     // §7.3.4 CreateDataPropertyOrThrow on an array: indices at
                     // or beyond length GROW the array (length = index+1).
-                    // Pad with undefined via push (handles grow + root updates),
-                    // mirroring the array_push discipline.
+                    // Pad with holes via push (handles grow + root updates),
+                    // mirroring the array_push discipline. Huge indices
+                    // (past the 1M sparse threshold) become named extra_props
+                    // entries instead — materializing billions of slots OOMs
+                    // (B1f: S15.4.5.2_A3_T4 stores at 2^32-2). Length is not
+                    // extended for the named route (B1f-5 length work owns
+                    // huge lengths); reads still find the value through the
+                    // extra_props fallthrough in load_property_recursive.
+                    if index > 1_000_000 {
+                        let key = value_to_prop_key(raw_key);
+                        let mut arr_ptr = obj.heap_ptr().unwrap();
+                        unsafe {
+                            let mut props = RuneArray::extra_props(arr_ptr as *mut RuneArray);
+                            if props.is_null() {
+                                let new_obj = JSObject::allocate(gc, Shape::empty(), &[]);
+                                let gc_tag = (*(arr_ptr as *const GcHeader)).tag();
+                                if gc_tag == TAG_ARRAY
+                                    && (*(arr_ptr as *const GcHeader)).is_forwarded()
+                                {
+                                    arr_ptr = (*(arr_ptr as *const GcHeader)).forwarding_addr();
+                                }
+                                RuneArray::set_extra_props(
+                                    arr_ptr as *mut RuneArray,
+                                    new_obj as *mut u8,
+                                );
+                                props = new_obj as *mut u8;
+                            }
+                            if let Some(key) = key {
+                                let eshape =
+                                    JSObject::shape_ptr(props as *mut JSObject);
+                                if let Some(slot) = eshape.lookup(&key) {
+                                    JSObject::set_slot(props as *mut JSObject, slot, value);
+                                } else {
+                                    let key_name = value_to_debug_string(raw_key);
+                                    JSObject::add_property(
+                                        props as *mut JSObject,
+                                        key,
+                                        key_name,
+                                        value,
+                                    );
+                                }
+                            }
+                        }
+                        return true;
+                    }
                     let mut cur = ptr as *mut RuneArray;
                     unsafe {
                         for k in len..=(index as u32) {
                             let v = if k == index as u32 {
                                 value
                             } else {
-                                Value::undefined()
+                                Value::empty_sentinel()
                             };
                             let new_arr = RuneArray::push(gc, cur, v);
                             if new_arr as *mut u8 != cur as *mut u8 {
@@ -12345,16 +12481,151 @@ pub(crate) fn do_store_property(
             } else if let Some(key_str) = raw_key.heap_ptr() {
                 let k = unsafe { HeapString::to_string(key_str as *mut HeapString) };
                 if k == "length" {
-                    if let Some(n) = value.as_smi() {
+                    // B1f: accept floats (length is a Number); saturate at
+                    // 2^32-1 instead of wrapping (direct-assignment
+                    // RangeError is B1f-5 length-descriptor work); shrinks
+                    // punch holes, not undefined elements.
+                    let n = value
+                        .as_smi()
+                        .map(|v| v as f64)
+                        .or_else(|| value.as_float64());
+                    if let Some(n) = n {
                         let arr = ptr as *mut RuneArray;
                         let old_len = unsafe { RuneArray::length(arr) };
-                        let new_len = n.max(0) as u32;
+                        let new_len = (n.clamp(0.0, 4_294_967_295.0)) as u32;
                         if new_len < old_len {
-                            for i in new_len as usize..old_len as usize {
-                                unsafe { RuneArray::set_element(arr, i, Value::undefined()) };
+                            let cap = unsafe { RuneArray::capacity(arr) };
+                            // B1f: length shrink with ArraySetLength delete
+                            // semantics — descending, aborting (length
+                            // unchanged, caller maps to strict-throw) at the
+                            // first non-configurable index. Dense slots have
+                            // no attributes (always deletable); extra_props
+                            // numeric entries (overlay accessors AND huge
+                            // never-materialized indices) check theirs.
+                            // Allocation-free sweep (Rust strings + interning
+                            // only), so no GC can move `arr`/`extra` mid-way.
+                            let extra = unsafe { RuneArray::extra_props(arr) };
+                            let mut blocker: Option<u64> = None;
+                            if !extra.is_null() {
+                                let eshape = unsafe {
+                                    JSObject::shape_ptr(extra as *mut JSObject)
+                                };
+                                let count = unsafe {
+                                    JSObject::slot_count(extra as *mut JSObject)
+                                };
+                                for i in 0..count {
+                                    if let Some(name) = eshape.key_name_at(i) {
+                                        if let Some(k) = canonical_index_name(name) {
+                                            if k >= new_len as u64 {
+                                                let attr = eshape.attr_at(i);
+                                                if attr
+                                                    & rune_core::shape::ATTR_CONFIGURABLE
+                                                    == 0
+                                                {
+                                                    blocker =
+                                                        Some(blocker.map_or(k, |b| b.max(k)));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
+                            match blocker {
+                                // Blocked: holes above the blocker still land
+                                // (spec deletes descending until the block),
+                                // lower slots keep their values, length stays.
+                                Some(b) => {
+                                    let upto =
+                                        (old_len as usize).min(cap as usize);
+                                    for i in (b as usize + 1)..upto {
+                                        unsafe {
+                                            RuneArray::set_element(
+                                                arr,
+                                                i,
+                                                Value::empty_sentinel(),
+                                            )
+                                        };
+                                    }
+                                    let eshape = unsafe {
+                                        JSObject::shape_ptr(extra as *mut JSObject)
+                                    };
+                                    let count = unsafe {
+                                        JSObject::slot_count(extra as *mut JSObject)
+                                    };
+                                    let mut doomed: Vec<(u64, PropertyKey)> =
+                                        Vec::new();
+                                    for i in 0..count {
+                                        if let Some(name) = eshape.key_name_at(i) {
+                                            if let Some(k) = canonical_index_name(name) {
+                                                if k > b {
+                                                    doomed.push((
+                                                        k,
+                                                        PropertyKey::from_string(name),
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    doomed.sort_by(|a, b| b.0.cmp(&a.0));
+                                    for (_, pk) in doomed {
+                                        unsafe {
+                                            JSObject::remove_property(
+                                                extra as *mut JSObject,
+                                                &pk,
+                                            )
+                                        };
+                                    }
+                                    return false;
+                                }
+                                None => {
+                                    let upto =
+                                        (old_len as usize).min(cap as usize);
+                                    for i in new_len as usize..upto {
+                                        unsafe {
+                                            RuneArray::set_element(
+                                                arr,
+                                                i,
+                                                Value::empty_sentinel(),
+                                            )
+                                        };
+                                    }
+                                    if !extra.is_null() {
+                                        let eshape = unsafe {
+                                            JSObject::shape_ptr(extra as *mut JSObject)
+                                        };
+                                        let count = unsafe {
+                                            JSObject::slot_count(extra as *mut JSObject)
+                                        };
+                                        let mut doomed: Vec<(u64, PropertyKey)> =
+                                            Vec::new();
+                                        for i in 0..count {
+                                            if let Some(name) = eshape.key_name_at(i) {
+                                                if let Some(k) = canonical_index_name(name) {
+                                                    if k >= new_len as u64 {
+                                                        doomed.push((
+                                                            k,
+                                                            PropertyKey::from_string(name),
+                                                        ));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        doomed.sort_by(|a, b| b.0.cmp(&a.0));
+                                        for (_, pk) in doomed {
+                                            unsafe {
+                                                JSObject::remove_property(
+                                                    extra as *mut JSObject,
+                                                    &pk,
+                                                )
+                                            };
+                                        }
+                                    }
+                                    unsafe { RuneArray::set_length(arr, new_len) };
+                                }
+                            }
+                        } else {
+                            unsafe { RuneArray::set_length(arr, new_len) };
                         }
-                        unsafe { RuneArray::set_length(arr, new_len) };
                     }
                 } else if let Some(key) = value_to_prop_key(raw_key) {
                     // Named property → extra_props JSObject (lazily allocated).
@@ -12684,7 +12955,30 @@ pub(crate) fn has_property(obj: Value, raw_key: Value, function_prototype: Optio
                             return true;
                         }
                     }
+                    // B1f: huge canonical indices live as named extra_props
+                    // (never materialized) — still own properties.
+                    if let Some(key) = value_to_prop_key(raw_key) {
+                        let extra = unsafe { RuneArray::extra_props(ptr as *mut RuneArray) };
+                        if !extra.is_null() {
+                            let eshape =
+                                unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                            if eshape.lookup(&key).is_some() {
+                                return true;
+                            }
+                        }
+                    }
                 } else {
+                    // Out of bounds: same named-overflow check as above.
+                    if let Some(key) = value_to_prop_key(raw_key) {
+                        let extra = unsafe { RuneArray::extra_props(ptr as *mut RuneArray) };
+                        if !extra.is_null() {
+                            let eshape =
+                                unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                            if eshape.lookup(&key).is_some() {
+                                return true;
+                            }
+                        }
+                    }
                     return false;
                 }
             }
@@ -12785,19 +13079,46 @@ pub(crate) fn value_is_string(v: Value) -> bool {
 }
 
 /// Convert a Value to an array index if it is a non-negative Smi.
+/// Canonical array-index key test (B1f): all digits, no leading zeros
+/// (unless the key is exactly "0"), value < 2^32-1. Used by the key model
+/// and the move-range quiet check alike.
+pub(crate) fn canonical_index_name(s: &str) -> Option<u64> {
+    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    if s.len() > 1 && s.starts_with('0') {
+        return None;
+    }
+    let n: u64 = s.parse().ok()?;
+    if n >= 4_294_967_295 {
+        return None;
+    }
+    if n.to_string() != s {
+        return None;
+    }
+    Some(n)
+}
+
 pub(crate) fn value_to_array_index(v: Value) -> Option<usize> {
     if let Some(n) = v.as_smi() {
         if n >= 0 { Some(n as usize) } else { None }
+    } else if let Some(f) = v.as_float64() {
+        // B1f: integral floats are canonical index keys (arr[1.0] === arr[1]).
+        if f.is_nan() || !(0.0..4_294_967_295.0).contains(&f) || f.fract() != 0.0 {
+            None
+        } else {
+            Some(f as usize)
+        }
     } else if let Some(ptr) = v.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_STRING {
             let s = unsafe { HeapString::to_string(ptr as *mut HeapString) };
-            // Only parse canonical numeric strings to avoid surprises
-            s.parse::<usize>().ok()
+            // B1f: canonical form only ("01"/"+1"/"4294967295" are names).
+            canonical_index_name(&s).map(|n| n as usize)
         } else if tag == TAG_STRING_OBJ {
             let sptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
             let s = unsafe { HeapString::to_string(sptr as *mut HeapString) };
-            s.parse::<usize>().ok()
+            canonical_index_name(&s).map(|n| n as usize)
         } else {
             None
         }

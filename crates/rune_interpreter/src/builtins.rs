@@ -5927,12 +5927,12 @@ fn define_key_and_name(raw_key: Value) -> Result<(PropertyKey, String), ()> {
 /// the F3 getter/setter paths already dispatch).
 fn define_own_property(
     gc: &mut SemiSpace,
-    vm: &Vm,
-    obj_ptr: *mut JSObject,
+    vm: &mut Vm,
+    mut obj_ptr: *mut JSObject,
     key: PropertyKey,
     key_name: String,
     desc: &PropDesc,
-) -> Result<(), Value> {
+) -> Result<*mut JSObject, Value> {
     let mut type_err = |msg: &str| {
         crate::errors::error_object(
             gc,
@@ -5966,6 +5966,9 @@ fn define_own_property(
                 ));
             }
             let attr = attr_for(desc);
+            // B1f: room first — the pair allocation below may GC-move us,
+            // and the add itself must never hit the capacity assert.
+            obj_ptr = vm.ensure_object_capacity(gc, obj_ptr);
             if is_accessor_desc {
                 let pair = rune_core::accessor::AccessorPair::allocate(
                     gc,
@@ -5980,6 +5983,7 @@ fn define_own_property(
                         Value::undefined()
                     },
                 );
+                obj_ptr = resolve_forwarded(obj_ptr as *mut u8) as *mut JSObject;
                 unsafe {
                     JSObject::add_property_with_attrs(
                         obj_ptr,
@@ -6004,7 +6008,7 @@ fn define_own_property(
                     );
                 }
             }
-            Ok(())
+            Ok(obj_ptr)
         }
         Some(slot) => {
             let cur_attr = shape.attr_at(slot);
@@ -6141,6 +6145,8 @@ fn define_own_property(
                     )
                 };
                 let pair = rune_core::accessor::AccessorPair::allocate(gc, get, set);
+                // B1f: the allocation may have GC-moved the object.
+                obj_ptr = resolve_forwarded(obj_ptr as *mut u8) as *mut JSObject;
                 unsafe {
                     JSObject::set_slot(obj_ptr, slot, Value::from_heap_ptr(pair));
                 }
@@ -6149,7 +6155,7 @@ fn define_own_property(
                     JSObject::set_slot(obj_ptr, slot, desc.value);
                 }
             }
-            Ok(())
+            Ok(obj_ptr)
         }
     }
 }
@@ -6439,13 +6445,23 @@ pub fn object_define_property(
                         }
                         props
                     };
-                    if let Err(e) =
-                        define_own_property(gc, vm, overlay as *mut JSObject, pk, key_name, &desc)
+                    match define_own_property(gc, vm, overlay as *mut JSObject, pk, key_name, &desc)
                     {
-                        vm.set_pending_exception(e);
-                        return Value::undefined();
+                        Ok(live_overlay) => {
+                            // The overlay may have grown (moved): re-link it
+                            // from the live array.
+                            let arr_live =
+                                refresh_value(target).heap_ptr().unwrap() as *mut RuneArray;
+                            unsafe {
+                                RuneArray::set_extra_props(arr_live, live_overlay as *mut u8);
+                            }
+                        }
+                        Err(e) => {
+                            vm.set_pending_exception(e);
+                            return Value::undefined();
+                        }
                     }
-                    return target;
+                    return refresh_value(target);
                 }
             }
         }
@@ -6457,11 +6473,13 @@ pub fn object_define_property(
             return Value::undefined();
         }
     };
-    if let Err(e) = define_own_property(gc, vm, obj_ptr, key, key_name, &desc) {
-        vm.set_pending_exception(e);
-        return Value::undefined();
+    match define_own_property(gc, vm, obj_ptr, key, key_name, &desc) {
+        Ok(live) => Value::from_heap_ptr(live as *mut u8),
+        Err(e) => {
+            vm.set_pending_exception(e);
+            Value::undefined()
+        }
     }
-    target
 }
 
 /// Object.defineProperties(obj, {k: descriptor}) — batch form (§20.1.2.4).
@@ -7047,21 +7065,34 @@ fn clamp_index_throwing(
 /// LengthOfArrayLike with the symbol abrupt (B1d): a symbol `length`
 /// throws via ToNumber. Ok(length) or Err(error value to raise).
 fn checked_array_length(gc: &mut SemiSpace, vm: &mut Vm, this: Value) -> Result<u32, Value> {
-    if let Some(ptr) = this.heap_ptr() {
-        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_OBJECT {
-            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
-            if let Some(slot) = shape.lookup(&PropertyKey::from_string("length")) {
-                let lv = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
-                if lv.is_symbol() {
-                    return Err(crate::errors::error_object(
-                        gc,
-                        &vm.error_protos,
-                        crate::errors::ErrorKind::TypeError,
-                        "Cannot convert a Symbol value to a number",
-                    ));
-                }
-            }
+    // B1f: LengthOfArrayLike reads through the proto chain (A5_T1 sets
+    // Object.prototype.length) — a symbol anywhere on it throws.
+    let mut current = this;
+    for _ in 0..crate::vm::MAX_PROTOTYPE_DEPTH {
+        let Some(ptr) = current.heap_ptr() else {
+            break;
+        };
+        if unsafe { (*(ptr as *const GcHeader)).tag() } != TAG_OBJECT {
+            break;
         }
+        let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+        if let Some(slot) = shape.lookup(&PropertyKey::from_string("length")) {
+            let lv = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+            if lv.is_symbol() {
+                return Err(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "Cannot convert a Symbol value to a number",
+                ));
+            }
+            break;
+        }
+        let proto = unsafe { JSObject::prototype(ptr as *mut JSObject) };
+        if proto.is_null() {
+            break;
+        }
+        current = Value::from_heap_ptr(proto);
     }
     Ok(crate::vm::array_like_length(this).unwrap_or(0))
 }
@@ -7181,45 +7212,791 @@ pub fn array_with(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
 
 /// Array.prototype.push(value) — pushes value to the array, returns new length.
 /// Auto-grows the array if capacity is exhausted and updates VM references.
-pub fn array_push(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let val = args.first().copied().unwrap_or(Value::undefined());
-    if let Some(ptr) = this.heap_ptr() {
-        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-        if tag == TAG_ARRAY {
-            unsafe {
-                let old_ptr = ptr;
-                let new_arr = RuneArray::push(gc, old_ptr as *mut RuneArray, val);
-                if new_arr as *mut u8 != old_ptr {
-                    // If GC ran during push, old_ptr may be a stale from-space address.
-                    // Resolve to the current to-space address for the root update.
-                    let resolved_old = if (*(old_ptr as *const GcHeader)).is_forwarded() {
-                        (*(old_ptr as *const GcHeader)).forwarding_addr()
-                    } else {
-                        old_ptr
-                    };
-                    if resolved_old != new_arr as *mut u8 {
-                        vm.update_heap_reference(resolved_old, new_arr as *mut u8);
-                    }
-                }
-                let len = RuneArray::length(new_arr);
-                return Value::smi(len as i32);
-            }
+/// ================= B1f-1: stack/queue mutators audit =================
+///
+/// Array.prototype.push/pop/shift/unshift/reverse (§23.1.3.22/.23/.26/.27/
+/// .37): generic over heap receivers (dense fast discipline + plain-object
+/// HasProperty/Get/Set/Delete), hole-preserving, u64 lengths with ToLength
+/// clamping, 2^53-1 overflow TypeErrors, spec-order length writes, exact
+/// length return values. Sync data-path: builtin getters/setters run
+/// inline; JS accessors are a documented sync-gap (B1f-6 runs them through
+/// the machine); ToObject boxing is absent (primitives take the
+/// discarded-box path, strings the exotic-reject path).
+///
+/// LengthOfArrayLike as (clamped u64, raw f64) — direct symbol lengths
+/// throw via checked_array_length; ToLength clamps to 2^53-1 (never
+/// iterates past it).
+fn mutator_length(gc: &mut SemiSpace, vm: &mut Vm, this: Value) -> Result<(u64, f64), Value> {
+    checked_array_length(gc, vm, this)?;
+    let raw = length_to_number(gc, vm, length_walk_value(this))?;
+    Ok((to_length_clamp(raw), raw))
+}
+
+/// First length slot value up the chain (or undefined): dense length,
+/// own-or-inherited data slots, UTF-16 length for strings. Pure sync walk
+/// (accessor lengths surface as their pair value for the converter).
+fn length_walk_value(this: Value) -> Value {
+    let Some(ptr) = this.heap_ptr() else {
+        return Value::undefined();
+    };
+    let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+    if tag == TAG_ARRAY {
+        let len = unsafe { RuneArray::length(ptr as *mut RuneArray) };
+        return length_value(len as u64);
+    }
+    if tag == TAG_STRING {
+        let len = unsafe {
+            HeapString::to_string(ptr as *mut HeapString)
+                .encode_utf16()
+                .count()
+        };
+        return length_value(len as u64);
+    }
+    if tag != TAG_OBJECT {
+        return Value::undefined();
+    }
+    let mut current = this;
+    for _ in 0..crate::vm::MAX_PROTOTYPE_DEPTH {
+        let Some(cptr) = current.heap_ptr() else {
+            return Value::undefined();
+        };
+        if unsafe { (*(cptr as *const GcHeader)).tag() } != TAG_OBJECT {
+            return Value::undefined();
         }
+        let shape = unsafe { JSObject::shape_ptr(cptr as *mut JSObject) };
+        if let Some(slot) = shape.lookup(&PropertyKey::from_string("length")) {
+            return unsafe { JSObject::get_slot(cptr as *mut JSObject, slot) };
+        }
+        let proto = unsafe { JSObject::prototype(cptr as *mut JSObject) };
+        if proto.is_null() {
+            return Value::undefined();
+        }
+        current = Value::from_heap_ptr(proto);
     }
     Value::undefined()
 }
 
-/// Array.prototype.pop() — removes and returns the last element.
-pub fn array_pop(_gc: &mut SemiSpace, this: Value, _args: &[Value], _vm: &mut Vm) -> Value {
-    if let Some(ptr) = this.heap_ptr() {
+/// ToNumber for length values with builtin-inline coercion (B1f): Smi/float
+/// direct; symbols throw; strings parse; heap objects try builtin valueOf
+/// then builtin toString inline (String objects coerce — reverse A2_T3 uses
+/// `new String("9")`); JS-driven methods read as 0 (B1f-6 runs them through
+/// the machine).
+fn length_to_number(gc: &mut SemiSpace, vm: &mut Vm, v: Value) -> Result<f64, Value> {
+    if let Some(n) = v.as_smi().map(|v| v as f64).or_else(|| v.as_float64()) {
+        return Ok(n);
+    }
+    if v.is_symbol() {
+        return Err(sort_type_error(
+            gc,
+            vm,
+            "Cannot convert a Symbol value to a number",
+        ));
+    }
+    if let Some(ptr) = v.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-        if tag == TAG_ARRAY {
-            unsafe {
-                return RuneArray::pop(ptr as *mut RuneArray);
+        if tag == TAG_STRING {
+            let s = unsafe { HeapString::to_string(ptr as *mut HeapString) };
+            let t = s.trim();
+            if t.is_empty() {
+                return Ok(0.0);
+            }
+            return Ok(t.parse::<f64>().unwrap_or(f64::NAN));
+        }
+        // String objects coerce by their inner string (own valueOf
+        // overrides are a documented gap — B1f-6 dispatches methods).
+        if tag == TAG_STRING_OBJ {
+            let str_ptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
+            let s = unsafe { HeapString::to_string(str_ptr as *mut HeapString) };
+            let t = s.trim();
+            if t.is_empty() {
+                return Ok(0.0);
+            }
+            return Ok(t.parse::<f64>().unwrap_or(f64::NAN));
+        }
+        if tag == TAG_OBJECT {
+            for name in ["valueOf", "toString"] {
+                let key = PropertyKey::from_string(name);
+                let method = toprim_find_method(v, &key);
+                let Some(m) = method else { continue };
+                let Some(smi) = m.as_smi() else { continue };
+                if smi >= 0 {
+                    continue;
+                }
+                let id = ((-smi) as usize) - 1;
+                if id >= vm.builtins.len() {
+                    continue;
+                }
+                let result = (vm.builtins[id].func)(gc, v, &[], vm);
+                if let Some(exc) = vm.pending_exception.take() {
+                    return Err(exc);
+                }
+                if toprim_is_primitive(result) {
+                    if result.is_symbol() {
+                        return Err(sort_type_error(
+                            gc,
+                            vm,
+                            "Cannot convert a Symbol value to a number",
+                        ));
+                    }
+                    return Ok(crate::vm::to_number(result));
+                }
+                // Non-primitive: fall through to the next method.
             }
         }
     }
-    Value::undefined()
+    Ok(0.0)
+}
+
+/// ToLength clamp (§7.1.22 lite): NaN/negative → 0, above 2^53-1 saturates.
+fn to_length_clamp(n: f64) -> u64 {
+    if n.is_nan() || n <= 0.0 {
+        0
+    } else {
+        n.min(9_007_199_254_740_991.0) as u64
+    }
+}
+
+/// Length as a return value: Smi inside the i31 range, float64 above
+/// (Value::smi debug-asserts i31 — lengths near 2^32 must not wrap).
+pub(crate) fn length_value(len: u64) -> Value {
+    if len < (1 << 30) {
+        Value::smi(len as i32)
+    } else {
+        Value::from_float64(len as f64)
+    }
+}
+
+/// Canonical index key for walks (B1f): Smi fast path, HeapString past the
+/// i31 range (huge walks only — normal paths never allocate here).
+fn index_key(gc: &mut SemiSpace, k: u64) -> Value {
+    if k < (1 << 30) {
+        Value::smi(k as i32)
+    } else {
+        Value::from_heap_ptr(HeapString::allocate(gc, &k.to_string()) as *mut u8)
+    }
+}
+
+/// What a mutator write faces at an index (shared with the sort machine).
+pub(crate) enum StoreTarget {
+    /// Plain data slot (or absent — create it).
+    Data,
+    /// Builtin setter: run inline.
+    SetterBuiltin(Value),
+    /// JS setter: sync-gap (B1f-6 runs it through the machine).
+    SetterJs(Value),
+    /// Getter-only or invalid setter: strict Set rejects.
+    GetterOnly,
+    SetterInvalid,
+}
+
+/// Classify a write target: own-or-inherited accessor scan (dense overlay
+/// for arrays, shape slots for objects, then the tag-guarded proto chain).
+pub(crate) fn classify_store(gc: &mut SemiSpace, obj: Value, idx: usize) -> StoreTarget {
+    let Some(pair) = sort_find_accessor(gc, obj, idx as u64) else {
+        return StoreTarget::Data;
+    };
+    let Some(aptr) = pair.heap_ptr() else {
+        return StoreTarget::GetterOnly;
+    };
+    let setter = unsafe { rune_core::accessor::AccessorPair::setter(aptr) };
+    if setter.is_undefined() || setter.is_null() {
+        return StoreTarget::GetterOnly;
+    }
+    if let Some(smi) = setter.as_smi() {
+        if smi < 0 {
+            return StoreTarget::SetterBuiltin(setter);
+        }
+        return StoreTarget::SetterInvalid;
+    }
+    if setter
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC)
+    {
+        return StoreTarget::SetterJs(setter);
+    }
+    StoreTarget::SetterInvalid
+}
+
+/// Own data value for strict-Set SameValue checks (B1f): dense elements
+/// (holes read as absent) and own object slots only — never the proto
+/// chain (a proto match must not excuse a failed own store).
+fn own_data_value(obj: Value, key: Value, idx: u64) -> Option<Value> {
+    let ptr = obj.heap_ptr()?;
+    let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+    if tag == TAG_ARRAY {
+        let len = unsafe { RuneArray::length(ptr as *mut RuneArray) } as u64;
+        let cap = unsafe { RuneArray::capacity(ptr as *mut RuneArray) } as u64;
+        if idx < len && idx < cap {
+            let elem = unsafe { RuneArray::get_element(ptr as *mut RuneArray, idx as usize) };
+            if elem != Value::empty_sentinel() {
+                return Some(elem);
+            }
+        }
+        return None;
+    }
+    if tag != TAG_OBJECT {
+        return None;
+    }
+    let prop = crate::vm::value_to_prop_key(key)?;
+    let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+    shape
+        .lookup(&prop)
+        .map(|slot| unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) })
+}
+
+/// Sync spec-Set(throw=true) on an index for mutators (B1f-1). Builtin
+/// setters run inline; getter-only/read-only reject with TypeError; JS
+/// setters are skipped (documented sync-gap — B1f-6 dispatches them).
+/// Never calls handle_throw (setup-safe like sort_store_one).
+fn mutator_store(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    obj: &mut Value,
+    idx: u64,
+    val: Value,
+) -> Result<(), Value> {
+    let key = index_key(gc, idx);
+    // The key allocation may have GC-moved the receiver; every allocating
+    // step below refreshes the same way (growth sets forwarding, GC sets
+    // forwarding — refresh_value follows both).
+    *obj = refresh_value(*obj);
+    // String exotics reject every write (length behaves getter-only).
+    if let Some(ptr) = obj.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_STRING {
+            return Err(sort_type_error(
+                gc,
+                vm,
+                "Cannot assign to read only property of a string",
+            ));
+        }
+    }
+    match classify_store(gc, *obj, idx.min(usize::MAX as u64) as usize) {
+        StoreTarget::Data => {
+            if crate::vm::do_store_property(*obj, key, val, gc, vm) {
+                *obj = refresh_value(*obj);
+                Ok(())
+            } else {
+                *obj = refresh_value(*obj);
+                // SameValue stores succeed silently (ValidateAndApply).
+                if own_data_value(*obj, key, idx).is_some_and(|cur| same_value(cur, val)) {
+                    Ok(())
+                } else {
+                    Err(sort_type_error(
+                        gc,
+                        vm,
+                        "Cannot assign to read-only property",
+                    ))
+                }
+            }
+        }
+        StoreTarget::SetterBuiltin(setter) => {
+            let id = ((-setter.as_smi().unwrap()) as usize) - 1;
+            if id < vm.builtins.len() {
+                (vm.builtins[id].func)(gc, *obj, &[val], vm);
+                *obj = refresh_value(*obj);
+                if let Some(exc) = vm.pending_exception.take() {
+                    return Err(exc);
+                }
+                return Ok(());
+            }
+            Err(sort_type_error(gc, vm, "setter is not a function"))
+        }
+        // B1f-6 runs user setters through the machine; the sync audit
+        // leaves the slot untouched rather than corrupting it.
+        StoreTarget::SetterJs(_) => Ok(()),
+        StoreTarget::GetterOnly => Err(sort_type_error(
+            gc,
+            vm,
+            "Cannot set property with only a getter",
+        )),
+        StoreTarget::SetterInvalid => Err(sort_type_error(gc, vm, "setter is not a function")),
+    }
+}
+
+/// Sync element read for mutators (B1f-1): full Get (proto consult, holes
+/// included); builtin getters run inline; JS getters read as undefined
+/// (documented sync-gap — B1f-6 dispatches them).
+fn mutator_read(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    obj: &mut Value,
+    idx: u64,
+) -> Result<Value, Value> {
+    let raw = crate::vm::load_property_recursive(*obj, index_key(gc, idx), None, gc);
+    // The key allocation may have GC-moved the receiver.
+    *obj = refresh_value(*obj);
+    let Some(aptr) = raw.heap_ptr() else {
+        return Ok(raw);
+    };
+    if unsafe { (*(aptr as *const GcHeader)).tag() } != TAG_ACCESSOR {
+        return Ok(raw);
+    }
+    let getter = unsafe { rune_core::accessor::AccessorPair::getter(aptr) };
+    if getter.is_undefined() || getter.is_null() {
+        return Ok(Value::undefined());
+    }
+    if let Some(smi) = getter.as_smi() {
+        if smi < 0 {
+            let id = ((-smi) as usize) - 1;
+            if id < vm.builtins.len() {
+                let result = (vm.builtins[id].func)(gc, *obj, &[], vm);
+                // The inline call may have allocated or grown.
+                *obj = refresh_value(*obj);
+                if let Some(exc) = vm.pending_exception.take() {
+                    return Err(exc);
+                }
+                return Ok(result);
+            }
+        }
+        return Ok(Value::undefined());
+    }
+    // JS getter: B1f-6 dispatches it; the sync audit reads undefined.
+    Ok(Value::undefined())
+}
+
+/// Ensure dense capacity covers `need` (B1f): materializes length-extended
+/// tails as holes up front so the move loops never grow mid-walk (a grow
+/// moves the array and stales the local receiver Value — pre-growing once
+/// keeps every subsequent raw/do_store write sound). Refuses absurd sizes;
+/// leftovers grow per-index exactly like before.
+fn ensure_dense_capacity(gc: &mut SemiSpace, vm: &mut Vm, obj: &mut Value, need: u64) {
+    let Some(ptr) = obj.heap_ptr() else {
+        return;
+    };
+    if unsafe { (*(ptr as *const GcHeader)).tag() } != TAG_ARRAY {
+        return;
+    }
+    // B1f: never materialize absurd tails (A3 pushes onto length 2^32-1;
+    // unbounded growth OOMs the 16 MiB semispace). The 1M bound mirrors
+    // the sparse-construction threshold; beyond it slots stay holes and
+    // per-index growth takes over exactly like before this helper.
+    if need > 1_000_000 {
+        return;
+    }
+    let mut arr = ptr as *mut RuneArray;
+    while (unsafe { RuneArray::capacity(arr) } as u64) < need {
+        unsafe {
+            arr = grow_dense_array(gc, vm, arr);
+        }
+    }
+    // A grow moves the array: refresh the caller's receiver (the old
+    // address is abandoned — every later read/write must use the live
+    // pointer). update_heap_reference inside grow_dense_array fixed the
+    // VM roots; only this Rust-local copy needs rewriting.
+    *obj = Value::from_heap_ptr(arr as *mut u8);
+}
+
+/// Spec Set(obj, "length") for mutators (B1f-1): dense sets the magic
+/// length (past 2^32-1 throws RangeError — the array-exotic length
+/// invariant, §23.1.4.1); plain objects set the slot when present; strings
+/// always throw (getter-only model); non-string primitives are
+/// discarded-box no-ops. Non-writable/frozen length states cannot be
+/// constructed yet (B1f-5), so no attribute checks run here.
+fn set_length_checked(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    obj: &mut Value,
+    len: u64,
+) -> Result<(), Value> {
+    let Some(ptr) = obj.heap_ptr() else {
+        // Discarded-box primitive: nothing to store into.
+        return Ok(());
+    };
+    let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+    if tag == TAG_ARRAY {
+        if len > 4_294_967_295 {
+            // push's element Set landed first (named slot); the length
+            // update then throws, exactly like V8 (A3).
+            return Err(sort_range_error(gc, vm, "Invalid array length"));
+        }
+        // Dense lengths fit u32 by construction (growth paths that could
+        // exceed it cannot materialize that many elements).
+        unsafe { RuneArray::set_length(ptr as *mut RuneArray, len as u32) };
+        return Ok(());
+    }
+    if tag == TAG_STRING {
+        return Err(sort_type_error(
+            gc,
+            vm,
+            "Cannot assign to read only property 'length' of a string",
+        ));
+    }
+    if tag != TAG_OBJECT {
+        return Ok(());
+    }
+    let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+    if let Some(slot) = shape.lookup(&PropertyKey::from_string("length")) {
+        unsafe { JSObject::set_slot(ptr as *mut JSObject, slot, length_value(len)) };
+        return Ok(());
+    }
+    // Absent length (e.g. pop/shift on {}) is CREATED by the spec Set.
+    let key = Value::from_heap_ptr(HeapString::allocate(gc, "length") as *mut u8);
+    // The key allocation may have GC-moved the receiver.
+    *obj = refresh_value(*obj);
+    crate::vm::do_store_property(*obj, key, length_value(len), gc, vm);
+    *obj = refresh_value(*obj);
+    Ok(())
+}
+
+/// True when a move span provably performs no observable work (B1f):
+/// no indexed entries (data or accessor, own or inherited) anywhere in
+/// [lo, hi). Lets huge sparse walks (the clamps tests at 2^53 lengths)
+/// complete instantly instead of iterating billions of absent indices.
+/// Sound: absent→absent deletes are no-ops, and with no accessors no user
+/// code can observe or perturb the walk. Dense arrays always move data
+/// (their indices are present unless holes — holes still move), so callers
+/// only consult this for plain objects.
+fn move_range_is_quiet(obj: Value, lo: u64, hi: u64) -> bool {
+    let mut current = obj;
+    for _ in 0..crate::vm::MAX_PROTOTYPE_DEPTH {
+        let Some(cptr) = current.heap_ptr() else {
+            return true;
+        };
+        if unsafe { (*(cptr as *const GcHeader)).tag() } != TAG_OBJECT {
+            // Conservative: exotic links (e.g. dense-array protos serving
+            // indices) may observe the walk.
+            return false;
+        }
+        let shape = unsafe { JSObject::shape_ptr(cptr as *mut JSObject) };
+        let count = unsafe { JSObject::slot_count(cptr as *mut JSObject) };
+        for i in 0..count {
+            let Some(name) = shape.key_name_at(i) else {
+                continue;
+            };
+            // Any indexed entry in span (data or accessor) is observable.
+            if let Some(k) = crate::vm::canonical_index_name(name) {
+                if k >= lo && k < hi {
+                    return false;
+                }
+            }
+            // Any accessor anywhere could serve an index in span via the
+            // pair path... pairs serve only their own key, which the
+            // numeric test above already covers — but a pair under a
+            // NON-index name is harmless. Only index-named pairs matter,
+            // already handled. (No extra check needed.)
+        }
+        let proto = unsafe { JSObject::prototype(cptr as *mut JSObject) };
+        if proto.is_null() {
+            return true;
+        }
+        current = Value::from_heap_ptr(proto);
+    }
+    false
+}
+
+/// DeletePropertyOrThrow on an index, routing through the shared sort rule
+/// (dense punches holes, objects check configurability).
+fn mutator_delete(gc: &mut SemiSpace, vm: &Vm, obj: &mut Value, idx: u64) -> Result<(), Value> {
+    // Deletes never allocate, but refresh anyway: a later grow relies on a
+    // live receiver and this keeps the discipline total.
+    let out = sort_delete_one(gc, vm, *obj, idx);
+    *obj = refresh_value(*obj);
+    out
+}
+
+/// Array.prototype.push(...items) — appends all args, returns the new
+/// length (§23.1.3.23). Generic over heap receivers; strings reject every
+/// write; non-string primitives take the discarded-box path.
+pub fn array_push(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let (mut len, _) = match mutator_length(gc, vm, this) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let count = args.len() as u64;
+    if len + count > 9_007_199_254_740_991 {
+        vm.set_pending_exception(sort_type_error(
+            gc,
+            vm,
+            "Pushing elements exceeds the maximum array length",
+        ));
+        return Value::undefined();
+    }
+    let is_prim = this.heap_ptr().is_none();
+    let is_string = this
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_STRING);
+    if !is_prim && !is_string {
+        ensure_dense_capacity(gc, vm, &mut this, len + count);
+    }
+    for (k, &item) in args.iter().enumerate() {
+        let at = len + k as u64;
+        if is_prim && !is_string {
+            // Discarded-box primitive: the store succeeds into the void.
+            continue;
+        }
+        if let Err(e) = mutator_store(gc, vm, &mut this, at, refresh_value(item)) {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    }
+    len += count;
+    if !is_prim {
+        if let Err(e) = set_length_checked(gc, vm, &mut this, len) {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    }
+    length_value(len)
+}
+pub fn array_pop(gc: &mut SemiSpace, mut this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let (len, _) = match mutator_length(gc, vm, this) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    if len == 0 {
+        if this.heap_ptr().is_some() {
+            if let Err(e) = set_length_checked(gc, vm, &mut this, 0) {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
+        return Value::undefined();
+    }
+    if this.heap_ptr().is_none() {
+        return Value::undefined();
+    }
+    let last = len - 1;
+    let element = match mutator_read(gc, vm, &mut this, last) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    if let Err(e) = mutator_delete(gc, vm, &mut this, last) {
+        vm.set_pending_exception(e);
+        return Value::undefined();
+    }
+    if let Err(e) = set_length_checked(gc, vm, &mut this, last) {
+        vm.set_pending_exception(e);
+        return Value::undefined();
+    }
+    element
+}
+pub fn array_shift(gc: &mut SemiSpace, mut this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let (len, _) = match mutator_length(gc, vm, this) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    if len == 0 {
+        if this.heap_ptr().is_some() {
+            if let Err(e) = set_length_checked(gc, vm, &mut this, 0) {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
+        return Value::undefined();
+    }
+    if this.heap_ptr().is_none() {
+        return Value::undefined();
+    }
+    let first = match mutator_read(gc, vm, &mut this, 0) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    // B1f: huge sparse walks with no indexed entries anywhere are
+    // provably silent — skip them (the clamps tests iterate at 2^53).
+    // Dense arrays always move data; only plain objects consult quiet.
+    let is_dense = this
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_ARRAY);
+    if is_dense {
+        ensure_dense_capacity(gc, vm, &mut this, len);
+    }
+    let mut k: u64 = 1;
+    if !is_dense && move_range_is_quiet(this, 0, len) {
+        k = len;
+    }
+    while k < len {
+        let from_present = crate::vm::has_property(this, index_key(gc, k), None);
+        if from_present {
+            let v = match mutator_read(gc, vm, &mut this, k) {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            };
+            if let Err(e) = mutator_store(gc, vm, &mut this, k - 1, v) {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        } else if let Err(e) = mutator_delete(gc, vm, &mut this, k - 1) {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+        k += 1;
+    }
+    if let Err(e) = mutator_delete(gc, vm, &mut this, len - 1) {
+        vm.set_pending_exception(e);
+        return Value::undefined();
+    }
+    if let Err(e) = set_length_checked(gc, vm, &mut this, len - 1) {
+        vm.set_pending_exception(e);
+        return Value::undefined();
+    }
+    first
+}
+pub fn array_unshift(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let (len, _) = match mutator_length(gc, vm, this) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let count = args.len() as u64;
+    // u64 math throughout: the old u32 `length + arg_count` wrapped (the
+    // length-near-integer-limit ENGINE PANIC).
+    if count > 0 && len + count > 9_007_199_254_740_991 {
+        vm.set_pending_exception(sort_type_error(
+            gc,
+            vm,
+            "Unshifting elements exceeds the maximum array length",
+        ));
+        return Value::undefined();
+    }
+    let is_prim = this.heap_ptr().is_none();
+    let is_dense = this
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_ARRAY);
+    if !is_prim && is_dense {
+        ensure_dense_capacity(gc, vm, &mut this, len + count);
+    }
+    if !is_prim {
+        // Backward slide: from k-1 to k+count-1 (spec order). Quiet
+        // huge sparse spans skip (see shift).
+        let mut k = len;
+        if !is_dense && move_range_is_quiet(this, 0, len + count) {
+            k = 0;
+        }
+        while k > 0 {
+            let from = k - 1;
+            let to = k + count - 1;
+            if crate::vm::has_property(this, index_key(gc, from), None) {
+                let v = match mutator_read(gc, vm, &mut this, from) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        vm.set_pending_exception(e);
+                        return Value::undefined();
+                    }
+                };
+                if let Err(e) = mutator_store(gc, vm, &mut this, to, v) {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            } else if let Err(e) = mutator_delete(gc, vm, &mut this, to) {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+            k -= 1;
+        }
+        for (j, &item) in args.iter().enumerate() {
+            if let Err(e) = mutator_store(gc, vm, &mut this, j as u64, refresh_value(item)) {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
+        if let Err(e) = set_length_checked(gc, vm, &mut this, len + count) {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    }
+    length_value(len + count)
+}
+pub fn array_reverse(gc: &mut SemiSpace, mut this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let (len, _) = match mutator_length(gc, vm, this) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    if len <= 1 || this.heap_ptr().is_none() {
+        return this;
+    }
+    let is_dense = this
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_ARRAY);
+    // B1f: a span with no indexed entries anywhere reverses to itself
+    // (all four swap cases are no-ops) — required for the 2^53 walks.
+    if !is_dense && move_range_is_quiet(this, 0, len) {
+        return this;
+    }
+    if is_dense {
+        ensure_dense_capacity(gc, vm, &mut this, len);
+    }
+    let middle = len / 2;
+    let mut lower: u64 = 0;
+    while lower != middle {
+        let upper = len - lower - 1;
+        let lower_present = crate::vm::has_property(this, index_key(gc, lower), None);
+        let lower_val = if lower_present {
+            match mutator_read(gc, vm, &mut this, lower) {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            }
+        } else {
+            Value::undefined()
+        };
+        let upper_present = crate::vm::has_property(this, index_key(gc, upper), None);
+        let upper_val = if upper_present {
+            match mutator_read(gc, vm, &mut this, upper) {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            }
+        } else {
+            Value::undefined()
+        };
+        let step: Result<(), Value> = match (lower_present, upper_present) {
+            (true, true) => mutator_store(gc, vm, &mut this, lower, upper_val)
+                .and_then(|()| mutator_store(gc, vm, &mut this, upper, lower_val)),
+            (false, true) => mutator_store(gc, vm, &mut this, lower, upper_val)
+                .and_then(|()| mutator_delete(gc, vm, &mut this, upper)),
+            (true, false) => mutator_delete(gc, vm, &mut this, lower)
+                .and_then(|()| mutator_store(gc, vm, &mut this, upper, lower_val)),
+            (false, false) => Ok(()),
+        };
+        if let Err(e) = step {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+        lower += 1;
+    }
+    this
 }
 
 /// String.fromCharCode(codes...) — creates a string from char codes.
@@ -9535,60 +10312,6 @@ pub fn array_slice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
     Value::from_heap_ptr(result_ptr)
 }
 
-/// Array.prototype.reverse — §23.1.3.31, reverses elements in place and returns this.
-pub fn array_reverse(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
-    let Some(length) = crate::vm::array_like_length(this) else {
-        vm.set_pending_exception(crate::errors::error_object(
-            gc,
-            &vm.error_protos,
-            crate::errors::ErrorKind::TypeError,
-            "Array.prototype.reverse called on null or undefined",
-        ));
-        return Value::undefined();
-    };
-    if length <= 1 {
-        return this;
-    }
-    // For dense arrays, swap directly via RuneArray
-    if let Some(ptr) = this.heap_ptr() {
-        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-        if tag == TAG_ARRAY {
-            let arr = ptr as *mut RuneArray;
-            let len = unsafe { RuneArray::length(arr) } as usize;
-            for i in 0..len / 2 {
-                let a = unsafe { RuneArray::get_element(arr, i) };
-                let b = unsafe { RuneArray::get_element(arr, len - 1 - i) };
-                unsafe {
-                    RuneArray::set_element(arr, i, b);
-                    RuneArray::set_element(arr, len - 1 - i, a);
-                }
-            }
-            return this;
-        }
-    }
-    // Generic array-like (object) — use HasProperty/Get/Set/Delete per spec
-    // For simplicity, handle via array_like helpers plus JSObject property ops
-    for k in 0..length / 2 {
-        let lower = k;
-        let upper = length - 1 - k;
-        let lower_exists = crate::vm::array_like_index(this, lower).is_some();
-        let upper_exists = crate::vm::array_like_index(this, upper).is_some();
-        let lower_val = crate::vm::array_like_index(this, lower).unwrap_or(Value::undefined());
-        let upper_val = crate::vm::array_like_index(this, upper).unwrap_or(Value::undefined());
-        if lower_exists && upper_exists {
-            set_array_like_index(this, lower, upper_val, gc);
-            set_array_like_index(this, upper, lower_val, gc);
-        } else if !lower_exists && upper_exists {
-            set_array_like_index(this, lower, upper_val, gc);
-            delete_array_like_index(this, upper);
-        } else if lower_exists && !upper_exists {
-            delete_array_like_index(this, lower);
-            set_array_like_index(this, upper, lower_val, gc);
-        }
-    }
-    this
-}
-
 /// Array.prototype.concat — §23.1.3.4, concatenates arrays/values, respects @@isConcatSpreadable
 pub fn array_concat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
@@ -9666,112 +10389,7 @@ pub fn array_concat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
     Value::from_heap_ptr(result_ptr)
 }
 
-/// Array.prototype.shift — §23.1.3.33, removes first element and returns it
-pub fn array_shift(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
-    if !require_object_coercible(this, vm, gc) {
-        return Value::undefined();
-    }
-    let Some(length) = crate::vm::array_like_length(this) else {
-        return Value::undefined();
-    };
-    if length == 0 {
-        // Ensure length is 0
-        if let Some(ptr) = this.heap_ptr() {
-            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-            if tag == TAG_ARRAY {
-                unsafe { RuneArray::set_length(ptr as *mut RuneArray, 0) };
-            }
-        }
-        return Value::undefined();
-    }
-    let first = crate::vm::array_like_index(this, 0).unwrap_or(Value::undefined());
-    if let Some(ptr) = this.heap_ptr() {
-        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-        if tag == TAG_ARRAY {
-            let arr = ptr as *mut RuneArray;
-            let len = unsafe { RuneArray::length(arr) } as usize;
-            for i in 1..len {
-                let v = unsafe { RuneArray::get_element(arr, i) };
-                unsafe { RuneArray::set_element(arr, i - 1, v) };
-            }
-            unsafe { RuneArray::set_length(arr, (len - 1) as u32) };
-        } else if tag == TAG_OBJECT {
-            for i in 1..length {
-                let v = crate::vm::array_like_index(this, i).unwrap_or(Value::undefined());
-                let exists = crate::vm::array_like_index(this, i).is_some();
-                if exists {
-                    set_array_like_index(this, i - 1, v, gc);
-                } else {
-                    delete_array_like_index(this, i - 1);
-                }
-            }
-            delete_array_like_index(this, length - 1);
-            // Update length
-            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
-            if let Some(slot) = shape.lookup(&PropertyKey::from_string("length")) {
-                unsafe {
-                    JSObject::set_slot(ptr as *mut JSObject, slot, Value::smi((length - 1) as i32))
-                };
-            }
-        }
-    }
-    first
-}
-
 /// Array.prototype.unshift — §23.1.3.35, inserts elements at start and returns new length
-pub fn array_unshift(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    if !require_object_coercible(this, vm, gc) {
-        return Value::undefined();
-    }
-    let Some(length) = crate::vm::array_like_length(this) else {
-        return Value::undefined();
-    };
-    let arg_count = args.len() as u32;
-    let new_len = length + arg_count;
-    if let Some(ptr) = this.heap_ptr() {
-        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-        if tag == TAG_ARRAY {
-            // Grow first (each grow may move the array / trigger a GC) and keep
-            // using the live pointer. Capacity must be re-read after every grow.
-            let mut arr = ptr as *mut RuneArray;
-            unsafe {
-                while (new_len as usize) > RuneArray::capacity(arr) as usize {
-                    arr = grow_dense_array(gc, vm, arr);
-                }
-                // Shift existing elements to the right
-                for i in (0..length).rev() {
-                    let v = RuneArray::get_element(arr, i as usize);
-                    RuneArray::set_element(arr, (i + arg_count) as usize, v);
-                }
-                for (i, &arg) in args.iter().enumerate() {
-                    RuneArray::set_element(arr, i, refresh_value(arg));
-                }
-                RuneArray::set_length(arr, new_len);
-            }
-        } else if tag == TAG_OBJECT {
-            for i in (0..length).rev() {
-                let v = crate::vm::array_like_index(this, i).unwrap_or(Value::undefined());
-                let exists = crate::vm::array_like_index(this, i).is_some();
-                if exists {
-                    set_array_like_index(this, i + arg_count, v, gc);
-                } else {
-                    delete_array_like_index(this, i + arg_count);
-                }
-            }
-            for (i, &arg) in args.iter().enumerate() {
-                set_array_like_index(this, i as u32, arg, gc);
-            }
-            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
-            if let Some(slot) = shape.lookup(&PropertyKey::from_string("length")) {
-                unsafe {
-                    JSObject::set_slot(ptr as *mut JSObject, slot, Value::smi(new_len as i32))
-                };
-            }
-        }
-    }
-    Value::smi(new_len as i32)
-}
-
 /// Array.prototype.splice — §23.1.3.32
 pub fn array_splice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
@@ -11615,7 +12233,7 @@ enum SortStoreOut {
 /// Find the own-or-inherited accessor pair governing a sort write index
 /// (dense overlay for arrays, shape slots for objects, then the proto
 /// chain — tags guarded, unlike the legacy funnel loop).
-fn sort_find_accessor(obj: Value, idx: usize) -> Option<Value> {
+fn sort_find_accessor(gc: &mut SemiSpace, obj: Value, idx: u64) -> Option<Value> {
     let mut current = obj;
     let mut depth = 0;
     loop {
@@ -11626,7 +12244,10 @@ fn sort_find_accessor(obj: Value, idx: usize) -> Option<Value> {
         let ptr = current.heap_ptr()?;
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_ARRAY {
-            if let Some(pair) = crate::vm::array_overlay_accessor(ptr as *mut RuneArray, idx) {
+            if let Some(pair) = crate::vm::array_overlay_accessor(
+                ptr as *mut RuneArray,
+                idx.min(usize::MAX as u64) as usize,
+            ) {
                 return Some(pair);
             }
             let proto = unsafe { JSObject::prototype(ptr as *mut JSObject) };
@@ -11635,7 +12256,7 @@ fn sort_find_accessor(obj: Value, idx: usize) -> Option<Value> {
             }
             current = Value::from_heap_ptr(proto);
         } else if tag == TAG_OBJECT {
-            if let Some(key) = crate::vm::value_to_prop_key(Value::smi(idx as i32)) {
+            if let Some(key) = crate::vm::value_to_prop_key(index_key(gc, idx)) {
                 let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
                 if let Some(slot) = shape.lookup(&key) {
                     let v = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
@@ -11667,51 +12288,45 @@ fn sort_store_one(
     idx: usize,
     val: Value,
 ) -> SortStoreOut {
-    if let Some(pair) = sort_find_accessor(obj, idx) {
-        let aptr = pair.heap_ptr().unwrap();
-        let setter = unsafe { rune_core::accessor::AccessorPair::setter(aptr) };
-        if setter.is_undefined() || setter.is_null() {
-            return SortStoreOut::Raise(sort_type_error(
-                gc,
-                vm,
-                "Cannot set property with only a getter",
-            ));
-        }
-        if let Some(smi) = setter.as_smi() {
-            if smi < 0 {
-                let id = ((-smi) as usize) - 1;
-                if id < vm.builtins.len() {
-                    (vm.builtins[id].func)(gc, obj, &[val], vm);
-                    if let Some(exc) = vm.pending_exception.take() {
-                        return SortStoreOut::Raise(exc);
-                    }
-                    return SortStoreOut::Done;
+    let key = index_key(gc, idx as u64);
+    match classify_store(gc, obj, idx) {
+        StoreTarget::Data => {
+            if crate::vm::do_store_property(obj, key, val, gc, vm) {
+                SortStoreOut::Done
+            } else {
+                // Strict Set failure. SameValue stores succeed silently (spec
+                // ValidateAndApply); anything else throws.
+                let cur = crate::vm::load_property_recursive(obj, key, None, gc);
+                if same_value(cur, val) {
+                    SortStoreOut::Done
+                } else {
+                    SortStoreOut::Raise(sort_type_error(
+                        gc,
+                        vm,
+                        "Cannot assign to read-only property",
+                    ))
                 }
             }
-            return SortStoreOut::Raise(sort_type_error(gc, vm, "setter is not a function"));
         }
-        if setter
-            .heap_ptr()
-            .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC)
-        {
-            return SortStoreOut::WaitSetter(setter);
+        StoreTarget::SetterBuiltin(setter) => {
+            let id = ((-setter.as_smi().unwrap()) as usize) - 1;
+            if id < vm.builtins.len() {
+                (vm.builtins[id].func)(gc, obj, &[val], vm);
+                if let Some(exc) = vm.pending_exception.take() {
+                    return SortStoreOut::Raise(exc);
+                }
+                return SortStoreOut::Done;
+            }
+            SortStoreOut::Raise(sort_type_error(gc, vm, "setter is not a function"))
         }
-        return SortStoreOut::Raise(sort_type_error(gc, vm, "setter is not a function"));
-    }
-    if crate::vm::do_store_property(obj, Value::smi(idx as i32), val, gc, vm) {
-        SortStoreOut::Done
-    } else {
-        // Strict Set failure. SameValue stores succeed silently (spec
-        // ValidateAndApply); anything else throws.
-        let cur = crate::vm::array_like_index(obj, idx as u32).unwrap_or(Value::undefined());
-        if same_value(cur, val) {
-            SortStoreOut::Done
-        } else {
-            SortStoreOut::Raise(sort_type_error(
-                gc,
-                vm,
-                "Cannot assign to read-only property",
-            ))
+        StoreTarget::SetterJs(setter) => SortStoreOut::WaitSetter(setter),
+        StoreTarget::GetterOnly => SortStoreOut::Raise(sort_type_error(
+            gc,
+            vm,
+            "Cannot set property with only a getter",
+        )),
+        StoreTarget::SetterInvalid => {
+            SortStoreOut::Raise(sort_type_error(gc, vm, "setter is not a function"))
         }
     }
 }
@@ -11734,7 +12349,7 @@ fn sort_delete_one(gc: &mut SemiSpace, vm: &Vm, obj: Value, idx: u64) -> Result<
         }
         Ok(())
     } else if tag == TAG_OBJECT {
-        if let Some(key) = crate::vm::value_to_prop_key(Value::smi(idx as i32)) {
+        if let Some(key) = crate::vm::value_to_prop_key(index_key(gc, idx)) {
             let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
             if let Some(s) = shape.lookup(&key) {
                 if shape.attr_at(s) & rune_core::shape::ATTR_CONFIGURABLE == 0 {

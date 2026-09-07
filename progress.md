@@ -46,6 +46,76 @@ paths can't match immediates (no JIT change needed).
   exact, retracted in A2.)
 - 860 workspace / 0 failed; clippy/fmt/no-default/x86 clean.
 
+## B1f-1 DONE — push/pop/shift/unshift/reverse audit (2026-09-07)
+
+First B1f sub-slice (stack/queue mutators; slice/splice/concat → B1f-2,
+map/filter shapes → B1f-3, from → B1f-4, length-descriptors/freeze → B1f-5,
+observable-access machine → B1f-6):
+
+- **Rewrites** (§23.1.3.22/.23/.26/.27/.37): generic over heap receivers
+  (dense discipline + plain-object HasProperty/Get/Set/Delete), hole
+  preservation (sentinel moves, 4-case reverse swap), u64 walks with
+  ToLength clamping, 2^53-1 overflow TypeErrors (u64 math — the old u32
+  `length + argCount` WRAPPED, the length-near-integer-limit ENGINE
+  PANIC), spec-order length writes (created when absent, Set even when
+  0), exact length returns (i31-or-float), multi-arg push, string
+  receivers (exotic-reject: every Set throws, incl. SameValue length),
+  non-string primitives (discarded-box passthrough).
+- **Shared helpers**: mutator_length (chain-aware lengths incl. proto,
+  strings, builtin-inline valueOf for String objects), index_key
+  (Smi/HeapString), length_value, classify_store (extracted from
+  sort_store_one — dense overlay + tag-guarded proto setter scan),
+  mutator_store/read/delete, set_length_checked (dense exotic RangeError
+  past 2^32-1, length creation), move_range_is_quiet (O(props) proof that
+  huge sparse walks are silent — the clamps tests iterate at 2^53),
+  ensure_dense_capacity (1M-bounded pre-grow + receiver refresh).
+- **Key model** (load-bearing for A3/A4 tests): value_to_array_index is
+  now canonical (< 2^32-1, no "01"/"+1", integral floats);
+  value_to_prop_key coerces integral floats (obj[4294967295] hits).
+- **Array-exotic length invariants**: dense length reads return exact
+  values (was i32-wrap); float length stores accepted + saturated (was
+  silently dropped); shrinks punch holes; ArraySetLength delete
+  semantics on shrink (descending, non-configurable aborts with length
+  unchanged — the every/7-b-16 family); huge canonical indices store as
+  named extra_props (never materialize billions — the S15.4.5.2_A3_T4
+  OOM panic) with HasProperty/load fallthrough + shrink sweep.
+- **Object growth** (replaces the 8→32 reserve band-aid, which OOM'd the
+  GC stress tests): JSObject::grow (copy + forwarding + extensible-bit)
+  wired through do_store, define_own_property (&mut Vm, returns live
+  ptr), DefineProperty/DefineAccessor/Spread arms; &mut-receiver +
+  refresh discipline in mutator loops (growth staleness quarantined).
+- **16-byte heap alignment** (ROOT-CAUSED segfault via crash-report
+  backtrace: load → typedarray::read_element on a stale pointer): the
+  4-bit forwarding tag breaks on 8-aligned addresses with bit 3 set
+  (is_forwarded misses, forwarding_addr clears bit 3) — silent heap
+  corruption, not just B1f-1's crash. All bump strides + env alloc now
+  16-rounded. GC tests (bounds bumped 128→1024 for reserve headroom)
+  green.
+- **Number constants** (EPSILON/MAX_SAFE/MIN_SAFE/MAX/MIN/NaN/±INFINITY)
+  + `new Number(x)` → primitive (unblocks the S15 length families;
+  real wrappers stay B2).
+- **Gains (+69 Array net, 1 owned loss)**: 1698→1767 (70 newly passing;
+  push 1→15, pop 4→15, shift 5→11, unshift 4→13, reverse 4→9). Object
+  +13 (1280→1293) with ZERO losses (stash-baseline diffed). The single
+  new failure (map/8-c-i-18) passed at B1e for the wrong reason
+  (undefined-padding made holes present) and needs B1f-3 result shapes.
+- **Tests**: `test_array_push_pop_shift_unshift_reverse`. **872
+  workspace / 0**; clippy/fmt/no-default/x86 clean.
+- **Deferred with measurements**: 4× freeze + 4-5× non-writable-length
+  per method → B1f-5 (array-freeze + length descriptors); JS
+  valueOf-lengths (A2_T3/T4/T5), getter moves (get_if_present,
+  length-exceeding-reverse, unshift length-near), JS setters →
+  B1f-6 machine; reverse call-with-boolean → B2 (ToObject);
+  resizable-TA → out of scope; B1d defineProperty-huge-keys
+  (length-near-set-failure) → B1f-5.
+- **Process lessons**: (1) `touch` + verify `Compiling` before EVERY
+  build — stale binaries caused TWO phantom-triage episodes this slice
+  (old "comparator unsupported" message; suite-vs-raw contradictions).
+  (2) Never infer pass from empty output — always check exit codes
+  (the length A3_T4 "pass" was exit=101 hidden by 2>&1 plumbing).
+  (3) `git stash` + rebuild is the ground-truth check for
+  "pre-existing vs regressed" (settled the map-shape question).
+
 ## B1e DONE — sort/toSorted + holes + observable access (2026-09-06)
 
 Fifth B1 sub-slice (comparator sort; `from` and the push/pop/shift/unshift/

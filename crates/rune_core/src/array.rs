@@ -54,9 +54,12 @@ impl RuneArray {
 
             let elems_ptr = ptr.add(ARRAY_HEADER_END) as *mut Value;
             ptr::copy_nonoverlapping(elements.as_ptr(), elems_ptr, len);
-            // Zero out reserved elements
+            // Reserved slots are holes (empty sentinel), never undefined:
+            // length-extension exposes them and they must read as absent
+            // (B1f — an undefined fill here shadowed the prototype for
+            // length-grown tails).
             for i in len..cap {
-                *elems_ptr.add(i) = Value::undefined();
+                *elems_ptr.add(i) = Value::empty_sentinel();
             }
         }
         ptr as *mut RuneArray
@@ -68,6 +71,17 @@ impl RuneArray {
 
     pub unsafe fn set_length(arr: *mut RuneArray, n: u32) {
         unsafe {
+            let old = Self::length(arr);
+            // Shrinking punches holes (a later re-grow must not resurrect
+            // stale values). Bounded by capacity — never writes OOB.
+            if n < old {
+                let cap = Self::capacity(arr);
+                let upto = (old as usize).min(cap as usize);
+                let elems_ptr = (arr as *mut u8).add(ARRAY_HEADER_END) as *mut Value;
+                for i in n as usize..upto {
+                    *elems_ptr.add(i) = Value::empty_sentinel();
+                }
+            }
             *((arr as *mut u8).add(16) as *mut u32) = n;
         }
     }

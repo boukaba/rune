@@ -12,7 +12,7 @@ fn test_semispace_full_gc() {
 
     // Allocate until nearly full; keep first object as root
     for i in 0.. {
-        if ss.remaining() < 128 {
+        if ss.remaining() < 1024 {
             break;
         }
         let vals = vec![Value::smi(i)];
@@ -49,7 +49,7 @@ fn test_multiple_gc_cycles() {
 
     // First batch: fill and GC
     for i in 0.. {
-        if ss.remaining() < 128 {
+        if ss.remaining() < 1024 {
             break;
         }
         let vals = vec![Value::smi(i)];
@@ -65,7 +65,7 @@ fn test_multiple_gc_cycles() {
 
     // Second batch: fill and GC
     for i in 0.. {
-        if ss.remaining() < 128 {
+        if ss.remaining() < 1024 {
             break;
         }
         let vals = vec![Value::smi(1000 + i)];
@@ -100,7 +100,7 @@ fn test_no_root_reclamation() {
 
     for cycle in 0..5 {
         // Fill semispace with objects, no roots
-        while ss.remaining() > 128 {
+        while ss.remaining() > 1024 {
             let vals = vec![Value::smi(cycle)];
             let _obj = JSObject::allocate(&mut ss, shape, &vals);
         }
@@ -125,7 +125,7 @@ fn test_rapid_gc() {
     for cycle in 0..50 {
         let mut root = 0u64;
         let mut count = 0;
-        while ss.remaining() > 128 {
+        while ss.remaining() > 1024 {
             let vals = vec![Value::smi(count + cycle * 1000)];
             let obj = JSObject::allocate(&mut ss, shape, &vals);
             if count == 0 {

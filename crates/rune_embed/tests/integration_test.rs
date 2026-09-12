@@ -1553,6 +1553,30 @@ fn test_array_integrity_freeze_seal_descriptors() {
 }
 
 #[test]
+fn test_array_species_prologue() {
+    // B1f-6a: SpeciesConstructor sync checks (non-Object ctor / non-ctor
+    // species throw; custom ctors fall back to plain until B1f-6-frames).
+    let mut ctx = Context::new_small();
+    // Non-object constructors throw (null/number/string/boolean).
+    ctx.eval(
+        "assert.throws(TypeError, function () { var a = []; a.constructor = null; a.slice(); });",
+    )
+    .unwrap();
+    ctx.eval("assert.throws(TypeError, function () { var a = []; a.constructor = 1; a.map(function (x) { return x; }); });")
+        .unwrap();
+    // Non-constructor species throws.
+    ctx.eval("assert.throws(TypeError, function () { var a = [1]; a.constructor = {}; a.constructor[Symbol.species] = parseInt; a.filter(function (x) { return true; }); });")
+        .unwrap();
+    // Absent/null species build plain (custom valid ctors also fall back).
+    let r = ctx
+        .eval("var a = [1, 2]; var c = a.concat([3]); c.length === 3 && Array.isArray(c);")
+        .unwrap();
+    assert!(r.to_bool());
+    let r = ctx.eval("var C = function () {}; var a = [1]; a.constructor = {}; a.constructor[Symbol.species] = C; var s = a.slice(); s.length === 1 && Array.isArray(s);").unwrap();
+    assert!(r.to_bool());
+}
+
+#[test]
 fn test_array_index_search_family() {
     // B1b: indexOf/lastIndexOf/includes with spec equality + fromIndex.
     let mut ctx = Context::new_small();

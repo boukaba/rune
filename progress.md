@@ -46,6 +46,37 @@ paths can't match immediates (no JIT change needed).
   exact, retracted in A2.)
 - 860 workspace / 0 failed; clippy/fmt/no-default/x86 clean.
 
+## B1f-6a DONE — species sync prologue (2026-09-07)
+
+First B1f-6 sub-slice (B1f-6 split: 6a species sync checks (here) → 6b length
+dispatch → 6c custom-ctor Construct + frames → 6d element gaps + GetMethod
+getters + ToPrimitive sync):
+
+- **New**: `value_is_constructor` predicate (§7.2.4: arrows/async/generators
+  lack [[Construct]], classes keep it, known builtin ctor objects + only
+  Test262Error among Smi handles) + `species_resolve`/`SpeciesOut`
+  (SpeciesConstructor minus Construct: Get ctor → undefined?/non-Object
+  throw; Get @@species → null/undefined?/non-ctor throw; valid ctors defer
+  as Custom; accessor pairs defer to default — poisoned tests stay failing;
+  no realms) wired into slice/splice/concat/map/filter/flatMap/flat at their
+  spec ArraySpeciesCreate points (post-length/clamp/overflow/callable where
+  the spec puts them; slice reordered species-before-count-guard to match).
+- **Gains (+12 Array, ZERO new failures)**: ctor-non-object + species-non-ctor
+  across slice/splice/concat/map/filter + flat/non-object-ctor-throws +
+  flatMap/this-value-ctor-non-object. Array 1936→1948. Object/Function
+  identical to stash. 877/0 workspace (1 new integration test);
+  stable clippy (CI flags)/fmt/no-default clean.
+- **Deferred with measurements**: custom-ctor Construct + species getters
+  (~35: species.js/abrupt/poisoned/neg-zero, cstm-ctor*, forwards-length,
+  non-extensible*, traps-order → B1f-6c); JS lengths (~15: set_length_no_args,
+  2-x, coercion-order, A2_T* → B1f-6b); element getter/setter gaps + GetMethod
+  getters + ToPrimitive sync (~15 → B1f-6d); sort precise (15, sort-machine
+  observable work — owner TBD); Proxy/B7, wrappers/B2, sloppy/B8, resizable
+  oos per earlier slices.
+- **Process**: categorize-before-slicing paid off (47-file species cluster
+  split into 12-sync-now vs 35-frames-later by reading 8 representatives, not
+  by guessing).
+
 ## B1f-5 DONE — array descriptors + integrity (2026-09-07)
 
 Fifth B1f sub-slice (length exotic, freeze/seal, index descriptors, overlay

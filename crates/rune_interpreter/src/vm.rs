@@ -13024,6 +13024,47 @@ pub(crate) fn array_overlay_entry(arr_ptr: *mut RuneArray, idx: usize) -> Option
     Some(unsafe { JSObject::get_slot(extra as *mut JSObject, slot) })
 }
 
+/// IsConstructor (§7.2.4, B1f-6a sync subset): user functions need
+/// [[Construct]] — arrows, async functions and generators lack it (classes
+/// keep it); known builtin ctor objects construct via the New arms; Smi
+/// builtin handles don't (except Test262Error); everything else (including
+/// plain objects) doesn't. No realms/Proxy/bound (out of scope).
+pub(crate) fn value_is_constructor(vm: &Vm, v: Value) -> bool {
+    if let Some(ptr) = v.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_FUNC {
+            let fp = ptr as *mut Func;
+            return unsafe {
+                !Func::is_arrow(fp) && !Func::is_async_fn(fp) && !Func::is_generator_fn(fp)
+            };
+        }
+        if v == vm.array_constructor
+            || v == vm.object_constructor
+            || v == vm.number_constructor
+            || v == vm.string_constructor
+            || v == vm.date_constructor
+            || v == vm.regexp_constructor
+            || v == vm.promise_constructor
+            || v == vm.map_constructor
+            || v == vm.set_constructor
+            || v == vm.array_buffer_constructor
+        {
+            return true;
+        }
+        if vm.error_ctors.contains(&v) || vm.typed_array_ctors.contains(&v) {
+            return true;
+        }
+        return false;
+    }
+    if let Some(smi) = v.as_smi() {
+        if smi < 0 {
+            let id = ((-smi) as usize) - 1;
+            return id < vm.builtins.len() && vm.builtins[id].name == "Test262Error";
+        }
+    }
+    false
+}
+
 pub(crate) fn has_property(obj: Value, raw_key: Value, function_prototype: Option<Value>) -> bool {
     // Builtin handles (negative Smis) are function-like: check Function.prototype
     if let Some(smi) = obj.as_smi() {

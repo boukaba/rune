@@ -11620,6 +11620,89 @@ pub fn apply_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
     Value::undefined()
 }
 
+// ---------- B1f-6a: SpeciesConstructor sync prologue (§7.3.22) ----------
+
+/// Outcome of the species sync prologue (B1f-6a): Default = build plain
+/// (no custom species); Custom(ctor) = valid constructor found — callers fall
+/// back to plain until B1f-6-frames run real Construct (iteration stays
+/// exact, linkage diverges there); Raise = spec TypeError (non-Object ctor,
+/// non-constructor species).
+pub(crate) enum SpeciesOut {
+    Default,
+    /// Valid constructor found — payload consumed by B1f-6-frames.
+    #[allow(dead_code)]
+    Custom(Value),
+    Raise(Value),
+}
+
+/// SpeciesConstructor minus Construct (B1f-6a): Get "constructor" (data path;
+/// accessor pairs need frames to invoke getters — deferred to default),
+/// undefined → Default, non-Object → TypeError; Get @@species (same pair
+/// rule), null/undefined → Default; IsConstructor false → TypeError, true →
+/// Custom. Cross-realm check skipped (no realms). Callers invoke at the
+/// spec ArraySpeciesCreate point (after length/clamp/overflow work).
+pub(crate) fn species_resolve(gc: &mut SemiSpace, vm: &mut Vm, obj: &mut Value) -> SpeciesOut {
+    let key = Value::from_heap_ptr(HeapString::allocate(gc, "constructor") as *mut u8);
+    // Key alloc may GC-move the receiver (B1f-1 discipline).
+    *obj = refresh_value(*obj);
+    let ctor = load_property_recursive(*obj, key, None, gc);
+    *obj = refresh_value(*obj);
+    // Accessor pairs (e.g. create-ctor-poisoned) need frames to invoke.
+    if ctor
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_ACCESSOR })
+    {
+        return SpeciesOut::Default;
+    }
+    if ctor.is_undefined() {
+        return SpeciesOut::Default;
+    }
+    // "If ctor is not an Object, throw": primitives (incl. heap strings,
+    // which are String values, not Objects) reject here.
+    let ctor_is_object = ctor
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() != TAG_STRING });
+    if !ctor_is_object {
+        return SpeciesOut::Raise(sort_type_error(
+            gc,
+            vm,
+            "Array species constructor is not an object",
+        ));
+    }
+    let skey = Value::symbol(rune_core::symbol::SYM_SPECIES);
+    let sp = load_property_recursive(ctor, skey, None, gc);
+    if sp
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_ACCESSOR })
+    {
+        return SpeciesOut::Default;
+    }
+    if sp.is_undefined() || sp.is_null() {
+        return SpeciesOut::Default;
+    }
+    if !crate::vm::value_is_constructor(vm, sp) {
+        return SpeciesOut::Raise(sort_type_error(
+            gc,
+            vm,
+            "Array species is not a constructor",
+        ));
+    }
+    SpeciesOut::Custom(sp)
+}
+
+/// Run species resolution at an ArraySpeciesCreate site (B1f-6a): Default and
+/// Custom both build plain today (Custom awaits B1f-6-frames); Raise sets the
+/// pending exception. Returns false when the caller must bail out.
+pub(crate) fn species_check(gc: &mut SemiSpace, vm: &mut Vm, obj: &mut Value) -> bool {
+    match species_resolve(gc, vm, obj) {
+        SpeciesOut::Default | SpeciesOut::Custom(_) => true,
+        SpeciesOut::Raise(e) => {
+            vm.set_pending_exception(e);
+            false
+        }
+    }
+}
+
 // ---------- B1f-2 shared helpers (slice/splice/concat audit) ----------
 
 /// Array exotic length limit (2^32-1): result materialization past it throws
@@ -12067,7 +12150,7 @@ fn copy_sparse_to_result(
 /// RangeError before any copy (A3_T1/T2, was ENGINE PANIC). Observable
 /// length/element getters (create-non-array-invalid-len) + Proxy/resizable →
 /// B1f-6/B7/out-of-scope.
-pub fn array_slice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+pub fn array_slice(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
@@ -12104,6 +12187,11 @@ pub fn array_slice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
         vm.set_pending_exception(sort_range_error(gc, vm, "Invalid array length"));
         return Value::undefined();
     }
+    // B1f-6a: species prologue (non-Object ctor / non-ctor species throw;
+    // custom ctors fall back to plain until B1f-6-frames).
+    if !species_check(gc, vm, &mut this) {
+        return Value::undefined();
+    }
     let mut result = fresh_dense_array(gc, vm);
     let mut obj = this;
     if let Err(e) = copy_range_to_result(gc, vm, &mut obj, &mut result, k, fin) {
@@ -12129,8 +12217,12 @@ pub fn array_slice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
 /// stays failing — no %Boolean.prototype% exists yet). TypedArray spread reads
 /// ride the integer-indexed exotic (length + elements); TA named stores
 /// (the spreadable flag itself) depend on B4 named-prop support.
-pub fn array_concat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+pub fn array_concat(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    // B1f-6a: species prologue (step 2 — before the item loop).
+    if !species_check(gc, vm, &mut this) {
         return Value::undefined();
     }
     let mut result = fresh_dense_array(gc, vm);
@@ -12260,6 +12352,10 @@ pub fn array_splice(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mu
     // Species ArrayCreate throws past 2^32-1 before the deleted copy.
     if actual_delete > MAX_ARRAY_LENGTH {
         vm.set_pending_exception(sort_range_error(gc, vm, "Invalid array length"));
+        return Value::undefined();
+    }
+    // B1f-6a: species prologue (step 10 — after the overflow check).
+    if !species_check(gc, vm, &mut this) {
         return Value::undefined();
     }
     // Steps 10-13: deleted copy (fresh array, holes preserved).
@@ -12723,12 +12819,16 @@ pub fn array_for_each(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
 }
 
 /// Array.prototype.filter(callback, thisArg) — set up state machine iteration.
-pub fn array_filter(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some((length, callback, this_arg, source_ptr)) =
+pub fn array_filter(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some((length, callback, this_arg, _)) =
         array_iter_prologue(gc, vm, this, args, "Array.prototype.filter")
     else {
         return Value::undefined();
     };
+    // B1f-6a: species prologue (step 4 — after the callable check).
+    if !species_check(gc, vm, &mut this) {
+        return Value::undefined();
+    }
     let result_arr = RuneArray::allocate(gc, &[]);
     unsafe {
         let ptr = result_arr as *mut u8;
@@ -12738,6 +12838,10 @@ pub fn array_filter(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
             *(ptr.add(24) as *mut *mut u8) = proto;
         }
     }
+    // Refresh first (species allocs may have moved the receiver), then
+    // re-resolve the raw source pointer (B1f-1 discipline).
+    this = refresh_value(this);
+    let source_ptr = this.heap_ptr().unwrap_or(std::ptr::null_mut());
     let Some(first) = first_existing_index(this, length) else {
         return Value::from_heap_ptr(result_arr as *mut u8);
     };
@@ -12781,12 +12885,21 @@ pub fn array_filter(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
 }
 
 /// Array.prototype.map(callback, thisArg) — set up state machine iteration.
-pub fn array_map(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some((length, callback, this_arg, source_ptr)) =
+pub fn array_map(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some((length, callback, this_arg, _)) =
         array_iter_prologue(gc, vm, this, args, "Array.prototype.map")
     else {
         return Value::undefined();
     };
+    // B1f-6a: species prologue (step 4 — after the callable check; the
+    // length RangeError above models ArrayCreate throwing after it).
+    if !species_check(gc, vm, &mut this) {
+        return Value::undefined();
+    }
+    // Refresh first (species allocs may have moved the receiver), then
+    // re-resolve the raw source pointer (B1f-1 discipline).
+    this = refresh_value(this);
+    let source_ptr = this.heap_ptr().unwrap_or(std::ptr::null_mut());
     let result_arr = RuneArray::allocate(gc, &[]);
     unsafe {
         let ptr = result_arr as *mut u8;
@@ -13301,7 +13414,7 @@ fn is_array_val(v: Value) -> bool {
 }
 
 /// Array.prototype.flat(depth) — flatten nested arrays to specified depth.
-pub fn array_flat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+pub fn array_flat(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
@@ -13324,6 +13437,11 @@ pub fn array_flat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
     } else {
         depth_num.max(0.0) as u32
     };
+    // B1f-6a: species prologue (flat species-creates before flattening).
+    if !species_check(gc, vm, &mut this) {
+        return Value::undefined();
+    }
+    this = refresh_value(this);
     fn flatten(gc: &mut SemiSpace, vm: &Vm, arr_val: Value, depth: u32) -> *mut u8 {
         let result_arr = RuneArray::allocate(gc, &[]);
         let mut result_ptr = result_arr as *mut u8;
@@ -14476,12 +14594,18 @@ pub fn array_to_sorted(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
 }
 
 /// Array.prototype.flatMap(callback, thisArg) — set up state machine iteration, spreading array results.
-pub fn array_flat_map(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some((length, callback, this_arg, source_ptr)) =
+pub fn array_flat_map(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some((length, callback, this_arg, _)) =
         array_iter_prologue(gc, vm, this, args, "Array.prototype.flatMap")
     else {
         return Value::undefined();
     };
+    // B1f-6a: species prologue (after the callable check).
+    if !species_check(gc, vm, &mut this) {
+        return Value::undefined();
+    }
+    this = refresh_value(this);
+    let source_ptr = this.heap_ptr().unwrap_or(std::ptr::null_mut());
     let result_arr = RuneArray::allocate(gc, &[]);
     unsafe {
         let ptr = result_arr as *mut u8;

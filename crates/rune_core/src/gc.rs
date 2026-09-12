@@ -235,7 +235,10 @@ impl SemiSpace {
                         // Forward array elements
                         let slots_ptr = scan_ptr.add(crate::array::ARRAY_HEADER_END) as *mut u64;
                         // Array layout: offset +16 = length, offset +20 = capacity
-                        let cap = *(scan_ptr.add(20) as *const u32) as usize;
+                        // (mask integrity flag bits — B1f-5).
+                        let cap = (*(scan_ptr.add(20) as *const u32)
+                            & !crate::array::ARRAY_FLAG_MASK)
+                            as usize;
                         for i in 0..cap {
                             self.forward_value(slots_ptr.add(i));
                         }
@@ -354,9 +357,10 @@ impl SemiSpace {
                     obj_start.add(align_up(total, 16))
                 }
                 TAG_ARRAY => {
-                    // Array layout: offset +20 = capacity
+                    // Array layout: offset +20 = capacity (mask the B1f-5
+                    // integrity flag bits, like EXTENSIBLE_BIT for objects).
                     let capacity_ptr = obj_start.add(20) as *const u32;
-                    let capacity = *capacity_ptr as usize;
+                    let capacity = (*capacity_ptr & !crate::array::ARRAY_FLAG_MASK) as usize;
                     let total = crate::array::ARRAY_HEADER_END + capacity * size_of::<u64>();
                     obj_start.add(align_up(total, 16))
                 }

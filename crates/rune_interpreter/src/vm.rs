@@ -4748,6 +4748,15 @@ impl Vm {
         }
         if do_store_property(obj, raw_key, value, gc, self) {
             PropSetOut::Ready(value)
+        } else if let Some(exc) = self.pending_exception.take() {
+            // B1f-5: do_store stashed a precise error (array-length
+            // RangeError) — prefer it over the generic strict TypeError below.
+            // Only the array-"length" path stashes (all other do_store
+            // callers use non-"length" keys), so no misattribution.
+            match self.handle_throw(gc, exc) {
+                Some(exit) => PropSetOut::Bail(Some(exit)),
+                None => PropSetOut::Bail(None),
+            }
         } else if site.is_strict {
             // Strict-mode [[Set]] failure throws (§10.1.8.1);
             // sloppy failures silently keep the RHS value.
@@ -6419,23 +6428,29 @@ impl Vm {
                             if let Some(key) = value_to_prop_key(raw_key) {
                                 unsafe { JSObject::remove_property(ptr as *mut JSObject, &key) };
                             }
+                            // B1f-5: object configurability enforcement stays
+                            // A4-owned (remove_property is authoritative there).
+                            Value::boolean(true)
                         } else if tag == TAG_ARRAY {
-                            if let Some(index) = value_to_array_index(raw_key) {
-                                let arr = ptr as *mut RuneArray;
-                                let len = unsafe { RuneArray::length(arr) };
-                                // B1e: deleting a dense element makes a
-                                // real hole (empty sentinel), not an
-                                // undefined element. Unallocated tail slots
-                                // are already holes (skip the write).
-                                let cap = unsafe { RuneArray::capacity(arr) };
-                                if (index as u32) < len && index < cap as usize {
-                                    unsafe {
-                                        RuneArray::set_element(arr, index, Value::empty_sentinel())
-                                    };
+                            // B1f-5: configurability-checked delete (holes and
+                            // missing keys succeed vacuously; locked indices
+                            // and `length` fail — sloppy false, strict throw).
+                            let mut arr_val = obj;
+                            match crate::builtins::array_delete_key(gc, self, &mut arr_val, raw_key)
+                            {
+                                Ok(()) => Value::boolean(true),
+                                Err(e) => {
+                                    if self.executing_is_strict(fi) {
+                                        if let Some(exit) = self.handle_throw(gc, e) {
+                                            return exit;
+                                        }
+                                    }
+                                    Value::boolean(false)
                                 }
                             }
+                        } else {
+                            Value::boolean(true)
                         }
-                        Value::boolean(true)
                     } else {
                         Value::boolean(true)
                     };
@@ -12073,14 +12088,15 @@ pub(crate) fn load_property_recursive(
                     return Value::undefined();
                 }
             } else if tag == TAG_ARRAY {
-                // Dense array: numeric key → overlay accessor, then direct
-                // element access; holes (B1e) fall through to the prototype
-                // walk below. Out-of-bounds indices also walk the prototype
-                // (ordinary Get semantics — e.g. Array.prototype[3] serves a
-                // shrunk array; TypedArrays keep exotic OOB→undefined below).
+                // Dense array: numeric key → overlay entry (accessor pair or
+                // single-locked data), then direct element access; holes (B1e)
+                // fall through to the prototype walk below. Out-of-bounds
+                // indices also walk the prototype (ordinary Get semantics —
+                // e.g. Array.prototype[3] serves a shrunk array; TypedArrays
+                // keep exotic OOB→undefined below).
                 if let Some(index) = value_to_array_index(raw_key) {
-                    if let Some(pair) = array_overlay_accessor(ptr as *mut RuneArray, index) {
-                        return pair;
+                    if let Some(entry) = array_overlay_entry(ptr as *mut RuneArray, index) {
+                        return entry;
                     }
                     let len = unsafe { RuneArray::length(ptr as *mut RuneArray) };
                     // B1e: only allocated slots are read (length-extended
@@ -12606,6 +12622,50 @@ pub(crate) fn do_store_property(
             if let Some(index) = value_to_array_index(raw_key) {
                 let len = unsafe { RuneArray::length(ptr as *mut RuneArray) };
                 if (index as u32) < len {
+                    // B1f-5 integrity gates: frozen elements reject all
+                    // in-bounds writes; hole-fills create (need extensible).
+                    let arr = ptr as *mut RuneArray;
+                    if unsafe { RuneArray::elems_are_nonwritable(arr) } {
+                        return false;
+                    }
+                    // B1f-5: overlay entries own their index. Pairs are
+                    // dispatched upstream (setter scan); a stray pair here is
+                    // a backstop no-op. Data entries write their slot gated
+                    // by their own writability (frozen already rejected).
+                    {
+                        let extra = unsafe { RuneArray::extra_props(arr) };
+                        if !extra.is_null() {
+                            let ekey = PropertyKey::from_string(&index.to_string());
+                            let eshape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                            if let Some(slot) = eshape.lookup(&ekey) {
+                                let v = unsafe { JSObject::get_slot(extra as *mut JSObject, slot) };
+                                let is_pair = v.heap_ptr().is_some_and(|vp| unsafe {
+                                    (*(vp as *const GcHeader)).tag() == TAG_ACCESSOR
+                                });
+                                if is_pair {
+                                    return true;
+                                }
+                                if eshape.attr_at(slot) & rune_core::shape::ATTR_WRITABLE == 0 {
+                                    return false;
+                                }
+                                unsafe { JSObject::set_slot(extra as *mut JSObject, slot, value) };
+                                return true;
+                            }
+                        }
+                    }
+                    // Sealed (non-extensible, writable) arrays: hole (absent)
+                    // writes create → reject; present rewrites stay allowed.
+                    if !unsafe { RuneArray::is_extensible(arr) } {
+                        // Hole (absent) writes create → reject; present
+                        // rewrites stay allowed on sealed (writable) arrays.
+                        let cap = unsafe { RuneArray::capacity(arr) };
+                        let present = index < cap as usize
+                            && unsafe { RuneArray::get_element(arr, index) }
+                                != Value::empty_sentinel();
+                        if !present {
+                            return false;
+                        }
+                    }
                     // B1e: the slot may be unallocated (length-extended
                     // arrays have length > capacity) — grow first, never
                     // write OOB. Absurd indices stay holes (same 1M bound
@@ -12630,6 +12690,15 @@ pub(crate) fn do_store_property(
                         unsafe { RuneArray::set_element(ptr as *mut RuneArray, index, value) };
                     }
                 } else {
+                    // B1f-5 exotic creation gates (§10.4.2.1 step 2.3):
+                    // beyond-length indices always create — non-extensible
+                    // arrays reject, as do non-writable lengths.
+                    let arr = ptr as *mut RuneArray;
+                    if !unsafe { RuneArray::is_extensible(arr) }
+                        || !unsafe { RuneArray::length_is_writable(arr) }
+                    {
+                        return false;
+                    }
                     // §7.3.4 CreateDataPropertyOrThrow on an array: indices at
                     // or beyond length GROW the array (length = index+1).
                     // Pad with holes via push (handles grow + root updates),
@@ -12704,124 +12773,22 @@ pub(crate) fn do_store_property(
             } else if let Some(key_str) = raw_key.heap_ptr() {
                 let k = unsafe { HeapString::to_string(key_str as *mut HeapString) };
                 if k == "length" {
-                    // B1f: accept floats (length is a Number); saturate at
-                    // 2^32-1 instead of wrapping (direct-assignment
-                    // RangeError is B1f-5 length-descriptor work); shrinks
-                    // punch holes, not undefined elements.
-                    let n = value
-                        .as_smi()
-                        .map(|v| v as f64)
-                        .or_else(|| value.as_float64());
-                    if let Some(n) = n {
-                        let arr = ptr as *mut RuneArray;
-                        let old_len = unsafe { RuneArray::length(arr) };
-                        let new_len = (n.clamp(0.0, 4_294_967_295.0)) as u32;
-                        if new_len < old_len {
-                            let cap = unsafe { RuneArray::capacity(arr) };
-                            // B1f: length shrink with ArraySetLength delete
-                            // semantics — descending, aborting (length
-                            // unchanged, caller maps to strict-throw) at the
-                            // first non-configurable index. Dense slots have
-                            // no attributes (always deletable); extra_props
-                            // numeric entries (overlay accessors AND huge
-                            // never-materialized indices) check theirs.
-                            // Allocation-free sweep (Rust strings + interning
-                            // only), so no GC can move `arr`/`extra` mid-way.
-                            let extra = unsafe { RuneArray::extra_props(arr) };
-                            let mut blocker: Option<u64> = None;
-                            if !extra.is_null() {
-                                let eshape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
-                                let count = unsafe { JSObject::slot_count(extra as *mut JSObject) };
-                                for i in 0..count {
-                                    if let Some(name) = eshape.key_name_at(i) {
-                                        if let Some(k) = canonical_index_name(name) {
-                                            if k >= new_len as u64 {
-                                                let attr = eshape.attr_at(i);
-                                                if attr & rune_core::shape::ATTR_CONFIGURABLE == 0 {
-                                                    blocker = Some(blocker.map_or(k, |b| b.max(k)));
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            match blocker {
-                                // Blocked: holes above the blocker still land
-                                // (spec deletes descending until the block),
-                                // lower slots keep their values, length stays.
-                                Some(b) => {
-                                    let upto = (old_len as usize).min(cap as usize);
-                                    for i in (b as usize + 1)..upto {
-                                        unsafe {
-                                            RuneArray::set_element(arr, i, Value::empty_sentinel())
-                                        };
-                                    }
-                                    let eshape =
-                                        unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
-                                    let count =
-                                        unsafe { JSObject::slot_count(extra as *mut JSObject) };
-                                    let mut doomed: Vec<(u64, PropertyKey)> = Vec::new();
-                                    for i in 0..count {
-                                        if let Some(name) = eshape.key_name_at(i) {
-                                            if let Some(k) = canonical_index_name(name) {
-                                                if k > b {
-                                                    doomed
-                                                        .push((k, PropertyKey::from_string(name)));
-                                                }
-                                            }
-                                        }
-                                    }
-                                    doomed.sort_by_key(|entry| std::cmp::Reverse(entry.0));
-                                    for (_, pk) in doomed {
-                                        unsafe {
-                                            JSObject::remove_property(extra as *mut JSObject, &pk)
-                                        };
-                                    }
-                                    return false;
-                                }
-                                None => {
-                                    let upto = (old_len as usize).min(cap as usize);
-                                    for i in new_len as usize..upto {
-                                        unsafe {
-                                            RuneArray::set_element(arr, i, Value::empty_sentinel())
-                                        };
-                                    }
-                                    if !extra.is_null() {
-                                        let eshape =
-                                            unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
-                                        let count =
-                                            unsafe { JSObject::slot_count(extra as *mut JSObject) };
-                                        let mut doomed: Vec<(u64, PropertyKey)> = Vec::new();
-                                        for i in 0..count {
-                                            if let Some(name) = eshape.key_name_at(i) {
-                                                if let Some(k) = canonical_index_name(name) {
-                                                    if k >= new_len as u64 {
-                                                        doomed.push((
-                                                            k,
-                                                            PropertyKey::from_string(name),
-                                                        ));
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        doomed.sort_by_key(|entry| std::cmp::Reverse(entry.0));
-                                        for (_, pk) in doomed {
-                                            unsafe {
-                                                JSObject::remove_property(
-                                                    extra as *mut JSObject,
-                                                    &pk,
-                                                )
-                                            };
-                                        }
-                                    }
-                                    unsafe { RuneArray::set_length(arr, new_len) };
-                                }
-                            }
-                        } else {
-                            unsafe { RuneArray::set_length(arr, new_len) };
+                    // B1f-5: full ArraySetLength (coercion RangeErrors,
+                    // non-writable rejection, shrink deletes with k+1 abort).
+                    // Only the funnel observes the stashed RangeError (all
+                    // other do_store callers use non-"length" keys); plain
+                    // denials stay silent-false for the funnel's strict gate.
+                    let mut arr_val = obj;
+                    match crate::builtins::array_store_length_value(gc, vm, &mut arr_val, value) {
+                        Ok(()) => return true,
+                        Err(crate::builtins::LengthSetErr::Range(e)) => {
+                            vm.set_pending_exception(e);
+                            return false;
                         }
+                        Err(crate::builtins::LengthSetErr::Deny) => return false,
                     }
                 } else if let Some(key) = value_to_prop_key(raw_key) {
+                    // Named property → extra_props JSObject (lazily allocated).                } else if let Some(key) = value_to_prop_key(raw_key) {
                     // Named property → extra_props JSObject (lazily allocated).
                     // Re-resolve ptr after allocation (GC may move objects).
                     let _key = key;
@@ -13036,6 +13003,17 @@ fn ic_cache_key(shape_id: u64, raw_key: Value) -> (u64, u64) {
 /// under the numeric key (dense elements can't hold pairs inline); the
 /// dense slot itself is a hole. Returns the pair when present.
 pub(crate) fn array_overlay_accessor(arr_ptr: *mut RuneArray, idx: usize) -> Option<Value> {
+    let v = array_overlay_entry(arr_ptr, idx)?;
+    v.heap_ptr()
+        .filter(|vp| unsafe { (*(*vp as *const GcHeader)).tag() } == TAG_ACCESSOR)
+        .map(|_| v)
+}
+
+/// Any overlay entry (accessor pair OR data) at an index (B1f-5: single-locked
+/// data indices live here with their attrs; dense holds only all-default
+/// data). Presence/value paths use this; getter/setter dispatch paths keep
+/// the pair-only version above (data has no accessors to dispatch).
+pub(crate) fn array_overlay_entry(arr_ptr: *mut RuneArray, idx: usize) -> Option<Value> {
     let extra = unsafe { RuneArray::extra_props(arr_ptr) };
     if extra.is_null() {
         return None;
@@ -13043,10 +13021,7 @@ pub(crate) fn array_overlay_accessor(arr_ptr: *mut RuneArray, idx: usize) -> Opt
     let key = PropertyKey::from_string(&idx.to_string());
     let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
     let slot = shape.lookup(&key)?;
-    let v = unsafe { JSObject::get_slot(extra as *mut JSObject, slot) };
-    v.heap_ptr()
-        .filter(|vp| unsafe { (*(*vp as *const GcHeader)).tag() } == TAG_ACCESSOR)
-        .map(|_| v)
+    Some(unsafe { JSObject::get_slot(extra as *mut JSObject, slot) })
 }
 
 pub(crate) fn has_property(obj: Value, raw_key: Value, function_prototype: Option<Value>) -> bool {
@@ -13140,8 +13115,9 @@ pub(crate) fn has_property(obj: Value, raw_key: Value, function_prototype: Optio
             has_property(Value::from_heap_ptr(super_ptr), raw_key, function_prototype)
         } else if tag == TAG_ARRAY {
             if let Some(index) = value_to_array_index(raw_key) {
-                // B1e: an own accessor overlay counts as present.
-                if array_overlay_accessor(ptr as *mut RuneArray, index).is_some() {
+                // B1e: an own overlay entry (accessor pair or data) counts
+                // as present.
+                if array_overlay_entry(ptr as *mut RuneArray, index).is_some() {
                     return true;
                 }
                 let len = unsafe { RuneArray::length(ptr as *mut RuneArray) };

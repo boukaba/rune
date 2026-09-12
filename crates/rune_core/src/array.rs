@@ -20,6 +20,25 @@ pub const EXTRA_PROPS_OFFSET: usize = 32;
 /// Byte offset of the first element slot (header end).
 pub const ARRAY_HEADER_END: usize = 40;
 
+/// Array integrity flags in the capacity word (B1f-5; A4 object precedent —
+/// bit set = restricted). Capacities never approach 2^28 in practice (1M
+/// sparse threshold; huge lengths stay length-extended with small caps), and
+/// `capacity()` masks them out everywhere (get_element guard, grow math).
+pub const ARRAY_NONEXTENSIBLE_BIT: u32 = 1 << 31;
+/// Set when `length` is non-writable (freeze, or defineProperty length
+/// writable:false). Fresh arrays are length-writable.
+pub const ARRAY_LENGTH_NONWRITABLE_BIT: u32 = 1 << 30;
+/// Set when elements are non-configurable (seal/freeze whole-array lock).
+pub const ARRAY_ELEMS_NONCONFIGURABLE_BIT: u32 = 1 << 29;
+/// Set when elements are non-writable (freeze whole-array lock; seal keeps
+/// writability).
+pub const ARRAY_ELEMS_NONWRITABLE_BIT: u32 = 1 << 28;
+/// Mask of all integrity flag bits in the capacity word (GC + capacity()).
+pub const ARRAY_FLAG_MASK: u32 = ARRAY_NONEXTENSIBLE_BIT
+    | ARRAY_LENGTH_NONWRITABLE_BIT
+    | ARRAY_ELEMS_NONCONFIGURABLE_BIT
+    | ARRAY_ELEMS_NONWRITABLE_BIT;
+
 /// Number of extra element slots to reserve beyond initial length.
 const RESERVED_ELEMENTS: usize = 4;
 
@@ -87,7 +106,73 @@ impl RuneArray {
     }
 
     pub unsafe fn capacity(arr: *mut RuneArray) -> u32 {
+        // Mask the integrity flag bits (see above).
+        unsafe { (*((arr as *mut u8).add(20) as *const u32)) & !ARRAY_FLAG_MASK }
+    }
+
+    /// Raw capacity word (flags included) — GC sizing and flag access only.
+    pub unsafe fn capacity_word(arr: *mut RuneArray) -> u32 {
         unsafe { *((arr as *mut u8).add(20) as *const u32) }
+    }
+
+    /// Array extensibility (§10.1.9). Fresh arrays are extensible.
+    pub unsafe fn is_extensible(arr: *mut RuneArray) -> bool {
+        unsafe { Self::capacity_word(arr) & ARRAY_NONEXTENSIBLE_BIT == 0 }
+    }
+
+    /// Set array extensibility (preventExtensions/seal/freeze clear it).
+    pub unsafe fn set_extensible(arr: *mut RuneArray, extensible: bool) {
+        unsafe {
+            let w = Self::capacity_word(arr);
+            *((arr as *mut u8).add(20) as *mut u32) = if extensible {
+                w & !ARRAY_NONEXTENSIBLE_BIT
+            } else {
+                w | ARRAY_NONEXTENSIBLE_BIT
+            };
+        }
+    }
+
+    /// `length` writability (§23.1.4.1). Fresh arrays are writable.
+    pub unsafe fn length_is_writable(arr: *mut RuneArray) -> bool {
+        unsafe { Self::capacity_word(arr) & ARRAY_LENGTH_NONWRITABLE_BIT == 0 }
+    }
+
+    /// Set `length` writability (freeze / defineProperty length writable:false
+    /// clear it; nothing re-enables it — non-writable is sticky per spec).
+    pub unsafe fn set_length_writable(arr: *mut RuneArray, writable: bool) {
+        unsafe {
+            let w = Self::capacity_word(arr);
+            *((arr as *mut u8).add(20) as *mut u32) = if writable {
+                w & !ARRAY_LENGTH_NONWRITABLE_BIT
+            } else {
+                w | ARRAY_LENGTH_NONWRITABLE_BIT
+            };
+        }
+    }
+
+    /// Whole-array element configurability (seal/freeze lock). Per-index
+    /// overlay pairs keep their own shape attrs; the bit overrides them on
+    /// reads (bits authoritative — no shape rewrite on seal/freeze).
+    pub unsafe fn elems_are_nonconfigurable(arr: *mut RuneArray) -> bool {
+        unsafe { Self::capacity_word(arr) & ARRAY_ELEMS_NONCONFIGURABLE_BIT != 0 }
+    }
+
+    /// Whole-array element writability (freeze lock; seal keeps writability).
+    pub unsafe fn elems_are_nonwritable(arr: *mut RuneArray) -> bool {
+        unsafe { Self::capacity_word(arr) & ARRAY_ELEMS_NONWRITABLE_BIT != 0 }
+    }
+
+    /// Apply an integrity level (B1f-5): seal locks configurability,
+    /// freeze additionally locks writability (elements + length).
+    pub unsafe fn seal_elements(arr: *mut RuneArray, freeze_writes: bool) {
+        unsafe {
+            let w = Self::capacity_word(arr);
+            let mut nw = w | ARRAY_NONEXTENSIBLE_BIT | ARRAY_ELEMS_NONCONFIGURABLE_BIT;
+            if freeze_writes {
+                nw |= ARRAY_ELEMS_NONWRITABLE_BIT | ARRAY_LENGTH_NONWRITABLE_BIT;
+            }
+            *((arr as *mut u8).add(20) as *mut u32) = nw;
+        }
     }
 
     pub unsafe fn get_element(arr: *mut RuneArray, index: usize) -> Value {
@@ -160,8 +245,11 @@ impl RuneArray {
             // Copy header (GcHeader + shape + length + capacity + prototype +
             // extra_props) = 40 bytes
             std::ptr::copy_nonoverlapping(src, new_ptr, ARRAY_HEADER_END);
-            // Update capacity in new header
-            *(new_ptr.add(20) as *mut u32) = new_cap as u32;
+            // Update capacity in new header, preserving integrity flags
+            // (B1f-5; A4 object precedent — seal/freeze survive growth).
+            // Flags read from the resolved source (arr may be stale).
+            *(new_ptr.add(20) as *mut u32) =
+                (new_cap as u32) | (Self::capacity_word(src as *mut RuneArray) & ARRAY_FLAG_MASK);
             // Copy elements (only the allocated window is readable;
             // a length-extended array may have length > capacity).
             // Everything past the copied window is a hole (empty sentinel),

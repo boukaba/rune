@@ -1498,6 +1498,61 @@ fn test_array_from() {
 }
 
 #[test]
+fn test_array_integrity_freeze_seal_descriptors() {
+    // B1f-5: length exotic, freeze/seal, index descriptors, overlay delete.
+    let mut ctx = Context::new_small();
+    // defineProperty length shrink deletes descending with holes.
+    let r = ctx.eval("var a = [1, 2, 3]; Object.defineProperty(a, 'length', {value: 1}); a.length === 1 && a.join() === '1' && (1 in a) === false;").unwrap();
+    assert!(r.to_bool());
+    // Length coercion RangeErrors precede attr checks.
+    ctx.eval("assert.throws(RangeError, function () { Object.defineProperty([], 'length', {value: -1}); });").unwrap();
+    ctx.eval("assert.throws(RangeError, function () { Object.defineProperty([], 'length', {value: 3.5}); });").unwrap();
+    // Direct length assignment runs the exotic (RangeError even sloppy).
+    ctx.eval("assert.throws(RangeError, function () { [].length = 4294967296; });")
+        .unwrap();
+    // Writable flip true->false locks; false->true throws.
+    let r = ctx.eval("var b = [1, 2]; Object.defineProperty(b, 'length', {writable: false}); b.length === 2;").unwrap();
+    assert!(r.to_bool());
+    ctx.eval("assert.throws(TypeError, function () { var b = [1, 2]; Object.defineProperty(b, 'length', {writable: false}); Object.defineProperty(b, 'length', {writable: true}); });").unwrap();
+    // Non-writable length rejects shrinking writes (A6.1_T2).
+    ctx.eval("assert.throws(TypeError, function () { var a = [0, 1, 2]; Object.defineProperty(a, 'length', {writable: false}); a.splice(1, 2, 4); });").unwrap();
+    // Freeze: tests, push/write rejection, descriptors, delete falseness.
+    let r = ctx.eval("var f = [1, 2]; Object.freeze(f); Object.isFrozen(f) && Object.isSealed(f) && !Object.isExtensible(f);").unwrap();
+    assert!(r.to_bool());
+    ctx.eval(
+        "assert.throws(TypeError, function () { var f = [1, 2]; Object.freeze(f); f.push(3); });",
+    )
+    .unwrap();
+    let r = ctx.eval("var f = [1, 2]; Object.freeze(f); var d = Object.getOwnPropertyDescriptor(f, 0); d.value === 1 && d.writable === false && d.enumerable === true && d.configurable === false;").unwrap();
+    assert!(r.to_bool());
+    let r = ctx.eval("var f = [1, 2]; Object.freeze(f); var d = Object.getOwnPropertyDescriptor(f, 'length'); d.value === 2 && d.writable === false && d.enumerable === false && d.configurable === false;").unwrap();
+    assert!(r.to_bool());
+    let r = ctx
+        .eval(
+            "var f = [1, 2]; Object.freeze(f); delete f[0] === false && delete f.length === false;",
+        )
+        .unwrap();
+    assert!(r.to_bool());
+    // Seal: writes pass, growth and deletes fail, frozen stays false.
+    let r = ctx.eval("var s = [1, 2]; Object.seal(s); Object.isSealed(s) && !Object.isFrozen(s); s[0] = 9; s[0] === 9;").unwrap();
+    assert!(r.to_bool());
+    ctx.eval(
+        "assert.throws(TypeError, function () { var s = [1, 2]; Object.seal(s); s.push(3); });",
+    )
+    .unwrap();
+    // Holes describe as absent; overlay delete removes the pair (8-b-9).
+    let r = ctx
+        .eval("var h = [1, , 3]; Object.getOwnPropertyDescriptor(h, 1) === undefined;")
+        .unwrap();
+    assert!(r.to_bool());
+    let r = ctx.eval("var o = [0, 1]; Object.defineProperty(o, '0', {get: function () { delete o[1]; return 0; }, configurable: true}); var m = o.map(function (v, i) { return i === 1 ? false : true; }); m[0] === true && typeof m[1] === 'undefined';").unwrap();
+    assert!(r.to_bool());
+    // Primitives pass through integrity builtins.
+    let r = ctx.eval("Object.freeze(undefined) === undefined;").unwrap();
+    assert!(r.to_bool());
+}
+
+#[test]
 fn test_array_index_search_family() {
     // B1b: indexOf/lastIndexOf/includes with spec equality + fromIndex.
     let mut ctx = Context::new_small();

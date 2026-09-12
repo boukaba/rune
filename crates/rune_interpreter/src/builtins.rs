@@ -4998,8 +4998,9 @@ pub fn object_prototype_has_own_property(
     let found = match tag {
         TAG_ARRAY => {
             if let Some(index) = value_to_array_index(key) {
-                // B1e: an own accessor overlay counts as present.
-                if crate::vm::array_overlay_accessor(ptr as *mut rune_core::array::RuneArray, index)
+                // B1e: an own overlay entry (accessor pair or data) counts
+                // as present.
+                if crate::vm::array_overlay_entry(ptr as *mut rune_core::array::RuneArray, index)
                     .is_some()
                 {
                     return Value::boolean(true);
@@ -5652,9 +5653,16 @@ pub fn object_has_own(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
         }
         TAG_ARRAY => {
             if let Some(idx) = crate::vm::value_to_array_index(key) {
-                // B1e: an own accessor overlay counts as present.
-                if crate::vm::array_overlay_accessor(ptr as *mut RuneArray, idx).is_some() {
-                    return Value::boolean(true);
+                // B1f-5: overlay entries (pairs and single-locked data) report
+                // their own enumerability.
+                let extra = unsafe { RuneArray::extra_props(ptr as *mut RuneArray) };
+                if !extra.is_null() {
+                    let eshape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                    if let Some(slot) = eshape.lookup(&PropertyKey::from_string(&idx.to_string())) {
+                        return Value::boolean(
+                            eshape.attr_at(slot) & rune_core::shape::ATTR_ENUMERABLE != 0,
+                        );
+                    }
                 }
                 let len = unsafe { RuneArray::length(ptr as *mut RuneArray) };
                 // B1e: holes are not own properties.
@@ -6233,9 +6241,14 @@ fn define_array_index_property(
         let cur = unsafe { JSObject::get_slot(overlay as *mut JSObject, slot) };
         (slot, attr, cur)
     });
-    if let Some((_, attr, _)) = existing {
+    if let Some((_, attr, cur)) = existing {
         use rune_core::shape::{ATTR_CONFIGURABLE, ATTR_ENUMERABLE};
-        if attr & ATTR_CONFIGURABLE == 0 {
+        // Effective configurability: the whole-array seal bit overrides
+        // shape attrs (reads agree — B1f-5).
+        let ap = arr.heap_ptr().unwrap() as *mut RuneArray;
+        let locked =
+            attr & ATTR_CONFIGURABLE == 0 || unsafe { RuneArray::elems_are_nonconfigurable(ap) };
+        if locked {
             if desc.has_configurable && desc.configurable {
                 return Err(define_array_type_err(
                     gc,
@@ -6250,17 +6263,20 @@ fn define_array_index_property(
                     "Cannot redefine a non-configurable property",
                 ));
             }
-            // Overlay entries are always accessors; any data fields or
-            // changed get/set on a locked entry reject.
-            if desc.has_value || desc.has_writable {
-                return Err(define_array_type_err(
-                    gc,
-                    vm,
-                    "Cannot redefine a non-configurable property",
-                ));
-            }
+            let cur_is_pair = cur
+                .heap_ptr()
+                .is_some_and(|vp| unsafe { (*(vp as *const GcHeader)).tag() == TAG_ACCESSOR });
             if is_accessor_desc {
-                let vp = existing.unwrap().2.heap_ptr().unwrap();
+                // Locked data never converts to accessor; locked pairs keep
+                // SameValue getters/setters only.
+                if !cur_is_pair {
+                    return Err(define_array_type_err(
+                        gc,
+                        vm,
+                        "Cannot redefine a non-configurable property",
+                    ));
+                }
+                let vp = cur.heap_ptr().unwrap();
                 let (cur_get, cur_set) = unsafe {
                     (
                         rune_core::accessor::AccessorPair::getter(vp),
@@ -6282,6 +6298,8 @@ fn define_array_index_property(
                     ));
                 }
             }
+            // (Data-desc value/writable checks live in the data branch below,
+            // which allows SameValue on locked data.)
         }
     }
     if is_accessor_desc {
@@ -6366,20 +6384,262 @@ fn define_array_index_property(
             );
         }
     } else {
-        // Data descriptor: drop any overlay accessor, write dense.
-        if existing.is_some() {
-            unsafe { JSObject::remove_property(overlay as *mut JSObject, &overlay_key) };
+        // Data descriptor: ValidateAndApply-lite over current (overlay entry
+        // or dense default with whole-array bit overrides), then store dense
+        // (all-default) or as an overlay data entry (locked) with the dense
+        // slot punched (B1e shadow invariant). Absent value keeps current on
+        // redefine, undefined on create; absent flags keep current on
+        // redefine, false on create (spec defaults).
+        use rune_core::shape::{ATTR_CONFIGURABLE, ATTR_ENUMERABLE, ATTR_WRITABLE};
+        // Current (value, writable, enumerable, configurable, is_create).
+        // Overlay pairs count as present accessor-current (converting to
+        // data below); dense defaults modulate with the whole-array bits.
+        let ap = arr.heap_ptr().unwrap() as *mut RuneArray;
+        let (cur_val, cw, ce, cc, is_create): (Value, bool, bool, bool, bool) = match existing {
+            Some((_, attr, cur))
+                if cur.heap_ptr().is_some_and(|vp| unsafe {
+                    (*(vp as *const GcHeader)).tag() != TAG_ACCESSOR
+                }) =>
+            {
+                // Overlay data entry (own attrs; seal bit overrides C,
+                // matching reads).
+                let c = attr & ATTR_CONFIGURABLE != 0
+                    && !unsafe { RuneArray::elems_are_nonconfigurable(ap) };
+                (
+                    cur,
+                    attr & ATTR_WRITABLE != 0,
+                    attr & ATTR_ENUMERABLE != 0,
+                    c,
+                    false,
+                )
+            }
+            Some((_, attr, _)) => {
+                // Overlay pair → converting accessor to data: value and
+                // flags come from the descriptor (absent → spec defaults
+                // for the conversion); configurability gates it.
+                let c = attr & ATTR_CONFIGURABLE != 0
+                    && !unsafe { RuneArray::elems_are_nonconfigurable(ap) };
+                (Value::undefined(), false, false, c, true)
+            }
+            None => {
+                let sealed = unsafe { RuneArray::elems_are_nonconfigurable(ap) };
+                let frozen = unsafe { RuneArray::elems_are_nonwritable(ap) };
+                let len = unsafe { RuneArray::length(ap) } as usize;
+                let cap = unsafe { RuneArray::capacity(ap) } as usize;
+                let present = idx < len
+                    && idx < cap
+                    && unsafe { RuneArray::get_element(ap, idx) } != Value::empty_sentinel();
+                let v = if present {
+                    unsafe { RuneArray::get_element(ap, idx) }
+                } else {
+                    Value::undefined()
+                };
+                (v, !frozen, true, !sealed, !present)
+            }
+        };
+        // Validate (non-configurable current).
+        if !cc {
+            if desc.has_configurable && desc.configurable {
+                return Err(define_array_type_err(
+                    gc,
+                    vm,
+                    "Cannot redefine a non-configurable property",
+                ));
+            }
+            // Non-configurable accessor→data conversion rejects any
+            // value/writable field outright (ValidateAndApply).
+            if desc.has_value || desc.has_writable {
+                if existing.is_some_and(|(_, _, cur)| {
+                    cur.heap_ptr().is_some_and(|vp| unsafe {
+                        (*(vp as *const GcHeader)).tag() == TAG_ACCESSOR
+                    })
+                }) {
+                    return Err(define_array_type_err(
+                        gc,
+                        vm,
+                        "Cannot redefine a non-configurable property",
+                    ));
+                }
+            }
+            if desc.has_enumerable && desc.enumerable != ce {
+                return Err(define_array_type_err(
+                    gc,
+                    vm,
+                    "Cannot redefine a non-configurable property",
+                ));
+            }
+            if desc.has_writable && desc.writable && !cw {
+                return Err(define_array_type_err(
+                    gc,
+                    vm,
+                    "Cannot redefine a non-configurable property",
+                ));
+            }
+            if desc.has_value && !cw && !same_value(desc.value, cur_val) {
+                return Err(define_array_type_err(
+                    gc,
+                    vm,
+                    "Cannot redefine a non-configurable property",
+                ));
+            }
         }
+        // Apply.
         let value = if desc.has_value {
             desc.value
-        } else {
+        } else if is_create {
             Value::undefined()
+        } else {
+            cur_val
         };
-        crate::vm::do_store_property(arr, Value::smi(idx as i32), value, gc, vm);
+        let w = if desc.has_writable {
+            desc.writable
+        } else if is_create {
+            false
+        } else {
+            cw
+        };
+        let e = if desc.has_enumerable {
+            desc.enumerable
+        } else if is_create {
+            false
+        } else {
+            ce
+        };
+        let c = if desc.has_configurable {
+            desc.configurable
+        } else if is_create {
+            false
+        } else {
+            cc
+        };
+        if w && e && c {
+            // All-default: dense store (+ drop any overlay entry).
+            if existing.is_some() {
+                unsafe { JSObject::remove_property(overlay as *mut JSObject, &overlay_key) };
+            }
+            if !crate::vm::do_store_property(arr, Value::smi(idx as i32), value, gc, vm) {
+                return Err(define_array_type_err(
+                    gc,
+                    vm,
+                    "Cannot define property on this array",
+                ));
+            }
+        } else {
+            // Locked: overlay data entry + punch the dense slot (B1e shadow
+            // invariant — the overlay shadows dense).
+            let mut attr = 0u8;
+            if w {
+                attr |= ATTR_WRITABLE;
+            }
+            if e {
+                attr |= ATTR_ENUMERABLE;
+            }
+            if c {
+                attr |= ATTR_CONFIGURABLE;
+            }
+            let overlay = unsafe { RuneArray::extra_props(ap) };
+            let eshape = unsafe { JSObject::shape_ptr(overlay as *mut JSObject) };
+            if eshape.lookup(&overlay_key).is_some() {
+                let slot = eshape.lookup(&overlay_key).unwrap();
+                let new_shape = Shape::with_replaced_attr(eshape, slot, attr);
+                // Refresh discipline: interning may GC-move arr + overlay
+                // (B1f-1 rule — re-resolve locals after allocating calls).
+                let arr = refresh_value(arr);
+                let overlay =
+                    unsafe { RuneArray::extra_props(arr.heap_ptr().unwrap() as *mut RuneArray) };
+                let eshape2 = unsafe { JSObject::shape_ptr(overlay as *mut JSObject) };
+                let slot2 = eshape2.lookup(&overlay_key).unwrap();
+                unsafe {
+                    JSObject::set_shape_ptr(overlay as *mut JSObject, new_shape);
+                    JSObject::set_slot(overlay as *mut JSObject, slot2, value);
+                }
+            } else {
+                unsafe {
+                    JSObject::add_property_with_attrs(
+                        overlay as *mut JSObject,
+                        overlay_key,
+                        key_name,
+                        value,
+                        attr,
+                    );
+                }
+            }
+            let arr = refresh_value(arr);
+            let ap2 = arr.heap_ptr().unwrap() as *mut RuneArray;
+            let len2 = unsafe { RuneArray::length(ap2) } as usize;
+            if idx < len2 {
+                unsafe { RuneArray::set_element(ap2, idx, Value::empty_sentinel()) };
+            } else if idx < 4_294_967_295 {
+                // Defining at/past the end extends length (spec exotic step
+                // 2.5 — holes fill the gap, which read absent by construction).
+                // Length-writability was gated at dispatch; u32 range holds
+                // by the canonical-index bound.
+                unsafe { RuneArray::set_length(ap2, idx as u32 + 1) };
+            }
+        }
     }
     // Silence unused-mut on arr_ptr in case the optimizer disagrees.
     let _ = arr_ptr;
     Ok(())
+}
+
+/// defineProperty(arr, "length", desc) — ArraySetLength (§10.4.2.4, B1f-5).
+/// Attr-only desc goes through the no-[[Value]] branch (configurable:true /
+/// enumerable:true / writable false→true reject; true→false locks); valued
+/// descs coerce first (RangeError precedes attr checks — length-error), then
+/// ValidateAndApply invariants, then the exotic core (shrink deletes with
+/// k+1 abort). Accessor conversion is forbidden (length is non-configurable
+/// data). JS-driven length values read as 0 (B1f-6 gap — coercion-order).
+fn define_array_length_property(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    arr: Value,
+    desc: &PropDesc,
+) -> Result<Value, Value> {
+    let arr_ptr = match arr.heap_ptr() {
+        Some(p) => p as *mut RuneArray,
+        None => {
+            return Err(sort_type_error(
+                gc,
+                vm,
+                "DefineProperty called on non-object",
+            ));
+        }
+    };
+    if desc.has_get || desc.has_set {
+        return Err(sort_type_error(gc, vm, "Cannot redefine property 'length'"));
+    }
+    if !desc.has_value {
+        if desc.has_configurable && desc.configurable {
+            return Err(sort_type_error(gc, vm, "Cannot redefine property 'length'"));
+        }
+        if desc.has_enumerable && desc.enumerable {
+            return Err(sort_type_error(gc, vm, "Cannot redefine property 'length'"));
+        }
+        if desc.has_writable {
+            let writable_now = unsafe { RuneArray::length_is_writable(arr_ptr) };
+            if !desc.writable && writable_now {
+                unsafe { RuneArray::set_length_writable(arr_ptr, false) };
+            } else if desc.writable && !writable_now {
+                return Err(sort_type_error(gc, vm, "Cannot redefine property 'length'"));
+            }
+        }
+        return Ok(arr);
+    }
+    let new_len = coerce_array_length_value(gc, vm, desc.value)?;
+    if desc.has_configurable && desc.configurable {
+        return Err(sort_type_error(gc, vm, "Cannot redefine property 'length'"));
+    }
+    if desc.has_enumerable && desc.enumerable {
+        return Err(sort_type_error(gc, vm, "Cannot redefine property 'length'"));
+    }
+    if desc.has_writable && desc.writable && !unsafe { RuneArray::length_is_writable(arr_ptr) } {
+        return Err(sort_type_error(gc, vm, "Cannot redefine property 'length'"));
+    }
+    let lock = desc.has_writable && !desc.writable;
+    let mut live = arr;
+    array_exotic_set_length(gc, vm, &mut live, new_len, lock)?;
+    Ok(live)
 }
 
 /// Object.defineProperty(obj, key, descriptor) — defines or redefines an
@@ -6419,6 +6679,49 @@ pub fn object_define_property(
     if let Some(tptr) = target.heap_ptr() {
         if unsafe { (*(tptr as *const GcHeader)).tag() } == TAG_ARRAY {
             if let Some(idx) = value_to_array_index(raw_key) {
+                // B1f-5 exotic invariants (§10.4.2.1 step 2.3): defining at or
+                // past length with a non-writable length rejects; creating on
+                // a non-extensible array rejects. (Holey fills within length
+                // always define — holes are absent properties.)
+                let arr_ptr = tptr as *mut RuneArray;
+                let len = unsafe { RuneArray::length(arr_ptr) };
+                if (idx as u64) >= len as u64 && !unsafe { RuneArray::length_is_writable(arr_ptr) }
+                {
+                    vm.set_pending_exception(define_array_type_err(
+                        gc,
+                        vm,
+                        "Cannot define property on an array with non-writable length",
+                    ));
+                    return Value::undefined();
+                }
+                if !unsafe { RuneArray::is_extensible(arr_ptr) } {
+                    // Creation check: present (dense non-hole or overlay)
+                    // indices redefine; absent ones create → reject.
+                    let present = {
+                        let cap = unsafe { RuneArray::capacity(arr_ptr) };
+                        let dense_hit = (idx as u32) < len
+                            && idx < cap as usize
+                            && unsafe { RuneArray::get_element(arr_ptr, idx) }
+                                != Value::empty_sentinel();
+                        dense_hit
+                            || !unsafe { RuneArray::extra_props(arr_ptr) }.is_null()
+                                && unsafe {
+                                    JSObject::shape_ptr(
+                                        RuneArray::extra_props(arr_ptr) as *mut JSObject
+                                    )
+                                }
+                                .lookup(&PropertyKey::from_string(&idx.to_string()))
+                                .is_some()
+                    };
+                    if !present {
+                        vm.set_pending_exception(define_array_type_err(
+                            gc,
+                            vm,
+                            "Cannot define property on a non-extensible object",
+                        ));
+                        return Value::undefined();
+                    }
+                }
                 if let Err(e) = define_array_index_property(
                     gc,
                     vm,
@@ -6434,6 +6737,18 @@ pub fn object_define_property(
                 return target;
             }
             if let Some(pk) = value_to_prop_key(raw_key) {
+                if pk.as_u64() == PropertyKey::from_string("length").as_u64() {
+                    // B1f-5: defineProperty(arr, "length", desc) — full
+                    // ArraySetLength (coercion RangeErrors, shrink deletes
+                    // with k+1 abort, writability locks).
+                    return match define_array_length_property(gc, vm, target, &desc) {
+                        Ok(live) => refresh_value(live),
+                        Err(e) => {
+                            vm.set_pending_exception(e);
+                            Value::undefined()
+                        }
+                    };
+                }
                 if pk.as_u64() != PropertyKey::from_string("length").as_u64() {
                     let overlay = unsafe {
                         let mut props = RuneArray::extra_props(tptr as *mut RuneArray);
@@ -6562,6 +6877,65 @@ pub fn object_define_properties(
     result
 }
 
+/// Own-property descriptor on a dense array (B1f-5, §10.1.5.1): "length"
+/// reports the magic length with its writability bit (never enumerable nor
+/// configurable); canonical indices consult the overlay first (pairs with
+/// their attrs, whole-array seal bit overriding), then dense elements (holes
+/// → undefined) with whole-array freeze/seal bits overriding; huge named
+/// indices and other named extras read through extra_props.
+fn array_own_property_descriptor(gc: &mut SemiSpace, ptr: *mut u8, raw_key: Value) -> Value {
+    let arr = ptr as *mut RuneArray;
+    // "length" (string key only — canonical indices never spell it).
+    if let Some(kptr) = raw_key.heap_ptr() {
+        if unsafe { (*(kptr as *const GcHeader)).tag() } == TAG_STRING {
+            let s = unsafe { HeapString::to_string(kptr as *mut HeapString) };
+            if s == "length" {
+                let len = unsafe { RuneArray::length(arr) };
+                let mut attr = 0u8;
+                if unsafe { RuneArray::length_is_writable(arr) } {
+                    attr |= rune_core::shape::ATTR_WRITABLE;
+                }
+                return make_descriptor_object(gc, length_value(len as u64), attr);
+            }
+        }
+    }
+    // Overlay entry first (accessor pairs with attrs; also huge named
+    // indices and named extras, which share the table — all describe).
+    if let Some(key) = value_to_prop_key(raw_key) {
+        let extra = unsafe { RuneArray::extra_props(arr) };
+        if !extra.is_null() {
+            let eshape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+            if let Some(slot) = eshape.lookup(&key) {
+                let mut attr = eshape.attr_at(slot);
+                if unsafe { RuneArray::elems_are_nonconfigurable(arr) } {
+                    attr &= !rune_core::shape::ATTR_CONFIGURABLE;
+                }
+                let v = unsafe { JSObject::get_slot(extra as *mut JSObject, slot) };
+                return make_descriptor_object(gc, v, attr);
+            }
+        }
+    }
+    // Dense element (holes absent).
+    if let Some(index) = value_to_array_index(raw_key) {
+        let len = unsafe { RuneArray::length(arr) } as usize;
+        let cap = unsafe { RuneArray::capacity(arr) } as usize;
+        if index < len && index < cap {
+            let elem = unsafe { RuneArray::get_element(arr, index) };
+            if elem != Value::empty_sentinel() {
+                let mut attr = rune_core::shape::ATTR_DEFAULT;
+                if unsafe { RuneArray::elems_are_nonconfigurable(arr) } {
+                    attr &= !rune_core::shape::ATTR_CONFIGURABLE;
+                }
+                if unsafe { RuneArray::elems_are_nonwritable(arr) } {
+                    attr &= !rune_core::shape::ATTR_WRITABLE;
+                }
+                return make_descriptor_object(gc, elem, attr);
+            }
+        }
+    }
+    Value::undefined()
+}
+
 /// Object.getOwnPropertyDescriptor(obj, key) — own-property descriptor
 /// object or undefined (§20.1.2.10).
 pub fn object_get_own_property_descriptor(
@@ -6584,10 +6958,15 @@ pub fn object_get_own_property_descriptor(
         // Primitives have no own properties to describe.
         return Value::undefined();
     };
+    let raw_key = args.get(1).copied().unwrap_or(Value::undefined());
+    // B1f-5: descriptors on dense arrays (§10.1.5.1 via the exotic — holes
+    // read as absent → undefined).
+    if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_ARRAY {
+        return array_own_property_descriptor(gc, ptr, raw_key);
+    }
     if unsafe { (*(ptr as *const GcHeader)).tag() } != TAG_OBJECT {
         return Value::undefined();
     }
-    let raw_key = args.get(1).copied().unwrap_or(Value::undefined());
     let (key, _) = match define_key_and_name(raw_key) {
         Ok(k) => k,
         Err(()) => return Value::undefined(),
@@ -6599,6 +6978,13 @@ pub fn object_get_own_property_descriptor(
     };
     let attr = shape.attr_at(slot);
     let val = unsafe { JSObject::get_slot(obj, slot) };
+    make_descriptor_object(gc, val, attr)
+}
+
+/// Build a fresh `{enumerable, configurable, value/writable | get/set}`
+/// descriptor object from a stored value + attribute byte (B1f-5: shared by
+/// plain objects and dense arrays).
+fn make_descriptor_object(gc: &mut SemiSpace, val: Value, attr: u8) -> Value {
     let pairs: Vec<(&str, Value)> = vec![
         (
             "enumerable",
@@ -6656,6 +7042,22 @@ fn set_integrity_level(
     target: Value,
     level: u8,
 ) -> Result<Value, Value> {
+    // B1f-5: dense arrays participate (§10.4 exotic has no integrity
+    // override — SetIntegrityLevel walks indices + length). Whole-array flag
+    // bits (never per-index tables: seal/freeze lock uniformly and growth is
+    // impossible once non-extensible, so flags stay exact).
+    if let Some(tptr) = target.heap_ptr() {
+        if unsafe { (*(tptr as *const GcHeader)).tag() } == TAG_ARRAY {
+            let arr = tptr as *mut RuneArray;
+            unsafe {
+                RuneArray::set_extensible(arr, false);
+                if level >= 1 {
+                    RuneArray::seal_elements(arr, level >= 2);
+                }
+            }
+            return Ok(target);
+        }
+    }
     let obj_ptr = define_target(gc, vm, what, target)?;
     let shape = unsafe { JSObject::shape_ptr(obj_ptr) };
     let mut attrs = shape.attrs.clone();
@@ -6694,9 +7096,9 @@ macro_rules! integrity_builtin {
     ($name:ident, $what:expr, $level:expr) => {
         pub fn $name(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
             let target = args.first().copied().unwrap_or(Value::undefined());
-            // Primitives: return as-is (spec ToObject would box, but the
-            // observable result is the primitive itself).
-            if !target.is_heap_object() && !target.is_null() && !target.is_undefined() {
+            // Primitives (incl. null/undefined) return as-is (spec ToObject
+            // would box, but integrity on a transient is unobservable).
+            if !target.is_heap_object() {
                 return target;
             }
             match set_integrity_level(gc, vm, $what, target, $level) {
@@ -6725,9 +7127,29 @@ macro_rules! integrity_test_builtin {
             let Some(ptr) = target.heap_ptr() else {
                 return Value::boolean($kind != 0);
             };
+            // B1f-5: dense arrays carry whole-array integrity bits (seal/freeze
+            // lock uniformly and growth is impossible once non-extensible, so
+            // bits stay exact — no per-index tables needed).
+            if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_ARRAY {
+                let arr = ptr as *mut RuneArray;
+                return Value::boolean(match $kind {
+                    0 => unsafe { RuneArray::is_extensible(arr) },
+                    1 => {
+                        !unsafe { RuneArray::is_extensible(arr) }
+                            && unsafe { RuneArray::elems_are_nonconfigurable(arr) }
+                    }
+                    _ => {
+                        !unsafe { RuneArray::is_extensible(arr) }
+                            && unsafe { RuneArray::elems_are_nonconfigurable(arr) }
+                            && unsafe { RuneArray::elems_are_nonwritable(arr) }
+                            && !unsafe { RuneArray::length_is_writable(arr) }
+                    }
+                });
+            }
             if unsafe { (*(ptr as *const GcHeader)).tag() } != TAG_OBJECT {
-                // Non-plain receivers (arrays, wrappers): always extensible
-                // in this engine's model (no per-object seal tracking there).
+                // Remaining exotic receivers (wrappers, etc.): always
+                // extensible in this engine's model (no per-object seal
+                // tracking there).
                 return Value::boolean($kind == 0);
             }
             let obj = ptr as *mut JSObject;
@@ -8098,11 +8520,38 @@ pub(crate) enum StoreTarget {
     /// Getter-only or invalid setter: strict Set rejects.
     GetterOnly,
     SetterInvalid,
+    /// Non-writable data (single-locked overlay entry): strict Set rejects.
+    ReadOnly,
 }
 
 /// Classify a write target: own-or-inherited accessor scan (dense overlay
 /// for arrays, shape slots for objects, then the tag-guarded proto chain).
 pub(crate) fn classify_store(gc: &mut SemiSpace, obj: Value, idx: usize) -> StoreTarget {
+    // B1f-5: own overlay DATA entries gate writability first (an own data
+    // property short-circuits proto setters per OrdinarySet — same as dense).
+    if let Some(optr) = obj.heap_ptr() {
+        if unsafe { (*(optr as *const GcHeader)).tag() } == TAG_ARRAY {
+            if let Some(entry) = crate::vm::array_overlay_entry(optr as *mut RuneArray, idx) {
+                let is_pair = entry
+                    .heap_ptr()
+                    .is_some_and(|vp| unsafe { (*(vp as *const GcHeader)).tag() == TAG_ACCESSOR });
+                if !is_pair {
+                    let extra = unsafe { RuneArray::extra_props(optr as *mut RuneArray) };
+                    let eshape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                    let ro = eshape
+                        .lookup(&PropertyKey::from_string(&idx.to_string()))
+                        .is_some_and(|slot| {
+                            eshape.attr_at(slot) & rune_core::shape::ATTR_WRITABLE == 0
+                        })
+                        || unsafe { RuneArray::elems_are_nonwritable(optr as *mut RuneArray) };
+                    if ro {
+                        return StoreTarget::ReadOnly;
+                    }
+                    return StoreTarget::Data;
+                }
+            }
+        }
+    }
     let Some(pair) = sort_find_accessor(gc, obj, idx as u64) else {
         return StoreTarget::Data;
     };
@@ -8220,6 +8669,11 @@ fn mutator_store(
             vm,
             "Cannot set property with only a getter",
         )),
+        StoreTarget::ReadOnly => Err(sort_type_error(
+            gc,
+            vm,
+            "Cannot assign to read-only property",
+        )),
         StoreTarget::SetterInvalid => Err(sort_type_error(gc, vm, "setter is not a function")),
     }
 }
@@ -8297,15 +8751,172 @@ fn ensure_dense_capacity(gc: &mut SemiSpace, vm: &mut Vm, obj: &mut Value, need:
     *obj = Value::from_heap_ptr(arr as *mut u8);
 }
 
-/// Spec Set(obj, "length") for mutators (B1f-1 + B1f-2): dense sets the magic
-/// length (past 2^32-1 throws RangeError — the array-exotic length
-/// invariant, §23.1.4.1); plain objects set the slot when present; strings
-/// always throw (getter-only model); non-string primitives are
-/// discarded-box no-ops. B1f-2: an accessor-pair length dispatches the setter
-/// (builtin inline) and throws getter-only/invalid (splice A6.1_T3); a JS
-/// setter is quiet-skipped (B1f-6 runs it through the machine —
-/// set_length_no_args stays failing). Non-writable/frozen length states cannot
-/// be constructed yet (B1f-5), so no attribute checks run here.
+// ---------- B1f-5: array length exotic + integrity ----------
+
+/// ToUint32 with spec modulo semantics (B1f-5, §7.1.9): NaN/±0/±Infinity → 0;
+/// otherwise truncate toward zero, then modulo 2^32 into range. (Rust `as u32`
+/// saturates — wrong for negatives and huge values.)
+fn to_uint32_mod(n: f64) -> u32 {
+    if !n.is_finite() || n == 0.0 {
+        0
+    } else {
+        ((n.trunc() % 4_294_967_296.0 + 4_294_967_296.0) % 4_294_967_296.0) as u32
+    }
+}
+
+/// Coerce a length-descriptor value per ArraySetLength steps 3-5 (B1f-5):
+/// ToUint32 + ToNumber with a SameValueZero check → RangeError on mismatch
+/// (3.5, -1, 2^32, "3.5", undefined). Sync subset (Smi/float/bool/null direct,
+/// numeric strings, builtin-inline valueOf); JS-driven methods read as 0
+/// (B1f-6 runs them — the coercion-order callCount tests stay failing).
+fn coerce_array_length_value(gc: &mut SemiSpace, vm: &mut Vm, v: Value) -> Result<u32, Value> {
+    let n = length_to_number(gc, vm, v)?;
+    let u = to_uint32_mod(n);
+    // SameValueZero(u, n): NaN never matches (→ RangeError); ±0 match 0.
+    let same = !n.is_nan() && ((u as f64) == n || (u == 0 && n == 0.0));
+    if !same {
+        return Err(sort_range_error(gc, vm, "Invalid array length"));
+    }
+    Ok(u)
+}
+
+/// Outcome class for `length=` stores (B1f-5): RangeErrors always throw (even
+/// sloppy — the throw happens inside ArraySetLength, not at the Set site);
+/// denials throw TypeError in strict mode and stay silent in sloppy mode.
+pub(crate) enum LengthSetErr {
+    Range(Value),
+    Deny,
+}
+
+/// ArraySetLength core for dense arrays (B1f-5, §10.4.2.4 steps 7-14 without
+/// the descriptor unpacking): grow/extend freely (callers RangeError first);
+/// shrink runs descending deletes with the k+1 restoration abort; optional
+/// writability lock applies at success (step 13) or abort-restore (step 12).
+/// Non-writable length rejects any differing value (steps 8-9 — SameValue
+/// extension allowed). Partial deletions persist on abort. Returns Err on
+/// abort (caller throws TypeError); length-bit state is spec-consistent.
+fn array_exotic_set_length(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    obj: &mut Value,
+    new_len: u32,
+    lock_writable: bool,
+) -> Result<(), Value> {
+    let deny = |gc: &mut SemiSpace, vm: &Vm| {
+        sort_type_error(gc, vm, "Cannot assign to read-only property 'length'")
+    };
+    let Some(ptr) = obj.heap_ptr() else {
+        return Ok(());
+    };
+    let arr = ptr as *mut RuneArray;
+    let old_len = unsafe { RuneArray::length(arr) };
+    if new_len == old_len {
+        if lock_writable {
+            unsafe { RuneArray::set_length_writable(arr, false) };
+        }
+        return Ok(());
+    }
+    // Steps 8-9: any differing value through a non-writable length fails
+    // (growth and shrink alike — ValidateAndApply on the length slot).
+    if !unsafe { RuneArray::length_is_writable(arr) } {
+        return Err(deny(gc, vm));
+    }
+    if new_len > old_len {
+        unsafe { RuneArray::set_length(arr, new_len) };
+        if lock_writable {
+            unsafe { RuneArray::set_length_writable(arr, false) };
+        }
+        return Ok(());
+    }
+    // Shrink: length lands first (step 11), then descending deletes.
+    unsafe { RuneArray::set_length(arr, new_len) };
+    // Phase 1 (B1f-5): named canonical indices at or beyond old_len (the
+    // B1f-1 named-overflow model — never materialized) delete first, in
+    // descending numeric order (spec visits highest-first; A3_T4's huge entry
+    // must go even though it sits past length).
+    let mut named: Vec<u64> = Vec::new();
+    if let Some(aptr) = obj.heap_ptr() {
+        let extra = unsafe { RuneArray::extra_props(aptr as *mut RuneArray) };
+        if !extra.is_null() {
+            let eshape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+            let count = unsafe { JSObject::slot_count(extra as *mut JSObject) };
+            for i in 0..count {
+                if let Some(name) = eshape.key_name_at(i) {
+                    if let Some(k) = sparse_key_in_range(name, new_len as u64, u64::MAX) {
+                        if k >= old_len as u64 {
+                            named.push(k);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    named.sort_unstable_by(|a, b| b.cmp(a));
+    for k in named {
+        if let Err(e) = mutator_delete(gc, vm, obj, k) {
+            // Abort (step 12): restore length past the blocker (saturating
+            // the unrepresentable 2^32 edge), apply the pending lock, then
+            // propagate the delete TypeError.
+            let restored = (k + 1).min(4_294_967_295);
+            if let Some(rptr) = obj.heap_ptr() {
+                unsafe {
+                    RuneArray::set_length(rptr as *mut RuneArray, restored as u32);
+                    if lock_writable {
+                        RuneArray::set_length_writable(rptr as *mut RuneArray, false);
+                    }
+                }
+            }
+            return Err(e);
+        }
+    }
+    let mut k = old_len;
+    while k > new_len {
+        k -= 1;
+        // mutator_delete refreshes obj (remove_property may intern shapes).
+        if let Err(e) = mutator_delete(gc, vm, obj, k as u64) {
+            // Abort (step 12): restore length to k+1, apply the pending lock,
+            // keep partial deletions, propagate the TypeError.
+            if let Some(rptr) = obj.heap_ptr() {
+                unsafe {
+                    RuneArray::set_length(rptr as *mut RuneArray, k + 1);
+                    if lock_writable {
+                        RuneArray::set_length_writable(rptr as *mut RuneArray, false);
+                    }
+                }
+            }
+            return Err(e);
+        }
+    }
+    if lock_writable {
+        if let Some(rptr) = obj.heap_ptr() {
+            unsafe { RuneArray::set_length_writable(rptr as *mut RuneArray, false) };
+        }
+    }
+    Ok(())
+}
+
+/// `length=` store on a dense array through the funnel (B1f-5): coerce with
+/// RangeError fidelity, then the exotic core. Plain Deny (non-writable) maps
+/// to the funnel's generic strict/sloppy handling; callers needing exact
+/// texts use the core directly.
+pub(crate) fn array_store_length_value(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    obj: &mut Value,
+    v: Value,
+) -> Result<(), LengthSetErr> {
+    let new_len = coerce_array_length_value(gc, vm, v).map_err(LengthSetErr::Range)?;
+    array_exotic_set_length(gc, vm, obj, new_len, false).map_err(|_| LengthSetErr::Deny)
+}
+
+/// Spec Set(obj, "length") for mutators (B1f-1 + B1f-2, B1f-5: dense routes
+/// through the exotic core — non-writable lengths throw (A6.1_T2), shrinks
+/// punch holes with the k+1 abort rule, past-2^32-1 throws RangeError);
+/// plain objects set the slot when present; strings always throw
+/// (getter-only model); non-string primitives are discarded-box no-ops.
+/// B1f-2: an accessor-pair length dispatches the setter (builtin inline) and
+/// throws getter-only/invalid (splice A6.1_T3); a JS setter is quiet-skipped
+/// (B1f-6 runs it through the machine — set_length_no_args stays failing).
 fn set_length_checked(
     gc: &mut SemiSpace,
     vm: &mut Vm,
@@ -8323,10 +8934,8 @@ fn set_length_checked(
             // update then throws, exactly like V8 (A3).
             return Err(sort_range_error(gc, vm, "Invalid array length"));
         }
-        // Dense lengths fit u32 by construction (growth paths that could
-        // exceed it cannot materialize that many elements).
-        unsafe { RuneArray::set_length(ptr as *mut RuneArray, len as u32) };
-        return Ok(());
+        // B1f-5: full exotic semantics (non-writable throw, shrink deletes).
+        return array_exotic_set_length(gc, vm, obj, len as u32, false);
     }
     if tag == TAG_STRING {
         return Err(sort_type_error(
@@ -13511,6 +14120,11 @@ fn sort_store_one(
             vm,
             "Cannot set property with only a getter",
         )),
+        StoreTarget::ReadOnly => SortStoreOut::Raise(sort_type_error(
+            gc,
+            vm,
+            "Cannot assign to read-only property",
+        )),
         StoreTarget::SetterInvalid => {
             SortStoreOut::Raise(sort_type_error(gc, vm, "setter is not a function"))
         }
@@ -13526,6 +14140,67 @@ fn sort_delete_one(gc: &mut SemiSpace, vm: &Vm, obj: Value, idx: u64) -> Result<
     };
     let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
     if tag == TAG_ARRAY {
+        let arr = ptr as *mut RuneArray;
+        // Huge canonical indices live as named extra_props (B1f-1
+        // named-overflow model, never materialized): delete the named entry
+        // with the usual configurability check.
+        if idx >= 4_294_967_295 {
+            let okey = PropertyKey::from_string(&idx.to_string());
+            let extra = unsafe { RuneArray::extra_props(arr) };
+            if !extra.is_null() {
+                let eshape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                if let Some(slot) = eshape.lookup(&okey) {
+                    if eshape.attr_at(slot) & rune_core::shape::ATTR_CONFIGURABLE == 0 {
+                        return Err(sort_type_error(
+                            gc,
+                            vm,
+                            "Cannot delete a non-configurable property",
+                        ));
+                    }
+                    unsafe { JSObject::remove_property(extra as *mut JSObject, &okey) };
+                }
+            }
+            return Ok(());
+        }
+        // B1f-5: the index overlay pair (if any) is part of the property:
+        // non-configurable (own attrs, or the whole-array seal bit which
+        // overrides shape attrs) rejects; otherwise remove it alongside the
+        // dense hole-punch (8-b-9: stale overlays shadowed punched holes).
+        {
+            let okey = PropertyKey::from_string(&idx.to_string());
+            let extra = unsafe { RuneArray::extra_props(arr) };
+            if !extra.is_null() {
+                let eshape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                if let Some(slot) = eshape.lookup(&okey) {
+                    let locked = unsafe { RuneArray::elems_are_nonconfigurable(arr) }
+                        || eshape.attr_at(slot) & rune_core::shape::ATTR_CONFIGURABLE == 0;
+                    if locked {
+                        return Err(sort_type_error(
+                            gc,
+                            vm,
+                            "Cannot delete a non-configurable property",
+                        ));
+                    }
+                    unsafe { JSObject::remove_property(extra as *mut JSObject, &okey) };
+                }
+            }
+            // Whole-array seal bit with no overlay entry: dense element is
+            // non-configurable too.
+            if unsafe { RuneArray::elems_are_nonconfigurable(arr) } {
+                let len = unsafe { RuneArray::length(arr) } as u64;
+                let cap = unsafe { RuneArray::capacity(arr) } as u64;
+                if idx < len && idx < cap {
+                    let elem = unsafe { RuneArray::get_element(arr, idx as usize) };
+                    if elem != Value::empty_sentinel() {
+                        return Err(sort_type_error(
+                            gc,
+                            vm,
+                            "Cannot delete a non-configurable property",
+                        ));
+                    }
+                }
+            }
+        }
         let len = unsafe { RuneArray::length(ptr as *mut RuneArray) } as u64;
         let cap = unsafe { RuneArray::capacity(ptr as *mut RuneArray) } as u64;
         if idx < len && idx < cap {
@@ -13552,6 +14227,50 @@ fn sort_delete_one(gc: &mut SemiSpace, vm: &Vm, obj: Value, idx: u64) -> Result<
     } else {
         Ok(())
     }
+}
+
+/// DeletePropertyOrThrow core for dense arrays (B1f-5, §10.1.10.1): canonical
+/// indices ride mutator_delete (overlay removal + configurability + hole
+/// punch; absent → Ok); `length` is non-configurable (always Err); other named
+/// keys (incl. huge named-overflow indices) remove from extra_props with the
+/// usual configurability check, else Ok. Callers map Err to strict-throw /
+/// sloppy-false.
+pub(crate) fn array_delete_key(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    obj: &mut Value,
+    raw_key: Value,
+) -> Result<(), Value> {
+    if let Some(index) = value_to_array_index(raw_key) {
+        return mutator_delete(gc, vm, obj, index as u64);
+    }
+    let Some(key) = value_to_prop_key(raw_key) else {
+        // Unkeyable (non-integral floats, ...) → absent → vacuously true.
+        return Ok(());
+    };
+    if key.as_u64() == PropertyKey::from_string("length").as_u64() {
+        return Err(sort_type_error(gc, vm, "Cannot delete property 'length'"));
+    }
+    let Some(ptr) = obj.heap_ptr() else {
+        return Ok(());
+    };
+    let extra = unsafe { RuneArray::extra_props(ptr as *mut RuneArray) };
+    if extra.is_null() {
+        return Ok(());
+    }
+    let eshape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+    if let Some(slot) = eshape.lookup(&key) {
+        if eshape.attr_at(slot) & rune_core::shape::ATTR_CONFIGURABLE == 0 {
+            return Err(sort_type_error(
+                gc,
+                vm,
+                "Cannot delete a non-configurable property",
+            ));
+        }
+        unsafe { JSObject::remove_property(extra as *mut JSObject, &key) };
+        *obj = refresh_value(*obj);
+    }
+    Ok(())
 }
 
 /// Writeback: toSorted densifies into a fresh array; sort Sets each present

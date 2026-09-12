@@ -46,6 +46,61 @@ paths can't match immediates (no JIT change needed).
   exact, retracted in A2.)
 - 860 workspace / 0 failed; clippy/fmt/no-default/x86 clean.
 
+## B1f-5 DONE — array descriptors + integrity (2026-09-07)
+
+Fifth B1f sub-slice (length exotic, freeze/seal, index descriptors, overlay
+delete; observable-access machine → B1f-6):
+
+- **Storage**: 4 integrity bits in the array capacity word (A4 object
+  precedent — nonextensible/length-nonwritable/elems-nonconfigurable/
+  elems-nonwritable; masked in `capacity()`, GC size+scan, preserved by grow).
+  Whole-array flags stay exact (seal/freeze lock uniformly; growth impossible
+  once non-extensible). Overlay shape attrs carry per-index locks; bits
+  override them on reads (no shape rewrite on seal/freeze).
+- **Length exotic**: `array_exotic_set_length` core (§10.4.2.4: coerce with
+  ToUint32/ToNumber SameValueZero → RangeError before attr checks; shrink
+  descending deletes with k+1 abort + lock apply; non-writable rejects;
+  SameValue extension allowed) serving defineProperty-length, `length=`
+  assignment (funnel route with RangeError fidelity), and set_length_checked
+  (mutators — A6.1_T2). Named-overflow tail sweep (A3_T4's past-length entry).
+- **defineProperty**: index path gains exotic gates (non-writable length past
+  length; non-extensible creation) + ValidateAndApply-lite with overlay-DATA
+  entries for locked shapes (dense stays all-default; length auto-grows on
+  locked defines past end).
+- **Reads/deletes/stores**: getOwnPropertyDescriptor dense arm (holes absent;
+  overlay with attrs; dense defaults modulated by bits; length with its bit);
+  sort_delete_one removes overlay pairs (configurability-checked — 8-b-9) +
+  huge-named entries; do_store enforces frozen writes/creation gates + routes
+  overlay-data writes to their slots; DeleteProperty opcode reports
+  configurability (sloppy false, strict throw); freeze/seal/preventExtensions
+  + is-checks support arrays (primitives passthrough fixed en route).
+- **Gains (+~150 suite-wide, ZERO new failures)**: Array 1912→1936 (+24:
+  length×5, overlays/descriptors, concat-arguments tails, 7-b-9 family,
+  frozen sort/with); Object 1293→1372 (+79: defineProperty +50,
+  defineProperties +13, seal/freeze/isFrozen/preventExtensions); defineProperty
+  +50; length suite 14→19; freeze/seal/isFrozen/preventExtensions +14;
+  expressions +2 (delete operator). All fail-list diffed (array-wide, Object,
+  defineProperty, getOwnPropertyDescriptor, length, integrity suites);
+  String/Function/statements identical to stash. 876/0 workspace; stable
+  clippy (CI flags)/fmt/no-default clean.
+- **Tests**: `test_array_integrity_freeze_seal_descriptors` (14 asserts).
+- **Deferred with measurements**: JS valueOf-lengths/coercion-order (2×
+  ToPrimitive dispatches → B1f-6 machine); JS length/element getters+setters
+  (get-iter-method-err shape, set_length_no_args, sloppy/strict-arguments
+  full tails → B1f-6); custom-ctor Construct (old + new B1f-4/B1f-5
+  create/species/defineProperty-ctor tests → B1f-6); Proxy/target traps
+  (abrupt-completion, throws-when-false → B7); TypedArray/function wrappers
+  (seal-o-is-*exotic → B2/B4); resizable (oos); SameValue-on-frozen writes +
+  proto-data non-writable shadowing (micro-gaps, C); u64 machine keys +
+  scale-rooting (C).
+- **Process lessons**: (1) a "fixed" test that never observes the fix still
+  validates the walk — but stale binaries fake both directions; the ONLY
+  ground truth is touch + `Compiling` in output + behavior change. (2) Suite
+  numbers swinging ±6 between runs traced to one stale build, not flakes —
+  verify with back-to-back identical fail lists, not counts. (3) Baseline
+  passes via blanket throws (length-define always TypeError'd) unmask into
+  real failures when fixed — budget the follow-through (overlay-data here).
+
 ## B1f-4 DONE — Array.from (2026-09-07)
 
 Fourth B1f sub-slice (from drain; length-descriptors/freeze + array

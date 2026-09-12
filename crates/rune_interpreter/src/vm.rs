@@ -787,6 +787,11 @@ pub(crate) enum SpeciesStage {
     GetCtor,
     /// @@species JS getter outstanding (resume validates the species).
     GetSpecies,
+    /// Custom-ctor Construct outstanding (B1f-6d: resume installs the result).
+    Construct,
+    /// Array.of length-Set JS setter outstanding (B1f-6d: resume completes
+    /// with the object — no re-dispatch, so the setter fires exactly once).
+    OfLength,
 }
 
 /// Pending SpeciesConstructor-Gets (B1f-6c): runs the two Gets with frames
@@ -802,9 +807,26 @@ pub(crate) struct PendingSpeciesOp {
     pub(crate) stash_args: Vec<Value>,
     /// Resolved "constructor" value (set after the GetCtor leg).
     pub(crate) ctor: Value,
+    /// Length argument for the custom-ctor Construct (B1f-6d: species len;
+    /// callers pass it in because the machine re-drives from scratch).
+    pub(crate) construct_len: u64,
+    /// Fresh `this` of the outstanding Construct frame (B1f-6d): resume
+    /// substitutes it when the ctor body returns a non-object.
+    pub(crate) constructed_this: Value,
     pub(crate) stage: SpeciesStage,
     pub(crate) await_callee: Value,
 }
+/// Outcome of a builtin-driven Construct (B1f-6d): Done = built
+/// synchronously (builtin ctors); Pushed = a JS ctor frame was pushed
+/// (caller arms it as a Wait); Fail = spec TypeError.
+pub(crate) enum ConstructOut {
+    Done(Value),
+    /// Frame pushed; payload is the fresh `this` (resume substitutes it
+    /// when the body returns a non-object — New-path leniency).
+    Pushed(Value),
+    Fail(Value),
+}
+
 /// Set by the builtin function, consumed/updated by the Return handler.
 pub(crate) struct ArrayOpState {
     pub(crate) kind: ArrayOpKind,
@@ -836,6 +858,11 @@ pub(crate) struct ArrayOpState {
     /// dispatching. `index` holds the precomputed next-element index
     /// (usize::MAX = none remain → complete with the accumulator).
     pub(crate) awaiting_acc: bool,
+    /// B1f-6d: non-dense species result to return at completion (Map/Filter/
+    /// FlatMap only). The machine still fills a temp dense `result`
+    /// (callbacks stay observable); completion swaps this in. Dense customs
+    /// swap in as `result` directly and leave this None.
+    pub(crate) species_fallback: Option<Value>,
 }
 
 /// Stack-based bytecode interpreter with call frame support.
@@ -1039,6 +1066,9 @@ pub struct Vm {
     /// Species passed for builtin re-entry after a species suspension
     /// (B1f-6c): same single-flight contract as length_resume.
     pub(crate) species_passed: bool,
+    /// Custom-ctor result for builtin re-entry after a Construct suspension
+    /// (B1f-6d): the re-dispatched builtin installs it as its result.
+    pub(crate) species_made: Option<Value>,
     /// B1e: func of the most recently pushed callback/getter frame
     /// (machines copy this into their await state at push time).
     pub(crate) last_pushed_callee: Value,
@@ -1231,6 +1261,7 @@ impl Vm {
             length_resume: None,
             pending_species_op: None,
             species_passed: false,
+            species_made: None,
             last_pushed_callee: Value::undefined(),
             last_popped_callee: Value::undefined(),
             iter_state_symbol: rune_core::symbol::symbol_for("__rune_iter_state"),
@@ -3323,6 +3354,9 @@ impl Vm {
             if let Some(ref acc) = op.accumulator {
                 gc.push_root(acc as *const Value as *mut u64);
             }
+            if let Some(ref fb) = op.species_fallback {
+                gc.push_root(fb as *const Value as *mut u64);
+            }
         }
         if let Some(ref pa) = self.pending_assert {
             gc.push_root(&pa.expected_error as *const Value as *mut u64);
@@ -3413,10 +3447,14 @@ impl Vm {
         if let Some(ref ps) = self.pending_species_op {
             gc.push_root(&ps.stash_this as *const Value as *mut u64);
             gc.push_root(&ps.ctor as *const Value as *mut u64);
+            gc.push_root(&ps.constructed_this as *const Value as *mut u64);
             gc.push_root(&ps.await_callee as *const Value as *mut u64);
             for a in ps.stash_args.iter() {
                 gc.push_root(a as *const Value as *mut u64);
             }
+        }
+        if let Some(ref sm) = self.species_made {
+            gc.push_root(sm as *const Value as *mut u64);
         }
         if let Some(ref pra) = self.pending_replace_all_op {
             gc.push_root(&pra.fn_val as *const Value as *mut u64);
@@ -3480,6 +3518,163 @@ impl Vm {
         // place — historically new machines forgot this and fired on the
         // wrong Return, cf. v0.8.1 skip-gate batch).
         self.rebase_pending_depths();
+    }
+
+    /// Construct(ctor, args) for builtins (B1f-6d species/of/from): mirrors
+    /// the Opcode::New arms without touching the operand stack (caller holds
+    /// ctor/args in its op). TAG_FUNC allocates this (proto from
+    /// ctor.prototype) + pushes a constructor frame; builtin ctors run
+    /// inline; arrows/non-ctors Fail. Other builtin exotics (Map/Set/… as a
+    /// species) are a documented micro-gap (no test262 coverage). Like
+    /// push_callback_call, rebases live machines.
+    pub(crate) fn push_construct_frame(
+        &mut self,
+        gc: &mut SemiSpace,
+        ctor: Value,
+        args: Vec<Value>,
+    ) -> ConstructOut {
+        // Array [[Construct]] inline (single-arg length form et al).
+        if ctor == self.array_constructor {
+            let result = crate::builtins::array_constructor(gc, Value::undefined(), &args, self);
+            if let Some(exc) = self.pending_exception.take() {
+                return ConstructOut::Fail(exc);
+            }
+            return ConstructOut::Done(result);
+        }
+        // Object [[Construct]]: fresh empty object (args ignored).
+        if ctor == self.object_constructor {
+            let shape = Shape::empty();
+            let obj = JSObject::allocate(gc, shape, &[]);
+            if let Some(pp) = self.object_prototype.heap_ptr() {
+                unsafe {
+                    JSObject::set_prototype(obj, pp);
+                }
+            }
+            return ConstructOut::Done(Value::from_heap_ptr(obj as *mut u8));
+        }
+        // Smi builtins: only Test262Error constructs (New-arm rule).
+        if let Some(smi_val) = ctor.as_smi() {
+            if smi_val < 0 {
+                let id = ((-smi_val) as usize) - 1;
+                if id < self.builtins.len() {
+                    if self.builtins[id].name != "Test262Error" {
+                        let exc = crate::errors::error_object(
+                            gc,
+                            &self.error_protos,
+                            crate::errors::ErrorKind::TypeError,
+                            &format!("{} is not a constructor", self.builtins[id].name),
+                        );
+                        return ConstructOut::Fail(exc);
+                    }
+                    let shape = Shape::empty();
+                    let obj = JSObject::allocate(gc, shape, &[]);
+                    let obj_val = Value::from_heap_ptr(obj as *mut u8);
+                    let result = (self.builtins[id].func)(gc, obj_val, &args, &mut *self);
+                    if let Some(exc) = self.pending_exception.take() {
+                        return ConstructOut::Fail(exc);
+                    }
+                    if result.is_heap_object() {
+                        return ConstructOut::Done(result);
+                    }
+                    return ConstructOut::Done(obj_val);
+                }
+            }
+            return ConstructOut::Fail(crate::errors::error_object(
+                gc,
+                &self.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "value is not a constructor",
+            ));
+        }
+        // User functions: fresh this + constructor frame (New-arm shape).
+        if let Some(ptr) = ctor.heap_ptr() {
+            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+            if tag == TAG_FUNC {
+                if unsafe { Func::is_arrow(ptr as *mut Func) } {
+                    return ConstructOut::Fail(crate::errors::error_object(
+                        gc,
+                        &self.error_protos,
+                        crate::errors::ErrorKind::TypeError,
+                        "Arrow function is not a constructor",
+                    ));
+                }
+                let shape = Shape::empty();
+                let obj = JSObject::allocate(gc, shape, &[]);
+                let obj_val = Value::from_heap_ptr(obj as *mut u8);
+                if let Some(p) = ctor.heap_ptr() {
+                    let tag = unsafe { (*(p as *const GcHeader)).tag() };
+                    if tag == TAG_OBJECT {
+                        let shape = unsafe { JSObject::shape_ptr(p as *mut JSObject) };
+                        if let Some(slot) = shape.lookup(&PROTOTYPE_KEY) {
+                            let proto_val = unsafe { JSObject::get_slot(p as *mut JSObject, slot) };
+                            if proto_val.is_heap_object() {
+                                if let Some(proto_ptr) = proto_val.heap_ptr() {
+                                    unsafe {
+                                        JSObject::set_prototype(obj, proto_ptr);
+                                    }
+                                }
+                            }
+                        }
+                    } else if tag == TAG_FUNC {
+                        let proto_ptr = unsafe { Func::prototype(p as *mut Func) };
+                        if !proto_ptr.is_null() {
+                            unsafe {
+                                JSObject::set_prototype(obj, proto_ptr);
+                            }
+                        }
+                    }
+                }
+                let func_idx = unsafe { Func::func_index(ptr as *mut Func) } as usize;
+                let creator_prog =
+                    unsafe { &*(Func::prog_ptr(ptr as *mut Func) as *const BytecodeProgram) };
+                if func_idx < creator_prog.functions.len() {
+                    let func_prog = &creator_prog.functions[func_idx];
+                    let func_ptr = ptr as *mut Func;
+                    let func_env = unsafe { Func::env_ptr(func_ptr) };
+                    // B1e: callee identity for machine Return arms.
+                    self.last_pushed_callee = ctor;
+                    let mut locals: Vec<Value> = if func_prog.named_function {
+                        vec![ctor]
+                    } else {
+                        vec![]
+                    };
+                    let passed_argc = args.len();
+                    locals.extend(args);
+                    self.frames.push(Frame {
+                        locals,
+                        lexical_slots: Vec::new(),
+                        lexical_tdz: Vec::new(),
+                        lexical_const: Vec::new(),
+                        scope_boundaries: Vec::new(),
+                        passed_argc,
+                        pc: 0,
+                        stack_base: self.stack.len(),
+                        prog: func_prog as *const BytecodeProgram,
+                        generator_id: None,
+                        this: obj_val,
+                        is_constructor_call: true,
+                        constructed_object: obj_val,
+                        env: func_env,
+                        func_ptr: func_ptr as *mut u8,
+                        private_name_ids: std::ptr::null_mut(),
+                    });
+                    self.rebase_pending_depths();
+                    return ConstructOut::Pushed(obj_val);
+                }
+                return ConstructOut::Fail(crate::errors::error_object(
+                    gc,
+                    &self.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "value is not a constructor",
+                ));
+            }
+        }
+        ConstructOut::Fail(crate::errors::error_object(
+            gc,
+            &self.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "value is not a constructor",
+        ))
     }
 
     /// F4: overwrite every live pending machine's `source_frame_depth` with
@@ -7737,6 +7932,59 @@ impl Vm {
                             };
                             Func::set_prototype(resolved_ptr, resolved_proto);
                         }
+                        // MakeConstructor back-ref (§10.2.4 step 9.b):
+                        // prototype.constructor = F (writable + configurable,
+                        // NON-enumerable). Post-block so the binding below
+                        // feeds every later use (ids/flags/push). Inner
+                        // unsafe blocks omitted: already inside one.
+                        let mut resolved_ptr =
+                            if (*(resolved_ptr as *const GcHeader)).is_forwarded() {
+                                (*(resolved_ptr as *const GcHeader)).forwarding_addr() as *mut Func
+                            } else {
+                                resolved_ptr
+                            };
+                        if !is_arrow {
+                            // Proto is authoritative post-set (avoids threading
+                            // the inner binding out of its scope).
+                            let proto_now = Func::prototype(resolved_ptr);
+                            let ckey_str = HeapString::allocate(gc, "constructor");
+                            // Key alloc may have GC-moved either object.
+                            resolved_ptr = if (*(resolved_ptr as *const GcHeader)).is_forwarded() {
+                                (*(resolved_ptr as *const GcHeader)).forwarding_addr() as *mut Func
+                            } else {
+                                resolved_ptr
+                            };
+                            let mut proto_now = if !proto_now.is_null()
+                                && (*(proto_now as *const GcHeader)).is_forwarded()
+                            {
+                                (*(proto_now as *const GcHeader)).forwarding_addr()
+                            } else {
+                                proto_now
+                            };
+                            proto_now = {
+                                let roomy =
+                                    self.ensure_object_capacity(gc, proto_now as *mut JSObject);
+                                if (*(roomy as *const GcHeader)).is_forwarded() {
+                                    (*(roomy as *const GcHeader)).forwarding_addr()
+                                } else {
+                                    roomy as *mut u8
+                                }
+                            };
+                            let func_val = Value::from_heap_ptr(resolved_ptr as *mut u8);
+                            JSObject::add_property_with_attrs(
+                                proto_now as *mut JSObject,
+                                PropertyKey::from_string(&HeapString::to_string(ckey_str)),
+                                "constructor".to_string(),
+                                func_val,
+                                rune_core::shape::ATTR_WRITABLE
+                                    | rune_core::shape::ATTR_CONFIGURABLE,
+                            );
+                            resolved_ptr = if (*(resolved_ptr as *const GcHeader)).is_forwarded() {
+                                (*(resolved_ptr as *const GcHeader)).forwarding_addr() as *mut Func
+                            } else {
+                                resolved_ptr
+                            };
+                        }
                         // Propagate private name IDs from class evaluation frame to Func.
                         // Inside a constructor (which itself was created during class
                         // evaluation), the frame has no IDs but the executing Func does —
@@ -9709,19 +9957,29 @@ impl Vm {
                             // Done: push result and advance pc.
                             let final_result = match op_kind {
                                 ArrayOpKind::Filter | ArrayOpKind::FlatMap => {
-                                    Value::from_heap_ptr(op.result)
+                                    // B1f-6d: non-dense species result swaps in
+                                    // (temp dense takes the writes).
+                                    op.species_fallback
+                                        .unwrap_or(Value::from_heap_ptr(op.result))
                                 }
                                 ArrayOpKind::Map => {
                                     // B1f-3: positional writes leave trailing
                                     // holes — set the species length explicitly
                                     // (tail past capacity reads as holes).
-                                    unsafe {
-                                        RuneArray::set_length(
-                                            op.result as *mut RuneArray,
-                                            op.length,
-                                        )
-                                    };
-                                    Value::from_heap_ptr(op.result)
+                                    // B1f-6d: non-dense customs swap in (temp
+                                    // dense takes the writes, unwritten).
+                                    match op.species_fallback {
+                                        Some(fb) => fb,
+                                        None => {
+                                            unsafe {
+                                                RuneArray::set_length(
+                                                    op.result as *mut RuneArray,
+                                                    op.length,
+                                                )
+                                            };
+                                            Value::from_heap_ptr(op.result)
+                                        }
+                                    }
                                 }
                                 ArrayOpKind::Reduce | ArrayOpKind::ReduceRight => {
                                     op.accumulator.unwrap_or(Value::undefined())
@@ -9917,6 +10175,38 @@ impl Vm {
                                     let frames_len = self.frames.len();
                                     self.stack.truncate(callee_base);
                                     self.push(r);
+                                    self.frames[frames_len - 1].pc += 1;
+                                    continue 'run;
+                                }
+                                crate::builtins::SpeciesOut::Made(made) => {
+                                    // Publish the constructed object for the
+                                    // re-dispatched builtin, which installs
+                                    // it (B1f-6d). Shared re-dispatch body.
+                                    self.species_made = Some(made);
+                                    let depth_before = self.frames.len();
+                                    let r = (sop.caller)(gc, sop.stash_this, &sop.stash_args, self);
+                                    if let Some(exc) = self.pending_exception.take() {
+                                        if let Some(exit) = self.handle_throw(gc, exc) {
+                                            return exit;
+                                        }
+                                        continue 'run;
+                                    }
+                                    if self.frames.len() > depth_before {
+                                        continue 'run;
+                                    }
+                                    let frames_len = self.frames.len();
+                                    self.stack.truncate(callee_base);
+                                    self.push(r);
+                                    self.frames[frames_len - 1].pc += 1;
+                                    continue 'run;
+                                }
+                                crate::builtins::SpeciesOut::Done(v) => {
+                                    // Terminal value (of-length-set resume):
+                                    // no re-dispatch — push as the builtin's
+                                    // result (sort-Done shape).
+                                    let frames_len = self.frames.len();
+                                    self.stack.truncate(callee_base);
+                                    self.push(v);
                                     self.frames[frames_len - 1].pc += 1;
                                     continue 'run;
                                 }

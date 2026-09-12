@@ -79,6 +79,49 @@ errors — all corrected below by reading tests + probing the engine):
 - **Order**: 6d → fill/toReversed audits → 6e → B2 → B8 → B5 → B3 →
   B4 → B6 → B7 → C → J3.
 
+## B1f-6d DONE — custom-ctor Construct + install (2026-09-07)
+
+Fourth B1f-6 sub-slice (6a ✓ → 6b ✓ → 6c ✓ → 6d HERE → 6e element gaps):
+
+- **New push_construct_frame helper** (vm.rs: mirrors the Opcode::New arms
+  without touching the operand stack — Array/Object inline, Test262Error
+  Smi inline, TAG_FUNC fresh-this (proto from ctor.prototype) + constructor
+  frame, arrows/non-ctors Fail; other builtin exotics documented micro-gap)
+  + **PendingSpeciesOp Construct leg** (construct_len, constructed_this for
+  New-path non-object→this leniency, Made/Done outcomes, species_made
+  publish, full Return cascade) + **install** (dense R swaps in as the
+  buffer — reset to 0 first so derived-Array holes don't offset; identity
+  survives grow via reference scans; plain R takes CreateDataPropertyOrThrow
+  per present element via temp-then-define; map/filter/flatMap non-array R
+  via species_fallback temp+swap) + **of-custom-this** (default for
+  non-ctors, Construct + defines + Set length with a LengthSet suspend leg
+  so JS setters fire exactly once — new Done arm, no re-dispatch) +
+  **from-cstm** (Construct(C) before GetMethod; from_result_write already
+  generic) + **MakeConstructor prototype.constructor back-ref**
+  (non-enumerable W|C — result.constructor === C, instanceof generally).
+- **Gains (+31 Array, ZERO new failures)**: create-species ×5, abrupt ×5,
+  neg-zero ×2, concat locked-install ×6, slice/splice/flat target ×6,
+  of-custom ×5 (incl. Pack setter hits===1), from-cstm ×2 + 1 bonus.
+  Array 2101→2132 (2132 passed / 751 failed). Siblings: 0 new everywhere;
+  +6 spillover (Object seal-async/generator ×3, Function S10.1.1, statements
+  S13.2 ×2 — all via the back-ref).
+- **Pre-existing bugs found (NOT 6d)**: assert.throws × machine
+  return-path (thunk ending in a machine call yields undefined + passes
+  vacuously — map/filter/flatMap target-* pass spuriously today, become
+  real here; throw-path unaffected) → own slice later. `new.target`
+  unparseable → deferred (no winnable test; flatMap-poisoned also needs the
+  B2 literal).
+- **Still failing (owned)**: flatMap species trio (B2 literal + new.target);
+  of/new-array-object (B8 bind); undef-invalid-len + traps-order (B7);
+  from remainder (6e); Symbol.species/return-value (B2 static).
+- 880/0 workspace (species_prologue updated to Construct semantics + 1 new
+  construct test: 5 probes); stable clippy (CI flags — 3 lints)/fmt/
+  no-default clean.
+- **Process**: flatMap-block clobber caught by hunk-review (diff-stat per
+  fn before building — non-matching oldStrings are the tell); `updated
+  heap refs keep result===instance` verified by probe not reasoning;
+  exit codes off runners not pipes.
+
 ## B1f-6c DONE — species Get dispatch through frames (2026-09-07)
 
 Third B1f-6 sub-slice (re-split by categorize-before-slicing: 6a species

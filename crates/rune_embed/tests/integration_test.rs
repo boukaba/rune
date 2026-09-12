@@ -1572,7 +1572,9 @@ fn test_array_species_prologue() {
         .eval("var a = [1, 2]; var c = a.concat([3]); c.length === 3 && Array.isArray(c);")
         .unwrap();
     assert!(r.to_bool());
-    let r = ctx.eval("var C = function () {}; var a = [1]; a.constructor = {}; a.constructor[Symbol.species] = C; var s = a.slice(); s.length === 1 && Array.isArray(s);").unwrap();
+    // B1f-6d: valid custom ctors Construct (len arg, new-this) and the
+    // result installs (dense swaps in; plain takes defines, not Array).
+    let r = ctx.eval("var calls = 0; var C = function (len) { calls += 1; this.len = len; }; var a = [1]; a.constructor = {}; a.constructor[Symbol.species] = C; var s = a.slice(); calls === 1 && s instanceof C && s[0] === 1 && !Array.isArray(s);").unwrap();
     assert!(r.to_bool());
 }
 
@@ -1635,6 +1637,36 @@ fn test_array_species_getters() {
     // throw (IsArray false → ArrayCreate path).
     let r = ctx
         .eval("var o = {0: 5, length: 1}; Object.defineProperty(o, 'constructor', {get: function () { throw 'must-not-run'; }}); var s = Array.prototype.slice.call(o); s.length === 1 && s[0] === 5;")
+        .unwrap();
+    assert!(r.to_bool());
+}
+
+#[test]
+fn test_array_species_construct() {
+    // B1f-6d: custom species ctors Construct(len) via New-frames (called
+    // once, new-this with ctor.prototype, +0 len arg); object results win,
+    // otherwise the fresh this installs; dense results swap in as the
+    // buffer (identity holds); abrupt ctors propagate with no callbacks.
+    let mut ctx = Context::new_small();
+    // Full protocol on map (create-species.js shape).
+    let r = ctx
+        .eval("var calls = 0; var instance = []; var seenThis, seenArgs; var C = function () { calls += 1; seenThis = this; seenArgs = arguments; return instance; }; var a = [1, 2, 3]; a.constructor = {}; a.constructor[Symbol.species] = C; var r = a.map(function () {}); calls === 1 && seenArgs.length === 1 && seenArgs[0] === 3 && r === instance && Object.getPrototypeOf(seenThis) === C.prototype;")
+        .unwrap();
+    assert!(r.to_bool());
+    // Throwing ctor propagates; callback never runs.
+    ctx.eval("assert.throws('ctor-abrupt', function () { var a = [1]; var n = 0; a.constructor = {}; a.constructor[Symbol.species] = function () { throw 'ctor-abrupt'; }; a.map(function () { n += 1; }); });")
+        .unwrap();
+    // Neg-zero species length arrives as +0 on a plain install.
+    let r = ctx
+        .eval("var got; var C = function () { got = arguments; }; var a = []; a.constructor = {}; a.constructor[Symbol.species] = C; a.slice(0, -0); got.length === 1 && got[0] === 0 && (1 / got[0] > 0);")
+        .unwrap();
+    assert!(r.to_bool());
+    // Non-extensible custom result: concat's first write throws TypeError.
+    ctx.eval("assert.throws(TypeError, function () { var A = function (l) { this.length = 0; Object.preventExtensions(this); }; var a = []; a.constructor = {}; a.constructor[Symbol.species] = A; a.concat(1); });")
+        .unwrap();
+    // Array.of custom this: defines + Set length (setter fires once).
+    let r = ctx
+        .eval("var hits = 0; function Pack() { Object.defineProperty(this, 'length', {set: function (l) { hits += 1; }}); } var r = Array.of.call(Pack, 'a', 'b'); hits === 1 && r instanceof Pack && r[0] === 'a' && r[1] === 'b';")
         .unwrap();
     assert!(r.to_bool());
 }

@@ -7352,9 +7352,167 @@ fn wire_array_proto(_gc: &mut SemiSpace, vm: &Vm, arr: *mut RuneArray) {
 }
 
 /// Array.of(...items) — collects arguments into a fresh array (§22.1.3.1).
-pub fn array_of(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    // Generic over `this` ctor in spec; engine always builds dense arrays.
-    build_array(gc, args, vm)
+pub fn array_of(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    // Custom `this` Constructs (B1f-6d): non-constructors (incl. undefined)
+    // take the default %Array% path (Array.of.call(undefined) is Array —
+    // ground truth over the letter of the spec); the %Array% ctor itself is
+    // plain (Construct(Array, len) is unobservable). Re-entry consumes a
+    // published construct result first-thing (species_made borrows the
+    // species suspend record — same single-flight contract).
+    if let Some(made) = vm.species_made.take() {
+        return of_install(gc, vm, made, args);
+    }
+    if this == vm.array_constructor || !crate::vm::value_is_constructor(vm, this) {
+        // Generic over `this` ctor in spec; engine always builds dense arrays.
+        return build_array(gc, args, vm);
+    }
+    let len_value = length_value(args.len() as u64);
+    match vm.push_construct_frame(gc, this, vec![len_value]) {
+        crate::vm::ConstructOut::Done(r) => of_install(gc, vm, r, args),
+        crate::vm::ConstructOut::Pushed(fresh_this) => {
+            let op = crate::vm::PendingSpeciesOp {
+                source_frame_depth: vm.frame_depth() - 1,
+                caller: array_of,
+                stash_this: this,
+                stash_args: args.to_vec(),
+                ctor: this,
+                construct_len: args.len() as u64,
+                constructed_this: fresh_this,
+                stage: crate::vm::SpeciesStage::Construct,
+                await_callee: this,
+            };
+            vm.pending_species_op = Some(op);
+            Value::undefined()
+        }
+        crate::vm::ConstructOut::Fail(e) => {
+            vm.set_pending_exception(e);
+            Value::undefined()
+        }
+    }
+}
+
+/// Install Array.of items on a constructed custom this (B1f-6d):
+/// CreateDataPropertyOrThrow per index, then Set length (fires Pack-style
+/// setters — JS setters suspend through the species op's LengthSet leg).
+/// Dense results push (identity-safe via reference scans).
+fn of_install(gc: &mut SemiSpace, vm: &mut Vm, made: Value, args: &[Value]) -> Value {
+    let made = refresh_value(made);
+    if species_result_is_dense(made) {
+        let mut cur = made;
+        for v in args.iter() {
+            let v = refresh_value(*v);
+            let mcur = refresh_value(cur);
+            cur = mcur;
+            if let Err(e) = result_push(gc, vm, &mut cur, v) {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
+        return refresh_value(cur);
+    }
+    for (i, v) in args.iter().enumerate() {
+        let v = refresh_value(*v);
+        if let Err(e) = species_define(gc, vm, refresh_value(made), i as u64, v) {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    }
+    of_set_length(gc, vm, made, args.len() as u64, args)
+}
+
+/// Set(A, "length", len, true) on an of-result (B1f-6d): data/absent lengths
+/// define inline; a JS setter pushes a frame + suspends the species op on
+/// the LengthSet leg (resume completes with the object — no re-dispatch,
+// so the setter fires exactly once).
+fn of_set_length(gc: &mut SemiSpace, vm: &mut Vm, made: Value, len: u64, args: &[Value]) -> Value {
+    let made = refresh_value(made);
+    let len_key = Value::from_heap_ptr(HeapString::allocate(gc, "length") as *mut u8);
+    let made = refresh_value(made);
+    let current = load_property_recursive(made, len_key, None, gc);
+    let made = refresh_value(made);
+    let Some(ap) = current
+        .heap_ptr()
+        .filter(|p| unsafe { (*(*p as *const GcHeader)).tag() == TAG_ACCESSOR })
+    else {
+        // Data or absent: plain define (fresh R has no locks to trip).
+        let desc = PropDesc {
+            has_value: true,
+            value: length_value(len),
+            has_writable: true,
+            writable: true,
+            has_get: false,
+            get: Value::undefined(),
+            has_set: false,
+            set: Value::undefined(),
+            has_enumerable: true,
+            enumerable: true,
+            has_configurable: true,
+            configurable: true,
+        };
+        if let Some(ptr) = made.heap_ptr() {
+            if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_OBJECT {
+                let key = PropertyKey::from_string("length");
+                match define_own_property(
+                    gc,
+                    vm,
+                    ptr as *mut JSObject,
+                    key,
+                    "length".to_string(),
+                    &desc,
+                ) {
+                    Ok(_) => return refresh_value(made),
+                    Err(e) => {
+                        vm.set_pending_exception(e);
+                        return Value::undefined();
+                    }
+                }
+            }
+        }
+        vm.set_pending_exception(sort_type_error(gc, vm, "Cannot set length on of-result"));
+        return Value::undefined();
+    };
+    let setter = unsafe { rune_core::accessor::AccessorPair::setter(ap) };
+    if setter.is_undefined() || setter.is_null() {
+        vm.set_pending_exception(sort_type_error(gc, vm, "Cannot set length on of-result"));
+        return Value::undefined();
+    }
+    if let Some(smi) = setter.as_smi() {
+        if smi < 0 {
+            let id = ((-smi) as usize) - 1;
+            if id < vm.builtins.len() {
+                let r = (vm.builtins[id].func)(gc, made, &[length_value(len)], vm);
+                if let Some(exc) = vm.pending_exception.take() {
+                    vm.set_pending_exception(exc);
+                    return Value::undefined();
+                }
+                let _ = r;
+                return refresh_value(made);
+            }
+        }
+        vm.set_pending_exception(sort_type_error(gc, vm, "Cannot set length on of-result"));
+        return Value::undefined();
+    }
+    if setter
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC)
+    {
+        vm.push_callback_call(gc, setter, made, vec![length_value(len)]);
+        let op = crate::vm::PendingSpeciesOp {
+            source_frame_depth: vm.frame_depth() - 1,
+            caller: array_of,
+            stash_this: made,
+            stash_args: args.to_vec(),
+            ctor: made,
+            construct_len: len,
+            constructed_this: Value::undefined(),
+            stage: crate::vm::SpeciesStage::OfLength,
+            await_callee: vm.last_pushed_callee,
+        };
+        vm.pending_species_op = Some(op);
+        return Value::undefined();
+    }
+    vm.set_pending_exception(sort_type_error(gc, vm, "Cannot set length on of-result"));
+    Value::undefined()
 }
 
 // ---------- B1f-4: Array.from (§23.1.2.1) ----------
@@ -7925,6 +8083,51 @@ pub fn array_from(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
     }
     let map_this = args.get(2).copied().unwrap_or(Value::undefined());
     let items = args.first().copied().unwrap_or(Value::undefined());
+    // B1f-6d: custom-`this` Construct (spec order: C validated + Construct(C)
+    // BEFORE GetMethod — iter-cstm-ctor-err throws without touching items).
+    // Re-entry consumes a published construct result first-thing (the species
+    // suspend record is borrowed — same single-flight contract).
+    let custom_made = if let Some(made) = vm.species_made.take() {
+        Some(made)
+    } else if crate::vm::value_is_constructor(vm, this)
+        && this != vm.array_constructor
+        && this != vm.object_constructor
+    {
+        match vm.push_construct_frame(gc, this, vec![]) {
+            crate::vm::ConstructOut::Done(r) => {
+                if r.heap_ptr().is_none() {
+                    vm.set_pending_exception(sort_type_error(
+                        gc,
+                        vm,
+                        "Array.from constructor returned a non-object",
+                    ));
+                    return Value::undefined();
+                }
+                Some(r)
+            }
+            crate::vm::ConstructOut::Pushed(fresh_this) => {
+                let op = crate::vm::PendingSpeciesOp {
+                    source_frame_depth: vm.frame_depth() - 1,
+                    caller: array_from,
+                    stash_this: this,
+                    stash_args: args.to_vec(),
+                    ctor: this,
+                    construct_len: 0,
+                    constructed_this: fresh_this,
+                    stage: crate::vm::SpeciesStage::Construct,
+                    await_callee: this,
+                };
+                vm.pending_species_op = Some(op);
+                return Value::undefined();
+            }
+            crate::vm::ConstructOut::Fail(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
+    } else {
+        None
+    };
     // Step 4: GetMethod(@@iterator). JS getters read as absent (B1f-6 gap —
     // same class as spreadable flags); null/undefined fall to array-like,
     // whose ToObject throws (items-is-null-throws).
@@ -7938,17 +8141,20 @@ pub fn array_from(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
     };
     // Ctor dispatch (steps 5.1 / 9): IsConstructor via identity; JS ctors
     // (TAG_FUNC) fall back to plain (B1f-6 runs real Construct).
-    let mut result = match from_ctor_kind(this, vm) {
-        FromCtor::Array | FromCtor::Plain => fresh_dense_array(gc, vm),
-        FromCtor::Object => {
-            let o = object_builtin(gc, Value::undefined(), &[], vm);
-            if let Some(optr) = o.heap_ptr() {
-                if let Some(pptr) = vm.object_prototype.heap_ptr() {
-                    unsafe { JSObject::set_prototype(optr as *mut JSObject, pptr) };
+    let mut result = match custom_made {
+        Some(m) => m,
+        None => match from_ctor_kind(this, vm) {
+            FromCtor::Array | FromCtor::Plain => fresh_dense_array(gc, vm),
+            FromCtor::Object => {
+                let o = object_builtin(gc, Value::undefined(), &[], vm);
+                if let Some(optr) = o.heap_ptr() {
+                    if let Some(pptr) = vm.object_prototype.heap_ptr() {
+                        unsafe { JSObject::set_prototype(optr as *mut JSObject, pptr) };
+                    }
                 }
+                o
             }
-            o
-        }
+        },
     };
     result = refresh_value(result);
     let done_key = Value::from_heap_ptr(HeapString::allocate(gc, "done") as *mut u8);
@@ -12008,6 +12214,10 @@ pub fn apply_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
 pub(crate) enum SpeciesOut {
     Wait,
     Passed,
+    /// Custom ctor constructed (B1f-6d): caller installs the object.
+    Made(Value),
+    /// Terminal value, no re-dispatch (B1f-6d of-length-set resume).
+    Done(Value),
     Fail(Value),
 }
 
@@ -12121,7 +12331,8 @@ fn species_after_ctor(
 }
 
 /// After the @@species Get: null/undefined → default; non-ctor → TypeError;
-/// valid ctors pass (plain fallback until 6d runs Construct).
+/// the %Array% ctor → default (Construct(Array, len) is unobservable);
+/// other valid ctors Construct (B1f-6d).
 fn species_after_species(
     vm: &mut Vm,
     gc: &mut SemiSpace,
@@ -12139,7 +12350,41 @@ fn species_after_species(
             "Array species is not a constructor",
         ));
     }
-    SpeciesOut::Passed
+    if sp == vm.array_constructor {
+        return SpeciesOut::Passed;
+    }
+    species_construct(vm, gc, op, sp)
+}
+
+/// Construct(C, «len») for a validated custom species ctor (B1f-6d): sync
+/// builtin ctors resolve now; JS ctors push a frame + arm Construct (caller
+/// stores op, returns Wait); abrupt propagates as Fail.
+fn species_construct(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    op: &mut crate::vm::PendingSpeciesOp,
+    ctor: Value,
+) -> SpeciesOut {
+    let len_value = length_value(op.construct_len);
+    match vm.push_construct_frame(gc, ctor, vec![len_value]) {
+        crate::vm::ConstructOut::Done(r) => {
+            if r.heap_ptr().is_none() {
+                return SpeciesOut::Fail(sort_type_error(
+                    gc,
+                    vm,
+                    "Array species constructor returned a non-object",
+                ));
+            }
+            SpeciesOut::Made(r)
+        }
+        crate::vm::ConstructOut::Pushed(fresh_this) => {
+            op.stage = crate::vm::SpeciesStage::Construct;
+            op.await_callee = ctor;
+            op.constructed_this = fresh_this;
+            SpeciesOut::Wait
+        }
+        crate::vm::ConstructOut::Fail(e) => SpeciesOut::Fail(e),
+    }
 }
 
 /// Drive species resolution from entry (B1f-6c): non-Array receivers take the
@@ -12177,7 +12422,10 @@ fn species_drive(
     }
 }
 
-/// Resume species resolution with a JS getter's return value (B1f-6c).
+/// Resume species resolution with a JS frame's return value (B1f-6c/6d):
+/// GetCtor/GetSpecies continue the Gets; Construct validates the built
+/// object (New-path guarantees Object-or-throw — the guard is belt-and-
+/// braces for exotic inline results).
 pub(crate) fn species_resume(
     vm: &mut Vm,
     gc: &mut SemiSpace,
@@ -12188,12 +12436,29 @@ pub(crate) fn species_resume(
     match kind {
         crate::vm::SpeciesStage::GetCtor => species_after_ctor(vm, gc, op, result),
         crate::vm::SpeciesStage::GetSpecies => species_after_species(vm, gc, op, result),
+        crate::vm::SpeciesStage::Construct => {
+            // New-path leniency (mirrors Opcode::New): an object result wins,
+            // anything else falls back to the fresh `this`.
+            let r = if result.heap_ptr().is_some() {
+                result
+            } else {
+                refresh_value(op.constructed_this)
+            };
+            SpeciesOut::Made(r)
+        }
+        crate::vm::SpeciesStage::OfLength => {
+            // Length setter finished (its own abrupt already propagated via
+            // the unwind path — a normal return completes the of-result).
+            let _ = result;
+            SpeciesOut::Done(refresh_value(op.stash_this))
+        }
     }
 }
 
-/// Entry: resolve species for `caller`, suspending on JS getters (B1f-6c).
-/// Re-entry (after resume) consumes vm.species_passed first-thing. Pre-point
-/// work in all 8 wired builtins is pure-or-alloc, so re-entry is
+/// Entry: resolve species for `caller` at an ArraySpeciesCreate point with
+/// creation length `len` (B1f-6c/6d). Re-entry consumes vm.species_made
+/// (install the object) then vm.species_passed (build plain) first-thing.
+/// Pre-point work in all wired builtins is pure-or-alloc, so re-entry is
 /// side-effect free (length re-drives only when BOTH length and species
 /// getters are JS — documented micro-gap).
 pub(crate) fn species_stage(
@@ -12202,7 +12467,11 @@ pub(crate) fn species_stage(
     caller: crate::builtins::BuiltinFn,
     this: Value,
     args: &[Value],
+    len: u64,
 ) -> SpeciesOut {
+    if let Some(made) = vm.species_made.take() {
+        return SpeciesOut::Made(made);
+    }
     if std::mem::take(&mut vm.species_passed) {
         return SpeciesOut::Passed;
     }
@@ -12212,6 +12481,8 @@ pub(crate) fn species_stage(
         stash_this: this,
         stash_args: args.to_vec(),
         ctor: Value::undefined(),
+        construct_len: len,
+        constructed_this: Value::undefined(),
         stage: crate::vm::SpeciesStage::GetCtor,
         await_callee: Value::undefined(),
     };
@@ -12223,6 +12494,88 @@ pub(crate) fn species_stage(
         }
         other => other,
     }
+}
+
+/// Whether a constructed species result takes raw dense writes (B1f-6d).
+/// Only dense arrays buffer-swap; everything else goes through
+/// CreateDataPropertyOrThrow per write (species_define).
+pub(crate) fn species_result_is_dense(r: Value) -> bool {
+    r.heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_ARRAY)
+}
+
+/// CreateDataPropertyOrThrow on a non-dense species result (B1f-6d): plain
+/// objects define (non-extensible / non-configurable → TypeError, setters
+/// never fire — this is Define, not Set). Anything else cannot hold indexed
+/// data → TypeError.
+pub(crate) fn species_define(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    result: Value,
+    idx: u64,
+    val: Value,
+) -> Result<(), Value> {
+    let Some(ptr) = result.heap_ptr() else {
+        return Err(sort_type_error(
+            gc,
+            vm,
+            "Cannot create property on species result",
+        ));
+    };
+    if unsafe { (*(ptr as *const GcHeader)).tag() } != TAG_OBJECT {
+        return Err(sort_type_error(
+            gc,
+            vm,
+            "Cannot create property on species result",
+        ));
+    }
+    let key = PropertyKey::from_string(&idx.to_string());
+    let desc = PropDesc {
+        has_value: true,
+        value: val,
+        has_writable: true,
+        writable: true,
+        has_get: false,
+        get: Value::undefined(),
+        has_set: false,
+        set: Value::undefined(),
+        has_enumerable: true,
+        enumerable: true,
+        has_configurable: true,
+        configurable: true,
+    };
+    match define_own_property(gc, vm, ptr as *mut JSObject, key, idx.to_string(), &desc) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Install a temp dense result's present elements onto a non-dense species
+/// result (B1f-6d): positional CreateDataPropertyOrThrow in ascending order;
+/// holes stay absent (spec HasProperty gate). Returns the object for chaining.
+pub(crate) fn species_install_temp(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    made: Value,
+    tmp: Value,
+) -> Result<Value, Value> {
+    let tmp = refresh_value(tmp);
+    let len = tmp
+        .heap_ptr()
+        .map(|p| unsafe { RuneArray::length(p as *mut RuneArray) as u64 })
+        .unwrap_or(0);
+    let mut i = 0u64;
+    while i < len {
+        let v = tmp
+            .heap_ptr()
+            .map(|p| unsafe { RuneArray::get_element(p as *mut RuneArray, i as usize) })
+            .unwrap_or(Value::undefined());
+        if v != Value::empty_sentinel() {
+            species_define(gc, vm, refresh_value(made), i, v)?;
+        }
+        i += 1;
+    }
+    Ok(refresh_value(made))
 }
 
 // ---------- B1f-2 shared helpers (slice/splice/concat audit) ----------
@@ -12711,21 +13064,49 @@ pub fn array_slice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
         vm.set_pending_exception(sort_range_error(gc, vm, "Invalid array length"));
         return Value::undefined();
     }
-    // B1f-6c: species Gets suspend (op stored, frame pushed); resume
-    // re-dispatches (pre-point work is pure-or-alloc).
-    match species_stage(gc, vm, array_slice, this, args) {
-        SpeciesOut::Passed => {}
+    // B1f-6d: species Construct installs (dense swaps in as the buffer;
+    // plain objects take CreateDataPropertyOrThrow per present element).
+    let made = match species_stage(gc, vm, array_slice, this, args, count) {
+        SpeciesOut::Passed => None,
+        SpeciesOut::Made(r) => Some(r),
+        // Unreachable via species_stage (only the OfLength resume emits
+        // Done, and it never re-enters a species site) — degrade to plain.
+        SpeciesOut::Done(_) => None,
         SpeciesOut::Wait => return Value::undefined(),
         SpeciesOut::Fail(e) => {
             vm.set_pending_exception(e);
             return Value::undefined();
         }
-    }
-    let mut result = fresh_dense_array(gc, vm);
+    };
+    let mut result = match made {
+        Some(m) if species_result_is_dense(m) => {
+            // Fresh R starts empty for the positional copy (a derived-Array
+            // R carries len holes from Construct — reset so pushes land 0..).
+            if let Some(rptr) = m.heap_ptr() {
+                unsafe { RuneArray::set_length(rptr as *mut RuneArray, 0) };
+            }
+            m
+        }
+        _ => fresh_dense_array(gc, vm),
+    };
+    let made_dense = made.map(species_result_is_dense);
     let mut obj = this;
     if let Err(e) = copy_range_to_result(gc, vm, &mut obj, &mut result, k, fin) {
         vm.set_pending_exception(e);
         return Value::undefined();
+    }
+    // Revalidate after the (possibly GCing) copy; denseness is tag-stable.
+    let made = made.map(refresh_value);
+    if let Some(m) = made {
+        if made_dense != Some(true) {
+            match species_install_temp(gc, vm, m, result) {
+                Ok(r) => return r,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            }
+        }
     }
     // Length is exact by construction (holes pushed as sentinel); set
     // explicitly per spec step 9 (covers non-Array species — plain here).
@@ -12750,16 +13131,30 @@ pub fn array_concat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    // B1f-6c: species Gets suspend (step 2 — before the item loop).
-    match species_stage(gc, vm, array_concat, this, args) {
-        SpeciesOut::Passed => {}
+    // B1f-6d: species Construct installs (len 0 per spec; dense swaps in,
+    // plain takes CreateDataPropertyOrThrow per write via temp install).
+    let made = match species_stage(gc, vm, array_concat, this, args, 0) {
+        SpeciesOut::Passed => None,
+        SpeciesOut::Made(r) => Some(r),
+        // Unreachable via species_stage (only the OfLength resume emits
+        // Done, and it never re-enters a species site) — degrade to plain.
+        SpeciesOut::Done(_) => None,
         SpeciesOut::Wait => return Value::undefined(),
         SpeciesOut::Fail(e) => {
             vm.set_pending_exception(e);
             return Value::undefined();
         }
-    }
-    let mut result = fresh_dense_array(gc, vm);
+    };
+    let mut result = match made {
+        Some(m) if species_result_is_dense(m) => {
+            if let Some(rptr) = m.heap_ptr() {
+                unsafe { RuneArray::set_length(rptr as *mut RuneArray, 0) };
+            }
+            m
+        }
+        _ => fresh_dense_array(gc, vm),
+    };
+    let made_dense = made.map(species_result_is_dense);
     let mut next: u64 = 0;
     // Operands: `this` first, then the args — each refreshed at use (pushes may
     // GC-move them; B1f-1 discipline). Never pre-collect into a Vec (stale).
@@ -12817,7 +13212,20 @@ pub fn array_concat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
         n += 1;
     }
     // Final length set explicitly (spec step 6 — trailing holes/non-Array
-    // species; plain here, exact by construction).
+    // species; plain here, exact by construction). Plain customs take the
+    // temp install instead (defines throw on locked shapes).
+    let made = made.map(refresh_value);
+    if let Some(m) = made {
+        if made_dense != Some(true) {
+            match species_install_temp(gc, vm, m, result) {
+                Ok(r) => return r,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            }
+        }
+    }
     result = refresh_value(result);
     if let Some(rptr) = result.heap_ptr() {
         unsafe { RuneArray::set_length(rptr as *mut RuneArray, next as u32) };
@@ -12890,17 +13298,31 @@ pub fn array_splice(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mu
         vm.set_pending_exception(sort_range_error(gc, vm, "Invalid array length"));
         return Value::undefined();
     }
-    // B1f-6c: species Gets suspend (step 10 — after the overflow check).
-    match species_stage(gc, vm, array_splice, this, args) {
-        SpeciesOut::Passed => {}
+    // B1f-6d: species Construct installs the deleted array (dense swaps
+    // in; plain takes CreateDataPropertyOrThrow per present element).
+    let made = match species_stage(gc, vm, array_splice, this, args, actual_delete) {
+        SpeciesOut::Passed => None,
+        SpeciesOut::Made(r) => Some(r),
+        // Unreachable via species_stage (only the OfLength resume emits
+        // Done, and it never re-enters a species site) — degrade to plain.
+        SpeciesOut::Done(_) => None,
         SpeciesOut::Wait => return Value::undefined(),
         SpeciesOut::Fail(e) => {
             vm.set_pending_exception(e);
             return Value::undefined();
         }
-    }
+    };
     // Steps 10-13: deleted copy (fresh array, holes preserved).
-    let mut deleted = fresh_dense_array(gc, vm);
+    let mut deleted = match made {
+        Some(m) if species_result_is_dense(m) => {
+            if let Some(rptr) = m.heap_ptr() {
+                unsafe { RuneArray::set_length(rptr as *mut RuneArray, 0) };
+            }
+            m
+        }
+        _ => fresh_dense_array(gc, vm),
+    };
+    let made_dense = made.map(species_result_is_dense);
     let mut ro = this;
     if let Err(e) = copy_range_to_result(
         gc,
@@ -12915,6 +13337,19 @@ pub fn array_splice(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mu
     }
     this = refresh_value(ro);
     deleted = refresh_value(deleted);
+    let made = made.map(refresh_value);
+    if let Some(m) = made {
+        if made_dense != Some(true) {
+            // Plain customs return here (spec never Sets length on them).
+            match species_install_temp(gc, vm, m, deleted) {
+                Ok(r) => return r,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            }
+        }
+    }
     if let Some(dptr) = deleted.heap_ptr() {
         unsafe { RuneArray::set_length(dptr as *mut RuneArray, actual_delete as u32) };
     }
@@ -13163,6 +13598,7 @@ fn array_index_search(
         accumulator: Some(search),
         awaiting_element: None,
         awaiting_acc: false,
+        species_fallback: None,
     };
     // First step runs inline; only a JS element getter parks the machine.
     match crate::vm::array_search_step(vm, gc, &mut op, None) {
@@ -13342,6 +13778,7 @@ pub fn array_for_each(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
         accumulator: None,
         awaiting_element: None,
         awaiting_acc: false,
+        species_fallback: None,
     });
     // B1a: accessor elements dispatch their getter (Wait records the
     // await; SyncErr routes through the normal pending-exception path).
@@ -13375,15 +13812,25 @@ pub fn array_filter(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mu
     else {
         return Value::undefined();
     };
-    // B1f-6c: species Gets suspend (step 4 — after the callable check).
-    match species_stage(gc, vm, array_filter, this, args) {
-        SpeciesOut::Passed => {}
+    // B1f-6d: species Construct installs (len 0; dense swaps in as the
+    // buffer, plain returns at completion via species_fallback).
+    let made = match species_stage(gc, vm, array_filter, this, args, 0) {
+        SpeciesOut::Passed => None,
+        SpeciesOut::Made(r) => Some(r),
+        // Unreachable via species_stage (only the OfLength resume emits
+        // Done, and it never re-enters a species site) — degrade to plain.
+        SpeciesOut::Done(_) => None,
         SpeciesOut::Wait => return Value::undefined(),
         SpeciesOut::Fail(e) => {
             vm.set_pending_exception(e);
             return Value::undefined();
         }
-    }
+    };
+    let made_dense = made.map(species_result_is_dense);
+    let fallback = match made {
+        Some(m) if made_dense != Some(true) => Some(m),
+        _ => None,
+    };
     let result_arr = RuneArray::allocate(gc, &[]);
     unsafe {
         let ptr = result_arr as *mut u8;
@@ -13396,14 +13843,24 @@ pub fn array_filter(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mu
     // Refresh first (species allocs may have moved the receiver), then
     // re-resolve the raw source pointer (B1f-1 discipline).
     this = refresh_value(this);
+    let made = made.map(refresh_value);
+    let result_ptr = match made {
+        Some(m) if made_dense == Some(true) => {
+            if let Some(rptr) = m.heap_ptr() {
+                unsafe { RuneArray::set_length(rptr as *mut RuneArray, 0) };
+            }
+            m.heap_ptr().unwrap_or(result_arr as *mut u8)
+        }
+        _ => result_arr as *mut u8,
+    };
     let source_ptr = this.heap_ptr().unwrap_or(std::ptr::null_mut());
     let Some(first) = first_existing_index(this, length) else {
-        return Value::from_heap_ptr(result_arr as *mut u8);
+        return fallback.unwrap_or(Value::from_heap_ptr(result_arr as *mut u8));
     };
     vm.pending_array_op = Some(crate::vm::ArrayOpState {
         kind: crate::vm::ArrayOpKind::Filter,
         source: source_ptr,
-        result: result_arr as *mut u8,
+        result: result_ptr,
         callback,
         this_val: this_arg,
         source_val: this,
@@ -13413,6 +13870,7 @@ pub fn array_filter(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mu
         accumulator: None,
         awaiting_element: None,
         awaiting_acc: false,
+        species_fallback: fallback,
     });
     // B1a: accessor elements dispatch their getter (Wait records the
     // await; SyncErr routes through the normal pending-exception path).
@@ -13446,19 +13904,29 @@ pub fn array_map(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut V
     else {
         return Value::undefined();
     };
-    // B1f-6c: species Gets suspend (step 4 — after the callable check; the
-    // length RangeError above models ArrayCreate throwing after it).
-    match species_stage(gc, vm, array_map, this, args) {
-        SpeciesOut::Passed => {}
+    // B1f-6d: species Construct installs (len; dense swaps in as the
+    // buffer, plain returns at completion via species_fallback).
+    let made = match species_stage(gc, vm, array_map, this, args, length as u64) {
+        SpeciesOut::Passed => None,
+        SpeciesOut::Made(r) => Some(r),
+        // Unreachable via species_stage (only the OfLength resume emits
+        // Done, and it never re-enters a species site) — degrade to plain.
+        SpeciesOut::Done(_) => None,
         SpeciesOut::Wait => return Value::undefined(),
         SpeciesOut::Fail(e) => {
             vm.set_pending_exception(e);
             return Value::undefined();
         }
-    }
+    };
+    let made_dense = made.map(species_result_is_dense);
+    let fallback = match made {
+        Some(m) if made_dense != Some(true) => Some(m),
+        _ => None,
+    };
     // Refresh first (species allocs may have moved the receiver), then
     // re-resolve the raw source pointer (B1f-1 discipline).
     this = refresh_value(this);
+    let made = made.map(refresh_value);
     let source_ptr = this.heap_ptr().unwrap_or(std::ptr::null_mut());
     let result_arr = RuneArray::allocate(gc, &[]);
     unsafe {
@@ -13469,17 +13937,33 @@ pub fn array_map(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut V
             *(ptr.add(24) as *mut *mut u8) = proto;
         }
     }
+    let result_ptr = match made {
+        Some(m) if made_dense == Some(true) => m.heap_ptr().unwrap_or(result_arr as *mut u8),
+        _ => result_arr as *mut u8,
+    };
     let Some(first) = first_existing_index(this, length) else {
         // B1f-3: map presizes the species length (holes stay holes — the walk
         // never visits them). Unallocated tail slots read as holes by
         // construction (B1e capacity discipline), so no fill is needed.
+        // B1f-6d: presize the dense custom buffer (or swap the fallback in).
+        if let Some(m) = made {
+            if made_dense == Some(true) {
+                if let Some(rptr) = m.heap_ptr() {
+                    unsafe { RuneArray::set_length(rptr as *mut RuneArray, length) };
+                }
+                return m;
+            }
+            if let Some(fb) = fallback {
+                return fb;
+            }
+        }
         unsafe { RuneArray::set_length(result_arr, length) };
         return Value::from_heap_ptr(result_arr as *mut u8);
     };
     vm.pending_array_op = Some(crate::vm::ArrayOpState {
         kind: crate::vm::ArrayOpKind::Map,
         source: source_ptr,
-        result: result_arr as *mut u8,
+        result: result_ptr,
         callback,
         this_val: this_arg,
         source_val: this,
@@ -13489,6 +13973,7 @@ pub fn array_map(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut V
         accumulator: None,
         awaiting_element: None,
         awaiting_acc: false,
+        species_fallback: fallback,
     });
     // B1a: accessor elements dispatch their getter (Wait records the
     // await; SyncErr routes through the normal pending-exception path).
@@ -13543,6 +14028,7 @@ pub fn array_reduce(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
             accumulator: Some(initial),
             awaiting_element: None,
             awaiting_acc: false,
+            species_fallback: None,
         });
         // B1a: the first element may itself be an accessor (getter runs).
         match crate::vm::array_element_value(vm, gc, this, first) {
@@ -13594,6 +14080,7 @@ pub fn array_reduce(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
         accumulator: None,
         awaiting_element: None,
         awaiting_acc: false,
+        species_fallback: None,
     });
     match crate::vm::array_element_value(vm, gc, this, first) {
         crate::vm::ArrayElemOut::Ready(acc) => {
@@ -13677,6 +14164,7 @@ pub fn array_reduce_right(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
             accumulator: Some(initial),
             awaiting_element: None,
             awaiting_acc: false,
+            species_fallback: None,
         });
         match crate::vm::array_element_value(vm, gc, this, last) {
             crate::vm::ArrayElemOut::Ready(element) => {
@@ -13725,6 +14213,7 @@ pub fn array_reduce_right(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
         accumulator: None,
         awaiting_element: None,
         awaiting_acc: false,
+        species_fallback: None,
     });
     match crate::vm::array_element_value(vm, gc, this, last) {
         crate::vm::ArrayElemOut::Ready(acc) => {
@@ -13800,6 +14289,7 @@ pub fn array_find_last(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
         accumulator: None,
         awaiting_element: None,
         awaiting_acc: false,
+        species_fallback: None,
     });
     match crate::vm::array_element_value(vm, gc, this, last) {
         crate::vm::ArrayElemOut::Ready(element) => {
@@ -13857,6 +14347,7 @@ pub fn array_find_last_index(
         accumulator: None,
         awaiting_element: None,
         awaiting_acc: false,
+        species_fallback: None,
     });
     match crate::vm::array_element_value(vm, gc, this, last) {
         crate::vm::ArrayElemOut::Ready(element) => {
@@ -13904,6 +14395,7 @@ pub fn array_find(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
         accumulator: None,
         awaiting_element: None,
         awaiting_acc: false,
+        species_fallback: None,
     });
     // B1a: accessor elements dispatch their getter (Wait records the
     // await; SyncErr routes through the normal pending-exception path).
@@ -13958,6 +14450,7 @@ pub fn array_find_index(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
         accumulator: None,
         awaiting_element: None,
         awaiting_acc: false,
+        species_fallback: None,
     });
     // B1a: accessor elements dispatch their getter (Wait records the
     // await; SyncErr routes through the normal pending-exception path).
@@ -14017,15 +14510,20 @@ pub fn array_flat(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut 
     } else {
         depth_num.max(0.0) as u32
     };
-    // B1f-6c: species Gets suspend (flat species-creates before flattening).
-    match species_stage(gc, vm, array_flat, this, args) {
-        SpeciesOut::Passed => {}
+    // B1f-6d: species Construct installs the outer array (len 0; inner
+    // levels stay ArrayCreate temps per spec).
+    let made = match species_stage(gc, vm, array_flat, this, args, 0) {
+        SpeciesOut::Passed => None,
+        SpeciesOut::Made(r) => Some(r),
+        // Unreachable via species_stage (only the OfLength resume emits
+        // Done, and it never re-enters a species site) — degrade to plain.
+        SpeciesOut::Done(_) => None,
         SpeciesOut::Wait => return Value::undefined(),
         SpeciesOut::Fail(e) => {
             vm.set_pending_exception(e);
             return Value::undefined();
         }
-    }
+    };
     this = refresh_value(this);
     fn flatten(gc: &mut SemiSpace, vm: &Vm, arr_val: Value, depth: u32) -> *mut u8 {
         let result_arr = RuneArray::allocate(gc, &[]);
@@ -14067,7 +14565,49 @@ pub fn array_flat(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut 
         result_ptr
     }
     let result_ptr = flatten(gc, vm, this, effective_depth);
-    Value::from_heap_ptr(result_ptr)
+    let mut tmp = Value::from_heap_ptr(result_ptr);
+    let made = made.map(refresh_value);
+    match made {
+        None => tmp,
+        Some(m) if species_result_is_dense(m) => {
+            // Copy the temp into R positionally (reset first so a
+            // derived-Array R's Construct holes don't offset the writes).
+            let mut cur = m.heap_ptr().unwrap_or(result_ptr);
+            unsafe { RuneArray::set_length(cur as *mut RuneArray, 0) };
+            let mut i = 0usize;
+            loop {
+                let tlen = tmp
+                    .heap_ptr()
+                    .map(|p| unsafe { RuneArray::length(p as *mut RuneArray) as usize })
+                    .unwrap_or(0);
+                if i >= tlen {
+                    let mcur = refresh_value(Value::from_heap_ptr(cur));
+                    cur = mcur.heap_ptr().unwrap_or(cur);
+                    unsafe { RuneArray::set_length(cur as *mut RuneArray, tlen as u32) };
+                    break;
+                }
+                let v = tmp
+                    .heap_ptr()
+                    .map(|p| unsafe { RuneArray::get_element(p as *mut RuneArray, i) });
+                if let Some(v) = v {
+                    unsafe {
+                        cur = RuneArray::push(gc, cur as *mut RuneArray, v) as *mut u8;
+                    }
+                    // Push may GC-move the temp (forwarding left behind).
+                    tmp = refresh_value(tmp);
+                }
+                i += 1;
+            }
+            Value::from_heap_ptr(cur)
+        }
+        Some(m) => match species_install_temp(gc, vm, m, tmp) {
+            Ok(r) => r,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                Value::undefined()
+            }
+        },
+    }
 }
 
 /// ================= B1e: sort / toSorted =================
@@ -15190,16 +15730,27 @@ pub fn array_flat_map(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &
     ) else {
         return Value::undefined();
     };
-    // B1f-6c: species Gets suspend (after the callable check).
-    match species_stage(gc, vm, array_flat_map, this, args) {
-        SpeciesOut::Passed => {}
+    // B1f-6d: species Construct installs (len 0; dense swaps in as the
+    // buffer, plain returns at completion via species_fallback).
+    let made = match species_stage(gc, vm, array_flat_map, this, args, 0) {
+        SpeciesOut::Passed => None,
+        SpeciesOut::Made(r) => Some(r),
+        // Unreachable via species_stage (only the OfLength resume emits
+        // Done, and it never re-enters a species site) — degrade to plain.
+        SpeciesOut::Done(_) => None,
         SpeciesOut::Wait => return Value::undefined(),
         SpeciesOut::Fail(e) => {
             vm.set_pending_exception(e);
             return Value::undefined();
         }
-    }
+    };
+    let made_dense = made.map(species_result_is_dense);
+    let fallback = match made {
+        Some(m) if made_dense != Some(true) => Some(m),
+        _ => None,
+    };
     this = refresh_value(this);
+    let made = made.map(refresh_value);
     let source_ptr = this.heap_ptr().unwrap_or(std::ptr::null_mut());
     let result_arr = RuneArray::allocate(gc, &[]);
     unsafe {
@@ -15210,13 +15761,22 @@ pub fn array_flat_map(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &
             *(ptr.add(24) as *mut *mut u8) = proto;
         }
     }
+    let result_ptr = match made {
+        Some(m) if made_dense == Some(true) => {
+            if let Some(rptr) = m.heap_ptr() {
+                unsafe { RuneArray::set_length(rptr as *mut RuneArray, 0) };
+            }
+            m.heap_ptr().unwrap_or(result_arr as *mut u8)
+        }
+        _ => result_arr as *mut u8,
+    };
     let Some(first) = first_existing_index(this, length) else {
-        return Value::from_heap_ptr(result_arr as *mut u8);
+        return fallback.unwrap_or(Value::from_heap_ptr(result_arr as *mut u8));
     };
     vm.pending_array_op = Some(crate::vm::ArrayOpState {
         kind: crate::vm::ArrayOpKind::FlatMap,
         source: source_ptr,
-        result: result_arr as *mut u8,
+        result: result_ptr,
         callback,
         this_val: this_arg,
         source_val: this,
@@ -15226,6 +15786,7 @@ pub fn array_flat_map(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &
         accumulator: None,
         awaiting_element: None,
         awaiting_acc: false,
+        species_fallback: fallback,
     });
     // B1a: accessor elements dispatch their getter (Wait records the
     // await; SyncErr routes through the normal pending-exception path).
@@ -15275,6 +15836,7 @@ pub fn array_some(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
         accumulator: None,
         awaiting_element: None,
         awaiting_acc: false,
+        species_fallback: None,
     });
     // B1a: accessor elements dispatch their getter (Wait records the
     // await; SyncErr routes through the normal pending-exception path).
@@ -15324,6 +15886,7 @@ pub fn array_every(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
         accumulator: None,
         awaiting_element: None,
         awaiting_acc: false,
+        species_fallback: None,
     });
     // B1a: accessor elements dispatch their getter (Wait records the
     // await; SyncErr routes through the normal pending-exception path).

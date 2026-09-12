@@ -6935,6 +6935,710 @@ pub fn array_of(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -
     build_array(gc, args, vm)
 }
 
+// ---------- B1f-4: Array.from (§23.1.2.1) ----------
+
+/// Drive outcome for the from machine (B1f-4; sort-cascade shape).
+pub(crate) enum FromStepOut {
+    /// A JS frame was pushed (await armed); store op and yield to the loop.
+    Wait,
+    /// Advanced synchronously; re-drive (Return cascade only).
+    Progress,
+    /// Complete with the result.
+    Done(Value),
+    /// Fail with an error value (cascade routes via handle_throw).
+    Raise(Value),
+}
+
+/// Which constructor Array.from builds (B1f-4): the Array and Object builtins
+/// construct directly (0-arg {} semantics + writes); anything else — incl. JS
+/// ctors, which need frames to Construct — falls back to a plain dense array
+/// (real Construct is B1f-6; iteration stays exact, linkage diverges there).
+enum FromCtor {
+    Array,
+    Object,
+    Plain,
+}
+
+fn from_ctor_kind(this: Value, vm: &Vm) -> FromCtor {
+    if this == vm.array_constructor {
+        FromCtor::Array
+    } else if this == vm.object_constructor {
+        FromCtor::Object
+    } else {
+        FromCtor::Plain
+    }
+}
+
+/// Refresh machine-held Values after a possibly-GCing call (B1f-1 discipline,
+// best-effort: resolves moved objects; unrooted-drive losses stay C-class
+// like the sort machine's items Vec).
+fn from_refresh(op: &mut crate::vm::PendingFromOp) {
+    op.result = refresh_value(op.result);
+    op.staged_value = refresh_value(op.staged_value);
+    op.mapper = refresh_value(op.mapper);
+    op.map_this = refresh_value(op.map_this);
+    op.await_callee = refresh_value(op.await_callee);
+    match &mut op.feed {
+        crate::vm::FromFeed::ArrayLike { obj, .. } => {
+            *obj = refresh_value(*obj);
+        }
+        crate::vm::FromFeed::Iter { iter, next } => {
+            *iter = refresh_value(*iter);
+            *next = refresh_value(*next);
+        }
+    }
+    if let Some(a) = op.closing_abrupt.take() {
+        op.closing_abrupt = Some(refresh_value(a));
+    }
+}
+
+/// Call outcome for from-machine callees (B1f-4).
+enum FromCallOut {
+    Ready(Value),
+    Wait,
+    Raise(Value),
+}
+
+/// Call next/factory/mapper/return for the from machine (B1f-4): builtin
+/// handles run inline (sync-leaf assumption — a machine-driving builtin here
+/// is the documented C-class nested hole, same as the array machine); JS
+/// functions push a frame + arm the given await. Anything else raises
+/// TypeError (callers pre-validate; next-redefinition hits this).
+fn from_call(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    op: &mut crate::vm::PendingFromOp,
+    callee: Value,
+    this: Value,
+    args: Vec<Value>,
+    await_kind: crate::vm::FromAwait,
+) -> FromCallOut {
+    if let Some(smi) = callee.as_smi() {
+        if smi < 0 {
+            let id = ((-smi) as usize) - 1;
+            if id < vm.builtins.len() {
+                let r = (vm.builtins[id].func)(gc, this, &args, vm);
+                if let Some(exc) = vm.pending_exception.take() {
+                    return FromCallOut::Raise(exc);
+                }
+                from_refresh(op);
+                return FromCallOut::Ready(r);
+            }
+        }
+        return FromCallOut::Raise(sort_type_error(gc, vm, "not a function"));
+    }
+    if callee
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC)
+    {
+        vm.push_callback_call(gc, callee, this, args);
+        op.await_kind = await_kind;
+        op.await_callee = vm.last_pushed_callee;
+        return FromCallOut::Wait;
+    }
+    FromCallOut::Raise(sort_type_error(gc, vm, "not a function"))
+}
+
+/// Property read with builtin-inline getters for the from machine (B1f-4):
+/// data reads direct; builtin getters run inline; JS getters push a frame +
+/// arm the given await (hang-proofing — a gap-undefined `done` would spin to
+/// 2^53). Invalid getters read as undefined (mutator_read gap, documented).
+enum FromPropOut {
+    Ready(Value),
+    Wait,
+    Raise(Value),
+}
+
+fn from_prop_value(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    op: &mut crate::vm::PendingFromOp,
+    obj: Value,
+    key: Value,
+    await_kind: crate::vm::FromAwait,
+) -> FromPropOut {
+    let raw = load_property_recursive(obj, key, None, gc);
+    from_refresh(op);
+    let Some(aptr) = raw.heap_ptr() else {
+        return FromPropOut::Ready(raw);
+    };
+    if unsafe { (*(aptr as *const GcHeader)).tag() } != TAG_ACCESSOR {
+        return FromPropOut::Ready(raw);
+    }
+    let getter = unsafe { rune_core::accessor::AccessorPair::getter(aptr) };
+    if getter.is_undefined() || getter.is_null() {
+        return FromPropOut::Ready(Value::undefined());
+    }
+    if let Some(smi) = getter.as_smi() {
+        if smi < 0 {
+            let id = ((-smi) as usize) - 1;
+            if id < vm.builtins.len() {
+                let r = (vm.builtins[id].func)(gc, obj, &[], vm);
+                if let Some(exc) = vm.pending_exception.take() {
+                    return FromPropOut::Raise(exc);
+                }
+                from_refresh(op);
+                return FromPropOut::Ready(r);
+            }
+        }
+        return FromPropOut::Ready(Value::undefined());
+    }
+    if getter
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC)
+    {
+        vm.push_callback_call(gc, getter, obj, vec![]);
+        op.await_kind = await_kind;
+        op.await_callee = vm.last_pushed_callee;
+        return FromPropOut::Wait;
+    }
+    FromPropOut::Ready(Value::undefined())
+}
+
+/// CreateDataProperty at the next index for the from result (B1f-4): dense
+/// arrays push positionally (k always appends — no gaps possible); plain
+/// objects define own data props (never proto-consult, never setter-dispatch),
+/// growing like the SpreadIntoObject arm. Fresh results keep this infallible
+/// in practice; failures raise (closed if iterable).
+fn from_result_write(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    op: &mut crate::vm::PendingFromOp,
+    val: Value,
+) -> Result<(), Value> {
+    let val = refresh_value(val);
+    let is_dense = op
+        .result
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_ARRAY);
+    if is_dense {
+        // 2^32-1 valve (B1f-2 result_push discipline — the exotic invariant).
+        let cur_len = op
+            .result
+            .heap_ptr()
+            .map(|p| unsafe { RuneArray::length(p as *mut RuneArray) } as u64)
+            .unwrap_or(0);
+        if cur_len >= MAX_ARRAY_LENGTH {
+            return Err(sort_range_error(gc, vm, "Invalid array length"));
+        }
+        let rp = op.result.heap_ptr().unwrap() as *mut RuneArray;
+        let np = crate::vm::array_result_push(gc, vm, rp as *mut u8, val);
+        op.result = Value::from_heap_ptr(np);
+        return Ok(());
+    }
+    let key_str = op.k.to_string();
+    let key = PropertyKey::from_string(&key_str);
+    let ptr = match op.result.heap_ptr() {
+        Some(p) => p as *mut JSObject,
+        None => {
+            return Err(sort_type_error(
+                gc,
+                vm,
+                "Cannot create property on non-object",
+            ));
+        }
+    };
+    let shape = unsafe { JSObject::shape_ptr(ptr) };
+    if let Some(slot) = shape.lookup(&key) {
+        unsafe { JSObject::set_slot(ptr, slot, val) };
+    } else {
+        let live = vm.ensure_object_capacity(gc, ptr);
+        unsafe { JSObject::add_property(live, key, key_str, val) };
+        op.result = Value::from_heap_ptr(live as *mut u8);
+    }
+    from_refresh(op);
+    Ok(())
+}
+
+/// Finalize: Set length k + complete (B1f-4 — spec steps 5.4.1 / 13).
+fn from_finalize(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    op: &mut crate::vm::PendingFromOp,
+) -> FromStepOut {
+    op.result = refresh_value(op.result);
+    let is_dense = op
+        .result
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_ARRAY);
+    if is_dense {
+        if op.k > MAX_ARRAY_LENGTH {
+            return FromStepOut::Raise(sort_range_error(gc, vm, "Invalid array length"));
+        }
+        if let Some(rptr) = op.result.heap_ptr() {
+            unsafe { RuneArray::set_length(rptr as *mut RuneArray, op.k as u32) };
+        }
+    } else if let Err(e) = set_length_checked(gc, vm, &mut op.result, op.k) {
+        return FromStepOut::Raise(e);
+    }
+    FromStepOut::Done(op.result)
+}
+
+/// Raise, closing the iterator first when draining one (B1f-4): mapper/define/
+/// guard abrupts close; next/done/value/factory abrupts propagate raw (spec).
+fn from_close_or_raise(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    op: &mut crate::vm::PendingFromOp,
+    e: Value,
+) -> FromStepOut {
+    if matches!(op.feed, crate::vm::FromFeed::Iter { .. }) {
+        from_close(vm, gc, op, e)
+    } else {
+        FromStepOut::Raise(e)
+    }
+}
+
+/// IteratorClose for an abrupt (B1f-4): Get return (sync load; JS getters read
+/// as absent — B1f-6 gap, same as spreadable flags); absent/non-callable → the
+/// abrupt propagates; builtin runs inline (its abrupt REPLACES per
+/// IfAbruptCloseIterator); JS pushes a frame + AwaitClose (abrupt stashed).
+pub(crate) fn from_close(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    op: &mut crate::vm::PendingFromOp,
+    abrupt: Value,
+) -> FromStepOut {
+    // The key alloc may have GC-moved everything in flight (B1f-1 discipline):
+    // refresh the machine AND the abrupt itself (single-cycle sound — the
+    // abrupt is unrooted until stored below), then read locals back fresh.
+    let key = Value::from_heap_ptr(HeapString::allocate(gc, "return") as *mut u8);
+    from_refresh(op);
+    let abrupt = refresh_value(abrupt);
+    let iter = match op.feed {
+        crate::vm::FromFeed::Iter { iter, .. } => refresh_value(iter),
+        _ => return FromStepOut::Raise(abrupt),
+    };
+    let raw = load_property_recursive(iter, key, None, gc);
+    from_refresh(op);
+    let ret = match raw.heap_ptr() {
+        Some(aptr) if unsafe { (*(aptr as *const GcHeader)).tag() } == TAG_ACCESSOR => {
+            Value::undefined()
+        }
+        _ => raw,
+    };
+    if ret.is_undefined() || ret.is_null() {
+        return FromStepOut::Raise(abrupt);
+    }
+    if let Some(smi) = ret.as_smi() {
+        if smi < 0 {
+            let id = ((-smi) as usize) - 1;
+            if id < vm.builtins.len() {
+                (vm.builtins[id].func)(gc, iter, &[], vm);
+                if let Some(exc) = vm.pending_exception.take() {
+                    return FromStepOut::Raise(exc);
+                }
+                from_refresh(op);
+                return FromStepOut::Raise(abrupt);
+            }
+        }
+        return FromStepOut::Raise(abrupt);
+    }
+    if ret
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC)
+    {
+        op.closing_abrupt = Some(abrupt);
+        match from_call(vm, gc, op, ret, iter, vec![], crate::vm::FromAwait::Close) {
+            FromCallOut::Ready(_) => FromStepOut::Raise(abrupt),
+            FromCallOut::Wait => FromStepOut::Wait,
+            FromCallOut::Raise(e) => FromStepOut::Raise(e),
+        }
+    } else {
+        FromStepOut::Raise(abrupt)
+    }
+}
+
+/// Map-or-define a fed value (B1f-4): mapper (value, k) when mapping, then
+/// CreateDataProperty at k. Abrupts close when iterable.
+fn from_got_value(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    op: &mut crate::vm::PendingFromOp,
+    value: Value,
+) -> FromStepOut {
+    let v = refresh_value(value);
+    if op.mapping {
+        let k = length_value(op.k);
+        match from_call(
+            vm,
+            gc,
+            op,
+            op.mapper,
+            op.map_this,
+            vec![v, k],
+            crate::vm::FromAwait::Map,
+        ) {
+            FromCallOut::Ready(mapped) => match from_result_write(gc, vm, op, mapped) {
+                Ok(()) => {
+                    op.k += 1;
+                    FromStepOut::Progress
+                }
+                Err(e) => from_close_or_raise(vm, gc, op, e),
+            },
+            FromCallOut::Wait => FromStepOut::Wait,
+            FromCallOut::Raise(e) => from_close_or_raise(vm, gc, op, e),
+        }
+    } else {
+        match from_result_write(gc, vm, op, v) {
+            Ok(()) => {
+                op.k += 1;
+                FromStepOut::Progress
+            }
+            Err(e) => from_close_or_raise(vm, gc, op, e),
+        }
+    }
+}
+
+/// Consume an iterator-result object (B1f-4): validate Object (raw throw, no
+/// close — IteratorStep rule), resolve done (JS getters await), finalize on
+/// done, else resolve value (JS getters await) and feed it onward.
+fn from_consume_next_result(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    op: &mut crate::vm::PendingFromOp,
+    res: Value,
+) -> FromStepOut {
+    let is_object = res
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() != TAG_STRING });
+    if !is_object {
+        return FromStepOut::Raise(sort_type_error(gc, vm, "Iterator result is not an object"));
+    }
+    let done_key = op.done_key;
+    match from_prop_value(vm, gc, op, res, done_key, crate::vm::FromAwait::Done) {
+        FromPropOut::Ready(d) => {
+            if d.to_bool() {
+                return from_finalize(gc, vm, op);
+            }
+        }
+        FromPropOut::Wait => {
+            op.staged_value = res;
+            return FromStepOut::Wait;
+        }
+        FromPropOut::Raise(e) => return FromStepOut::Raise(e),
+    }
+    let value_key = op.value_key;
+    match from_prop_value(vm, gc, op, res, value_key, crate::vm::FromAwait::Val) {
+        FromPropOut::Ready(v) => from_got_value(vm, gc, op, v),
+        FromPropOut::Wait => {
+            op.staged_value = res;
+            FromStepOut::Wait
+        }
+        FromPropOut::Raise(e) => FromStepOut::Raise(e),
+    }
+}
+
+/// Validate a factory result + resolve its next (B1f-4): non-objects throw
+/// (no close — factory stage); next must be callable (data or builtin-inline;
+/// JS-getter next reads as absent → TypeError, documented gap).
+fn from_factory_result(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    op: &mut crate::vm::PendingFromOp,
+    res: Value,
+) -> Result<(), Value> {
+    let is_object = res
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() != TAG_STRING });
+    if !is_object {
+        return Err(sort_type_error(gc, vm, "Iterator result is not an object"));
+    }
+    let key = Value::from_heap_ptr(HeapString::allocate(gc, "next") as *mut u8);
+    from_refresh(op);
+    let raw = load_property_recursive(res, key, None, gc);
+    from_refresh(op);
+    let nxt = match raw.heap_ptr() {
+        Some(aptr) if unsafe { (*(aptr as *const GcHeader)).tag() } == TAG_ACCESSOR => {
+            let getter = unsafe { rune_core::accessor::AccessorPair::getter(aptr) };
+            if let Some(smi) = getter.as_smi() {
+                if smi < 0 {
+                    let id = ((-smi) as usize) - 1;
+                    if id < vm.builtins.len() {
+                        let r = (vm.builtins[id].func)(gc, res, &[], vm);
+                        if let Some(exc) = vm.pending_exception.take() {
+                            return Err(exc);
+                        }
+                        from_refresh(op);
+                        r
+                    } else {
+                        Value::undefined()
+                    }
+                } else {
+                    Value::undefined()
+                }
+            } else {
+                Value::undefined()
+            }
+        }
+        _ => raw,
+    };
+    if !(nxt.as_smi().is_some_and(|s| s < 0)
+        || nxt
+            .heap_ptr()
+            .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC))
+    {
+        return Err(sort_type_error(gc, vm, "Iterator next is not a function"));
+    }
+    op.feed = crate::vm::FromFeed::Iter {
+        iter: res,
+        next: nxt,
+    };
+    Ok(())
+}
+
+/// Drive the from machine synchronously until Wait/Done/Raise (B1f-4).
+pub(crate) fn from_drive(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    op: &mut crate::vm::PendingFromOp,
+) -> FromStepOut {
+    loop {
+        match &op.feed {
+            crate::vm::FromFeed::ArrayLike { obj, len } => {
+                let (obj, len) = (*obj, *len);
+                if op.k >= len {
+                    return from_finalize(gc, vm, op);
+                }
+                // Unconditional Get (holes densify — no presence gate, spec).
+                match crate::vm::array_element_value(vm, gc, obj, op.k as usize) {
+                    crate::vm::ArrayElemOut::Ready(v) => match from_got_value(vm, gc, op, v) {
+                        FromStepOut::Progress => continue,
+                        other => return other,
+                    },
+                    crate::vm::ArrayElemOut::Wait => {
+                        op.await_kind = crate::vm::FromAwait::Read;
+                        op.await_callee = vm.last_pushed_callee;
+                        return FromStepOut::Wait;
+                    }
+                    crate::vm::ArrayElemOut::SyncErr(e) => {
+                        return FromStepOut::Raise(e);
+                    }
+                }
+            }
+            crate::vm::FromFeed::Iter { iter, next } => {
+                let (iter, next) = (*iter, *next);
+                // 2^53 guard BEFORE the next call (spec 5.1, closed).
+                if op.k >= MAX_SAFE_INTEGER_U64 {
+                    let abrupt =
+                        sort_type_error(gc, vm, "Too many elements to convert into an array");
+                    return from_close(vm, gc, op, abrupt);
+                }
+                match from_call(vm, gc, op, next, iter, vec![], crate::vm::FromAwait::Next) {
+                    FromCallOut::Ready(res) => match from_consume_next_result(vm, gc, op, res) {
+                        FromStepOut::Progress => continue,
+                        other => return other,
+                    },
+                    FromCallOut::Wait => return FromStepOut::Wait,
+                    // Next-call abrupts propagate raw (no close — IteratorStep).
+                    FromCallOut::Raise(e) => return FromStepOut::Raise(e),
+                }
+            }
+        }
+    }
+}
+
+/// Resume the from machine with a JS frame's return value (B1f-4).
+pub(crate) fn from_resume(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    op: &mut crate::vm::PendingFromOp,
+    result: Value,
+) -> FromStepOut {
+    let kind = std::mem::replace(&mut op.await_kind, crate::vm::FromAwait::None);
+    match kind {
+        crate::vm::FromAwait::None => FromStepOut::Progress,
+        crate::vm::FromAwait::Factory => match from_factory_result(vm, gc, op, result) {
+            Ok(()) => FromStepOut::Progress,
+            Err(e) => FromStepOut::Raise(e),
+        },
+        crate::vm::FromAwait::Read => from_got_value(vm, gc, op, result),
+        crate::vm::FromAwait::Next => from_consume_next_result(vm, gc, op, result),
+        crate::vm::FromAwait::Done => {
+            if result.to_bool() {
+                from_finalize(gc, vm, op)
+            } else {
+                let res = op.staged_value;
+                let value_key = op.value_key;
+                match from_prop_value(vm, gc, op, res, value_key, crate::vm::FromAwait::Val) {
+                    FromPropOut::Ready(v) => from_got_value(vm, gc, op, v),
+                    FromPropOut::Wait => {
+                        op.staged_value = res;
+                        FromStepOut::Wait
+                    }
+                    FromPropOut::Raise(e) => FromStepOut::Raise(e),
+                }
+            }
+        }
+        crate::vm::FromAwait::Val => from_got_value(vm, gc, op, result),
+        crate::vm::FromAwait::Map => match from_result_write(gc, vm, op, result) {
+            Ok(()) => {
+                op.k += 1;
+                FromStepOut::Progress
+            }
+            Err(e) => from_close_or_raise(vm, gc, op, e),
+        },
+        crate::vm::FromAwait::Close => match op.closing_abrupt.take() {
+            Some(abrupt) => FromStepOut::Raise(abrupt),
+            None => FromStepOut::Raise(sort_type_error(gc, vm, "lost close continuation")),
+        },
+    }
+}
+
+/// Array.from(items, mapper, thisArg) — §23.1.2.1 (B1f-4): iterable drain +
+/// array-like fallback, both with optional mapfn, built on PendingFromOp.
+/// Constructors: Array/Object build directly (plain dense / {} + writes);
+/// JS ctors fall back to plain (real Construct needs frames — B1f-6).
+pub fn array_from(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    // Steps 2-3: mapper validation FIRST (even before GetMethod).
+    let mapper = args.get(1).copied().unwrap_or(Value::undefined());
+    let mapping = !mapper.is_undefined();
+    if mapping && !is_callable_value(mapper) {
+        vm.set_pending_exception(sort_type_error(
+            gc,
+            vm,
+            "Array.from requires a callable mapper",
+        ));
+        return Value::undefined();
+    }
+    let map_this = args.get(2).copied().unwrap_or(Value::undefined());
+    let items = args.first().copied().unwrap_or(Value::undefined());
+    // Step 4: GetMethod(@@iterator). JS getters read as absent (B1f-6 gap —
+    // same class as spreadable flags); null/undefined fall to array-like,
+    // whose ToObject throws (items-is-null-throws).
+    let factory = match get_iter_method(vm, gc, items) {
+        SymbolMethodResult::Found(m) => Some(m),
+        SymbolMethodResult::NotCallable => {
+            vm.set_pending_exception(sort_type_error(gc, vm, "@@iterator method is not callable"));
+            return Value::undefined();
+        }
+        SymbolMethodResult::NotFound => None,
+    };
+    // Ctor dispatch (steps 5.1 / 9): IsConstructor via identity; JS ctors
+    // (TAG_FUNC) fall back to plain (B1f-6 runs real Construct).
+    let mut result = match from_ctor_kind(this, vm) {
+        FromCtor::Array | FromCtor::Plain => fresh_dense_array(gc, vm),
+        FromCtor::Object => {
+            let o = object_builtin(gc, Value::undefined(), &[], vm);
+            if let Some(optr) = o.heap_ptr() {
+                if let Some(pptr) = vm.object_prototype.heap_ptr() {
+                    unsafe { JSObject::set_prototype(optr as *mut JSObject, pptr) };
+                }
+            }
+            o
+        }
+    };
+    result = refresh_value(result);
+    let done_key = Value::from_heap_ptr(HeapString::allocate(gc, "done") as *mut u8);
+    let value_key = Value::from_heap_ptr(HeapString::allocate(gc, "value") as *mut u8);
+    result = refresh_value(result);
+    if let Some(f) = factory {
+        // Iterable branch: dispatch the factory now (builtin-inline or frame,
+        // like the array-machine setup); the drive drains via next().
+        let mut op = crate::vm::PendingFromOp {
+            source_frame_depth: 0,
+            result,
+            feed: crate::vm::FromFeed::Iter {
+                iter: items,
+                next: Value::undefined(),
+            },
+            k: 0,
+            mapping,
+            mapper,
+            map_this,
+            await_kind: crate::vm::FromAwait::None,
+            await_callee: Value::undefined(),
+            staged_value: Value::undefined(),
+            closing_abrupt: None,
+            done_key,
+            value_key,
+        };
+        match from_call(
+            vm,
+            gc,
+            &mut op,
+            f,
+            items,
+            vec![],
+            crate::vm::FromAwait::Factory,
+        ) {
+            FromCallOut::Ready(r) => {
+                if let Err(e) = from_factory_result(vm, gc, &mut op, r) {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            }
+            FromCallOut::Wait => {
+                op.source_frame_depth = vm.frame_depth() - 1;
+                vm.pending_from_op = Some(op);
+                return Value::undefined();
+            }
+            FromCallOut::Raise(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
+        match from_drive(vm, gc, &mut op) {
+            FromStepOut::Wait => {
+                op.source_frame_depth = vm.frame_depth() - 1;
+                vm.pending_from_op = Some(op);
+                Value::undefined()
+            }
+            FromStepOut::Done(v) => v,
+            FromStepOut::Raise(e) => {
+                vm.set_pending_exception(e);
+                Value::undefined()
+            }
+            FromStepOut::Progress => unreachable!("from_drive never returns Progress"),
+        }
+    } else {
+        // Array-like branch: ToObject + LengthOfArrayLike, unconditional Gets.
+        if !require_object_coercible(items, vm, gc) {
+            return Value::undefined();
+        }
+        let (len, _) = match seq_length(gc, vm, items) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        };
+        // ArrayCreate bound (all paths — materialization guard, documented).
+        if len > MAX_ARRAY_LENGTH {
+            vm.set_pending_exception(sort_range_error(gc, vm, "Invalid array length"));
+            return Value::undefined();
+        }
+        let mut op = crate::vm::PendingFromOp {
+            source_frame_depth: 0,
+            result,
+            feed: crate::vm::FromFeed::ArrayLike { obj: items, len },
+            k: 0,
+            mapping,
+            mapper,
+            map_this,
+            await_kind: crate::vm::FromAwait::None,
+            await_callee: Value::undefined(),
+            staged_value: Value::undefined(),
+            closing_abrupt: None,
+            done_key,
+            value_key,
+        };
+        match from_drive(vm, gc, &mut op) {
+            FromStepOut::Wait => {
+                op.source_frame_depth = vm.frame_depth() - 1;
+                vm.pending_from_op = Some(op);
+                Value::undefined()
+            }
+            FromStepOut::Done(v) => v,
+            FromStepOut::Raise(e) => {
+                vm.set_pending_exception(e);
+                Value::undefined()
+            }
+            FromStepOut::Progress => unreachable!("from_drive never returns Progress"),
+        }
+    }
+}
+
 /// Array.prototype.copyWithin(target, start, end?) — in-place block copy
 /// (§23.1.3.4). Missing source indices DELETE the target (throwing on
 /// non-configurable own targets); symbol index/length arguments throw.
@@ -14588,6 +15292,11 @@ pub fn default_builtins() -> Vec<Builtin> {
         },
         Builtin {
             length: 1,
+            name: "Array_from",
+            func: array_from,
+        },
+        Builtin {
+            length: 1,
             name: "Array_of",
             func: array_of,
         },
@@ -15396,7 +16105,8 @@ pub fn assert_throws(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut 
     // Set up pending assert state for the Return/Throw handlers
     vm.pending_assert = Some(crate::vm::PendingAssert {
         expected_error: error_ctor,
-        source_frame_depth: 0, // will be set by push_callback_call
+        source_frame_depth: 0,    // will be set by push_callback_call
+        pinned_depth: usize::MAX, // pinned by rebase on first push (B1f-4)
     });
 
     // Push the function call — the Return handler will catch the result

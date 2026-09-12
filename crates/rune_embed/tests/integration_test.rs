@@ -1457,6 +1457,47 @@ fn test_array_map_filter_result_shapes() {
 }
 
 #[test]
+fn test_array_from() {
+    // B1f-4: iterable drain + array-like fallback + mapfn + IteratorClose.
+    let mut ctx = Context::new_small();
+    // Arrays drain via @@iterator.
+    let r = ctx
+        .eval("Array.from([1, 2, 3]).join() === '1,2,3';")
+        .unwrap();
+    assert!(r.to_bool());
+    // Strings drain as UTF-16 units.
+    let r = ctx.eval("Array.from('abc').join() === 'a,b,c';").unwrap();
+    assert!(r.to_bool());
+    // Array-likes read unconditionally (holes densify to present undefined).
+    let r = ctx.eval("var d = Array.from({length: 3, 0: 'a', 2: 'c'}); d.length === 3 && d[0] === 'a' && d[1] === undefined && (1 in d) === true && d[2] === 'c';").unwrap();
+    assert!(r.to_bool());
+    // mapfn gets (value, index) with thisArg.
+    let r = ctx
+        .eval("Array.from([1, 2, 3], function (v) { return v * 2; }).join() === '2,4,6';")
+        .unwrap();
+    assert!(r.to_bool());
+    let r = ctx
+        .eval(
+            "Array.from([1, 2], function (v) { return v + this.x; }, {x: 10}).join() === '11,12';",
+        )
+        .unwrap();
+    assert!(r.to_bool());
+    // Custom iterables drain; mapper abrupts close the iterator first.
+    let r = ctx.eval("var it = {}; it[Symbol.iterator] = function () { var i = 0; return { next: function () { i++; return i <= 2 ? {value: i, done: false} : {done: true}; } }; }; Array.from(it).join() === '1,2';").unwrap();
+    assert!(r.to_bool());
+    let r = ctx.eval("var cc = 0; var it = {}; it[Symbol.iterator] = function () { return { return: function () { cc++; }, next: function () { return {done: false}; } }; }; try { Array.from(it, function () { throw 7; }); } catch (e) {} cc === 1;").unwrap();
+    assert!(r.to_bool());
+    // Prologue errors: null items, non-callable mapper.
+    ctx.eval("assert.throws(TypeError, function () { Array.from(null); });")
+        .unwrap();
+    ctx.eval("assert.throws(TypeError, function () { Array.from([1], 5); });")
+        .unwrap();
+    // Arity is 1.
+    let r = ctx.eval("Array.from.length === 1;").unwrap();
+    assert!(r.to_bool());
+}
+
+#[test]
 fn test_array_index_search_family() {
     // B1b: indexOf/lastIndexOf/includes with spec equality + fromIndex.
     let mut ctx = Context::new_small();

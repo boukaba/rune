@@ -239,6 +239,13 @@ pub(crate) struct PendingAssert {
     pub(crate) expected_error: Value,
     /// Number of frames on the stack when the assert was initiated.
     pub(crate) source_frame_depth: usize,
+    /// Thunk frame index, pinned at arm time and NEVER rebased (B1f-4): the
+    /// unwind path consumes when unwinding REACHES the thunk, while the
+    /// Return path keeps following the dragged depth above. Without this,
+    /// rebase drags the unwind check onto nested frames (eating throws meant
+    /// for inner machines like IteratorClose) or past them (missing the thunk
+    /// after a divert pops the inner frame). usize::MAX until the arm push.
+    pub(crate) pinned_depth: usize,
 }
 
 /// What a pending_call frame's return needs (B1e: the generic arm must
@@ -688,6 +695,64 @@ pub(crate) struct PendingSortOp {
     /// after rebase but never callees.
     pub(crate) await_callee: Value,
 }
+
+/// Array.from feed mode (B1f-4): iterable drain vs array-like index walk.
+/// The iterable branch always goes through the @@iterator protocol (even for
+/// arrays — custom @@iterator overrides must win); the array-like branch does
+/// unconditional Gets (holes densify to undefined — no HasProperty gate).
+pub(crate) enum FromFeed {
+    /// Unconditional Get per index over a fixed length.
+    ArrayLike { obj: Value, len: u64 },
+    /// Iterator drain. `next` is resolved post-factory (undefined until the
+    /// factory frame returns).
+    Iter { iter: Value, next: Value },
+}
+
+/// PendingFromOp await discriminant (B1f-4). `None` while driving; set when a
+/// JS frame is pushed so the Return arm can route its value back.
+pub(crate) enum FromAwait {
+    None,
+    /// @@iterator() factory result → validate object, resolve next.
+    Factory,
+    /// Array-like element JS getter result → map/define it.
+    Read,
+    /// next() result → validate object, resolve done/value.
+    Next,
+    /// JS getter for done on an iterator result.
+    Done,
+    /// JS getter for value on an iterator result.
+    Val,
+    /// mapper() result → define it.
+    Map,
+    /// return() during IteratorClose → rethrow the stashed abrupt.
+    Close,
+}
+
+/// Pending Array.from operation (B1f-4): feeds, maps, defines and closes per
+/// §23.1.2.1. Drives synchronously (builtin next/mapfn inline) until a JS
+/// frame is needed (Wait), then resumes in the Return arm by await_kind with
+/// a callee-identity guard (sort pattern — nested foreign pushes share depths
+/// after rebase but never callees).
+pub(crate) struct PendingFromOp {
+    pub(crate) source_frame_depth: usize,
+    /// Fresh result (dense array, or plain object for Object-ctor dispatch).
+    pub(crate) result: Value,
+    pub(crate) feed: FromFeed,
+    /// Next index to write (also the iterable length so far).
+    pub(crate) k: u64,
+    pub(crate) mapping: bool,
+    pub(crate) mapper: Value,
+    pub(crate) map_this: Value,
+    pub(crate) await_kind: FromAwait,
+    pub(crate) await_callee: Value,
+    /// Staged iterator-result across done/value awaits.
+    pub(crate) staged_value: Value,
+    /// Pre-interned "done"/"value" keys (per-step HeapStrings would churn).
+    pub(crate) done_key: Value,
+    pub(crate) value_key: Value,
+    /// Abrupt being closed (IteratorClose then rethrow).
+    pub(crate) closing_abrupt: Option<Value>,
+}
 /// Set by the builtin function, consumed/updated by the Return handler.
 pub(crate) struct ArrayOpState {
     pub(crate) kind: ArrayOpKind,
@@ -909,6 +974,7 @@ pub struct Vm {
     pub(crate) pending_collection_foreach: Option<PendingCollectionForEach>,
     /// B1e: live sort/toSorted merge machine (see PendingSortOp).
     pub(crate) pending_sort_op: Option<PendingSortOp>,
+    pub(crate) pending_from_op: Option<PendingFromOp>,
     /// B1e: func of the most recently pushed callback/getter frame
     /// (machines copy this into their await state at push time).
     pub(crate) last_pushed_callee: Value,
@@ -1096,6 +1162,7 @@ impl Vm {
             pending_collection_ctor: None,
             pending_collection_foreach: None,
             pending_sort_op: None,
+            pending_from_op: None,
             last_pushed_callee: Value::undefined(),
             last_popped_callee: Value::undefined(),
             iter_state_symbol: rune_core::symbol::symbol_for("__rune_iter_state"),
@@ -2728,6 +2795,49 @@ impl Vm {
         }
     }
 
+    /// B1f-4: divert a throw escaping a From mapper frame into IteratorClose.
+    /// Spec requires calling the iterator's return() before propagating the
+    /// abrupt (IfAbruptCloseIterator). Pops the mapper frame, runs the close,
+    /// and either waits on a JS return() or rethrows via handle_throw.
+    /// Next/factory/done/value/close-frame throws are NOT diverted (raw
+    /// propagation); array-like feeds never close.
+    fn divert_from_throw(&mut self, gc: &mut SemiSpace, val: Value) -> Option<DivertOut> {
+        let top = self.frames.len().wrapping_sub(1);
+        let hit = self.pending_from_op.as_ref().is_some_and(|op| {
+            op.source_frame_depth == top
+                && matches!(op.await_kind, FromAwait::Map)
+                && matches!(op.feed, FromFeed::Iter { .. })
+        });
+        if !hit {
+            return None;
+        }
+        let mut op = self.pending_from_op.take().unwrap();
+        // Pop the mapper frame (mirror the standard pop bookkeeping; do NOT
+        // drop_dead_from_op — the op stays live in our hands below).
+        let popped_frame = self.frames.len() - 1;
+        let callee_base = self.frames.last().unwrap().stack_base;
+        self.frames.pop();
+        self.try_stack
+            .retain(|tf| tf.frame_depth != popped_frame + 1);
+        self.drop_dead_array_op(popped_frame);
+        self.drop_dead_sort_op(popped_frame);
+        self.stack.truncate(callee_base);
+        match crate::builtins::from_close(self, gc, &mut op, val) {
+            crate::builtins::FromStepOut::Wait => {
+                self.pending_from_op = Some(op);
+                self.rebase_pending_depths();
+                Some(DivertOut::Handled)
+            }
+            crate::builtins::FromStepOut::Raise(e) => match self.handle_throw(gc, e) {
+                Some(exit) => Some(DivertOut::Throw(exit)),
+                None => Some(DivertOut::Handled),
+            },
+            crate::builtins::FromStepOut::Progress | crate::builtins::FromStepOut::Done(_) => {
+                unreachable!("from_close never drives or completes")
+            }
+        }
+    }
+
     /// B1b: drop a live array-iteration machine whose callback/getter
     /// frame is being unwound past (its depth would otherwise point beyond
     /// the stack and misfire on depth coincidence — proven via the Call
@@ -2752,6 +2862,17 @@ impl Vm {
             .is_some_and(|op| op.source_frame_depth == popped_frame)
         {
             self.pending_sort_op = None;
+        }
+    }
+
+    /// B1f-4: same firewall for the from machine.
+    fn drop_dead_from_op(&mut self, popped_frame: usize) {
+        if self
+            .pending_from_op
+            .as_ref()
+            .is_some_and(|op| op.source_frame_depth == popped_frame)
+        {
+            self.pending_from_op = None;
         }
     }
 
@@ -2839,8 +2960,30 @@ impl Vm {
             // while preserving live state below (e.g. an enclosing for-of's
             // [iter, next] pair in the caller frame).
             let callee_base = self.frames.last().unwrap().stack_base;
-            // Check for pending assert.throws before popping frame
-            let assert_depth = self.pending_assert.as_ref().map(|pa| pa.source_frame_depth);
+            // B1f-4: a throw escaping a From mapper frame diverts into
+            // IteratorClose BEFORE assert.throws can consume it (rebase drags
+            // assert's depth onto nested frames; the close must run first per
+            // IfAbruptCloseIterator, then the abrupt rethrows into assert).
+            // Narrow to Map-awaits on iterable feeds — everything else falls
+            // through to the historical order below.
+            if let Some(outcome) = self.divert_from_throw(gc, val) {
+                match outcome {
+                    DivertOut::Handled => return None,
+                    DivertOut::Throw(exit) => return Some(exit),
+                }
+            }
+            // Check for pending assert.throws before popping frame. B1f-4: the
+            // unwind check uses the PINNED thunk depth (never rebased), so a
+            // throw surfacing from nested frames (after inner machines divert
+            // or die) still routes into assert at the thunk. The Return path
+            // keeps using the dragged depth above.
+            let assert_depth = self.pending_assert.as_ref().map(|pa| {
+                if pa.pinned_depth == usize::MAX {
+                    pa.source_frame_depth
+                } else {
+                    pa.pinned_depth
+                }
+            });
             if let Some(source_depth) = assert_depth {
                 if self.frames.len() - 1 == source_depth {
                     let pa = self.pending_assert.take().unwrap();
@@ -2862,6 +3005,7 @@ impl Vm {
                             .retain(|tf| tf.frame_depth != popped_frame + 1);
                         self.drop_dead_array_op(popped_frame);
                         self.drop_dead_sort_op(popped_frame);
+                        self.drop_dead_from_op(popped_frame);
                         self.stack.truncate(callee_base);
                         return self.handle_throw(gc, err);
                     }
@@ -2870,6 +3014,7 @@ impl Vm {
                         .retain(|tf| tf.frame_depth != popped_frame + 1);
                     self.drop_dead_array_op(popped_frame);
                     self.drop_dead_sort_op(popped_frame);
+                    self.drop_dead_from_op(popped_frame);
                     self.stack.truncate(callee_base);
                     self.push(Value::undefined());
                     let new_fi = self.frames.len() - 1;
@@ -2893,6 +3038,7 @@ impl Vm {
             // B1b: drop array machines unwound past (see helper docs).
             self.drop_dead_array_op(popped_frame);
             self.drop_dead_sort_op(popped_frame);
+            self.drop_dead_from_op(popped_frame);
             if self.frames.is_empty() {
                 self.stack.clear();
                 return Some(Exit::Throw(val));
@@ -3138,6 +3284,27 @@ impl Vm {
             }
             gc.push_root(&pso.await_callee as *const Value as *mut u64);
         }
+        if let Some(ref pf) = self.pending_from_op {
+            gc.push_root(&pf.result as *const Value as *mut u64);
+            gc.push_root(&pf.mapper as *const Value as *mut u64);
+            gc.push_root(&pf.map_this as *const Value as *mut u64);
+            gc.push_root(&pf.await_callee as *const Value as *mut u64);
+            gc.push_root(&pf.staged_value as *const Value as *mut u64);
+            gc.push_root(&pf.done_key as *const Value as *mut u64);
+            gc.push_root(&pf.value_key as *const Value as *mut u64);
+            if let Some(ref a) = pf.closing_abrupt {
+                gc.push_root(a as *const Value as *mut u64);
+            }
+            match &pf.feed {
+                FromFeed::ArrayLike { obj, .. } => {
+                    gc.push_root(obj as *const Value as *mut u64);
+                }
+                FromFeed::Iter { iter, next } => {
+                    gc.push_root(iter as *const Value as *mut u64);
+                    gc.push_root(next as *const Value as *mut u64);
+                }
+            }
+        }
         if let Some(ref pra) = self.pending_replace_all_op {
             gc.push_root(&pra.fn_val as *const Value as *mut u64);
         }
@@ -3217,6 +3384,12 @@ impl Vm {
         }
         if let Some(ref mut state) = self.pending_assert {
             state.source_frame_depth = depth;
+            // B1f-4: pin the thunk frame on first push only — later pushes
+            // (nested callbacks, machine frames) must not drag the unwind
+            // check (see PendingAssert::pinned_depth).
+            if state.pinned_depth == usize::MAX {
+                state.pinned_depth = depth;
+            }
         }
         if let Some(ref mut state) = self.pending_promise_ctor {
             state.source_frame_depth = depth;
@@ -3261,6 +3434,9 @@ impl Vm {
             state.source_frame_depth = depth;
         }
         if let Some(ref mut state) = self.pending_sort_op {
+            state.source_frame_depth = depth;
+        }
+        if let Some(ref mut state) = self.pending_from_op {
             state.source_frame_depth = depth;
         }
         // F4 additions: accessor_call and primitive_conversion never
@@ -3321,6 +3497,10 @@ impl Vm {
                 .is_some_and(|p| fi < p.source_frame_depth)
             || self
                 .pending_sort_op
+                .as_ref()
+                .is_some_and(|p| fi < p.source_frame_depth)
+            || self
+                .pending_from_op
                 .as_ref()
                 .is_some_and(|p| fi < p.source_frame_depth)
             || self
@@ -9466,6 +9646,46 @@ impl Vm {
                             }
                         } else {
                             self.pending_sort_op = Some(sop);
+                        }
+                    }
+                    // Check if this return completes a pending Array.from step
+                    // (iterator factory/next, done/value getter, mapper, or
+                    // IteratorClose return call). Same callee+depth guard as
+                    // sort (B1f-4).
+                    if let Some(mut fop) = self.pending_from_op.take() {
+                        let callee_match = self
+                            .last_popped_callee
+                            .heap_ptr()
+                            .is_some_and(|p| Some(p) == fop.await_callee.heap_ptr());
+                        if self.frames.len() <= fop.source_frame_depth && callee_match {
+                            let mut out = crate::builtins::from_resume(self, gc, &mut fop, result);
+                            loop {
+                                match out {
+                                    crate::builtins::FromStepOut::Wait => {
+                                        self.pending_from_op = Some(fop);
+                                        self.rebase_pending_depths();
+                                        continue 'run;
+                                    }
+                                    crate::builtins::FromStepOut::Progress => {
+                                        out = crate::builtins::from_drive(self, gc, &mut fop);
+                                    }
+                                    crate::builtins::FromStepOut::Done(v) => {
+                                        let frames_len = self.frames.len();
+                                        self.stack.truncate(callee_base);
+                                        self.push(v);
+                                        self.frames[frames_len - 1].pc += 1;
+                                        continue 'run;
+                                    }
+                                    crate::builtins::FromStepOut::Raise(e) => {
+                                        if let Some(exit) = self.handle_throw(gc, e) {
+                                            return exit;
+                                        }
+                                        continue 'run;
+                                    }
+                                }
+                            }
+                        } else {
+                            self.pending_from_op = Some(fop);
                         }
                     }
                     // Check if this return completes a pending assert.throws callback.

@@ -46,6 +46,55 @@ paths can't match immediates (no JIT change needed).
   exact, retracted in A2.)
 - 860 workspace / 0 failed; clippy/fmt/no-default/x86 clean.
 
+## B1f-4 DONE — Array.from (2026-09-07)
+
+Fourth B1f sub-slice (from drain; length-descriptors/freeze + array
+descriptors/integrity → B1f-5, observable-access machine → B1f-6):
+
+- **New PendingFromOp machine** (§23.1.2.1): spec-order prologue (mapper
+  validation before GetMethod; @@iterator via get_iter_method; ctor identity —
+  Array/Object build directly, JS ctors plain-fallback), iterable drain
+  (builtin-sync factory/next inline, JS via frames; done/value with JS-getter
+  awaits so gap-undefined `done` can't spin to 2^53; 2^53 guard + close),
+  array-like fallback (ToObject, chain lengths, unconditional Gets — holes
+  densify per spec (no gate); 2^32-1 RangeError), mapfn (value, k) via
+  builtin-inline/frames, CreateDataProperty writes (dense positional pushes /
+  object defines via ensure+add), explicit length set. Full F4 recipe: rebase/
+  root/owns-call/drop-dead/Return-cascade with callee guard.
+- **IteratorClose-on-throw divert**: a throw escaping a Map-await frame on an
+  iterable feed runs return() first (IfAbruptCloseIterator) via a
+  handle_throw divert hook (delegate-style pop bookkeeping); next/factory/
+  done/value/close abrupts propagate raw (spec — no close).
+- **Assert-pinning fix** (found by the divert): pending_assert gains a
+  never-rebased pinned_depth for the unwind path. Rebase dragged the unwind
+  check onto nested frames (eating throws meant for inner machines before
+  close could run) or past the thunk (missing it after a divert pops). The
+  Return path keeps the dragged depth. Fixed iter-map-fn-err plus 6
+  spread-err-* expressions tests as spillover (the drag was breaking those
+  too).
+- **Gains (+26 from/, +32 suite-wide, ZERO new failures)**: from/ 4→30;
+  expressions 1833→1839 via pinning; Array 1886→1912. Object/String/Function/
+  statements identical to stash baselines (fail-list diffed array-wide +
+  expressions). 1 unmasking (source-object-length-set-elem-prop-err passed at
+  baseline via missing-method TypeError — needs real Construct, B1f-6;
+  proven via stash solo run). 875/0 workspace; stable clippy (CI flags)/fmt/
+  no-default clean.
+- **Tests**: `test_array_from` (10 asserts).
+- **Deferred with measurements**: custom-ctor Construct (forwards-length,
+  iter-cstm-ctor*, iter-set-elem-prop-err, length-set-elem variant →
+  B1f-6); JS @@iterator getters (get-iter-method-err → B1f-6); sloppy thisArg
+  (elements-deleted-after, source-array-boundary, calling-noStrict → B8);
+  .constructor linkage + builtin fn `.name`s (source-object-constructor,
+  from-name-skipped → object-model/B2); resizable (oos); u64 machine keys +
+  nested-machine single-slot + scale-rooting (→ B1f-6-machine/C).
+- **Process lessons**: (1) `$?` after a pipeline is the LAST command's status
+  — a whole confusion cycle here (phantom "heisenbug") came from measuring
+  `head` instead of rune; redirect to files and read `$?` off the runner, or
+  use PIPESTATUS. (2) touch + verify `Compiling` in output before EVERY result
+  (edit-tool mtimes unreliable — brief stale-binary scare, resolved by the
+  rule). (3) When a probe and the suite disagree, suspect the harness first
+  (assert.throws depth dragging), not the feature.
+
 ## B1f-3 DONE — map/filter result shapes (2026-09-07)
 
 Third B1f sub-slice (iterative results; from → B1f-4, length-descriptors/

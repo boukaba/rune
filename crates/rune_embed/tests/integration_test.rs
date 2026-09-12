@@ -1577,6 +1577,41 @@ fn test_array_species_prologue() {
 }
 
 #[test]
+fn test_array_length_dispatch() {
+    // B1f-6b: LengthOfArrayLike dispatches JS (getter / valueOf / toString /
+    // @@toPrimitive) through the PendingLengthOp machine. Methods resolve on
+    // the ORIGINAL length object (OrdinaryToPrimitive pinned base); double
+    // object results throw TypeError; throwing methods propagate.
+    let mut ctx = Context::new_small();
+    // valueOf length drives pop.
+    let r = ctx
+        .eval("var o = {0: -1, length: {valueOf: function () { return 1; }}}; Array.prototype.pop.call(o);")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(-1));
+    // toString fallback when valueOf returns an object.
+    let r = ctx
+        .eval("var o = {0: 7, length: {valueOf: function () { return {}; }, toString: function () { return 1; }}}; Array.prototype.pop.call(o);")
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(7));
+    // Both methods returning objects throws TypeError.
+    ctx.eval("assert.throws(TypeError, function () { var o = {0: -1, length: {valueOf: function () { return {}; }, toString: function () { return {}; }}}; Array.prototype.pop.call(o); });")
+        .unwrap();
+    // Throwing valueOf propagates the original error.
+    ctx.eval("assert.throws('error', function () { var o = {0: -1, length: {valueOf: function () { throw 'error'; }, toString: function () { return 0; }}}; Array.prototype.pop.call(o); });")
+        .unwrap();
+    // Length getter runs and its result coerces (slice never writes length).
+    let r = ctx
+        .eval("var o = {0: 5}; Object.defineProperty(o, 'length', {get: function () { return '1'; }, configurable: true}); var s = Array.prototype.slice.call(o); s.length === 1 && s[0] === 5;")
+        .unwrap();
+    assert!(r.to_bool());
+    // map honors a valueOf length (iterates once).
+    let r = ctx
+        .eval("var o = {0: 3, 1: 4, length: {valueOf: function () { return 1; }}}; var m = Array.prototype.map.call(o, function (x) { return x * 2; }); m.length === 1 && m[0] === 6;")
+        .unwrap();
+    assert!(r.to_bool());
+}
+
+#[test]
 fn test_array_index_search_family() {
     // B1b: indexOf/lastIndexOf/includes with spec equality + fromIndex.
     let mut ctx = Context::new_small();

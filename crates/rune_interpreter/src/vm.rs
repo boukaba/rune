@@ -747,11 +747,39 @@ pub(crate) struct PendingFromOp {
     pub(crate) await_callee: Value,
     /// Staged iterator-result across done/value awaits.
     pub(crate) staged_value: Value,
-    /// Pre-interned "done"/"value" keys (per-step HeapStrings would churn).
     pub(crate) done_key: Value,
     pub(crate) value_key: Value,
     /// Abrupt being closed (IteratorClose then rethrow).
     pub(crate) closing_abrupt: Option<Value>,
+}
+
+/// Length-resolution suspension point (B1f-6b): which JS call is outstanding.
+pub(crate) enum LengthStage {
+    /// Length-slot JS getter outstanding (resume feeds its result to coerce).
+    Get,
+    /// ToPrimitive method call outstanding (0=@@toPrimitive, 1=valueOf,
+    /// 2=toString); resume continues the chain after it.
+    Call(u8),
+}
+
+/// Pending LengthOfArrayLike-with-frames (B1f-6b): resolves a JS-driven
+/// length (getter / valueOf / toString / @@toPrimitive) then re-dispatches
+/// the suspended builtin with the resolved value. Sync-resolvable lengths
+/// never suspend (zero-cost fast path through length_stage).
+pub(crate) struct PendingLengthOp {
+    pub(crate) source_frame_depth: usize,
+    /// Re-entry target once resolved (caller reruns; pre-length work in
+    /// wired builtins is pure-or-alloc, so re-entry is side-effect free).
+    pub(crate) caller: BuiltinFn,
+    pub(crate) stash_this: Value,
+    pub(crate) stash_args: Vec<Value>,
+    /// In-flight value (getter result / object under coercion).
+    pub(crate) staged: Value,
+    /// Next ToPrimitive method to try (0=@@toPrimitive, 1=valueOf, 2=toString;
+    /// 3+=exhausted). Persists across Call resumes.
+    pub(crate) method_idx: u8,
+    pub(crate) stage: LengthStage,
+    pub(crate) await_callee: Value,
 }
 /// Set by the builtin function, consumed/updated by the Return handler.
 pub(crate) struct ArrayOpState {
@@ -975,6 +1003,13 @@ pub struct Vm {
     /// B1e: live sort/toSorted merge machine (see PendingSortOp).
     pub(crate) pending_sort_op: Option<PendingSortOp>,
     pub(crate) pending_from_op: Option<PendingFromOp>,
+    /// B1f-6b: live length-resolution machine (see PendingLengthOp).
+    pub(crate) pending_length_op: Option<PendingLengthOp>,
+    /// Resolved length for builtin re-entry after a length suspension
+    /// (B1f-6b): set synchronously inside the resume immediately before
+    /// re-dispatching, consumed first-thing by length_stage. Single-flight
+    /// by construction (no user code runs between set and consume).
+    pub(crate) length_resume: Option<(u64, f64)>,
     /// B1e: func of the most recently pushed callback/getter frame
     /// (machines copy this into their await state at push time).
     pub(crate) last_pushed_callee: Value,
@@ -1163,6 +1198,8 @@ impl Vm {
             pending_collection_foreach: None,
             pending_sort_op: None,
             pending_from_op: None,
+            pending_length_op: None,
+            length_resume: None,
             last_pushed_callee: Value::undefined(),
             last_popped_callee: Value::undefined(),
             iter_state_symbol: rune_core::symbol::symbol_for("__rune_iter_state"),
@@ -2865,6 +2902,17 @@ impl Vm {
         }
     }
 
+    /// B1f-6b: same firewall for the length machine.
+    fn drop_dead_length_op(&mut self, popped_frame: usize) {
+        if self
+            .pending_length_op
+            .as_ref()
+            .is_some_and(|op| op.source_frame_depth == popped_frame)
+        {
+            self.pending_length_op = None;
+        }
+    }
+
     /// B1f-4: same firewall for the from machine.
     fn drop_dead_from_op(&mut self, popped_frame: usize) {
         if self
@@ -3006,6 +3054,7 @@ impl Vm {
                         self.drop_dead_array_op(popped_frame);
                         self.drop_dead_sort_op(popped_frame);
                         self.drop_dead_from_op(popped_frame);
+                        self.drop_dead_length_op(popped_frame);
                         self.stack.truncate(callee_base);
                         return self.handle_throw(gc, err);
                     }
@@ -3015,6 +3064,7 @@ impl Vm {
                     self.drop_dead_array_op(popped_frame);
                     self.drop_dead_sort_op(popped_frame);
                     self.drop_dead_from_op(popped_frame);
+                    self.drop_dead_length_op(popped_frame);
                     self.stack.truncate(callee_base);
                     self.push(Value::undefined());
                     let new_fi = self.frames.len() - 1;
@@ -3039,6 +3089,7 @@ impl Vm {
             self.drop_dead_array_op(popped_frame);
             self.drop_dead_sort_op(popped_frame);
             self.drop_dead_from_op(popped_frame);
+            self.drop_dead_length_op(popped_frame);
             if self.frames.is_empty() {
                 self.stack.clear();
                 return Some(Exit::Throw(val));
@@ -3305,6 +3356,15 @@ impl Vm {
                 }
             }
         }
+        if let Some(ref pl) = self.pending_length_op {
+            gc.push_root(&pl.stash_this as *const Value as *mut u64);
+            gc.push_root(&pl.stash_this as *const Value as *mut u64);
+            gc.push_root(&pl.staged as *const Value as *mut u64);
+            gc.push_root(&pl.await_callee as *const Value as *mut u64);
+            for a in pl.stash_args.iter() {
+                gc.push_root(a as *const Value as *mut u64);
+            }
+        }
         if let Some(ref pra) = self.pending_replace_all_op {
             gc.push_root(&pra.fn_val as *const Value as *mut u64);
         }
@@ -3439,6 +3499,9 @@ impl Vm {
         if let Some(ref mut state) = self.pending_from_op {
             state.source_frame_depth = depth;
         }
+        if let Some(ref mut state) = self.pending_length_op {
+            state.source_frame_depth = depth;
+        }
         // F4 additions: accessor_call and primitive_conversion never
         // rebased (stale depth if a nested callback pushed between set and
         // return). PendingAsyncGen has no depth field (bridge-driven, not
@@ -3501,6 +3564,10 @@ impl Vm {
                 .is_some_and(|p| fi < p.source_frame_depth)
             || self
                 .pending_from_op
+                .as_ref()
+                .is_some_and(|p| fi < p.source_frame_depth)
+            || self
+                .pending_length_op
                 .as_ref()
                 .is_some_and(|p| fi < p.source_frame_depth)
             || self
@@ -9701,6 +9768,56 @@ impl Vm {
                             }
                         } else {
                             self.pending_from_op = Some(fop);
+                        }
+                    }
+                    // Check if this return completes a pending length
+                    // resolution (B1f-6b: JS length getter / valueOf / toString
+                    // / @@toPrimitive). Same callee+depth guard as sort/from.
+                    if let Some(mut lop) = self.pending_length_op.take() {
+                        let callee_match = self
+                            .last_popped_callee
+                            .heap_ptr()
+                            .is_some_and(|p| Some(p) == lop.await_callee.heap_ptr());
+                        if self.frames.len() <= lop.source_frame_depth && callee_match {
+                            match crate::builtins::length_resume(self, gc, &mut lop, result) {
+                                crate::builtins::LengthOut::Wait => {
+                                    self.pending_length_op = Some(lop);
+                                    self.rebase_pending_depths();
+                                    continue 'run;
+                                }
+                                crate::builtins::LengthOut::Done(resolved) => {
+                                    // Publish for the re-dispatched builtin,
+                                    // which consumes it first-thing.
+                                    self.length_resume = Some(resolved);
+                                    let depth_before = self.frames.len();
+                                    let r = (lop.caller)(gc, lop.stash_this, &lop.stash_args, self);
+                                    if let Some(exc) = self.pending_exception.take() {
+                                        if let Some(exit) = self.handle_throw(gc, exc) {
+                                            return exit;
+                                        }
+                                        continue 'run;
+                                    }
+                                    if self.frames.len() > depth_before {
+                                        // Re-entry armed a nested machine
+                                        // (e.g. map's first JS callback):
+                                        // it owns pc/stack from here.
+                                        continue 'run;
+                                    }
+                                    let frames_len = self.frames.len();
+                                    self.stack.truncate(callee_base);
+                                    self.push(r);
+                                    self.frames[frames_len - 1].pc += 1;
+                                    continue 'run;
+                                }
+                                crate::builtins::LengthOut::Raise(e) => {
+                                    if let Some(exit) = self.handle_throw(gc, e) {
+                                        return exit;
+                                    }
+                                    continue 'run;
+                                }
+                            }
+                        } else {
+                            self.pending_length_op = Some(lop);
                         }
                     }
                     // Check if this return completes a pending assert.throws callback.

@@ -8361,9 +8361,378 @@ fn mutator_length(gc: &mut SemiSpace, vm: &mut Vm, this: Value) -> Result<(u64, 
     Ok((to_length_clamp(raw), raw))
 }
 
-/// First length slot value up the chain (or undefined): dense length,
-/// own-or-inherited data slots, UTF-16 length for strings. Pure sync walk
-/// (accessor lengths surface as their pair value for the converter).
+// ---------- B1f-6b: awaitable LengthOfArrayLike ----------
+
+/// Drive outcome for length resolution (B1f-6b). No Progress variant: resume
+/// routes straight back through the chain driver to a terminal outcome.
+pub(crate) enum LengthOut {
+    /// A JS frame was pushed (stage armed); store op and yield to the loop.
+    Wait,
+    /// Resolved to (clamped u64, integer f64).
+    Done((u64, f64)),
+    /// Fail with an error value (cascade routes via handle_throw).
+    Raise(Value),
+}
+
+/// Is this value an accessor pair (JS getter/setter behind a load)?
+fn is_accessor_pair(v: Value) -> bool {
+    v.heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_ACCESSOR)
+}
+
+/// Finish a length number: ToIntegerOrInfinity then ToLength clamp (B1f-6b).
+/// Integer f64 out (callers ignore raw, but keep the tuple shape).
+fn length_finish(n: f64) -> LengthOut {
+    let i = if n.is_nan() || n == 0.0 {
+        0.0
+    } else if n.is_infinite() {
+        n
+    } else {
+        n.trunc()
+    };
+    LengthOut::Done((to_length_clamp(i), i))
+}
+
+/// Sync number projection for staged length values (B1f-6b): Smi/float/bool
+/// direct; null → 0; undefined → NaN (integerizes to 0); strings parsed (no
+/// hex — StringNumericValue is B2); symbols throw. Heap objects return None
+/// (ride the method chain below).
+fn length_prim_number(gc: &mut SemiSpace, vm: &mut Vm, v: Value) -> Result<Option<f64>, Value> {
+    if let Some(n) = v.as_smi().map(|v| v as f64).or_else(|| v.as_float64()) {
+        return Ok(Some(n));
+    }
+    if let Some(b) = v.to_boolean() {
+        return Ok(Some(if b { 1.0 } else { 0.0 }));
+    }
+    if v.is_null() {
+        return Ok(Some(0.0));
+    }
+    if v.is_undefined() {
+        return Ok(Some(f64::NAN));
+    }
+    if v.is_symbol() {
+        return Err(sort_type_error(
+            gc,
+            vm,
+            "Cannot convert a Symbol value to a number",
+        ));
+    }
+    if let Some(ptr) = v.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_STRING {
+            let s = unsafe { HeapString::to_string(ptr as *mut HeapString) };
+            let t = s.trim();
+            if t.is_empty() {
+                return Ok(Some(0.0));
+            }
+            return Ok(Some(t.parse::<f64>().unwrap_or(f64::NAN)));
+        }
+        // B1f-2 parity (length_to_number): String objects coerce by inner
+        // string (own valueOf overrides are a documented gap there too).
+        if tag == TAG_STRING_OBJ {
+            let sptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
+            let s = unsafe { HeapString::to_string(sptr as *mut HeapString) };
+            let t = s.trim();
+            if t.is_empty() {
+                return Ok(Some(0.0));
+            }
+            return Ok(Some(t.parse::<f64>().unwrap_or(f64::NAN)));
+        }
+    }
+    Ok(None)
+}
+
+/// Call one coercion method for the length chain (B1f-6b): builtin handles
+/// run inline (pending → Raise); JS functions push a frame + arm Call(idx);
+/// anything else resolves per position (@@toPrimitive non-callable-non-null
+/// throws per GetMethod; valueOf/toString skip per OrdinaryToPrimitive).
+/// Accessor pairs (method getters) skip — documented micro-gap.
+enum LengthCallOut {
+    Ready(Value),
+    Wait,
+    Raise(Value),
+    Skip,
+}
+
+fn length_call_method(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    op: &mut crate::vm::PendingLengthOp,
+    method: Value,
+    recv: Value,
+    idx: u8,
+    throw_if_not_callable: bool,
+) -> LengthCallOut {
+    if method.is_undefined() || method.is_null() {
+        return LengthCallOut::Skip;
+    }
+    if let Some(smi) = method.as_smi() {
+        if smi < 0 {
+            let id = ((-smi) as usize) - 1;
+            if id < vm.builtins.len() {
+                let r = (vm.builtins[id].func)(gc, recv, &[], vm);
+                if let Some(exc) = vm.pending_exception.take() {
+                    return LengthCallOut::Raise(exc);
+                }
+                length_refresh(op);
+                return LengthCallOut::Ready(r);
+            }
+        }
+        if throw_if_not_callable {
+            return LengthCallOut::Raise(sort_type_error(gc, vm, "Not a function"));
+        }
+        return LengthCallOut::Skip;
+    }
+    if method
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC)
+    {
+        vm.push_callback_call(gc, method, recv, vec![]);
+        op.stage = crate::vm::LengthStage::Call(idx);
+        op.await_callee = vm.last_pushed_callee;
+        return LengthCallOut::Wait;
+    }
+    if throw_if_not_callable {
+        return LengthCallOut::Raise(sort_type_error(gc, vm, "Not a function"));
+    }
+    LengthCallOut::Skip
+}
+
+/// Refresh length-op fields after a possibly-GCing call (B1f-1 discipline,
+// best-effort single-cycle: resolves moved objects).
+fn length_refresh(op: &mut crate::vm::PendingLengthOp) {
+    op.stash_this = refresh_value(op.stash_this);
+    op.staged = refresh_value(op.staged);
+    op.await_callee = refresh_value(op.await_callee);
+    for a in op.stash_args.iter_mut() {
+        *a = refresh_value(*a);
+    }
+}
+
+/// Advance the ToPrimitive method chain on op.staged from op.method_idx
+/// (B1f-6b): 0=@@toPrimitive (GetMethod rule), 1=valueOf, 2=toString (skip
+/// rule); exhaustion throws. Sync-resolves or suspends on the first JS call.
+///
+/// OrdinaryToPrimitive looks every method up on the ORIGINAL object
+/// (op.staged stays pinned as the coercion base): a method result is only
+/// tested for primitiveness — object results advance to the next method on
+/// the same base, never re-target the lookup.
+fn length_chain(vm: &mut Vm, gc: &mut SemiSpace, op: &mut crate::vm::PendingLengthOp) -> LengthOut {
+    loop {
+        // Fast path: staged already primitive (or symbol-throw).
+        match length_prim_number(gc, vm, op.staged) {
+            Ok(Some(n)) => return length_finish(n),
+            Ok(None) => {}
+            Err(e) => return LengthOut::Raise(e),
+        }
+        // B1f-2 parity (length_to_number): non-Object heap receivers (arrays,
+        // functions, dates, ...) read as 0 without proto-method dispatch.
+        // Full exotic ToPrimitive is B2 hardening.
+        if op
+            .staged
+            .heap_ptr()
+            .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() != TAG_OBJECT })
+        {
+            return LengthOut::Done((0, 0.0));
+        }
+        if op.method_idx > 2 {
+            return LengthOut::Raise(sort_type_error(
+                gc,
+                vm,
+                "Cannot convert object to primitive value",
+            ));
+        }
+        let idx = op.method_idx;
+        // Resolve the method value with plain loads (never frames here;
+        // pair-valued methods skip per the documented micro-gap).
+        let method = if idx == 0 {
+            load_property_recursive(
+                op.staged,
+                Value::symbol(rune_core::symbol::SYM_TO_PRIMITIVE),
+                None,
+                gc,
+            )
+        } else {
+            let key = PropertyKey::from_string(if idx == 1 { "valueOf" } else { "toString" });
+            match toprim_find_method(op.staged, &key) {
+                Some(m) => m,
+                None => {
+                    op.method_idx += 1;
+                    continue;
+                }
+            }
+        };
+        length_refresh(op);
+        match length_call_method(vm, gc, op, method, op.staged, idx, idx == 0) {
+            LengthCallOut::Ready(r) => {
+                // Exotic result object → TypeError (no Ordinary fallback).
+                if idx == 0 && r.is_heap_object() {
+                    return LengthOut::Raise(sort_type_error(
+                        gc,
+                        vm,
+                        "Cannot convert object to primitive value",
+                    ));
+                }
+                // Ordinary methods resolve against the pinned base: a
+                // primitive result finishes, an object result advances to
+                // the next method on the SAME base (never re-targets).
+                match length_prim_number(gc, vm, r) {
+                    Ok(Some(n)) => return length_finish(n),
+                    Ok(None) => {
+                        op.method_idx = idx + 1;
+                        continue;
+                    }
+                    Err(e) => return LengthOut::Raise(e),
+                }
+            }
+            LengthCallOut::Wait => return LengthOut::Wait,
+            LengthCallOut::Raise(e) => return LengthOut::Raise(e),
+            LengthCallOut::Skip => {
+                op.method_idx += 1;
+                continue;
+            }
+        }
+    }
+}
+
+/// Drive length resolution from entry (B1f-6b): find the slot (dense/string
+/// fast paths fall straight into coerce), dispatching a JS length getter via
+/// frame + Get await when present.
+pub(crate) fn length_drive(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    op: &mut crate::vm::PendingLengthOp,
+) -> LengthOut {
+    // Sync exotics first (B1f-2 seq_length parity): TypedArray indexed count
+    // and String-object inner length never suspend.
+    if let Some(ptr) = op.stash_this.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_TYPED_ARRAY {
+            let len = unsafe { typedarray::RuneTypedArray::length(ptr) } as u64;
+            return LengthOut::Done((len, len as f64));
+        }
+        if tag == TAG_STRING_OBJ {
+            let sptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
+            let units = unsafe { HeapString::to_string(sptr as *mut HeapString) }
+                .encode_utf16()
+                .count() as u64;
+            return LengthOut::Done((units, units as f64));
+        }
+    }
+    let v = length_walk_value(op.stash_this);
+    if !is_accessor_pair(v) {
+        op.staged = v;
+        op.method_idx = 0;
+        return length_chain(vm, gc, op);
+    }
+    let ap = v.heap_ptr().unwrap();
+    let getter = unsafe { rune_core::accessor::AccessorPair::getter(ap) };
+    if getter.is_undefined() || getter.is_null() {
+        op.staged = Value::undefined();
+        op.method_idx = 0;
+        return length_chain(vm, gc, op);
+    }
+    if let Some(smi) = getter.as_smi() {
+        if smi < 0 {
+            let id = ((-smi) as usize) - 1;
+            if id < vm.builtins.len() {
+                let r = (vm.builtins[id].func)(gc, op.stash_this, &[], vm);
+                if let Some(exc) = vm.pending_exception.take() {
+                    return LengthOut::Raise(exc);
+                }
+                length_refresh(op);
+                op.staged = r;
+                op.method_idx = 0;
+                return length_chain(vm, gc, op);
+            }
+        }
+        op.staged = Value::undefined();
+        op.method_idx = 0;
+        return length_chain(vm, gc, op);
+    }
+    if getter
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC)
+    {
+        vm.push_callback_call(gc, getter, op.stash_this, vec![]);
+        op.stage = crate::vm::LengthStage::Get;
+        op.await_callee = vm.last_pushed_callee;
+        return LengthOut::Wait;
+    }
+    op.staged = Value::undefined();
+    op.method_idx = 0;
+    length_chain(vm, gc, op)
+}
+
+/// Resume length resolution with a JS frame's return value (B1f-6b): Get feeds
+/// the getter result into coerce; Call(idx) enforces the exotic no-fallback
+/// rule then continues the chain (objects) — primitives finish via the chain.
+pub(crate) fn length_resume(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    op: &mut crate::vm::PendingLengthOp,
+    result: Value,
+) -> LengthOut {
+    let kind = std::mem::replace(&mut op.stage, crate::vm::LengthStage::Get);
+    match kind {
+        crate::vm::LengthStage::Get => {
+            op.staged = result;
+            op.method_idx = 0;
+            length_chain(vm, gc, op)
+        }
+        crate::vm::LengthStage::Call(idx) => {
+            if idx == 0 && result.is_heap_object() {
+                return LengthOut::Raise(sort_type_error(
+                    gc,
+                    vm,
+                    "Cannot convert object to primitive value",
+                ));
+            }
+            // Pinned-base rule (see length_chain): primitive results finish,
+            // object results advance on the SAME staged base.
+            match length_prim_number(gc, vm, result) {
+                Ok(Some(n)) => length_finish(n),
+                Ok(None) => {
+                    op.method_idx = idx + 1;
+                    length_chain(vm, gc, op)
+                }
+                Err(e) => LengthOut::Raise(e),
+            }
+        }
+    }
+}
+
+/// Entry: resolve `this` length for `caller`, suspending on JS (B1f-6b).
+/// Re-entry (after resume) consumes vm.length_resume first-thing.
+pub(crate) fn length_stage(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    caller: crate::builtins::BuiltinFn,
+    this: Value,
+    args: &[Value],
+) -> LengthOut {
+    if let Some(resolved) = vm.length_resume.take() {
+        return LengthOut::Done(resolved);
+    }
+    let mut op = crate::vm::PendingLengthOp {
+        source_frame_depth: 0,
+        caller,
+        stash_this: this,
+        stash_args: args.to_vec(),
+        staged: Value::undefined(),
+        method_idx: 0,
+        stage: crate::vm::LengthStage::Get,
+        await_callee: Value::undefined(),
+    };
+    match length_drive(vm, gc, &mut op) {
+        LengthOut::Wait => {
+            op.source_frame_depth = vm.frame_depth() - 1;
+            vm.pending_length_op = Some(op);
+            LengthOut::Wait
+        }
+        other => other,
+    }
+}
 fn length_walk_value(this: Value) -> Value {
     let Some(ptr) = this.heap_ptr() else {
         return Value::undefined();
@@ -9058,9 +9427,12 @@ pub fn array_push(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut 
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let (mut len, _) = match mutator_length(gc, vm, this) {
-        Ok(v) => v,
-        Err(e) => {
+    // B1f-6b: JS-driven lengths suspend (op stored, frame pushed); resume
+    // re-enters here and consumes the slot first-thing (pure prefix).
+    let (mut len, _) = match length_stage(gc, vm, array_push, this, args) {
+        LengthOut::Done(v) => v,
+        LengthOut::Wait => return Value::undefined(),
+        LengthOut::Raise(e) => {
             vm.set_pending_exception(e);
             return Value::undefined();
         }
@@ -9105,9 +9477,11 @@ pub fn array_pop(gc: &mut SemiSpace, mut this: Value, _args: &[Value], vm: &mut 
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let (len, _) = match mutator_length(gc, vm, this) {
-        Ok(v) => v,
-        Err(e) => {
+    // B1f-6b: suspend on JS-driven lengths (see array_push).
+    let (len, _) = match length_stage(gc, vm, array_pop, this, _args) {
+        LengthOut::Done(v) => v,
+        LengthOut::Wait => return Value::undefined(),
+        LengthOut::Raise(e) => {
             vm.set_pending_exception(e);
             return Value::undefined();
         }
@@ -9146,9 +9520,11 @@ pub fn array_shift(gc: &mut SemiSpace, mut this: Value, _args: &[Value], vm: &mu
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let (len, _) = match mutator_length(gc, vm, this) {
-        Ok(v) => v,
-        Err(e) => {
+    // B1f-6b: suspend on JS-driven lengths (see array_push).
+    let (len, _) = match length_stage(gc, vm, array_shift, this, _args) {
+        LengthOut::Done(v) => v,
+        LengthOut::Wait => return Value::undefined(),
+        LengthOut::Raise(e) => {
             vm.set_pending_exception(e);
             return Value::undefined();
         }
@@ -9219,9 +9595,11 @@ pub fn array_unshift(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &m
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let (len, _) = match mutator_length(gc, vm, this) {
-        Ok(v) => v,
-        Err(e) => {
+    // B1f-6b: suspend on JS-driven lengths (see array_push).
+    let (len, _) = match length_stage(gc, vm, array_unshift, this, args) {
+        LengthOut::Done(v) => v,
+        LengthOut::Wait => return Value::undefined(),
+        LengthOut::Raise(e) => {
             vm.set_pending_exception(e);
             return Value::undefined();
         }
@@ -9289,9 +9667,11 @@ pub fn array_reverse(gc: &mut SemiSpace, mut this: Value, _args: &[Value], vm: &
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let (len, _) = match mutator_length(gc, vm, this) {
-        Ok(v) => v,
-        Err(e) => {
+    // B1f-6b: suspend on JS-driven lengths (see array_push).
+    let (len, _) = match length_stage(gc, vm, array_reverse, this, _args) {
+        LengthOut::Done(v) => v,
+        LengthOut::Wait => return Value::undefined(),
+        LengthOut::Raise(e) => {
             vm.set_pending_exception(e);
             return Value::undefined();
         }
@@ -12154,9 +12534,11 @@ pub fn array_slice(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let (len, _) = match seq_length(gc, vm, this) {
-        Ok(v) => v,
-        Err(e) => {
+    // B1f-6b: suspend on JS-driven lengths (see array_push).
+    let (len, _) = match length_stage(gc, vm, array_slice, this, args) {
+        LengthOut::Done(v) => v,
+        LengthOut::Wait => return Value::undefined(),
+        LengthOut::Raise(e) => {
             vm.set_pending_exception(e);
             return Value::undefined();
         }
@@ -12306,9 +12688,11 @@ pub fn array_splice(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mu
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let (len, _) = match seq_length(gc, vm, this) {
-        Ok(v) => v,
-        Err(e) => {
+    // B1f-6b: suspend on JS-driven lengths (see array_push).
+    let (len, _) = match length_stage(gc, vm, array_splice, this, args) {
+        LengthOut::Done(v) => v,
+        LengthOut::Wait => return Value::undefined(),
+        LengthOut::Raise(e) => {
             vm.set_pending_exception(e);
             return Value::undefined();
         }
@@ -12693,6 +13077,7 @@ fn array_iter_prologue(
     this: Value,
     args: &[Value],
     method: &str,
+    caller: BuiltinFn,
 ) -> Option<(u32, Value, Value, *mut u8)> {
     if !require_object_coercible(this, vm, gc) {
         return None;
@@ -12710,9 +13095,12 @@ fn array_iter_prologue(
     let (len_u64, _) = if is_prim_string {
         (0, 0.0)
     } else {
-        match mutator_length(gc, vm, this) {
-            Ok(v) => v,
-            Err(e) => {
+        match length_stage(gc, vm, caller, this, args) {
+            LengthOut::Done(v) => v,
+            // Suspended (op stored, frame pushed): the Call arm skips via
+            // pending_owns_call; resume re-enters the caller via the slot.
+            LengthOut::Wait => return None,
+            LengthOut::Raise(e) => {
                 vm.set_pending_exception(e);
                 return None;
             }
@@ -12771,9 +13159,14 @@ fn prev_existing_index(this: Value, before: usize) -> Option<usize> {
 }
 
 pub fn array_for_each(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some((length, callback, this_arg, source_ptr)) =
-        array_iter_prologue(gc, vm, this, args, "Array.prototype.forEach")
-    else {
+    let Some((length, callback, this_arg, source_ptr)) = array_iter_prologue(
+        gc,
+        vm,
+        this,
+        args,
+        "Array.prototype.forEach",
+        array_for_each,
+    ) else {
         return Value::undefined();
     };
     let Some(first) = first_existing_index(this, length) else {
@@ -12821,7 +13214,7 @@ pub fn array_for_each(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
 /// Array.prototype.filter(callback, thisArg) — set up state machine iteration.
 pub fn array_filter(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let Some((length, callback, this_arg, _)) =
-        array_iter_prologue(gc, vm, this, args, "Array.prototype.filter")
+        array_iter_prologue(gc, vm, this, args, "Array.prototype.filter", array_filter)
     else {
         return Value::undefined();
     };
@@ -12887,7 +13280,7 @@ pub fn array_filter(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mu
 /// Array.prototype.map(callback, thisArg) — set up state machine iteration.
 pub fn array_map(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let Some((length, callback, this_arg, _)) =
-        array_iter_prologue(gc, vm, this, args, "Array.prototype.map")
+        array_iter_prologue(gc, vm, this, args, "Array.prototype.map", array_map)
     else {
         return Value::undefined();
     };
@@ -12960,7 +13353,7 @@ pub fn array_map(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut V
 /// (holes skipped); no present elements at all → TypeError.
 pub fn array_reduce(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let Some((length, callback, _, source_ptr)) =
-        array_iter_prologue(gc, vm, this, args, "Array.prototype.reduce")
+        array_iter_prologue(gc, vm, this, args, "Array.prototype.reduce", array_reduce)
     else {
         return Value::undefined();
     };
@@ -13088,9 +13481,14 @@ pub fn array_reduce(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
 /// Array.prototype.reduceRight(callback, initialValue) — backward mirror
 /// of reduce (B1c): seeds from the last present element, iterates down.
 pub fn array_reduce_right(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some((length, callback, _, source_ptr)) =
-        array_iter_prologue(gc, vm, this, args, "Array.prototype.reduceRight")
-    else {
+    let Some((length, callback, _, source_ptr)) = array_iter_prologue(
+        gc,
+        vm,
+        this,
+        args,
+        "Array.prototype.reduceRight",
+        array_reduce_right,
+    ) else {
         return Value::undefined();
     };
     let has_initial = args.len() > 1;
@@ -13209,9 +13607,14 @@ pub fn array_reduce_right(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
 
 /// Array.prototype.findLast(callback, thisArg) — backward find (B1c).
 pub fn array_find_last(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some((length, callback, this_arg, source_ptr)) =
-        array_iter_prologue(gc, vm, this, args, "Array.prototype.findLast")
-    else {
+    let Some((length, callback, this_arg, source_ptr)) = array_iter_prologue(
+        gc,
+        vm,
+        this,
+        args,
+        "Array.prototype.findLast",
+        array_find_last,
+    ) else {
         return Value::undefined();
     };
     let Some(last) = last_existing_index(this, length) else {
@@ -13261,9 +13664,14 @@ pub fn array_find_last_index(
     args: &[Value],
     vm: &mut Vm,
 ) -> Value {
-    let Some((length, callback, this_arg, source_ptr)) =
-        array_iter_prologue(gc, vm, this, args, "Array.prototype.findLastIndex")
-    else {
+    let Some((length, callback, this_arg, source_ptr)) = array_iter_prologue(
+        gc,
+        vm,
+        this,
+        args,
+        "Array.prototype.findLastIndex",
+        array_find_last_index,
+    ) else {
         return Value::smi(-1);
     };
     let Some(last) = last_existing_index(this, length) else {
@@ -13309,7 +13717,7 @@ pub fn array_find_last_index(
 /// Array.prototype.find(callback, thisArg) — set up state machine iteration.
 pub fn array_find(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let Some((length, callback, this_arg, source_ptr)) =
-        array_iter_prologue(gc, vm, this, args, "Array.prototype.find")
+        array_iter_prologue(gc, vm, this, args, "Array.prototype.find", array_find)
     else {
         return Value::undefined();
     };
@@ -13357,9 +13765,14 @@ pub fn array_find(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
 
 /// Array.prototype.findIndex(callback, thisArg) — set up state machine iteration.
 pub fn array_find_index(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some((length, callback, this_arg, source_ptr)) =
-        array_iter_prologue(gc, vm, this, args, "Array.prototype.findIndex")
-    else {
+    let Some((length, callback, this_arg, source_ptr)) = array_iter_prologue(
+        gc,
+        vm,
+        this,
+        args,
+        "Array.prototype.findIndex",
+        array_find_index,
+    ) else {
         return Value::smi(-1);
     };
     let Some(first) = first_existing_index(this, length) else {
@@ -14595,9 +15008,14 @@ pub fn array_to_sorted(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
 
 /// Array.prototype.flatMap(callback, thisArg) — set up state machine iteration, spreading array results.
 pub fn array_flat_map(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some((length, callback, this_arg, _)) =
-        array_iter_prologue(gc, vm, this, args, "Array.prototype.flatMap")
-    else {
+    let Some((length, callback, this_arg, _)) = array_iter_prologue(
+        gc,
+        vm,
+        this,
+        args,
+        "Array.prototype.flatMap",
+        array_flat_map,
+    ) else {
         return Value::undefined();
     };
     // B1f-6a: species prologue (after the callable check).
@@ -14660,7 +15078,7 @@ pub fn array_flat_map(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &
 /// Array.prototype.some(callback, thisArg) — set up state machine iteration.
 pub fn array_some(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let Some((length, callback, this_arg, source_ptr)) =
-        array_iter_prologue(gc, vm, this, args, "Array.prototype.some")
+        array_iter_prologue(gc, vm, this, args, "Array.prototype.some", array_some)
     else {
         return Value::boolean(false);
     };
@@ -14709,7 +15127,7 @@ pub fn array_some(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
 /// Array.prototype.every(callback, thisArg) — set up state machine iteration.
 pub fn array_every(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let Some((length, callback, this_arg, source_ptr)) =
-        array_iter_prologue(gc, vm, this, args, "Array.prototype.every")
+        array_iter_prologue(gc, vm, this, args, "Array.prototype.every", array_every)
     else {
         return Value::boolean(true);
     };

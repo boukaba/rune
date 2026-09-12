@@ -46,6 +46,51 @@ paths can't match immediates (no JIT change needed).
   exact, retracted in A2.)
 - 860 workspace / 0 failed; clippy/fmt/no-default/x86 clean.
 
+## B1f-6b DONE — awaitable LengthOfArrayLike (2026-09-07)
+
+Second B1f-6 sub-slice (6a species sync ✓ → 6b HERE → 6c custom-ctor
+Construct + frames → 6d element gaps + GetMethod getters + ToPrimitive sync):
+
+- **New PendingLengthOp machine** (§7.3.23 LengthOfArrayLike with frames:
+  sync-exotic fast paths (TypedArray count, String-object inner length,
+  dense/string fast lanes) → length-slot Get (plain loads; JS getter via
+  frame + Get await; builtin getter inline) → ToPrimitive chain with
+  **pinned-base rule** (OrdinaryToPrimitive looks valueOf/toString up on the
+  ORIGINAL length object; method results only test primitive — object
+  results advance on the same base; exhaustion throws TypeError; @@toPrimitive
+  GetMethod rule with exotic no-fallback throw; builtin methods inline, JS
+  methods via frame + Call(idx) await; non-Object heap staged → 0.0 parity;
+  symbol → TypeError) → ToInteger+ToLength clamp → LengthOut::Done published
+  via vm.length_resume; caller re-dispatches (pre-length work pure-or-alloc).
+  Full F4 sites (root/rebase/owns-call-skip/drop-dead/Return cascade with
+  callee+depth guard + nested-machine handoff). Wired into
+  push/pop/shift/unshift/reverse/slice/splice + array_iter_prologue (12 sites
+  with explicit caller: BuiltinFn).
+- **Root-caused en route**: chain re-targeted `staged` to each method result,
+  so toString resolved on valueOf's fresh `{}` (proto toString →
+  "[object Object]" → NaN → length 0, A2_T4#8 silent pass). Pinning the base
+  per OrdinaryToPrimitive fixed it (now TypeError).
+- **Gains (+155 Array, ZERO new failures)**: reduce 26 + reduceRight 25
+  (length-driven bound), map 18, filter 18, some/forEach/every 16 each, find
+  family 4, flatMap 3, slice/splice 3 each, concat 2, push/pop/shift/unshift
+  1 each, flat 1. Flagships: map 2-7 (valueOf length), slice
+  create-non-array-invalid-len, find return-abrupt-from-this-length, pop
+  A2_T4 (full 8-part incl. double-{} TypeError). Array 1948→2091 (2091
+  passed / 792 failed). Object/String/Function/statements/expressions
+  FAIL-lists byte-identical to stash (0 new / 0 fixed).
+- **Still failing (owned by later slices)**: set_length_no_args (WRITE-side
+  dispatch — mutator set_length_checked is sync; needs the write machine);
+  toSpliced/length-tolength (toSpliced uses unwired checked_array_length);
+  T8 = pre-existing flaky hang/crash (pass/TIMEOUT/PANIC/SEGV across builds,
+  solo-flaky, C bucket with T9/T10).
+- 878/0 workspace (1 new integration test test_array_length_dispatch: 6
+  probes incl. pinned-base toString fallback + exhaustion TypeError +
+  throwing-valueOf propagation + getter length); stable clippy (CI
+  flags)/fmt/no-default clean.
+- **Process**: touch+verify-Compiling caught a stale-binary phantom (2.24s
+  "rebuild" after stash was real — probe decided it); exit code off the
+  runner not head (PIPESTATUS); fmt exit via file redirect (pipe masks it).
+
 ## B1f-6a DONE — species sync prologue (2026-09-07)
 
 First B1f-6 sub-slice (B1f-6 split: 6a species sync checks (here) → 6b length

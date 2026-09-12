@@ -46,6 +46,39 @@ paths can't match immediates (no JIT change needed).
   exact, retracted in A2.)
 - 860 workspace / 0 failed; clippy/fmt/no-default/x86 clean.
 
+## B1 census — corrected Array inventory (2026-09-07)
+
+Deep check after 6c (Array 2101/3081 pass, 782 fails; first pass had 6
+errors — all corrected below by reading tests + probing the engine):
+
+- **Corrections**: fill/toReversed are UNIMPLEMENTED (`typeof [].fill ===
+  "undefined"` — need full audits, not gaps); lastIndexOf/at on undefined
+  already throw; undef-invalid-len ×2 is Proxy (B7); flatMap-poisoned needs
+  the `{get [sym]}` literal (B2) + 6c + 6d; of/new-array-object needs bind
+  (B8); find must VISIT holes (test wants 4 calls, we do 2 — probed);
+  `-9-3` fails are top-level hoisting (`typeof foo === "undefined"` before
+  its decl line — probed repro), not species.
+- **6d Construct+install ~35**: create-species data/abrupt/neg-zero/
+  non-extensible-install 23 + flatMap species 3 + of-custom-this 4 +
+  from-cstm 3 + of/from misc 2.
+- **Method audits ~45**: fill 15 + toReversed 13 (missing) + with 5 +
+  toSpliced remainder ~8 + flat depth-symbol.
+- **6e element/gap closure ~130**: element getters/setters/abrupt;
+  dense-shadows-proto (probed `arr[2]` → 2 not proto getter); find-hole
+  visit; sparse-walk (`every` on `new Array(10)`); length-machine wiring
+  (fill/copyWithin/at/join/includes/with/toSpliced/flat + undefined-end);
+  write side (frozen-mutator ×19, set_length_no_args, NaN-length
+  RangeError, length/ descriptor-order ×10); ToPropertyKey legacy.
+- **Cross-owned (in Array suite)**: B2 ~105 (`-1-*` primitive receivers
+  78 + hex ~10 + wrappers/toString); B8 ~100 (`-5-*` sloppy-thisArg 36 +
+  hoisting `-6-/-7-/-9-/-10-` ~50 + ReferenceError-fidelity + bind ×3);
+  B4 resizable 56; B7 Proxy 23; B5 ctors ~10; C scale/flakes ~15.
+- **Verified probes**: species/ctor poison propagates + callbacks skipped;
+  IsArray gate skips Gets; `{get [Symbol.species]()}` literal never
+  installs (defineProperty form works); `new [].fill()` — n/a (missing).
+- **Order**: 6d → fill/toReversed audits → 6e → B2 → B8 → B5 → B3 →
+  B4 → B6 → B7 → C → J3.
+
 ## B1f-6c DONE — species Get dispatch through frames (2026-09-07)
 
 Third B1f-6 sub-slice (re-split by categorize-before-slicing: 6a species

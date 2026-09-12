@@ -761,7 +761,6 @@ pub(crate) enum LengthStage {
     /// 2=toString); resume continues the chain after it.
     Call(u8),
 }
-
 /// Pending LengthOfArrayLike-with-frames (B1f-6b): resolves a JS-driven
 /// length (getter / valueOf / toString / @@toPrimitive) then re-dispatches
 /// the suspended builtin with the resolved value. Sync-resolvable lengths
@@ -779,6 +778,31 @@ pub(crate) struct PendingLengthOp {
     /// 3+=exhausted). Persists across Call resumes.
     pub(crate) method_idx: u8,
     pub(crate) stage: LengthStage,
+    pub(crate) await_callee: Value,
+}
+
+/// Species-Get suspension point (B1f-6c): which species Get is outstanding.
+pub(crate) enum SpeciesStage {
+    /// "constructor" JS getter outstanding (resume validates + reads species).
+    GetCtor,
+    /// @@species JS getter outstanding (resume validates the species).
+    GetSpecies,
+}
+
+/// Pending SpeciesConstructor-Gets (B1f-6c): runs the two Gets with frames
+/// for JS getters, then re-dispatches the suspended builtin (which rebuilds
+/// plain — Custom Construct lands in 6d). Sync-resolvable shapes never
+/// suspend (zero-cost fast path through species_stage).
+pub(crate) struct PendingSpeciesOp {
+    pub(crate) source_frame_depth: usize,
+    /// Re-entry target once resolved (caller reruns; pre-point work in
+    /// wired builtins is pure-or-alloc, so re-entry is side-effect free).
+    pub(crate) caller: BuiltinFn,
+    pub(crate) stash_this: Value,
+    pub(crate) stash_args: Vec<Value>,
+    /// Resolved "constructor" value (set after the GetCtor leg).
+    pub(crate) ctor: Value,
+    pub(crate) stage: SpeciesStage,
     pub(crate) await_callee: Value,
 }
 /// Set by the builtin function, consumed/updated by the Return handler.
@@ -1010,6 +1034,11 @@ pub struct Vm {
     /// re-dispatching, consumed first-thing by length_stage. Single-flight
     /// by construction (no user code runs between set and consume).
     pub(crate) length_resume: Option<(u64, f64)>,
+    /// B1f-6c: live species-Get machine (see PendingSpeciesOp).
+    pub(crate) pending_species_op: Option<PendingSpeciesOp>,
+    /// Species passed for builtin re-entry after a species suspension
+    /// (B1f-6c): same single-flight contract as length_resume.
+    pub(crate) species_passed: bool,
     /// B1e: func of the most recently pushed callback/getter frame
     /// (machines copy this into their await state at push time).
     pub(crate) last_pushed_callee: Value,
@@ -1200,6 +1229,8 @@ impl Vm {
             pending_from_op: None,
             pending_length_op: None,
             length_resume: None,
+            pending_species_op: None,
+            species_passed: false,
             last_pushed_callee: Value::undefined(),
             last_popped_callee: Value::undefined(),
             iter_state_symbol: rune_core::symbol::symbol_for("__rune_iter_state"),
@@ -2902,6 +2933,17 @@ impl Vm {
         }
     }
 
+    /// B1f-6c: same firewall for the species machine.
+    fn drop_dead_species_op(&mut self, popped_frame: usize) {
+        if self
+            .pending_species_op
+            .as_ref()
+            .is_some_and(|op| op.source_frame_depth == popped_frame)
+        {
+            self.pending_species_op = None;
+        }
+    }
+
     /// B1f-6b: same firewall for the length machine.
     fn drop_dead_length_op(&mut self, popped_frame: usize) {
         if self
@@ -3055,6 +3097,7 @@ impl Vm {
                         self.drop_dead_sort_op(popped_frame);
                         self.drop_dead_from_op(popped_frame);
                         self.drop_dead_length_op(popped_frame);
+                        self.drop_dead_species_op(popped_frame);
                         self.stack.truncate(callee_base);
                         return self.handle_throw(gc, err);
                     }
@@ -3065,6 +3108,7 @@ impl Vm {
                     self.drop_dead_sort_op(popped_frame);
                     self.drop_dead_from_op(popped_frame);
                     self.drop_dead_length_op(popped_frame);
+                    self.drop_dead_species_op(popped_frame);
                     self.stack.truncate(callee_base);
                     self.push(Value::undefined());
                     let new_fi = self.frames.len() - 1;
@@ -3090,6 +3134,7 @@ impl Vm {
             self.drop_dead_sort_op(popped_frame);
             self.drop_dead_from_op(popped_frame);
             self.drop_dead_length_op(popped_frame);
+            self.drop_dead_species_op(popped_frame);
             if self.frames.is_empty() {
                 self.stack.clear();
                 return Some(Exit::Throw(val));
@@ -3365,6 +3410,14 @@ impl Vm {
                 gc.push_root(a as *const Value as *mut u64);
             }
         }
+        if let Some(ref ps) = self.pending_species_op {
+            gc.push_root(&ps.stash_this as *const Value as *mut u64);
+            gc.push_root(&ps.ctor as *const Value as *mut u64);
+            gc.push_root(&ps.await_callee as *const Value as *mut u64);
+            for a in ps.stash_args.iter() {
+                gc.push_root(a as *const Value as *mut u64);
+            }
+        }
         if let Some(ref pra) = self.pending_replace_all_op {
             gc.push_root(&pra.fn_val as *const Value as *mut u64);
         }
@@ -3502,6 +3555,9 @@ impl Vm {
         if let Some(ref mut state) = self.pending_length_op {
             state.source_frame_depth = depth;
         }
+        if let Some(ref mut state) = self.pending_species_op {
+            state.source_frame_depth = depth;
+        }
         // F4 additions: accessor_call and primitive_conversion never
         // rebased (stale depth if a nested callback pushed between set and
         // return). PendingAsyncGen has no depth field (bridge-driven, not
@@ -3518,8 +3574,9 @@ impl Vm {
     /// and pc advance because a pending machine owns the continuation (the
     /// callback-setup builtin pushed the callback frame itself; the Return
     /// handler's state machine owns the pc). Membership is exactly the
-    /// historical 12 (machines whose builtins return junk that must not leak
-    /// onto the caller stack); other machines (for_of_*, yield_star_next,
+    /// historical 12 plus the length/species re-dispatch machines (whose
+    /// builtins return junk that must not leak onto the caller stack); other
+    /// machines (for_of_*, yield_star_next,
     /// iter_drain, accessor_call, …) complete through different paths and
     /// must NOT skip. When adding a machine, decide membership here.
     fn pending_owns_call(&self, fi: usize) -> bool {
@@ -3568,6 +3625,10 @@ impl Vm {
                 .is_some_and(|p| fi < p.source_frame_depth)
             || self
                 .pending_length_op
+                .as_ref()
+                .is_some_and(|p| fi < p.source_frame_depth)
+            || self
+                .pending_species_op
                 .as_ref()
                 .is_some_and(|p| fi < p.source_frame_depth)
             || self
@@ -9818,6 +9879,56 @@ impl Vm {
                             }
                         } else {
                             self.pending_length_op = Some(lop);
+                        }
+                    }
+                    // Check if this return completes a pending species Get
+                    // (B1f-6c: JS "constructor" / @@species getter). Same
+                    // callee+depth guard as length/from.
+                    if let Some(mut sop) = self.pending_species_op.take() {
+                        let callee_match = self
+                            .last_popped_callee
+                            .heap_ptr()
+                            .is_some_and(|p| Some(p) == sop.await_callee.heap_ptr());
+                        if self.frames.len() <= sop.source_frame_depth && callee_match {
+                            match crate::builtins::species_resume(self, gc, &mut sop, result) {
+                                crate::builtins::SpeciesOut::Wait => {
+                                    self.pending_species_op = Some(sop);
+                                    self.rebase_pending_depths();
+                                    continue 'run;
+                                }
+                                crate::builtins::SpeciesOut::Passed => {
+                                    // Publish for the re-dispatched builtin,
+                                    // which consumes it first-thing.
+                                    self.species_passed = true;
+                                    let depth_before = self.frames.len();
+                                    let r = (sop.caller)(gc, sop.stash_this, &sop.stash_args, self);
+                                    if let Some(exc) = self.pending_exception.take() {
+                                        if let Some(exit) = self.handle_throw(gc, exc) {
+                                            return exit;
+                                        }
+                                        continue 'run;
+                                    }
+                                    if self.frames.len() > depth_before {
+                                        // Re-entry armed a nested machine
+                                        // (e.g. map's first JS callback):
+                                        // it owns pc/stack from here.
+                                        continue 'run;
+                                    }
+                                    let frames_len = self.frames.len();
+                                    self.stack.truncate(callee_base);
+                                    self.push(r);
+                                    self.frames[frames_len - 1].pc += 1;
+                                    continue 'run;
+                                }
+                                crate::builtins::SpeciesOut::Fail(e) => {
+                                    if let Some(exit) = self.handle_throw(gc, e) {
+                                        return exit;
+                                    }
+                                    continue 'run;
+                                }
+                            }
+                        } else {
+                            self.pending_species_op = Some(sop);
                         }
                     }
                     // Check if this return completes a pending assert.throws callback.

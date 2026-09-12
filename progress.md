@@ -46,6 +46,48 @@ paths can't match immediates (no JIT change needed).
   exact, retracted in A2.)
 - 860 workspace / 0 failed; clippy/fmt/no-default/x86 clean.
 
+## B1f-6c DONE — species Get dispatch through frames (2026-09-07)
+
+Third B1f-6 sub-slice (re-split by categorize-before-slicing: 6a species
+sync ✓ → 6b length dispatch ✓ → 6c species Gets HERE → 6d custom-ctor
+Construct + install → 6e element gaps + GetMethod getters + ToPrimitive
+sync):
+
+- **New PendingSpeciesOp machine** (§7.3.22 SpeciesConstructor Gets with
+  frames + §10.4.2.3 step-1 IsArray gate): non-Array receivers take the
+  ArrayCreate path with NO Gets (spec — previously data-path Gets ran on
+  generics); arrays read "constructor" (data fast path; JS getter via frame
+  + GetCtor await with receiver O; builtin-Smi getters inline) then
+  @@species on the resolved ctor (GetSpecies await, receiver C); undefined →
+  default, non-Object ctor → TypeError, null/undefined species → default,
+  non-ctor species → TypeError, valid ctors pass (plain fallback until 6d).
+  Full F4 sites (root/rebase/owns-call-skip/drop-dead at 3 unwind pops/
+  Return cascade with callee+depth guard + re-dispatch via
+  vm.species_passed + nested-machine handoff), wired into all 8 species
+  sites (slice/concat/splice/filter/map/flat/flatMap; pre-point work
+  audited pure-or-alloc at each). Sync shapes never suspend (zero-cost).
+- **Gains (+10 Array, ZERO new failures)**: create-ctor-poisoned ×5 +
+  create-species-poisoned ×5 (map/filter/slice/splice/concat — throwing
+  getters propagate, callbacks never run). Array 2091→2101 (2101 passed /
+  782 failed). Object/String/Function/statements/expressions FAIL-lists
+  byte-identical to stash (0 new / 0 fixed).
+- **Pre-existing gaps found (NOT 6c)**: object-literal computed SYMBOL
+  getters (`{get [Symbol.species]()}`) never install (data-symbol +
+  computed-string + defineProperty-symbol getters all work — parser/emitter
+  literal path, → B2 object-model); T8 flake 5th mode (PANIC→TIMEOUT,
+  solo-passes ×2 → C).
+- **Still failing (owned)**: create-species*/abrupt/neg-zero (Construct →
+  6d); undef-invalid-len (Proxy → B7); traps-order (Proxy result → B7);
+  from/cstm-ctor + of/custom-instance (custom-this Construct, separate
+  paths); Symbol.species/return-value (Array @@species static → B2).
+- 879/0 workspace (1 new integration test test_array_species_getters: 4
+  probes incl. getter-called counting + non-Array gate); stable clippy (CI
+  flags — nonminimal_bool fix)/fmt/no-default clean.
+- **Process**: edit-tool vs `unsafe {…}` brace placement (bisect with
+  single-line probes, revert immediately); clippy suggests is_none_or;
+  behavior-probes beat timing for stale-binary checks (0.67s "rebuilds"
+  are real — incremental).
+
 ## B1f-6b DONE — awaitable LengthOfArrayLike (2026-09-07)
 
 Second B1f-6 sub-slice (6a species sync ✓ → 6b HERE → 6c custom-ctor

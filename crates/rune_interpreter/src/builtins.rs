@@ -12000,86 +12000,228 @@ pub fn apply_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
     Value::undefined()
 }
 
-// ---------- B1f-6a: SpeciesConstructor sync prologue (§7.3.22) ----------
+// ---------- B1f-6c: awaitable SpeciesConstructor Gets (§7.3.22/§10.4.2.3) ----------
 
-/// Outcome of the species sync prologue (B1f-6a): Default = build plain
-/// (no custom species); Custom(ctor) = valid constructor found — callers fall
-/// back to plain until B1f-6-frames run real Construct (iteration stays
-/// exact, linkage diverges there); Raise = spec TypeError (non-Object ctor,
-/// non-constructor species).
+/// Outcome of species resolution at an ArraySpeciesCreate site (B1f-6c):
+/// Passed = build plain (Default, or Custom until 6d runs Construct);
+/// Wait = a JS getter frame was pushed (op stored); Fail = spec TypeError.
 pub(crate) enum SpeciesOut {
-    Default,
-    /// Valid constructor found — payload consumed by B1f-6-frames.
-    #[allow(dead_code)]
-    Custom(Value),
-    Raise(Value),
+    Wait,
+    Passed,
+    Fail(Value),
 }
 
-/// SpeciesConstructor minus Construct (B1f-6a): Get "constructor" (data path;
-/// accessor pairs need frames to invoke getters — deferred to default),
-/// undefined → Default, non-Object → TypeError; Get @@species (same pair
-/// rule), null/undefined → Default; IsConstructor false → TypeError, true →
-/// Custom. Cross-realm check skipped (no realms). Callers invoke at the
-/// spec ArraySpeciesCreate point (after length/clamp/overflow work).
-pub(crate) fn species_resolve(gc: &mut SemiSpace, vm: &mut Vm, obj: &mut Value) -> SpeciesOut {
-    let key = Value::from_heap_ptr(HeapString::allocate(gc, "constructor") as *mut u8);
-    // Key alloc may GC-move the receiver (B1f-1 discipline).
-    *obj = refresh_value(*obj);
-    let ctor = load_property_recursive(*obj, key, None, gc);
-    *obj = refresh_value(*obj);
-    // Accessor pairs (e.g. create-ctor-poisoned) need frames to invoke.
-    if ctor
+/// Read one species Get through a possible accessor pair (B1f-6c): data
+/// values (incl. builtin-Smi getters run inline) resolve now; a JS getter
+/// pushes a frame + arms `stage` (caller stores op, returns Wait).
+enum SpeciesReadOut {
+    Done(Value),
+    Wait,
+    Fail(Value),
+}
+
+fn species_refresh(op: &mut crate::vm::PendingSpeciesOp) {
+    op.stash_this = refresh_value(op.stash_this);
+    op.ctor = refresh_value(op.ctor);
+    op.await_callee = refresh_value(op.await_callee);
+    for a in op.stash_args.iter_mut() {
+        *a = refresh_value(*a);
+    }
+}
+
+fn species_read(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    op: &mut crate::vm::PendingSpeciesOp,
+    holder: Value,
+    recv: Value,
+    key: Value,
+    stage: crate::vm::SpeciesStage,
+) -> SpeciesReadOut {
+    let raw = load_property_recursive(holder, key, None, gc);
+    species_refresh(op);
+    let is_pair = raw
         .heap_ptr()
-        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_ACCESSOR })
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_ACCESSOR });
+    if !is_pair {
+        return SpeciesReadOut::Done(raw);
+    }
+    let ap = raw.heap_ptr().unwrap();
+    let getter = unsafe { rune_core::accessor::AccessorPair::getter(ap) };
+    if getter.is_undefined() || getter.is_null() {
+        return SpeciesReadOut::Done(Value::undefined());
+    }
+    if let Some(smi) = getter.as_smi() {
+        if smi < 0 {
+            let id = ((-smi) as usize) - 1;
+            if id < vm.builtins.len() {
+                let r = (vm.builtins[id].func)(gc, recv, &[], vm);
+                if let Some(exc) = vm.pending_exception.take() {
+                    return SpeciesReadOut::Fail(exc);
+                }
+                species_refresh(op);
+                return SpeciesReadOut::Done(r);
+            }
+        }
+        return SpeciesReadOut::Done(Value::undefined());
+    }
+    if getter
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC)
     {
-        return SpeciesOut::Default;
+        vm.push_callback_call(gc, getter, recv, vec![]);
+        op.stage = stage;
+        op.await_callee = vm.last_pushed_callee;
+        return SpeciesReadOut::Wait;
     }
+    SpeciesReadOut::Done(Value::undefined())
+}
+
+/// After the "constructor" Get: undefined → default; non-Object → TypeError;
+/// else read @@species (may suspend again under GetSpecies).
+fn species_after_ctor(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    op: &mut crate::vm::PendingSpeciesOp,
+    ctor: Value,
+) -> SpeciesOut {
     if ctor.is_undefined() {
-        return SpeciesOut::Default;
+        return SpeciesOut::Passed;
     }
-    // "If ctor is not an Object, throw": primitives (incl. heap strings,
-    // which are String values, not Objects) reject here.
+    // "If C is not an Object, throw": primitives (incl. heap strings, which
+    // are String values, not Objects) reject here.
     let ctor_is_object = ctor
         .heap_ptr()
         .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() != TAG_STRING });
     if !ctor_is_object {
-        return SpeciesOut::Raise(sort_type_error(
+        return SpeciesOut::Fail(sort_type_error(
             gc,
             vm,
             "Array species constructor is not an object",
         ));
     }
+    op.ctor = ctor;
+    species_refresh(op);
     let skey = Value::symbol(rune_core::symbol::SYM_SPECIES);
-    let sp = load_property_recursive(ctor, skey, None, gc);
-    if sp
-        .heap_ptr()
-        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_ACCESSOR })
-    {
-        return SpeciesOut::Default;
+    // Key alloc may GC-move the holder (B1f-1 discipline).
+    species_refresh(op);
+    match species_read(
+        vm,
+        gc,
+        op,
+        op.ctor,
+        op.ctor,
+        skey,
+        crate::vm::SpeciesStage::GetSpecies,
+    ) {
+        SpeciesReadOut::Done(sp) => species_after_species(vm, gc, op, sp),
+        SpeciesReadOut::Wait => SpeciesOut::Wait,
+        SpeciesReadOut::Fail(e) => SpeciesOut::Fail(e),
     }
+}
+
+/// After the @@species Get: null/undefined → default; non-ctor → TypeError;
+/// valid ctors pass (plain fallback until 6d runs Construct).
+fn species_after_species(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    op: &mut crate::vm::PendingSpeciesOp,
+    sp: Value,
+) -> SpeciesOut {
+    let _ = op;
     if sp.is_undefined() || sp.is_null() {
-        return SpeciesOut::Default;
+        return SpeciesOut::Passed;
     }
     if !crate::vm::value_is_constructor(vm, sp) {
-        return SpeciesOut::Raise(sort_type_error(
+        return SpeciesOut::Fail(sort_type_error(
             gc,
             vm,
             "Array species is not a constructor",
         ));
     }
-    SpeciesOut::Custom(sp)
+    SpeciesOut::Passed
 }
 
-/// Run species resolution at an ArraySpeciesCreate site (B1f-6a): Default and
-/// Custom both build plain today (Custom awaits B1f-6-frames); Raise sets the
-/// pending exception. Returns false when the caller must bail out.
-pub(crate) fn species_check(gc: &mut SemiSpace, vm: &mut Vm, obj: &mut Value) -> bool {
-    match species_resolve(gc, vm, obj) {
-        SpeciesOut::Default | SpeciesOut::Custom(_) => true,
-        SpeciesOut::Raise(e) => {
-            vm.set_pending_exception(e);
-            false
+/// Drive species resolution from entry (B1f-6c): non-Array receivers take the
+/// ArrayCreate path with NO Gets (§10.4.2.3 step 1); arrays read
+/// "constructor" (JS getter via frame + GetCtor await), then @@species
+/// (GetSpecies await). Sync-resolvable shapes never suspend.
+fn species_drive(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    op: &mut crate::vm::PendingSpeciesOp,
+) -> SpeciesOut {
+    if op
+        .stash_this
+        .heap_ptr()
+        .is_none_or(|p| unsafe { (*(p as *const GcHeader)).tag() } != TAG_ARRAY)
+    {
+        return SpeciesOut::Passed;
+    }
+    let key = Value::from_heap_ptr(HeapString::allocate(gc, "constructor") as *mut u8);
+    // Key alloc may GC-move the receiver (B1f-1 discipline).
+    species_refresh(op);
+    let this = op.stash_this;
+    match species_read(
+        vm,
+        gc,
+        op,
+        this,
+        this,
+        key,
+        crate::vm::SpeciesStage::GetCtor,
+    ) {
+        SpeciesReadOut::Done(ctor) => species_after_ctor(vm, gc, op, ctor),
+        SpeciesReadOut::Wait => SpeciesOut::Wait,
+        SpeciesReadOut::Fail(e) => SpeciesOut::Fail(e),
+    }
+}
+
+/// Resume species resolution with a JS getter's return value (B1f-6c).
+pub(crate) fn species_resume(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    op: &mut crate::vm::PendingSpeciesOp,
+    result: Value,
+) -> SpeciesOut {
+    let kind = std::mem::replace(&mut op.stage, crate::vm::SpeciesStage::GetCtor);
+    match kind {
+        crate::vm::SpeciesStage::GetCtor => species_after_ctor(vm, gc, op, result),
+        crate::vm::SpeciesStage::GetSpecies => species_after_species(vm, gc, op, result),
+    }
+}
+
+/// Entry: resolve species for `caller`, suspending on JS getters (B1f-6c).
+/// Re-entry (after resume) consumes vm.species_passed first-thing. Pre-point
+/// work in all 8 wired builtins is pure-or-alloc, so re-entry is
+/// side-effect free (length re-drives only when BOTH length and species
+/// getters are JS — documented micro-gap).
+pub(crate) fn species_stage(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    caller: crate::builtins::BuiltinFn,
+    this: Value,
+    args: &[Value],
+) -> SpeciesOut {
+    if std::mem::take(&mut vm.species_passed) {
+        return SpeciesOut::Passed;
+    }
+    let mut op = crate::vm::PendingSpeciesOp {
+        source_frame_depth: 0,
+        caller,
+        stash_this: this,
+        stash_args: args.to_vec(),
+        ctor: Value::undefined(),
+        stage: crate::vm::SpeciesStage::GetCtor,
+        await_callee: Value::undefined(),
+    };
+    match species_drive(vm, gc, &mut op) {
+        SpeciesOut::Wait => {
+            op.source_frame_depth = vm.frame_depth() - 1;
+            vm.pending_species_op = Some(op);
+            SpeciesOut::Wait
         }
+        other => other,
     }
 }
 
@@ -12530,7 +12672,7 @@ fn copy_sparse_to_result(
 /// RangeError before any copy (A3_T1/T2, was ENGINE PANIC). Observable
 /// length/element getters (create-non-array-invalid-len) + Proxy/resizable →
 /// B1f-6/B7/out-of-scope.
-pub fn array_slice(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
+pub fn array_slice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
@@ -12569,10 +12711,15 @@ pub fn array_slice(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut
         vm.set_pending_exception(sort_range_error(gc, vm, "Invalid array length"));
         return Value::undefined();
     }
-    // B1f-6a: species prologue (non-Object ctor / non-ctor species throw;
-    // custom ctors fall back to plain until B1f-6-frames).
-    if !species_check(gc, vm, &mut this) {
-        return Value::undefined();
+    // B1f-6c: species Gets suspend (op stored, frame pushed); resume
+    // re-dispatches (pre-point work is pure-or-alloc).
+    match species_stage(gc, vm, array_slice, this, args) {
+        SpeciesOut::Passed => {}
+        SpeciesOut::Wait => return Value::undefined(),
+        SpeciesOut::Fail(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
     }
     let mut result = fresh_dense_array(gc, vm);
     let mut obj = this;
@@ -12599,13 +12746,18 @@ pub fn array_slice(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut
 /// stays failing — no %Boolean.prototype% exists yet). TypedArray spread reads
 /// ride the integer-indexed exotic (length + elements); TA named stores
 /// (the spreadable flag itself) depend on B4 named-prop support.
-pub fn array_concat(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
+pub fn array_concat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    // B1f-6a: species prologue (step 2 — before the item loop).
-    if !species_check(gc, vm, &mut this) {
-        return Value::undefined();
+    // B1f-6c: species Gets suspend (step 2 — before the item loop).
+    match species_stage(gc, vm, array_concat, this, args) {
+        SpeciesOut::Passed => {}
+        SpeciesOut::Wait => return Value::undefined(),
+        SpeciesOut::Fail(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
     }
     let mut result = fresh_dense_array(gc, vm);
     let mut next: u64 = 0;
@@ -12738,9 +12890,14 @@ pub fn array_splice(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mu
         vm.set_pending_exception(sort_range_error(gc, vm, "Invalid array length"));
         return Value::undefined();
     }
-    // B1f-6a: species prologue (step 10 — after the overflow check).
-    if !species_check(gc, vm, &mut this) {
-        return Value::undefined();
+    // B1f-6c: species Gets suspend (step 10 — after the overflow check).
+    match species_stage(gc, vm, array_splice, this, args) {
+        SpeciesOut::Passed => {}
+        SpeciesOut::Wait => return Value::undefined(),
+        SpeciesOut::Fail(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
     }
     // Steps 10-13: deleted copy (fresh array, holes preserved).
     let mut deleted = fresh_dense_array(gc, vm);
@@ -13218,9 +13375,14 @@ pub fn array_filter(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mu
     else {
         return Value::undefined();
     };
-    // B1f-6a: species prologue (step 4 — after the callable check).
-    if !species_check(gc, vm, &mut this) {
-        return Value::undefined();
+    // B1f-6c: species Gets suspend (step 4 — after the callable check).
+    match species_stage(gc, vm, array_filter, this, args) {
+        SpeciesOut::Passed => {}
+        SpeciesOut::Wait => return Value::undefined(),
+        SpeciesOut::Fail(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
     }
     let result_arr = RuneArray::allocate(gc, &[]);
     unsafe {
@@ -13284,10 +13446,15 @@ pub fn array_map(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut V
     else {
         return Value::undefined();
     };
-    // B1f-6a: species prologue (step 4 — after the callable check; the
+    // B1f-6c: species Gets suspend (step 4 — after the callable check; the
     // length RangeError above models ArrayCreate throwing after it).
-    if !species_check(gc, vm, &mut this) {
-        return Value::undefined();
+    match species_stage(gc, vm, array_map, this, args) {
+        SpeciesOut::Passed => {}
+        SpeciesOut::Wait => return Value::undefined(),
+        SpeciesOut::Fail(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
     }
     // Refresh first (species allocs may have moved the receiver), then
     // re-resolve the raw source pointer (B1f-1 discipline).
@@ -13850,9 +14017,14 @@ pub fn array_flat(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut 
     } else {
         depth_num.max(0.0) as u32
     };
-    // B1f-6a: species prologue (flat species-creates before flattening).
-    if !species_check(gc, vm, &mut this) {
-        return Value::undefined();
+    // B1f-6c: species Gets suspend (flat species-creates before flattening).
+    match species_stage(gc, vm, array_flat, this, args) {
+        SpeciesOut::Passed => {}
+        SpeciesOut::Wait => return Value::undefined(),
+        SpeciesOut::Fail(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
     }
     this = refresh_value(this);
     fn flatten(gc: &mut SemiSpace, vm: &Vm, arr_val: Value, depth: u32) -> *mut u8 {
@@ -15018,9 +15190,14 @@ pub fn array_flat_map(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &
     ) else {
         return Value::undefined();
     };
-    // B1f-6a: species prologue (after the callable check).
-    if !species_check(gc, vm, &mut this) {
-        return Value::undefined();
+    // B1f-6c: species Gets suspend (after the callable check).
+    match species_stage(gc, vm, array_flat_map, this, args) {
+        SpeciesOut::Passed => {}
+        SpeciesOut::Wait => return Value::undefined(),
+        SpeciesOut::Fail(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
     }
     this = refresh_value(this);
     let source_ptr = this.heap_ptr().unwrap_or(std::ptr::null_mut());

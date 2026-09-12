@@ -1612,6 +1612,34 @@ fn test_array_length_dispatch() {
 }
 
 #[test]
+fn test_array_species_getters() {
+    // B1f-6c: SpeciesConstructor Gets dispatch JS getters through the
+    // PendingSpeciesOp machine (throwing getters propagate before any
+    // callback runs); non-Array receivers skip the Gets entirely
+    // (§10.4.2.3 step 1); data-path custom ctors still build plain (6d).
+    let mut ctx = Context::new_small();
+    // Poisoned "constructor" getter throws; callback never runs.
+    ctx.eval("assert.throws('ctor-poison', function () { var a = [1]; var n = 0; Object.defineProperty(a, 'constructor', {get: function () { throw 'ctor-poison'; }}); a.map(function () { n += 1; }); });")
+        .unwrap();
+    // Poisoned @@species getter throws; filter callback never runs.
+    ctx.eval("assert.throws('sp-poison', function () { var a = [1]; a.constructor = {}; Object.defineProperty(a.constructor, Symbol.species, {get: function () { throw 'sp-poison'; }}); a.filter(function () { return true; }); });")
+        .unwrap();
+    // Species getter returning null still builds plain — and the getter ran
+    // (defineProperty form; the `{get [Symbol.species]()}` literal shape
+    // does not install — pre-existing parser gap, B2).
+    let r = ctx
+        .eval("var calls = 0; var a = [1, 2]; a.constructor = {}; Object.defineProperty(a.constructor, Symbol.species, {get: function () { calls += 1; return null; }, configurable: true}); var s = a.slice(); calls === 1 && s.length === 2 && Array.isArray(s);")
+        .unwrap();
+    assert!(r.to_bool());
+    // Non-Array receiver with a poisoned "constructor" getter: no Gets, no
+    // throw (IsArray false → ArrayCreate path).
+    let r = ctx
+        .eval("var o = {0: 5, length: 1}; Object.defineProperty(o, 'constructor', {get: function () { throw 'must-not-run'; }}); var s = Array.prototype.slice.call(o); s.length === 1 && s[0] === 5;")
+        .unwrap();
+    assert!(r.to_bool());
+}
+
+#[test]
 fn test_array_index_search_family() {
     // B1b: indexOf/lastIndexOf/includes with spec equality + fromIndex.
     let mut ctx = Context::new_small();

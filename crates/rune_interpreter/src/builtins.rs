@@ -8440,9 +8440,10 @@ fn checked_array_length(gc: &mut SemiSpace, vm: &mut Vm, this: Value) -> Result<
 /// past 2^32-1 via ArrayCreate — both before any Get), three-segment copy with
 /// holes materialized as present undefined (proto fallthrough via seq_has) and
 /// the deleted range never read (discarded-element-not-read). Fresh plain result,
-/// no species (ignores-species). JS element getters read as undefined
-/// (documented sync-gap → 6e: elements-read-in-order, mutate-while-iterating,
-/// length-increased/decreased); primitive-receiver proto lengths are B2.
+/// no species (ignores-species). Element Gets dispatch through the 6e-copy
+/// machine (JS getters run with frames — elements-read-in-order,
+/// mutate-while-iterating, length-increased/decreased); primitive-receiver
+/// proto lengths are B2.
 pub fn array_to_spliced(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
@@ -8500,47 +8501,65 @@ pub fn array_to_spliced(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
         vm.set_pending_exception(sort_range_error(gc, vm, "Invalid array length"));
         return Value::undefined();
     }
-    let mut result = fresh_dense_array(gc, vm);
-    let mut obj = this;
-    if let Err(e) = copy_present_segment_to_result(gc, vm, &mut obj, &mut result, 0, actual_start) {
-        vm.set_pending_exception(e);
-        return Value::undefined();
-    }
-    if args.len() > 2 {
-        for item in &args[2..] {
-            let item = refresh_value(*item);
-            if let Err(e) = result_push(gc, vm, &mut result, item) {
-                vm.set_pending_exception(e);
-                return Value::undefined();
-            }
+    let result = fresh_dense_array(gc, vm);
+    let (a_win, a_cands) = copy_walk_shape(this, 0, actual_start);
+    let (b_win, b_cands) = copy_walk_shape(this, actual_start + skip, len);
+    let mut op = crate::vm::PendingCopyOp {
+        source_frame_depth: 0,
+        source: this,
+        result,
+        final_len: new_len,
+        plan: crate::vm::CopyPlan::Spliced {
+            a: crate::vm::CopyRange {
+                hi: actual_start,
+                win_end: a_win,
+                pos: 0,
+                cands: a_cands,
+                ci: 0,
+            },
+            items: if args.len() > 2 {
+                args[2..].to_vec()
+            } else {
+                Vec::new()
+            },
+            ii: 0,
+            b: crate::vm::CopyRange {
+                hi: len,
+                win_end: b_win,
+                pos: actual_start + skip,
+                cands: b_cands,
+                ci: 0,
+            },
+            stage: 0,
+        },
+        await_idx: u64::MAX,
+        await_callee: Value::undefined(),
+    };
+    match copy_drive(vm, gc, &mut op) {
+        CopyOut::Wait => {
+            op.source_frame_depth = vm.frame_depth() - 1;
+            vm.pending_copy_op = Some(op);
+            Value::undefined()
+        }
+        CopyOut::Done(v) => v,
+        CopyOut::Raise(e) => {
+            vm.set_pending_exception(e);
+            Value::undefined()
         }
     }
-    if let Err(e) =
-        copy_present_segment_to_result(gc, vm, &mut obj, &mut result, actual_start + skip, len)
-    {
-        vm.set_pending_exception(e);
-        return Value::undefined();
-    }
-    // Length is exact by construction; set explicitly per the slice discipline.
-    result = refresh_value(result);
-    if let Some(rptr) = result.heap_ptr() {
-        unsafe { RuneArray::set_length(rptr as *mut RuneArray, new_len as u32) };
-    }
-    result
 }
-
 /// Array.prototype.with(index, value) — §23.1.3.39 audit: generic receiver,
 /// LengthOfArrayLike via the length machine (JS lengths suspend, incl. the
 /// valueOf-object form in length-tolength), ToIntegerOrInfinity index with
 /// symbol abrupt (index-throw-completion) in spec order (before the ArrayCreate
 /// valve, so a symbol index throws TypeError even past the length limit),
 /// negative-from-end with OOB RangeError, ArrayCreate(len) RangeError past
-/// 2^32-1 before any Get, then an ascending copy that Gets every index EXCEPT
-/// the replaced one (no-get-replaced-index — value pushed directly) with holes
-/// materialized as present undefined (proto fallthrough via seq_has). Fresh
-/// plain result, no species (ignores-species). JS element getters read as
-/// undefined (documented sync-gap → 6e: length-increased/decreased);
-/// primitive-receiver proto lengths are B2 (this-value-boolean).
+/// 2^32-1 before any Get, then an ascending copy that never Gets the replaced
+/// index (no-get-replaced-index — value pushed directly) with holes
+/// materialized as present undefined (proto fallthrough). Element Gets dispatch
+/// through the 6e-copy machine (JS getters run with frames —
+/// length-increased/decreased-while-iterating). Fresh plain result, no species
+/// (ignores-species); primitive-receiver proto lengths are B2.
 pub fn array_with(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
@@ -8578,26 +8597,38 @@ pub fn array_with(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
         return Value::undefined();
     }
     let actual = actual as u64;
-    let mut result = fresh_dense_array(gc, vm);
-    let mut obj = this;
-    if let Err(e) = copy_present_segment_to_result(gc, vm, &mut obj, &mut result, 0, actual) {
-        vm.set_pending_exception(e);
-        return Value::undefined();
+    let result = fresh_dense_array(gc, vm);
+    let (win_end, cands) = copy_walk_shape(this, 0, len);
+    let mut op = crate::vm::PendingCopyOp {
+        source_frame_depth: 0,
+        source: this,
+        result,
+        final_len: len,
+        plan: crate::vm::CopyPlan::Asc {
+            range: crate::vm::CopyRange {
+                hi: len,
+                win_end,
+                pos: 0,
+                cands,
+                ci: 0,
+            },
+            replace: Some((actual, value)),
+        },
+        await_idx: u64::MAX,
+        await_callee: Value::undefined(),
+    };
+    match copy_drive(vm, gc, &mut op) {
+        CopyOut::Wait => {
+            op.source_frame_depth = vm.frame_depth() - 1;
+            vm.pending_copy_op = Some(op);
+            Value::undefined()
+        }
+        CopyOut::Done(v) => v,
+        CopyOut::Raise(e) => {
+            vm.set_pending_exception(e);
+            Value::undefined()
+        }
     }
-    if let Err(e) = result_push(gc, vm, &mut result, refresh_value(value)) {
-        vm.set_pending_exception(e);
-        return Value::undefined();
-    }
-    if let Err(e) = copy_present_segment_to_result(gc, vm, &mut obj, &mut result, actual + 1, len) {
-        vm.set_pending_exception(e);
-        return Value::undefined();
-    }
-    // Length is exact by construction; set explicitly per the slice discipline.
-    result = refresh_value(result);
-    if let Some(rptr) = result.heap_ptr() {
-        unsafe { RuneArray::set_length(rptr as *mut RuneArray, len as u32) };
-    }
-    result
 }
 
 /// Array.prototype.push(value) — pushes value to the array, returns new length.
@@ -9077,10 +9108,16 @@ fn length_to_number(gc: &mut SemiSpace, vm: &mut Vm, v: Value) -> Result<f64, Va
             return Ok(t.parse::<f64>().unwrap_or(f64::NAN));
         }
         if tag == TAG_OBJECT {
+            // OrdinaryToPrimitive needs a callable valueOf or toString: a
+            // method-less object (null prototype, no own methods) throws
+            // TypeError instead of reading 0 (flat null-depth). A name that
+            // resolves to a JS function stays the 6e sync-gap (reads 0).
+            let mut found_any = false;
             for name in ["valueOf", "toString"] {
                 let key = PropertyKey::from_string(name);
                 let method = toprim_find_method(v, &key);
                 let Some(m) = method else { continue };
+                found_any = true;
                 let Some(smi) = m.as_smi() else { continue };
                 if smi >= 0 {
                     continue;
@@ -9104,6 +9141,13 @@ fn length_to_number(gc: &mut SemiSpace, vm: &mut Vm, v: Value) -> Result<f64, Va
                     return Ok(crate::vm::to_number(result));
                 }
                 // Non-primitive: fall through to the next method.
+            }
+            if !found_any {
+                return Err(sort_type_error(
+                    gc,
+                    vm,
+                    "Cannot convert object to primitive value",
+                ));
             }
         }
     }
@@ -10070,11 +10114,10 @@ pub fn array_fill(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
 /// 2^32-1 before any Get (length-exceeding-array-length-limit), NO species
 /// (ignores-species — plain fresh_dense_array even with a custom ctor, and
 /// .constructor is never read), descending Gets with holes materialized as
-/// present undefined, exact length set by construction. Returns a NEW array
-/// (immutable/zero-or-one-element); frozen sources read fine. JS element
-/// getters read as undefined (documented sync-gap → 6e, covering
-/// get-descending-order and length-decreased-while-iterating);
-/// primitive-receiver proto lengths are B2 (this-value-boolean
+/// present undefined. Element Gets dispatch through the 6e-copy machine (JS
+/// getters run with frames — get-descending-order, length-while-iterating).
+/// Returns a NEW array (immutable/zero-or-one-element); frozen sources read
+/// fine; primitive-receiver proto lengths are B2 (this-value-boolean
 /// prototype half).
 pub fn array_to_reversed(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
@@ -10092,19 +10135,36 @@ pub fn array_to_reversed(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &m
         vm.set_pending_exception(sort_range_error(gc, vm, "Invalid array length"));
         return Value::undefined();
     }
-    let mut result = fresh_dense_array(gc, vm);
-    let mut obj = this;
-    if let Err(e) = copy_reversed_to_result(gc, vm, &mut obj, &mut result, len) {
-        vm.set_pending_exception(e);
-        return Value::undefined();
+    let result = fresh_dense_array(gc, vm);
+    let (win_end, cands) = copy_walk_shape(this, 0, len);
+    let ti = cands.len();
+    let mut op = crate::vm::PendingCopyOp {
+        source_frame_depth: 0,
+        source: this,
+        result,
+        final_len: len,
+        plan: crate::vm::CopyPlan::Desc {
+            len,
+            win_end,
+            pos: 0,
+            cands,
+            ti,
+        },
+        await_idx: u64::MAX,
+        await_callee: Value::undefined(),
+    };
+    match copy_drive(vm, gc, &mut op) {
+        CopyOut::Wait => {
+            op.source_frame_depth = vm.frame_depth() - 1;
+            vm.pending_copy_op = Some(op);
+            Value::undefined()
+        }
+        CopyOut::Done(v) => v,
+        CopyOut::Raise(e) => {
+            vm.set_pending_exception(e);
+            Value::undefined()
+        }
     }
-    // Length is exact by construction (every position pushed, holes as
-    // undefined); set explicitly per the slice discipline.
-    result = refresh_value(result);
-    if let Some(rptr) = result.heap_ptr() {
-        unsafe { RuneArray::set_length(rptr as *mut RuneArray, len as u32) };
-    }
-    result
 }
 
 /// String.fromCharCode(codes...) — creates a string from char codes.
@@ -13183,134 +13243,256 @@ fn copy_sparse_to_result(
     Ok(())
 }
 
-/// Copy O[0..len) reversed onto the fresh `result` positionally (§23.1.3.34
-/// lite, toReversed): result position k Gets source len-1-k, so Gets run in
-/// descending source order (get-descending-order observes [2,1,0]). Absent
-/// indices push `undefined` as PRESENT (holes-not-preserved — every
-/// CreateDataPropertyOrThrow creates, incl. proto-served reads via seq_has).
-/// Dense receivers walk the materialized window directly; the tail past the
-/// window and plain objects walk sparse candidates with undefined-filled gaps
-/// (same silence proof as copy_range_to_result); exotics walk directly.
-/// Returns Err on abrupt Gets (the 2^32-1 RangeError valve lives in
-/// result_push). JS getters read as undefined (documented sync-gap → 6e,
-/// same as seq_read everywhere).
-fn copy_reversed_to_result(
-    gc: &mut SemiSpace,
-    vm: &mut Vm,
-    obj: &mut Value,
-    result: &mut Value,
-    len: u64,
-) -> Result<(), Value> {
-    if len == 0 {
-        return Ok(());
-    }
-    *obj = refresh_value(*obj);
-    let win_end = obj
-        .heap_ptr()
-        .filter(|p| unsafe { (*(*p as *const GcHeader)).tag() } == TAG_ARRAY)
-        .map(|p| unsafe {
-            let arr = p as *mut RuneArray;
-            (RuneArray::length(arr) as u64).min(RuneArray::capacity(arr) as u64)
-        })
-        .unwrap_or(0)
-        .min(len);
-    // Tail sources [win_end, len): sparse-driven when enumerable, else direct.
-    if win_end < len {
-        if let Some(cands) = sparse_present_in(*obj, win_end, len) {
-            // Result position for source `from` is len-1-from; candidates
-            // arrive ascending, so visit them descending (spec Get order).
-            let mut pos = 0u64;
-            for from in cands.iter().rev().copied() {
-                if from < win_end || from >= len {
-                    continue;
-                }
-                let target = len - 1 - from;
-                while pos < target {
-                    result_push(gc, vm, result, Value::undefined())?;
-                    pos += 1;
-                }
-                let key = index_key(gc, from);
-                *obj = refresh_value(*obj);
-                if seq_has(*obj, key) {
-                    let mut o = *obj;
-                    let v = seq_read(gc, vm, &mut o, from)?;
-                    *obj = o;
-                    result_push(gc, vm, result, v)?;
-                } else {
-                    result_push(gc, vm, result, Value::undefined())?;
-                }
-                pos += 1;
-            }
-            while pos < len - win_end {
-                result_push(gc, vm, result, Value::undefined())?;
-                pos += 1;
-            }
-        } else {
-            // Exotic link (typed array, string, ...): direct descending walk.
-            let mut from = len;
-            while from > win_end {
-                from -= 1;
-                push_get_or_undefined(gc, vm, obj, result, from)?;
-            }
-        }
-    }
-    // Materialized window [0, win_end): direct descending walk (holes read
-    // through the proto chain via seq_has, same as copy_range_to_result).
-    if win_end > 0 {
-        let mut from = win_end;
-        while from > 0 {
-            from -= 1;
-            push_get_or_undefined(gc, vm, obj, result, from)?;
-        }
-    }
-    Ok(())
+// ---------- 6e-copy: element-Get read machine ----------
+
+/// Drive outcome for copy operations (6e-copy). No Progress variant: resume
+/// drives straight back through copy_drive to a terminal outcome.
+pub(crate) enum CopyOut {
+    /// A JS getter frame was pushed (op armed); store op and yield to the loop.
+    Wait,
+    /// Copy complete (result length already set) — push as the builtin result.
+    Done(Value),
+    /// Fail with an error value (cascade routes via handle_throw).
+    Raise(Value),
 }
 
-/// Get-push one index as present (shared by the no-holes copy family):
-/// present indices (incl. proto-served) push their Get value own;
-/// absent indices push `undefined` as PRESENT (holes-not-preserved —
-/// CreateDataPropertyOrThrow always creates). Refreshes both sides across
-/// the key allocation and any GC inside the read.
-fn push_get_or_undefined(
-    gc: &mut SemiSpace,
+/// One walk step inside a copy drive (6e-copy).
+enum CopyStepOut {
+    /// A value was pushed — keep driving.
+    Advanced,
+    /// Range exhausted — caller transitions stage or completes.
+    RangeDone,
+    /// JS getter frame pushed (await slots recorded) — arm op and yield.
+    Wait,
+    /// Fail with an error value.
+    Raise(Value),
+}
+
+/// Resolve one source index with accessor dispatch (6e-copy): absent indices
+/// (incl. holes with no proto value) push `undefined` as PRESENT; present
+/// indices Get with proto fallthrough; builtin getters run inline; JS getters
+/// push a frame (Wait, recording await_idx/callee in the op slots).
+#[allow(clippy::too_many_arguments)]
+fn copy_resolve_push(
     vm: &mut Vm,
-    obj: &mut Value,
+    gc: &mut SemiSpace,
+    source: &mut Value,
     result: &mut Value,
+    await_idx: &mut u64,
+    await_callee: &mut Value,
     idx: u64,
-) -> Result<(), Value> {
+) -> CopyStepOut {
     let key = index_key(gc, idx);
-    *obj = refresh_value(*obj);
-    if seq_has(*obj, key) {
-        let mut o = *obj;
-        let v = seq_read(gc, vm, &mut o, idx)?;
-        *obj = o;
-        result_push(gc, vm, result, v)?;
-    } else {
-        result_push(gc, vm, result, Value::undefined())?;
+    *source = refresh_value(*source);
+    if !seq_has(*source, key) {
+        if let Err(e) = result_push(gc, vm, result, Value::undefined()) {
+            return CopyStepOut::Raise(e);
+        }
+        *source = refresh_value(*source);
+        return CopyStepOut::Advanced;
     }
-    Ok(())
+    let raw = crate::vm::load_property_recursive(*source, key, None, gc);
+    *source = refresh_value(*source);
+    let Some(aptr) = raw.heap_ptr() else {
+        if let Err(e) = result_push(gc, vm, result, refresh_value(raw)) {
+            return CopyStepOut::Raise(e);
+        }
+        *source = refresh_value(*source);
+        return CopyStepOut::Advanced;
+    };
+    if unsafe { (*(aptr as *const GcHeader)).tag() } != TAG_ACCESSOR {
+        if let Err(e) = result_push(gc, vm, result, refresh_value(raw)) {
+            return CopyStepOut::Raise(e);
+        }
+        *source = refresh_value(*source);
+        return CopyStepOut::Advanced;
+    }
+    let getter = unsafe { rune_core::accessor::AccessorPair::getter(aptr) };
+    if getter.is_undefined() || getter.is_null() {
+        if let Err(e) = result_push(gc, vm, result, Value::undefined()) {
+            return CopyStepOut::Raise(e);
+        }
+        *source = refresh_value(*source);
+        return CopyStepOut::Advanced;
+    }
+    if getter.as_smi().is_some_and(|s| s < 0) {
+        return match crate::vm::call_builtin_sync(vm, gc, getter, *source, &[]) {
+            Ok(v) => {
+                *source = refresh_value(*source);
+                if let Err(e) = result_push(gc, vm, result, refresh_value(v)) {
+                    CopyStepOut::Raise(e)
+                } else {
+                    *source = refresh_value(*source);
+                    CopyStepOut::Advanced
+                }
+            }
+            Err(_) => CopyStepOut::Raise(sort_type_error(gc, vm, "getter threw")),
+        };
+    }
+    let Some(gptr) = getter.heap_ptr() else {
+        if let Err(e) = result_push(gc, vm, result, Value::undefined()) {
+            return CopyStepOut::Raise(e);
+        }
+        *source = refresh_value(*source);
+        return CopyStepOut::Advanced;
+    };
+    if unsafe { (*(gptr as *const GcHeader)).tag() } != TAG_FUNC {
+        if let Err(e) = result_push(gc, vm, result, Value::undefined()) {
+            return CopyStepOut::Raise(e);
+        }
+        *source = refresh_value(*source);
+        return CopyStepOut::Advanced;
+    }
+    // JS getter: push its frame (mirrors array_element_value, but records
+    // the copy resume instead of pending_accessor_call or awaiting_element).
+    if !crate::vm::push_accessor_frame(vm, getter, *source, None) {
+        if let Err(e) = result_push(gc, vm, result, Value::undefined()) {
+            return CopyStepOut::Raise(e);
+        }
+        *source = refresh_value(*source);
+        return CopyStepOut::Advanced;
+    }
+    *await_idx = idx;
+    *await_callee = getter;
+    CopyStepOut::Wait
 }
 
-/// Copy [lo, hi) positionally with holes as present undefined (§23.1.3.35 /
-/// §23.1.3.39 lite — toSpliced/with segments): every index Gets in ascending
-/// order (elements-read-in-order observes [0,1,3]); absent indices push
-/// `undefined` own (holes-not-preserved). Dense receivers walk the
-/// materialized window directly; the tail past the window and plain objects
-/// walk sparse candidates with undefined-filled gaps (same silence proof as
-/// copy_range_to_result); exotics walk directly. JS getters read as undefined
-/// (documented sync-gap → 6e, same as seq_read everywhere).
-fn copy_present_segment_to_result(
-    gc: &mut SemiSpace,
+/// Drive one ascending range step (6e-copy): dense window resolves directly;
+/// sparse tail walks cands with undefined gap-fills (pure pushes, never
+/// suspend). Returns RangeDone when [lo, hi) is fully pushed.
+#[allow(clippy::too_many_arguments)]
+fn copy_asc_step(
     vm: &mut Vm,
-    obj: &mut Value,
+    gc: &mut SemiSpace,
+    source: &mut Value,
     result: &mut Value,
-    lo: u64,
-    hi: u64,
-) -> Result<(), Value> {
-    if lo >= hi {
-        return Ok(());
+    await_idx: &mut u64,
+    await_callee: &mut Value,
+    r: &mut crate::vm::CopyRange,
+    replace: Option<(u64, Value)>,
+) -> CopyStepOut {
+    if r.pos < r.win_end {
+        let idx = r.pos;
+        if let Some((ri, v)) = replace {
+            if ri == idx {
+                if let Err(e) = result_push(gc, vm, result, refresh_value(v)) {
+                    return CopyStepOut::Raise(e);
+                }
+                *source = refresh_value(*source);
+                r.pos += 1;
+                return CopyStepOut::Advanced;
+            }
+        }
+        match copy_resolve_push(vm, gc, source, result, await_idx, await_callee, idx) {
+            CopyStepOut::Advanced => {
+                r.pos += 1;
+                CopyStepOut::Advanced
+            }
+            other => other,
+        }
+    } else if r.ci < r.cands.len() {
+        let c = r.cands[r.ci];
+        if c < r.pos || c >= r.hi {
+            r.ci += 1;
+            return CopyStepOut::Advanced;
+        }
+        while r.pos < c {
+            if let Err(e) = result_push(gc, vm, result, Value::undefined()) {
+                return CopyStepOut::Raise(e);
+            }
+            r.pos += 1;
+        }
+        *source = refresh_value(*source);
+        if let Some((ri, v)) = replace {
+            if ri == c {
+                if let Err(e) = result_push(gc, vm, result, refresh_value(v)) {
+                    return CopyStepOut::Raise(e);
+                }
+                *source = refresh_value(*source);
+                r.pos = c + 1;
+                r.ci += 1;
+                return CopyStepOut::Advanced;
+            }
+        }
+        match copy_resolve_push(vm, gc, source, result, await_idx, await_callee, c) {
+            CopyStepOut::Advanced => {
+                r.pos = c + 1;
+                r.ci += 1;
+                CopyStepOut::Advanced
+            }
+            other => other,
+        }
+    } else if r.pos < r.hi {
+        if let Err(e) = result_push(gc, vm, result, Value::undefined()) {
+            return CopyStepOut::Raise(e);
+        }
+        r.pos += 1;
+        CopyStepOut::Advanced
+    } else {
+        CopyStepOut::RangeDone
     }
-    *obj = refresh_value(*obj);
+}
+
+/// Drive one descending step for toReversed (6e-copy): result position pos
+/// reads source len-1-pos. Tail sources [win_end, len) walk cands descending
+/// (ti counts remaining); then the dense window [0, win_end) walks directly.
+#[allow(clippy::too_many_arguments)]
+fn copy_desc_step(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    source: &mut Value,
+    result: &mut Value,
+    await_idx: &mut u64,
+    await_callee: &mut Value,
+    len: u64,
+    win_end: u64,
+    pos: &mut u64,
+    cands: &[u64],
+    ti: &mut usize,
+) -> CopyStepOut {
+    if *ti > 0 {
+        let c = cands[*ti - 1];
+        if c < win_end || c >= len {
+            *ti -= 1;
+            return CopyStepOut::Advanced;
+        }
+        let target = len - 1 - c;
+        while *pos < target {
+            if let Err(e) = result_push(gc, vm, result, Value::undefined()) {
+                return CopyStepOut::Raise(e);
+            }
+            *pos += 1;
+        }
+        *source = refresh_value(*source);
+        match copy_resolve_push(vm, gc, source, result, await_idx, await_callee, c) {
+            CopyStepOut::Advanced => {
+                *pos += 1;
+                *ti -= 1;
+                CopyStepOut::Advanced
+            }
+            other => other,
+        }
+    } else if *pos < len {
+        let idx = len - 1 - *pos;
+        match copy_resolve_push(vm, gc, source, result, await_idx, await_callee, idx) {
+            CopyStepOut::Advanced => {
+                *pos += 1;
+                CopyStepOut::Advanced
+            }
+            other => other,
+        }
+    } else {
+        CopyStepOut::RangeDone
+    }
+}
+
+/// Build the walk shape for an ascending range (6e-copy): dense receivers get
+/// a materialized window; sparse tails and plain objects get candidates;
+/// exotics (unenumberable links) fall back to a direct full walk.
+fn copy_walk_shape(obj: Value, lo: u64, hi: u64) -> (u64, Vec<u64>) {
+    if lo >= hi {
+        return (lo, Vec::new());
+    }
     let win_end = obj
         .heap_ptr()
         .filter(|p| unsafe { (*(*p as *const GcHeader)).tag() } == TAG_ARRAY)
@@ -13318,54 +13500,191 @@ fn copy_present_segment_to_result(
             let arr = p as *mut RuneArray;
             (RuneArray::length(arr) as u64).min(RuneArray::capacity(arr) as u64)
         })
-        .unwrap_or(0)
+        .unwrap_or(lo)
         .min(hi)
         .max(lo);
-    let mut k = lo;
-    while k < win_end {
-        push_get_or_undefined(gc, vm, obj, result, k)?;
-        k += 1;
+    match sparse_present_in(obj, win_end, hi) {
+        Some(cands) => (win_end, cands),
+        // Exotic link: direct walk (bounded in practice — same fallback as
+        // copy_range_to_result).
+        None => (hi, Vec::new()),
     }
-    if win_end < hi {
-        if let Some(cands) = sparse_present_in(*obj, win_end, hi) {
-            let mut pos = win_end;
-            for c in cands {
-                if c < pos || c >= hi {
-                    continue;
-                }
-                let key = index_key(gc, c);
-                *obj = refresh_value(*obj);
-                if seq_has(*obj, key) {
-                    while pos < c {
-                        result_push(gc, vm, result, Value::undefined())?;
-                        pos += 1;
+}
+
+/// Drive a pending copy to a terminal outcome (6e-copy): loops steps until a
+/// JS getter suspends (Wait), the plan completes (Done, length set from
+/// final_len), or an abrupt surfaces (Raise). Sync-resolvable copies run
+/// straight through with no suspension.
+pub(crate) fn copy_drive(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    op: &mut crate::vm::PendingCopyOp,
+) -> CopyOut {
+    let crate::vm::PendingCopyOp {
+        source,
+        result,
+        final_len,
+        plan,
+        await_idx,
+        await_callee,
+        ..
+    } = op;
+    loop {
+        match plan {
+            crate::vm::CopyPlan::Asc { range, replace } => {
+                match copy_asc_step(
+                    vm,
+                    gc,
+                    source,
+                    result,
+                    await_idx,
+                    await_callee,
+                    range,
+                    *replace,
+                ) {
+                    CopyStepOut::Advanced => {}
+                    CopyStepOut::RangeDone => {
+                        let out = refresh_value(*result);
+                        if let Some(rptr) = out.heap_ptr() {
+                            unsafe {
+                                RuneArray::set_length(rptr as *mut RuneArray, *final_len as u32)
+                            };
+                        }
+                        return CopyOut::Done(refresh_value(out));
                     }
-                    let mut o = *obj;
-                    let v = seq_read(gc, vm, &mut o, c)?;
-                    *obj = o;
-                    result_push(gc, vm, result, v)?;
-                    pos = c + 1;
+                    CopyStepOut::Wait => return CopyOut::Wait,
+                    CopyStepOut::Raise(e) => return CopyOut::Raise(e),
+                }
+            }
+            crate::vm::CopyPlan::Desc {
+                len,
+                win_end,
+                pos,
+                cands,
+                ti,
+            } => {
+                match copy_desc_step(
+                    vm,
+                    gc,
+                    source,
+                    result,
+                    await_idx,
+                    await_callee,
+                    *len,
+                    *win_end,
+                    pos,
+                    cands,
+                    ti,
+                ) {
+                    CopyStepOut::Advanced => {}
+                    CopyStepOut::RangeDone => {
+                        let out = refresh_value(*result);
+                        if let Some(rptr) = out.heap_ptr() {
+                            unsafe {
+                                RuneArray::set_length(rptr as *mut RuneArray, *final_len as u32)
+                            };
+                        }
+                        return CopyOut::Done(refresh_value(out));
+                    }
+                    CopyStepOut::Wait => return CopyOut::Wait,
+                    CopyStepOut::Raise(e) => return CopyOut::Raise(e),
+                }
+            }
+            crate::vm::CopyPlan::Spliced {
+                a,
+                items,
+                ii,
+                b,
+                stage,
+            } => {
+                if *stage == 0 {
+                    match copy_asc_step(vm, gc, source, result, await_idx, await_callee, a, None) {
+                        CopyStepOut::Advanced => {}
+                        CopyStepOut::RangeDone => {
+                            *stage = 1;
+                        }
+                        CopyStepOut::Wait => return CopyOut::Wait,
+                        CopyStepOut::Raise(e) => return CopyOut::Raise(e),
+                    }
+                } else if *stage == 1 {
+                    while *ii < items.len() {
+                        let item = refresh_value(items[*ii]);
+                        if let Err(e) = result_push(gc, vm, result, item) {
+                            return CopyOut::Raise(e);
+                        }
+                        *source = refresh_value(*source);
+                        *ii += 1;
+                    }
+                    *stage = 2;
                 } else {
-                    // Vanished between collect and walk: whole span undefined.
-                    while pos <= c {
-                        result_push(gc, vm, result, Value::undefined())?;
-                        pos += 1;
+                    match copy_asc_step(vm, gc, source, result, await_idx, await_callee, b, None) {
+                        CopyStepOut::Advanced => {}
+                        CopyStepOut::RangeDone => {
+                            let out = refresh_value(*result);
+                            if let Some(rptr) = out.heap_ptr() {
+                                unsafe {
+                                    RuneArray::set_length(rptr as *mut RuneArray, *final_len as u32)
+                                };
+                            }
+                            return CopyOut::Done(refresh_value(out));
+                        }
+                        CopyStepOut::Wait => return CopyOut::Wait,
+                        CopyStepOut::Raise(e) => return CopyOut::Raise(e),
                     }
                 }
-            }
-            while pos < hi {
-                result_push(gc, vm, result, Value::undefined())?;
-                pos += 1;
-            }
-        } else {
-            // Exotic link: direct ascending walk (bounded in practice).
-            while k < hi {
-                push_get_or_undefined(gc, vm, obj, result, k)?;
-                k += 1;
             }
         }
     }
-    Ok(())
+}
+
+/// Resume a pending copy with a JS getter's return value (6e-copy): pushes it
+/// past await_idx, then re-drives. Cursor mapping mirrors the walk shapes:
+/// ascending ranges set pos past the awaited index (tail consumes its
+/// candidate); descending advances one result position (tail consumes one).
+pub(crate) fn copy_resume(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    op: &mut crate::vm::PendingCopyOp,
+    value: Value,
+) -> CopyOut {
+    op.source = refresh_value(op.source);
+    op.result = refresh_value(op.result);
+    if let Err(e) = result_push(gc, vm, &mut op.result, refresh_value(value)) {
+        return CopyOut::Raise(e);
+    }
+    op.source = refresh_value(op.source);
+    let awaited = op.await_idx;
+    match &mut op.plan {
+        crate::vm::CopyPlan::Asc { range, .. } => {
+            range.pos = awaited + 1;
+            if awaited >= range.win_end {
+                range.ci += 1;
+            }
+        }
+        crate::vm::CopyPlan::Desc {
+            pos, ti, win_end, ..
+        } => {
+            *pos += 1;
+            if awaited >= *win_end {
+                *ti -= 1;
+            }
+        }
+        crate::vm::CopyPlan::Spliced { a, b, stage, .. } => {
+            if *stage == 0 {
+                a.pos = awaited + 1;
+                if awaited >= a.win_end {
+                    a.ci += 1;
+                }
+            } else {
+                b.pos = awaited + 1;
+                if awaited >= b.win_end {
+                    b.ci += 1;
+                }
+            }
+        }
+    }
+    op.await_idx = u64::MAX;
+    copy_drive(vm, gc, op)
 }
 
 /// Array.prototype.slice(start, end) — §23.1.3.28 audit (B1f-2): generic over
@@ -14849,7 +15168,16 @@ pub fn array_flat(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut 
     } else if let Some(f) = depth.as_float64() {
         f
     } else {
-        to_integer_or_infinity(depth)
+        // ToIntegerOrInfinity with abrupt symbols + method-less objects
+        // (null-prototype depth throws — symbol-object-create-null-depth).
+        // JS-driven methods stay the 6e sync-gap (read as 0).
+        match to_integer_sync(gc, vm, depth) {
+            Ok(n) => n,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
     };
     let effective_depth = if depth_num.is_infinite() || depth_num.is_nan() {
         if depth_num.is_sign_negative() {

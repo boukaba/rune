@@ -816,6 +816,58 @@ pub(crate) struct PendingSpeciesOp {
     pub(crate) stage: SpeciesStage,
     pub(crate) await_callee: Value,
 }
+/// One ascending copy range with walk state (6e-copy): dense window
+/// [lo, win_end) resolves directly via pos; sparse tail [win_end, hi) walks
+/// cands (ci cursor) with undefined gap-fills. Gaps are provably silent (no
+/// indexed entries anywhere in them — same proof as copy_range_to_result).
+pub(crate) struct CopyRange {
+    pub(crate) hi: u64,
+    pub(crate) win_end: u64,
+    pub(crate) pos: u64,
+    pub(crate) cands: Vec<u64>,
+    pub(crate) ci: usize,
+}
+
+/// Copy plan for the element-Get read machine (6e-copy): ascending segments
+/// (with/ — optional single-index replacement pushed without Get; toSpliced —
+/// two ascending ranges with items pushed between) or a full descending copy
+/// (toReversed — result position p reads source len-1-p).
+pub(crate) enum CopyPlan {
+    Asc {
+        range: CopyRange,
+        replace: Option<(u64, Value)>,
+    },
+    Desc {
+        len: u64,
+        win_end: u64,
+        pos: u64,
+        cands: Vec<u64>,
+        ti: usize,
+    },
+    Spliced {
+        a: CopyRange,
+        items: Vec<Value>,
+        ii: usize,
+        b: CopyRange,
+        stage: u8,
+    },
+}
+
+/// Pending element-Get copy (6e-copy): drives copy builtins (toReversed/with/
+/// toSpliced) synchronously until a JS element getter needs a frame (Wait),
+/// then resumes per getter result in the Return arm. Sync-resolvable copies
+/// never suspend (zero-cost fast path through copy_drive). Single-flight like
+/// the other machines: a re-entrant copy clobbers (documented B1e-class gap).
+pub(crate) struct PendingCopyOp {
+    pub(crate) source_frame_depth: usize,
+    pub(crate) source: Value,
+    pub(crate) result: Value,
+    pub(crate) final_len: u64,
+    pub(crate) plan: CopyPlan,
+    /// Source index whose JS getter is outstanding (u64::MAX = none).
+    pub(crate) await_idx: u64,
+    pub(crate) await_callee: Value,
+}
 /// Outcome of a builtin-driven Construct (B1f-6d): Done = built
 /// synchronously (builtin ctors); Pushed = a JS ctor frame was pushed
 /// (caller arms it as a Wait); Fail = spec TypeError.
@@ -1069,6 +1121,8 @@ pub struct Vm {
     /// Custom-ctor result for builtin re-entry after a Construct suspension
     /// (B1f-6d): the re-dispatched builtin installs it as its result.
     pub(crate) species_made: Option<Value>,
+    /// 6e-copy: live element-Get copy machine (see PendingCopyOp).
+    pub(crate) pending_copy_op: Option<PendingCopyOp>,
     /// B1e: func of the most recently pushed callback/getter frame
     /// (machines copy this into their await state at push time).
     pub(crate) last_pushed_callee: Value,
@@ -1262,6 +1316,7 @@ impl Vm {
             pending_species_op: None,
             species_passed: false,
             species_made: None,
+            pending_copy_op: None,
             last_pushed_callee: Value::undefined(),
             last_popped_callee: Value::undefined(),
             iter_state_symbol: rune_core::symbol::symbol_for("__rune_iter_state"),
@@ -3003,6 +3058,18 @@ impl Vm {
         }
     }
 
+    /// 6e-copy: same firewall for the element-Get copy machine (drops the
+    /// partial copy when its getter frame is unwound past).
+    fn drop_dead_copy_op(&mut self, popped_frame: usize) {
+        if self
+            .pending_copy_op
+            .as_ref()
+            .is_some_and(|op| op.source_frame_depth == popped_frame)
+        {
+            self.pending_copy_op = None;
+        }
+    }
+
     /// Unwind stack for a thrown value, routing to try/catch/finally handlers.
     /// This implements the same logic as the Opcode::Throw handler so that
     /// builtins can route exceptions through the JS try/catch mechanism
@@ -3135,6 +3202,7 @@ impl Vm {
                         self.drop_dead_from_op(popped_frame);
                         self.drop_dead_length_op(popped_frame);
                         self.drop_dead_species_op(popped_frame);
+                        self.drop_dead_copy_op(popped_frame);
                         self.stack.truncate(callee_base);
                         return self.handle_throw(gc, err);
                     }
@@ -3146,6 +3214,7 @@ impl Vm {
                     self.drop_dead_from_op(popped_frame);
                     self.drop_dead_length_op(popped_frame);
                     self.drop_dead_species_op(popped_frame);
+                    self.drop_dead_copy_op(popped_frame);
                     self.stack.truncate(callee_base);
                     self.push(Value::undefined());
                     let new_fi = self.frames.len() - 1;
@@ -3172,6 +3241,7 @@ impl Vm {
             self.drop_dead_from_op(popped_frame);
             self.drop_dead_length_op(popped_frame);
             self.drop_dead_species_op(popped_frame);
+            self.drop_dead_copy_op(popped_frame);
             if self.frames.is_empty() {
                 self.stack.clear();
                 return Some(Exit::Throw(val));
@@ -3457,6 +3527,24 @@ impl Vm {
             gc.push_root(&ps.await_callee as *const Value as *mut u64);
             for a in ps.stash_args.iter() {
                 gc.push_root(a as *const Value as *mut u64);
+            }
+        }
+        if let Some(ref pc) = self.pending_copy_op {
+            gc.push_root(&pc.source as *const Value as *mut u64);
+            gc.push_root(&pc.result as *const Value as *mut u64);
+            gc.push_root(&pc.await_callee as *const Value as *mut u64);
+            match &pc.plan {
+                CopyPlan::Asc { replace, .. } => {
+                    if let Some((_, v)) = replace {
+                        gc.push_root(v as *const Value as *mut u64);
+                    }
+                }
+                CopyPlan::Spliced { items, .. } => {
+                    for item in items.iter() {
+                        gc.push_root(item as *const Value as *mut u64);
+                    }
+                }
+                CopyPlan::Desc { .. } => {}
             }
         }
         if let Some(ref sm) = self.species_made {
@@ -3759,6 +3847,9 @@ impl Vm {
         if let Some(ref mut state) = self.pending_species_op {
             state.source_frame_depth = depth;
         }
+        if let Some(ref mut state) = self.pending_copy_op {
+            state.source_frame_depth = depth;
+        }
         // F4 additions: accessor_call and primitive_conversion never
         // rebased (stale depth if a nested callback pushed between set and
         // return). PendingAsyncGen has no depth field (bridge-driven, not
@@ -3830,6 +3921,10 @@ impl Vm {
                 .is_some_and(|p| fi < p.source_frame_depth)
             || self
                 .pending_species_op
+                .as_ref()
+                .is_some_and(|p| fi < p.source_frame_depth)
+            || self
+                .pending_copy_op
                 .as_ref()
                 .is_some_and(|p| fi < p.source_frame_depth)
             || self
@@ -10227,6 +10322,40 @@ impl Vm {
                             self.pending_species_op = Some(sop);
                         }
                     }
+                    // Check if this return completes a pending element-Get
+                    // copy step (6e-copy: JS element getter for toReversed /
+                    // with / toSpliced). Same callee+depth guard as
+                    // length/from/species; resume drives (no re-dispatch).
+                    if let Some(mut cop) = self.pending_copy_op.take() {
+                        let callee_match = self
+                            .last_popped_callee
+                            .heap_ptr()
+                            .is_some_and(|p| Some(p) == cop.await_callee.heap_ptr());
+                        if self.frames.len() <= cop.source_frame_depth && callee_match {
+                            match crate::builtins::copy_resume(self, gc, &mut cop, result) {
+                                crate::builtins::CopyOut::Wait => {
+                                    self.pending_copy_op = Some(cop);
+                                    self.rebase_pending_depths();
+                                    continue 'run;
+                                }
+                                crate::builtins::CopyOut::Done(v) => {
+                                    let frames_len = self.frames.len();
+                                    self.stack.truncate(callee_base);
+                                    self.push(v);
+                                    self.frames[frames_len - 1].pc += 1;
+                                    continue 'run;
+                                }
+                                crate::builtins::CopyOut::Raise(e) => {
+                                    if let Some(exit) = self.handle_throw(gc, e) {
+                                        return exit;
+                                    }
+                                    continue 'run;
+                                }
+                            }
+                        } else {
+                            self.pending_copy_op = Some(cop);
+                        }
+                    }
                     // Check if this return completes a pending assert.throws callback.
                     if let Some(pa) = self.pending_assert.take() {
                         if self.frames.len() == pa.source_frame_depth {
@@ -13709,7 +13838,10 @@ pub(crate) fn has_property(obj: Value, raw_key: Value, function_prototype: Optio
                         }
                     }
                 } else {
-                    // Out of bounds: same named-overflow check as above.
+                    // Out of bounds: same named-overflow check as above; a
+                    // miss falls through to the prototype walk below (a proto
+                    // entry serves the index — load already serves it, so `in`
+                    // must agree; 6e-copy length-decreased cases).
                     if let Some(key) = value_to_prop_key(raw_key) {
                         let extra = unsafe { RuneArray::extra_props(ptr as *mut RuneArray) };
                         if !extra.is_null() {
@@ -13719,7 +13851,6 @@ pub(crate) fn has_property(obj: Value, raw_key: Value, function_prototype: Optio
                             }
                         }
                     }
-                    return false;
                 }
             }
             if let Some(key_ptr) = raw_key.heap_ptr() {

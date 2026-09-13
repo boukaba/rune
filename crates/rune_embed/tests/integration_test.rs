@@ -1378,6 +1378,46 @@ fn test_array_with_tospliced() {
 }
 
 #[test]
+fn test_array_copy_element_dispatch() {
+    // 6e-copy: JS element getters run through frames during copies (reads
+    // observe in spec order, side effects apply); flat depth rejects symbols
+    // and method-less objects; OOB `in` agrees with proto-serving loads.
+    let mut ctx = Context::new_small();
+    // toReversed observes descending Gets.
+    let r = ctx
+        .eval("var o = []; var a = {length: 3, get 0() { o.push(0); }, get 1() { o.push(1); }, get 2() { o.push(2); }}; Array.prototype.toReversed.call(a); o.join() === '2,1,0';")
+        .unwrap();
+    assert!(r.to_bool(), "toReversed Gets descend");
+    // toSpliced observes ascending Gets, skips the deleted range.
+    let r = ctx
+        .eval("var o = []; var a = {get 0() { o.push(0); return 'a'; }, get 1() { o.push(1); return 'b'; }, 2: 'none', get 3() { o.push(3); return 'c'; }, length: 4}; var res = Array.prototype.toSpliced.call(a, 2, 1); (res.join() === 'a,b,c') && (o.join() === '0,1,3');")
+        .unwrap();
+    assert!(r.to_bool(), "toSpliced Gets ascend, deleted unread");
+    // Shrinking getter + proto fallthrough (length-decreased shape).
+    let r = ctx
+        .eval("var arr = [0, 1, 2, 3, 4]; Array.prototype[1] = 5; Object.defineProperty(arr, '3', {get: function () { arr.length = 1; return 3; }}); var r = arr.toReversed(); (r[2] === undefined) && (r[3] === 5); delete Array.prototype[1];")
+        .unwrap();
+    assert!(r.to_bool(), "post-shrink reads serve holes + proto");
+    // with/ replaces without Getting the replaced index.
+    let r = ctx
+        .eval("var arr = [0, 1, 2, 3]; Object.defineProperty(arr, '2', {get: function () { throw new Error('must not Get 2'); }}); arr.with(2, 6).join() === '0,1,6,3';")
+        .unwrap();
+    assert!(r.to_bool(), "with never Gets the replaced index");
+    // flat depth: symbols + method-less objects throw, plain objects read 0.
+    ctx.eval("assert.throws(TypeError, function () { [].flat(Symbol()); });")
+        .unwrap();
+    ctx.eval("assert.throws(TypeError, function () { [].flat(Object.create(null)); });")
+        .unwrap();
+    let r = ctx.eval("[1, [2]].flat({}).length === 2;").unwrap();
+    assert!(r.to_bool(), "flat plain-object depth reads 0");
+    // OOB `in` agrees with proto-serving loads.
+    let r = ctx
+        .eval("Array.prototype[4] = 5; var arr = [0, 1]; var ok = (4 in arr) && (arr[4] === 5); delete Array.prototype[4]; ok;")
+        .unwrap();
+    assert!(r.to_bool(), "OOB in walks proto");
+}
+
+#[test]
 fn test_array_sort_tosorted() {
     // B1e: comparator sort + toSorted (stable, observable, spec-ordered).
     let mut ctx = Context::new_small();

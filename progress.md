@@ -12,6 +12,42 @@
 > regexp advanced classes, class-static-block, top-level-await,
 > iterator-helpers (kept force-skipped).
 
+## 6e-copy DONE — element-Get read machine + flat depth + OOB has fix (2026-09-13)
+
+Highest-compounding slice first: JS element getters now dispatch through frames
+during copies (was: read-as-undefined sync gap), via a new PendingCopyOp machine
+following the 6b/6c/6d pattern (op struct + sync drive + Return resume with
+callee+depth guard + full F4 sites + unwind firewall). Array suite 2157→2175
+(+18 newly-passing), ZERO new failures (5 siblings byte-identical; T8 flake →C).
+
+- **PendingCopyOp** (vm.rs structs/field/init + builtins.rs copy_drive/copy_resume):
+  CopyPlan Asc (with/ replacer pushed without Get — no-get-replaced-index kept) /
+  Desc (toReversed) / Spliced (toSpliced two ranges + items); walk shapes reuse
+  the sparse silence proof (dense window direct, tail candidates with pure-push
+  gap-fills, exotic direct walk); replacer/items/await values refreshed per use,
+  op fields rooted while armed. Wired into toReversed/with/toSpliced (all
+  species-free; slice/flat reuse the machine in later slices).
+- **+10 copy tests**: toReversed get-descending-order + length-inc/dec,
+  with length-inc/dec, toSpliced elements-read-in-order + length-inc/dec +
+  mutate-while-iterating (setter writes ride plain stores; re-reads never hit
+  the quiet-skip path). Copy suites now fail ONLY this-value-boolean ×3 (→B2).
+- **flat depth-symbol (+1, closes item 14 save B8/B7)**: depth through
+  to_integer_sync (symbols throw) + new length_to_number rule — method-less
+  objects (null prototype, no own valueOf/toString) throw TypeError instead of
+  reading 0 (spec OrdinaryToPrimitive; normal `{}` still reads 0 via builtin
+  valueOf→toString→NaN). bind/proxy flat tests stay (B8/B7).
+- **has_property OOB fallthrough (+8 iterative spillover)**: the TAG_ARRAY
+  out-of-bounds arm returned false without consulting proto while load serves
+  proto values (found via with/toSpliced length-decreased: post-shrink reads
+  missed Array.prototype). One-line fallthrough; also fixed every/filter/map/
+  some/forEach -b-15 + reduce/b-28 variants (proto-getter + shrink shapes).
+  En-route root-caused (NOT a bug): set_length pre-punch + k+1 abort is
+  observably identical to spec (punched slots match the deletes that would run).
+- 1 integration test (test_array_copy_element_dispatch, 8 asserts); 883/0
+  workspace; clippy (CI flags)/fmt/no-default clean. Process: branch-baseline
+  FAIL-list diff (Array) + all 5 siblings byte-identical; touch+verify-Compiling
+  before every measurement; behavior-probes for the shrink forensics.
+
 ## B1-method-audits DONE — with + toSpliced (2026-09-13)
 
 Remaining two copy-methods audited (length machine + sync index clamps + shared

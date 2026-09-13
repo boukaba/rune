@@ -1240,6 +1240,78 @@ fn test_array_ctor_copywithin_tospliced_with() {
 }
 
 #[test]
+fn test_array_fill_toreversed() {
+    // B1-method-audits: fill (in-place, returns this) + toReversed (copy).
+    let mut ctx = Context::new_small();
+    let r = ctx.eval("[0, 0, 0].fill(8).join() === '8,8,8';").unwrap();
+    assert!(r.to_bool());
+    let r = ctx
+        .eval("[0, 0, 0].fill(8, 1).join() === '0,8,8';")
+        .unwrap();
+    assert!(r.to_bool());
+    let r = ctx
+        .eval("[0, 0, 0].fill(8, -1).join() === '0,0,8';")
+        .unwrap();
+    assert!(r.to_bool());
+    let r = ctx
+        .eval("[0, 0, 0, 0, 0].fill(8, -3, 4).join() === '0,0,8,8,0';")
+        .unwrap();
+    assert!(r.to_bool());
+    let r = ctx.eval("[0, 0].fill(1, true).join() === '0,1';").unwrap();
+    assert!(r.to_bool(), "fill coerces boolean start");
+    let r = ctx.eval("[0, 0].fill().length === 2;").unwrap();
+    assert!(r.to_bool(), "fill() writes undefined");
+    // Returns this (identity).
+    let r = ctx.eval("var a = [1, 2]; a.fill(0) === a;").unwrap();
+    assert!(r.to_bool(), "fill returns this");
+    let r = ctx
+        .eval("var o = {length: 0}; Array.prototype.fill.call(o) === o;")
+        .unwrap();
+    assert!(r.to_bool(), "fill returns generic receiver");
+    // Abrupts: nullish receiver, symbol index, frozen write.
+    ctx.eval("assert.throws(TypeError, function () { Array.prototype.fill.call(null, 1); });")
+        .unwrap();
+    ctx.eval("assert.throws(TypeError, function () { [].fill(1, Symbol('s')); });")
+        .unwrap();
+    ctx.eval("assert.throws(TypeError, function () { Object.freeze([1, 2]).fill(9); });")
+        .unwrap();
+    // toReversed: copy, descending, fresh identity.
+    let r = ctx
+        .eval("[1, 2, 3].toReversed().join() === '3,2,1';")
+        .unwrap();
+    assert!(r.to_bool());
+    let r = ctx
+        .eval("var a = [1, 2, 3]; var b = a.toReversed(); (a.join() === '1,2,3') && (b.join() === '3,2,1') && (a !== b);")
+        .unwrap();
+    assert!(r.to_bool(), "toReversed must not mutate");
+    // Holes materialize as present undefined (not preserved).
+    let r = ctx
+        .eval(
+            "var r = [0, , 2].toReversed(); (r.length === 3) && (1 in r) && (r[1] === undefined);",
+        )
+        .unwrap();
+    assert!(r.to_bool(), "toReversed fills holes with undefined");
+    // Generic receiver + frozen source reads fine.
+    let r = ctx
+        .eval("Array.prototype.toReversed.call({length: 3, 0: 0, 1: 1, 2: 2}).join() === '2,1,0';")
+        .unwrap();
+    assert!(r.to_bool());
+    let r = ctx
+        .eval("Object.freeze([0, 1, 2]).toReversed().join() === '2,1,0';")
+        .unwrap();
+    assert!(r.to_bool(), "toReversed reads frozen sources");
+    // No species: custom ctor never consulted.
+    let r = ctx
+        .eval("var a = []; a.constructor = {}; Object.getPrototypeOf(a.toReversed()) === Array.prototype;")
+        .unwrap();
+    assert!(r.to_bool(), "toReversed ignores species");
+    ctx.eval("assert.throws(TypeError, function () { Array.prototype.toReversed.call(null); });")
+        .unwrap();
+    ctx.eval("assert.throws(RangeError, function () { Array.prototype.toReversed.call({length: 4294967296}); });")
+        .unwrap();
+}
+
+#[test]
 fn test_array_sort_tosorted() {
     // B1e: comparator sort + toSorted (stable, observable, spec-ordered).
     let mut ctx = Context::new_small();

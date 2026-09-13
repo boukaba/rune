@@ -12,6 +12,43 @@
 > regexp advanced classes, class-static-block, top-level-await,
 > iterator-helpers (kept force-skipped).
 
+## B1-method-audits DONE — fill + toReversed (2026-09-13)
+
+Two missing Array.prototype methods implemented B1f-2-style (length machine +
+sync index clamps + shared copy/store helpers), wired onto Array.prototype.
+Array suite 2132→2149 (+17 newly-passing), ZERO new failures (5 siblings
+Object/String/Function/statements/expressions FAIL-lists byte-identical to
+stash baseline; T8 TIMEOUT↔PANIC mode-change proven solo-flaky →C).
+
+- **fill** (§23.1.3.9): length_stage (JS lengths suspend), to_clamped_index_checked
+  start/end (undefined→0/len, negatives, ±Inf, sync ToInteger), mutator_store Sets
+  (dense hole-fill, frozen/read-only throw, builtin setters inline), returns `this`.
+  fill/ 12/22 pass (was 4 wrong-reason passes with the method missing: nullish-Call
+  TypeErrors passed via "undefined has no .call" — now correct-reason). 7 fails all
+  triaged: return-abrupt-from-start/end (JS valueOf closures read as 0 — index
+  coercion gap →6e), return-abrupt-from-setting-property-value pt.2 (JS setter
+  quiet-skip per sync policy →6e), call-with-boolean (no Boolean boxing →B2),
+  length-near-integer-limit (STORES correct — read-back via huge float key misses:
+  float↔string canonicalization gap past 2^32, key-model →6e), resizable-buffer +
+  typed-array-resize (B4 out-of-scope). 3 skips = propertyHelper includes.
+- **toReversed** (§23.1.3.34): length_stage, RangeError past 2^32-1 before any Get,
+  NO species (ignores-species — .constructor never read), new copy_reversed_to_result
+  (descending Gets in spec order, holes materialize as PRESENT undefined via
+  seq_has/seq_read proto fallthrough, dense-window direct walk + sparse tail with
+  undefined-filled gaps + exotic direct walk, 2^32-1 valve via result_push), exact
+  length set by construction. toReversed/ 10/17 pass (was 1 wrong-reason carryover).
+  4 fails: get-descending-order + length-decreased-while-iterating (JS element getters
+  read as undefined — element dispatch →6e), length-increased-while-iterating (same:
+  replacing getter reads undefined, not the pushed value), this-value-boolean
+  Boolean.prototype half (→B2; bare true/false → [] correct). 3 skips as before.
+- **Pre-existing, cross-cutting (NOT this slice)**: builtin/JS-function `.name`/`.length`
+  metadata unimplemented (`function foo(a,b){}; foo.length` → undefined; every builtin
+  reports length 1 / mangled internal name) — fill/length.js passes by luck (expects 1),
+  toReversed/length.js + both name.js fail in that bucket. Own B5-adjacent slice later.
+- 1 integration test (test_array_fill_toreversed, 20 asserts); 881/0 workspace;
+  clippy (CI flags)/fmt/no-default clean. Process: stash+rebuild ground truth for
+  Array + all 5 siblings; touch+verify-Compiling before each measurement.
+
 ## A1 DONE — RequireObjectCoercible at the funnel tops (2026-09-05)
 
 First multiplier slice: property reads/writes on null/undefined now throw a

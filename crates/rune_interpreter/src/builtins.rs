@@ -9942,6 +9942,116 @@ pub fn array_reverse(gc: &mut SemiSpace, mut this: Value, _args: &[Value], vm: &
     this
 }
 
+/// Array.prototype.fill(value, start, end) — §23.1.3.9 audit: generic
+/// receiver, LengthOfArrayLike via the length machine (JS lengths suspend),
+/// spec clamped start/end (undefined → 0/len, negatives from the end, sync
+/// ToInteger — JS-closure indices read as 0 per the index-coercion gap →
+/// 6e), Set writes via mutator_store (dense fast incl. hole-fill, frozen/
+/// read-only throw, builtin setters inline, JS setters quiet-skip per the
+/// sync policy → 6e), returns `this` (return-this). No species (plain
+/// here — fill never ArraySpeciesCreates).
+pub fn array_fill(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let (len, _) = match length_stage(gc, vm, array_fill, this, args) {
+        LengthOut::Done(v) => v,
+        LengthOut::Wait => return Value::undefined(),
+        LengthOut::Raise(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let start_v = args.get(1).copied().unwrap_or(Value::undefined());
+    let k = match to_clamped_index_checked(gc, vm, start_v, len) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let end_v = args.get(2).copied().unwrap_or(Value::undefined());
+    let fin = if end_v.is_undefined() {
+        len
+    } else {
+        match to_clamped_index_checked(gc, vm, end_v, len) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
+    };
+    let mut obj = this;
+    if fin > k {
+        // value is re-resolved per store below (mutator_store may GC).
+        let mut value = args.first().copied().unwrap_or(Value::undefined());
+        if let Some(ptr) = obj.heap_ptr() {
+            if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_ARRAY {
+                let cap = unsafe { RuneArray::capacity(ptr as *mut RuneArray) as u64 };
+                if fin > cap {
+                    ensure_dense_capacity(gc, vm, &mut obj, fin);
+                }
+            }
+        }
+        let mut i = k;
+        while i < fin {
+            // The previous store may have GC-moved the value (builtin
+            // setter path) — re-resolve before each store.
+            value = refresh_value(value);
+            if let Err(e) = mutator_store(gc, vm, &mut obj, i, value) {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+            i += 1;
+        }
+    }
+    refresh_value(obj)
+}
+
+/// Array.prototype.toReversed() — §23.1.3.34 audit: generic receiver,
+/// LengthOfArrayLike via the length machine (JS lengths suspend, incl. the
+/// valueOf-object form in length-tolength), ArrayCreate(len) RangeError past
+/// 2^32-1 before any Get (length-exceeding-array-length-limit), NO species
+/// (ignores-species — plain fresh_dense_array even with a custom ctor, and
+/// .constructor is never read), descending Gets with holes materialized as
+/// present undefined, exact length set by construction. Returns a NEW array
+/// (immutable/zero-or-one-element); frozen sources read fine. JS element
+/// getters read as undefined (documented sync-gap → 6e, covering
+/// get-descending-order and length-decreased-while-iterating);
+/// primitive-receiver proto lengths are B2 (this-value-boolean
+/// prototype half).
+pub fn array_to_reversed(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let (len, _) = match length_stage(gc, vm, array_to_reversed, this, args) {
+        LengthOut::Done(v) => v,
+        LengthOut::Wait => return Value::undefined(),
+        LengthOut::Raise(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    if len > MAX_ARRAY_LENGTH {
+        vm.set_pending_exception(sort_range_error(gc, vm, "Invalid array length"));
+        return Value::undefined();
+    }
+    let mut result = fresh_dense_array(gc, vm);
+    let mut obj = this;
+    if let Err(e) = copy_reversed_to_result(gc, vm, &mut obj, &mut result, len) {
+        vm.set_pending_exception(e);
+        return Value::undefined();
+    }
+    // Length is exact by construction (every position pushed, holes as
+    // undefined); set explicitly per the slice discipline.
+    result = refresh_value(result);
+    if let Some(rptr) = result.heap_ptr() {
+        unsafe { RuneArray::set_length(rptr as *mut RuneArray, len as u32) };
+    }
+    result
+}
+
 /// String.fromCharCode(codes...) — creates a string from char codes.
 pub fn string_from_char_code(
     gc: &mut SemiSpace,
@@ -13015,6 +13125,107 @@ fn copy_sparse_to_result(
         }
     }
     result_fill_holes(gc, vm, result, hi - pos)?;
+    Ok(())
+}
+
+/// Copy O[0..len) reversed onto the fresh `result` positionally (§23.1.3.34
+/// lite, toReversed): result position k Gets source len-1-k, so Gets run in
+/// descending source order (get-descending-order observes [2,1,0]). Absent
+/// indices push `undefined` as PRESENT (holes-not-preserved — every
+/// CreateDataPropertyOrThrow creates, incl. proto-served reads via seq_has).
+/// Dense receivers walk the materialized window directly; the tail past the
+/// window and plain objects walk sparse candidates with undefined-filled gaps
+/// (same silence proof as copy_range_to_result); exotics walk directly.
+/// Returns Err on abrupt Gets (the 2^32-1 RangeError valve lives in
+/// result_push). JS getters read as undefined (documented sync-gap → 6e,
+/// same as seq_read everywhere).
+fn copy_reversed_to_result(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    obj: &mut Value,
+    result: &mut Value,
+    len: u64,
+) -> Result<(), Value> {
+    if len == 0 {
+        return Ok(());
+    }
+    *obj = refresh_value(*obj);
+    let win_end = obj
+        .heap_ptr()
+        .filter(|p| unsafe { (*(*p as *const GcHeader)).tag() } == TAG_ARRAY)
+        .map(|p| unsafe {
+            let arr = p as *mut RuneArray;
+            (RuneArray::length(arr) as u64).min(RuneArray::capacity(arr) as u64)
+        })
+        .unwrap_or(0)
+        .min(len);
+    // Tail sources [win_end, len): sparse-driven when enumerable, else direct.
+    if win_end < len {
+        if let Some(cands) = sparse_present_in(*obj, win_end, len) {
+            // Result position for source `from` is len-1-from; candidates
+            // arrive ascending, so visit them descending (spec Get order).
+            let mut pos = 0u64;
+            for from in cands.iter().rev().copied() {
+                if from < win_end || from >= len {
+                    continue;
+                }
+                let target = len - 1 - from;
+                while pos < target {
+                    result_push(gc, vm, result, Value::undefined())?;
+                    pos += 1;
+                }
+                let key = index_key(gc, from);
+                *obj = refresh_value(*obj);
+                if seq_has(*obj, key) {
+                    let mut o = *obj;
+                    let v = seq_read(gc, vm, &mut o, from)?;
+                    *obj = o;
+                    result_push(gc, vm, result, v)?;
+                } else {
+                    result_push(gc, vm, result, Value::undefined())?;
+                }
+                pos += 1;
+            }
+            while pos < len - win_end {
+                result_push(gc, vm, result, Value::undefined())?;
+                pos += 1;
+            }
+        } else {
+            // Exotic link (typed array, string, ...): direct descending walk.
+            let mut from = len;
+            while from > win_end {
+                from -= 1;
+                let key = index_key(gc, from);
+                *obj = refresh_value(*obj);
+                if seq_has(*obj, key) {
+                    let mut o = *obj;
+                    let v = seq_read(gc, vm, &mut o, from)?;
+                    *obj = o;
+                    result_push(gc, vm, result, v)?;
+                } else {
+                    result_push(gc, vm, result, Value::undefined())?;
+                }
+            }
+        }
+    }
+    // Materialized window [0, win_end): direct descending walk (holes read
+    // through the proto chain via seq_has, same as copy_range_to_result).
+    if win_end > 0 {
+        let mut from = win_end;
+        while from > 0 {
+            from -= 1;
+            let key = index_key(gc, from);
+            *obj = refresh_value(*obj);
+            if seq_has(*obj, key) {
+                let mut o = *obj;
+                let v = seq_read(gc, vm, &mut o, from)?;
+                *obj = o;
+                result_push(gc, vm, result, v)?;
+            } else {
+                result_push(gc, vm, result, Value::undefined())?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -17734,6 +17945,18 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 2,
             name: "assert__isSameValue",
             func: assert_is_same_value,
+        },
+        // Appended last (never insert mid-table): builtin Smi handles are
+        // index-derived, and shifting them perturbs JIT/AFPC records.
+        Builtin {
+            length: 1,
+            name: "Array_prototype_fill",
+            func: array_fill,
+        },
+        Builtin {
+            length: 0,
+            name: "Array_prototype_toReversed",
+            func: array_to_reversed,
         },
     ]
 }

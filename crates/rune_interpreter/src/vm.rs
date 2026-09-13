@@ -1482,6 +1482,12 @@ impl Vm {
             if let Some(h) = find_handle(&self.builtins, "Array_prototype_with") {
                 proto_entries.push(("with", h));
             }
+            if let Some(h) = find_handle(&self.builtins, "Array_prototype_fill") {
+                proto_entries.push(("fill", h));
+            }
+            if let Some(h) = find_handle(&self.builtins, "Array_prototype_toReversed") {
+                proto_entries.push(("toReversed", h));
+            }
             if let Some(sh) = find_handle(&self.builtins, "Array_prototype_sort") {
                 proto_entries.push(("sort", sh));
             }

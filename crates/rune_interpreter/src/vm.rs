@@ -851,6 +851,10 @@ pub(crate) enum CopyPlan {
         b: CopyRange,
         stage: u8,
     },
+    /// Fill writes (6e-copy-writes): Set(source, k, value) for k in
+    /// [cur, fin), dispatching JS setters through frames (sort_store_one
+    /// tri-state). Completes with the receiver itself (fill returns `this`).
+    Fill { value: Value, cur: u64, fin: u64 },
 }
 
 /// Pending element-Get copy (6e-copy): drives copy builtins (toReversed/with/
@@ -3543,6 +3547,9 @@ impl Vm {
                     for item in items.iter() {
                         gc.push_root(item as *const Value as *mut u64);
                     }
+                }
+                CopyPlan::Fill { value, .. } => {
+                    gc.push_root(value as *const Value as *mut u64);
                 }
                 CopyPlan::Desc { .. } => {}
             }

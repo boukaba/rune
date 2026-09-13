@@ -12,6 +12,29 @@
 > regexp advanced classes, class-static-block, top-level-await,
 > iterator-helpers (kept force-skipped).
 
+## 6e-copy-writes DONE — Fill plan with setter dispatch (2026-09-13)
+
+Write-side template established: CopyPlan::Fill reuses PendingCopyOp (op + drive
++ Return resume + F4, new legs only), dispatching each Set through the sort
+machine's proven sort_store_one tri-state (Data fast / builtin inline / JS setter
+frame; resume discards the setter result and advances — no push). Array suite
+2175→2176 (+1: fill return-abrupt-from-setting-property-value), ZERO new failures
+(5 siblings byte-identical; T9 TIMEOUT→PANIC joins the documented T8/T10
+huge-array flake family — fails all 5 runs, mode varies with timing).
+
+- Fill now runs setters with frames (throwing setters propagate catchably;
+  recording setters run once per index, fill continues, identity kept); frozen /
+  read-only still reject synchronously; empty ranges complete without suspending.
+- Surveyed the write-side demand for next slices: push/unshift setter-freeze
+  (setter must RUN, then the length write throws on the frozen array),
+  copyWithin set-target (do_store_property path, needs dispatch), pop/shift
+  getter-freeze (need READ dispatch in the stack/queue mutators — mutator_read
+  gap, separate wiring). Each follows the Fill template (cursor plan + legs).
+- 2 integration asserts (in test_array_copy_element_dispatch); 883/0 workspace;
+  clippy (CI flags)/fmt/no-default clean. Process: branch-baseline FAIL diff +
+  5 siblings; touch+verify-Compiling; behavior-probes (incl. catching my own
+  wrong join expectation before misdiagnosing).
+
 ## 6e-copy DONE — element-Get read machine + flat depth + OOB has fix (2026-09-13)
 
 Highest-compounding slice first: JS element getters now dispatch through frames

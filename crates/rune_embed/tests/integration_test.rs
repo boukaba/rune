@@ -1415,6 +1415,14 @@ fn test_array_copy_element_dispatch() {
         .eval("Array.prototype[4] = 5; var arr = [0, 1]; var ok = (4 in arr) && (arr[4] === 5); delete Array.prototype[4]; ok;")
         .unwrap();
     assert!(r.to_bool(), "OOB in walks proto");
+    // 6e-copy-writes: JS setters run through frames during fill (throwing
+    // setters propagate; recording setters run once per index, fill continues).
+    ctx.eval("assert.throws(Test262Error, function () { var a = {length: 1}; Object.defineProperty(a, '0', {set: function () { throw new Test262Error(); }}); Array.prototype.fill.call(a); });")
+        .unwrap();
+    let r = ctx
+        .eval("var calls = []; var o = {length: 3}; Object.defineProperty(o, '1', {set: function (v) { calls.push(v); }}); var res = Array.prototype.fill.call(o, 7); (res === o) && (calls.join() === '7') && (o[0] === 7) && (o[2] === 7);")
+        .unwrap();
+    assert!(r.to_bool(), "fill setter runs, fill continues");
 }
 
 #[test]

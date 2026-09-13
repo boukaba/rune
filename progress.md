@@ -12,6 +12,41 @@
 > regexp advanced classes, class-static-block, top-level-await,
 > iterator-helpers (kept force-skipped).
 
+## B1-method-audits DONE — with + toSpliced (2026-09-13)
+
+Remaining two copy-methods audited (length machine + sync index clamps + shared
+present-undefined segment copy). Array suite 2149→2157 (+8 newly-passing),
+ZERO new failures (5 siblings Object/String/Function/statements/expressions
+FAIL-lists byte-identical to the fill/toReversed branch lists; T8 PANIC↔TIMEOUT
+mode-flip again, solo-passes →C).
+
+- **with** (§23.1.3.39): length_stage, ToIntegerOrInfinity index with symbol abrupt
+  in spec order (before the ArrayCreate valve), negative-from-end, OOB RangeError,
+  2^32-1 RangeError before any Get, ascending copy that never Gets the replaced
+  index (value pushed directly — no-get-replaced-index), holes as present undefined
+  with proto fallthrough. with/ 13→15/21 (+holes-not-preserved, +length-tolength).
+  3 fails: length-increased/decreased (JS getters →6e), this-value-boolean (→B2).
+- **toSpliced** (§23.1.3.35, fetched full algorithm): length_stage (u64 — kills the
+  u32 truncation that hung length-exceeding as a 4B with_capacity TIMEOUT),
+  ToClampedIndex start, PRESENCE-gated skip (start absent → 0 so bare toSpliced()
+  copies; skipCount absent → delete-to-end; explicit undefined → 0 via ToInteger —
+  spec-fetched, bare-vs-undefined distinction verified by test), newLength valves in
+  spec order (TypeError past 2^53-1, RangeError past 2^32-1, both before any Get),
+  three-segment copy via new copy_present_segment_to_result (dense window + sparse
+  tail + exotic walk; deleted range never read — discarded-element-not-read kept),
+  exact length set. toSpliced/ 16→22/30 (+missing, +frozen, +holes, +tolength,
+  +clamped-2pow53m1, +exceeding). 5 fails: elements-read-in-order,
+  length-increased/decreased, mutate-while-iterating (JS getters →6e),
+  this-value-boolean (→B2).
+- Shared: new push_get_or_undefined + copy_present_segment_to_result helpers;
+  copy_reversed_to_result's exotic loop refactored onto the helper (no behavior
+  change — toReversed suite re-verified 10/17). Old u32 checked_array_length /
+  array_like_index / Vec-collect paths for both methods deleted.
+- 1 integration test (test_array_with_tospliced, 19 asserts); 882/0 workspace;
+  clippy (CI flags)/fmt/no-default clean. Process: branch-baseline FAIL-list diff
+  for Array (no stash round-trip needed — prior FAIL list was same-tree) + all 5
+  siblings byte-identical.
+
 ## B1-method-audits DONE — fill + toReversed (2026-09-13)
 
 Two missing Array.prototype methods implemented B1f-2-style (length machine +

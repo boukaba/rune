@@ -1312,6 +1312,72 @@ fn test_array_fill_toreversed() {
 }
 
 #[test]
+fn test_array_with_tospliced() {
+    // B1-method-audits: with (indexed copy) + toSpliced (presence-gated skip).
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval("[1, 2, 3].with(1, 9).join() === '1,9,3';")
+        .unwrap();
+    assert!(r.to_bool());
+    let r = ctx
+        .eval("[1, 2, 3].with(-1, 9).join() === '1,2,9';")
+        .unwrap();
+    assert!(r.to_bool());
+    let r = ctx
+        .eval("[0, 4, 16].with('1', 3).join() === '0,3,16';")
+        .unwrap();
+    assert!(r.to_bool(), "with coerces string index");
+    let r = ctx
+        .eval("[0, 4, 16].with(NaN, 2).join() === '2,4,16';")
+        .unwrap();
+    assert!(r.to_bool(), "with NaN index means 0");
+    // Holes materialize as present undefined; receiver untouched.
+    let r = ctx
+        .eval("var a = [0, , 2]; var r = a.with(0, 9); (r.join() === '9,,2') && (1 in r) && (a.join() === '0,,2');")
+        .unwrap();
+    assert!(r.to_bool(), "with fills holes, never mutates");
+    ctx.eval("assert.throws(RangeError, function () { [1, 2, 3].with(3, 9); });")
+        .unwrap();
+    ctx.eval("assert.throws(RangeError, function () { [1, 2, 3].with(-4, 9); });")
+        .unwrap();
+    ctx.eval("assert.throws(TypeError, function () { [1].with(Symbol('s'), 9); });")
+        .unwrap();
+    // toSpliced: bare call copies, undefined start deletes all.
+    let r = ctx
+        .eval("var a = ['first', 'second', 'third']; var b = a.toSpliced(); (b.join() === 'first,second,third') && (b !== a);")
+        .unwrap();
+    assert!(r.to_bool(), "bare toSpliced copies");
+    let r = ctx
+        .eval("['first', 'second', 'third'].toSpliced(undefined).join() === '';")
+        .unwrap();
+    assert!(r.to_bool(), "undefined start deletes all");
+    let r = ctx
+        .eval("['first', 'second', 'third'].toSpliced(1).join() === 'first';")
+        .unwrap();
+    assert!(r.to_bool(), "missing deleteCount deletes to end");
+    let r = ctx
+        .eval("[0, 1, 2, 3, 4].toSpliced(1, 2, 9).join() === '0,9,3,4';")
+        .unwrap();
+    assert!(r.to_bool());
+    let r = ctx
+        .eval("Object.freeze([2, 0, 1]).toSpliced().join() === '2,0,1';")
+        .unwrap();
+    assert!(r.to_bool(), "toSpliced reads frozen sources");
+    let r = ctx
+        .eval("var a = []; a.constructor = {}; Object.getPrototypeOf(a.toSpliced(0, 0)) === Array.prototype;")
+        .unwrap();
+    assert!(r.to_bool(), "toSpliced ignores species");
+    ctx.eval(
+        "assert.throws(TypeError, function () { Array.prototype.toSpliced.call(null, 0, 0); });",
+    )
+    .unwrap();
+    ctx.eval("assert.throws(TypeError, function () { Array.prototype.toSpliced.call({length: 9007199254740991}, 0, 0, 1); });")
+        .unwrap();
+    ctx.eval("assert.throws(RangeError, function () { Array.prototype.toSpliced.call({length: 4294967296}, 0, 0); });")
+        .unwrap();
+}
+
+#[test]
 fn test_array_sort_tosorted() {
     // B1e: comparator sort + toSorted (stable, observable, spec-ordered).
     let mut ctx = Context::new_small();

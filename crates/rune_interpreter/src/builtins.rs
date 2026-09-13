@@ -8431,105 +8431,140 @@ fn checked_array_length(gc: &mut SemiSpace, vm: &mut Vm, this: Value) -> Result<
     }
     Ok(crate::vm::array_like_length(this).unwrap_or(0))
 }
-/// Array.prototype.toSpliced(start, deleteCount, ...items) — non-mutating
-/// splice (§23.1.3.33 lite): copies the receiver, applies splice index
-/// math on the copy, returns it. Holes copy as undefined (dense model).
+/// Array.prototype.toSpliced(start, skipCount, ...items) — §23.1.3.35 audit:
+/// generic receiver, LengthOfArrayLike via the length machine (JS lengths
+/// suspend, incl. the valueOf-object form in length-tolength), ToClampedIndex
+/// start, presence-gated skip (start ABSENT → 0, so bare toSpliced() copies;
+/// skipCount absent → delete to end; explicit undefined skip → 0 via ToInteger),
+/// newLength overflow valves in spec order (TypeError past 2^53-1, RangeError
+/// past 2^32-1 via ArrayCreate — both before any Get), three-segment copy with
+/// holes materialized as present undefined (proto fallthrough via seq_has) and
+/// the deleted range never read (discarded-element-not-read). Fresh plain result,
+/// no species (ignores-species). JS element getters read as undefined
+/// (documented sync-gap → 6e: elements-read-in-order, mutate-while-iterating,
+/// length-increased/decreased); primitive-receiver proto lengths are B2.
 pub fn array_to_spliced(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let len = match checked_array_length(gc, vm, this) {
-        Ok(len) => len as i64,
-        Err(e) => {
+    let (len, _) = match length_stage(gc, vm, array_to_spliced, this, args) {
+        LengthOut::Done(v) => v,
+        LengthOut::Wait => return Value::undefined(),
+        LengthOut::Raise(e) => {
             vm.set_pending_exception(e);
             return Value::undefined();
         }
     };
-    let start = match clamp_index_throwing(gc, vm, args.first().copied(), len, 0) {
+    let start_v = args.first().copied().unwrap_or(Value::undefined());
+    let actual_start = match to_clamped_index_checked(gc, vm, start_v, len) {
         Ok(v) => v,
         Err(e) => {
             vm.set_pending_exception(e);
             return Value::undefined();
         }
     };
-    let delete = if args.len() < 2 {
-        len - start
-    } else if args[1].is_symbol() {
-        vm.set_pending_exception(crate::errors::error_object(
-            gc,
-            &vm.error_protos,
-            crate::errors::ErrorKind::TypeError,
-            "Cannot convert a Symbol value to a number",
-        ));
-        return Value::undefined();
+    let max_skip = len - actual_start;
+    let skip = if args.is_empty() {
+        // Start not present → skip 0 (bare toSpliced() copies whole).
+        0
+    } else if args.len() < 2 {
+        // SkipCount not present → delete to end (deleteCount-missing).
+        max_skip
     } else {
-        let n = to_integer_or_infinity(args[1]);
-        (n.max(0.0) as i64).min(len - start)
+        match to_integer_sync(gc, vm, args[1]) {
+            Ok(n) => {
+                if n.is_nan() || n <= 0.0 {
+                    0
+                } else {
+                    (n.min(max_skip as f64)) as u64
+                }
+            }
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
     };
-    let items: &[Value] = if args.len() > 2 { &args[2..] } else { &[] };
-    let mut out: Vec<Value> = Vec::with_capacity(len as usize + items.len());
-    for i in 0..start as usize {
-        out.push(crate::vm::array_like_index(this, i as u32).unwrap_or(Value::undefined()));
+    let insert = if args.len() > 2 {
+        (args.len() - 2) as u64
+    } else {
+        0
+    };
+    // Skip never exceeds len (clamped to max_skip above), so no underflow.
+    let new_len = len + insert - skip;
+    if new_len > MAX_SAFE_INTEGER_U64 {
+        vm.set_pending_exception(sort_type_error(gc, vm, "Invalid array length"));
+        return Value::undefined();
     }
-    out.extend_from_slice(items);
-    for i in (start + delete) as usize..len as usize {
-        out.push(crate::vm::array_like_index(this, i as u32).unwrap_or(Value::undefined()));
+    if new_len > MAX_ARRAY_LENGTH {
+        vm.set_pending_exception(sort_range_error(gc, vm, "Invalid array length"));
+        return Value::undefined();
     }
-    build_array(gc, &out, vm)
+    let mut result = fresh_dense_array(gc, vm);
+    let mut obj = this;
+    if let Err(e) = copy_present_segment_to_result(gc, vm, &mut obj, &mut result, 0, actual_start) {
+        vm.set_pending_exception(e);
+        return Value::undefined();
+    }
+    if args.len() > 2 {
+        for item in &args[2..] {
+            let item = refresh_value(*item);
+            if let Err(e) = result_push(gc, vm, &mut result, item) {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
+    }
+    if let Err(e) =
+        copy_present_segment_to_result(gc, vm, &mut obj, &mut result, actual_start + skip, len)
+    {
+        vm.set_pending_exception(e);
+        return Value::undefined();
+    }
+    // Length is exact by construction; set explicitly per the slice discipline.
+    result = refresh_value(result);
+    if let Some(rptr) = result.heap_ptr() {
+        unsafe { RuneArray::set_length(rptr as *mut RuneArray, new_len as u32) };
+    }
+    result
 }
 
-/// Array.prototype.with(index, value) — copy with one element replaced
-/// (§23.1.3.36 lite). Negative index counts from the end; out of range
-/// (incl. -0?) throws RangeError.
+/// Array.prototype.with(index, value) — §23.1.3.39 audit: generic receiver,
+/// LengthOfArrayLike via the length machine (JS lengths suspend, incl. the
+/// valueOf-object form in length-tolength), ToIntegerOrInfinity index with
+/// symbol abrupt (index-throw-completion) in spec order (before the ArrayCreate
+/// valve, so a symbol index throws TypeError even past the length limit),
+/// negative-from-end with OOB RangeError, ArrayCreate(len) RangeError past
+/// 2^32-1 before any Get, then an ascending copy that Gets every index EXCEPT
+/// the replaced one (no-get-replaced-index — value pushed directly) with holes
+/// materialized as present undefined (proto fallthrough via seq_has). Fresh
+/// plain result, no species (ignores-species). JS element getters read as
+/// undefined (documented sync-gap → 6e: length-increased/decreased);
+/// primitive-receiver proto lengths are B2 (this-value-boolean).
 pub fn array_with(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let len = match checked_array_length(gc, vm, this) {
-        Ok(len) => len as usize,
+    let (len, _) = match length_stage(gc, vm, array_with, this, args) {
+        LengthOut::Done(v) => v,
+        LengthOut::Wait => return Value::undefined(),
+        LengthOut::Raise(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let value = args.get(1).copied().unwrap_or(Value::undefined());
+    let rel_v = args.first().copied().unwrap_or(Value::undefined());
+    let n = match to_integer_sync(gc, vm, rel_v) {
+        Ok(n) => n,
         Err(e) => {
             vm.set_pending_exception(e);
             return Value::undefined();
         }
     };
-    // B1e (unmasked by the Exp fix): ArrayCreate(len) throws RangeError for
-    // len > 2^32-1, before any element Get (with/length-exceeding-...).
-    if let Some(lptr) = this.heap_ptr() {
-        if unsafe { (*(lptr as *const GcHeader)).tag() } == TAG_OBJECT {
-            let shape = unsafe { JSObject::shape_ptr(lptr as *mut JSObject) };
-            if let Some(slot) = shape.lookup(&PropertyKey::from_string("length")) {
-                let lv = unsafe { JSObject::get_slot(lptr as *mut JSObject, slot) };
-                let n = lv
-                    .as_smi()
-                    .map(|v| v as f64)
-                    .or_else(|| lv.as_float64())
-                    .unwrap_or(f64::NAN);
-                if n > 4_294_967_295.0 {
-                    vm.set_pending_exception(crate::errors::error_object(
-                        gc,
-                        &vm.error_protos,
-                        crate::errors::ErrorKind::RangeError,
-                        "Invalid array length",
-                    ));
-                    return Value::undefined();
-                }
-            }
-        }
-    }
-    let value = args.get(1).copied().unwrap_or(Value::undefined());
-    let rel = args.first().copied().unwrap_or(Value::undefined());
-    if rel.is_symbol() {
-        vm.set_pending_exception(crate::errors::error_object(
-            gc,
-            &vm.error_protos,
-            crate::errors::ErrorKind::TypeError,
-            "Cannot convert a Symbol value to a number",
-        ));
-        return Value::undefined();
-    }
-    let idx = to_integer_or_infinity(rel) as i64;
-    let actual = if idx < 0 { len as i64 + idx } else { idx };
-    if actual < 0 || actual >= len as i64 {
+    // f64 math stays exact (len ≤ 2^53-1, n integral-or-infinite).
+    let actual = if n < 0.0 { len as f64 + n } else { n };
+    if actual < 0.0 || actual >= len as f64 {
         vm.set_pending_exception(crate::errors::error_object(
             gc,
             &vm.error_protos,
@@ -8538,11 +8573,31 @@ pub fn array_with(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
         ));
         return Value::undefined();
     }
-    let mut elems: Vec<Value> = (0..len)
-        .map(|i| crate::vm::array_like_index(this, i as u32).unwrap_or(Value::undefined()))
-        .collect();
-    elems[actual as usize] = value;
-    build_array(gc, &elems, vm)
+    if len > MAX_ARRAY_LENGTH {
+        vm.set_pending_exception(sort_range_error(gc, vm, "Invalid array length"));
+        return Value::undefined();
+    }
+    let actual = actual as u64;
+    let mut result = fresh_dense_array(gc, vm);
+    let mut obj = this;
+    if let Err(e) = copy_present_segment_to_result(gc, vm, &mut obj, &mut result, 0, actual) {
+        vm.set_pending_exception(e);
+        return Value::undefined();
+    }
+    if let Err(e) = result_push(gc, vm, &mut result, refresh_value(value)) {
+        vm.set_pending_exception(e);
+        return Value::undefined();
+    }
+    if let Err(e) = copy_present_segment_to_result(gc, vm, &mut obj, &mut result, actual + 1, len) {
+        vm.set_pending_exception(e);
+        return Value::undefined();
+    }
+    // Length is exact by construction; set explicitly per the slice discipline.
+    result = refresh_value(result);
+    if let Some(rptr) = result.heap_ptr() {
+        unsafe { RuneArray::set_length(rptr as *mut RuneArray, len as u32) };
+    }
+    result
 }
 
 /// Array.prototype.push(value) — pushes value to the array, returns new length.
@@ -13195,16 +13250,7 @@ fn copy_reversed_to_result(
             let mut from = len;
             while from > win_end {
                 from -= 1;
-                let key = index_key(gc, from);
-                *obj = refresh_value(*obj);
-                if seq_has(*obj, key) {
-                    let mut o = *obj;
-                    let v = seq_read(gc, vm, &mut o, from)?;
-                    *obj = o;
-                    result_push(gc, vm, result, v)?;
-                } else {
-                    result_push(gc, vm, result, Value::undefined())?;
-                }
+                push_get_or_undefined(gc, vm, obj, result, from)?;
             }
         }
     }
@@ -13214,15 +13260,108 @@ fn copy_reversed_to_result(
         let mut from = win_end;
         while from > 0 {
             from -= 1;
-            let key = index_key(gc, from);
-            *obj = refresh_value(*obj);
-            if seq_has(*obj, key) {
-                let mut o = *obj;
-                let v = seq_read(gc, vm, &mut o, from)?;
-                *obj = o;
-                result_push(gc, vm, result, v)?;
-            } else {
+            push_get_or_undefined(gc, vm, obj, result, from)?;
+        }
+    }
+    Ok(())
+}
+
+/// Get-push one index as present (shared by the no-holes copy family):
+/// present indices (incl. proto-served) push their Get value own;
+/// absent indices push `undefined` as PRESENT (holes-not-preserved —
+/// CreateDataPropertyOrThrow always creates). Refreshes both sides across
+/// the key allocation and any GC inside the read.
+fn push_get_or_undefined(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    obj: &mut Value,
+    result: &mut Value,
+    idx: u64,
+) -> Result<(), Value> {
+    let key = index_key(gc, idx);
+    *obj = refresh_value(*obj);
+    if seq_has(*obj, key) {
+        let mut o = *obj;
+        let v = seq_read(gc, vm, &mut o, idx)?;
+        *obj = o;
+        result_push(gc, vm, result, v)?;
+    } else {
+        result_push(gc, vm, result, Value::undefined())?;
+    }
+    Ok(())
+}
+
+/// Copy [lo, hi) positionally with holes as present undefined (§23.1.3.35 /
+/// §23.1.3.39 lite — toSpliced/with segments): every index Gets in ascending
+/// order (elements-read-in-order observes [0,1,3]); absent indices push
+/// `undefined` own (holes-not-preserved). Dense receivers walk the
+/// materialized window directly; the tail past the window and plain objects
+/// walk sparse candidates with undefined-filled gaps (same silence proof as
+/// copy_range_to_result); exotics walk directly. JS getters read as undefined
+/// (documented sync-gap → 6e, same as seq_read everywhere).
+fn copy_present_segment_to_result(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    obj: &mut Value,
+    result: &mut Value,
+    lo: u64,
+    hi: u64,
+) -> Result<(), Value> {
+    if lo >= hi {
+        return Ok(());
+    }
+    *obj = refresh_value(*obj);
+    let win_end = obj
+        .heap_ptr()
+        .filter(|p| unsafe { (*(*p as *const GcHeader)).tag() } == TAG_ARRAY)
+        .map(|p| unsafe {
+            let arr = p as *mut RuneArray;
+            (RuneArray::length(arr) as u64).min(RuneArray::capacity(arr) as u64)
+        })
+        .unwrap_or(0)
+        .min(hi)
+        .max(lo);
+    let mut k = lo;
+    while k < win_end {
+        push_get_or_undefined(gc, vm, obj, result, k)?;
+        k += 1;
+    }
+    if win_end < hi {
+        if let Some(cands) = sparse_present_in(*obj, win_end, hi) {
+            let mut pos = win_end;
+            for c in cands {
+                if c < pos || c >= hi {
+                    continue;
+                }
+                let key = index_key(gc, c);
+                *obj = refresh_value(*obj);
+                if seq_has(*obj, key) {
+                    while pos < c {
+                        result_push(gc, vm, result, Value::undefined())?;
+                        pos += 1;
+                    }
+                    let mut o = *obj;
+                    let v = seq_read(gc, vm, &mut o, c)?;
+                    *obj = o;
+                    result_push(gc, vm, result, v)?;
+                    pos = c + 1;
+                } else {
+                    // Vanished between collect and walk: whole span undefined.
+                    while pos <= c {
+                        result_push(gc, vm, result, Value::undefined())?;
+                        pos += 1;
+                    }
+                }
+            }
+            while pos < hi {
                 result_push(gc, vm, result, Value::undefined())?;
+                pos += 1;
+            }
+        } else {
+            // Exotic link: direct ascending walk (bounded in practice).
+            while k < hi {
+                push_get_or_undefined(gc, vm, obj, result, k)?;
+                k += 1;
             }
         }
     }

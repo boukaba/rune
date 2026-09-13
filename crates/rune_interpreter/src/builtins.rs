@@ -5925,6 +5925,14 @@ fn define_key_and_name(raw_key: Value) -> Result<(PropertyKey, String), ()> {
     if let Some(v) = raw_key.as_smi() {
         return Ok((PropertyKey::from_string(&v.to_string()), v.to_string()));
     }
+    // 6e-key-model: integral floats are canonical string keys (same rule as
+    // value_to_prop_key — huge indices define under their exact form).
+    if let Some(f) = raw_key.as_float64() {
+        if !f.is_nan() && f.is_finite() && f.fract() == 0.0 && f.abs() <= 9_007_199_254_740_992.0 {
+            let s = format!("{}", f as i64);
+            return Ok((PropertyKey::from_string(&s), s));
+        }
+    }
     Err(())
 }
 
@@ -8534,6 +8542,7 @@ pub fn array_to_spliced(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
         },
         await_idx: u64::MAX,
         await_callee: Value::undefined(),
+        await_write: false,
     };
     match copy_drive(vm, gc, &mut op) {
         CopyOut::Wait => {
@@ -8616,6 +8625,7 @@ pub fn array_with(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
         },
         await_idx: u64::MAX,
         await_callee: Value::undefined(),
+        await_write: false,
     };
     match copy_drive(vm, gc, &mut op) {
         CopyOut::Wait => {
@@ -9224,6 +9234,23 @@ pub(crate) fn classify_store(gc: &mut SemiSpace, obj: Value, idx: usize) -> Stor
                     return StoreTarget::Data;
                 }
             }
+            // Present dense elements are own data (OrdinarySet short-circuits
+            // proto setters — 6e-copy-writes shift/unshift moves onto dense
+            // targets must store own, never dispatch an inherited setter).
+            // Holes/tails fall through to the proto walk below.
+            let arr = optr as *mut RuneArray;
+            let (dlen, cap) = unsafe {
+                (
+                    RuneArray::length(arr) as usize,
+                    RuneArray::capacity(arr) as usize,
+                )
+            };
+            if idx < dlen && idx < cap {
+                let elem = unsafe { RuneArray::get_element(arr, idx) };
+                if elem != Value::empty_sentinel() {
+                    return StoreTarget::Data;
+                }
+            }
         }
     }
     let Some(pair) = sort_find_accessor(gc, obj, idx as u64) else {
@@ -9580,6 +9607,17 @@ pub(crate) fn array_store_length_value(
     v: Value,
 ) -> Result<(), LengthSetErr> {
     let new_len = coerce_array_length_value(gc, vm, v).map_err(LengthSetErr::Range)?;
+    // OrdinarySet 2a (set-length-zero-array-is-frozen): a Set on a
+    // non-writable length rejects even for SameValue (no ValidateAndApply
+    // escape — that leniency is defineProperty-only; the shared exotic core
+    // below keeps it).
+    if let Some(ptr) = obj.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_ARRAY
+            && !unsafe { RuneArray::length_is_writable(ptr as *mut RuneArray) }
+        {
+            return Err(LengthSetErr::Deny);
+        }
+    }
     array_exotic_set_length(gc, vm, obj, new_len, false).map_err(|_| LengthSetErr::Deny)
 }
 
@@ -9608,6 +9646,16 @@ fn set_length_checked(
             // update then throws, exactly like V8 (A3).
             return Err(sort_range_error(gc, vm, "Invalid array length"));
         }
+        // OrdinarySet 2a: non-writable lengths reject even SameValue
+        // (set-length-zero-array-is-frozen; the exotic core's SameValue
+        // leniency is defineProperty-only).
+        if !unsafe { RuneArray::length_is_writable(ptr as *mut RuneArray) } {
+            return Err(sort_type_error(
+                gc,
+                vm,
+                "Cannot assign to read-only property 'length'",
+            ));
+        }
         // B1f-5: full exotic semantics (non-writable throw, shrink deletes).
         return array_exotic_set_length(gc, vm, obj, len as u32, false);
     }
@@ -9616,6 +9664,15 @@ fn set_length_checked(
             gc,
             vm,
             "Cannot assign to read only property 'length' of a string",
+        ));
+    }
+    if tag == TAG_FUNC {
+        // Function length is own, non-writable (throws-when-length-writable
+        // family): Set rejects even SameValue.
+        return Err(sort_type_error(
+            gc,
+            vm,
+            "Cannot assign to read-only property 'length'",
         ));
     }
     if tag != TAG_OBJECT {
@@ -9654,6 +9711,15 @@ fn set_length_checked(
                 *obj = refresh_value(*obj);
                 return Ok(());
             }
+        }
+        // OrdinarySet 2a: non-writable data rejects even SameValue
+        // (throws-when-length-is-writable-false family).
+        if shape.attr_at(slot) & rune_core::shape::ATTR_WRITABLE == 0 {
+            return Err(sort_type_error(
+                gc,
+                vm,
+                "Cannot assign to read-only property 'length'",
+            ));
         }
         unsafe { JSObject::set_slot(ptr as *mut JSObject, slot, length_value(len)) };
         return Ok(());
@@ -9727,14 +9793,17 @@ fn mutator_delete(gc: &mut SemiSpace, vm: &Vm, obj: &mut Value, idx: u64) -> Res
 
 /// Array.prototype.push(...items) — appends all args, returns the new
 /// length (§23.1.3.23). Generic over heap receivers; strings reject every
-/// write; non-string primitives take the discarded-box path.
+/// write; non-string primitives take the discarded-box path. Element Sets
+/// dispatch through the 6e-copy Push plan (JS setters run with frames —
+/// setter-freeze shapes); the spec length write follows (frozen lengths
+/// throw after a freezing setter ran).
 pub fn array_push(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
     // B1f-6b: JS-driven lengths suspend (op stored, frame pushed); resume
     // re-enters here and consumes the slot first-thing (pure prefix).
-    let (mut len, _) = match length_stage(gc, vm, array_push, this, args) {
+    let (len, _) = match length_stage(gc, vm, array_push, this, args) {
         LengthOut::Done(v) => v,
         LengthOut::Wait => return Value::undefined(),
         LengthOut::Raise(e) => {
@@ -9751,32 +9820,43 @@ pub fn array_push(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut 
         ));
         return Value::undefined();
     }
-    let is_prim = this.heap_ptr().is_none();
+    if this.heap_ptr().is_none() {
+        // Discarded-box primitive: stores succeed into the void and the
+        // length write is skipped (set_length_checked is a heap no-op).
+        return length_value(len + count);
+    }
     let is_string = this
         .heap_ptr()
         .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_STRING);
-    if !is_prim && !is_string {
+    if !is_string {
         ensure_dense_capacity(gc, vm, &mut this, len + count);
     }
-    for (k, &item) in args.iter().enumerate() {
-        let at = len + k as u64;
-        if is_prim && !is_string {
-            // Discarded-box primitive: the store succeeds into the void.
-            continue;
+    let mut op = crate::vm::PendingCopyOp {
+        source_frame_depth: 0,
+        source: this,
+        result: Value::undefined(),
+        final_len: len + count,
+        plan: crate::vm::CopyPlan::Push {
+            items: args.to_vec(),
+            len,
+            ii: 0,
+        },
+        await_idx: u64::MAX,
+        await_callee: Value::undefined(),
+        await_write: false,
+    };
+    match copy_drive(vm, gc, &mut op) {
+        CopyOut::Wait => {
+            op.source_frame_depth = vm.frame_depth() - 1;
+            vm.pending_copy_op = Some(op);
+            Value::undefined()
         }
-        if let Err(e) = mutator_store(gc, vm, &mut this, at, refresh_value(item)) {
+        CopyOut::Done(v) => v,
+        CopyOut::Raise(e) => {
             vm.set_pending_exception(e);
-            return Value::undefined();
+            Value::undefined()
         }
     }
-    len += count;
-    if !is_prim {
-        if let Err(e) = set_length_checked(gc, vm, &mut this, len) {
-            vm.set_pending_exception(e);
-            return Value::undefined();
-        }
-    }
-    length_value(len)
 }
 pub fn array_pop(gc: &mut SemiSpace, mut this: Value, _args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
@@ -9803,23 +9883,30 @@ pub fn array_pop(gc: &mut SemiSpace, mut this: Value, _args: &[Value], vm: &mut 
     if this.heap_ptr().is_none() {
         return Value::undefined();
     }
-    let last = len - 1;
-    let element = match mutator_read(gc, vm, &mut this, last) {
-        Ok(v) => v,
-        Err(e) => {
-            vm.set_pending_exception(e);
-            return Value::undefined();
-        }
+    // Element Get dispatches through the 6e-copy Pop plan (a freezing
+    // getter runs; the delete + length set then throw on the frozen array).
+    let mut op = crate::vm::PendingCopyOp {
+        source_frame_depth: 0,
+        source: this,
+        result: Value::undefined(),
+        final_len: len - 1,
+        plan: crate::vm::CopyPlan::Pop { len },
+        await_idx: u64::MAX,
+        await_callee: Value::undefined(),
+        await_write: false,
     };
-    if let Err(e) = mutator_delete(gc, vm, &mut this, last) {
-        vm.set_pending_exception(e);
-        return Value::undefined();
+    match copy_drive(vm, gc, &mut op) {
+        CopyOut::Wait => {
+            op.source_frame_depth = vm.frame_depth() - 1;
+            vm.pending_copy_op = Some(op);
+            Value::undefined()
+        }
+        CopyOut::Done(v) => v,
+        CopyOut::Raise(e) => {
+            vm.set_pending_exception(e);
+            Value::undefined()
+        }
     }
-    if let Err(e) = set_length_checked(gc, vm, &mut this, last) {
-        vm.set_pending_exception(e);
-        return Value::undefined();
-    }
-    element
 }
 pub fn array_shift(gc: &mut SemiSpace, mut this: Value, _args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
@@ -9846,55 +9933,49 @@ pub fn array_shift(gc: &mut SemiSpace, mut this: Value, _args: &[Value], vm: &mu
     if this.heap_ptr().is_none() {
         return Value::undefined();
     }
-    let first = match mutator_read(gc, vm, &mut this, 0) {
-        Ok(v) => v,
-        Err(e) => {
-            vm.set_pending_exception(e);
-            return Value::undefined();
-        }
-    };
-    // B1f: huge sparse walks with no indexed entries anywhere are
-    // provably silent — skip them (the clamps tests iterate at 2^53).
-    // Dense arrays always move data; only plain objects consult quiet.
+    // Moves dispatch through the 6e-copy Shift plan (freezing getters/setters
+    // run with frames; deletes + the length set stay sync).
     let is_dense = this
         .heap_ptr()
         .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_ARRAY);
     if is_dense {
         ensure_dense_capacity(gc, vm, &mut this, len);
     }
-    let mut k: u64 = 1;
+    // B1f: huge sparse walks with no indexed entries anywhere are provably
+    // silent — skip them (the clamps tests iterate at 2^53). Only plain
+    // objects consult quiet (dense arrays always move data); a quiet span
+    // stays silent under dispatch too (no accessors exist to suspend on —
+    // any getter/setter anywhere in span defeats quiet).
+    let mut k: u64 = 0;
     if !is_dense && move_range_is_quiet(this, 0, len) {
         k = len;
     }
-    while k < len {
-        let from_present = crate::vm::has_property(this, index_key(gc, k), None);
-        if from_present {
-            let v = match mutator_read(gc, vm, &mut this, k) {
-                Ok(v) => v,
-                Err(e) => {
-                    vm.set_pending_exception(e);
-                    return Value::undefined();
-                }
-            };
-            if let Err(e) = mutator_store(gc, vm, &mut this, k - 1, v) {
-                vm.set_pending_exception(e);
-                return Value::undefined();
-            }
-        } else if let Err(e) = mutator_delete(gc, vm, &mut this, k - 1) {
-            vm.set_pending_exception(e);
-            return Value::undefined();
+    let mut op = crate::vm::PendingCopyOp {
+        source_frame_depth: 0,
+        source: this,
+        result: Value::undefined(),
+        final_len: len - 1,
+        plan: crate::vm::CopyPlan::Shift {
+            len,
+            k,
+            first: Value::undefined(),
+        },
+        await_idx: u64::MAX,
+        await_callee: Value::undefined(),
+        await_write: false,
+    };
+    match copy_drive(vm, gc, &mut op) {
+        CopyOut::Wait => {
+            op.source_frame_depth = vm.frame_depth() - 1;
+            vm.pending_copy_op = Some(op);
+            Value::undefined()
         }
-        k += 1;
+        CopyOut::Done(v) => v,
+        CopyOut::Raise(e) => {
+            vm.set_pending_exception(e);
+            Value::undefined()
+        }
     }
-    if let Err(e) = mutator_delete(gc, vm, &mut this, len - 1) {
-        vm.set_pending_exception(e);
-        return Value::undefined();
-    }
-    if let Err(e) = set_length_checked(gc, vm, &mut this, len - 1) {
-        vm.set_pending_exception(e);
-        return Value::undefined();
-    }
-    first
 }
 pub fn array_unshift(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
@@ -9927,46 +10008,45 @@ pub fn array_unshift(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &m
     if !is_prim && is_dense {
         ensure_dense_capacity(gc, vm, &mut this, len + count);
     }
-    if !is_prim {
-        // Backward slide: from k-1 to k+count-1 (spec order). Quiet
-        // huge sparse spans skip (see shift).
-        let mut k = len;
-        if !is_dense && move_range_is_quiet(this, 0, len + count) {
-            k = 0;
+    if is_prim {
+        // Discarded-box primitive: no moves or stores; length write skipped.
+        return length_value(len + count);
+    }
+    // Backward slide dispatches through the 6e-copy Unshift plan (stage 0
+    // moves with read+write dispatch, stage 1 inserts, then the length set).
+    // Quiet huge sparse spans skip the moves (same proof as shift).
+    let mut k = len;
+    if !is_dense && move_range_is_quiet(this, 0, len + count) {
+        k = 0;
+    }
+    let mut op = crate::vm::PendingCopyOp {
+        source_frame_depth: 0,
+        source: this,
+        result: Value::undefined(),
+        final_len: len + count,
+        plan: crate::vm::CopyPlan::Unshift {
+            len,
+            items: args.to_vec(),
+            ii: 0,
+            k,
+            stage: 0,
+        },
+        await_idx: u64::MAX,
+        await_callee: Value::undefined(),
+        await_write: false,
+    };
+    match copy_drive(vm, gc, &mut op) {
+        CopyOut::Wait => {
+            op.source_frame_depth = vm.frame_depth() - 1;
+            vm.pending_copy_op = Some(op);
+            Value::undefined()
         }
-        while k > 0 {
-            let from = k - 1;
-            let to = k + count - 1;
-            if crate::vm::has_property(this, index_key(gc, from), None) {
-                let v = match mutator_read(gc, vm, &mut this, from) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        vm.set_pending_exception(e);
-                        return Value::undefined();
-                    }
-                };
-                if let Err(e) = mutator_store(gc, vm, &mut this, to, v) {
-                    vm.set_pending_exception(e);
-                    return Value::undefined();
-                }
-            } else if let Err(e) = mutator_delete(gc, vm, &mut this, to) {
-                vm.set_pending_exception(e);
-                return Value::undefined();
-            }
-            k -= 1;
-        }
-        for (j, &item) in args.iter().enumerate() {
-            if let Err(e) = mutator_store(gc, vm, &mut this, j as u64, refresh_value(item)) {
-                vm.set_pending_exception(e);
-                return Value::undefined();
-            }
-        }
-        if let Err(e) = set_length_checked(gc, vm, &mut this, len + count) {
+        CopyOut::Done(v) => v,
+        CopyOut::Raise(e) => {
             vm.set_pending_exception(e);
-            return Value::undefined();
+            Value::undefined()
         }
     }
-    length_value(len + count)
 }
 pub fn array_reverse(gc: &mut SemiSpace, mut this: Value, _args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
@@ -10101,6 +10181,7 @@ pub fn array_fill(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
         plan: crate::vm::CopyPlan::Fill { value, cur: k, fin },
         await_idx: u64::MAX,
         await_callee: Value::undefined(),
+        await_write: false,
     };
     match copy_drive(vm, gc, &mut op) {
         CopyOut::Wait => {
@@ -10160,6 +10241,7 @@ pub fn array_to_reversed(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &m
         },
         await_idx: u64::MAX,
         await_callee: Value::undefined(),
+        await_write: false,
     };
     match copy_drive(vm, gc, &mut op) {
         CopyOut::Wait => {
@@ -13276,10 +13358,78 @@ enum CopyStepOut {
     Raise(Value),
 }
 
+/// Resolve outcome for one source index (6e-copy).
+enum ResolveOut {
+    /// Get value (absent indices resolve to `undefined`).
+    Ready(Value),
+    /// JS getter frame pushed (await slots recorded).
+    Wait,
+    /// Fail with an error value.
+    Raise(Value),
+}
+
 /// Resolve one source index with accessor dispatch (6e-copy): absent indices
-/// (incl. holes with no proto value) push `undefined` as PRESENT; present
-/// indices Get with proto fallthrough; builtin getters run inline; JS getters
-/// push a frame (Wait, recording await_idx/callee in the op slots).
+/// (incl. holes with no proto value) resolve to `undefined`; present indices
+/// Get with proto fallthrough; builtin getters run inline; JS getters push a
+/// frame (recording await_idx/callee in the op slots and clearing
+/// await_write). No pushing — callers decide (copy plans push
+/// present-undefined; mutators consume the value directly).
+#[allow(clippy::too_many_arguments)]
+fn copy_resolve(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    source: &mut Value,
+    await_idx: &mut u64,
+    await_callee: &mut Value,
+    await_write: &mut bool,
+    idx: u64,
+) -> ResolveOut {
+    let key = index_key(gc, idx);
+    *source = refresh_value(*source);
+    if !seq_has(*source, key) {
+        return ResolveOut::Ready(Value::undefined());
+    }
+    let raw = crate::vm::load_property_recursive(*source, key, None, gc);
+    *source = refresh_value(*source);
+    let Some(aptr) = raw.heap_ptr() else {
+        return ResolveOut::Ready(refresh_value(raw));
+    };
+    if unsafe { (*(aptr as *const GcHeader)).tag() } != TAG_ACCESSOR {
+        return ResolveOut::Ready(refresh_value(raw));
+    }
+    let getter = unsafe { rune_core::accessor::AccessorPair::getter(aptr) };
+    if getter.is_undefined() || getter.is_null() {
+        return ResolveOut::Ready(Value::undefined());
+    }
+    if getter.as_smi().is_some_and(|s| s < 0) {
+        return match crate::vm::call_builtin_sync(vm, gc, getter, *source, &[]) {
+            Ok(v) => {
+                *source = refresh_value(*source);
+                ResolveOut::Ready(refresh_value(v))
+            }
+            Err(_) => ResolveOut::Raise(sort_type_error(gc, vm, "getter threw")),
+        };
+    }
+    let Some(gptr) = getter.heap_ptr() else {
+        return ResolveOut::Ready(Value::undefined());
+    };
+    if unsafe { (*(gptr as *const GcHeader)).tag() } != TAG_FUNC {
+        return ResolveOut::Ready(Value::undefined());
+    }
+    // JS getter: push its frame (mirrors array_element_value, but records
+    // the copy resume instead of pending_accessor_call or awaiting_element).
+    if !crate::vm::push_accessor_frame(vm, getter, *source, None) {
+        return ResolveOut::Ready(Value::undefined());
+    }
+    *await_idx = idx;
+    *await_callee = getter;
+    *await_write = false;
+    ResolveOut::Wait
+}
+
+/// Resolve-and-push one index as present (copy plans): absent indices push
+/// `undefined` as PRESENT (holes-not-preserved — CreateDataPropertyOrThrow
+/// always creates). Refreshes both sides across the key allocation and reads.
 #[allow(clippy::too_many_arguments)]
 fn copy_resolve_push(
     vm: &mut Vm,
@@ -13288,81 +13438,51 @@ fn copy_resolve_push(
     result: &mut Value,
     await_idx: &mut u64,
     await_callee: &mut Value,
+    await_write: &mut bool,
     idx: u64,
 ) -> CopyStepOut {
-    let key = index_key(gc, idx);
-    *source = refresh_value(*source);
-    if !seq_has(*source, key) {
-        if let Err(e) = result_push(gc, vm, result, Value::undefined()) {
-            return CopyStepOut::Raise(e);
-        }
-        *source = refresh_value(*source);
-        return CopyStepOut::Advanced;
-    }
-    let raw = crate::vm::load_property_recursive(*source, key, None, gc);
-    *source = refresh_value(*source);
-    let Some(aptr) = raw.heap_ptr() else {
-        if let Err(e) = result_push(gc, vm, result, refresh_value(raw)) {
-            return CopyStepOut::Raise(e);
-        }
-        *source = refresh_value(*source);
-        return CopyStepOut::Advanced;
-    };
-    if unsafe { (*(aptr as *const GcHeader)).tag() } != TAG_ACCESSOR {
-        if let Err(e) = result_push(gc, vm, result, refresh_value(raw)) {
-            return CopyStepOut::Raise(e);
-        }
-        *source = refresh_value(*source);
-        return CopyStepOut::Advanced;
-    }
-    let getter = unsafe { rune_core::accessor::AccessorPair::getter(aptr) };
-    if getter.is_undefined() || getter.is_null() {
-        if let Err(e) = result_push(gc, vm, result, Value::undefined()) {
-            return CopyStepOut::Raise(e);
-        }
-        *source = refresh_value(*source);
-        return CopyStepOut::Advanced;
-    }
-    if getter.as_smi().is_some_and(|s| s < 0) {
-        return match crate::vm::call_builtin_sync(vm, gc, getter, *source, &[]) {
-            Ok(v) => {
-                *source = refresh_value(*source);
-                if let Err(e) = result_push(gc, vm, result, refresh_value(v)) {
-                    CopyStepOut::Raise(e)
-                } else {
-                    *source = refresh_value(*source);
-                    CopyStepOut::Advanced
-                }
+    match copy_resolve(vm, gc, source, await_idx, await_callee, await_write, idx) {
+        ResolveOut::Ready(v) => {
+            if let Err(e) = result_push(gc, vm, result, refresh_value(v)) {
+                return CopyStepOut::Raise(e);
             }
-            Err(_) => CopyStepOut::Raise(sort_type_error(gc, vm, "getter threw")),
-        };
-    }
-    let Some(gptr) = getter.heap_ptr() else {
-        if let Err(e) = result_push(gc, vm, result, Value::undefined()) {
-            return CopyStepOut::Raise(e);
+            *source = refresh_value(*source);
+            CopyStepOut::Advanced
         }
-        *source = refresh_value(*source);
-        return CopyStepOut::Advanced;
-    };
-    if unsafe { (*(gptr as *const GcHeader)).tag() } != TAG_FUNC {
-        if let Err(e) = result_push(gc, vm, result, Value::undefined()) {
-            return CopyStepOut::Raise(e);
-        }
-        *source = refresh_value(*source);
-        return CopyStepOut::Advanced;
+        ResolveOut::Wait => CopyStepOut::Wait,
+        ResolveOut::Raise(e) => CopyStepOut::Raise(e),
     }
-    // JS getter: push its frame (mirrors array_element_value, but records
-    // the copy resume instead of pending_accessor_call or awaiting_element).
-    if !crate::vm::push_accessor_frame(vm, getter, *source, None) {
-        if let Err(e) = result_push(gc, vm, result, Value::undefined()) {
-            return CopyStepOut::Raise(e);
+}
+
+/// One Set with setter dispatch for mutator drives (6e-copy-writes): Done =
+/// stored inline (data/builtin setter); Wait arms a JS setter frame
+/// (await slots recorded, await_write set); Raise carries abrupt.
+#[allow(clippy::too_many_arguments)]
+fn copy_store(
+    vm: &mut Vm,
+    gc: &mut SemiSpace,
+    source: &mut Value,
+    await_idx: &mut u64,
+    await_callee: &mut Value,
+    await_write: &mut bool,
+    idx: u64,
+    val: Value,
+) -> CopyStepOut {
+    let v = refresh_value(val);
+    match sort_store_one(vm, gc, *source, idx as usize, v) {
+        SortStoreOut::Done => {
+            *source = refresh_value(*source);
+            CopyStepOut::Advanced
         }
-        *source = refresh_value(*source);
-        return CopyStepOut::Advanced;
+        SortStoreOut::WaitSetter(setter) => {
+            crate::vm::push_accessor_frame(vm, setter, *source, Some(v));
+            *await_idx = idx;
+            *await_callee = setter;
+            *await_write = true;
+            CopyStepOut::Wait
+        }
+        SortStoreOut::Raise(e) => CopyStepOut::Raise(e),
     }
-    *await_idx = idx;
-    *await_callee = getter;
-    CopyStepOut::Wait
 }
 
 /// Drive one ascending range step (6e-copy): dense window resolves directly;
@@ -13376,6 +13496,7 @@ fn copy_asc_step(
     result: &mut Value,
     await_idx: &mut u64,
     await_callee: &mut Value,
+    await_write: &mut bool,
     r: &mut crate::vm::CopyRange,
     replace: Option<(u64, Value)>,
 ) -> CopyStepOut {
@@ -13391,7 +13512,16 @@ fn copy_asc_step(
                 return CopyStepOut::Advanced;
             }
         }
-        match copy_resolve_push(vm, gc, source, result, await_idx, await_callee, idx) {
+        match copy_resolve_push(
+            vm,
+            gc,
+            source,
+            result,
+            await_idx,
+            await_callee,
+            await_write,
+            idx,
+        ) {
             CopyStepOut::Advanced => {
                 r.pos += 1;
                 CopyStepOut::Advanced
@@ -13422,7 +13552,16 @@ fn copy_asc_step(
                 return CopyStepOut::Advanced;
             }
         }
-        match copy_resolve_push(vm, gc, source, result, await_idx, await_callee, c) {
+        match copy_resolve_push(
+            vm,
+            gc,
+            source,
+            result,
+            await_idx,
+            await_callee,
+            await_write,
+            c,
+        ) {
             CopyStepOut::Advanced => {
                 r.pos = c + 1;
                 r.ci += 1;
@@ -13452,6 +13591,7 @@ fn copy_desc_step(
     result: &mut Value,
     await_idx: &mut u64,
     await_callee: &mut Value,
+    await_write: &mut bool,
     len: u64,
     win_end: u64,
     pos: &mut u64,
@@ -13472,7 +13612,16 @@ fn copy_desc_step(
             *pos += 1;
         }
         *source = refresh_value(*source);
-        match copy_resolve_push(vm, gc, source, result, await_idx, await_callee, c) {
+        match copy_resolve_push(
+            vm,
+            gc,
+            source,
+            result,
+            await_idx,
+            await_callee,
+            await_write,
+            c,
+        ) {
             CopyStepOut::Advanced => {
                 *pos += 1;
                 *ti -= 1;
@@ -13482,7 +13631,16 @@ fn copy_desc_step(
         }
     } else if *pos < len {
         let idx = len - 1 - *pos;
-        match copy_resolve_push(vm, gc, source, result, await_idx, await_callee, idx) {
+        match copy_resolve_push(
+            vm,
+            gc,
+            source,
+            result,
+            await_idx,
+            await_callee,
+            await_write,
+            idx,
+        ) {
             CopyStepOut::Advanced => {
                 *pos += 1;
                 CopyStepOut::Advanced
@@ -13535,6 +13693,7 @@ pub(crate) fn copy_drive(
         plan,
         await_idx,
         await_callee,
+        await_write,
         ..
     } = op;
     loop {
@@ -13547,6 +13706,7 @@ pub(crate) fn copy_drive(
                     result,
                     await_idx,
                     await_callee,
+                    await_write,
                     range,
                     *replace,
                 ) {
@@ -13578,6 +13738,7 @@ pub(crate) fn copy_drive(
                     result,
                     await_idx,
                     await_callee,
+                    await_write,
                     *len,
                     *win_end,
                     pos,
@@ -13606,7 +13767,17 @@ pub(crate) fn copy_drive(
                 stage,
             } => {
                 if *stage == 0 {
-                    match copy_asc_step(vm, gc, source, result, await_idx, await_callee, a, None) {
+                    match copy_asc_step(
+                        vm,
+                        gc,
+                        source,
+                        result,
+                        await_idx,
+                        await_callee,
+                        await_write,
+                        a,
+                        None,
+                    ) {
                         CopyStepOut::Advanced => {}
                         CopyStepOut::RangeDone => {
                             *stage = 1;
@@ -13625,7 +13796,17 @@ pub(crate) fn copy_drive(
                     }
                     *stage = 2;
                 } else {
-                    match copy_asc_step(vm, gc, source, result, await_idx, await_callee, b, None) {
+                    match copy_asc_step(
+                        vm,
+                        gc,
+                        source,
+                        result,
+                        await_idx,
+                        await_callee,
+                        await_write,
+                        b,
+                        None,
+                    ) {
                         CopyStepOut::Advanced => {}
                         CopyStepOut::RangeDone => {
                             let out = refresh_value(*result);
@@ -13644,33 +13825,229 @@ pub(crate) fn copy_drive(
             crate::vm::CopyPlan::Fill { value, cur, fin } => {
                 while *cur < *fin {
                     let v = refresh_value(*value);
-                    match sort_store_one(vm, gc, *source, *cur as usize, v) {
-                        SortStoreOut::Done => {
-                            *source = refresh_value(*source);
+                    match copy_store(
+                        vm,
+                        gc,
+                        source,
+                        await_idx,
+                        await_callee,
+                        await_write,
+                        *cur,
+                        v,
+                    ) {
+                        CopyStepOut::Advanced => {
                             *cur += 1;
                         }
-                        SortStoreOut::WaitSetter(setter) => {
-                            crate::vm::push_accessor_frame(vm, setter, *source, Some(v));
-                            *await_idx = *cur;
-                            *await_callee = setter;
-                            return CopyOut::Wait;
+                        CopyStepOut::RangeDone => {
+                            // Unreachable (copy_store never emits it).
+                            *cur = *fin;
                         }
-                        SortStoreOut::Raise(e) => return CopyOut::Raise(e),
+                        CopyStepOut::Wait => return CopyOut::Wait,
+                        CopyStepOut::Raise(e) => return CopyOut::Raise(e),
                     }
                 }
                 // Fill returns the receiver itself (not a fresh result).
                 return CopyOut::Done(refresh_value(*source));
+            }
+            crate::vm::CopyPlan::Push { items, len, ii } => {
+                while *ii < items.len() {
+                    let v = refresh_value(items[*ii]);
+                    match copy_store(
+                        vm,
+                        gc,
+                        source,
+                        await_idx,
+                        await_callee,
+                        await_write,
+                        *len + *ii as u64,
+                        v,
+                    ) {
+                        CopyStepOut::Advanced => {
+                            *ii += 1;
+                        }
+                        CopyStepOut::RangeDone => {
+                            *ii = items.len();
+                        }
+                        CopyStepOut::Wait => return CopyOut::Wait,
+                        CopyStepOut::Raise(e) => return CopyOut::Raise(e),
+                    }
+                }
+                let new_len = *len + items.len() as u64;
+                if let Err(e) = set_length_checked(gc, vm, source, new_len) {
+                    return CopyOut::Raise(e);
+                }
+                return CopyOut::Done(length_value(new_len));
+            }
+            crate::vm::CopyPlan::Pop { len } => {
+                let last = *len - 1;
+                match copy_resolve(vm, gc, source, await_idx, await_callee, await_write, last) {
+                    ResolveOut::Ready(v) => {
+                        let v = refresh_value(v);
+                        if let Err(e) = mutator_delete(gc, vm, source, last) {
+                            return CopyOut::Raise(e);
+                        }
+                        if let Err(e) = set_length_checked(gc, vm, source, last) {
+                            return CopyOut::Raise(e);
+                        }
+                        return CopyOut::Done(v);
+                    }
+                    ResolveOut::Wait => return CopyOut::Wait,
+                    ResolveOut::Raise(e) => return CopyOut::Raise(e),
+                }
+            }
+            crate::vm::CopyPlan::Shift { len, k, first } => loop {
+                if *k >= *len {
+                    if let Err(e) = mutator_delete(gc, vm, source, *len - 1) {
+                        return CopyOut::Raise(e);
+                    }
+                    if let Err(e) = set_length_checked(gc, vm, source, *len - 1) {
+                        return CopyOut::Raise(e);
+                    }
+                    return CopyOut::Done(refresh_value(*first));
+                }
+                if *k == 0 {
+                    match copy_resolve(vm, gc, source, await_idx, await_callee, await_write, 0) {
+                        ResolveOut::Ready(v) => {
+                            *first = refresh_value(v);
+                            *k = 1;
+                        }
+                        ResolveOut::Wait => return CopyOut::Wait,
+                        ResolveOut::Raise(e) => return CopyOut::Raise(e),
+                    }
+                } else if seq_has(*source, index_key(gc, *k)) {
+                    *source = refresh_value(*source);
+                    let from = *k;
+                    match copy_resolve(vm, gc, source, await_idx, await_callee, await_write, from) {
+                        ResolveOut::Ready(v) => {
+                            match copy_store(
+                                vm,
+                                gc,
+                                source,
+                                await_idx,
+                                await_callee,
+                                await_write,
+                                from - 1,
+                                refresh_value(v),
+                            ) {
+                                CopyStepOut::Advanced => {
+                                    *k += 1;
+                                }
+                                CopyStepOut::RangeDone => {
+                                    *k = *len;
+                                }
+                                CopyStepOut::Wait => return CopyOut::Wait,
+                                CopyStepOut::Raise(e) => return CopyOut::Raise(e),
+                            }
+                        }
+                        ResolveOut::Wait => return CopyOut::Wait,
+                        ResolveOut::Raise(e) => return CopyOut::Raise(e),
+                    }
+                } else {
+                    *source = refresh_value(*source);
+                    if let Err(e) = mutator_delete(gc, vm, source, *k - 1) {
+                        return CopyOut::Raise(e);
+                    }
+                    *k += 1;
+                }
+            },
+            crate::vm::CopyPlan::Unshift {
+                len,
+                items,
+                ii,
+                k,
+                stage,
+            } => {
+                let count = items.len() as u64;
+                if *stage == 0 {
+                    // Backward slide: from k-1 to k+count-1. Quiet huge sparse
+                    // spans skip (same proof as the sync path).
+                    while *k > 0 {
+                        let from = *k - 1;
+                        let to = *k + count - 1;
+                        if seq_has(*source, index_key(gc, from)) {
+                            *source = refresh_value(*source);
+                            match copy_resolve(
+                                vm,
+                                gc,
+                                source,
+                                await_idx,
+                                await_callee,
+                                await_write,
+                                from,
+                            ) {
+                                ResolveOut::Ready(v) => {
+                                    match copy_store(
+                                        vm,
+                                        gc,
+                                        source,
+                                        await_idx,
+                                        await_callee,
+                                        await_write,
+                                        to,
+                                        refresh_value(v),
+                                    ) {
+                                        CopyStepOut::Advanced => {
+                                            *k -= 1;
+                                        }
+                                        CopyStepOut::RangeDone => {
+                                            *k = 0;
+                                        }
+                                        CopyStepOut::Wait => return CopyOut::Wait,
+                                        CopyStepOut::Raise(e) => return CopyOut::Raise(e),
+                                    }
+                                }
+                                ResolveOut::Wait => return CopyOut::Wait,
+                                ResolveOut::Raise(e) => return CopyOut::Raise(e),
+                            }
+                        } else {
+                            *source = refresh_value(*source);
+                            if let Err(e) = mutator_delete(gc, vm, source, to) {
+                                return CopyOut::Raise(e);
+                            }
+                            *k -= 1;
+                        }
+                    }
+                    *stage = 1;
+                }
+                if *stage == 1 {
+                    while *ii < items.len() {
+                        let v = refresh_value(items[*ii]);
+                        match copy_store(
+                            vm,
+                            gc,
+                            source,
+                            await_idx,
+                            await_callee,
+                            await_write,
+                            *ii as u64,
+                            v,
+                        ) {
+                            CopyStepOut::Advanced => {
+                                *ii += 1;
+                            }
+                            CopyStepOut::RangeDone => {
+                                *ii = items.len();
+                            }
+                            CopyStepOut::Wait => return CopyOut::Wait,
+                            CopyStepOut::Raise(e) => return CopyOut::Raise(e),
+                        }
+                    }
+                    *stage = 2;
+                }
+                if let Err(e) = set_length_checked(gc, vm, source, *len + count) {
+                    return CopyOut::Raise(e);
+                }
+                return CopyOut::Done(length_value(*len + count));
             }
         }
     }
 }
 
 /// Resume a pending copy with a JS accessor's return value (6e-copy): read
-/// awaits push the getter's value past await_idx; write awaits (Fill setters)
-/// discard it — the Set already ran inside the setter frame. Then re-drive.
-/// Cursor mapping mirrors the walk shapes: ascending ranges set pos past the
-/// awaited index (tail consumes its candidate); descending advances one
-/// result position (tail consumes one).
+/// awaits route the getter's value per plan (copy plans push it; Pop finishes;
+/// Shift/Unshift run the paired write inline); write awaits discard the setter
+/// result — the Set already ran — and advance the write side. Then re-drive
+/// (arms that complete return early). Cursor mapping mirrors the walk shapes.
 pub(crate) fn copy_resume(
     vm: &mut Vm,
     gc: &mut SemiSpace,
@@ -13680,6 +14057,44 @@ pub(crate) fn copy_resume(
     op.source = refresh_value(op.source);
     op.result = refresh_value(op.result);
     let awaited = op.await_idx;
+    if op.await_write {
+        // Setter completed — advance the write side, then re-drive.
+        match &mut op.plan {
+            crate::vm::CopyPlan::Fill { cur, .. } => {
+                *cur += 1;
+            }
+            crate::vm::CopyPlan::Push { len, ii, .. } => {
+                *ii = (awaited - *len) as usize + 1;
+            }
+            crate::vm::CopyPlan::Shift { k, .. } => {
+                *k = awaited + 1;
+            }
+            crate::vm::CopyPlan::Unshift {
+                k,
+                ii,
+                stage,
+                items,
+                ..
+            } => {
+                if *stage == 0 {
+                    // Move write at to completed — back to its from.
+                    *k = awaited - items.len() as u64;
+                } else {
+                    *ii = awaited as usize + 1;
+                }
+            }
+            // Read-only plans never arm write awaits (copy_store is only
+            // called by the mutator legs above).
+            crate::vm::CopyPlan::Asc { .. }
+            | crate::vm::CopyPlan::Desc { .. }
+            | crate::vm::CopyPlan::Spliced { .. }
+            | crate::vm::CopyPlan::Pop { .. } => {
+                unreachable!("read-only copy plan resumed as a write await")
+            }
+        }
+        op.await_idx = u64::MAX;
+        return copy_drive(vm, gc, op);
+    }
     match &mut op.plan {
         crate::vm::CopyPlan::Asc { range, .. } => {
             if let Err(e) = result_push(gc, vm, &mut op.result, refresh_value(value)) {
@@ -13720,8 +14135,73 @@ pub(crate) fn copy_resume(
                 }
             }
         }
-        crate::vm::CopyPlan::Fill { cur, .. } => {
-            *cur += 1;
+        crate::vm::CopyPlan::Fill { .. } | crate::vm::CopyPlan::Push { .. } => {
+            unreachable!("write-only copy plan resumed as a read await")
+        }
+        crate::vm::CopyPlan::Pop { len } => {
+            let last = *len - 1;
+            if let Err(e) = mutator_delete(gc, vm, &mut op.source, last) {
+                return CopyOut::Raise(e);
+            }
+            if let Err(e) = set_length_checked(gc, vm, &mut op.source, last) {
+                return CopyOut::Raise(e);
+            }
+            return CopyOut::Done(refresh_value(value));
+        }
+        crate::vm::CopyPlan::Shift { k, first, .. } => {
+            if awaited == 0 {
+                *first = refresh_value(value);
+                *k = 1;
+            } else {
+                // Paired write for the awaited read runs inline here (it may
+                // itself suspend as a write await).
+                let to = awaited - 1;
+                match copy_store(
+                    vm,
+                    gc,
+                    &mut op.source,
+                    &mut op.await_idx,
+                    &mut op.await_callee,
+                    &mut op.await_write,
+                    to,
+                    refresh_value(value),
+                ) {
+                    CopyStepOut::Advanced => {
+                        *k = awaited + 1;
+                    }
+                    // copy_store never emits RangeDone; treat defensively.
+                    CopyStepOut::RangeDone => {
+                        *k = awaited + 1;
+                    }
+                    CopyStepOut::Wait => return CopyOut::Wait,
+                    CopyStepOut::Raise(e) => return CopyOut::Raise(e),
+                }
+            }
+        }
+        crate::vm::CopyPlan::Unshift { k, items, .. } => {
+            // Move read at awaited completed — paired write to awaited+count
+            // runs inline here (it may itself suspend as a write await).
+            let to = awaited + items.len() as u64;
+            match copy_store(
+                vm,
+                gc,
+                &mut op.source,
+                &mut op.await_idx,
+                &mut op.await_callee,
+                &mut op.await_write,
+                to,
+                refresh_value(value),
+            ) {
+                CopyStepOut::Advanced => {
+                    *k = awaited;
+                }
+                // copy_store never emits RangeDone; treat defensively.
+                CopyStepOut::RangeDone => {
+                    *k = awaited;
+                }
+                CopyStepOut::Wait => return CopyOut::Wait,
+                CopyStepOut::Raise(e) => return CopyOut::Raise(e),
+            }
         }
     }
     op.await_idx = u64::MAX;

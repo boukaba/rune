@@ -1423,6 +1423,27 @@ fn test_array_copy_element_dispatch() {
         .eval("var calls = []; var o = {length: 3}; Object.defineProperty(o, '1', {set: function (v) { calls.push(v); }}); var res = Array.prototype.fill.call(o, 7); (res === o) && (calls.join() === '7') && (o[0] === 7) && (o[2] === 7);")
         .unwrap();
     assert!(r.to_bool(), "fill setter runs, fill continues");
+    // 6e-mutators: freezing accessors run mid-operation, then the tail
+    // throws; non-writable lengths reject even SameValue; stack/queue moves
+    // stay exact; own data shadows proto setters on write.
+    ctx.eval("assert.throws(TypeError, function () { var a = []; Object.defineProperty(Array.prototype, '0', {set: function (_v) { Object.freeze(a); }, configurable: true}); try { a.push(1); } finally { delete Array.prototype[0]; } });")
+        .unwrap();
+    ctx.eval("assert.throws(TypeError, function () { var a = []; Object.freeze(a); a.push(); });")
+        .unwrap();
+    ctx.eval("assert.throws(TypeError, function () { var a = []; Object.freeze(a); a.pop(); });")
+        .unwrap();
+    let r = ctx
+        .eval("var s = [1, 2, 3]; s.shift(); s.join() === '2,3';")
+        .unwrap();
+    assert!(r.to_bool(), "shift moves");
+    let r = ctx
+        .eval("var u = [1, 2, 3]; u.unshift(0); u.join() === '0,1,2,3';")
+        .unwrap();
+    assert!(r.to_bool(), "unshift moves");
+    let r = ctx
+        .eval("Object.defineProperty(Array.prototype, '0', {get: function () { return 9; }, configurable: true}); var arr = [1, 2, 3]; var ok = arr[0] === 1; delete Array.prototype[0]; ok;")
+        .unwrap();
+    assert!(r.to_bool(), "own data shadows proto accessors");
 }
 
 #[test]

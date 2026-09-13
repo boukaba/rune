@@ -12,6 +12,45 @@
 > regexp advanced classes, class-static-block, top-level-await,
 > iterator-helpers (kept force-skipped).
 
+## 6e-mutators DONE — push/pop/shift/unshift dispatch + length strictness (2026-09-13)
+
+Stack/queue family through the copy machine (Push/Pop/Shift/Unshift plans +
+await_write router shared with Fill; paired read→write chaining in resume).
+Array suite 2176→2196 (+20 newly-passing), ZERO new failures (4 siblings
+identical; Object -3 with zero new fails; T9 flake both ways →C). All four
+mutator suites now fully pass (modulo skips).
+
+- **Plans**: Push (per-item Sets + spec length write), Pop (one dispatched Get
+  + sync delete/length tail), Shift (first-read + move loop with presence-gated
+  delete + tail), Unshift (backward moves + inserts + length). Resume routes on
+  await_write (read: pair the write inline, may re-suspend; write: advance).
+  Quiet-span skips preserved via initial cursors (2^53 clamps unaffected).
+- **+8 frozen/non-writable**: push/unshift setter-freeze (setter RUNS, then the
+  length write throws on the frozen array), pop/shift getter-freeze (read runs,
+  then delete/length throws), zero-array frozen/non-writable across all four
+  (OrdinarySet-2a strictness), shift string/function/non-writable-length.
+- **OrdinarySet-2a strictness** (V8-oracled: builtin-internal Sets use
+  Throw=true, so SameValue on non-writable rejects): set_length_checked array
+  arm (non-writable → throw even SameValue; define path untouched — its
+  SameValue leniency is ValidateAndApply-correct), object data-length slot
+  (was set unconditionally — added ATTR_WRITABLE gate), TAG_FUNC arm (function
+  length is non-writable → throw). Sloppy user stores still silent via the
+  funnel (verified SameValue-frozen parity with V8 in both modes).
+- **classify_store own-data precedence** (spec OrdinarySet: own data
+  short-circuits proto setters): present dense elements return Data before the
+  proto walk (was: inherited setter misdispatched — silent skip before, would
+  have been wrong-frame dispatch now). Found via shift moves under a proto
+  setter; m6-shape probes.
+- **6e-key-model alignment**: value_to_prop_key float gate 9e15 → 2^53 +
+  define_key_and_name accepts integral floats (was "Invalid property key"):
+  fixes fill/push length-near-integer-limit pair AND spills +3 into Object
+  (defineProperty/getOwnPropertyDescriptor with -0/huge keys). Beyond 2^53
+  stays unrepresentable (JS exponent form — documented gap).
+- 5 integration asserts (in test_array_copy_element_dispatch); 883/0 workspace;
+  clippy (CI flags)/fmt/no-default clean. Process: branch-baseline FAIL diff +
+  5 siblings; touch+verify-Compiling; V8 oracle for strictness semantics;
+  caught own wrong-expectation probes twice before misdiagnosing.
+
 ## 6e-copy-writes DONE — Fill plan with setter dispatch (2026-09-13)
 
 Write-side template established: CopyPlan::Fill reuses PendingCopyOp (op + drive

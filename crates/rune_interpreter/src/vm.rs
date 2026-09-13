@@ -855,6 +855,30 @@ pub(crate) enum CopyPlan {
     /// [cur, fin), dispatching JS setters through frames (sort_store_one
     /// tri-state). Completes with the receiver itself (fill returns `this`).
     Fill { value: Value, cur: u64, fin: u64 },
+    /// Push writes (6e-copy-writes): Set(source, len+ii, items[ii]) per item,
+    /// then the spec length write. Completes with the new length.
+    Push {
+        items: Vec<Value>,
+        len: u64,
+        ii: usize,
+    },
+    /// Pop read (6e-copy-writes): Get(source, len-1) with dispatch, then
+    /// delete + length set. Completes with the popped element.
+    Pop { len: u64 },
+    /// Shift moves (6e-copy-writes): Get(0) into first, then per k in 1..len
+    /// Get(k) into k-1 (absent k deletes k-1), then delete + length set.
+    /// Completes with the shifted element.
+    Shift { len: u64, k: u64, first: Value },
+    /// Unshift moves + inserts (6e-copy-writes): stage 0 slides [0, len) up
+    /// by items.len() (backward; absent from deletes to); stage 1 Sets
+    /// items[0..]; then the spec length write. Completes with the new length.
+    Unshift {
+        len: u64,
+        items: Vec<Value>,
+        ii: usize,
+        k: u64,
+        stage: u8,
+    },
 }
 
 /// Pending element-Get copy (6e-copy): drives copy builtins (toReversed/with/
@@ -871,6 +895,10 @@ pub(crate) struct PendingCopyOp {
     /// Source index whose JS getter is outstanding (u64::MAX = none).
     pub(crate) await_idx: u64,
     pub(crate) await_callee: Value,
+    /// True while a JS *setter* (not getter) is outstanding: resume discards
+    /// the value and advances the write side instead of pushing. Set when
+    /// arming a write await, cleared when arming a read await.
+    pub(crate) await_write: bool,
 }
 /// Outcome of a builtin-driven Construct (B1f-6d): Done = built
 /// synchronously (builtin ctors); Pushed = a JS ctor frame was pushed
@@ -3551,7 +3579,15 @@ impl Vm {
                 CopyPlan::Fill { value, .. } => {
                     gc.push_root(value as *const Value as *mut u64);
                 }
-                CopyPlan::Desc { .. } => {}
+                CopyPlan::Push { items, .. } | CopyPlan::Unshift { items, .. } => {
+                    for item in items.iter() {
+                        gc.push_root(item as *const Value as *mut u64);
+                    }
+                }
+                CopyPlan::Shift { first, .. } => {
+                    gc.push_root(first as *const Value as *mut u64);
+                }
+                CopyPlan::Pop { .. } | CopyPlan::Desc { .. } => {}
             }
         }
         if let Some(ref sm) = self.species_made {
@@ -12327,8 +12363,12 @@ pub(crate) fn value_to_prop_key(val: Value) -> Option<PropertyKey> {
     }
     // B1f: integral floats are property keys by their canonical string
     // (obj[4294967295] must hit the "4294967295" slot, not miss).
+    // 6e-key-model: every exactly-representable integer (|f| <= 2^53)
+    // stringifies exactly (Rust {} and JS agree below 1e21), so huge
+    // indices (length-near-integer-limit shapes) canonicalize the same as
+    // index_key's u64 to_string. Beyond 2^53 stays unrepresentable.
     if let Some(f) = val.as_float64() {
-        if !f.is_nan() && f.is_finite() && f.fract() == 0.0 && f.abs() < 9.0e15 {
+        if !f.is_nan() && f.is_finite() && f.fract() == 0.0 && f.abs() <= 9_007_199_254_740_992.0 {
             return Some(PropertyKey::from_string(&format!("{}", f as i64)));
         }
         return None;

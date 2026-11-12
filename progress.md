@@ -163,7 +163,28 @@ Integration suite: **744 passed, 0 failed, 3 ignored**. Remaining known gaps:
 `async () =>` parse, ESM live bindings, function hoisting, arrow lexical
 `this`, and captured-variable update expressions.
 
-Next: ESM live bindings, then hoisting/arrow-this/captured-update semantics.
+### Phase 0 — ESM live bindings (2026-11-13)
+
+Imported bindings now observe mutations made by the exporting module, and
+exported functions read their own module's bindings even when called from
+another module's top-level code.
+
+- `LoadGlobal`/`StoreGlobal` prioritize the executing function's own
+  `module_mi` over the caller's `globals_override`; only top-level module
+  frames (no owning Func) use the override.
+- `IncGlobal`/`DecGlobal` now read and write the module env for module
+  functions and top-level module code, and throw `TypeError` when the target
+  is an imported binding. They previously mutated the shared globals map,
+  which is why `count++` inside an exported function left the import at 1.
+- Regression test imports `count`/`inc`/`get`, checks the import value, calls
+  the exported mutator, checks the live import and an in-module getter.
+  Expected `1 -> 2 -> 2` (previously `1 -> 1` and the getter returned
+  undefined).
+
+Integration suite: 745 passed, 0 failed, 3 ignored.
+
+Next: function hoisting, arrow lexical `this`, and the remaining captured
+update/stack semantics.
 
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,

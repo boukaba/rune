@@ -7337,7 +7337,13 @@ impl Vm {
                 Opcode::LoadGlobal => {
                     let name_idx = instr.operands[0] as usize;
                     if let Some(name) = self.frames[fi].prog_str(name_idx) {
-                        let val = if let Some(mi) = self.globals_override {
+                        let val = if self.module_mi_of_frame(fi).is_some() {
+                            self.load_global_from_module_frame(gc, fi, &name)
+                                .or_else(|| self.globals.get(&name).copied())
+                                .or_else(|| self.builtin_wrappers.get(&name).copied())
+                                .or_else(|| self.get_builtin(&name))
+                                .unwrap_or(Value::undefined())
+                        } else if let Some(mi) = self.globals_override {
                             let env_v = self.module_records[mi].env.get(&name).copied();
                             if let Some(v) = env_v {
                                 if v == Value::empty_sentinel() {
@@ -7383,9 +7389,12 @@ impl Vm {
                     let name_idx = instr.operands[0] as usize;
                     let value = self.pop();
                     if let Some(name) = self.frames[fi].prog_str(name_idx) {
-                        if let Some(mi) = self.globals_override {
-                            self.module_records[mi].env.insert(name, value);
-                        } else if let Some(mi) = self.module_mi_of_frame(fi) {
+                        // A function created during module evaluation writes
+                        // its own module's env even when called from another
+                        // module's top-level code (whose globals_override is
+                        // still active). Only top-level module frames (no
+                        // owning Func) use globals_override.
+                        if let Some(mi) = self.module_mi_of_frame(fi) {
                             let info =
                                 unsafe { (*self.module_records[mi].program).module.as_ref() };
                             let imported = info
@@ -7408,6 +7417,8 @@ impl Vm {
                                 self.frames[fi].pc = pc + 1;
                                 continue;
                             }
+                            self.module_records[mi].env.insert(name, value);
+                        } else if let Some(mi) = self.globals_override {
                             self.module_records[mi].env.insert(name, value);
                         } else {
                             self.globals.insert(name, value);
@@ -7597,13 +7608,49 @@ impl Vm {
                     let name_idx = instr.operands[0] as usize;
                     let is_prefix = instr.operands[1] != 0;
                     if let Some(name) = self.frames[fi].prog_str(name_idx) {
-                        let old_val = self
-                            .globals
-                            .get(&name)
-                            .copied()
-                            .or_else(|| self.builtin_wrappers.get(&name).copied())
-                            .or_else(|| self.get_builtin(&name))
-                            .unwrap_or(Value::undefined());
+                        // Module functions and top-level module code store into
+                        // the module env, not the shared globals map.
+                        let env_mi = self.module_mi_of_frame(fi).or(self.globals_override);
+                        if let Some(mi) = env_mi {
+                            let imported = unsafe {
+                                (*self.module_records[mi].program)
+                                    .module
+                                    .as_ref()
+                                    .map(|info| {
+                                        info.imports
+                                            .iter()
+                                            .any(|imp| imp.imported != "*ns*" && imp.local == name)
+                                    })
+                                    .unwrap_or(false)
+                            };
+                            if imported {
+                                let exc = Value::from_heap_ptr(heap_string(
+                                    gc,
+                                    "Assignment to constant variable.",
+                                ));
+                                if let Some(exit) = self.handle_throw(gc, exc) {
+                                    return exit;
+                                }
+                                continue;
+                            }
+                        }
+                        let old_val = if let Some(mi) = env_mi {
+                            self.module_records[mi]
+                                .env
+                                .get(&name)
+                                .copied()
+                                .or_else(|| self.globals.get(&name).copied())
+                                .or_else(|| self.builtin_wrappers.get(&name).copied())
+                                .or_else(|| self.get_builtin(&name))
+                                .unwrap_or(Value::undefined())
+                        } else {
+                            self.globals
+                                .get(&name)
+                                .copied()
+                                .or_else(|| self.builtin_wrappers.get(&name).copied())
+                                .or_else(|| self.get_builtin(&name))
+                                .unwrap_or(Value::undefined())
+                        };
                         if old_val.is_symbol() {
                             let err = crate::errors::error_object(
                                 gc,
@@ -7618,7 +7665,11 @@ impl Vm {
                         }
                         let n = to_number(old_val) + 1.0;
                         let new_val = number_result(gc, n);
-                        self.globals.insert(name, new_val);
+                        if let Some(mi) = env_mi {
+                            self.module_records[mi].env.insert(name, new_val);
+                        } else {
+                            self.globals.insert(name, new_val);
+                        }
                         self.push(if is_prefix { new_val } else { old_val });
                     } else {
                         self.push(Value::undefined());
@@ -7629,13 +7680,49 @@ impl Vm {
                     let name_idx = instr.operands[0] as usize;
                     let is_prefix = instr.operands[1] != 0;
                     if let Some(name) = self.frames[fi].prog_str(name_idx) {
-                        let old_val = self
-                            .globals
-                            .get(&name)
-                            .copied()
-                            .or_else(|| self.builtin_wrappers.get(&name).copied())
-                            .or_else(|| self.get_builtin(&name))
-                            .unwrap_or(Value::undefined());
+                        // Module functions and top-level module code store into
+                        // the module env, not the shared globals map.
+                        let env_mi = self.module_mi_of_frame(fi).or(self.globals_override);
+                        if let Some(mi) = env_mi {
+                            let imported = unsafe {
+                                (*self.module_records[mi].program)
+                                    .module
+                                    .as_ref()
+                                    .map(|info| {
+                                        info.imports
+                                            .iter()
+                                            .any(|imp| imp.imported != "*ns*" && imp.local == name)
+                                    })
+                                    .unwrap_or(false)
+                            };
+                            if imported {
+                                let exc = Value::from_heap_ptr(heap_string(
+                                    gc,
+                                    "Assignment to constant variable.",
+                                ));
+                                if let Some(exit) = self.handle_throw(gc, exc) {
+                                    return exit;
+                                }
+                                continue;
+                            }
+                        }
+                        let old_val = if let Some(mi) = env_mi {
+                            self.module_records[mi]
+                                .env
+                                .get(&name)
+                                .copied()
+                                .or_else(|| self.globals.get(&name).copied())
+                                .or_else(|| self.builtin_wrappers.get(&name).copied())
+                                .or_else(|| self.get_builtin(&name))
+                                .unwrap_or(Value::undefined())
+                        } else {
+                            self.globals
+                                .get(&name)
+                                .copied()
+                                .or_else(|| self.builtin_wrappers.get(&name).copied())
+                                .or_else(|| self.get_builtin(&name))
+                                .unwrap_or(Value::undefined())
+                        };
                         if old_val.is_symbol() {
                             let err = crate::errors::error_object(
                                 gc,
@@ -7650,7 +7737,11 @@ impl Vm {
                         }
                         let n = to_number(old_val) - 1.0;
                         let new_val = number_result(gc, n);
-                        self.globals.insert(name, new_val);
+                        if let Some(mi) = env_mi {
+                            self.module_records[mi].env.insert(name, new_val);
+                        } else {
+                            self.globals.insert(name, new_val);
+                        }
                         self.push(if is_prefix { new_val } else { old_val });
                     } else {
                         self.push(Value::undefined());

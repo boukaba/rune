@@ -13318,3 +13318,36 @@ fn test_promise_all_empty_and_rejected() {
     assert_eq!(ctx.eval("empty").unwrap().as_smi(), Some(0));
     assert_eq!(eval_str(&mut ctx, "rejected"), "nope");
 }
+
+#[test]
+fn test_esm_live_binding_updates_after_exported_mutation() {
+    let mut ctx = Context::new_small();
+    eval_module_with(
+        &mut ctx,
+        r#"
+            import { count, inc, get } from "./dep.js";
+            export function before() { return count; }
+            export function bump() { inc(); return count; }
+            export function inside() { return get(); }
+        "#,
+        &[(
+            "./dep.js",
+            r#"
+                export let count = 1;
+                export function inc() { count++; }
+                export function get() { return count; }
+            "#,
+        )],
+    )
+    .unwrap();
+    let before = ctx.module_export("<entry>", "before").unwrap();
+    assert_eq!(ctx.call_value(before, &[]).unwrap().as_smi(), Some(1));
+    let bump = ctx.module_export("<entry>", "bump").unwrap();
+    assert_eq!(ctx.call_value(bump, &[]).unwrap().as_smi(), Some(2));
+    let inside = ctx.module_export("<entry>", "inside").unwrap();
+    assert_eq!(
+        ctx.call_value(inside, &[]).unwrap().as_smi(),
+        Some(2),
+        "module function must read its own live binding"
+    );
+}

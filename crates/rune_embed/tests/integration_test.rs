@@ -12673,3 +12673,212 @@ fn test_gc_microtask_callback_survives_collection() {
     let r = ctx.eval("out").unwrap();
     assert_eq!(r.as_smi(), Some(8), "queued microtask must survive GC");
 }
+
+// ---------------------------------------------------------------------------
+// Production-readiness gate: growth must not invalidate aliases. The object/
+// array header is copied to a new address; every holder of the old value must
+// observe the replacement (forwarding resolution), and a later GC must copy
+// the final target rather than leaving a from-space pointer behind.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_grow_object_alias_in_array() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var o = { x: 42 };
+            var a = [o];
+            for (var i = 0; i < 20; i++) { o["p" + i] = i; }
+            a[0].x;
+        "#,
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(42), "array-held object must survive growth");
+}
+
+#[test]
+fn test_grow_array_alias_in_array() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var a = [1];
+            var holder = [a];
+            for (var i = 0; i < 20; i++) { a.push(i); }
+            holder[0].length;
+        "#,
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(21), "array-held array must survive growth");
+}
+
+#[test]
+fn test_grow_object_alias_in_object() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var o = { x: 42 };
+            var holder = { ref: o };
+            for (var i = 0; i < 20; i++) { o["p" + i] = i; }
+            holder.ref.x;
+        "#,
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(42), "object slot must survive growth");
+}
+
+#[test]
+fn test_grow_prototype_object() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var p = {};
+            var o = Object.create(p);
+            for (var i = 0; i < 20; i++) { p["p" + i] = i; }
+            o.p19;
+        "#,
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(19), "prototype pointer must resolve growth");
+}
+
+#[test]
+fn test_grow_then_collection_alias() {
+    let mut ctx = Context::new_small();
+    let src = format!(
+        r#"
+        var o = {{ x: 42 }};
+        var a = [o];
+        for (var i = 0; i < 20; i++) {{ o["p" + i] = i; }}
+        {}
+        a[0].x;
+        "#,
+        GC_STRESS_ALLOC
+    );
+    let r = ctx.eval(&src).unwrap();
+    assert_eq!(
+        r.as_smi(),
+        Some(42),
+        "a GC after growth must preserve the alias"
+    );
+}
+
+#[test]
+fn test_grow_array_alias_in_object_slot() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var a = [1];
+            var holder = { ref: a };
+            for (var i = 0; i < 20; i++) { a.push(i); }
+            holder.ref.length;
+        "#,
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(21), "object slot must survive array growth");
+}
+
+#[test]
+fn test_grow_strict_equality_resolves() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var o = { x: 42 };
+            var a = [o];
+            for (var i = 0; i < 20; i++) { o["p" + i] = i; }
+            (a[0] === o) && (a[0] == o);
+        "#,
+        )
+        .unwrap();
+    assert!(r.to_bool(), "identity must resolve forwarding aliases");
+}
+
+#[test]
+fn test_grow_array_then_collection_alias() {
+    let mut ctx = Context::new_small();
+    let src = format!(
+        r#"
+        var a = [1];
+        var holder = [a];
+        for (var i = 0; i < 20; i++) {{ a.push(i); }}
+        {}
+        holder[0].length;
+        "#,
+        GC_STRESS_ALLOC
+    );
+    let r = ctx.eval(&src).unwrap();
+    assert_eq!(
+        r.as_smi(),
+        Some(21),
+        "a GC after array growth must preserve the alias"
+    );
+}
+
+#[test]
+fn test_grow_array_as_prototype() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var p = [7];
+            var o = Object.create(p);
+            for (var i = 0; i < 20; i++) { p.push(i); }
+            o[0] + o[1];
+        "#,
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(7), "array prototype must resolve growth");
+}
+
+#[test]
+fn test_grow_generator_local_array_alias() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            function* g() {
+                var a = [1];
+                yield a;
+                for (var i = 0; i < 2000; i++) { a.push(i); }
+                return a.length;
+            }
+            var it = g();
+            var a = it.next().value;
+            for (var i = 0; i < 200; i++) { a.push(i); }
+            it.next().value;
+        "#,
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(2201), "generator-local array must survive growth");
+}
+
+#[test]
+fn test_grow_source_array_during_iteration() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var a = [1, 2, 3];
+            var seen = [];
+            a.forEach(function (x) {
+                seen.push(x);
+                if (seen.length === 1) {
+                    for (var i = 0; i < 20; i++) { a.push(9); }
+                }
+            });
+            seen.join(",");
+        "#,
+        )
+        .unwrap();
+    assert_eq!(
+        eval_str(&mut ctx, "seen.join(',')"),
+        "1,2,3",
+        "growth during iteration must not change the captured walk"
+    );
+    let _ = r;
+}

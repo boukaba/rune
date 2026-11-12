@@ -419,29 +419,88 @@ impl SemiSpace {
         }
     }
 
+    /// True when `ptr` belongs to the current to-space.
+    fn in_to_space(&self, ptr: *mut u8) -> bool {
+        let lo = self.regions[self.active] as usize;
+        let hi = lo + self.semispace_size;
+        (ptr as usize) >= lo && (ptr as usize) < hi
+    }
+
+    /// True when `ptr` belongs to the current from-space.
+    fn in_from_space(&self, ptr: *mut u8) -> bool {
+        let from = 1 - self.active;
+        let lo = self.regions[from] as usize;
+        let hi = lo + self.semispace_size;
+        (ptr as usize) >= lo && (ptr as usize) < hi
+    }
+
     /// Copy an object from from-space to to-space if not already forwarded.
+    ///
+    /// Forwarding is not necessarily a single hop: `JSObject::grow` and
+    /// `RuneArray::grow` create a replacement in the current semispace and
+    /// mark the old header forwarded, so a GC can encounter a chain that ends
+    /// in from-space. Copy the final target and collapse the chain to it;
+    /// otherwise a root would be rewritten to a from-space address that is
+    /// reused after the collection.
     unsafe fn forward_object(&mut self, obj: *mut GcHeader) -> *mut u8 {
         unsafe {
-            if (*obj).is_forwarded() {
-                return (*obj).forwarding_addr();
+            let mut cur = obj as *mut u8;
+            let mut hops = 0usize;
+            loop {
+                let hdr = cur as *mut GcHeader;
+                if (*hdr).is_forwarded() {
+                    let next = (*hdr).forwarding_addr();
+                    if self.in_to_space(next) {
+                        return next;
+                    }
+                    if next == cur {
+                        return next;
+                    }
+                    cur = next;
+                    hops += 1;
+                    if hops > 32 {
+                        // Defensive bound: a corrupt chain must not hang the
+                        // collector. Returning the last address keeps the
+                        // existing failure mode visible instead of spinning.
+                        return next;
+                    }
+                    continue;
+                }
+
+                // A live to-space object (or a raw non-heap pointer) needs no
+                // copy. Only from-space objects are relocated.
+                if self.in_to_space(cur) {
+                    return cur;
+                }
+                if !self.in_from_space(cur) {
+                    return cur;
+                }
+
+                let tag = (*hdr).tag();
+                let obj_size = self.scan_end(cur, tag) as usize - cur as usize;
+                let aligned = align_up(obj_size, 16);
+
+                let to_addr = self.bump;
+                let end = to_addr.add(aligned);
+                if end > self.limit {
+                    panic!("GC: to-space exhausted during collection");
+                }
+                std::ptr::copy_nonoverlapping(cur, to_addr, obj_size);
+                self.bump = end;
+
+                // Collapse the whole forwarding chain onto the new address so
+                // every stale alias resolves in one hop for the rest of the
+                // collection and for forwarding-aware readers.
+                (*hdr).set_forwarding(to_addr);
+                let mut p = obj as *mut u8;
+                while p != cur {
+                    let next = (*(p as *mut GcHeader)).forwarding_addr();
+                    (*(p as *mut GcHeader)).set_forwarding(to_addr);
+                    p = next;
+                }
+
+                return to_addr;
             }
-
-            let obj_addr = obj as *mut u8;
-            let tag = (*obj).tag();
-            let obj_size = self.scan_end(obj_addr, tag) as usize - obj_addr as usize;
-            let aligned = align_up(obj_size, 16);
-
-            let to_addr = self.bump;
-            let end = to_addr.add(aligned);
-            if end > self.limit {
-                panic!("GC: to-space exhausted during collection");
-            }
-            std::ptr::copy_nonoverlapping(obj_addr, to_addr, obj_size);
-            self.bump = end;
-
-            (*obj).set_forwarding(to_addr);
-
-            to_addr
         }
     }
 
@@ -465,6 +524,37 @@ unsafe fn alloc_zeroed(size: usize) -> *mut u8 {
 
 pub(crate) fn align_up(size: usize, align: usize) -> usize {
     (size + align - 1) & !(align - 1)
+}
+
+/// Follow GC forwarding pointers to the current address of an object.
+///
+/// Heap growth (`JSObject::grow` / `RuneArray::grow`) copies an object and
+/// marks the old header forwarded. Values and raw prototype/property pointers
+/// can still hold the old address until the next collection. All readers that
+/// dereference a GC pointer should resolve it first; this is the shared
+/// single-hop-or-chain resolver used by `Value::heap_ptr` and the object
+/// alloy accessors.
+///
+/// # Safety
+/// `ptr` must be null or point at a live GC object header.
+pub unsafe fn resolve_forwarded(mut ptr: *mut u8) -> *mut u8 {
+    unsafe {
+        if ptr.is_null() {
+            return ptr;
+        }
+        for _ in 0..32 {
+            let hdr = ptr as *const GcHeader;
+            if !(*hdr).is_forwarded() {
+                break;
+            }
+            let next = (*hdr).forwarding_addr();
+            if next == ptr {
+                break;
+            }
+            ptr = next;
+        }
+        ptr
+    }
 }
 
 pub const fn size_of<T>() -> usize {

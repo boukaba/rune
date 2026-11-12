@@ -40,7 +40,7 @@ impl RuneDate {
     }
 
     pub unsafe fn prototype(ptr: *mut u8) -> *mut u8 {
-        unsafe { (*(ptr as *mut RuneDate)).prototype }
+        unsafe { crate::gc::resolve_forwarded((*(ptr as *mut RuneDate)).prototype) }
     }
 
     pub unsafe fn set_prototype(ptr: *mut u8, proto: *mut u8) {

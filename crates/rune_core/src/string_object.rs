@@ -37,7 +37,7 @@ impl StringObject {
         unsafe {
             let ptr_bytes = ptr as *mut u8;
             let proto_ptr = ptr_bytes.add(STRING_OBJ_PROTOTYPE_OFFSET) as *const u64;
-            *proto_ptr as *mut u8
+            crate::gc::resolve_forwarded(*proto_ptr as *mut u8)
         }
     }
 

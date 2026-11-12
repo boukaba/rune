@@ -45,8 +45,44 @@ collections. Proven pre-fix: `test_gc_frame_this_survives_collection` and
 post-fix all six pass. The suite filter also runs under `--jit-stats` with zero
 JIT entries for the allocation loops, so these are GC failures, not codegen.
 
-Next: grow-alias repair (self-moving `JSObject::grow` / `RuneArray::grow`), then
-JIT opt-in and the array continuation stack.
+### Phase 0 — growth aliases repaired (2026-11-13)
+
+The deterministic P0 from the review is fixed for values held in containers,
+generators, prototypes, and object literals. The root cause was twofold:
+`RuneArray::grow` (unlike `JSObject::grow`) never marked the old header
+forwarded, and even a forwarded header was invisible to readers because
+`Value::heap_ptr` returned the raw encoded address. A later GC could then
+rewrite a root to a from-space grow target without copying it.
+
+Landed:
+
+- `RuneArray::grow` marks the resolved old header forwarded to the new array;
+  both grow paths use `gc::resolve_forwarded` to collapse existing chains.
+- New `rune_core::gc::resolve_forwarded`; `Value::heap_ptr` resolves chains,
+  and `Value` identity (`PartialEq`) compares resolved addresses so
+  `a[0] === o` remains true across growth.
+- Prototype/property pointers resolve forwarding in `JSObject`, `RuneArray`,
+  `Func`, `RuneStringObject`, `RuneDate`, `RuneMap`/`RuneSet`, `Promise`,
+  `RegExp`, and both typed-array families; `RuneArray`'s low-level
+  length/capacity/element/slot accessors also resolve at entry.
+- `SemiSpace::forward_object` follows forwarding chains, copies a final target
+  that still lives in from-space, and collapses the chain onto the to-space
+  address; this closes the "grow then collect rewrites a root into from-space"
+  window.
+- `refresh_value` now returns the resolved address (it previously returned the
+  stale encoded Value once `heap_ptr` itself resolved).
+
+Eleven regression tests cover object/array aliases in arrays and object slots,
+prototype chains (object and array prototypes), strict equality, a GC after
+growth, generator-local arrays, and growth of the source array during
+`forEach`. All pass; pre-fix the array alias returned the old length (4).
+
+This is an interim forwarding solution. Stable headers with separate slot
+storage remain the roadmap target for v1.0; the current approach costs a
+header check on heap-pointer reads and still needs audit coverage for raw
+`*mut` fields.
+
+Next: JIT opt-in and the array continuation stack.
 
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,

@@ -14674,15 +14674,11 @@ fn resolve_forwarded(ptr: *mut u8) -> *mut u8 {
 /// that moved its heap object. Roots were rewritten by the collector itself;
 /// only Rust-local copies need refreshing.
 fn refresh_value(v: Value) -> Value {
+    // heap_ptr() already resolves growth/GC forwarding. Rebuild the Value at
+    // the resolved address so raw-pointer consumers that hold this Value see
+    // the current object, not the stale encoded address.
     match v.heap_ptr() {
-        Some(p) => {
-            let r = resolve_forwarded(p);
-            if std::ptr::eq(r, p) {
-                v
-            } else {
-                Value::from_heap_ptr(r)
-            }
-        }
+        Some(p) => Value::from_heap_ptr(p),
         None => v,
     }
 }

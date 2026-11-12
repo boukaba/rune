@@ -54,7 +54,7 @@ impl RegExp {
     }
 
     pub unsafe fn prototype(ptr: *mut u8) -> *mut u8 {
-        unsafe { (*(ptr as *mut RegExp)).prototype }
+        unsafe { crate::gc::resolve_forwarded((*(ptr as *mut RegExp)).prototype) }
     }
 
     pub unsafe fn set_prototype(ptr: *mut u8, proto: *mut u8) {

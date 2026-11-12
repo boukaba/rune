@@ -88,7 +88,10 @@ impl Value {
     pub fn heap_ptr(&self) -> Option<*mut u8> {
         if self.is_heap_object() {
             let ptr = ((self.0 & PAYLOAD_MASK) << 3) as *mut u8;
-            Some(ptr)
+            // Growth relocates JSObject/RuneArray and leaves a forwarding
+            // header behind. Resolve it here so every Value reader observes
+            // the current object rather than a stale from-space copy.
+            Some(unsafe { crate::gc::resolve_forwarded(ptr) })
         } else {
             None
         }
@@ -275,7 +278,16 @@ impl fmt::Display for Value {
 
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
+        if self.0 == other.0 {
+            return true;
+        }
+        // A grown object can be referenced by both its old (forwarded) and
+        // new addresses until the next collection. Identity must not depend on
+        // which copy a container happens to hold.
+        if self.is_heap_object() && other.is_heap_object() {
+            return self.heap_ptr() == other.heap_ptr();
+        }
+        false
     }
 }
 

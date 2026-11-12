@@ -129,12 +129,10 @@ impl JSObject {
             let new_cap = (old_cap * 2).max(old_cap + 8);
             let total = OBJECT_HEADER_END + new_cap * size_of::<Value>();
             let new_ptr = ss.alloc(total);
-            // GC during alloc may have moved `ptr` (from-space, forwarded).
-            let src = if (*(ptr as *const GcHeader)).is_forwarded() {
-                (*(ptr as *const GcHeader)).forwarding_addr()
-            } else {
-                ptr as *mut u8
-            };
+            // GC during alloc may have moved `ptr` (from-space, forwarded),
+            // and an earlier growth may already have forwarded it. Resolve
+            // the full chain before copying.
+            let src = crate::gc::resolve_forwarded(ptr as *mut u8);
             // Copy header (GcHeader + shape + capacity + count + prototype).
             std::ptr::copy_nonoverlapping(src, new_ptr, OBJECT_HEADER_END);
             // Capacity word carries EXTENSIBLE_BIT — preserve the flag.
@@ -157,7 +155,7 @@ impl JSObject {
         unsafe {
             let ptr_bytes = ptr as *mut u8;
             let proto_ptr = ptr_bytes.add(24) as *const *mut u8;
-            *proto_ptr
+            crate::gc::resolve_forwarded(*proto_ptr)
         }
     }
 

@@ -136,7 +136,7 @@ impl Func {
     pub unsafe fn prototype(ptr: *mut Func) -> *mut u8 {
         unsafe {
             let ptr_bytes = ptr as *mut u8;
-            *(ptr_bytes.add(size_of::<GcHeader>() + 16) as *const u64) as *mut u8
+            crate::gc::resolve_forwarded(*(ptr_bytes.add(size_of::<GcHeader>() + 16) as *const u64) as *mut u8)
         }
     }
 
@@ -283,7 +283,7 @@ impl Func {
     pub unsafe fn extra_props(ptr: *mut Func) -> *mut u8 {
         unsafe {
             let ptr_bytes = ptr as *mut u8;
-            *(ptr_bytes.add(size_of::<GcHeader>() + 56) as *const u64) as *mut u8
+            crate::gc::resolve_forwarded(*(ptr_bytes.add(size_of::<GcHeader>() + 56) as *const u64) as *mut u8)
         }
     }
 

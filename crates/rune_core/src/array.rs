@@ -43,6 +43,11 @@ pub const ARRAY_FLAG_MASK: u32 = ARRAY_NONEXTENSIBLE_BIT
 const RESERVED_ELEMENTS: usize = 4;
 
 impl RuneArray {
+    /// Resolve a possibly-forwarded array pointer to the current header.
+    #[inline]
+    unsafe fn live(arr: *mut RuneArray) -> *mut RuneArray {
+        unsafe { crate::gc::resolve_forwarded(arr as *mut u8) as *mut RuneArray }
+    }
     /// Allocate a dense array with the given elements.
     pub fn allocate(ss: &mut SemiSpace, elements: &[Value]) -> *mut RuneArray {
         let len = elements.len();
@@ -85,10 +90,12 @@ impl RuneArray {
     }
 
     pub unsafe fn length(arr: *mut RuneArray) -> u32 {
+        let arr = unsafe { Self::live(arr) };
         unsafe { *((arr as *mut u8).add(16) as *const u32) }
     }
 
     pub unsafe fn set_length(arr: *mut RuneArray, n: u32) {
+        let arr = unsafe { Self::live(arr) };
         unsafe {
             let old = Self::length(arr);
             // Shrinking punches holes (a later re-grow must not resurrect
@@ -106,12 +113,14 @@ impl RuneArray {
     }
 
     pub unsafe fn capacity(arr: *mut RuneArray) -> u32 {
+        let arr = unsafe { Self::live(arr) };
         // Mask the integrity flag bits (see above).
         unsafe { (*((arr as *mut u8).add(20) as *const u32)) & !ARRAY_FLAG_MASK }
     }
 
     /// Raw capacity word (flags included) — GC sizing and flag access only.
     pub unsafe fn capacity_word(arr: *mut RuneArray) -> u32 {
+        let arr = unsafe { Self::live(arr) };
         unsafe { *((arr as *mut u8).add(20) as *const u32) }
     }
 
@@ -176,6 +185,7 @@ impl RuneArray {
     }
 
     pub unsafe fn get_element(arr: *mut RuneArray, index: usize) -> Value {
+        let arr = unsafe { Self::live(arr) };
         unsafe {
             // Beyond-capacity reads are holes (a length-extended array has
             // length > capacity; its tail is unallocated). Never read OOB.
@@ -188,6 +198,7 @@ impl RuneArray {
     }
 
     pub unsafe fn set_element(arr: *mut RuneArray, index: usize, val: Value) {
+        let arr = unsafe { Self::live(arr) };
         unsafe {
             let elems_ptr = (arr as *mut u8).add(ARRAY_HEADER_END) as *mut Value;
             *elems_ptr.add(index) = val;
@@ -195,10 +206,14 @@ impl RuneArray {
     }
 
     pub unsafe fn extra_props(arr: *mut RuneArray) -> *mut u8 {
-        unsafe { *((arr as *mut u8).add(EXTRA_PROPS_OFFSET) as *const *mut u8) }
+        let arr = unsafe { Self::live(arr) };
+        unsafe {
+            crate::gc::resolve_forwarded(*((arr as *mut u8).add(EXTRA_PROPS_OFFSET) as *const *mut u8))
+        }
     }
 
     pub unsafe fn set_extra_props(arr: *mut RuneArray, props: *mut u8) {
+        let arr = unsafe { Self::live(arr) };
         unsafe {
             *((arr as *mut u8).add(EXTRA_PROPS_OFFSET) as *mut *mut u8) = props;
         }
@@ -215,10 +230,12 @@ impl RuneArray {
     }
 
     pub unsafe fn prototype(arr: *mut RuneArray) -> *mut u8 {
-        unsafe { *((arr as *mut u8).add(24) as *const *mut u8) }
+        let arr = unsafe { Self::live(arr) };
+        unsafe { crate::gc::resolve_forwarded(*((arr as *mut u8).add(24) as *const *mut u8)) }
     }
 
     pub unsafe fn set_prototype(arr: *mut RuneArray, proto: *mut u8) {
+        let arr = unsafe { Self::live(arr) };
         unsafe {
             *((arr as *mut u8).add(24) as *mut *mut u8) = proto;
         }
@@ -236,12 +253,9 @@ impl RuneArray {
             let total_size = ARRAY_HEADER_END + new_cap * size_of::<Value>();
             let new_ptr = ss.alloc(total_size);
             // If GC ran during alloc, `arr` may be a stale from-space pointer
-            // with a forwarded header. Resolve to the to-space copy.
-            let src = if (*(arr as *const GcHeader)).is_forwarded() {
-                (*(arr as *const GcHeader)).forwarding_addr()
-            } else {
-                arr as *mut u8
-            };
+            // with a forwarded header (and it may itself already be the target
+            // of an earlier growth). Resolve the full chain.
+            let src = crate::gc::resolve_forwarded(arr as *mut u8);
             // Copy header (GcHeader + shape + length + capacity + prototype +
             // extra_props) = 40 bytes
             std::ptr::copy_nonoverlapping(src, new_ptr, ARRAY_HEADER_END);
@@ -262,6 +276,12 @@ impl RuneArray {
             for i in copied..new_cap {
                 *new_elems.add(i) = Value::empty_sentinel();
             }
+            // Mark the old array forwarded. Aliases stored in arrays,
+            // objects, generators, or pending machines may still hold this
+            // address; without the header every reader would keep observing
+            // the pre-growth length/elements until a collection happens to
+            // rewrite the holder.
+            (*(src as *const GcHeader)).set_forwarding(new_ptr);
             (src, new_ptr as *mut RuneArray)
         }
     }

@@ -116,7 +116,7 @@ impl RuneArrayBuffer {
     }
 
     pub unsafe fn prototype(ptr: *mut u8) -> *mut u8 {
-        unsafe { (*(ptr as *mut RuneArrayBuffer)).prototype }
+        unsafe { crate::gc::resolve_forwarded((*(ptr as *mut RuneArrayBuffer)).prototype) }
     }
 
     pub unsafe fn set_prototype(ptr: *mut u8, proto: *mut u8) {
@@ -208,7 +208,7 @@ impl RuneTypedArray {
     }
 
     pub unsafe fn prototype(ptr: *mut u8) -> *mut u8 {
-        unsafe { (*(ptr as *mut RuneTypedArray)).prototype }
+        unsafe { crate::gc::resolve_forwarded((*(ptr as *mut RuneTypedArray)).prototype) }
     }
 
     /// Byte length of the viewed region: length × element size.

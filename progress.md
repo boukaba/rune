@@ -183,8 +183,26 @@ another module's top-level code.
 
 Integration suite: 745 passed, 0 failed, 3 ignored.
 
-Next: function hoisting, arrow lexical `this`, and the remaining captured
-update/stack semantics.
+### Phase 0 — captured and lexical update expressions (2026-11-13)
+
+`++`/`--` on a captured or lexical binding no longer corrupts the operand
+stack. The emitter's captured path treated `StoreCaptured` as value-preserving
+(it pops), so a prefix update emitted no result (the enclosing `Return`
+panicked with `stack underflow`) and a postfix update popped the saved old
+value. The lexical path had the opposite contract: `StoreLexical` pushes the
+new value back, so postfix still needs a `Pop` to expose the old value.
+
+The emitter now emits the correct per-destination sequence:
+
+- captured prefix: load, add, store, reload the stored value;
+- captured postfix: load, dup, add, store (old value remains);
+- lexical prefix: load, add, store (store leaves the new value);
+- lexical postfix: load, dup, add, store, pop the new value.
+
+New regression asserts `[1,1,2]` then `[3,3,4]` for captured prefix/postfix and
+`[2,2,3]` for lexical. Integration suite: 746 passed, 0 failed, 3 ignored.
+
+Next: function hoisting and arrow lexical `this`.
 
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,

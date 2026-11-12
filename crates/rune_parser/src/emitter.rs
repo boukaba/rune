@@ -2552,8 +2552,10 @@ impl Emitter {
                         };
                         self.emit(opcode, vec![]);
                         self.emit(Opcode::StoreCaptured, vec![depth as i64, slot as i64]);
-                        if !is_pre {
-                            self.emit(Opcode::Pop, vec![]);
+                        if is_pre {
+                            // StoreCaptured consumes the new value; prefix must
+                            // leave it as the expression result.
+                            self.emit(Opcode::LoadCaptured, vec![depth as i64, slot as i64]);
                         }
                     } else if self.lexical_slot(name).is_some() {
                         let slot = self.lexical_slot(name).unwrap();
@@ -2569,6 +2571,8 @@ impl Emitter {
                         self.emit(opcode, vec![]);
                         self.emit(Opcode::StoreLexical, vec![slot as i64]);
                         if !is_pre {
+                            // StoreLexical leaves the new value on the stack;
+                            // postfix must return the old value underneath it.
                             self.emit(Opcode::Pop, vec![]);
                         }
                     } else if let Some(idx) = self.local_index(name) {

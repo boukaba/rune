@@ -13351,3 +13351,34 @@ fn test_esm_live_binding_updates_after_exported_mutation() {
         "module function must read its own live binding"
     );
 }
+
+#[test]
+fn test_update_expression_captured_and_lexical() {
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+        function mk() {
+            var n = 0;
+            return function () { return [++n, n++, n]; };
+        }
+        var f = mk();
+        var first = f();
+        var second = f();
+        var captured = JSON.stringify([first, second]);
+        let m = 1;
+        var lexical = JSON.stringify([++m, m++, m]);
+        0;
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        eval_str(&mut ctx, "captured"),
+        "[[1,1,2],[3,3,4]]",
+        "captured prefix/postfix results"
+    );
+    assert_eq!(
+        eval_str(&mut ctx, "lexical"),
+        "[2,2,3]",
+        "lexical prefix/postfix results"
+    );
+}

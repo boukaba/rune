@@ -13424,3 +13424,57 @@ fn test_function_declaration_hoisting_inside_function_and_block() {
     );
     let _ = r;
 }
+
+#[test]
+fn test_arrow_lexical_this_in_method() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var o = {
+                v: 7,
+                m: function () { var f = () => this.v; return f(); },
+                make: function () { return () => this.v; }
+            };
+            var captured = o.make();
+            o.m() + "|" + captured();
+        "#,
+        )
+        .unwrap();
+    assert_eq!(
+        eval_str(&mut ctx, "o.m() + '|' + captured()"),
+        "7|7",
+        "arrow must capture defining receiver"
+    );
+    let _ = r;
+    let r2 = ctx
+        .eval(
+            r#"
+            function m() { var f = () => this.z; return f(); }
+            m.call({ z: 9 });
+        "#,
+        )
+        .unwrap();
+    assert_eq!(r2.as_smi(), Some(9));
+}
+
+#[test]
+fn test_arrow_lexical_this_survives_gc() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var o = {
+                v: 11,
+                m: function () {
+                    var f = () => this.v;
+                    for (var i = 0; i < 80000; i++) { var t = { n: i, s: "z" + i }; }
+                    return f();
+                }
+            };
+            o.m();
+        "#,
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(11), "arrow lexical this must survive GC");
+}

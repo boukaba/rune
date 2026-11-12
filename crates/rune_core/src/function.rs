@@ -1,4 +1,5 @@
 use crate::gc::{GcHeader, SemiSpace, TAG_FUNC, size_of};
+use crate::value::Value;
 
 /// A GC-allocated function object storing an index into the bytecode function table,
 /// a pointer to the bytecode program that owns the function table,
@@ -8,8 +9,8 @@ use crate::gc::{GcHeader, SemiSpace, TAG_FUNC, size_of};
 /// Memory layout:
 ///   [GcHeader(8) | func_idx(8) | prog_ptr(8) | prototype(8) |
 ///    call_count(4) | flags(4) | env_ptr(8) | jit_entry(8) | superclass(8) | extra_props(8) |
-///    private_name_ids(8)]
-///   Total: 80 bytes
+///    private_name_ids(8) | lexical_this(8)]
+///   Total: 88 bytes (96 with 16-byte alignment)
 ///
 /// flags word bit plan (F1 — carved from the old `module_mi << 1` layout;
 /// module ids never approach 2^27, so the high bits were wasted):
@@ -42,7 +43,7 @@ impl Func {
         is_arrow: bool,
         env_ptr: *mut u8,
     ) -> *mut Func {
-        let ptr = ss.alloc(80);
+        let ptr = ss.alloc(88);
         unsafe {
             let header = &mut *(ptr as *mut GcHeader);
             header.word = std::sync::atomic::AtomicU64::new(TAG_FUNC);
@@ -75,6 +76,10 @@ impl Func {
             // private_name_ids = null (set by PrivateNameScope during class evaluation)
             let priv_ids_ptr = ptr.add(size_of::<GcHeader>() + 64) as *mut u64;
             *priv_ids_ptr = 0;
+            // lexical_this = undefined for ordinary functions; MakeFunction
+            // stores the defining frame's receiver for arrow functions.
+            let this_ptr = ptr.add(size_of::<GcHeader>() + 72) as *mut u64;
+            *this_ptr = Value::undefined().raw();
         }
         ptr as *mut Func
     }
@@ -148,6 +153,21 @@ impl Func {
             let ptr_bytes = ptr as *mut u8;
             let proto_ptr = ptr_bytes.add(size_of::<GcHeader>() + 16) as *mut u64;
             *proto_ptr = proto as u64;
+        }
+    }
+
+    /// Lexical `this` captured by an arrow function (undefined otherwise).
+    pub unsafe fn lexical_this(ptr: *mut Func) -> Value {
+        unsafe {
+            let ptr_bytes = ptr as *mut u8;
+            Value::from_raw(*(ptr_bytes.add(size_of::<GcHeader>() + 72) as *const u64))
+        }
+    }
+
+    pub unsafe fn set_lexical_this(ptr: *mut Func, this: Value) {
+        unsafe {
+            let ptr_bytes = ptr as *mut u8;
+            *(ptr_bytes.add(size_of::<GcHeader>() + 72) as *mut u64) = this.raw();
         }
     }
 

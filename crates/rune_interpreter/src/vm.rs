@@ -5724,7 +5724,15 @@ impl Vm {
 
                 // ---- `this` binding ----
                 Opcode::LoadThis => {
-                    self.push(self.frames[fi].this);
+                    let this = {
+                        let fp = self.frames[fi].func_ptr;
+                        if !fp.is_null() && unsafe { Func::is_arrow(fp as *mut Func) } {
+                            unsafe { Func::lexical_this(fp as *mut Func) }
+                        } else {
+                            self.frames[fi].this
+                        }
+                    };
+                    self.push(this);
                     self.frames[fi].pc = pc + 1;
                 }
 
@@ -8490,6 +8498,14 @@ impl Vm {
                         if let Some(mi) = self.module_stack.last() {
                             Func::set_module_mi(resolved_ptr, *mi as i32);
                         }
+                        // Arrows capture the defining frame's `this`; the
+                        // loader ignores the call-site receiver for arrows.
+                        let lexical_this = if is_arrow {
+                            self.frames[fi].this
+                        } else {
+                            Value::undefined()
+                        };
+                        Func::set_lexical_this(resolved_ptr, lexical_this);
                         self.push(Value::from_heap_ptr(resolved_ptr as *mut u8));
                     }
                     self.frames[fi].pc = pc + 1;

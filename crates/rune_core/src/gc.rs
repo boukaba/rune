@@ -259,6 +259,9 @@ impl SemiSpace {
                         // Forward the private_name_ids pointer (byte offset 72 from object start)
                         let priv_ids_ptr = scan_ptr.add(72) as *mut u64;
                         self.forward_value(priv_ids_ptr);
+                        // Forward the arrow lexical-this Value (byte offset 80)
+                        let lexical_this_ptr = scan_ptr.add(80) as *mut u64;
+                        self.forward_value(lexical_this_ptr);
                     }
                     TAG_ENV => {
                         // Forward parent pointer at byte offset 16 from object start
@@ -345,8 +348,9 @@ impl SemiSpace {
                 TAG_FUNC => {
                     // Func layout: GcHeader(8) + func_idx(8) + prog_ptr(8) + prototype(8)
                     //   + call_count(4) + flags(4) + env_ptr(8) + jit_entry(8)
-                    //   + superclass(8) + extra_props(8) + private_name_ids(8) = 80 bytes
-                    obj_start.add(align_up(80, 16))
+                    //   + superclass(8) + extra_props(8) + private_name_ids(8)
+                    //   + lexical_this(8) = 88 bytes (96 aligned)
+                    obj_start.add(align_up(88, 16))
                 }
                 TAG_FLOAT64 => obj_start.add(align_up(size_of::<GcHeader>() + 8, 16)),
                 TAG_OBJECT => {

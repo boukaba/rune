@@ -215,7 +215,26 @@ Regression tests cover `typeof f` and `f()` before a top-level declaration,
 the same shape inside a function, and a block-local declaration. Mutual
 recursion remains green. Integration suite: 748 passed, 0 failed, 3 ignored.
 
-Next: arrow lexical `this`, top-level lexical TDZ, and `async () =>`.
+### Phase 0 — arrow lexical `this` (2026-11-13)
+
+Arrow functions now capture the defining frame's `this` instead of taking the
+call-site receiver.
+
+- `Func` gains a `lexical_this: Value` field (payload 88 bytes, 96 aligned;
+  GC traces and forwards it at offset 80). Ordinary functions store
+  `undefined`.
+- `MakeFunction` records the arrow flag plus the defining frame receiver;
+  `LoadThis` reads the captured value when the executing Func is an arrow and
+  the frame receiver otherwise.
+- Tests cover an arrow in a method, an arrow returned from a method and called
+  later, `m.call({z:9})`, and a GC during the arrow body.
+  Integration suite: **750 passed, 0 failed, 3 ignored**.
+
+Remaining semantic gaps: top-level script `let` TDZ, `async () =>` parsing,
+and `this` at script top level (the script frame still has no global receiver).
+
+Next: top-level TDZ and async-arrow parsing, then begin Phase 1 (runtime and
+stable layout work).
 
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,

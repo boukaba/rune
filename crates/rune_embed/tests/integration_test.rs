@@ -13478,3 +13478,46 @@ fn test_arrow_lexical_this_survives_gc() {
         .unwrap();
     assert_eq!(r.as_smi(), Some(11), "arrow lexical this must survive GC");
 }
+
+#[test]
+fn test_try_body_block_scope_and_tdz() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var name = "";
+            try { readBefore; let readBefore = 1; }
+            catch (e) { name = e.name; }
+            var leaked = typeof readBefore;
+            name + "|" + leaked;
+        "#,
+        )
+        .unwrap();
+    assert_eq!(
+        eval_str(&mut ctx, "name + '|' + typeof readBefore"),
+        "ReferenceError|undefined",
+        "try body must be a TDZ block"
+    );
+    let _ = r;
+}
+
+#[test]
+fn test_catch_and_finally_are_block_scoped() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var seen = "";
+            try { throw new Error("x"); }
+            catch (e) { let inside = "c"; seen += inside; }
+            finally { let fin = "f"; seen += fin; }
+            seen + "|" + typeof inside + "|" + typeof fin;
+        "#,
+        )
+        .unwrap();
+    assert_eq!(
+        eval_str(&mut ctx, "seen + '|' + typeof inside + '|' + typeof fin"),
+        "cf|undefined|undefined"
+    );
+    let _ = r;
+}

@@ -2159,14 +2159,15 @@ impl Emitter {
             Stmt::Class(class, _) => {
                 self.emit_class(class, false);
             }
-            Stmt::Try(body, catch_opt, finalizer_opt, _) => {
+            Stmt::Try(body, catch_opt, finalizer_opt, span) => {
                 let try_idx = self.current();
                 self.emit(Opcode::TryBegin, vec![0, 0]);
 
                 // --- try body ---
-                for stmt in body.iter() {
-                    self.emit_statement(stmt);
-                }
+                // A try body is its own block scope: let/const declared here
+                // must be in TDZ before their declaration and must not leak to
+                // the catch/finally scopes.
+                self.emit_statement(&Stmt::Block(body.to_vec(), *span));
 
                 match (catch_opt, finalizer_opt) {
                     (Some(c), None) => {
@@ -2186,18 +2187,14 @@ impl Emitter {
                             );
                         }
                         self.emit(Opcode::Pop, vec![]);
-                        for stmt in c.body.iter() {
-                            self.emit_statement(stmt);
-                        }
+                        self.emit_statement(&Stmt::Block(c.body.to_vec(), c.span));
                         self.patch(past_catch, self.current());
                     }
                     (None, Some(fin)) => {
                         // try-finally (no catch) — no TryEnd, fall through to finally
                         let fin_entry = self.current();
                         self.patch_operand(try_idx, 1, fin_entry as i64);
-                        for stmt in fin.iter() {
-                            self.emit_statement(stmt);
-                        }
+                        self.emit_statement(&Stmt::Block(fin.to_vec(), *span));
                         let fd_pc = self.current();
                         let rethrow_pc = fd_pc + 2;
                         self.emit(Opcode::FinallyDone, vec![rethrow_pc as i64]);
@@ -2221,15 +2218,11 @@ impl Emitter {
                             );
                         }
                         self.emit(Opcode::Pop, vec![]);
-                        for stmt in c.body.iter() {
-                            self.emit_statement(stmt);
-                        }
+                        self.emit_statement(&Stmt::Block(c.body.to_vec(), c.span));
                         let fin_entry = self.current();
                         self.patch(past_catch, fin_entry);
                         self.patch_operand(try_idx, 1, fin_entry as i64);
-                        for stmt in fin.iter() {
-                            self.emit_statement(stmt);
-                        }
+                        self.emit_statement(&Stmt::Block(fin.to_vec(), *span));
                         let fd_pc = self.current();
                         let rethrow_pc = fd_pc + 2;
                         self.emit(Opcode::FinallyDone, vec![rethrow_pc as i64]);

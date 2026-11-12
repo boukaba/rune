@@ -233,8 +233,22 @@ call-site receiver.
 Remaining semantic gaps: top-level script `let` TDZ, `async () =>` parsing,
 and `this` at script top level (the script frame still has no global receiver).
 
-Next: top-level TDZ and async-arrow parsing, then begin Phase 1 (runtime and
-stable layout work).
+### Phase 0 — try/catch/finally block scopes (2026-11-13)
+
+The three bodies of a `try` statement now compile as real block scopes, fixing
+the last common TDZ hole: `try { print(x); let x = 1; }` correctly throws
+`ReferenceError` instead of resolving an outer/global `x`. Lexical bindings in
+a try body no longer leak into catch/finally, and catch/finally `let` bindings
+do not leak past the statement.
+
+Existing try/finally completion tests (return, throw, nested, override) remain
+green with the added `BlockEnter`/`BlockLeave`; abrupt paths skip the block
+leave, which is safe because lexical slots are frame-owned and unreachable.
+
+Integration suite: **752 passed, 0 failed, 3 ignored**.
+
+Next: `async () =>` parsing and `Function.prototype.bind`, then begin Phase 1
+(runtime and stable layout work).
 
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,

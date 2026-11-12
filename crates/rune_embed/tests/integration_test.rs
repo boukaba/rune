@@ -13382,3 +13382,45 @@ fn test_update_expression_captured_and_lexical() {
         "lexical prefix/postfix results"
     );
 }
+
+#[test]
+fn test_function_declaration_hoisting() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var before = typeof f;
+            var called = f();
+            function f() { return 7; }
+            before + "|" + called;
+        "#,
+        )
+        .unwrap();
+    assert_eq!(eval_str(&mut ctx, "before + '|' + called"), "function|7");
+    let _ = r;
+}
+
+#[test]
+fn test_function_declaration_hoisting_inside_function_and_block() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            function outer() {
+                var t = typeof g;
+                return t + "|" + g();
+                function g() { return 8; }
+            }
+            var inner = outer();
+            var block;
+            { block = typeof h + "|" + h(); function h() { return 9; } }
+            inner + "|" + block;
+        "#,
+        )
+        .unwrap();
+    assert_eq!(
+        eval_str(&mut ctx, "inner + '|' + block"),
+        "function|8|function|9"
+    );
+    let _ = r;
+}

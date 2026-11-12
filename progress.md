@@ -202,7 +202,20 @@ The emitter now emits the correct per-destination sequence:
 New regression asserts `[1,1,2]` then `[3,3,4]` for captured prefix/postfix and
 `[2,2,3]` for lexical. Integration suite: 746 passed, 0 failed, 3 ignored.
 
-Next: function hoisting and arrow lexical `this`.
+### Phase 0 — function declaration hoisting (2026-11-13)
+
+Function declarations are now instantiated at scope entry instead of at their
+textual position. `emit_program`, block emission, and function-body blocks run a
+hoisting pre-pass that creates each closure in source order; the later
+`Stmt::Function` visit is a no-op via an AST-node set. The helper shares the
+existing local/captured/global storage path, so closures and script capture
+still work.
+
+Regression tests cover `typeof f` and `f()` before a top-level declaration,
+the same shape inside a function, and a block-local declaration. Mutual
+recursion remains green. Integration suite: 748 passed, 0 failed, 3 ignored.
+
+Next: arrow lexical `this`, top-level lexical TDZ, and `async () =>`.
 
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,

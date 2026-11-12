@@ -1,6 +1,7 @@
 use crate::ast::*;
 use rune_bytecode::opcode::{BytecodeProgram, Instruction, ModuleImport, ModuleInfo, Opcode};
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 /// A lexical scope binding with its allocated absolute slot index.
 struct LexicalBinding {
@@ -89,6 +90,8 @@ pub struct Emitter {
     /// Imported binding names → index into the module's `ModuleInfo.imports`.
     /// Reads/writes of these emit LoadModuleImport/StoreModuleImport (live bindings).
     module_imports: HashMap<Box<str>, usize>,
+    /// AST nodes already instantiated by the hoisting pre-pass.
+    hoisted_fn_nodes: HashSet<usize>,
     /// Module bindings that are exported under a DIFFERENT name (e.g.
     /// `export {a as b}`): stored name → export names. After each module-level
     /// store of the stored name, an ExportSync for each export name is emitted.
@@ -133,6 +136,7 @@ impl Emitter {
             private_field_names: Vec::new(),
             module_mode: false,
             module_imports: HashMap::new(),
+            hoisted_fn_nodes: HashSet::new(),
             module_export_renames: HashMap::new(),
         }
     }
@@ -217,6 +221,7 @@ impl Emitter {
             self.enter_lexical_scope(&prog.body, lexical_count);
             self.emit(Opcode::BlockEnter, vec![lexical_count as i64]);
         }
+        self.hoist_function_decls(&prog.body);
         let last_idx = prog.body.len() - 1;
         for stmt in &prog.body[..last_idx] {
             self.emit_statement(stmt);
@@ -1602,6 +1607,47 @@ impl Emitter {
         }
     }
 
+    /// Instantiate function declarations at scope entry (ES §10.2.1.3/§16.1.7).
+    /// Function declarations are initialized before any statement in the
+    /// scope runs, so calls/typeof before the textual declaration work.
+    fn hoist_function_decls(&mut self, stmts: &[Stmt]) {
+        for stmt in stmts {
+            if let Stmt::Function(fnode, _) = stmt {
+                if self
+                    .hoisted_fn_nodes
+                    .insert(fnode.as_ref() as *const FnNode as usize)
+                {
+                    self.emit_function_decl(fnode);
+                }
+            }
+        }
+    }
+
+    /// Emit one function declaration: create the closure, store it in the
+    /// local slot, and mirror it into the capture env when captured.
+    fn emit_function_decl(&mut self, fnode: &FnNode) {
+        let func_idx = self.compile_function(fnode) as i64;
+        if let Some(ref name) = fnode.name {
+            if !self.locals.contains(&name.to_string()) {
+                self.locals.push(name.to_string());
+            }
+            self.emit(Opcode::MakeFunction, vec![func_idx]);
+            if let Some(idx) = self.local_index(name) {
+                self.emit(Opcode::StoreLocal, vec![idx as i64]);
+            }
+            // Sync the binding into the capture env when the name is
+            // captured (script-level or enclosing function): inner functions
+            // resolve this identifier through the env, not the frame local.
+            // StoreLocal pushed the value back, so Dup before the popping
+            // StoreCaptured keeps balance.
+            if let Some((depth, slot)) = self.env_captured_slot(name) {
+                self.emit(Opcode::Dup, vec![]);
+                self.emit(Opcode::StoreCaptured, vec![depth as i64, slot as i64]);
+            }
+            self.emit(Opcode::Pop, vec![]);
+        }
+    }
+
     fn emit_statement(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Expr(expr, _) => {
@@ -1643,6 +1689,7 @@ impl Emitter {
                         self.emit(Opcode::MakeEnv, vec![name_count as i64]);
                     }
                 }
+                self.hoist_function_decls(stmts);
                 for s in stmts {
                     self.emit_statement(s);
                 }
@@ -2099,25 +2146,14 @@ impl Emitter {
                 }
             }
             Stmt::Function(fnode, _) => {
-                let func_idx = self.compile_function(fnode) as i64;
-                if let Some(ref name) = fnode.name {
-                    if !self.locals.contains(&name.to_string()) {
-                        self.locals.push(name.to_string());
-                    }
-                    self.emit(Opcode::MakeFunction, vec![func_idx]);
-                    if let Some(idx) = self.local_index(name) {
-                        self.emit(Opcode::StoreLocal, vec![idx as i64]);
-                    }
-                    // Sync the binding into the capture env when the name is
-                    // captured (script-level or enclosing function): inner
-                    // functions resolve this identifier through the env, not
-                    // the frame local. StoreLocal pushed the value back, so
-                    // Dup before the popping StoreCaptured keeps balance.
-                    if let Some((depth, slot)) = self.env_captured_slot(name) {
-                        self.emit(Opcode::Dup, vec![]);
-                        self.emit(Opcode::StoreCaptured, vec![depth as i64, slot as i64]);
-                    }
-                    self.emit(Opcode::Pop, vec![]);
+                // Function declarations are instantiated by the enclosing
+                // scope's hoisting pre-pass. Fall back to emitting here for
+                // statement lists without a pre-pass (e.g. a bare if-body).
+                if !self
+                    .hoisted_fn_nodes
+                    .contains(&(fnode.as_ref() as *const FnNode as usize))
+                {
+                    self.emit_function_decl(fnode);
                 }
             }
             Stmt::Class(class, _) => {

@@ -11,3 +11,9 @@ AGENTS.md
 ecma262.md
 .rune-cache
 
+
+# local build/test caches used by the production-readiness work
+.cargo/
+.cargo-home/
+.review-mmtk/
+spikes/target/

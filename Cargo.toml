@@ -13,8 +13,6 @@ members = [
     "crates/rune_embed",
     "crates/rune_capi",
     "crates/rune_cli",
-    "crates/spike_mmtk",
-    "crates/spike_jit",
     "crates/rune_bench",
     "crates/rune_jit_stencils",
 ]
@@ -23,10 +21,10 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-mmtk = { git = "https://github.com/mmtk/mmtk-core.git" }
 libc = "0.2"
 thiserror = "2"
 tracing = "0.1"

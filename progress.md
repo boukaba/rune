@@ -2,7 +2,31 @@
 
 > **Project:** Production-ready JavaScript runtime in Rust
 > **Spec Target:** ECMAScript 2027 (ECMA-262, 18th Edition)
-> **Status:** v0.11.1 🚧 (In Progress — 681/681 integration tests Pass, 3 Ignored; workspace 847 tests Pass)
+> **Status:** v0.11.1 (pre-production — soundness reset in progress; see `docs/production-roadmap.md`)
+
+## Production Readiness Program — Phase 0 kickoff (2026-11-13)
+
+The 2026-11-12 deep review (`docs/review-2026-11-12.md`) found four P0 classes
+that invalidate the current green suite as a production gate: self-moving
+object/array growth breaking aliases, incomplete GC roots (frame/generator/
+microtask state), single-flight pending machines corrupting nested callbacks,
+and silent JIT miscompiles at loop tier-up. Production work is now organized by
+`docs/production-roadmap.md`; new language features are frozen until the
+soundness gates pass.
+
+Landed in this step:
+
+- Research spikes (`spike_mmtk`, `spike_jit`) moved to a separate `spikes/`
+  workspace, so the product workspace no longer resolves the git-only MMTk
+  dependency and can build/test offline.
+- Removed the unused optional `mmtk` dependency from `rune_core`.
+- Added `rust-version = "1.85"` (edition 2024) and corrected the README badge.
+- Published the production roadmap and a truthful production-status banner in
+  the README.
+
+Next: GC-root completion with regression tests, then grow-alias repair, then
+JIT opt-in and the array continuation stack.
+
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:

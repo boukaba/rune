@@ -1,0 +1,14 @@
+# Research spikes live outside the product workspace so `cargo test --workspace`
+# stays offline-buildable and free of the git-only MMTk dependency.
+[workspace]
+resolver = "2"
+members = ["spike_mmtk", "spike_jit"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+mmtk = { git = "https://github.com/mmtk/mmtk-core.git" }
+libc = "0.2"

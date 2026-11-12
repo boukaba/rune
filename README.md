@@ -1,12 +1,19 @@
 # Rune
 
 [![License: MIT/Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.83%2B-orange)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange)](https://www.rust-lang.org)
 [![CI](https://github.com/boukaba/rune/actions/workflows/ci.yml/badge.svg)](https://github.com/boukaba/rune/actions)
+
+> **Production-readiness program (2026-11-13).** Rune is **not production-ready**.
+> The engine is in a soundness reset: GC-root completeness, object/array growth,
+> continuation machines, and JIT correctness are being fixed before new features.
+> See [the deep review](docs/review-2026-11-12.md) and
+> [the production roadmap](docs/production-roadmap.md). Claims below describe the
+> intended design and the current happy path; they are not yet a production guarantee.
 
 **A Rust-native JavaScript engine with AOT-first persistent compilation.**  
 
-Cold starts in **~4–7ms** — 5–8× faster than Node.js. Designed for serverless and edge environments where predictable latency, minimal memory, and instant warm boots matter more than peak throughput.
+Indicative cold starts in **~4–7ms** — 5–8× faster than Node.js. Designed for serverless and edge environments where predictable latency, minimal memory, and instant warm boots matter more than peak throughput.
 
 ## Why Rune?
 
@@ -15,7 +22,7 @@ Cold starts in **~4–7ms** — 5–8× faster than Node.js. Designed for server
 | **Cold start** (empty script) | **~4–7 ms** | ~26–33 ms |
 | **Compilation model** | AOT + persistent native cache | JIT-only, re-compiles on every restart |
 | **Shape system** | Immutable, content-addressed | Mutable hidden classes (transitions) |
-| **Cache validity** | Forever (content-addressed) | None (no cross-run caching) |
+| **Cache validity** | Keyed by engine build, source, ABI, and ISA (not yet enforced) | None (no cross-run caching) |
 | **Property IC** | SIMD (NEON/SSE), no megamorphic cliff | Linear probe, megamorphic cliff |
 | **GC** | Semi-space (Cheney) | Generational + concurrent |
 

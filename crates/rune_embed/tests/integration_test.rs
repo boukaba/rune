@@ -13521,3 +13521,26 @@ fn test_catch_and_finally_are_block_scoped() {
     );
     let _ = r;
 }
+
+#[test]
+fn test_async_arrow_forms() {
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+        var out = [];
+        var a = async (x) => { return x * 2; };
+        var b = async x => x + 1;
+        var c = async () => 5;
+        var d = async ({ x }) => x + 1;
+        var e = async () => { var v = await 3; return v + 4; };
+        a(4).then(function (v) { out.push(v); });
+        b(4).then(function (v) { out.push(v); });
+        c().then(function (v) { out.push(v); });
+        d({ x: 6 }).then(function (v) { out.push(v); });
+        e().then(function (v) { out.push(v); });
+        "";
+        "#,
+    )
+    .unwrap();
+    assert_eq!(eval_str(&mut ctx, "out.join(',')"), "8,5,5,7,7");
+}

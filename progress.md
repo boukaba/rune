@@ -247,7 +247,19 @@ leave, which is safe because lexical slots are frame-owned and unreachable.
 
 Integration suite: **752 passed, 0 failed, 3 ignored**.
 
-Next: `async () =>` parsing and `Function.prototype.bind`, then begin Phase 1
+### Phase 0 — async arrow functions (2026-11-13)
+
+The parser now accepts all async arrow forms: `async x => expr`,
+`async (x) => expr`, `async () => expr`, parenthesized params with defaults and
+destructuring, and rest params. `parse_arrow_body` carries an `is_async` flag
+into the `FnNode`, so the existing async-function desugaring and await bridge
+work unchanged; an awaited async arrow resolves correctly.
+
+Regression covers five forms (including `await` inside an async arrow) and
+checks the settled values `8,5,5,7,7`. Integration suite: **753 passed, 0
+failed, 3 ignored**.
+
+Next: `Function.prototype.bind`, `Promise.race`/`allSettled`, then begin Phase 1
 (runtime and stable layout work).
 
 

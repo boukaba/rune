@@ -1821,6 +1821,7 @@ impl Parser {
                             None,
                         )],
                         None,
+                        false,
                         start,
                     );
                 }
@@ -1838,7 +1839,7 @@ impl Parser {
                 if self.tok.kind == TokenKind::RParen {
                     self.advance();
                     if self.tok.kind == TokenKind::Arrow {
-                        return self.parse_arrow_body(Vec::new(), None, start);
+                        return self.parse_arrow_body(Vec::new(), None, false, start);
                     }
                     return Expr::Undefined(Span {
                         start: start.start,
@@ -1856,6 +1857,7 @@ impl Parser {
                             return self.parse_arrow_body(
                                 Vec::new(),
                                 Some(t.value.into_boxed_str()),
+                                false,
                                 start,
                             );
                         }
@@ -1901,7 +1903,12 @@ impl Parser {
                                 if let Some(rn) = rest_name {
                                     self.expect(TokenKind::RParen);
                                     if self.tok.kind == TokenKind::Arrow {
-                                        return self.parse_arrow_body(params, Some(rn), start);
+                                        return self.parse_arrow_body(
+                                            params,
+                                            Some(rn),
+                                            false,
+                                            start,
+                                        );
                                     }
                                     return Expr::Identifier(
                                         name,
@@ -1923,7 +1930,7 @@ impl Parser {
                             }
                             self.expect(TokenKind::RParen);
                             if self.tok.kind == TokenKind::Arrow {
-                                return self.parse_arrow_body(params, None, start);
+                                return self.parse_arrow_body(params, None, false, start);
                             }
                             // Not an arrow — reconstruct as comma expression
                             // For now, just return the first identifier
@@ -1944,7 +1951,7 @@ impl Parser {
                                 end: self.span().end,
                             };
                             let ident = Pattern::Identifier(name, p_span, None);
-                            return self.parse_arrow_body(vec![ident], None, start);
+                            return self.parse_arrow_body(vec![ident], None, false, start);
                         }
                         // (name) — just a parenthesized identifier
                         return Expr::Identifier(
@@ -1966,6 +1973,7 @@ impl Parser {
                         return self.parse_arrow_body(
                             vec![Pattern::Identifier(name.clone(), *id_span, None)],
                             None,
+                            false,
                             start,
                         );
                     }
@@ -2315,6 +2323,12 @@ impl Parser {
                     end: self.span().end,
                 };
                 Expr::Function(Box::new(body), span)
+            }
+            TokenKind::Async => {
+                // `async x => ...`, `async (x) => ...`, `async () => ...`
+                let start = self.span();
+                self.advance();
+                self.parse_async_arrow_tail(start)
             }
             TokenKind::RegExp => {
                 let t = self.tok.clone();
@@ -3085,12 +3099,96 @@ impl Parser {
         lhs
     }
 
+    /// Parse the parameter list/body of an async arrow after the `async`
+    /// token has been consumed. Supports identifiers, defaults, destructuring
+    /// patterns and a trailing rest parameter, matching the existing arrow
+    /// parser's coverage.
+    fn parse_async_arrow_tail(&mut self, start: Span) -> Expr {
+        if self.tok.kind == TokenKind::Identifier {
+            let t = self.tok.clone();
+            self.advance();
+            if self.tok.kind == TokenKind::Arrow {
+                return self.parse_arrow_body(
+                    vec![Pattern::Identifier(
+                        t.value.into_boxed_str(),
+                        Span {
+                            start: t.span.start,
+                            end: t.span.end,
+                        },
+                        None,
+                    )],
+                    None,
+                    true,
+                    start,
+                );
+            }
+        } else if self.tok.kind == TokenKind::LParen {
+            self.advance();
+            let mut params = Vec::new();
+            let mut rest_param = None;
+            if self.tok.kind != TokenKind::RParen {
+                loop {
+                    if self.tok.kind == TokenKind::Ellipsis {
+                        self.advance();
+                        if self.tok.kind == TokenKind::Identifier {
+                            let t = self.tok.clone();
+                            self.advance();
+                            rest_param = Some(t.value.into_boxed_str());
+                        } else {
+                            self.error("Expected parameter name after ...".into());
+                        }
+                        break;
+                    }
+                    let pat = if matches!(self.tok.kind, TokenKind::LBrace | TokenKind::LBracket) {
+                        self.parse_binding_pattern()
+                    } else if self.tok.kind == TokenKind::Identifier {
+                        let t = self.tok.clone();
+                        self.advance();
+                        Pattern::Identifier(
+                            t.value.into_boxed_str(),
+                            Span {
+                                start: t.span.start,
+                                end: t.span.end,
+                            },
+                            None,
+                        )
+                    } else {
+                        self.error("Expected async arrow parameter".into());
+                        break;
+                    };
+                    let pat = if self.tok.kind == TokenKind::EqAssign {
+                        self.advance();
+                        let default = self.parse_expr(0);
+                        Pattern::Default(Box::new(pat), Box::new(default))
+                    } else {
+                        pat
+                    };
+                    params.push(pat);
+                    if self.tok.kind == TokenKind::Comma {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.expect(TokenKind::RParen);
+            } else {
+                self.advance();
+            }
+            if self.tok.kind == TokenKind::Arrow {
+                return self.parse_arrow_body(params, rest_param, true, start);
+            }
+        }
+        self.error("Expected async arrow parameters".into());
+        Expr::Undefined(start)
+    }
+
     /// Parse an arrow function body after the `=>`.
     /// `params` is the list of parameter names already parsed.
     fn parse_arrow_body(
         &mut self,
         params: Vec<Pattern>,
         rest_param: Option<Box<str>>,
+        is_async: bool,
         start: Span,
     ) -> Expr {
         self.expect(TokenKind::Arrow);
@@ -3110,7 +3208,7 @@ impl Parser {
                 rest_param,
                 body,
                 is_generator: false,
-                is_async: false,
+                is_async,
                 is_arrow: true,
                 // Block bodies can carry a directive prologue; expression
                 // bodies (Stmt::Expr, non-block) never do.

@@ -3333,6 +3333,22 @@ impl Vm {
             for slot in &frame.lexical_slots {
                 gc.push_root(slot as *const Value as *mut u64);
             }
+            // The receiver and the object under construction exist only in
+            // the frame while a call executes; the operand stack no longer
+            // holds them. Without these roots, a GC during the body leaves
+            // `this` pointing at a from-space copy.
+            gc.push_root(&frame.this as *const Value as *mut u64);
+            gc.push_root(&frame.constructed_object as *const Value as *mut u64);
+            // Func and private-name-id arrays are heap objects too. func_ptr
+            // is the only reference to an immediately-invoked function while
+            // its frame runs; private_name_ids is the only reference to the
+            // class's private-name array for a ctor frame.
+            if !frame.func_ptr.is_null() {
+                gc.push_root(&frame.func_ptr as *const *mut u8 as *mut u64);
+            }
+            if !frame.private_name_ids.is_null() {
+                gc.push_root(&frame.private_name_ids as *const *mut u8 as *mut u64);
+            }
             // Root the frame's captured environment pointer (a valid GC heap pointer)
             if !frame.env.is_null() {
                 gc.push_root(&frame.env as *const *mut u8 as *mut u64);
@@ -3355,6 +3371,48 @@ impl Vm {
             }
             for val in &g.stack {
                 gc.push_root(val as *const Value as *mut u64);
+            }
+            // Suspended-generator state is not reachable from an active
+            // frame. Root the receiver, captured environment, banked try
+            // frames and any abrupt completion kept across suspension.
+            gc.push_root(&g.this as *const Value as *mut u64);
+            if !g.env.is_null() {
+                gc.push_root(&g.env as *const *mut u8 as *mut u64);
+            }
+            for tf in &g.try_frames {
+                if let Some(ref val) = tf.saved_exception {
+                    gc.push_root(val as *const Value as *mut u64);
+                }
+            }
+            match &g.abrupt {
+                Some(GeneratorResume::Next(v))
+                | Some(GeneratorResume::Throw(v))
+                | Some(GeneratorResume::Return(v)) => {
+                    gc.push_root(v as *const Value as *mut u64);
+                }
+                None => {}
+            }
+        }
+        // Queued microtasks run after the synchronous task, but allocations
+        // during that task can collect before the queue is drained. The
+        // callback, its arguments, and the promise-constructor continuation
+        // are roots in their own right.
+        for task in &self.microtask_queue {
+            gc.push_root(&task.callback as *const Value as *mut u64);
+            for arg in &task.args {
+                gc.push_root(arg as *const Value as *mut u64);
+            }
+            if let Some(ref ppc) = task.promise_ctor {
+                gc.push_root(&ppc.promise as *const Value as *mut u64);
+                gc.push_root(&ppc.resolve_handle as *const Value as *mut u64);
+                gc.push_root(&ppc.reject_handle as *const Value as *mut u64);
+            }
+        }
+        // The outer promise of an async function is held only by the task
+        // table until the function settles.
+        for task in &self.async_tasks {
+            if !task.promise.is_null() {
+                gc.push_root(&task.promise as *const *mut u8 as *mut u64);
             }
         }
         // Root builtin prototype objects that are stored as Vm fields

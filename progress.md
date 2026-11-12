@@ -24,7 +24,28 @@ Landed in this step:
 - Published the production roadmap and a truthful production-status banner in
   the README.
 
-Next: GC-root completion with regression tests, then grow-alias repair, then
+### Phase 0 — GC roots completed (2026-11-13)
+
+Fixed the P0 root gaps that made ordinary method calls unsafe under collection.
+`Vm::register_roots` now roots every piece of state that can exist only outside
+the operand stack:
+
+- `Frame.this`, `Frame.constructed_object`, `Frame.func_ptr`, and
+  `Frame.private_name_ids` (the receiver, `new` object, callee Func, and private
+  name table during a call);
+- suspended-generator `this`, captured `env`, banked `try_frames` saved
+  exceptions, and `abrupt` completion values;
+- queued `Microtask` callbacks/arguments and their `PendingPromiseCtor` values;
+- `AsyncTask.promise` (the outer promise of an async function).
+
+Six regression tests were added to `crates/rune_embed/tests/integration_test.rs`.
+They run in a 1 MiB semispace with 80k allocations per test to force several
+collections. Proven pre-fix: `test_gc_frame_this_survives_collection` and
+`test_gc_constructed_object_survives_collection` fail, then the binary SIGSEGVs;
+post-fix all six pass. The suite filter also runs under `--jit-stats` with zero
+JIT entries for the allocation loops, so these are GC failures, not codegen.
+
+Next: grow-alias repair (self-moving `JSObject::grow` / `RuneArray::grow`), then
 JIT opt-in and the array continuation stack.
 
 

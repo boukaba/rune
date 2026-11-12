@@ -12546,3 +12546,130 @@ fn test_jit_float_literal_accumulator() {
         "float accumulator must not bail (J2 goal)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Production-readiness gate: GC roots for state that lives only in a frame or
+// a suspended generator. These run with a 1 MiB semispace and enough
+// allocation to force several collections while the value is live.
+// ---------------------------------------------------------------------------
+
+const GC_STRESS_ALLOC: &str = r#"
+    for (var i = 0; i < 80000; i++) { var t = { n: i, s: "z" + i }; }
+"#;
+
+#[test]
+fn test_gc_frame_this_survives_collection() {
+    let mut ctx = Context::new_small();
+    let src = format!(
+        r#"
+        var o = {{ v: 7, m: function () {{
+            {}
+            return this.v;
+        }} }};
+        o.m();
+        "#,
+        GC_STRESS_ALLOC
+    );
+    let r = ctx.eval(&src).unwrap();
+    assert_eq!(r.as_smi(), Some(7), "method receiver must survive GC");
+}
+
+#[test]
+fn test_gc_constructed_object_survives_collection() {
+    let mut ctx = Context::new_small();
+    let src = format!(
+        r#"
+        function C() {{
+            {}
+            this.v = 42;
+        }}
+        var c = new C();
+        c.v;
+        "#,
+        GC_STRESS_ALLOC
+    );
+    let r = ctx.eval(&src).unwrap();
+    assert_eq!(r.as_smi(), Some(42), "new-object must survive GC");
+}
+
+#[test]
+fn test_gc_private_name_table_survives_collection() {
+    let mut ctx = Context::new_small();
+    let src = format!(
+        r#"
+        class C {{
+            #x = 41;
+            m() {{
+                {}
+                return this.#x + 1;
+            }}
+        }}
+        new C().m();
+        "#,
+        GC_STRESS_ALLOC
+    );
+    let r = ctx.eval(&src).unwrap();
+    assert_eq!(r.as_smi(), Some(42), "private-name table must survive GC");
+}
+
+#[test]
+fn test_gc_generator_this_survives_collection() {
+    let mut ctx = Context::new_small();
+    let src = format!(
+        r#"
+        var o = {{ v: 99, g: function* () {{
+            yield 1;
+            {}
+            return this.v;
+        }} }};
+        var it = o.g();
+        it.next();
+        {}
+        it.next().value;
+        "#,
+        GC_STRESS_ALLOC, GC_STRESS_ALLOC
+    );
+    let r = ctx.eval(&src).unwrap();
+    assert_eq!(r.as_smi(), Some(99), "suspended generator receiver must survive GC");
+}
+
+#[test]
+fn test_gc_generator_env_survives_collection() {
+    let mut ctx = Context::new_small();
+    let src = format!(
+        r#"
+        function make() {{
+            var x = 41;
+            return (function* () {{
+                yield 1;
+                {}
+                return x + 1;
+            }})();
+        }}
+        var it = make();
+        it.next();
+        {}
+        it.next().value;
+        "#,
+        GC_STRESS_ALLOC, GC_STRESS_ALLOC
+    );
+    let r = ctx.eval(&src).unwrap();
+    assert_eq!(r.as_smi(), Some(42), "suspended generator env must survive GC");
+}
+
+#[test]
+fn test_gc_microtask_callback_survives_collection() {
+    let mut ctx = Context::new_small();
+    let src = format!(
+        r#"
+        var out = 0;
+        Promise.resolve(7).then(function (v) {{ out = v + 1; }});
+        {}
+        0;
+        "#,
+        GC_STRESS_ALLOC
+    );
+    ctx.eval(&src).unwrap();
+    let r = ctx.eval("out").unwrap();
+    assert_eq!(r.as_smi(), Some(8), "queued microtask must survive GC");
+}

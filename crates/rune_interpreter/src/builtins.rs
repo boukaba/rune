@@ -17481,6 +17481,9 @@ pub fn promise_static_all(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: 
     };
     if len == 0 {
         let arr = RuneArray::allocate(gc, &[]);
+        if let Some(proto) = vm.array_prototype.heap_ptr() {
+            unsafe { RuneArray::set_prototype(arr, proto) };
+        }
         unsafe {
             Promise::set_state(result_ptr, PROMISE_FULFILLED);
             Promise::set_result(result_ptr, Value::from_heap_ptr(arr as *mut u8));
@@ -17488,6 +17491,9 @@ pub fn promise_static_all(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: 
         return result_val;
     }
     let mut arr_ptr = RuneArray::allocate(gc, &[]);
+    if let Some(proto) = vm.array_prototype.heap_ptr() {
+        unsafe { RuneArray::set_prototype(arr_ptr, proto) };
+    }
     let mut remaining: u32 = len;
     for i in 0..len {
         let item = crate::vm::array_like_index(iterable, i).unwrap_or(Value::undefined());

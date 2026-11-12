@@ -13235,3 +13235,86 @@ fn test_async_function_promise_resolves_after_await() {
         "async promise must settle"
     );
 }
+
+#[test]
+fn test_try_finally_return_runs_finally() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var log = [];
+            function f() { try { log.push("try"); return 1; } finally { log.push("fin"); } }
+            var value = f();
+            log.join(",") + "|" + value;
+        "#,
+        )
+        .unwrap();
+    assert_eq!(eval_str(&mut ctx, "log.join(',') + '|' + f()"), "try,fin|1");
+    let _ = r;
+}
+
+#[test]
+fn test_try_finally_nested_and_override() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            function f() { try { try { return 1; } finally { } } finally { } }
+            f();
+        "#,
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(1));
+    let r2 = ctx
+        .eval("function g(){ try { return 1; } finally { return 2; } } g();")
+        .unwrap();
+    assert_eq!(r2.as_smi(), Some(2), "return in finally overrides");
+}
+
+#[test]
+fn test_async_finally_after_await_return() {
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+        var out = "";
+        async function f() { try { await 1; return 1; } finally { out += "fin"; } }
+        f();
+        "";
+        "#,
+    )
+    .unwrap();
+    assert_eq!(eval_str(&mut ctx, "out"), "fin", "async finally must run");
+}
+
+#[test]
+fn test_promise_all_fulfills_with_array() {
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+        var out = "";
+        Promise.all([Promise.resolve(1), 2, Promise.resolve(3)]).then(function (v) {
+            out = v.join(",") + "|" + (v instanceof Array);
+        });
+        "";
+        "#,
+    )
+    .unwrap();
+    assert_eq!(eval_str(&mut ctx, "out"), "1,2,3|true");
+}
+
+#[test]
+fn test_promise_all_empty_and_rejected() {
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+        var empty = "";
+        var rejected = "";
+        Promise.all([]).then(function (v) { empty = v.length; });
+        Promise.all([Promise.reject(new Error("nope"))]).catch(function (e) { rejected = e.message; });
+        "";
+        "#,
+    )
+    .unwrap();
+    assert_eq!(ctx.eval("empty").unwrap().as_smi(), Some(0));
+    assert_eq!(eval_str(&mut ctx, "rejected"), "nope");
+}

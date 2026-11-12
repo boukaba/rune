@@ -143,12 +143,27 @@ machines; those remain single-flight for now.
   loop, call arguments across await, rejection into catch, and promise
   settlement. Integration suite: **739 passed, 0 failed, 3 ignored**.
 
-Known gaps found while testing and deferred: `finally` after `return` (plain
-and async) is still skipped; `Promise.all` does not settle; `async () =>` is a
-parse error. These are next, with a dedicated completion-semantics slice for
-`finally`.
+### Phase 0 — finally completion and Promise.all (2026-11-13)
 
-Next: `finally` completion (return/throw) and ESM live bindings.
+`return` now runs enclosing `finally` blocks. The VM stores a pending
+`(value, return_pc)` on the try frame, jumps to the finally block, and after
+`FinallyDone` either runs an outer finalizer or restores the value and
+re-executes the original `Return` instruction. The mechanism handles nested
+finalizers, a `return` inside a finalizer overriding the pending completion,
+and a throw inside a finalizer propagating to outer handlers; the
+`in_finally` marker prevents a throw/return from re-entering the same block.
+Async functions inherit the fix because their await frames use the same
+try-stack completion path.
+
+`Promise.all` now gives its result array `Array.prototype` (it previously
+returned a prototype-less array, so `v.join`, `v.map`, and `instanceof Array`
+failed inside `.then`). Empty and rejected-all cases are covered.
+
+Integration suite: **744 passed, 0 failed, 3 ignored**. Remaining known gaps:
+`async () =>` parse, ESM live bindings, function hoisting, arrow lexical
+`this`, and captured-variable update expressions.
+
+Next: ESM live bindings, then hoisting/arrow-this/captured-update semantics.
 
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,

@@ -143,7 +143,14 @@ pub struct TryFrame {
     stack_depth: usize,
     frame_depth: usize,
     saved_exception: Option<Value>,
+    /// A return completion waiting for this finally block: the value and the
+    /// PC of the Return instruction to resume at after the finally completes.
+    saved_return: Option<(Value, usize)>,
     in_catch: bool,
+    /// True while this finally block is executing. A return/throw raised by
+    /// the finally overrides the pending completion and must not re-enter the
+    /// same finally block.
+    in_finally: bool,
 }
 
 /// JIT bailout state, written by the bailout helper, read by vm.rs call site.
@@ -3147,12 +3154,25 @@ impl Vm {
                 let Some(idx) = handler_idx else {
                     break;
                 };
-                let (catch_pc, finally_pc, stack_depth, in_catch) = {
+                let (catch_pc, finally_pc, stack_depth, in_catch, in_finally) = {
                     let tf = &self.try_stack[idx];
-                    (tf.catch_pc, tf.finally_pc, tf.stack_depth, tf.in_catch)
+                    (
+                        tf.catch_pc,
+                        tf.finally_pc,
+                        tf.stack_depth,
+                        tf.in_catch,
+                        tf.in_finally,
+                    )
                 };
+                // A throw raised inside this finally must not re-enter it:
+                // discard the frame and let an outer handler take the throw.
+                if in_finally {
+                    self.try_stack.remove(idx);
+                    continue;
+                }
                 if in_catch && finally_pc != 0 {
                     self.try_stack[idx].saved_exception = Some(val);
+                    self.try_stack[idx].in_finally = true;
                     self.stack.truncate(stack_depth);
                     let fi = self.frames.len() - 1;
                     self.frames[fi].pc = finally_pc;
@@ -3179,6 +3199,7 @@ impl Vm {
                 }
                 if finally_pc != 0 {
                     self.try_stack[idx].saved_exception = Some(val);
+                    self.try_stack[idx].in_finally = true;
                     self.stack.truncate(stack_depth);
                     let fi = self.frames.len() - 1;
                     self.frames[fi].pc = finally_pc;
@@ -8126,7 +8147,9 @@ impl Vm {
                         stack_depth: self.stack.len(),
                         frame_depth: self.frames.len(),
                         saved_exception: None,
+                        saved_return: None,
                         in_catch: false,
+                        in_finally: false,
                     });
                     self.frames[fi].pc = pc + 1;
                 }
@@ -8140,9 +8163,25 @@ impl Vm {
                     if let Some(ex) = tf.saved_exception {
                         self.push(ex);
                         self.frames[fi].pc = rethrow_pc;
-                    } else {
-                        self.frames[fi].pc = pc + 1;
+                        continue;
                     }
+                    if let Some((val, return_pc)) = tf.saved_return {
+                        // Run any enclosing finally before actually returning.
+                        if let Some(pos) = self.try_stack.iter().rposition(|outer| {
+                            outer.frame_depth == self.frames.len() && outer.finally_pc != 0
+                        }) {
+                            let outer = &mut self.try_stack[pos];
+                            outer.saved_return = Some((val, return_pc));
+                            outer.saved_exception = None;
+                            outer.in_finally = true;
+                            self.frames[fi].pc = outer.finally_pc;
+                        } else {
+                            self.push(val);
+                            self.frames[fi].pc = return_pc;
+                        }
+                        continue;
+                    }
+                    self.frames[fi].pc = pc + 1;
                 }
 
                 // ---- Functions ----
@@ -9846,6 +9885,33 @@ impl Vm {
                     continue;
                 }
                 Opcode::Return => {
+                    // Completion over a finally: stash the return value and
+                    // run the finally block, then re-execute this Return after
+                    // FinallyDone restores the value and PC.
+                    //
+                    // If the Return is raised *inside* a finally, the current
+                    // finally frame is abandoned (the new return overrides the
+                    // pending completion); outer finalizers still run.
+                    while let Some(tf) = self.try_stack.last() {
+                        if tf.frame_depth == self.frames.len() && tf.in_finally {
+                            self.try_stack.pop();
+                        } else {
+                            break;
+                        }
+                    }
+                    if let Some(pos) = self
+                        .try_stack
+                        .iter()
+                        .rposition(|tf| tf.frame_depth == self.frames.len() && tf.finally_pc != 0)
+                    {
+                        let val = self.pop();
+                        let tf = &mut self.try_stack[pos];
+                        tf.saved_return = Some((val, pc));
+                        tf.saved_exception = None;
+                        tf.in_finally = true;
+                        self.frames[fi].pc = tf.finally_pc;
+                        continue;
+                    }
                     debug_assert!(
                         self.stack.len() > self.frames.last().unwrap().stack_base,
                         "Return: stack underflow (len={}, base={})",

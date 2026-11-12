@@ -125,8 +125,30 @@ Integration suite: **734 passed, 0 failed, 3 ignored** (737 total). The same
 stack pattern is the template for sort/from/length/species/promise/async
 machines; those remain single-flight for now.
 
-Next: async/await continuation (currently only the pre-await prefix runs) and
-ESM live bindings.
+### Phase 0 — async/await continuations (2026-11-13)
+
+`await` now resumes instead of stopping at the prefix.
+
+- The await bridge is a `.then` callback carrying a `PendingPromiseCtor`; the
+  Return handler's promise-ctor branch now detects `pending_async_gen` and
+  restores the generator frame before completing the internal chained promise.
+- Operand-stack values below the awaited expression and the generator's
+  try/catch frames are saved at `Await` and restored on resume. Absolute stack
+  and frame depths are rebased (microtask resume happens at a different depth
+  than the original call). Try frames belonging to outer callers are left with
+  the caller.
+- A rejected await resumes with `PendingAsyncGen.is_throw` and injects the
+  reason through `handle_throw`, so generator `catch` runs.
+- New end-to-end tests assert post-await values, chained awaits, awaits in a
+  loop, call arguments across await, rejection into catch, and promise
+  settlement. Integration suite: **739 passed, 0 failed, 3 ignored**.
+
+Known gaps found while testing and deferred: `finally` after `return` (plain
+and async) is still skipped; `Promise.all` does not settle; `async () =>` is a
+parse error. These are next, with a dedicated completion-semantics slice for
+`finally`.
+
+Next: `finally` completion (return/throw) and ESM live bindings.
 
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,

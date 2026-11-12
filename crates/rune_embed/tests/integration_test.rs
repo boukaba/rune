@@ -13123,3 +13123,115 @@ fn test_nested_map_outer_state_survives_gc() {
         "[11,12]"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Production-readiness gate: async/await continuations. The old tests only
+// asserted the pre-await prefix; these assert that execution resumes, values
+// flow, and the returned promise settles.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_async_await_resumes_and_resolves() {
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+        var out = 0;
+        async function f() { var x = await 3; out = x + 4; return out; }
+        f();
+        0;
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        ctx.eval("out").unwrap().as_smi(),
+        Some(7),
+        "await must resume"
+    );
+}
+
+#[test]
+fn test_async_await_multiple_and_loop() {
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+        var out = 0;
+        async function f() {
+            var s = 0;
+            for (var i = 0; i < 3; i++) { s += await Promise.resolve(i); }
+            var a = await 10;
+            var b = await 20;
+            out = s + a + b;
+        }
+        f();
+        0;
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        ctx.eval("out").unwrap().as_smi(),
+        Some(33),
+        "await loop + chained awaits"
+    );
+}
+
+#[test]
+fn test_async_await_preserves_call_arguments() {
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+        var out = 0;
+        function add(a, b) { return a + b; }
+        async function f() { out = add(await 1, 2); }
+        f();
+        0;
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        ctx.eval("out").unwrap().as_smi(),
+        Some(3),
+        "operands across await must survive"
+    );
+}
+
+#[test]
+fn test_async_await_rejection_propagates() {
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+        var out = "";
+        async function f() {
+            try { await Promise.reject(new Error("bad")); }
+            catch (e) { out = e.message; }
+            return out;
+        }
+        f();
+        "";
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        eval_str(&mut ctx, "out"),
+        "bad",
+        "rejected await must throw into catch"
+    );
+}
+
+#[test]
+fn test_async_function_promise_resolves_after_await() {
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+        var out = 0;
+        async function f() { await 1; return 9; }
+        f().then(function (v) { out = v; });
+        0;
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        ctx.eval("out").unwrap().as_smi(),
+        Some(9),
+        "async promise must settle"
+    );
+}

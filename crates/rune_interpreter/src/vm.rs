@@ -3699,6 +3699,90 @@ impl Vm {
         self.pending_array_op = self.pending_array_ops.pop();
     }
 
+    /// Restore the suspended async-function generator frame after its await
+    /// bridge (`async_continue`/`async_reject`) has run. The awaited value is
+    /// pushed as the result of the Await expression; a rejection is injected
+    /// through the normal throw router so generator try/catch runs.
+    fn resume_async_frame(&mut self, gc: &mut SemiSpace, pag: PendingAsyncGen) -> Option<Exit> {
+        let (
+            locals,
+            lexical_slots,
+            lexical_tdz,
+            lexical_const,
+            scope_boundaries,
+            pc,
+            prog,
+            this,
+            env,
+            started,
+            old_base,
+            saved_stack,
+            saved_try,
+        ) = {
+            let g = &self.generators[pag.gen_id];
+            (
+                g.locals.clone(),
+                g.lexical_slots.clone(),
+                g.lexical_tdz.clone(),
+                g.lexical_const.clone(),
+                g.scope_boundaries.clone(),
+                g.pc,
+                g.prog,
+                g.this,
+                g.env,
+                g.started,
+                g.stack_base_saved,
+                g.stack.clone(),
+                g.try_frames.clone(),
+            )
+        };
+        // Restore the generator's own operands on top of the current stack.
+        // The resume may happen at a different absolute depth (microtask vs
+        // nested call), so rebase saved stack/try-frame depths.
+        let new_base = self.stack.len();
+        let stack_delta = new_base as isize - old_base as isize;
+        let frame_base = new_base;
+        for v in saved_stack {
+            self.push(v);
+        }
+        let new_frame_depth = self.frames.len() + 1;
+        let old_frame_depth = saved_try.first().map(|t| t.frame_depth);
+        if let Some(old) = old_frame_depth {
+            let delta = new_frame_depth as isize - old as isize;
+            for mut tf in saved_try {
+                tf.frame_depth = (tf.frame_depth as isize + delta).max(1) as usize;
+                tf.stack_depth = (tf.stack_depth as isize + stack_delta).max(0) as usize;
+                self.try_stack.push(tf);
+            }
+        }
+        self.frames.push(Frame {
+            locals,
+            lexical_slots,
+            lexical_tdz,
+            lexical_const,
+            scope_boundaries,
+            passed_argc: 0,
+            pc,
+            stack_base: frame_base,
+            prog,
+            generator_id: Some(pag.gen_id),
+            this,
+            is_constructor_call: false,
+            constructed_object: Value::undefined(),
+            env,
+            func_ptr: std::ptr::null_mut(),
+            private_name_ids: std::ptr::null_mut(),
+        });
+        if pag.is_throw {
+            self.handle_throw(gc, pag.arg)
+        } else {
+            if started {
+                self.push(pag.arg);
+            }
+            None
+        }
+    }
+
     /// Push a frame for a JS function call (used by array method callbacks).
     /// Reads the function program from `callee` (must be TAG_FUNC) and sets
     /// up locals with the given args. Updates `source_frame_depth` in the
@@ -10935,6 +11019,17 @@ impl Vm {
                                         }
                                     }
                                 }
+                                // The async-function await bridge is a .then
+                                // callback whose PendingPromiseCtor is this
+                                // internal chained promise. Resume the
+                                // generator before the usual result push/return.
+                                if let Some(pag) = self.pending_async_gen.take() {
+                                    self.stack.truncate(callee_base);
+                                    if let Some(exit) = self.resume_async_frame(gc, pag) {
+                                        return exit;
+                                    }
+                                    continue;
+                                }
                                 self.stack.truncate(callee_base);
                                 self.push(ppc.promise);
                                 if self.frames.is_empty() {
@@ -11286,27 +11381,8 @@ impl Vm {
                     // Check if this return completes an async generator resume bridge.
                     if let Some(pag) = self.pending_async_gen.take() {
                         if self.frames.is_empty() {
-                            let g = &self.generators[pag.gen_id];
-                            self.frames.push(Frame {
-                                locals: g.locals.clone(),
-                                lexical_slots: g.lexical_slots.clone(),
-                                lexical_tdz: g.lexical_tdz.clone(),
-                                lexical_const: g.lexical_const.clone(),
-                                scope_boundaries: g.scope_boundaries.clone(),
-                                passed_argc: 0,
-                                pc: g.pc,
-                                stack_base: self.stack.len(),
-                                prog: g.prog,
-                                generator_id: Some(pag.gen_id),
-                                this: g.this,
-                                is_constructor_call: false,
-                                constructed_object: Value::undefined(),
-                                env: g.env,
-                                func_ptr: std::ptr::null_mut(),
-                                private_name_ids: std::ptr::null_mut(),
-                            });
-                            if g.started {
-                                self.push(pag.arg);
+                            if let Some(exit) = self.resume_async_frame(gc, pag) {
+                                return exit;
                             }
                             continue;
                         }
@@ -11454,6 +11530,25 @@ impl Vm {
                         g.started = true;
                         g.this = self.frames[fi].this;
                         g.env = self.frames[fi].env;
+                        // Preserve operands below the awaited expression and
+                        // the active try/catch state across the suspension.
+                        let base = self.frames[fi].stack_base;
+                        g.stack_base_saved = base;
+                        g.stack = self.stack[base..].to_vec();
+                        // Save only try frames belonging to this generator;
+                        // outer caller frames must stay with the caller.
+                        let gen_depth = self.frames.len();
+                        let mut saved_try = Vec::new();
+                        let mut kept_try = Vec::new();
+                        for tf in std::mem::take(&mut self.try_stack) {
+                            if tf.frame_depth >= gen_depth {
+                                saved_try.push(tf);
+                            } else {
+                                kept_try.push(tf);
+                            }
+                        }
+                        g.try_frames = saved_try;
+                        self.try_stack = kept_try;
                         // Create bridge functions for resume/reject
                         let continue_handle = self.find_builtin_handle("async_continue");
                         let reject_handle = self.find_builtin_handle("async_reject");

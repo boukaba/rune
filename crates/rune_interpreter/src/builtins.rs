@@ -14783,7 +14783,7 @@ fn array_index_search(
     match crate::vm::array_search_step(vm, gc, &mut op, None) {
         crate::vm::SearchStepOut::Done(v) => v,
         crate::vm::SearchStepOut::Wait => {
-            vm.pending_array_op = Some(op);
+            vm.push_array_op(op);
             vm.rebase_pending_depths();
             Value::undefined()
         }
@@ -14944,7 +14944,7 @@ pub fn array_for_each(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
     let Some(first) = first_existing_index(this, length) else {
         return Value::undefined();
     };
-    vm.pending_array_op = Some(crate::vm::ArrayOpState {
+    vm.push_array_op(crate::vm::ArrayOpState {
         kind: crate::vm::ArrayOpKind::ForEach,
         source: source_ptr,
         result: std::ptr::null_mut(),
@@ -14977,7 +14977,7 @@ pub fn array_for_each(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
             vm.rebase_pending_depths();
         }
         crate::vm::ArrayElemOut::SyncErr(e) => {
-            vm.pending_array_op = None;
+            vm.finish_array_op();
             vm.set_pending_exception(e);
         }
     }
@@ -15036,7 +15036,7 @@ pub fn array_filter(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mu
     let Some(first) = first_existing_index(this, length) else {
         return fallback.unwrap_or(Value::from_heap_ptr(result_arr as *mut u8));
     };
-    vm.pending_array_op = Some(crate::vm::ArrayOpState {
+    vm.push_array_op(crate::vm::ArrayOpState {
         kind: crate::vm::ArrayOpKind::Filter,
         source: source_ptr,
         result: result_ptr,
@@ -15069,7 +15069,7 @@ pub fn array_filter(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mu
             vm.rebase_pending_depths();
         }
         crate::vm::ArrayElemOut::SyncErr(e) => {
-            vm.pending_array_op = None;
+            vm.finish_array_op();
             vm.set_pending_exception(e);
         }
     }
@@ -15139,7 +15139,7 @@ pub fn array_map(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut V
         unsafe { RuneArray::set_length(result_arr, length) };
         return Value::from_heap_ptr(result_arr as *mut u8);
     };
-    vm.pending_array_op = Some(crate::vm::ArrayOpState {
+    vm.push_array_op(crate::vm::ArrayOpState {
         kind: crate::vm::ArrayOpKind::Map,
         source: source_ptr,
         result: result_ptr,
@@ -15172,7 +15172,7 @@ pub fn array_map(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut V
             vm.rebase_pending_depths();
         }
         crate::vm::ArrayElemOut::SyncErr(e) => {
-            vm.pending_array_op = None;
+            vm.finish_array_op();
             vm.set_pending_exception(e);
         }
     }
@@ -15194,7 +15194,7 @@ pub fn array_reduce(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
         let Some(first) = first_existing_index(this, length) else {
             return initial;
         };
-        vm.pending_array_op = Some(crate::vm::ArrayOpState {
+        vm.push_array_op(crate::vm::ArrayOpState {
             kind: crate::vm::ArrayOpKind::Reduce,
             source: source_ptr,
             result: std::ptr::null_mut(),
@@ -15226,7 +15226,7 @@ pub fn array_reduce(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
                 vm.rebase_pending_depths();
             }
             crate::vm::ArrayElemOut::SyncErr(e) => {
-                vm.pending_array_op = None;
+                vm.finish_array_op();
                 vm.set_pending_exception(e);
             }
         }
@@ -15246,7 +15246,7 @@ pub fn array_reduce(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
         return Value::undefined();
     };
     let next = next_existing_index(this, first + 1, length);
-    vm.pending_array_op = Some(crate::vm::ArrayOpState {
+    vm.push_array_op(crate::vm::ArrayOpState {
         kind: crate::vm::ArrayOpKind::Reduce,
         source: source_ptr,
         result: std::ptr::null_mut(),
@@ -15291,7 +15291,7 @@ pub fn array_reduce(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
                 }
                 // Single present element and a sync accumulator: done.
                 None => {
-                    vm.pending_array_op = None;
+                    vm.finish_array_op();
                     return acc;
                 }
             }
@@ -15304,7 +15304,7 @@ pub fn array_reduce(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
             vm.rebase_pending_depths();
         }
         crate::vm::ArrayElemOut::SyncErr(e) => {
-            vm.pending_array_op = None;
+            vm.finish_array_op();
             vm.set_pending_exception(e);
         }
     }
@@ -15330,7 +15330,7 @@ pub fn array_reduce_right(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
         let Some(last) = last_existing_index(this, length) else {
             return initial;
         };
-        vm.pending_array_op = Some(crate::vm::ArrayOpState {
+        vm.push_array_op(crate::vm::ArrayOpState {
             kind: crate::vm::ArrayOpKind::ReduceRight,
             source: source_ptr,
             result: std::ptr::null_mut(),
@@ -15361,7 +15361,7 @@ pub fn array_reduce_right(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
                 vm.rebase_pending_depths();
             }
             crate::vm::ArrayElemOut::SyncErr(e) => {
-                vm.pending_array_op = None;
+                vm.finish_array_op();
                 vm.set_pending_exception(e);
             }
         }
@@ -15379,7 +15379,7 @@ pub fn array_reduce_right(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
         return Value::undefined();
     };
     let prev = prev_existing_index(this, last);
-    vm.pending_array_op = Some(crate::vm::ArrayOpState {
+    vm.push_array_op(crate::vm::ArrayOpState {
         kind: crate::vm::ArrayOpKind::ReduceRight,
         source: source_ptr,
         result: std::ptr::null_mut(),
@@ -15420,7 +15420,7 @@ pub fn array_reduce_right(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
                     }
                 },
                 None => {
-                    vm.pending_array_op = None;
+                    vm.finish_array_op();
                     return acc;
                 }
             }
@@ -15433,7 +15433,7 @@ pub fn array_reduce_right(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
             vm.rebase_pending_depths();
         }
         crate::vm::ArrayElemOut::SyncErr(e) => {
-            vm.pending_array_op = None;
+            vm.finish_array_op();
             vm.set_pending_exception(e);
         }
     }
@@ -15455,7 +15455,7 @@ pub fn array_find_last(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
     let Some(last) = last_existing_index(this, length) else {
         return Value::undefined();
     };
-    vm.pending_array_op = Some(crate::vm::ArrayOpState {
+    vm.push_array_op(crate::vm::ArrayOpState {
         kind: crate::vm::ArrayOpKind::FindLast,
         source: source_ptr,
         result: std::ptr::null_mut(),
@@ -15486,7 +15486,7 @@ pub fn array_find_last(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
             vm.rebase_pending_depths();
         }
         crate::vm::ArrayElemOut::SyncErr(e) => {
-            vm.pending_array_op = None;
+            vm.finish_array_op();
             vm.set_pending_exception(e);
         }
     }
@@ -15513,7 +15513,7 @@ pub fn array_find_last_index(
     let Some(last) = last_existing_index(this, length) else {
         return Value::smi(-1);
     };
-    vm.pending_array_op = Some(crate::vm::ArrayOpState {
+    vm.push_array_op(crate::vm::ArrayOpState {
         kind: crate::vm::ArrayOpKind::FindLastIndex,
         source: source_ptr,
         result: std::ptr::null_mut(),
@@ -15544,7 +15544,7 @@ pub fn array_find_last_index(
             vm.rebase_pending_depths();
         }
         crate::vm::ArrayElemOut::SyncErr(e) => {
-            vm.pending_array_op = None;
+            vm.finish_array_op();
             vm.set_pending_exception(e);
         }
     }
@@ -15561,7 +15561,7 @@ pub fn array_find(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
     let Some(first) = first_existing_index(this, length) else {
         return Value::undefined();
     };
-    vm.pending_array_op = Some(crate::vm::ArrayOpState {
+    vm.push_array_op(crate::vm::ArrayOpState {
         kind: crate::vm::ArrayOpKind::Find,
         source: source_ptr,
         result: std::ptr::null_mut(),
@@ -15594,7 +15594,7 @@ pub fn array_find(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
             vm.rebase_pending_depths();
         }
         crate::vm::ArrayElemOut::SyncErr(e) => {
-            vm.pending_array_op = None;
+            vm.finish_array_op();
             vm.set_pending_exception(e);
         }
     }
@@ -15616,7 +15616,7 @@ pub fn array_find_index(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
     let Some(first) = first_existing_index(this, length) else {
         return Value::smi(-1);
     };
-    vm.pending_array_op = Some(crate::vm::ArrayOpState {
+    vm.push_array_op(crate::vm::ArrayOpState {
         kind: crate::vm::ArrayOpKind::FindIndex,
         source: source_ptr,
         result: std::ptr::null_mut(),
@@ -15649,7 +15649,7 @@ pub fn array_find_index(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
             vm.rebase_pending_depths();
         }
         crate::vm::ArrayElemOut::SyncErr(e) => {
-            vm.pending_array_op = None;
+            vm.finish_array_op();
             vm.set_pending_exception(e);
         }
     }
@@ -16961,7 +16961,7 @@ pub fn array_flat_map(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &
     let Some(first) = first_existing_index(this, length) else {
         return fallback.unwrap_or(Value::from_heap_ptr(result_arr as *mut u8));
     };
-    vm.pending_array_op = Some(crate::vm::ArrayOpState {
+    vm.push_array_op(crate::vm::ArrayOpState {
         kind: crate::vm::ArrayOpKind::FlatMap,
         source: source_ptr,
         result: result_ptr,
@@ -16994,7 +16994,7 @@ pub fn array_flat_map(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &
             vm.rebase_pending_depths();
         }
         crate::vm::ArrayElemOut::SyncErr(e) => {
-            vm.pending_array_op = None;
+            vm.finish_array_op();
             vm.set_pending_exception(e);
         }
     }
@@ -17011,7 +17011,7 @@ pub fn array_some(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
     let Some(first) = first_existing_index(this, length) else {
         return Value::boolean(false);
     };
-    vm.pending_array_op = Some(crate::vm::ArrayOpState {
+    vm.push_array_op(crate::vm::ArrayOpState {
         kind: crate::vm::ArrayOpKind::Some,
         source: source_ptr,
         result: std::ptr::null_mut(),
@@ -17044,7 +17044,7 @@ pub fn array_some(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
             vm.rebase_pending_depths();
         }
         crate::vm::ArrayElemOut::SyncErr(e) => {
-            vm.pending_array_op = None;
+            vm.finish_array_op();
             vm.set_pending_exception(e);
         }
     }
@@ -17061,7 +17061,7 @@ pub fn array_every(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
     let Some(first) = first_existing_index(this, length) else {
         return Value::boolean(true);
     };
-    vm.pending_array_op = Some(crate::vm::ArrayOpState {
+    vm.push_array_op(crate::vm::ArrayOpState {
         kind: crate::vm::ArrayOpKind::Every,
         source: source_ptr,
         result: std::ptr::null_mut(),
@@ -17094,7 +17094,7 @@ pub fn array_every(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
             vm.rebase_pending_depths();
         }
         crate::vm::ArrayElemOut::SyncErr(e) => {
-            vm.pending_array_op = None;
+            vm.finish_array_op();
             vm.set_pending_exception(e);
         }
     }

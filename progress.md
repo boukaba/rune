@@ -103,7 +103,30 @@ The JIT remains experimental until the JIT-on/off differential runner and the
 trace-entry fix land. This is intentional: a slower correct engine is a better
 production base than a fast silent miscompile.
 
-Next: the array continuation stack (nested callback re-entrancy).
+### Phase 0 — array continuation stack (2026-11-13)
+
+Nested callback-driven array methods no longer overwrite one another.
+`pending_array_op` remains the current machine; new `Vm::pending_array_ops` is
+a LIFO stack of suspended outer machines. `push_array_op` installs a new
+machine (saving the previous one); `finish_array_op` restores the outer machine
+after an inner completion; the unwind firewall drops machines whose awaited
+frame is popped and restores the next valid outer. Saved machines are registered
+as GC roots like the current one.
+
+Regression tests (9): nested `map`, nested `forEach`, `filter` inside `map`,
+`reduce` inside `reduce`, a getter inside a map callback that runs `map`,
+`map` inside a sort comparator, an inner throw caught by the outer callback,
+GC while an outer machine is suspended, and a nested map with multiple outer
+elements. Previously nested `map` returned `[11,21]` instead of
+`[[11,21],[12,22]]`, nested `forEach` visited one outer element, and a getter
+inside a map callback threw `TypeError`.
+
+Integration suite: **734 passed, 0 failed, 3 ignored** (737 total). The same
+stack pattern is the template for sort/from/length/species/promise/async
+machines; those remain single-flight for now.
+
+Next: async/await continuation (currently only the pre-await prefix runs) and
+ESM live bindings.
 
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,

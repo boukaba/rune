@@ -1181,6 +1181,12 @@ pub struct Vm {
     /// Pending array operation (filter/map/reduce) with callback state machine.
     /// Set by the builtin, consumed/updated by the Return handler.
     pub(crate) pending_array_op: Option<ArrayOpState>,
+    /// Outer array machines suspended while an inner callback-driven builtin
+    /// (e.g. map inside a map callback) owns the continuation. The current
+    /// machine is `pending_array_op`; this stack is LIFO and each entry keeps
+    /// its original frame depth. This replaces the old single-flight behavior
+    /// that silently truncated nested iteration.
+    pub(crate) pending_array_ops: Vec<ArrayOpState>,
     /// Pending Function.prototype.call invocation.
     pub(crate) pending_call: Option<PendingCall>,
     /// Pending Promise constructor call (executor → resolve/reject → return promise).
@@ -1363,6 +1369,7 @@ impl Vm {
             next_key: Value::undefined(),
             pending_exception: None,
             pending_array_op: None,
+            pending_array_ops: Vec::new(),
             pending_call: None,
             pending_promise_ctor: None,
             microtask_queue: Vec::new(),
@@ -3041,12 +3048,19 @@ impl Vm {
     /// skip-list poisoning after getter throws). Called at every frame-pop
     /// site in the unwind paths below.
     fn drop_dead_array_op(&mut self, popped_frame: usize) {
-        if self
+        let dropped = self
             .pending_array_op
             .as_ref()
-            .is_some_and(|op| op.source_frame_depth == popped_frame)
-        {
+            .is_some_and(|op| op.source_frame_depth == popped_frame);
+        if dropped {
             self.pending_array_op = None;
+        }
+        // Machines suspended below the current one whose awaited frame is
+        // also being unwound must not survive the unwind.
+        self.pending_array_ops
+            .retain(|op| op.source_frame_depth != popped_frame);
+        if dropped && self.pending_array_op.is_none() {
+            self.finish_array_op();
         }
     }
 
@@ -3516,7 +3530,11 @@ impl Vm {
     /// data (`usize`, `bool`, `String`, state enums) needs nothing. When
     /// adding a machine, add its fields here — nowhere else.
     fn root_pending_values(&self, gc: &mut SemiSpace) {
-        if let Some(ref op) = self.pending_array_op {
+        for op in self
+            .pending_array_op
+            .iter()
+            .chain(self.pending_array_ops.iter())
+        {
             gc.push_root(&op.callback as *const Value as *mut u64);
             gc.push_root(&op.this_val as *const Value as *mut u64);
             gc.push_root(&op.source_val as *const Value as *mut u64);
@@ -3664,6 +3682,21 @@ impl Vm {
                 gc.push_root(&value as *const Value as *mut u64);
             }
         }
+    }
+
+    /// Install a new array machine. If an outer machine is already live
+    /// (a callback invoked another array method), suspend it instead of
+    /// overwriting it; `finish_array_op` restores it when the inner machine
+    /// completes.
+    pub(crate) fn push_array_op(&mut self, op: ArrayOpState) {
+        if let Some(prev) = self.pending_array_op.replace(op) {
+            self.pending_array_ops.push(prev);
+        }
+    }
+
+    /// Complete the current array machine and resume the enclosing one, if any.
+    pub(crate) fn finish_array_op(&mut self) {
+        self.pending_array_op = self.pending_array_ops.pop();
     }
 
     /// Push a frame for a JS function call (used by array method callbacks).
@@ -9797,7 +9830,7 @@ impl Vm {
                                     match array_search_step(self, gc, &mut op, Some((idx, result)))
                                     {
                                         SearchStepOut::Done(v) => {
-                                            self.pending_array_op = None;
+                                            self.finish_array_op();
                                             self.stack.truncate(callee_base);
                                             self.push(v);
                                             let frames_len = self.frames.len();
@@ -9825,6 +9858,7 @@ impl Vm {
                                     op.accumulator = Some(result);
                                     let next = op.index;
                                     if next == usize::MAX {
+                                        self.finish_array_op();
                                         self.stack.truncate(callee_base);
                                         self.push(result);
                                         let frames_len = self.frames.len();
@@ -10027,6 +10061,7 @@ impl Vm {
                                             }
                                             _ => Value::smi(op.index as i32),
                                         };
+                                        self.finish_array_op();
                                         let frames_len = self.frames.len();
                                         self.stack.truncate(callee_base);
                                         self.push(found);
@@ -10036,6 +10071,7 @@ impl Vm {
                                 }
                                 ArrayOpKind::Some => {
                                     if result.to_bool() {
+                                        self.finish_array_op();
                                         let frames_len = self.frames.len();
                                         self.stack.truncate(callee_base);
                                         self.push(Value::boolean(true));
@@ -10045,6 +10081,7 @@ impl Vm {
                                 }
                                 ArrayOpKind::Every => {
                                     if !result.to_bool() {
+                                        self.finish_array_op();
                                         let frames_len = self.frames.len();
                                         self.stack.truncate(callee_base);
                                         self.push(Value::boolean(false));
@@ -10211,6 +10248,7 @@ impl Vm {
                                 | ArrayOpKind::LastIndexOf
                                 | ArrayOpKind::Includes => Value::undefined(),
                             };
+                            self.finish_array_op();
                             let frames_len = self.frames.len();
                             self.stack.truncate(callee_base);
                             self.push(final_result);

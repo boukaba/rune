@@ -12943,3 +12943,183 @@ fn test_jit_off_by_default() {
     );
     assert_eq!(ctx.vm().jit_entry_count, 0, "JIT must be opt-in by default");
 }
+
+// ---------------------------------------------------------------------------
+// Production-readiness gate: nested array machines. A callback-driven builtin
+// invoked from another callback must suspend the outer machine, not overwrite
+// it. These were silent data corruption before the continuation stack.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_nested_map_produces_nested_arrays() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            JSON.stringify([1, 2].map(function (x) {
+                return [10, 20].map(function (y) { return x + y; });
+            }));
+        "#,
+        )
+        .unwrap();
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "JSON.stringify([1,2].map(function(x){return [10,20].map(function(y){return x+y;});}))"
+        ),
+        "[[11,21],[12,22]]"
+    );
+    let _ = r;
+}
+
+#[test]
+fn test_nested_for_each_visits_all_outer_elements() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var s = 0;
+            [1, 2].forEach(function (x) {
+                [10, 20].forEach(function (y) { s += y; });
+                s += x;
+            });
+            s;
+        "#,
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(63), "outer forEach must not truncate");
+}
+
+#[test]
+fn test_nested_filter_inside_map() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            JSON.stringify([1, 2].map(function (x) {
+                return [10, 20].filter(function (y) { return y > x; });
+            }));
+        "#,
+        )
+        .unwrap();
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "JSON.stringify([1,2].map(function(x){return [10,20].filter(function(y){return y>x;});}))"
+        ),
+        "[[10,20],[10,20]]"
+    );
+    let _ = r;
+}
+
+#[test]
+fn test_nested_map_inside_getter_inside_map() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var o = { get v() { return [1, 2].map(function (z) { return z * 3; }).join(","); } };
+            [1, 2].map(function (x) { return o.v + "|" + x; }).join(";");
+        "#,
+        )
+        .unwrap();
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "[1,2].map(function(x){return o.v+'|'+x;}).join(';')"
+        ),
+        "3,6|1;3,6|2"
+    );
+    let _ = r;
+}
+
+#[test]
+fn test_nested_reduce_inside_reduce() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            [1, 2].reduce(function (acc, x) {
+                return acc + [10, 20].reduce(function (a, y) { return a + y; }, x);
+            }, 0);
+        "#,
+        )
+        .unwrap();
+    assert_eq!(
+        r.as_smi(),
+        Some(63),
+        "nested reduce must use both outer elements"
+    );
+}
+
+#[test]
+fn test_nested_map_error_caught_by_outer_callback() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var out = [];
+            [1, 2].forEach(function (x) {
+                try {
+                    [10].map(function () { throw new Error("boom"); });
+                    out.push("no");
+                } catch (e) {
+                    out.push("caught:" + x);
+                }
+            });
+            out.join(",");
+        "#,
+        )
+        .unwrap();
+    assert_eq!(
+        eval_str(&mut ctx, "out.join(',')"),
+        "caught:1,caught:2",
+        "inner throw must abort only the inner machine"
+    );
+    let _ = r;
+}
+
+#[test]
+fn test_nested_map_inside_sort_comparator() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var a = [3, 1, 2];
+            a.sort(function (x, y) {
+                var doubled = [x, y].map(function (v) { return v * 2; });
+                return doubled[0] - doubled[1];
+            });
+            a.join(",");
+        "#,
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), None);
+    let _ = r;
+    assert_eq!(eval_str(&mut ctx, "a.join(',')"), "1,2,3");
+}
+
+#[test]
+fn test_nested_map_outer_state_survives_gc() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            JSON.stringify([1, 2].map(function (x) {
+                return [10].map(function (y) {
+                    for (var i = 0; i < 80000; i++) { var t = { n: i, s: "z" + i }; }
+                    return x + y;
+                })[0];
+            }));
+        "#,
+        )
+        .unwrap();
+    let _ = r;
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "JSON.stringify([1,2].map(function(x){return [10].map(function(y){return x+y;})[0];}))"
+        ),
+        "[11,12]"
+    );
+}

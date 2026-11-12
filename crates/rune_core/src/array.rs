@@ -208,7 +208,9 @@ impl RuneArray {
     pub unsafe fn extra_props(arr: *mut RuneArray) -> *mut u8 {
         let arr = unsafe { Self::live(arr) };
         unsafe {
-            crate::gc::resolve_forwarded(*((arr as *mut u8).add(EXTRA_PROPS_OFFSET) as *const *mut u8))
+            crate::gc::resolve_forwarded(
+                *((arr as *mut u8).add(EXTRA_PROPS_OFFSET) as *const *mut u8),
+            )
         }
     }
 

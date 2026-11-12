@@ -18,6 +18,9 @@ pub struct Context {
     pub enable_inlining: bool,
     /// Use stencil-based code emission for JIT compilation (v0.3 copy-and-patch).
     pub stencil_jit: bool,
+    /// Enable the runtime JIT. Default false: the interpreter is the
+    /// correctness reference until JIT-on/off differential tests pass.
+    pub enable_jit: bool,
 }
 
 impl Default for Context {
@@ -55,6 +58,7 @@ impl Context {
             _keep_alive: Vec::new(),
             enable_inlining: false,
             stencil_jit: false,
+            enable_jit: false,
         };
         // Register default builtins
         for b in rune_interpreter::builtins::default_builtins() {
@@ -96,6 +100,7 @@ impl Context {
         // Sync configuration flags to Vm before execution.
         self.vm.enable_inlining = self.enable_inlining;
         self.vm.stencil_jit = self.stencil_jit;
+        self.vm.jit_enabled = self.enable_jit;
         let bytecode = self.compile(source)?;
 
         // Execute — keep bytecode alive for dangling prog_ptr refs from Func
@@ -126,6 +131,9 @@ impl Context {
 
     /// Execute a bytecode program and keep it alive in this context.
     pub fn eval_bytecode_owned(&mut self, bytecode: BytecodeProgram) -> Result<Value, String> {
+        self.vm.enable_inlining = self.enable_inlining;
+        self.vm.stencil_jit = self.stencil_jit;
+        self.vm.jit_enabled = self.enable_jit;
         let pinned = Box::pin(bytecode);
         self.programs.push(pinned);
         let prog_ref: &BytecodeProgram = &self.programs.last().unwrap().as_ref();
@@ -149,6 +157,7 @@ impl Context {
     ) -> Result<Value, String> {
         self.vm.enable_inlining = self.enable_inlining;
         self.vm.stencil_jit = self.stencil_jit;
+        self.vm.jit_enabled = self.enable_jit;
 
         // Compile the full import graph: (specifier, source) → pinned program.
         struct Pending {

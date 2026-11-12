@@ -1069,6 +1069,10 @@ pub struct Vm {
     /// Number of JIT bailouts (all reasons). Helps detect wasteful JIT entries
     /// where a function always bails (e.g., always receives non-Smi args).
     pub jit_bailout_count: u64,
+    /// Runtime JIT gate. The interpreter is the correctness reference; the
+    /// baseline/trace JIT stays opt-in until JIT-on/off differential tests
+    /// prove it sound. Default: false.
+    pub jit_enabled: bool,
     /// Whether inlining is enabled for JIT trace compilation (--inline flag).
     /// When false, InlinePlan is built but emit_inline_call is never reached
     /// because the plan is built as empty.
@@ -1297,6 +1301,7 @@ impl Vm {
             cached_jit_entries: HashMap::new(),
             jit_entry_count: 0,
             jit_bailout_count: 0,
+            jit_enabled: false,
             enable_inlining: false,
             stencil_jit: false,
             typeof_strings: [Value::undefined(); 7],
@@ -7680,6 +7685,13 @@ impl Vm {
                             self.frames[fi].pc = target;
                             continue;
                         }
+                        // Runtime JIT is opt-in: the interpreter is the
+                        // reference implementation until differential tests
+                        // prove the trace compiler sound.
+                        if !self.jit_enabled {
+                            self.frames[fi].pc = target;
+                            continue;
+                        }
                         let entry = self.loop_counts.entry(key).or_insert(0);
                         *entry += 1;
                         // Start recording a trace at threshold, or when a
@@ -9412,7 +9424,7 @@ impl Vm {
                                             #[cfg(feature = "jit")]
                                             let jit_entry = ic.jit_entry;
                                             #[cfg(feature = "jit")]
-                                            if !jit_entry.is_null() {
+                                            if self.jit_enabled && !jit_entry.is_null() {
                                                 // IC hit: call JIT entry directly, skip all overhead.
                                                 self.jit_locals_buffer.clear();
                                                 if func_prog.named_function {
@@ -9511,7 +9523,7 @@ impl Vm {
 
                                 // --- JIT tier-up (if enabled) ---
                                 #[cfg(all(feature = "jit", target_arch = "aarch64"))]
-                                if !caller_module && !caller_is_module_fn {
+                                if self.jit_enabled && !caller_module && !caller_is_module_fn {
                                     unsafe { Func::increment_call_count(ptr as *mut Func) };
                                     let count = unsafe { Func::call_count(ptr as *mut Func) };
                                     const JIT_THRESHOLD: u32 = 50;

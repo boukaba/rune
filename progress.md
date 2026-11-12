@@ -82,7 +82,28 @@ storage remain the roadmap target for v1.0; the current approach costs a
 header check on heap-pointer reads and still needs audit coverage for raw
 `*mut` fields.
 
-Next: JIT opt-in and the array continuation stack.
+### Phase 0 — Runtime JIT gated off (2026-11-13)
+
+The review's JIT P0 is now behind an explicit runtime flag. The interpreter is
+the correctness reference; the trace compiler can no longer silently miscompile
+a default execution.
+
+- New `Vm::jit_enabled` (default false) and `Context::enable_jit` (default
+  false), synced in `eval`, `eval_bytecode_owned`, and `eval_module`.
+- Loop trace recording/execution and function tier-up are gated on the flag;
+  call-IC native entries are ignored while it is off.
+- CLI: `--jit` enables it, `--no-jit` disables it (default).
+- 23 existing JIT tests now opt in explicitly; a new
+  `test_jit_off_by_default` pins the 1,000-iteration float loop to the correct
+  `1250.5` with zero JIT entries. Before this gate that same program returned
+  `65.5` with one entry and zero bailouts.
+- Integration suite: 726 passed, 0 failed, 3 ignored.
+
+The JIT remains experimental until the JIT-on/off differential runner and the
+trace-entry fix land. This is intentional: a slower correct engine is a better
+production base than a fast silent miscompile.
+
+Next: the array continuation stack (nested callback re-entrancy).
 
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,

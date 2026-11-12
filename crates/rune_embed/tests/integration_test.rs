@@ -2979,6 +2979,7 @@ fn test_jit_tier_up() {
     // opcode (MakeArgumentsArray, §6.2 bail-on-entry). Verifies the JIT
     // actually compiled and the bailout path works.
     let mut ctx = Context::new_small();
+    ctx.enable_jit = true;
     let r = ctx
         .eval(
             r#"
@@ -3005,6 +3006,7 @@ fn test_jit_bailout_on_float() {
     // add() tier-up at 50, then pass a float64 — JIT bails at MakeArgumentsArray
     // (§6.2 bail-on-entry), interpreter handles float via normal flow.
     let mut ctx = Context::new_small();
+    ctx.enable_jit = true;
     let r = ctx
         .eval(
             r#"
@@ -3038,6 +3040,7 @@ fn test_jit_non_smi_args_bail() {
     // to float64 via helper instead of bailing. The function still produces the
     // correct result, and JIT is used (entry_count > 0).
     let mut ctx = Context::new_small();
+    ctx.enable_jit = true;
     let r = ctx
         .eval(
             r#"
@@ -3068,6 +3071,7 @@ fn test_jit_non_smi_args_bail() {
 fn test_jit_bailout_count() {
     // Verify the jit_bailout_count counter increments alongside jit_entry_count.
     let mut ctx = Context::new_small();
+    ctx.enable_jit = true;
     ctx.eval(
         r#"
         // Uses `arguments` — MakeArgumentsArray still emitted → JIT bails on entry.
@@ -3097,6 +3101,7 @@ fn test_jit_no_bail_on_simple_fn() {
     // A function that doesn't use `arguments` no longer has MakeArgumentsArray.
     // The JIT should run end-to-end without bailing.
     let mut ctx = Context::new_small();
+    ctx.enable_jit = true;
     ctx.eval(
         r#"
         function add(a, b) { return a + b; }
@@ -3243,6 +3248,7 @@ fn test_jit_inline_no_bail() {
     // Simple frame-less function (add(a,b)) should inline cleanly with
     // zero bailouts when --inline is enabled.
     let mut ctx = Context::new_small();
+    ctx.enable_jit = true;
     ctx.enable_inlining = true;
     let r = ctx
         .eval(
@@ -3320,6 +3326,7 @@ fn test_jit_inline_bail() {
     // restored to pre-call state so the interpreter can re-execute the Call
     // instruction.  Verify correct result and bailout count > 0.
     let mut ctx = Context::new_small();
+    ctx.enable_jit = true;
     ctx.enable_inlining = true;
     let r = ctx
         .eval(
@@ -3361,6 +3368,7 @@ fn test_jit_inline_hot_function() {
     // F-4: verify jit_hot_function_1M with --inline produces the same result
     // as --no-inline.  add() called 1M times should tier up and inline.
     let mut ctx = Context::new_small();
+    ctx.enable_jit = true;
     ctx.enable_inlining = true;
     let r = ctx
         .eval(
@@ -3389,6 +3397,7 @@ fn test_jit_typeof_native() {
     // TypeOf is now native — the JIT calls typeof_helper instead of bailing.
     // This test verifies all typeof results and that the JIT enters + no bail.
     let mut ctx = Context::new_small();
+    ctx.enable_jit = true;
     let r = ctx
         .eval(
             r#"
@@ -3432,6 +3441,7 @@ fn test_jit_load_string_const() {
     // This test verifies that a function returning a bare string constant
     // runs end-to-end in the JIT without bailing.
     let mut ctx = Context::new_small();
+    ctx.enable_jit = true;
     let r = ctx
         .eval(
             r#"
@@ -3465,6 +3475,7 @@ fn test_jit_load_string_const() {
 #[cfg(target_arch = "aarch64")]
 fn test_jit_load_global() {
     let mut ctx = Context::new_small();
+    ctx.enable_jit = true;
     let r = ctx
         .eval(
             r#"
@@ -3499,6 +3510,7 @@ fn test_jit_load_global() {
 #[cfg(target_arch = "aarch64")]
 fn test_jit_store_global() {
     let mut ctx = Context::new_small();
+    ctx.enable_jit = true;
     let r = ctx
         .eval(
             r#"
@@ -3534,6 +3546,7 @@ fn test_jit_store_global() {
 #[cfg(target_arch = "aarch64")]
 fn test_jit_inc_global() {
     let mut ctx = Context::new_small();
+    ctx.enable_jit = true;
     let r = ctx
         .eval(
             r#"
@@ -3577,6 +3590,7 @@ fn test_jit_inc_global() {
 #[cfg(target_arch = "aarch64")]
 fn test_jit_shape_miss_load_bails_to_interpreter() {
     let mut ctx = Context::new_small();
+    ctx.enable_jit = true;
     let r = ctx
         .eval(
             r#"
@@ -3613,6 +3627,7 @@ fn test_jit_shape_miss_load_bails_to_interpreter() {
 #[cfg(target_arch = "aarch64")]
 fn test_jit_shape_miss_store_bails_to_interpreter() {
     let mut ctx = Context::new_small();
+    ctx.enable_jit = true;
     let r = ctx
         .eval(
             r#"
@@ -3649,6 +3664,7 @@ fn test_jit_shape_miss_store_bails_to_interpreter() {
 #[cfg(target_arch = "aarch64")]
 fn test_jit_mul_overflow_bailout_preserves_loop_state() {
     let mut ctx = Context::new_small();
+    ctx.enable_jit = true;
     let r = ctx
         .eval(
             r#"
@@ -3805,6 +3821,7 @@ fn test_jit_closure_capture_lexical_env() {
 #[cfg(target_arch = "aarch64")]
 fn test_jit_signed_mul_mod_untag() {
     let mut ctx = Context::new_small();
+    ctx.enable_jit = true;
     let r = ctx
         .eval(
             r#"
@@ -12331,6 +12348,7 @@ fn test_error_family_assert_throws_wrapper() {
 fn test_jit_div_exp_whitelisted() {
     // J1: Div/Exp compile natively via jit_binop_helper
     let mut ctx = Context::new_small();
+    ctx.enable_jit = true;
     ctx.eval(
         r#"
             function half(x) { return x / 2; }
@@ -12379,6 +12397,7 @@ fn test_jit_div_by_zero_and_negative_exp() {
 fn test_jit_optional_chaining_whitelisted() {
     // J1: JumpIfNullOrUndefined compiles natively for `?.`
     let mut ctx = Context::new_small();
+    ctx.enable_jit = true;
     let r = ctx
         .eval(
             r#"
@@ -12459,6 +12478,7 @@ fn test_jit_negative_smi_results_boxed() {
 fn test_jit_float_sub_native() {
     // J2#3b: Smi - float takes the helper path, stays native
     let mut ctx = Context::new_small();
+    ctx.enable_jit = true;
     ctx.eval(
         r#"
             function f(a, b) { return a - b; }
@@ -12481,6 +12501,7 @@ fn test_jit_float_sub_native() {
 fn test_jit_float_mod_native() {
     // J2#3c: float Mod via helper — incl. x % 0 → NaN without bailing
     let mut ctx = Context::new_small();
+    ctx.enable_jit = true;
     ctx.eval(
         r#"
             function m(a, b) { return a % b; }
@@ -12499,6 +12520,7 @@ fn test_jit_float_mod_native() {
 fn test_jit_float_comparisons_native() {
     // J2#3d: Lt/Gt/Le/Ge with float operands via helper
     let mut ctx = Context::new_small();
+    ctx.enable_jit = true;
     ctx.eval(
         r#"
             function cmp(a, b) {
@@ -12526,6 +12548,7 @@ fn test_jit_float_literal_accumulator() {
     // J2#4 + goal: float LITERALS inside fn bodies are now eligible;
     // the accumulator goes float after iteration 1 and stays native.
     let mut ctx = Context::new_small();
+    ctx.enable_jit = true;
     ctx.eval(
         r#"
             function grow(n) {
@@ -12630,7 +12653,11 @@ fn test_gc_generator_this_survives_collection() {
         GC_STRESS_ALLOC, GC_STRESS_ALLOC
     );
     let r = ctx.eval(&src).unwrap();
-    assert_eq!(r.as_smi(), Some(99), "suspended generator receiver must survive GC");
+    assert_eq!(
+        r.as_smi(),
+        Some(99),
+        "suspended generator receiver must survive GC"
+    );
 }
 
 #[test]
@@ -12654,7 +12681,11 @@ fn test_gc_generator_env_survives_collection() {
         GC_STRESS_ALLOC, GC_STRESS_ALLOC
     );
     let r = ctx.eval(&src).unwrap();
-    assert_eq!(r.as_smi(), Some(42), "suspended generator env must survive GC");
+    assert_eq!(
+        r.as_smi(),
+        Some(42),
+        "suspended generator env must survive GC"
+    );
 }
 
 #[test]
@@ -12694,7 +12725,11 @@ fn test_grow_object_alias_in_array() {
         "#,
         )
         .unwrap();
-    assert_eq!(r.as_smi(), Some(42), "array-held object must survive growth");
+    assert_eq!(
+        r.as_smi(),
+        Some(42),
+        "array-held object must survive growth"
+    );
 }
 
 #[test]
@@ -12742,7 +12777,11 @@ fn test_grow_prototype_object() {
         "#,
         )
         .unwrap();
-    assert_eq!(r.as_smi(), Some(19), "prototype pointer must resolve growth");
+    assert_eq!(
+        r.as_smi(),
+        Some(19),
+        "prototype pointer must resolve growth"
+    );
 }
 
 #[test]
@@ -12779,7 +12818,11 @@ fn test_grow_array_alias_in_object_slot() {
         "#,
         )
         .unwrap();
-    assert_eq!(r.as_smi(), Some(21), "object slot must survive array growth");
+    assert_eq!(
+        r.as_smi(),
+        Some(21),
+        "object slot must survive array growth"
+    );
 }
 
 #[test]
@@ -12854,7 +12897,11 @@ fn test_grow_generator_local_array_alias() {
         "#,
         )
         .unwrap();
-    assert_eq!(r.as_smi(), Some(2201), "generator-local array must survive growth");
+    assert_eq!(
+        r.as_smi(),
+        Some(2201),
+        "generator-local array must survive growth"
+    );
 }
 
 #[test]
@@ -12881,4 +12928,18 @@ fn test_grow_source_array_during_iteration() {
         "growth during iteration must not change the captured walk"
     );
     let _ = r;
+}
+
+#[test]
+fn test_jit_off_by_default() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval("var s = 0.5; for (var i = 0; i < 1000; i++) { s += 1.25; } s;")
+        .unwrap();
+    assert_eq!(
+        r.as_float64(),
+        Some(1250.5),
+        "interpreter must be the reference"
+    );
+    assert_eq!(ctx.vm().jit_entry_count, 0, "JIT must be opt-in by default");
 }

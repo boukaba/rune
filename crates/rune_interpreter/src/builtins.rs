@@ -14656,18 +14656,11 @@ pub fn array_splice(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mu
     deleted
 }
 
-/// Resolve a possibly-forwarded GC pointer to its current address (single hop).
-/// After a collection, local Value copies hold stale from-space addresses whose
-/// headers carry a forwarding pointer to the live to-space copy.
+/// Resolve a possibly-forwarded GC pointer to its current address.
+/// Growth can create chains (old -> grown copy -> later growth), so delegate
+/// to the core chain-aware resolver.
 fn resolve_forwarded(ptr: *mut u8) -> *mut u8 {
-    unsafe {
-        let h = ptr as *const GcHeader;
-        if (*h).is_forwarded() {
-            (*h).forwarding_addr()
-        } else {
-            ptr
-        }
-    }
+    unsafe { rune_core::gc::resolve_forwarded(ptr) }
 }
 
 /// Re-resolve a local Value copy after an allocation may have triggered a GC

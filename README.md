@@ -59,7 +59,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 | `rune_bytecode` | Bytecode opcodes, instructions, program representation, CFG/liveness analysis |
 | `rune_parser` | JavaScript lexer, recursive-descent parser, bytecode emitter |
 | `rune_interpreter` | Stack-based VM with SIDT inline caches, call frames, generators, builtins |
-| `rune_jit_baseline` | Baseline JIT (AArch64 + x86-64) — 62 opcodes whitelisted, function tier-up at 50 calls, N=16 vector IC table, **inlining** (Phase F: hot callees spliced inline, ~5% gain), **float self-tagging** (NaN-boxed Values, 0 heap allocation for floats) |
+| `rune_jit_baseline` | Baseline JIT (AArch64; runtime opt-in, off by default) — 62 opcodes whitelisted, function tier-up at 50 calls, N=16 vector IC table, **inlining** (Phase F: hot callees spliced inline, ~5% gain), **float self-tagging** (NaN-boxed Values, 0 heap allocation for floats) |
 | `rune_embed` | Embedding API (`Context::eval`), AFPC cache save/load |
 | `rune_cli` | CLI binary with `--cache`, `--snapshot`, `--ic-stats`, `--trace-stats` |
 | `rune_bench` | Criterion benchmarks with V8 comparison scripts |
@@ -103,7 +103,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 - **Modules:** Full ESM (`import`/`export` incl. default/named/namespace/star, live bindings, circular deps, TDZ, `.mjs` CLI). Gaps: no node_modules-style resolution (resolver callback), `import()` dynamic / `import.meta` unsupported, module functions don't JIT (bail to interpreter — LoadGlobal reads the module env)
 - **Classes:** Class names don't resolve inside static methods (pre-existing). Static private lookup walks the superclass chain. `o.#x` outside the class body throws at runtime, not parse time.
 - **Async/await:** `async function`, `async () =>`, `await expr` — full support with generator-based desugaring, synchronous until first await. 396 tests.
-- **JIT:** 62 opcodes whitelisted (out of ~93 opcode variants). Float Self-Tagging (NaN-boxing) eliminates all float heap allocation — all interpreter float paths use inline `Value::from_float64`. JIT has float64 Add promotion (full §12.8.5 string-concat semantics); Sub/Mul/Mod run natively as guarded Smi ops; **Sub/Mul/Div/Mod/Exp + Lt/Gt/Le/Ge all run native** with float fallback via `jit_binop_helper` (J1/J2); float literals eligible; float-promoted accumulators stay native with zero bailouts; optional chaining (`JumpIfNullOrUndefined`) runs native exact nullish branches; In/Instanceof bail to the interpreter. Compile-time `stack_depth` model + `push_raw` bail paths; every guard (shape-miss, Smi-check, overflow, call) bails to the interpreter with a validated pre-opcode snapshot. Phase F inlining shipped (5% on `jit_hot_function_1M`).
+- **JIT (experimental, off by default; enable with `--jit`):** 62 opcodes whitelisted (out of ~93 opcode variants). Float Self-Tagging (NaN-boxing) eliminates all float heap allocation — all interpreter float paths use inline `Value::from_float64`. JIT has float64 Add promotion (full §12.8.5 string-concat semantics); Sub/Mul/Mod run natively as guarded Smi ops; **Sub/Mul/Div/Mod/Exp + Lt/Gt/Le/Ge all run native** with float fallback via `jit_binop_helper` (J1/J2); float literals eligible; float-promoted accumulators stay native with zero bailouts; optional chaining (`JumpIfNullOrUndefined`) runs native exact nullish branches; In/Instanceof bail to the interpreter. Compile-time `stack_depth` model + `push_raw` bail paths; every guard (shape-miss, Smi-check, overflow, call) bails to the interpreter with a validated pre-opcode snapshot. Phase F inlining shipped (5% on `jit_hot_function_1M`).
 - **Debugger:** No CDP/DevTools
 
 ## Performance (AArch64, M4 Pro)
@@ -226,17 +226,17 @@ This makes Rune uniquely suited for serverless: functions can be compiled once d
 ## Development
 
 ```sh
-# Run tests
+# Run tests (interpreter is the correctness reference; JIT tests opt in)
 cargo test --workspace
 
-# With JIT enabled
-cargo test --features jit
+# Run a script with the experimental runtime JIT enabled
+cargo run -p rune_cli -- --jit -e 'var s=0; for (var i=0;i<1000;i++) s+=i; s'
 
 # Format + lint
-cargo fmt --all && cargo clippy -- -D warnings
+cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings
 
 # Criterion benchmarks
-cargo bench --features jit
+cargo bench
 
 # Enable pre-commit hooks
 git config core.hooksPath .githooks

@@ -11,7 +11,9 @@ rune_regex = { path = "../rune_regex" }
 rune_jit_baseline = { path = "../rune_jit_baseline", optional = true }
 rkyv = "0.8"
 tracing = { workspace = true }
+url = "2.5"
 
 [features]
 default = ["jit"]
 jit = ["rune_jit_baseline"]
+

@@ -13767,3 +13767,31 @@ fn test_function_length_and_name_metadata() {
     );
     let _ = r;
 }
+
+#[test]
+fn test_url_constructor_and_fields() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var u = new URL("https://example.com/a/b?x=1#h");
+            var rel = new URL("../c", "https://example.com/a/b");
+            var bad = "";
+            try { new URL("not a url"); } catch (e) { bad = e.name; }
+            var called = "";
+            try { URL("x"); } catch (e) { called = e.name; }
+            [u.href, u.origin, u.protocol, u.host, u.hostname, u.port,
+             u.pathname, u.search, u.hash, u.toString(), rel.href,
+             bad, called].join("|");
+        "#,
+        )
+        .unwrap();
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "[u.href, u.origin, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.toString(), rel.href, bad, called].join('|')"
+        ),
+        "https://example.com/a/b?x=1#h|https://example.com|https:|example.com|example.com||/a/b|?x=1|#h|https://example.com/a/b?x=1#h|https://example.com/c|TypeError|TypeError"
+    );
+    let _ = r;
+}

@@ -432,8 +432,27 @@ Known GC-stress boundary: the aggressive Promise.all stress case runs on a
 heap leaves too little headroom for the pending-reaction setup and is not a
 supported stress configuration.
 
-Next: Web API object/class surface (`URL`, `TextEncoder`, `fetch`) and the
-runtime crate; stable headers remain the structural Phase 1 item.
+### Phase 2 — URL constructor (2026-11-13)
+
+`new URL(input[, base])` now builds a URL instance via the `url` crate:
+
+- Own fields: `href`, `origin`, `protocol`, `username`, `password`, `host`,
+  `hostname`, `port`, `pathname`, `search`, `hash`.
+- Relative resolution against a base URL.
+- `URL.prototype.toString`/`toJSON`; invalid input and plain-call `URL(...)`
+  throw `TypeError`.
+- The instance uses `%URL.prototype%`, rooted in the VM; the constructor is
+  available as a global builtin handle and recognized by the `New` opcode.
+
+Regression covers absolute/relative URLs, all fields, stringification, invalid
+input, and call-without-new. Integration suite: **763 passed, 0 failed,
+3 ignored**.
+
+Known gaps: `URLSearchParams`, URL property setters, `URL.canParse`, and
+`URL.prototype` exposure through the constructor handle are not implemented.
+
+Next: `URLSearchParams`/`TextEncoder`, then the runtime crate and stable
+headers.
 
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,

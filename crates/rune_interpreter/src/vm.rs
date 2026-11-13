@@ -1102,6 +1102,9 @@ pub struct Vm {
     promise_bridge_prog: *const BytecodeProgram,
     pub object_prototype: Value,
     pub function_prototype: Value,
+    /// URL constructor builtin handle and %URL.prototype%.
+    pub url_constructor: Value,
+    pub url_prototype: Value,
     pub regexp_prototype: Value,
     /// Symbol constructor object (`Symbol` global) with well-known symbol statics.
     pub symbol_ctor: Value,
@@ -1335,6 +1338,8 @@ impl Vm {
             promise_bridge_prog: std::ptr::null(),
             object_prototype: Value::undefined(),
             function_prototype: Value::undefined(),
+            url_constructor: Value::undefined(),
+            url_prototype: Value::undefined(),
             regexp_prototype: Value::undefined(),
             symbol_ctor: Value::undefined(),
             map_constructor: Value::undefined(),
@@ -2358,6 +2363,18 @@ impl Vm {
             let console_obj = make_object(gc, &console_entries);
             self.builtin_wrappers
                 .insert("console".to_string(), console_obj);
+        }
+
+        // URL constructor handle + prototype (toString/toJSON).
+        if let Some(ts) = find_handle(&self.builtins, "URL_prototype_toString") {
+            let mut entries: Vec<(&str, Value)> = vec![("toString", ts)];
+            if let Some(tj) = find_handle(&self.builtins, "URL_prototype_toJSON") {
+                entries.push(("toJSON", tj));
+            }
+            self.url_prototype = make_object(gc, &entries);
+        }
+        if let Some(url) = find_handle(&self.builtins, "URL") {
+            self.url_constructor = url;
         }
 
         // Function.prototype with .call() method; its constructor is the
@@ -3530,6 +3547,8 @@ impl Vm {
         }
         gc.push_root(&self.promise_prototype as *const Value as *mut u64);
         gc.push_root(&self.function_prototype as *const Value as *mut u64);
+        gc.push_root(&self.url_constructor as *const Value as *mut u64);
+        gc.push_root(&self.url_prototype as *const Value as *mut u64);
         gc.push_root(&self.regexp_prototype as *const Value as *mut u64);
         gc.push_root(&self.symbol_ctor as *const Value as *mut u64);
         gc.push_root(&self.symbol_prototype as *const Value as *mut u64);
@@ -8890,6 +8909,18 @@ impl Vm {
                     let mut args: Vec<Value> = (0..argc).map(|_| self.pop()).collect();
                     args.reverse();
                     let constructor = self.pop();
+                    if constructor == self.url_constructor {
+                        let obj = crate::builtins::url_construct(gc, &args, self);
+                        if let Some(exc) = self.pending_exception.take() {
+                            if let Some(exit) = self.handle_throw(gc, exc) {
+                                return exit;
+                            }
+                            continue;
+                        }
+                        self.push(obj);
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    }
                     // String constructor [[Construct]]: create String wrapper
                     if constructor == self.string_constructor {
                         let arg = args.first().copied().unwrap_or(Value::undefined());

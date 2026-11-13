@@ -31,6 +31,7 @@ use rune_core::symbol::{
 };
 use rune_core::typedarray;
 use rune_core::value::Value;
+use url::Url;
 
 /// A registered built-in function.
 pub struct Builtin {
@@ -295,6 +296,123 @@ pub fn decode_uri_component_builtin(
         return Value::undefined();
     };
     Value::from_heap_ptr(HeapString::allocate(gc, &decoded) as *mut u8)
+}
+
+/// `URL` called without `new` — constructors are not callable.
+pub fn url_constructor_builtin(
+    gc: &mut SemiSpace,
+    _this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    vm.set_pending_exception(crate::errors::error_object(
+        gc,
+        &vm.error_protos,
+        crate::errors::ErrorKind::TypeError,
+        "Constructor URL requires 'new'",
+    ));
+    Value::undefined()
+}
+
+fn url_string(gc: &mut SemiSpace, s: &str) -> Value {
+    Value::from_heap_ptr(HeapString::allocate(gc, s) as *mut u8)
+}
+
+/// Construct a URL instance (`new URL(input[, base])`). The object is a plain
+/// JSObject with own URL fields; its prototype carries toString/toJSON.
+pub(crate) fn url_construct(gc: &mut SemiSpace, args: &[Value], vm: &mut Vm) -> Value {
+    let input = value_to_js_string(args.first().copied().unwrap_or(Value::undefined()));
+    let parsed = if let Some(base_val) = args.get(1).copied() {
+        let base_str = value_to_js_string(base_val);
+        match Url::parse(&base_str) {
+            Ok(base) => base.join(&input).ok(),
+            Err(_) => None,
+        }
+    } else {
+        Url::parse(&input).ok()
+    };
+    let Some(url) = parsed else {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Invalid URL",
+        ));
+        return Value::undefined();
+    };
+
+    let keys = [
+        "href", "origin", "protocol", "username", "password", "host", "hostname", "port",
+        "pathname", "search", "hash",
+    ];
+    let entries: Vec<(PropertyKey, usize)> = keys
+        .iter()
+        .enumerate()
+        .map(|(i, k)| (PropertyKey::from_string(k), i))
+        .collect();
+    let shape = Shape::intern(entries, keys.iter().map(|k| k.to_string()).collect());
+    let obj = JSObject::allocate(gc, shape, &[Value::undefined(); 11]);
+    let root_base = vm.temp_roots.len();
+    vm.temp_roots.push(Value::from_heap_ptr(obj as *mut u8));
+
+    let host = url.host_str().unwrap_or("").to_string();
+    let host_with_port = match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.clone(),
+    };
+    let fields = [
+        url.as_str().to_string(),
+        url.origin().ascii_serialization(),
+        format!("{}:", url.scheme()),
+        url.username().to_string(),
+        url.password().unwrap_or("").to_string(),
+        host_with_port,
+        host,
+        url.port().map(|p| p.to_string()).unwrap_or_default(),
+        url.path().to_string(),
+        url.query().map(|q| format!("?{q}")).unwrap_or_default(),
+        url.fragment().map(|f| format!("#{f}")).unwrap_or_default(),
+    ];
+    for (idx, text) in fields.iter().enumerate() {
+        let val = url_string(gc, text);
+        let obj_now = vm.temp_roots[root_base]
+            .heap_ptr()
+            .unwrap_or(std::ptr::null_mut()) as *mut JSObject;
+        unsafe { JSObject::set_slot(obj_now, idx, val) };
+    }
+    let obj_now = vm.temp_roots[root_base]
+        .heap_ptr()
+        .unwrap_or(std::ptr::null_mut()) as *mut JSObject;
+    if let Some(proto) = vm.url_prototype.heap_ptr() {
+        unsafe { JSObject::set_prototype(obj_now, proto) };
+    }
+    vm.temp_roots.truncate(root_base);
+    Value::from_heap_ptr(obj_now as *mut u8)
+}
+
+fn url_href(gc: &mut SemiSpace, this: Value) -> Value {
+    let Some(ptr) = this.heap_ptr() else {
+        return Value::undefined();
+    };
+    if unsafe { (*(ptr as *const GcHeader)).tag() } != TAG_OBJECT {
+        return Value::undefined();
+    }
+    let obj = ptr as *mut JSObject;
+    let shape = unsafe { JSObject::shape_ptr(obj) };
+    if let Some(slot) = shape.lookup(&PropertyKey::from_string("href")) {
+        return unsafe { JSObject::get_slot(obj, slot) };
+    }
+    let _ = gc;
+    Value::undefined()
+}
+
+/// `URL.prototype.toString` / `toJSON`.
+pub fn url_to_string(_gc: &mut SemiSpace, this: Value, _args: &[Value], _vm: &mut Vm) -> Value {
+    url_href(_gc, this)
+}
+
+pub fn url_to_json(_gc: &mut SemiSpace, this: Value, _args: &[Value], _vm: &mut Vm) -> Value {
+    url_href(_gc, this)
 }
 
 /// Try to convert a value to a string by calling ToPrimitive with string hint.
@@ -18191,6 +18309,21 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 0,
             name: "console_log",
             func: console_log,
+        },
+        Builtin {
+            length: 2,
+            name: "URL",
+            func: url_constructor_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "URL_prototype_toString",
+            func: url_to_string,
+        },
+        Builtin {
+            length: 0,
+            name: "URL_prototype_toJSON",
+            func: url_to_json,
         },
         Builtin {
             length: 0,

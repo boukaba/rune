@@ -387,8 +387,24 @@ Two changes:
 
 Integration suite: **760 passed, 0 failed, 3 ignored**.
 
-Next: Phase 1 foundations — stable object/array headers (replace the interim
-forwarding layer), then the runtime/Web API layer.
+### Phase 2 start — console, base64, URI helpers (2026-11-13)
+
+First runtime-facing globals, aimed at making ordinary scripts and tutorials
+actually run:
+
+- `console.log` / `console.error` / `console.warn` / `console.info` /
+  `console.debug` (log formats like `print`; error/warn go to stderr).
+- `btoa` / `atob` with Latin-1 validation and `TypeError`/`URIError` on invalid
+  input.
+- `encodeURIComponent` / `decodeURIComponent` with UTF-8 percent encoding and
+  malformed-escape errors.
+
+Regression test covers `typeof console.log`, `atob(btoa(...))`, non-ASCII
+Latin-1, percent round-trip, and the invalid-base64 error name. Integration
+suite: **761 passed, 0 failed, 3 ignored**.
+
+Next: Web API object/class surface (`URL`, `TextEncoder`, `fetch`) and the
+runtime crate; stable headers remain the structural Phase 1 item.
 
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,

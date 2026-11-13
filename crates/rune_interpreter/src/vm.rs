@@ -2346,6 +2346,20 @@ impl Vm {
             self.builtin_wrappers.insert("JSON".to_string(), json_obj);
         }
 
+        // console namespace: log/error and the usual aliases.
+        if let Some(log_handle) = find_handle(&self.builtins, "console_log") {
+            let mut console_entries: Vec<(&str, Value)> = vec![("log", log_handle)];
+            if let Some(err_handle) = find_handle(&self.builtins, "console_error") {
+                console_entries.push(("error", err_handle));
+                console_entries.push(("warn", err_handle));
+            }
+            console_entries.push(("info", log_handle));
+            console_entries.push(("debug", log_handle));
+            let console_obj = make_object(gc, &console_entries);
+            self.builtin_wrappers
+                .insert("console".to_string(), console_obj);
+        }
+
         // Function.prototype with .call() method; its constructor is the
         // %Function% wrapper so `ctor.constructor` chains resolve (spec:
         // %Error%.[[Prototype]] is %Function.prototype%).

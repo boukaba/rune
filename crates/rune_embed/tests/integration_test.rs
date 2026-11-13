@@ -13710,3 +13710,30 @@ fn test_promise_all_settled_pending_and_rejected() {
     .unwrap();
     assert_eq!(eval_str(&mut ctx, "out"), "fulfilled,2,rejected,bad");
 }
+
+#[test]
+fn test_console_and_base64_uri_helpers() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var results = [];
+            results.push(typeof console.log);
+            results.push(atob(btoa("hello")));
+            results.push(btoa("é"));
+            results.push(atob("6Q=="));
+            results.push(encodeURIComponent("a b/é"));
+            results.push(decodeURIComponent("a%20b%2F%C3%A9"));
+            var bad = "";
+            try { atob("***"); } catch (e) { bad = e.name; }
+            results.push(bad);
+            results.join("|");
+        "#,
+        )
+        .unwrap();
+    assert_eq!(
+        eval_str(&mut ctx, "results.join('|')"),
+        "function|hello|6Q==|é|a%20b%2F%C3%A9|a b/é|URIError"
+    );
+    let _ = r;
+}

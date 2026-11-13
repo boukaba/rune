@@ -102,6 +102,201 @@ pub fn print_builtin(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mu
     Value::undefined()
 }
 
+/// `console.log` — same formatting as `print`, a stable global for real code.
+pub fn console_log(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    print_builtin(gc, this, args, vm)
+}
+
+pub fn console_error(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let s = args
+        .iter()
+        .map(|v| value_to_js_string(*v))
+        .collect::<Vec<_>>()
+        .join(" ");
+    eprintln!("{s}");
+    let _ = gc;
+    Value::undefined()
+}
+
+fn base64_encode(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(T[((n >> 18) & 63) as usize] as char);
+        out.push(T[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            T[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    let mut vals = Vec::with_capacity(text.len());
+    for b in text.bytes() {
+        let v = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => continue,
+            b'\t' | b'\n' | b'\r' | b' ' | 0x0b | 0x0c => continue,
+            _ => return None,
+        };
+        vals.push(v);
+    }
+    if vals.len() % 4 == 1 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(vals.len() / 4 * 3);
+    for chunk in vals.chunks(4) {
+        let mut n = 0u32;
+        for (i, v) in chunk.iter().enumerate() {
+            n |= (*v as u32) << (18 - 6 * i);
+        }
+        out.push((n >> 16) as u8);
+        if chunk.len() > 2 {
+            out.push((n >> 8) as u8);
+        }
+        if chunk.len() > 3 {
+            out.push(n as u8);
+        }
+    }
+    Some(out)
+}
+
+/// `btoa(data)` — base64 of a Latin-1 string.
+pub fn btoa_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let text = value_to_js_string(args.first().copied().unwrap_or(Value::undefined()));
+    let mut bytes = Vec::with_capacity(text.len());
+    for c in text.chars() {
+        if (c as u32) > 0xff {
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "btoa: character out of Latin-1 range",
+            ));
+            return Value::undefined();
+        }
+        bytes.push(c as u8);
+    }
+    let encoded = base64_encode(&bytes);
+    Value::from_heap_ptr(HeapString::allocate(gc, &encoded) as *mut u8)
+}
+
+/// `atob(data)` — decode base64 to a Latin-1 string.
+pub fn atob_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let text = value_to_js_string(args.first().copied().unwrap_or(Value::undefined()));
+    let Some(bytes) = base64_decode(&text) else {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::UriError,
+            "atob: invalid base64",
+        ));
+        return Value::undefined();
+    };
+    let decoded: String = bytes.iter().map(|b| *b as char).collect();
+    Value::from_heap_ptr(HeapString::allocate(gc, &decoded) as *mut u8)
+}
+
+fn uri_encode(text: &str, extra_safe: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::new();
+    for c in text.chars() {
+        if c.is_ascii_alphanumeric()
+            || matches!(c, '-' | '_' | '.' | '!' | '~' | '*' | '\'' | '(' | ')')
+            || extra_safe.contains(c)
+        {
+            out.push(c);
+        } else {
+            let mut buf = [0u8; 4];
+            for b in c.encode_utf8(&mut buf).as_bytes() {
+                out.push('%');
+                out.push(HEX[(b >> 4) as usize] as char);
+                out.push(HEX[(b & 15) as usize] as char);
+            }
+        }
+    }
+    out
+}
+
+/// `encodeURIComponent(value)`.
+pub fn encode_uri_component_builtin(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    _vm: &mut Vm,
+) -> Value {
+    let text = value_to_js_string(args.first().copied().unwrap_or(Value::undefined()));
+    Value::from_heap_ptr(HeapString::allocate(gc, &uri_encode(&text, "")) as *mut u8)
+}
+
+/// `decodeURIComponent(value)`; throws URIError on malformed escapes/UTF-8.
+pub fn decode_uri_component_builtin(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let text = value_to_js_string(args.first().copied().unwrap_or(Value::undefined()));
+    let bytes = text.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::UriError,
+                    "URI malformed",
+                ));
+                return Value::undefined();
+            }
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            let (Some(hi), Some(lo)) = (hi, lo) else {
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::UriError,
+                    "URI malformed",
+                ));
+                return Value::undefined();
+            };
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    let Ok(decoded) = String::from_utf8(out) else {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::UriError,
+            "URI malformed",
+        ));
+        return Value::undefined();
+    };
+    Value::from_heap_ptr(HeapString::allocate(gc, &decoded) as *mut u8)
+}
+
 /// Try to convert a value to a string by calling ToPrimitive with string hint.
 /// For objects with a user-defined toString function, sets up the pending_call
 /// callback pattern and returns None (the caller must return immediately).
@@ -17945,6 +18140,36 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 0,
             name: "print",
             func: print_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "console_log",
+            func: console_log,
+        },
+        Builtin {
+            length: 0,
+            name: "console_error",
+            func: console_error,
+        },
+        Builtin {
+            length: 1,
+            name: "btoa",
+            func: btoa_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "atob",
+            func: atob_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "encodeURIComponent",
+            func: encode_uri_component_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "decodeURIComponent",
+            func: decode_uri_component_builtin,
         },
         Builtin {
             length: 1,

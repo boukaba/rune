@@ -4,7 +4,7 @@
 //! codes. Panics are caught so they never unwind across FFI.
 
 use crate::value::{HostCallback, RuneValue, retained_to_c, value_from_c, value_to_c};
-use rune_core::gc::{GcHeader, TAG_FUNC};
+use rune_core::gc::{GcHeader, TAG_FUNC, TAG_STRING};
 use rune_core::value::Value;
 use rune_embed::Context;
 use std::ffi::{CStr, CString, c_char, c_void};
@@ -116,11 +116,21 @@ pub unsafe extern "C" fn rune_context_register_host_fn(
         return STATUS_INVALID;
     };
     let ctx = unsafe { &mut *(ctx as *mut Context) };
-    ctx.register_host_fn(name, length, move |gc, _this, args, _vm| {
+    ctx.register_host_fn(name, length, move |gc, _this, args, vm| {
         let mut strings = Vec::new();
         let c_args: Vec<RuneValue> = args
             .iter()
-            .map(|value| value_to_c(*value, &mut strings))
+            .map(|value| {
+                let is_string = value
+                    .heap_ptr()
+                    .is_some_and(|ptr| unsafe { (*(ptr as *const GcHeader)).tag() == TAG_STRING });
+                if value.heap_ptr().is_some() && !is_string {
+                    let id = vm.retain_value(*value);
+                    retained_to_c(*value, id)
+                } else {
+                    value_to_c(*value, &mut strings)
+                }
+            })
             .collect();
         let result = unsafe { callback(user, c_args.len(), c_args.as_ptr()) };
         value_from_c(gc, result)
@@ -219,6 +229,49 @@ pub unsafe extern "C" fn rune_context_value_to_string(
     let text = rune_interpreter::builtins::value_to_js_string(value);
     unsafe { write_out(out, into_c_string(text)) };
     STATUS_OK
+}
+
+/// Read a data property from a retained object/array. JS getters are rejected
+/// because the C API cannot suspend the interpreter.
+///
+/// # Safety
+/// `ctx` must be live; `object` must be a retained heap value; `key` must be a
+/// NUL-terminated UTF-8 string; `result` must be a writable slot.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rune_context_get_property(
+    ctx: *mut c_void,
+    object: RuneValue,
+    key: *const c_char,
+    result: *mut RuneValue,
+    error: *mut *mut c_char,
+) -> i32 {
+    if !error.is_null() {
+        unsafe { *error = std::ptr::null_mut() };
+    }
+    if ctx.is_null() || key.is_null() || result.is_null() || object.handle == 0 {
+        return STATUS_INVALID;
+    }
+    let ctx = unsafe { &mut *(ctx as *mut Context) };
+    let key = unsafe { CStr::from_ptr(key) };
+    let Ok(key) = key.to_str() else {
+        return STATUS_INVALID;
+    };
+    let object = ctx.retained_value(object.handle as usize - 1);
+    match catch_unwind(AssertUnwindSafe(|| ctx.get_property(object, key))) {
+        Ok(Ok(value)) => {
+            let out = value_to_output(ctx, value);
+            unsafe { *result = out };
+            STATUS_OK
+        }
+        Ok(Err(message)) => {
+            unsafe { write_out(error, into_c_string(message)) };
+            STATUS_ERROR
+        }
+        Err(_) => {
+            unsafe { write_out(error, into_c_string("engine panic".to_string())) };
+            STATUS_ERROR
+        }
+    }
 }
 
 /// Release a retained heap value handle.
@@ -687,6 +740,114 @@ mod value_handle_tests {
             rune_context_release_value(ctx, string);
             rune_context_release_value(ctx, function);
             rune_context_release_value(ctx, result);
+        }
+        rune_context_destroy(ctx);
+    }
+}
+
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+    use crate::value::{RUNE_NUMBER, RUNE_OBJECT, RuneValue};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static CAPTURED: AtomicU64 = AtomicU64::new(0);
+
+    unsafe extern "C" fn capture_cb(
+        _user: *mut c_void,
+        argc: usize,
+        argv: *const RuneValue,
+    ) -> RuneValue {
+        if argc > 0 {
+            let arg = unsafe { *argv };
+            CAPTURED.store(arg.handle, Ordering::SeqCst);
+        }
+        RuneValue::undefined()
+    }
+
+    unsafe fn eval_value(ctx: *mut c_void, source: &str) -> RuneValue {
+        let source = CString::new(source).unwrap();
+        let mut out = RuneValue::undefined();
+        let mut error: *mut c_char = std::ptr::null_mut();
+        let status = unsafe {
+            rune_context_eval_value(
+                ctx,
+                source.as_ptr(),
+                &mut out as *mut RuneValue,
+                &mut error as *mut *mut c_char,
+            )
+        };
+        assert_eq!(status, 0, "eval failed");
+        if !error.is_null() {
+            unsafe { rune_free_string(error) };
+        }
+        out
+    }
+
+    unsafe fn get(ctx: *mut c_void, object: RuneValue, key: &str) -> RuneValue {
+        let key = CString::new(key).unwrap();
+        let mut out = RuneValue::undefined();
+        let mut error: *mut c_char = std::ptr::null_mut();
+        let status = unsafe {
+            rune_context_get_property(
+                ctx,
+                object,
+                key.as_ptr(),
+                &mut out as *mut RuneValue,
+                &mut error as *mut *mut c_char,
+            )
+        };
+        assert_eq!(status, 0, "get_property failed");
+        if !error.is_null() {
+            unsafe { rune_free_string(error) };
+        }
+        out
+    }
+
+    #[test]
+    fn properties_and_callback_object_handles() {
+        let ctx = rune_context_create();
+        unsafe {
+            rune_context_register_host_fn(
+                ctx,
+                c"capture".as_ptr(),
+                1,
+                std::ptr::null_mut(),
+                Some(capture_cb),
+            );
+        }
+        // Build the object inside JS and hand it to the callback.
+        let source = CString::new("capture({ x: 42 })").unwrap();
+        let mut error: *mut c_char = std::ptr::null_mut();
+        let status =
+            unsafe { rune_context_eval(ctx, source.as_ptr(), std::ptr::null_mut(), &mut error) };
+        assert_eq!(status, 0);
+        if !error.is_null() {
+            unsafe { rune_free_string(error) };
+        }
+        let handle = CAPTURED.load(Ordering::SeqCst);
+        assert_ne!(handle, 0);
+        let obj = RuneValue {
+            kind: RUNE_OBJECT,
+            boolean: 0,
+            number: 0.0,
+            string: std::ptr::null(),
+            handle,
+        };
+        let x = unsafe { get(ctx, obj, "x") };
+        assert_eq!(x.kind, RUNE_NUMBER);
+        assert_eq!(x.number, 42.0);
+
+        let array = unsafe { eval_value(ctx, "[10, 20, 30]") };
+        let length = unsafe { get(ctx, array, "length") };
+        assert_eq!(length.number, 3.0);
+        let second = unsafe { get(ctx, array, "1") };
+        assert_eq!(second.number, 20.0);
+        unsafe {
+            rune_context_release_value(ctx, obj);
+            rune_context_release_value(ctx, array);
+            rune_context_release_value(ctx, length);
+            rune_context_release_value(ctx, second);
         }
         rune_context_destroy(ctx);
     }

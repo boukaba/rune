@@ -68,6 +68,10 @@ int rune_context_eval_value(void *ctx, const char *source, RuneValue *result,
 /* Stringify a primitive or retained value. */
 int rune_context_value_to_string(void *ctx, RuneValue value, char **out);
 
+/* Read a data property from a retained object/array. */
+int rune_context_get_property(void *ctx, RuneValue object, const char *key,
+                              RuneValue *result, char **error);
+
 /* Release a retained value handle (handle == 0 is a no-op). */
 int rune_context_release_value(void *ctx, RuneValue value);
 

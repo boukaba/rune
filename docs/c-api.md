@@ -31,6 +31,7 @@ cc app.c -Icrates/rune_capi/include -Ltarget/release -lrune_capi \
 | `rune_context_value_to_string(ctx, value, &out)` | Stringify a primitive or retained value. |
 | `rune_context_release_value(ctx, value)` | Release a heap handle; `handle == 0` is a no-op. |
 | `rune_context_call_value(ctx, func, args, argc, &result, &error)` | Call a retained JS function. |
+| `rune_context_get_property(ctx, object, key, &result, &error)` | Read a data property from a retained object/array. |
 | `rune_free_string(text)` | Frees result/error strings. |
 
 Results are returned as JavaScript string representations. Callers own result
@@ -56,6 +57,10 @@ if (rune_context_eval_value(ctx, "(function (a,b){ return a+b; })", &fn, &error)
 }
 rune_context_release_value(ctx, fn);
 ```
+
+`rune_context_get_property` reads own/prototype data properties and array
+elements/length synchronously; JS getters are rejected because the C API cannot
+suspend the interpreter.
 
 Handles may be passed back as arguments to `rune_context_call_value`. They
 cannot be used while an evaluation is already on the stack (the C API is not
@@ -92,10 +97,11 @@ pointer must remain valid for the context's lifetime.
 ## Limitations
 
 - Host-callback arguments support numbers, booleans, null/undefined, and
-  strings; objects/arrays/symbols arrive as opaque `RUNE_OBJECT` with no
-  handle. Retained handles are available from `eval_value`, not from callback
-  arguments yet.
-- No `get_property`/`set_property` or object-inspection API yet.
+  strings; object/array/function arguments carry retained handles
+  (`RUNE_OBJECT`/`RUNE_FUNCTION`) that callers must release. Strings remain
+  borrowed for the callback duration.
+- `get_property` supports data properties; JS getters/accessors are rejected.
+  There is no `set_property` yet.
 - Timers, `fetch`, and the event-loop jobs are not installed by the C API.
 - Contexts are single-threaded; do not share one context across threads.
 - Raw invalid pointers are undefined behavior (standard C ABI rules); the API

@@ -4354,6 +4354,32 @@ impl Vm {
     }
 
     /// True when the current builtin/function invocation is a `new` call.
+    /// Synchronous data-property read for embedders. Accessors that would
+    /// require pushing a JS frame are rejected instead of leaving the VM
+    /// suspended.
+    pub fn get_property_sync(
+        &mut self,
+        gc: &mut SemiSpace,
+        object: Value,
+        key: &str,
+    ) -> Result<Value, String> {
+        let key = Value::from_heap_ptr(heap_string(gc, key));
+        let frames = self.frames.len();
+        let stack = self.stack.len();
+        let value = load_property_recursive(object, key, Some(self.function_prototype), gc);
+        if self.frames.len() != frames || self.pending_call.is_some() {
+            self.frames.truncate(frames);
+            self.stack.truncate(stack);
+            self.pending_call = None;
+            return Err("property getter requires asynchronous execution".to_string());
+        }
+        if let Some(exception) = self.pending_exception.take() {
+            return Err(crate::builtins::error_to_string(gc, exception)
+                .unwrap_or_else(|| "property access failed".to_string()));
+        }
+        Ok(value)
+    }
+
     pub fn current_call_is_constructor(&self) -> bool {
         self.frames
             .last()

@@ -394,6 +394,12 @@ impl Context {
         Value::from_heap_ptr(ptr as *mut u8)
     }
 
+    /// Read a data property synchronously (embedder helper). JS getters are
+    /// rejected because they require a running interpreter frame.
+    pub fn get_property(&mut self, object: Value, key: &str) -> Result<Value, String> {
+        self.vm.get_property_sync(&mut self.gc, object, key)
+    }
+
     pub fn gc(&mut self) -> &mut SemiSpace {
         &mut self.gc
     }

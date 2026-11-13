@@ -1047,6 +1047,22 @@ Integration suite: **789 passed, 0 failed, 3 ignored**; `rune_capi` **4 tests**.
 
 Integration suite: **792 passed, 0 failed, 3 ignored**; `rune_capi` **5 tests**.
 
+### Phase 3 — C property access + callback object handles (2026-11-13)
+
+- Added `Context::get_property`/`Vm::get_property_sync`: synchronous data
+  property reads (own/shape/prototype, array elements/length). JS getters are
+  detected (frame push / pending call) and rejected rather than leaving a
+  suspended frame.
+- C ABI: `rune_context_get_property(ctx, object, key, &result, &error)` reads a
+  property into a primitive or retained handle.
+- Host-callback object/array/function arguments now carry retained handles;
+  strings remain borrowed. Callers must release handles they keep.
+- C example prints `prop: 42` from `get_property` on an eval-result object.
+- Tests: **6** C API tests (function call, string conversion, property read,
+  callback object handle, release).
+
+Integration suite: **792 passed, 0 failed, 3 ignored**; `rune_capi` **6 tests**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

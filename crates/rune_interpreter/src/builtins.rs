@@ -8,6 +8,8 @@ use crate::vm::value_to_array_index;
 use crate::vm::value_to_prop_key;
 use crate::vm::{CollectionCtorState, PendingCollectionCtor};
 use crate::vm::{Exit, GeneratorResume, call_builtin_sync};
+use num_bigint::BigInt;
+use num_traits::ToPrimitive;
 use rune_bytecode::opcode::{BytecodeProgram, Instruction, Opcode};
 use rune_core::array::RuneArray;
 use rune_core::date;
@@ -16987,114 +16989,212 @@ pub fn math_f16round(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut 
 }
 
 /// Math.sumPrecise(iterable) — compensated summation over arrays/Sets of Numbers.
-pub fn math_sum_precise(_gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+pub fn math_sum_precise(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let Some(arg) = args.first().copied() else {
         vm.set_pending_exception(crate::errors::error_object(
-            _gc,
+            gc,
             &vm.error_protos,
             crate::errors::ErrorKind::TypeError,
             "Math.sumPrecise requires an iterable",
         ));
         return Value::undefined();
     };
-    let Some(ptr) = arg.heap_ptr() else {
-        vm.set_pending_exception(crate::errors::error_object(
-            _gc,
-            &vm.error_protos,
-            crate::errors::ErrorKind::TypeError,
-            "Math.sumPrecise requires an iterable",
-        ));
-        return Value::undefined();
-    };
-    let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-    let mut values: Vec<f64> = Vec::new();
-    let push_number = |v: Value, values: &mut Vec<f64>| -> bool {
-        if let Some(n) = v.as_smi() {
-            values.push(n as f64);
-            true
-        } else if let Some(n) = v.as_float64() {
-            values.push(n);
-            true
-        } else {
-            false
-        }
-    };
-    match tag {
-        TAG_ARRAY => {
-            let arr = ptr as *mut RuneArray;
-            let len = unsafe { RuneArray::length(arr) } as usize;
-            for i in 0..len {
-                let v = unsafe { RuneArray::get_element(arr, i) };
-                if v == Value::empty_sentinel() {
-                    values.push(f64::NAN);
-                } else if !push_number(v, &mut values) {
-                    vm.set_pending_exception(crate::errors::error_object(
-                        _gc,
-                        &vm.error_protos,
-                        crate::errors::ErrorKind::TypeError,
-                        "Math.sumPrecise requires Number values",
-                    ));
-                    return Value::undefined();
-                }
-            }
-        }
-        TAG_SET => {
-            let entries = unsafe { RuneSet::entries(ptr) } as *mut RuneArray;
-            if !entries.is_null() {
-                let len = unsafe { RuneArray::length(entries) } as usize;
-                for i in 0..len {
-                    let v = unsafe { RuneArray::get_element(entries, i) };
-                    if v == Value::empty_sentinel() {
-                        continue;
-                    }
-                    if !push_number(v, &mut values) {
-                        vm.set_pending_exception(crate::errors::error_object(
-                            _gc,
-                            &vm.error_protos,
-                            crate::errors::ErrorKind::TypeError,
-                            "Math.sumPrecise requires Number values",
-                        ));
-                        return Value::undefined();
-                    }
-                }
-            }
-        }
+    let method = match get_iter_method(vm, gc, arg) {
+        SymbolMethodResult::Found(m) => m,
         _ => {
             vm.set_pending_exception(crate::errors::error_object(
-                _gc,
+                gc,
                 &vm.error_protos,
                 crate::errors::ErrorKind::TypeError,
-                "Math.sumPrecise requires an iterable of Numbers",
+                "Math.sumPrecise requires an iterable",
             ));
             return Value::undefined();
         }
-    }
-    let empty = values.is_empty();
-    let all_negative_zero = !empty && values.iter().all(|v| *v == 0.0 && v.is_sign_negative());
-    let any_positive_zero = values.iter().any(|v| *v == 0.0 && !v.is_sign_negative());
-    let mut sum = 0.0f64;
-    let mut comp = 0.0f64;
-    for x in values {
-        if x.is_nan() {
-            return Value::from_float64(f64::NAN);
+    };
+    let iterator = match vm.call_value_sync(gc, method, arg, &[]) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
         }
-        let t = sum + x;
-        if sum.abs() >= x.abs() {
-            comp += (sum - t) + x;
+    };
+    let base = vm.temp_roots.len();
+    vm.temp_roots.push(iterator);
+    let mut total = BigInt::from(0);
+    let mut pos_inf = false;
+    let mut neg_inf = false;
+    let mut nan = false;
+    let mut saw_pos_zero = false;
+    let mut saw_nonzero = false;
+    loop {
+        let iter = vm.temp_roots[base];
+        let next = match get_value_sync(gc, vm, iter, "next") {
+            Ok(v) => v,
+            Err(e) => {
+                vm.temp_roots.truncate(base);
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        };
+        let result = match vm.call_value_sync(gc, next, iter, &[]) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.temp_roots.truncate(base);
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        };
+        let done = match get_value_sync(gc, vm, result, "done") {
+            Ok(v) => v.to_boolean().unwrap_or(false),
+            Err(e) => {
+                close_iterator(gc, vm, vm.temp_roots[base]);
+                vm.temp_roots.truncate(base);
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        };
+        if done {
+            break;
+        }
+        let value = match get_value_sync(gc, vm, result, "value") {
+            Ok(v) => v,
+            Err(e) => {
+                close_iterator(gc, vm, vm.temp_roots[base]);
+                vm.temp_roots.truncate(base);
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        };
+        let n = if let Some(n) = value.as_smi() {
+            n as f64
+        } else if let Some(n) = value.as_float64() {
+            n
         } else {
-            comp += (x - t) + sum;
-        }
-        sum = t;
-    }
-    let mut result = sum + comp;
-    if result == 0.0 {
-        if empty || (all_negative_zero && !any_positive_zero) {
-            result = -0.0;
+            close_iterator(gc, vm, vm.temp_roots[base]);
+            vm.temp_roots.truncate(base);
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Math.sumPrecise requires Number values",
+            ));
+            return Value::undefined();
+        };
+        if n.is_nan() {
+            nan = true;
+        } else if n.is_infinite() {
+            if n > 0.0 {
+                pos_inf = true;
+            } else {
+                neg_inf = true;
+            }
+        } else if n == 0.0 {
+            if !n.is_sign_negative() {
+                saw_pos_zero = true;
+            }
         } else {
-            result = 0.0;
+            saw_nonzero = true;
+            let bits = n.to_bits();
+            let sign = bits >> 63 != 0;
+            let exp = ((bits >> 52) & 0x7ff) as i32;
+            let frac = bits & 0x000f_ffff_ffff_ffff;
+            let (mant, e) = if exp == 0 {
+                (frac, -1074i32)
+            } else {
+                (frac | (1u64 << 52), exp - 1023 - 52)
+            };
+            let mut term = BigInt::from(mant) << ((e + 1074) as usize);
+            if sign {
+                term = -term;
+            }
+            total += term;
         }
     }
-    Value::from_float64(result)
+    vm.temp_roots.truncate(base);
+    if nan || (pos_inf && neg_inf) {
+        return Value::from_float64(f64::NAN);
+    }
+    if pos_inf {
+        return Value::from_float64(f64::INFINITY);
+    }
+    if neg_inf {
+        return Value::from_float64(f64::NEG_INFINITY);
+    }
+    if total == BigInt::from(0) {
+        // Empty and all-(-0) inputs produce -0; any +0 or cancellation of
+        // non-zero finite values makes it +0.
+        if saw_pos_zero || saw_nonzero {
+            return Value::smi(0);
+        }
+        return Value::from_float64(-0.0);
+    }
+    Value::from_float64(exact_bigint_to_f64(total))
+}
+
+/// Round an exact integer scaled by 2^-1074 to the nearest binary64
+/// (ties-to-even).
+fn exact_bigint_to_f64(total: BigInt) -> f64 {
+    let negative = total < BigInt::from(0);
+    let abs = if negative { -total } else { total };
+    let bits = abs.bits() as i64;
+    let round_shift = |abs: &BigInt, shift: i64| -> (BigInt, bool) {
+        if shift <= 0 {
+            return (abs.clone(), false);
+        }
+        let q = abs >> (shift as usize);
+        let mask = (BigInt::from(1) << (shift as usize)) - 1;
+        let rem = abs & mask;
+        let half = BigInt::from(1) << ((shift - 1) as usize);
+        let up = rem > half || (rem == half && q.to_u64().unwrap_or(0) & 1 == 1);
+        if up { (q + 1, true) } else { (q, false) }
+    };
+    let sign_bits = if negative { 1u64 << 63 } else { 0 };
+    if bits <= 52 {
+        let m = abs.to_u64().unwrap_or(0);
+        return f64::from_bits(sign_bits | m);
+    }
+    if bits == 53 {
+        let q = abs.to_u64().unwrap_or(0);
+        return f64::from_bits(sign_bits | (1u64 << 52) << 52 | (q - (1u64 << 52)));
+    }
+    // Normal: round to 53 significand bits.
+    let mut shift = bits - 53;
+    let (mut q, mut carried) = round_shift(&abs, shift);
+    if q.bits() > 53 {
+        q >>= 1usize;
+        shift += 1;
+        carried = true;
+    }
+    let _ = carried;
+    let q64 = q.to_u64().unwrap_or(0);
+    // exponent of q's leading bit relative to 2^-1074
+    let top = (q.bits() as i64 - 1) + (shift - 1074);
+    if top > 1023 {
+        return if negative {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
+    }
+    if top < -1022 {
+        // Subnormal: re-round at 2^-1074.
+        let (m, _) = if bits <= 52 {
+            (abs.clone(), false)
+        } else {
+            round_shift(&abs, bits - 52)
+        };
+        let m = m.to_u64().unwrap_or(0);
+        if m >= (1u64 << 52) {
+            return f64::from_bits(sign_bits | (1u64 << 52) << 52);
+        }
+        if m == 0 {
+            return f64::from_bits(sign_bits);
+        }
+        return f64::from_bits(sign_bits | m);
+    }
+    let exp_field = (top + 1023) as u64;
+    let mant = q64 - (1u64 << 52);
+    f64::from_bits(sign_bits | (exp_field << 52) | mant)
 }
 
 pub fn math_fround(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {

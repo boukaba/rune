@@ -2610,6 +2610,27 @@ Integration suite: **865 passed, 0 failed, 3 ignored**.
 
 Integration suite: **866 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Exact Math.sumPrecise + array symbol keys (2026-11-13)
+
+- `Math.sumPrecise` now drains arbitrary iterables through @@iterator
+  (`next`/`done`/`value`, IteratorClose on type errors) and requires raw
+  Number elements (no valueOf coercion).
+- Exact summation: every finite f64 is converted to an exact integer scaled by
+  2^-1074 and accumulated in an arbitrary-precision `num-bigint` integer;
+  the total is rounded once to binary64 (ties-to-even, normal/subnormal/
+  overflow paths). Handles ±Infinity (both → NaN), NaN, empty/all-−0 → −0,
+  +0 or cancellations → +0.
+- Added `num-bigint`/`num-traits` dependencies (locked offline).
+- Array `[[Set]]` now accepts symbol keys, storing them in extra_props (so
+  `arr[Symbol.iterator] = gen` / `Symbol.isConcatSpreadable = false` work).
+- Updated two integration expectations that had encoded the old ignored-symbol
+  behavior (`concat` non-spread length and a stale true-count).
+- Test262: Math **323 → 325/327**; `sumPrecise` 4/10 → 7/10 at first, now 8/10.
+- Remaining sumPrecise: generator/array-override synchronous nested iteration
+  edge and one non-number iterator test.
+
+Integration suite: **866 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

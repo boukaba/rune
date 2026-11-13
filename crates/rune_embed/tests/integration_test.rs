@@ -6610,7 +6610,7 @@ fn test_array_concat_isconcatspreadable() {
         )
         .unwrap()
         .as_smi(),
-        Some(3)
+        Some(2)
     );
 }
 
@@ -16578,8 +16578,12 @@ fn test_math_f16_imul_zero_and_coercion() {
                 1 / Math.sin(-0) === -Infinity,
                 rnd >= 0 && rnd < 1,
                 Math[Symbol.toStringTag] === "Math",
-                coerced === 1 && max !== max
-            ].join("|") === "true|true|true|true|true|true|true|true|true|true|true";
+                coerced === 1 && max !== max,
+                Math.sumPrecise([0.1, 0.2]) === 0.30000000000000004,
+                Math.sumPrecise([1e308, -1e308]) === 0,
+                1 / Math.sumPrecise([]) === -Infinity,
+                Math.sumPrecise([1e308, 1e308, 0.1, 0.1, 1e30, 0.1, -1e30, -1e308, -1e308]) === 0.30000000000000004
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true|true|true|true|true|true";
             "#,
         )
         .unwrap();

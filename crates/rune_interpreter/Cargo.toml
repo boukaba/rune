@@ -12,6 +12,8 @@ rune_jit_baseline = { path = "../rune_jit_baseline", optional = true }
 rkyv = "0.8"
 tracing = { workspace = true }
 url = "2.5"
+num-bigint = "0.4"
+num-traits = "0.2"
 
 [features]
 default = ["jit"]

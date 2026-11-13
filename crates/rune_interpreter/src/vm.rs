@@ -16243,6 +16243,21 @@ pub(crate) fn do_store_property(
                         let _ = obj; // obj refreshed by update_heap_reference above
                     }
                 }
+            } else if raw_key.as_symbol_id().is_some() {
+                let mut arr_ptr = obj.heap_ptr().unwrap();
+                unsafe {
+                    let mut props = RuneArray::extra_props(arr_ptr as *mut RuneArray);
+                    if props.is_null() {
+                        let new_obj = JSObject::allocate(gc, Shape::empty(), &[]);
+                        let gc_tag = (*(arr_ptr as *const GcHeader)).tag();
+                        if gc_tag == TAG_ARRAY && (*(arr_ptr as *const GcHeader)).is_forwarded() {
+                            arr_ptr = (*(arr_ptr as *const GcHeader)).forwarding_addr();
+                        }
+                        RuneArray::set_extra_props(arr_ptr as *mut RuneArray, new_obj as *mut u8);
+                        props = new_obj as *mut u8;
+                    }
+                    return do_store_property(Value::from_heap_ptr(props), raw_key, value, gc, vm);
+                }
             } else if let Some(key_str) = raw_key.heap_ptr() {
                 let k = unsafe { HeapString::to_string(key_str as *mut HeapString) };
                 if k == "length" {

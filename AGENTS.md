@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Builtin `instanceof Function` (2026-11-13)**: negative-Smi builtin handles now satisfy `instanceof Function`; Promise 359→**365/703**, String 666→668, Array +2. Integration **799**.
 - **Namespace prototypes + __proto__ descriptor (2026-11-13)**: Math/JSON/console chain to Object.prototype; `__proto__` is a real accessor (cycle TypeError, direct get/set) while assignment keeps the legacy fast path. Object 1558→**1580/3411**; defineProperty 509→521. Integration **798**.
 - **Object wrapper tags + legacy accessors (2026-11-13)**: `new Number`/`new Boolean` report their tags; toLocaleString; __lookupGetter__/__lookupSetter__/__defineGetter__/__defineSetter__. Object 1531→**1558/3411**. Integration **797**.
 - **String ToPrimitive + lastIndexOf (2026-11-13)**: ToPrimitive exhaustion throws TypeError; all String prototype methods coerce `this` via ToPrimitive; added lastIndexOf (UTF-16, clamped position, empty search). String 592→**666/1223**; lastIndexOf 12/25. Integration **796**.

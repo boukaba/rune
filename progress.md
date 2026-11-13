@@ -1251,6 +1251,21 @@ Integration suite: **797 passed, 0 failed, 3 ignored**.
 
 Integration suite: **798 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — builtin functions in `instanceof Function` (2026-11-13)
+
+- Builtin method/constructor handles are negative Smis with no heap header.
+  OrdinaryHasInstance treated them as non-objects, so every intrinsic method
+  failed `fn instanceof Function` (a common test262 precondition).
+- `ordinary_has_instance` now returns true for a builtin handle when the RHS
+  prototype is `%Function.prototype%`.
+- Test262: Promise **359 → 365/703**; String **666 → 668/1223**; Array
+  **2468 → 2470/3081**; Function **157/509**.
+- Regression: `test_builtin_methods_instanceof_function`.
+- Known gap: `%Function.prototype%` itself is still a plain object
+  (`typeof` "object", `instanceof Function` false), not a callable function.
+
+Integration suite: **799 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

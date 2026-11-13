@@ -15610,6 +15610,11 @@ pub(crate) fn value_prototype(value: Value) -> Option<*mut u8> {
 
 /// OrdinaryHasInstance per §13.10.2: walk lhs prototype chain looking for rhs_proto.
 fn ordinary_has_instance(lhs: Value, rhs_proto_ptr: *mut u8, function_proto: *mut u8) -> bool {
+    // Builtin function handles are negative Smis; their [[Prototype]] is
+    // %Function.prototype%, so `builtinMethod instanceof Function` is true.
+    if lhs.as_smi().is_some_and(|s| s < 0) {
+        return !function_proto.is_null() && rhs_proto_ptr == function_proto;
+    }
     let mut current = lhs;
     let mut depth = 0;
     loop {

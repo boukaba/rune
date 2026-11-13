@@ -14704,3 +14704,22 @@ fn test_namespace_prototypes_and_proto_accessor() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_builtin_methods_instanceof_function() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            [
+                [].map instanceof Function,
+                Promise.prototype.then instanceof Function,
+                String.prototype.slice instanceof Function,
+                Object.prototype.hasOwnProperty instanceof Function,
+                (function () {}) instanceof Function
+            ].join("|") === "true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

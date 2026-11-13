@@ -70,7 +70,8 @@ const OBJECT_SLOTS_OFFSET: usize = 32;
 /// StringObject layout constants (matches string_object.rs).
 const STRING_OBJ_PROTOTYPE_OFFSET: usize = 8;
 const STRING_OBJ_STRING_PTR_OFFSET: usize = 16;
-const STRING_OBJ_TOTAL_SIZE: usize = 24;
+const STRING_OBJ_EXTRA_OFFSET: usize = 24;
+const STRING_OBJ_TOTAL_SIZE: usize = 32;
 
 /// Trait for providing current GC root slots.
 /// Implemented by Vm to register stack/frame/locals roots.
@@ -355,6 +356,8 @@ impl SemiSpace {
                         self.forward_value(str_ptr);
                         let proto_ptr = scan_ptr.add(STRING_OBJ_PROTOTYPE_OFFSET) as *mut u64;
                         self.forward_value(proto_ptr);
+                        let extra_ptr = scan_ptr.add(STRING_OBJ_EXTRA_OFFSET) as *mut u64;
+                        self.forward_value(extra_ptr);
                     }
                     TAG_PROMISE => {
                         let result_ptr = scan_ptr.add(size_of::<GcHeader>() + 8) as *mut u64;

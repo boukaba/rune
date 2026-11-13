@@ -6645,6 +6645,42 @@ impl Vm {
                             let s = unsafe { HeapString::to_string(string_ptr as *mut HeapString) };
                             let len = s.encode_utf16().count();
                             Value::smi(len as i32)
+                        } else if tag == TAG_STRING_OBJ
+                            && value_to_prop_key(raw_key).is_some_and(|key| {
+                                string_object_extra_existing(obj.heap_ptr().unwrap()).is_some_and(
+                                    |extra| unsafe {
+                                        JSObject::shape_ptr(extra).lookup(&key).is_some()
+                                    },
+                                )
+                            })
+                        {
+                            let extra =
+                                string_object_extra_existing(obj.heap_ptr().unwrap()).unwrap();
+                            let key = value_to_prop_key(raw_key).unwrap();
+                            let slot = unsafe { JSObject::shape_ptr(extra) }.lookup(&key).unwrap();
+                            let v = unsafe { JSObject::get_slot(extra, slot) };
+                            if v.heap_ptr().is_some_and(|p| unsafe {
+                                (*(p as *const GcHeader)).tag() == TAG_ACCESSOR
+                            }) {
+                                let pair_ptr = v.heap_ptr().unwrap();
+                                let getter =
+                                    unsafe { rune_core::accessor::AccessorPair::getter(pair_ptr) };
+                                if getter.is_undefined() {
+                                    Value::undefined()
+                                } else {
+                                    match self.call_value_sync(gc, getter, obj, &[]) {
+                                        Ok(v) => v,
+                                        Err(e) => {
+                                            if let Some(exit) = self.handle_throw(gc, e) {
+                                                return PropGetOut::Bail(Some(exit));
+                                            }
+                                            return PropGetOut::Bail(None);
+                                        }
+                                    }
+                                }
+                            } else {
+                                v
+                            }
                         } else if self.string_prototype.is_heap_object() {
                             // Walk String.prototype → Object.prototype.
                             load_property_recursive(
@@ -15992,6 +16028,43 @@ pub(crate) fn do_store_property(
                 }
             }
             return true;
+        } else if tag == TAG_STRING_OBJ {
+            // String exotic object: indices and `length` are non-writable;
+            // other named properties live in the extra-props object.
+            if let Some(index) = value_to_array_index(raw_key) {
+                let s = unsafe {
+                    HeapString::to_string(
+                        StringObject::string_ptr(ptr as *mut StringObject) as *mut HeapString
+                    )
+                };
+                if index < s.encode_utf16().count() {
+                    return false;
+                }
+                let extra = string_object_extra(gc, ptr);
+                return do_store_property(
+                    Value::from_heap_ptr(extra as *mut u8),
+                    raw_key,
+                    value,
+                    gc,
+                    vm,
+                );
+            }
+            if let Some(kptr) = raw_key.heap_ptr() {
+                if unsafe { (*(kptr as *const GcHeader)).tag() } == TAG_STRING {
+                    let name = unsafe { HeapString::to_string(kptr as *mut HeapString) };
+                    if name == "length" {
+                        return false;
+                    }
+                }
+            }
+            let extra = string_object_extra(gc, ptr);
+            return do_store_property(
+                Value::from_heap_ptr(extra as *mut u8),
+                raw_key,
+                value,
+                gc,
+                vm,
+            );
         } else if tag == TAG_ARRAY {
             if let Some(index) = value_to_array_index(raw_key) {
                 let len = unsafe { RuneArray::length(ptr as *mut RuneArray) };
@@ -16722,6 +16795,28 @@ fn make_wrapper_value(gc: &mut SemiSpace, key: &str, value: Value, prototype: Va
         unsafe { JSObject::set_prototype(ptr, proto) };
     }
     Value::from_heap_ptr(ptr as *mut u8)
+}
+
+/// Lazily-allocated named-property object for a String wrapper.
+fn string_object_extra(gc: &mut SemiSpace, ptr: *mut u8) -> *mut JSObject {
+    let sop = ptr as *mut StringObject;
+    let mut extra = unsafe { StringObject::extra_props(sop) };
+    if extra.is_null() {
+        let obj = JSObject::allocate(gc, Shape::empty(), &[]);
+        let ptr = unsafe { rune_core::gc::resolve_forwarded(ptr) };
+        unsafe { StringObject::set_extra_props(ptr as *mut StringObject, obj as *mut u8) };
+        extra = obj as *mut u8;
+    }
+    extra as *mut JSObject
+}
+
+fn string_object_extra_existing(ptr: *mut u8) -> Option<*mut JSObject> {
+    let extra = unsafe { StringObject::extra_props(ptr as *mut StringObject) };
+    if extra.is_null() {
+        None
+    } else {
+        Some(extra as *mut JSObject)
+    }
 }
 
 /// ToObject (§7.1.14): box primitives into String/Boolean/Number wrapper

@@ -16473,3 +16473,36 @@ fn test_error_descriptors_to_string_and_wrapper_equality() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_string_wrapper_properties_and_position_coercion() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var s = new String("abc");
+            s.foo = 42;
+            var pos = { valueOf: function () { return 1; } };
+            var desc = Object.getOwnPropertyDescriptor(s, "foo");
+            var threw = false;
+            try { "abc".indexOf("a", { valueOf: function () { throw new TypeError("p"); } }); }
+            catch (e) { threw = e instanceof TypeError; }
+            [
+                s.foo === 42,
+                s.hasOwnProperty("foo"),
+                s.hasOwnProperty("0"),
+                s.hasOwnProperty("length"),
+                desc.value === 42,
+                "abc".indexOf("b", pos) === 1,
+                "abc".charCodeAt(pos) === 98,
+                "abc".substring(pos) === "bc",
+                "a".repeat({ valueOf: function () { return 3; } }) === "aaa",
+                "a".padStart({ valueOf: function () { return 3; } }, "0") === "00a",
+                "a,b,c".split(",", { valueOf: function () { return 2; } }).length === 2,
+                threw
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

@@ -5,7 +5,8 @@ pub const TAG_STRING_OBJ: u64 = 6;
 pub const STRING_OBJ_HEADER_SIZE: usize = 8;
 pub const STRING_OBJ_PROTOTYPE_OFFSET: usize = 8;
 pub const STRING_OBJ_STRING_PTR_OFFSET: usize = 16;
-pub const STRING_OBJ_TOTAL_SIZE: usize = 24;
+pub const STRING_OBJ_EXTRA_OFFSET: usize = 24;
+pub const STRING_OBJ_TOTAL_SIZE: usize = 32;
 
 pub struct StringObject;
 
@@ -29,6 +30,8 @@ impl StringObject {
 
             let str_ptr = ptr.add(STRING_OBJ_STRING_PTR_OFFSET) as *mut u64;
             *str_ptr = string_ptr as u64;
+            let extra_ptr = ptr.add(STRING_OBJ_EXTRA_OFFSET) as *mut u64;
+            *extra_ptr = 0;
         }
         ptr as *mut StringObject
     }
@@ -54,6 +57,22 @@ impl StringObject {
             let ptr_bytes = ptr as *mut u8;
             let str_ptr = ptr_bytes.add(STRING_OBJ_STRING_PTR_OFFSET) as *const u64;
             *str_ptr as *mut u8
+        }
+    }
+
+    pub unsafe fn extra_props(ptr: *mut StringObject) -> *mut u8 {
+        unsafe {
+            let ptr_bytes = ptr as *mut u8;
+            let extra = ptr_bytes.add(STRING_OBJ_EXTRA_OFFSET) as *const u64;
+            *extra as *mut u8
+        }
+    }
+
+    pub unsafe fn set_extra_props(ptr: *mut StringObject, props: *mut u8) {
+        unsafe {
+            let ptr_bytes = ptr as *mut u8;
+            let extra = ptr_bytes.add(STRING_OBJ_EXTRA_OFFSET) as *mut u64;
+            *extra = props as u64;
         }
     }
 }

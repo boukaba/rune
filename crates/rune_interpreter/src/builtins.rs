@@ -33,6 +33,23 @@ use rune_core::typedarray;
 use rune_core::value::Value;
 use url::Url;
 
+fn to_integer_or_infinity_sync(gc: &mut SemiSpace, vm: &mut Vm, v: Value) -> Result<f64, Value> {
+    let prim = to_primitive_sync(gc, vm, v, "number")?;
+    Ok(to_integer_or_infinity(prim))
+}
+
+macro_rules! to_int_sync {
+    ($gc:expr, $vm:expr, $v:expr) => {
+        match to_integer_or_infinity_sync($gc, $vm, $v) {
+            Ok(n) => n,
+            Err(e) => {
+                $vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
+    };
+}
+
 /// A registered built-in function.
 pub struct Builtin {
     pub name: &'static str,
@@ -8377,6 +8394,39 @@ pub fn object_prototype_has_own_property(
     };
     let key_is_str = |s: &str| key_str.as_deref() == Some(s);
     let found = match tag {
+        TAG_STRING => {
+            if let Some(index) = value_to_array_index(key) {
+                let text = unsafe { HeapString::to_string(ptr as *mut HeapString) };
+                index < text.encode_utf16().count()
+            } else {
+                key_is_str("length")
+            }
+        }
+        TAG_STRING_OBJ => {
+            let sptr = unsafe {
+                rune_core::string_object::StringObject::string_ptr(
+                    ptr as *mut rune_core::string_object::StringObject,
+                )
+            };
+            if let Some(index) = value_to_array_index(key) {
+                let text = unsafe { HeapString::to_string(sptr as *mut HeapString) };
+                index < text.encode_utf16().count()
+            } else if key_is_str("length") {
+                true
+            } else if let Some(pk) = value_to_prop_key(key) {
+                let extra = unsafe {
+                    rune_core::string_object::StringObject::extra_props(
+                        ptr as *mut rune_core::string_object::StringObject,
+                    )
+                };
+                !extra.is_null()
+                    && unsafe { JSObject::shape_ptr(extra as *mut JSObject) }
+                        .lookup(&pk)
+                        .is_some()
+            } else {
+                false
+            }
+        }
         TAG_PROMISE => {
             let extra = unsafe { Promise::extra_props(ptr) };
             if extra.is_null() {
@@ -8455,31 +8505,6 @@ pub fn object_prototype_has_own_property(
             shape.lookup(&pk).is_some()
         }
         TAG_FUNC | TAG_DATE | TAG_REGEXP => exotic_extra_props_has(ptr, key),
-        TAG_STRING | TAG_STRING_OBJ => {
-            let text = if tag == TAG_STRING {
-                unsafe {
-                    rune_core::string::HeapString::to_string(
-                        ptr as *mut rune_core::string::HeapString,
-                    )
-                }
-            } else {
-                let sp = unsafe {
-                    rune_core::string_object::StringObject::string_ptr(
-                        ptr as *mut rune_core::string_object::StringObject,
-                    )
-                };
-                unsafe {
-                    rune_core::string::HeapString::to_string(
-                        sp as *mut rune_core::string::HeapString,
-                    )
-                }
-            };
-            if let Some(index) = value_to_array_index(key) {
-                index < text.encode_utf16().count()
-            } else {
-                key_is_str("length")
-            }
-        }
         _ => false,
     };
     Value::boolean(found)
@@ -9823,6 +9848,32 @@ pub fn object_has_own(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
             } else {
                 Value::boolean(false)
             }
+        }
+        TAG_STRING_OBJ => {
+            let sptr = unsafe {
+                rune_core::string_object::StringObject::string_ptr(
+                    ptr as *mut rune_core::string_object::StringObject,
+                )
+            };
+            if let Some(idx) = crate::vm::value_to_array_index(key) {
+                let text = unsafe { HeapString::to_string(sptr as *mut HeapString) };
+                return Value::boolean(idx < text.encode_utf16().count());
+            }
+            if let Some(pk) = crate::vm::value_to_prop_key(key) {
+                if pk.as_u64() == PropertyKey::from_string("length").as_u64() {
+                    return Value::boolean(true);
+                }
+                let extra = unsafe {
+                    rune_core::string_object::StringObject::extra_props(
+                        ptr as *mut rune_core::string_object::StringObject,
+                    )
+                };
+                if !extra.is_null() {
+                    let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                    return Value::boolean(shape.lookup(&pk).is_some());
+                }
+            }
+            Value::boolean(false)
         }
         TAG_ARRAY => {
             if let Some(idx) = crate::vm::value_to_array_index(key) {
@@ -11486,6 +11537,58 @@ pub fn object_get_own_property_descriptor(
     // read as absent → undefined).
     if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_ARRAY {
         return array_own_property_descriptor(gc, ptr, raw_key, vm.object_prototype.heap_ptr());
+    }
+    if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_STRING_OBJ {
+        let sptr = unsafe {
+            rune_core::string_object::StringObject::string_ptr(
+                ptr as *mut rune_core::string_object::StringObject,
+            )
+        };
+        if let Some(idx) = value_to_array_index(raw_key) {
+            let text = unsafe { HeapString::to_string(sptr as *mut HeapString) };
+            if idx < text.encode_utf16().count() {
+                let ch = text.chars().nth(idx).unwrap_or('\u{0}');
+                let val =
+                    Value::from_heap_ptr(HeapString::allocate(gc, &ch.to_string()) as *mut u8);
+                return make_descriptor_object(
+                    gc,
+                    val,
+                    rune_core::shape::ATTR_ENUMERABLE,
+                    vm.object_prototype.heap_ptr(),
+                );
+            }
+            return Value::undefined();
+        }
+        if let Some(pk) = value_to_prop_key(raw_key) {
+            if pk.as_u64() == PropertyKey::from_string("length").as_u64() {
+                let text = unsafe { HeapString::to_string(sptr as *mut HeapString) };
+                let len = text.encode_utf16().count();
+                return make_descriptor_object(
+                    gc,
+                    Value::smi(len as i32),
+                    0,
+                    vm.object_prototype.heap_ptr(),
+                );
+            }
+            let extra = unsafe {
+                rune_core::string_object::StringObject::extra_props(
+                    ptr as *mut rune_core::string_object::StringObject,
+                )
+            };
+            if !extra.is_null() {
+                let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                if let Some(slot) = shape.lookup(&pk) {
+                    let val = unsafe { JSObject::get_slot(extra as *mut JSObject, slot) };
+                    return make_descriptor_object(
+                        gc,
+                        val,
+                        shape.attr_at(slot),
+                        vm.object_prototype.heap_ptr(),
+                    );
+                }
+            }
+        }
+        return Value::undefined();
     }
     if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_PROMISE {
         let extra = unsafe { Promise::extra_props(ptr) };
@@ -15073,10 +15176,10 @@ pub fn string_char_at(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let index = args
-        .first()
-        .map(|&v| to_integer_or_infinity(v).max(0.0) as usize)
-        .unwrap_or(0);
+    let index = match args.first() {
+        Some(&v) => to_int_sync!(gc, vm, v).max(0.0) as usize,
+        None => 0,
+    };
     let Some(s) = to_primitive_string(gc, this, vm) else {
         return Value::undefined();
     };
@@ -15153,7 +15256,7 @@ pub fn string_index_of(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
     let start = if pos.is_undefined() {
         0
     } else {
-        let f = to_integer_or_infinity(pos);
+        let f = to_int_sync!(gc, vm, pos);
         if f.is_nan() || f < 0.0 {
             0
         } else {
@@ -15192,7 +15295,7 @@ pub fn string_last_index_of(gc: &mut SemiSpace, this: Value, args: &[Value], vm:
     let pos = if pos.is_undefined() {
         len
     } else {
-        let f = to_integer_or_infinity(pos);
+        let f = to_int_sync!(gc, vm, pos);
         if f.is_nan() || f > len as f64 {
             len
         } else if f < 0.0 {
@@ -15231,7 +15334,7 @@ pub fn string_includes(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
     let start = if pos.is_undefined() {
         0
     } else {
-        let f = to_integer_or_infinity(pos);
+        let f = to_int_sync!(gc, vm, pos);
         if f.is_nan() || f < 0.0 {
             0
         } else {
@@ -15266,7 +15369,7 @@ pub fn string_starts_with(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
     let start = if pos.is_undefined() {
         0
     } else {
-        let f = to_integer_or_infinity(pos);
+        let f = to_int_sync!(gc, vm, pos);
         if f.is_nan() || f < 0.0 {
             0
         } else {
@@ -15291,7 +15394,7 @@ pub fn string_ends_with(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
     let end = if end_pos.is_undefined() {
         units.len()
     } else {
-        let f = to_integer_or_infinity(end_pos);
+        let f = to_int_sync!(gc, vm, end_pos);
         if f.is_nan() || f < 0.0 {
             0
         } else {
@@ -15307,46 +15410,14 @@ pub fn string_ends_with(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
 /// (objects with valueOf, hex, unparseable) yields 0 — documented gap
 /// shared with the string repeat/pad paths that also use this helper.
 pub(crate) fn to_integer_or_infinity(v: Value) -> f64 {
-    if v.is_undefined() || v.is_null() {
-        return 0.0;
+    let n = crate::vm::to_number(v);
+    if n.is_nan() || n == 0.0 {
+        0.0
+    } else if n.is_infinite() {
+        n
+    } else {
+        n.trunc()
     }
-    if let Some(b) = v.to_boolean() {
-        return if b { 1.0 } else { 0.0 };
-    }
-    if let Some(smi) = v.as_smi() {
-        return smi as f64;
-    }
-    if let Some(f) = v.as_float64() {
-        if f.is_nan() {
-            return 0.0;
-        }
-        return f.trunc();
-    }
-    // Numeric strings (fromIndex "2"/"3E0", repeat counts, pad lengths).
-    if let Some(ptr) = v.heap_ptr() {
-        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-        if tag == TAG_STRING {
-            let s = unsafe { HeapString::to_string(ptr as *mut HeapString) };
-            let t = s.trim();
-            if t.is_empty() {
-                return 0.0;
-            }
-            if t.eq_ignore_ascii_case("infinity") || t == "+Infinity" {
-                return f64::INFINITY;
-            }
-            if t == "-Infinity" {
-                return f64::NEG_INFINITY;
-            }
-            if let Ok(n) = t.parse::<f64>() {
-                if n.is_nan() {
-                    return 0.0;
-                }
-                return n.trunc();
-            }
-            return 0.0;
-        }
-    }
-    0.0
 }
 
 /// String.prototype.charCodeAt(index) — returns 16-bit UTF-16 code unit at position.
@@ -15359,7 +15430,7 @@ pub fn string_char_code_at(gc: &mut SemiSpace, this: Value, args: &[Value], vm: 
     };
     let pos = args.first().copied().unwrap_or(Value::undefined());
     // §22.1.3.4: pos = ToIntegerOrInfinity(index); NaN → 0 (to_integer_or_infinity).
-    let idx = to_integer_or_infinity(pos) as isize;
+    let idx = to_int_sync!(gc, vm, pos) as isize;
     if idx < 0 {
         return Value::from_float64(f64::NAN);
     }
@@ -15380,7 +15451,7 @@ pub fn string_code_point_at(gc: &mut SemiSpace, this: Value, args: &[Value], vm:
         return Value::undefined();
     };
     let pos = args.first().copied().unwrap_or(Value::undefined());
-    let idx = to_integer_or_infinity(pos) as isize;
+    let idx = to_int_sync!(gc, vm, pos) as isize;
     if idx < 0 {
         return Value::undefined();
     }
@@ -15410,8 +15481,11 @@ pub fn string_substring(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
     };
     let units = s.encode_utf16().collect::<Vec<u16>>();
     let len = units.len() as f64;
-    let raw_start = to_integer_or_infinity(args.first().copied().unwrap_or(Value::undefined()));
-    let raw_end = args.get(1).map(|&v| to_integer_or_infinity(v));
+    let raw_start = to_int_sync!(gc, vm, args.first().copied().unwrap_or(Value::undefined()));
+    let raw_end = match args.get(1) {
+        Some(&v) => Some(to_int_sync!(gc, vm, v)),
+        None => None,
+    };
     let final_start = raw_start.max(0.0).min(len) as usize;
     let final_end = match raw_end {
         Some(e) => e.max(0.0).min(len) as usize,
@@ -15437,13 +15511,16 @@ pub fn string_substr(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
     };
     let units = s.encode_utf16().collect::<Vec<u16>>();
     let len = units.len();
-    let raw_start = to_integer_or_infinity(args.first().copied().unwrap_or(Value::undefined()));
+    let raw_start = to_int_sync!(gc, vm, args.first().copied().unwrap_or(Value::undefined()));
     let int_start = if raw_start < 0.0 {
         (len as f64 + raw_start).max(0.0) as usize
     } else {
         (raw_start as usize).min(len)
     };
-    let int_len = args.get(1).map(|&v| to_integer_or_infinity(v));
+    let int_len = match args.get(1) {
+        Some(&v) => Some(to_int_sync!(gc, vm, v)),
+        None => None,
+    };
     let end = match int_len {
         Some(l) => {
             let clamped = l.max(0.0) as usize;
@@ -15584,7 +15661,7 @@ pub fn string_repeat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
         return Value::undefined();
     };
     let count = args.first().copied().unwrap_or(Value::undefined());
-    let n = to_integer_or_infinity(count);
+    let n = to_int_sync!(gc, vm, count);
     if n.is_infinite() || n < 0.0 || n.is_nan() {
         let err = make_error(gc, &vm.error_protos, "RangeError: Invalid count value");
         vm.set_pending_exception(err);
@@ -15623,7 +15700,7 @@ fn string_pad(gc: &mut SemiSpace, vm: &mut Vm, this: Value, args: &[Value], at_e
     };
     let units = s.encode_utf16().collect::<Vec<u16>>();
     let max_len = args.first().copied().unwrap_or(Value::undefined());
-    let target_f = to_integer_or_infinity(max_len);
+    let target_f = to_int_sync!(gc, vm, max_len);
     if target_f.is_nan() || !target_f.is_finite() || target_f > 9_007_199_254_740_991.0 {
         let err = make_error(gc, &vm.error_protos, "RangeError: Invalid string length");
         vm.set_pending_exception(err);
@@ -15712,15 +15789,6 @@ pub fn string_concat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
 /// String.prototype.split(separator, limit) — splits a string into an array of substrings.
 /// Per §22.1.3.17 (simplified: string separator only, no regex).
 pub fn string_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    fn to_u32(v: Value) -> u32 {
-        if let Some(n) = v.as_smi() {
-            n.max(0) as u32
-        } else if let Some(f) = v.as_float64() {
-            if f.is_finite() { f.max(0.0) as u32 } else { 0 }
-        } else {
-            0
-        }
-    }
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
@@ -15741,7 +15809,20 @@ pub fn string_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
     let lim = if limit.is_undefined() {
         u32::MAX
     } else {
-        to_u32(limit)
+        let n = match to_number_sync(gc, vm, limit) {
+            Ok(n) => n,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        };
+        if n.is_nan() || n == 0.0 {
+            0
+        } else if n.is_infinite() {
+            u32::MAX
+        } else {
+            (n.trunc().rem_euclid(4294967296.0)) as u32
+        }
     };
     if lim == 0 {
         let arr = RuneArray::allocate(gc, &[]);

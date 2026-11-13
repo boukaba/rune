@@ -2473,6 +2473,30 @@ Integration suite: **861 passed, 0 failed, 3 ignored**.
 
 Integration suite: **862 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — String wrapper properties + ToIntegerOrInfinity (2026-11-13)
+
+- StringObject layout grows to 32 bytes with a traced `extra_props` pointer.
+  Named properties on `new String(...)` now:
+  - Get/Set via the extra-props JSObject (accessor getters supported on read);
+  - report own indices/length/extra keys through `hasOwnProperty` and
+    `Object.getOwnPropertyDescriptor`;
+  - indices are enumerable/non-writable/non-configurable, `length` is
+    non-writable/non-configurable.
+- `to_integer_or_infinity` was a stub returning 0; it now performs real
+  ToNumber/truncation. String methods additionally use a synchronous
+  ToPrimitive(number) variant for object positions:
+  - indexOf/includes/startsWith/endsWith, charCodeAt/codePointAt, substring,
+    substr, charAt, repeat, padStart/padEnd;
+  - split limit uses full ToUint32 with object coercion and throw propagation.
+- Test262: String **849 → 890/1223**, Object **2674 → 2695/3411**, Array
+  **2626 → 2628/3081**.
+- Regression: `test_string_wrapper_properties_and_position_coercion`.
+- Known: primitive string receivers still report no own props via
+  hasOwnProperty in some paths; other String methods still use lightweight
+  coercion; exact toExponential/toPrecision rounding.
+
+Integration suite: **863 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

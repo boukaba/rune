@@ -2862,6 +2862,34 @@ Integration suite: **875 passed, 0 failed, 3 ignored**.
 
 Integration suite: **876 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — String ToPrimitive, split and replace protocols (2026-11-13)
+
+- `ToString(object)` now routes through the re-entrant ToPrimitive helper for
+  arrays/objects/functions/Date/RegExp, so accessors, `@@toPrimitive`,
+  user-defined `toString`/`valueOf`, and thrown values are observable.
+- Symbol receivers throw TypeError before any primitive stringification.
+- String wrappers honour an own `toString` override; String constructor with
+  no arguments yields `""`, and `new String(value)` uses the re-entrant
+  ToPrimitive.
+- `String.prototype.split`:
+  - `@@split` dispatch happens before `ToString(this)`;
+  - object separators use ToPrimitive (valueOf/toString overrides);
+  - empty separators split into UTF-16 code units (empty input → `[]`).
+- `String.prototype.replace`:
+  - `@@replace` dispatch precedes `ToString(this)`;
+  - string searches coerce the search value before the replacement;
+  - non-callable replacements are coerced once even when no match exists;
+  - function replacements for string searches resume through
+    `PendingReplaceOp` with `(match, position, input)`;
+  - `$0`/`$00` remain literal (capture indices start at 1).
+- Test262: String **961 → 1036/1223**, split **93 → 110/120**,
+  replace **33 → 43/55**; RegExp **579/1879**.
+- Remaining: global RegExp + function replacer continuation, `Function()`
+  constructed replacers, match/search regex feature gaps.
+- Regression: `test_string_toprimitive_split_replace_contracts`.
+
+Integration suite: **877 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

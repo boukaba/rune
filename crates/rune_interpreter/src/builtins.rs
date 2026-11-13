@@ -1048,6 +1048,15 @@ pub(crate) fn toprim_resume_valueof(
 }
 
 pub(crate) fn to_primitive_string(gc: &mut SemiSpace, val: Value, vm: &mut Vm) -> Option<String> {
+    if val.as_symbol_id().is_some() {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Cannot convert a Symbol value to a string",
+        ));
+        return None;
+    }
     // Fast path: non-object values
     if !val.is_heap_object() {
         return Some(value_to_js_string(val));
@@ -1103,6 +1112,31 @@ pub(crate) fn to_primitive_string(gc: &mut SemiSpace, val: Value, vm: &mut Vm) -
         }
         let str_ptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
         return Some(unsafe { HeapString::to_string(str_ptr as *mut HeapString) });
+    }
+    if tag == TAG_ARRAY
+        || tag == TAG_DATE
+        || tag == TAG_REGEXP
+        || tag == TAG_OBJECT
+        || tag == TAG_FUNC
+    {
+        // OrdinaryToPrimitive with observable Gets (accessors, @@toPrimitive,
+        // user methods) — the re-entrant helper runs JS callbacks.
+        return match to_primitive_sync(gc, vm, val, "string") {
+            Ok(p) if p.as_symbol_id().is_none() => Some(value_to_js_string(p)),
+            Ok(_) => {
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "Cannot convert a Symbol value to a string",
+                ));
+                None
+            }
+            Err(e) => {
+                vm.set_pending_exception(e);
+                None
+            }
+        };
     }
     if tag == TAG_ARRAY {
         return Some(array_to_string(ptr as *mut RuneArray));
@@ -1315,6 +1349,34 @@ pub(crate) fn to_primitive_string_sync(val: Value, gc: &mut SemiSpace, vm: &mut 
         return value_to_js_string(val);
     }
     value_to_js_string(val)
+}
+
+/// ToString with the full re-entrant ToPrimitive algorithm (observable Gets,
+/// user-defined toString/valueOf, @@toPrimitive). Used by constructors that run
+/// synchronously in the VM.
+pub(crate) fn to_primitive_string_reentrant(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    val: Value,
+) -> Result<String, Value> {
+    if val.as_symbol_id().is_some() {
+        return Err(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Cannot convert a Symbol value to a string",
+        ));
+    }
+    let prim = to_primitive_sync(gc, vm, val, "string")?;
+    if prim.as_symbol_id().is_some() {
+        return Err(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Cannot convert a Symbol value to a string",
+        ));
+    }
+    Ok(value_to_js_string(prim))
 }
 
 /// Convert a string to f64 per ToNumber(string) spec.
@@ -16056,19 +16118,20 @@ pub fn string_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let Some(s) = to_primitive_string(gc, this, vm) else {
-        return Value::undefined();
-    };
     let separator = args.first().copied().unwrap_or(Value::undefined());
     let limit = args.get(1).copied().unwrap_or(Value::undefined());
 
     // §22.1.3.17 step 3: if separator is an object with a callable @@split,
-    // dispatch to it with (this, limit).
+    // dispatch to it with (this, limit) BEFORE coercing the receiver.
     match dispatch_symbol_method(gc, separator, SYM_SPLIT, this, &[limit], vm) {
         Ok(Some(v)) => return v,
         Ok(None) => {}
         Err(()) => return Value::undefined(),
     }
+
+    let Some(s) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
 
     let lim = if limit.is_undefined() {
         u32::MAX
@@ -16172,9 +16235,30 @@ pub fn string_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
         let result_ptr = unsafe { RuneArray::push(gc, arr, s_val) };
         Value::from_heap_ptr(result_ptr as *mut u8)
     } else {
-        let sep = arg_to_string(gc, Some(separator), vm);
+        let sep = match to_primitive_sync(gc, vm, separator, "string") {
+            Ok(v) if v.as_symbol_id().is_none() => value_to_js_string(v),
+            Ok(_) => {
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "Cannot convert a Symbol value to a string",
+                ));
+                return Value::undefined();
+            }
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        };
         let pieces: Vec<String> = if sep.is_empty() {
-            s.chars().map(|c| c.to_string()).collect()
+            if s.is_empty() {
+                Vec::new()
+            } else {
+                s.encode_utf16()
+                    .map(|u| String::from_utf16_lossy(&[u]))
+                    .collect()
+            }
         } else {
             s.split(&sep).map(|p| p.to_string()).collect()
         };
@@ -16209,9 +16293,6 @@ pub fn string_replace(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let Some(s) = to_primitive_string(gc, this, vm) else {
-        return Value::undefined();
-    };
     let search = args.first().copied().unwrap_or(Value::undefined());
     let replacement_fn = args.get(1).copied();
     let is_fn_replacement = replacement_fn.is_some_and(|v| {
@@ -16233,6 +16314,9 @@ pub fn string_replace(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
         Err(()) => return Value::undefined(),
     }
 
+    let Some(s) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
     // Check if search is a RegExp
     if let Some(ptr) = search.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
@@ -16272,8 +16356,19 @@ pub fn string_replace(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
                             vm.push_callback_call(gc, fn_val, Value::undefined(), fn_args);
                             return Value::undefined();
                         }
-                        // String replacement (original logic)
-                        let replacement = arg_to_string(gc, replacement_fn, vm);
+                        // String replacement: ToString happens before the
+                        // match is expanded.
+                        let replacement = match replacement_to_string(
+                            gc,
+                            vm,
+                            replacement_fn.unwrap_or(Value::undefined()),
+                        ) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                vm.set_pending_exception(e);
+                                return Value::undefined();
+                            }
+                        };
                         let expanded = expand_replacement(&s, &m.groups, &replacement, &named);
                         let result = s[..start].to_string() + &expanded + &s[end..];
                         return Value::from_heap_ptr(HeapString::allocate(gc, &result) as *mut u8);
@@ -16290,8 +16385,54 @@ pub fn string_replace(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
     }
 
     // String pattern
-    let replacement_str = arg_to_string(gc, replacement_fn, vm);
-    let search_str = arg_to_string(gc, args.first().copied(), vm);
+    let search_str = match to_primitive_sync(
+        gc,
+        vm,
+        args.first().copied().unwrap_or(Value::undefined()),
+        "string",
+    ) {
+        Ok(v) if v.as_symbol_id().is_none() => value_to_js_string(v),
+        Ok(_) => {
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Cannot convert a Symbol value to a string",
+            ));
+            return Value::undefined();
+        }
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    if is_fn_replacement {
+        let fn_val = replacement_fn.unwrap();
+        if let Some(pos) = s.find(&search_str) {
+            let end = pos + search_str.len();
+            let fn_args = vec![
+                Value::from_heap_ptr(HeapString::allocate(gc, &search_str) as *mut u8),
+                Value::smi(pos as i32),
+                Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8),
+            ];
+            vm.pending_replace_op = Some(crate::vm::PendingReplaceOp {
+                source_frame_depth: 0,
+                input: s,
+                groups: vec![(pos, end)],
+            });
+            vm.push_callback_call(gc, fn_val, Value::undefined(), fn_args);
+            return Value::undefined();
+        }
+        return Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8);
+    }
+    let replacement_str =
+        match replacement_to_string(gc, vm, replacement_fn.unwrap_or(Value::undefined())) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        };
     if search_str.is_empty() {
         let result = replacement_str.clone() + &s;
         return Value::from_heap_ptr(HeapString::allocate(gc, &result) as *mut u8);
@@ -16369,7 +16510,7 @@ fn expand_replacement(
                             }
                         }
                     }
-                    if n < groups.len() {
+                    if n > 0 && n < groups.len() {
                         let (gs, ge) = groups[n];
                         if gs != usize::MAX {
                             result.push_str(&s[gs..ge]);

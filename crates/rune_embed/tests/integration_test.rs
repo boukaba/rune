@@ -16857,3 +16857,39 @@ fn test_json_stringify_key_order_and_control_escapes() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_string_toprimitive_split_replace_contracts() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var calls = 0;
+            var obj = { toString: function () { return " x "; }, valueOf: function () { return "y"; } };
+            var sep = { valueOf: function () { return "-"; }, toString: undefined };
+            var replaced = "g-nulluna".replace(null, function (match, pos) { calls += 1; return match + pos; });
+            var thrower = {};
+            thrower[Symbol.toPrimitive] = undefined;
+            Object.defineProperty(thrower, "toString", { get: function () { throw new RangeError("boom"); } });
+            var threw = false;
+            try { String.prototype.trimStart.call(thrower); } catch (e) { threw = e instanceof RangeError; }
+            var symThrew = false;
+            try { String.prototype.split.call(Symbol()); } catch (e) { symThrew = e instanceof TypeError; }
+            [
+                String.prototype.trimStart.call(obj) === "x ",
+                "a-b-c".split(sep).join("|") === "a|b|c",
+                "abc".split("").length === 3,
+                new String().length === 0,
+                new String("ab").length === 2,
+                replaced === "g-null2una",
+                calls === 1,
+                "x".replace("x", "$0") === "$0",
+                "ab3c".replace({ toString: function () { return "3"; } }, "<foo>") === "ab<foo>c",
+                threw,
+                symThrew
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

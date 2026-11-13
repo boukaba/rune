@@ -11008,8 +11008,20 @@ impl Vm {
                     }
                     // String constructor [[Construct]]: create String wrapper
                     if constructor == self.string_constructor {
-                        let arg = args.first().copied().unwrap_or(Value::undefined());
-                        let s = arg_to_js_string_for_ctor(arg, gc, self);
+                        let s = if args.is_empty() {
+                            String::new()
+                        } else {
+                            let arg = args.first().copied().unwrap_or(Value::undefined());
+                            match crate::builtins::to_primitive_string_reentrant(gc, self, arg) {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    if let Some(exit) = self.handle_throw(gc, e) {
+                                        return exit;
+                                    }
+                                    continue;
+                                }
+                            }
+                        };
                         let str_ptr = HeapString::allocate(gc, &s);
                         let str_obj = if self.string_prototype.is_heap_object() {
                             let proto_ptr = self.string_prototype.heap_ptr();
@@ -14994,12 +15006,6 @@ fn try_convert_object_to_string(val: Value, gc: &mut SemiSpace, vm: &mut Vm) -> 
             Err(())
         }
     }
-}
-
-/// Convert a value to a string for the String constructor (new String(x)).
-/// Uses the sync version (user-defined toString/valueOf fall through to [object Object]).
-fn arg_to_js_string_for_ctor(val: Value, gc: &mut SemiSpace, vm: &mut Vm) -> String {
-    to_primitive_string_sync(val, gc, vm)
 }
 
 /// Public spec name for a built-in, derived from the internal identifier

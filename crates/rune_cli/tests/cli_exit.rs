@@ -44,3 +44,42 @@ fn fetch_blocks_private_hosts_by_default() {
         "unexpected output: {stdout}"
     );
 }
+
+#[test]
+fn build_and_run_application_bundle() {
+    let dir = std::env::temp_dir().join(format!("rune-bundle-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let source = dir.join("app.js");
+    let bundle = dir.join("app.runeapp");
+    std::fs::write(
+        &source,
+        "function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }\nprint('fib', fib(12));\n",
+    )
+    .expect("write source");
+    let build = Command::new(env!("CARGO_BIN_EXE_rune"))
+        .args([
+            "build",
+            source.to_str().unwrap(),
+            "--out",
+            bundle.to_str().unwrap(),
+        ])
+        .output()
+        .expect("spawn build");
+    assert!(
+        build.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let run = Command::new(env!("CARGO_BIN_EXE_rune"))
+        .args(["run", bundle.to_str().unwrap()])
+        .output()
+        .expect("spawn run");
+    assert!(
+        run.status.success(),
+        "run failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(stdout.contains("fib 144"), "unexpected output: {stdout}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

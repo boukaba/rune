@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Application bundles (2026-11-13)**: in-memory AFPC serialize/deserialize (unaligned-body fix), `rune_embed::bundle` RUNEAPP1 format with source+bytecode+native+ICs, `rune build`/`rune run` executing cached bytecode without source parsing, CLI build/run test. CLI 6 tests; integration 783. Script-only; no standalone binary/ESM graph bundling.
 - **Real async test262 execution (2026-11-13)**: child installs `$DONE` host fn, drains microtasks, honors async failures. Honest Promise **340/703 (48.4%)**, map **199/216 (92.1%)**, integration **783**. Timer jobs are installed in the child; fetch remains unconfigured.
 - **Undeclared identifiers + async harness honesty (2026-11-13)**: LoadGlobal throws ReferenceError, soft typeof lookup, top-level var bindings seeded undefined, Promise statics precheck resolve/iterable, test262 `$DONE` shim; map **199/216 (92.1%)**, honest Promise **340/703 (48.4%)**, integration **783**.
 - **AggregateError + array tail (2026-11-13)**: real AggregateError ctor/prototype (Promise.any identity), @@toStringTag for Math/JSON/custom, primitive thisArg boxing for sloppy callbacks, full ToNumber for array-like lengths. test262 map 191→**199/216 (92.1%)**, Promise 373→**371/703 (52.8%)** after removing wrong-reason async passes; integration **783 passed**.
@@ -105,7 +106,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 - **GC**: forced-collection stress harness + CI job; aggressive Promise.all stress on 16 MiB at interval 48.
 - **Stable object/array headers**: initial values are inline; growth converts to a separate slot buffer and never moves the header. GC distinguishes inline/grown/buffer layouts; object self-pointers are repaired in to-space. JIT x86-64/AArch64 property IC and trace-IC slot offsets updated; AFPC v10. Regression + 100K-object stress + full 512-stress green.
 - Verification: integration **773 passed, 0 failed, 3 ignored**; `rune_runtime` **10 passed**; full workspace green; fmt/clippy/no-default clean.
-- Known gaps: host closure captures not GC-rooted by engine; same-host-function re-entry rejected; CLI fetch uses a real HTTP/HTTPS transport with literal private-network blocking and an opt-in allowlist policy; DNS rebinding/proxy/redirect policy still open; `rune_runtime` embedders choose their own; no snapshots/AOT product path; test262 90% gate not met; targeted `built-ins/Promise` honest async baseline is 340/703 (48.4%).
+- Known gaps: host closure captures not GC-rooted by engine; same-host-function re-entry rejected; CLI fetch uses a real HTTP/HTTPS transport with literal private-network blocking and an opt-in allowlist policy; DNS rebinding/proxy/redirect policy still open; `rune_runtime` embedders choose their own; initial `rune build`/`rune run` application bundles exist (script-only, no standalone binary or ESM graph bundling); test262 90% gate not met; targeted `built-ins/Promise` honest async baseline is 340/703 (48.4%).
 
 ### Goal
 Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8× vs Node) with enough stdlib to run real workloads. v0.4 = stdlib breadth (14 builtins). v0.5 = Promise + async patterns.

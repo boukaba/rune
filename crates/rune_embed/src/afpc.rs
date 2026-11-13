@@ -18,7 +18,6 @@ use rune_interpreter::ic::InlineCache;
 use rune_jit_baseline::assembler::ExecutableMemory;
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
 use std::path::Path;
 
 /// Magic bytes identifying an AFPC cache file.
@@ -204,17 +203,49 @@ impl AfpcCache {
     }
 }
 
+/// Serialize a full AFPC cache into an owned byte vector (header + rkyv body).
+pub fn serialize_afpc_cache(cache: &AfpcCache) -> Option<Vec<u8>> {
+    let header = CacheHeader::new(cache.source_hash);
+    let mut out = Vec::new();
+    out.extend_from_slice(header.as_bytes());
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(cache).ok()?;
+    out.extend_from_slice(&bytes);
+    Some(out)
+}
+
+/// Deserialize a cache from a byte vector produced by `serialize_afpc_cache`.
+pub fn deserialize_afpc_cache(data: &[u8]) -> Option<AfpcCache> {
+    if data.len() < std::mem::size_of::<CacheHeader>() {
+        return None;
+    }
+    let (header_bytes, body) = data.split_at(std::mem::size_of::<CacheHeader>());
+    let header = CacheHeader::from_bytes(header_bytes.try_into().ok()?);
+    if &header.magic != AFPC_MAGIC
+        || header.version != AFPC_VERSION
+        || header.engine_tag != engine_tag()
+    {
+        return None;
+    }
+    // rkyv requires an aligned body; bundle payloads may start at an odd
+    // offset after the embedded source.
+    let mut aligned = vec![0u8; body.len() + 16];
+    let offset = (16 - (aligned.as_ptr() as usize & 15)) & 15;
+    aligned[offset..offset + body.len()].copy_from_slice(body);
+    let cache =
+        rkyv::from_bytes::<AfpcCache, rkyv::rancor::Error>(&aligned[offset..offset + body.len()])
+            .ok()?;
+    if cache.source_hash != header.source_hash {
+        return None;
+    }
+    Some(cache)
+}
+
 /// Serialize a full AFPC cache and write it to `path`.
 pub fn save_afpc_cache<P: AsRef<Path>>(path: P, cache: &AfpcCache) -> std::io::Result<usize> {
-    let mut file = fs::File::create(path)?;
-    let header = CacheHeader::new(cache.source_hash);
-    file.write_all(header.as_bytes())?;
-
-    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(cache)
-        .map_err(|e| std::io::Error::other(format!("rkyv serialize: {e:?}")))?;
-    file.write_all(&bytes)?;
-
-    Ok(std::mem::size_of::<CacheHeader>() + bytes.len())
+    let bytes = serialize_afpc_cache(cache)
+        .ok_or_else(|| std::io::Error::other("rkyv serialize failed"))?;
+    fs::write(path, &bytes)?;
+    Ok(bytes.len())
 }
 
 /// Load a full AFPC cache from `path` if the cache is valid.
@@ -224,27 +255,7 @@ pub fn save_afpc_cache<P: AsRef<Path>>(path: P, cache: &AfpcCache) -> std::io::R
 /// source parsing.
 pub fn load_afpc_cache<P: AsRef<Path>>(path: P) -> Option<AfpcCache> {
     let data = fs::read(path).ok()?;
-    if data.len() < std::mem::size_of::<CacheHeader>() {
-        return None;
-    }
-
-    let (header_bytes, body) = data.split_at(std::mem::size_of::<CacheHeader>());
-    let header = CacheHeader::from_bytes(header_bytes.try_into().ok()?);
-    if &header.magic != AFPC_MAGIC
-        || header.version != AFPC_VERSION
-        || header.engine_tag != engine_tag()
-    {
-        return None;
-    }
-
-    let cache = rkyv::from_bytes::<AfpcCache, rkyv::rancor::Error>(body)
-        .map_err(|e| eprintln!("AFPC cache load failed: {e:?}"))
-        .ok()?;
-    if cache.source_hash != header.source_hash {
-        eprintln!("AFPC cache header/body source hash mismatch");
-        return None;
-    }
-    Some(cache)
+    deserialize_afpc_cache(&data)
 }
 
 /// Installs cached native code blobs into executable memory and returns a map

@@ -847,6 +847,25 @@ Integration suite: **782 passed, 0 failed, 3 ignored**; full 512-stress 782.
 
 Integration suite: **783 passed, 0 failed, 3 ignored**.
 
+### Phase 3 — application bundles (`rune build` / `rune run`) (2026-11-13)
+
+- AFPC gained in-memory `serialize_afpc_cache` / `deserialize_afpc_cache`;
+  deserialization realigns the body because bundle payloads can start at an
+  arbitrary offset.
+- New `rune_embed::bundle`: a self-contained `RUNEAPP1` file containing the
+  UTF-8 source plus the AFPC cache (bytecode, shapes, ICs, AOT native blobs).
+  The embedded source hash and engine/ABI tag reject stale/foreign bundles.
+- `rune build <script> [--out app.runeapp]` compiles, AOT-compiles functions,
+  and writes the bundle. `rune run <app.runeapp>` restores shapes, installs
+  cached native code/ICs, executes the cached bytecode **without parsing the
+  source**, then drains timers/microtasks.
+- CLI integration test builds and runs a fib script (`fib 12 = 144`).
+- Known limits: script-only (ESM dependency graphs are not bundled), no
+  standalone single-binary output, and no source-map/line diagnostics for
+  bundle execution yet.
+
+CLI tests: **6 tests** (1 HTTP unit + 5 integration); integration suite 783.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

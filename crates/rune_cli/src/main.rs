@@ -12,6 +12,7 @@ fn main() {
     let mut stencil_jit = false;
     let mut enable_jit = false;
     let mut allow_private_fetch = false;
+    let mut build_out: Option<String> = None;
 
     let mut source_args: Vec<String> = Vec::new();
     let mut i = 0;
@@ -46,6 +47,13 @@ fn main() {
             enable_jit = false;
         } else if arg == "--allow-private-fetch" {
             allow_private_fetch = true;
+        } else if arg == "--out" {
+            i += 1;
+            if i < args.len() {
+                build_out = Some(args[i].to_string());
+            }
+        } else if let Some(rest) = arg.strip_prefix("--out=") {
+            build_out = Some(rest.to_string());
         } else if arg == "--stencil-jit" {
             stencil_jit = true;
         } else if arg == "--no-stencil-jit" {
@@ -94,6 +102,74 @@ fn main() {
         }
     } else {
         match source_args[0].as_str() {
+            "build" => {
+                let Some(entry) = source_args.get(1) else {
+                    eprintln!("usage: rune build <script.js> [--out <app.runeapp>]");
+                    std::process::exit(1);
+                };
+                let source = match std::fs::read_to_string(entry) {
+                    Ok(source) => source,
+                    Err(error) => {
+                        eprintln!("Error: cannot read {entry}: {error}");
+                        std::process::exit(1);
+                    }
+                };
+                let out = build_out.clone().unwrap_or_else(|| {
+                    std::path::Path::new(entry)
+                        .with_extension("runeapp")
+                        .to_string_lossy()
+                        .into_owned()
+                });
+                let bytecode = match ctx.compile(&source) {
+                    Ok(bytecode) => bytecode,
+                    Err(error) => {
+                        eprintln!("Error: {error}");
+                        std::process::exit(1);
+                    }
+                };
+                let mut cache = rune_embed::afpc::AfpcCache::from_runtime(bytecode, Vec::new());
+                cache.source_hash = rune_embed::afpc::source_hash(&source);
+                match rune_embed::bundle::save_bundle(&out, &source, &cache) {
+                    Ok(size) => println!("built {out} ({size} bytes)"),
+                    Err(error) => {
+                        eprintln!("Error: cannot write {out}: {error}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            "run" => {
+                let Some(path) = source_args.get(1) else {
+                    eprintln!("usage: rune run <app.runeapp>");
+                    std::process::exit(1);
+                };
+                let Some(bundle) = rune_embed::bundle::load_bundle(path) else {
+                    eprintln!("Error: invalid or incompatible bundle {path}");
+                    std::process::exit(1);
+                };
+                let cache = bundle.cache;
+                cache.restore_shapes();
+                if !cache.compiled_funcs.is_empty() {
+                    let native = rune_embed::afpc::InstalledNativeCode::from_cache(&cache);
+                    ctx.install_native_code(native);
+                }
+                ctx.set_ics(cache.ic_table);
+                let result = ctx.eval_bytecode_owned(cache.bytecode);
+                if result.is_ok() {
+                    if let Some(jobs) = runtime_jobs.as_mut() {
+                        if let Err(error) = jobs.run_jobs(&mut ctx) {
+                            eprintln!("Error: {error}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                match result {
+                    Ok(value) => println!("=> {:?}", value),
+                    Err(error) => {
+                        eprintln!("Error: {error}");
+                        std::process::exit(1);
+                    }
+                }
+            }
             "test262" => {
                 let subdir = source_args.get(1).map(|s| s.as_str());
                 let suite_dir = source_args

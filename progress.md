@@ -1569,6 +1569,22 @@ Integration suite: **815 passed, 0 failed, 3 ignored**.
 
 Integration suite: **816 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — RegExp/number coercion + JS whitespace (2026-11-13)
+
+- Added `RegExp.prototype.toString` (`/source/flags`) and routed RegExp
+  receivers through ToPrimitive, so `String(/x/g)` and String methods called
+  with RegExp `this` produce the regexp source instead of `[object Object]`.
+- Number `ToString` now uses the JS exponent thresholds: `|x| >= 1e21` or
+  `|x| < 1e-6` prints `1e+21` / `1e-7` style, matching spec.
+- String trim/trimStart/trimEnd treat U+FEFF as ECMAScript whitespace.
+- Test262: String **697 → 722/1223**; `String.prototype.trim`
+  **108 → 123/129**.
+- Regression: `test_regexp_string_and_number_exponent_forms`.
+- Known gaps: trimStart/trimEnd still 9/23 each (exotic receivers/whitespace
+  tables); RegExp ToPrimitive does not honor a user-overridden `toString`.
+
+Integration suite: **817 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

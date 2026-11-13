@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Regexp/number coercion (2026-11-13)**: RegExp toString + ToPrimitive; JS exponent thresholds; FEFF whitespace. String 697→**722/1223**, trim 123/129. Integration **817**.
 - **Number formatting (2026-11-13)**: toFixed/toPrecision/toExponential/toLocaleString. Number 201→**223/340**. Integration **816**.
 - **Number statics + radix (2026-11-13)**: isFinite/isInteger/isNaN/isSafeInteger, radix toString, Number/Boolean prototype internal slots. Number 134→**201/340**. Integration **815**.
 - **Symbol equality/intrinsics (2026-11-13)**: SameValue compares symbols by id; primitive getPrototypeOf; description getter; String(Symbol). Symbol 21→**28/98**, Map 98. Integration **814**.

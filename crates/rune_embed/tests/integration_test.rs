@@ -15138,3 +15138,26 @@ fn test_number_formatting_methods() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_regexp_string_and_number_exponent_forms() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            [
+                String(/test/g) === "/test/g",
+                (/a/i).toString() === "/a/i",
+                String.prototype.trim.call(/x/) === "/x/",
+                " \uFEFFabc\uFEFF ".trim() === "abc",
+                "\uFEFFabc".trimStart() === "abc",
+                "abc\uFEFF".trimEnd() === "abc",
+                String(0.0000001) === "1e-7",
+                String(1e21) === "1e+21",
+                String(1.5e-7) === "1.5e-7"
+            ].join("|") === "true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

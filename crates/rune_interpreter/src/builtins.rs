@@ -72,6 +72,17 @@ pub fn value_to_js_string(v: Value) -> String {
             } else {
                 "Infinity".to_string()
             }
+        } else if f.abs() >= 1e21 || f.abs() < 1e-6 {
+            let s = format!("{:e}", f);
+            let Some((mantissa, exp)) = s.split_once('e') else {
+                return s;
+            };
+            let exp_num: i32 = exp.parse().unwrap_or(0);
+            format!(
+                "{mantissa}e{}{}",
+                if exp_num < 0 { '-' } else { '+' },
+                exp_num.abs()
+            )
         } else {
             f.to_string()
         }
@@ -1039,6 +1050,9 @@ pub(crate) fn to_primitive_string(gc: &mut SemiSpace, val: Value, vm: &mut Vm) -
         // §7.1.1.1: Date's default hint is string → ToDateString
         return Some(date::to_date_string(unsafe { date::RuneDate::tv(ptr) }));
     }
+    if tag == TAG_REGEXP {
+        return Some(value_to_js_string(regexp_to_string(gc, val, &[], vm)));
+    }
     if tag == TAG_OBJECT || tag == TAG_FUNC {
         if tag == TAG_FUNC {
             return Some(value_to_js_string(function_prototype_to_string(
@@ -1155,6 +1169,9 @@ pub(crate) fn to_primitive_string_sync(val: Value, gc: &mut SemiSpace, vm: &mut 
     }
     if tag == TAG_DATE {
         return date::to_date_string(unsafe { date::RuneDate::tv(ptr) });
+    }
+    if tag == TAG_REGEXP {
+        return value_to_js_string(regexp_to_string(gc, val, &[], vm));
     }
     if tag == TAG_FUNC {
         return value_to_js_string(function_prototype_to_string(gc, val, &[], vm));
@@ -13020,6 +13037,10 @@ pub fn string_substr(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
 }
 
 /// String.prototype.trim() — removes whitespace from both ends.
+fn is_js_whitespace(c: char) -> bool {
+    c.is_whitespace() || c == '\u{FEFF}'
+}
+
 pub fn string_trim(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
@@ -13027,7 +13048,7 @@ pub fn string_trim(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm
     let Some(s) = to_primitive_string(gc, this, vm) else {
         return Value::undefined();
     };
-    let result = HeapString::allocate(gc, s.trim_matches(char::is_whitespace));
+    let result = HeapString::allocate(gc, s.trim_matches(is_js_whitespace));
     Value::from_heap_ptr(result as *mut u8)
 }
 
@@ -13039,7 +13060,7 @@ pub fn string_trim_start(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &
     let Some(s) = to_primitive_string(gc, this, vm) else {
         return Value::undefined();
     };
-    let result = HeapString::allocate(gc, s.trim_start_matches(char::is_whitespace));
+    let result = HeapString::allocate(gc, s.trim_start_matches(is_js_whitespace));
     Value::from_heap_ptr(result as *mut u8)
 }
 
@@ -13051,7 +13072,7 @@ pub fn string_trim_end(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mu
     let Some(s) = to_primitive_string(gc, this, vm) else {
         return Value::undefined();
     };
-    let result = HeapString::allocate(gc, s.trim_end_matches(char::is_whitespace));
+    let result = HeapString::allocate(gc, s.trim_end_matches(is_js_whitespace));
     Value::from_heap_ptr(result as *mut u8)
 }
 
@@ -22153,6 +22174,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             func: regexp_exec,
         },
         Builtin {
+            length: 0,
+            name: "RegExp_prototype_toString",
+            func: regexp_to_string,
+        },
+        Builtin {
             length: 1,
             name: "RegExp_prototype_test",
             func: regexp_test,
@@ -23643,6 +23669,38 @@ fn get_regexp_this(this: Value) -> Option<*mut u8> {
         }
     }
     None
+}
+
+/// RegExp.prototype.toString — `/source/flags`.
+pub fn regexp_to_string(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    let Some(ptr) = get_regexp_this(this) else {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "RegExp.prototype.toString requires a RegExp receiver",
+        ));
+        return Value::undefined();
+    };
+    let pattern = unsafe { HeapString::to_string(RegExp::pattern(ptr) as *mut HeapString) };
+    let flags = unsafe { RegExp::flags(ptr) };
+    let mut f = String::new();
+    for (bit, ch) in [
+        (1u32, 'g'),
+        (2, 'i'),
+        (4, 'm'),
+        (8, 's'),
+        (16, 'u'),
+        (32, 'y'),
+        (64, 'd'),
+        (128, 'v'),
+    ] {
+        if flags & bit != 0 {
+            f.push(ch);
+        }
+    }
+    let text = format!("/{pattern}/{f}");
+    Value::from_heap_ptr(HeapString::allocate(gc, &text) as *mut u8)
 }
 
 /// RegExp.prototype.source getter — returns the pattern string.

@@ -2606,6 +2606,9 @@ impl Vm {
             if let Some(h) = flags_h {
                 proto_entries.push(("flags", h));
             }
+            if let Some(h) = find_handle(&self.builtins, "RegExp_prototype_toString") {
+                proto_entries.push(("toString", h));
+            }
             if let Some(h) = li_h {
                 proto_entries.push(("lastIndex", h));
             }

@@ -1791,6 +1791,21 @@ Integration suite: **827 passed, 0 failed, 3 ignored**.
 
 Integration suite: **828 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Builtin function [[Length]] metadata (2026-11-13)
+
+- Root-caused every built-in function reporting `.length === 1`:
+  `Context` installed the static builtin table through `register_builtin`,
+  which hard-coded `length: 1` and discarded each `Builtin.length`.
+- Added `register_builtin_with_length`; `Context` now preserves the spec
+  [[Length]] of every builtin.
+- Test262 movement: String **722 → 760/1223**, Number **223 → 247/340**,
+  Math **217 → 227/327**, Object **2495 → 2500/3411**, Function 173 → 177/509.
+- Regression: `test_builtin_function_lengths`.
+- `name` metadata for builtins remains the internal identifier
+  (`Object_defineProperty`), not the spec name; tracked as a follow-up.
+
+Integration suite: **829 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

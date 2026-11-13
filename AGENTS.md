@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Builtin [[Length]] fixed (2026-11-13)**: registration preserved spec lengths instead of hard-coded 1. String 722→**760/1223**, Number 223→**247/340**. Integration **829**.
 - **Array named ownership fixed (2026-11-13)**: hasOwnProperty/propertyIsEnumerable read extra-props overlay. Object 2436→**2495/3411**. Integration **828**.
 - **Non-configurable delete fixed (2026-11-13)**: delete checks ATTR_CONFIGURABLE, strict TypeError, caught-throw resume. Object 2229→**2436/3411**. Integration **827**.
 - **For-in break/continue fixed (2026-11-13)**: sentinel break/continue jumps patched; break cleanup pops loop state; propertyHelper no longer hangs. Object 2048→**2229/3411**. Integration **826**.

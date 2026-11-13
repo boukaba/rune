@@ -15460,3 +15460,24 @@ fn test_array_named_property_has_own_and_enumerable() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_builtin_function_lengths() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            [
+                Object.defineProperty.length === 3,
+                Object.create.length === 2,
+                parseInt.length === 2,
+                JSON.stringify.length === 3,
+                Math.max.length === 2,
+                String.fromCharCode.length === 1,
+                Array.isArray.length === 1
+            ].join("|") === "true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

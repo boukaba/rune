@@ -3358,12 +3358,19 @@ impl Vm {
 
     /// Register a built-in function and return its handle (negative Smi).
     pub fn register_builtin(&mut self, name: &'static str, func: BuiltinFn) -> Value {
+        self.register_builtin_with_length(name, 1, func)
+    }
+
+    /// Register a built-in with its spec [[Length]] (used by contexts that
+    /// install the static builtin table).
+    pub fn register_builtin_with_length(
+        &mut self,
+        name: &'static str,
+        length: u32,
+        func: BuiltinFn,
+    ) -> Value {
         let id = self.builtins.len();
-        self.builtins.push(Builtin {
-            name,
-            length: 1,
-            func,
-        });
+        self.builtins.push(Builtin { name, length, func });
         Value::smi(-(id as i32) - 1)
     }
 

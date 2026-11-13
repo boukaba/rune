@@ -291,6 +291,8 @@ pub(crate) struct PendingPromiseCtor {
     pub(crate) resolve_handle: Value,
     pub(crate) reject_handle: Value,
     pub(crate) resolve_with_result: bool,
+    /// True only for the user-visible `new Promise(executor)` continuation.
+    pub(crate) from_constructor: bool,
 }
 
 /// A microtask — a callback deferred to after the current synchronous task.
@@ -1226,6 +1228,8 @@ pub struct Vm {
     /// Sloppy global `this` object (script top level and sloppy calls with an
     /// undefined receiver).
     pub global_this: Value,
+    /// Set only while the `new` opcode invokes the Promise constructor.
+    pub promise_called_with_new: bool,
     /// Optional wall-clock deadline for interpreted execution. JIT is disabled
     /// while a deadline is active so native loops cannot bypass it.
     pub execution_deadline: Option<std::time::Instant>,
@@ -1440,6 +1444,7 @@ impl Vm {
             array_receiver_roots: Vec::new(),
             instruction_budget: u64::MAX,
             global_this: Value::undefined(),
+            promise_called_with_new: false,
             execution_deadline: None,
             deadline_counter: 4096,
             temp_roots: Vec::new(),
@@ -3643,6 +3648,33 @@ impl Vm {
                 // Discard and keep scanning this frame's outer entries.
                 self.try_stack.remove(idx);
             }
+            // A throw escaping the Promise executor rejects the promise
+            // (§27.2.3.1 step 11) instead of propagating to the caller.
+            if let Some(ppc) = self.pending_promise_ctor.as_ref() {
+                if ppc.from_constructor && self.frames.len() == ppc.source_frame_depth + 1 {
+                    let ppc = self.pending_promise_ctor.take().unwrap();
+                    crate::builtins::promise_reject_impl(gc, ppc.promise, &[val], self);
+                    let stack_base = self.frames.last().unwrap().stack_base;
+                    let popped_frame = self.frames.len() - 1;
+                    self.frames.pop();
+                    self.try_stack
+                        .retain(|tf| tf.frame_depth != popped_frame + 1);
+                    self.drop_dead_array_op(popped_frame);
+                    self.drop_dead_sort_op(popped_frame);
+                    self.drop_dead_from_op(popped_frame);
+                    self.drop_dead_length_op(popped_frame);
+                    self.drop_dead_species_op(popped_frame);
+                    self.drop_dead_copy_op(popped_frame);
+                    self.stack.truncate(stack_base);
+                    if self.frames.is_empty() {
+                        return Some(Exit::Return(ppc.promise));
+                    }
+                    self.push(ppc.promise);
+                    let caller_idx = self.frames.len() - 1;
+                    self.frames[caller_idx].pc += 1;
+                    return None;
+                }
+            }
             // No handler — pop frame and check caller
             // Respect nested-run_loop floors (generator resume, module eval):
             // the floor frame belongs to the outer loop — unwind to the owner
@@ -4319,6 +4351,13 @@ impl Vm {
     /// pending array op state to the frame count before pushing.
     pub fn frame_depth(&self) -> usize {
         self.frames.len()
+    }
+
+    /// True when the current builtin/function invocation is a `new` call.
+    pub fn current_call_is_constructor(&self) -> bool {
+        self.frames
+            .last()
+            .is_some_and(|frame| frame.is_constructor_call)
     }
 
     pub fn push_callback_call(
@@ -9601,12 +9640,14 @@ impl Vm {
                     }
                     // Promise constructor [[Construct]] / [[Call]]
                     if constructor == self.promise_constructor {
+                        self.promise_called_with_new = true;
                         let result = crate::builtins::promise_constructor(
                             gc,
                             Value::undefined(),
                             &args,
                             self,
                         );
+                        self.promise_called_with_new = false;
                         if let Some(exc) = self.pending_exception.take() {
                             if let Some(exit) = self.handle_throw(gc, exc) {
                                 return exit;

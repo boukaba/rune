@@ -14434,3 +14434,24 @@ fn test_sloppy_global_this_and_global_this_alias() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_promise_constructor_errors_and_executor_rejection() {
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+        var ctorErr = "";
+        try { new Promise(1); } catch (e) { ctorErr += e.name; }
+        try { Promise(function () {}); } catch (e) { ctorErr += "|" + e.name; }
+        try { Promise.call(null, function () {}); } catch (e) { ctorErr += "|" + e.name; }
+        var reason = "pending";
+        new Promise(function () { throw 9; }).catch(function (e) { reason = e; });
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        eval_str(&mut ctx, "ctorErr"),
+        "TypeError|TypeError|TypeError"
+    );
+    assert_eq!(ctx.eval("reason").unwrap().as_smi(), Some(9));
+}

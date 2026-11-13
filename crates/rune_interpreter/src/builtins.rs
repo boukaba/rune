@@ -13485,6 +13485,12 @@ pub fn call_builtin(_gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
     let new_this = args.first().copied().unwrap_or(Value::undefined());
     let call_args: Vec<Value> = args.iter().skip(1).copied().collect();
 
+    // Constructor wrappers are JSObjects, but `Promise.call(...)` must still
+    // reach the [[Call]] behavior (and its NewTarget TypeError).
+    if target == vm.promise_constructor {
+        return promise_constructor(_gc, new_this, &call_args, vm);
+    }
+
     // If target is a builtin, call it directly.
     // If it sets up pending_array_op (like array methods), that works naturally.
     if let Some(smi) = target.as_smi() {
@@ -13507,6 +13513,12 @@ pub fn call_builtin(_gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
             return Value::undefined();
         }
     }
+    vm.set_pending_exception(crate::errors::error_object(
+        _gc,
+        &vm.error_protos,
+        crate::errors::ErrorKind::TypeError,
+        "Function.prototype.call called on non-function",
+    ));
     Value::undefined()
 }
 
@@ -13516,6 +13528,15 @@ pub fn apply_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
     let target = this;
     let new_this = args.first().copied().unwrap_or(Value::undefined());
     let arg_array = args.get(1).copied().unwrap_or(Value::undefined());
+    if target == vm.promise_constructor {
+        let p_args: Vec<Value> = match crate::vm::array_like_length(arg_array) {
+            Some(len) => (0..len)
+                .map(|i| crate::vm::array_like_index(arg_array, i).unwrap_or(Value::undefined()))
+                .collect(),
+            None => Vec::new(),
+        };
+        return promise_constructor(gc, new_this, &p_args, vm);
+    }
 
     // Step 2: IsCallable(func) else TypeError
     let target_smi = target.as_smi().filter(|&s| s < 0);
@@ -18215,6 +18236,25 @@ pub fn array_every(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut
 /// Return a list of builtins to register in every new Vm.
 /// Promise(value) or new Promise(executor) — creates a Promise.
 pub fn promise_constructor(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !vm.promise_called_with_new {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Promise constructor requires new",
+        ));
+        return Value::undefined();
+    }
+    let executor = args.first().copied().unwrap_or(Value::undefined());
+    if !is_callable_value(executor) {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Promise executor is not a function",
+        ));
+        return Value::undefined();
+    }
     let proto_ptr = vm.promise_prototype.heap_ptr();
     let promise_ptr = Promise::allocate(gc, proto_ptr);
     let promise_val = Value::from_heap_ptr(promise_ptr);
@@ -18224,10 +18264,6 @@ pub fn promise_constructor(gc: &mut SemiSpace, _this: Value, args: &[Value], vm:
     let reject_handle = vm
         .get_builtin("_promise_reject")
         .unwrap_or(Value::undefined());
-    let executor = args.first().copied().unwrap_or(Value::undefined());
-    if executor.is_undefined() {
-        return promise_val;
-    }
     let resolve_func = vm.create_promise_bridge(gc, promise_val, resolve_handle);
     let reject_func = vm.create_promise_bridge(gc, promise_val, reject_handle);
     vm.pending_promise_ctor = Some(crate::vm::PendingPromiseCtor {
@@ -18236,6 +18272,7 @@ pub fn promise_constructor(gc: &mut SemiSpace, _this: Value, args: &[Value], vm:
         resolve_handle,
         reject_handle,
         resolve_with_result: false,
+        from_constructor: true,
     });
     vm.push_callback_call(
         gc,
@@ -18313,6 +18350,7 @@ pub(crate) fn settle_promise_reactions(vm: &mut Vm, ptr: *mut u8, value: Value, 
                 resolve_handle: Value::undefined(),
                 reject_handle: Value::undefined(),
                 resolve_with_result: true,
+                from_constructor: false,
             };
             vm.enqueue_microtask(cb, vec![value], Some(ppc));
         } else if let Some(cptr) = chained.heap_ptr() {
@@ -18372,6 +18410,7 @@ pub fn promise_prototype_then(
                     resolve_handle: Value::undefined(),
                     reject_handle: Value::undefined(),
                     resolve_with_result: true,
+                    from_constructor: false,
                 };
                 vm.enqueue_microtask(on_fulfilled, vec![result], Some(ppc));
                 vm.temp_roots.truncate(root_base);
@@ -18394,6 +18433,7 @@ pub fn promise_prototype_then(
                     resolve_handle: Value::undefined(),
                     reject_handle: Value::undefined(),
                     resolve_with_result: true,
+                    from_constructor: false,
                 };
                 vm.enqueue_microtask(on_rejected, vec![result], Some(ppc));
                 vm.temp_roots.truncate(root_base);
@@ -18704,6 +18744,7 @@ pub fn promise_static_resolve(
                     resolve_handle: resolve_h,
                     reject_handle: reject_h,
                     resolve_with_result: false,
+                    from_constructor: false,
                 });
                 vm.push_callback_call(gc, then_val, val, vec![resolve_bridge, reject_bridge]);
                 return Value::undefined();

@@ -836,7 +836,7 @@ Integration suite: **782 passed, 0 failed, 3 ignored**; full 512-stress 782.
   only checked the synchronous prefix.
 - The runner no longer injects a JavaScript `$DONE` shim; the host function is
   the single implementation.
-- Honest Promise baseline after enabling async completion: **340/703 (48.4%)**.
+- Honest Promise baseline after enabling async completion: **345/703 (49.1%)**.
   The drop from 371 reflects assertions that now actually run; new failures are
   concentrated in thenable jobs, poisoned `then`, resolve-self, and combinator
   species/constructor cases.
@@ -993,6 +993,22 @@ Integration suite: **789 passed, 0 failed, 3 ignored**; CLI **10 tests**
   version, and C host functions (number/string/boolean args and returns).
 
 Integration suite: **789 passed, 0 failed, 3 ignored**; `rune_capi` **4 tests**.
+
+### Phase 2 — Promise constructor semantics (2026-11-13)
+
+- `new Promise` now requires a construct call; plain `Promise(...)` and
+  `Promise.call(...)` throw catchable TypeError instead of silently building a
+  promise or (for a non-callable executor) panicking in `push_callback_call`.
+- Non-callable executors (`new Promise(1)`, missing executor) throw TypeError
+  before allocation.
+- A throw escaping the executor rejects the promise (§27.2.3.1) and runs
+  `.catch` handlers, instead of escaping as an uncaught error. The interception
+  is scoped to the user-visible constructor continuation (`from_constructor`),
+  so thenable-adoption and `.then` callback states are unaffected.
+- `Promise.call`/`Promise.apply` route through the constructor [[Call]] path.
+- Measured: Promise **345/703 (49.1%; was 340)**, map **203/216 (94.0%)**,
+  integration **790**.
+- Regression: `test_promise_constructor_errors_and_executor_rejection`.
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:

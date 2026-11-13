@@ -14993,3 +14993,24 @@ fn test_function_to_string_callable_rules() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_function_string_coercion() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var fn = function () { return 1; };
+            var concat = "" + fn;
+            var template = `${fn}`;
+            [
+                /native code/.test(concat),
+                template === concat,
+                String(fn) === concat,
+                typeof (fn + 1) === "string"
+            ].join("|") === "true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

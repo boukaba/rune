@@ -13981,7 +13981,7 @@ fn try_convert_object_to_string(val: Value, gc: &mut SemiSpace, vm: &mut Vm) -> 
             return Ok(primitive);
         }
     }
-    if tag != TAG_OBJECT {
+    if tag != TAG_OBJECT && tag != TAG_FUNC {
         return Ok(val);
     }
     match to_primitive_string(gc, val, vm) {

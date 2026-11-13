@@ -1470,6 +1470,20 @@ Integration suite: **809 passed, 0 failed, 3 ignored**.
 
 Integration suite: **810 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — function string coercion (2026-11-13)
+
+- Function values now participate in ToPrimitive/ToString:
+  - `"" + fn`, template literals and `String(fn)` produce the native-form
+    `Function.prototype.toString` result instead of `[object Object]`;
+  - the Add/JIT numeric helper path routes functions through the same
+    conversion.
+- Test262: Function **167 → 173/509**; String **673 → 696/1223**.
+- Regression: `test_function_string_coercion`.
+- Known gap: a user-overridden `fn.toString` is not consulted during coercion
+  (the intrinsic form is used), and exact source text is still unavailable.
+
+Integration suite: **811 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

@@ -152,6 +152,13 @@ fn build_test_source(test: &TestCase) -> Result<String, String> {
     }
 
     let harness_dir = test.suite_dir.join("harness");
+    if std::env::var("RUNE_T262_DEBUG").is_ok() {
+        eprintln!(
+            "DBG includes={:?} harness={}",
+            test.meta.includes,
+            harness_dir.display()
+        );
+    }
 
     // Don't inject sta.js — builtins provide Test262Error, $DONOTEVALUATE
     // Don't inject assert.js — builtins provide an `assert` wrapper

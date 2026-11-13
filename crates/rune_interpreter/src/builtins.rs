@@ -1039,7 +1039,15 @@ pub(crate) fn to_primitive_string(gc: &mut SemiSpace, val: Value, vm: &mut Vm) -
         // §7.1.1.1: Date's default hint is string → ToDateString
         return Some(date::to_date_string(unsafe { date::RuneDate::tv(ptr) }));
     }
-    if tag == TAG_OBJECT {
+    if tag == TAG_OBJECT || tag == TAG_FUNC {
+        if tag == TAG_FUNC {
+            return Some(value_to_js_string(function_prototype_to_string(
+                gc,
+                val,
+                &[],
+                vm,
+            )));
+        }
         // §7.1.1 ToPrimitive with string hint: call toString(), then valueOf().
         // A2: GetMethod walks the prototype chain — previously only OWN
         // properties dispatched, so inherited methods (notably
@@ -1147,6 +1155,9 @@ pub(crate) fn to_primitive_string_sync(val: Value, gc: &mut SemiSpace, vm: &mut 
     }
     if tag == TAG_DATE {
         return date::to_date_string(unsafe { date::RuneDate::tv(ptr) });
+    }
+    if tag == TAG_FUNC {
+        return value_to_js_string(function_prototype_to_string(gc, val, &[], vm));
     }
     if tag == TAG_OBJECT {
         // A2: chain-walk like the async version so inherited BUILTIN methods

@@ -17446,6 +17446,10 @@ pub fn promise_prototype_then(
     let proto = vm.promise_prototype.heap_ptr();
     let new_promise_ptr = Promise::allocate(gc, proto);
     let new_promise = Value::from_heap_ptr(new_promise_ptr);
+    // The derived promise is stored into reaction arrays below; those pushes
+    // may collect, so keep it rooted until setup is complete.
+    let root_base = vm.temp_roots.len();
+    vm.temp_roots.push(new_promise);
     if state == PROMISE_FULFILLED {
         if let Some(op) = on_fulfilled.heap_ptr() {
             if unsafe { (*(op as *const GcHeader)).tag() == TAG_FUNC } {
@@ -17457,6 +17461,7 @@ pub fn promise_prototype_then(
                     resolve_with_result: true,
                 };
                 vm.enqueue_microtask(on_fulfilled, vec![result], Some(ppc));
+                vm.temp_roots.truncate(root_base);
                 return new_promise;
             }
         }
@@ -17464,6 +17469,7 @@ pub fn promise_prototype_then(
             Promise::set_state(new_promise_ptr, PROMISE_FULFILLED);
             Promise::set_result(new_promise_ptr, result);
         }
+        vm.temp_roots.truncate(root_base);
         return new_promise;
     }
     if state == PROMISE_REJECTED {
@@ -17477,6 +17483,7 @@ pub fn promise_prototype_then(
                     resolve_with_result: true,
                 };
                 vm.enqueue_microtask(on_rejected, vec![result], Some(ppc));
+                vm.temp_roots.truncate(root_base);
                 return new_promise;
             }
         }
@@ -17484,6 +17491,7 @@ pub fn promise_prototype_then(
             Promise::set_state(new_promise_ptr, PROMISE_REJECTED);
             Promise::set_result(new_promise_ptr, result);
         }
+        vm.temp_roots.truncate(root_base);
         return new_promise;
     }
     // Pending — store reaction in the promise's reactions array

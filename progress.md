@@ -426,6 +426,14 @@ Known gap: anonymous function expressions assigned through object-literal data
 properties (`{ m: function(){} }`) still have an empty name; method shorthand
 (`{ m(){} }`) is inferred correctly.
 
+Known GC-stress boundary: the dedicated stress tests use a 128-allocation
+interval on a 1 MiB heap (CI also runs the full integration suite at 512). At
+an aggressive 48-allocation interval the `Promise.all` stress test corrupts a
+reaction-array slot (the onFulfilled function reads back as a string). This is
+an interim-growth/GC interaction, not a metadata regression, and is a concrete
+target for the stable-header/GC work; the derived promise is now rooted during
+`.then` setup as one mitigation.
+
 Next: Web API object/class surface (`URL`, `TextEncoder`, `fetch`) and the
 runtime crate; stable headers remain the structural Phase 1 item.
 

@@ -15368,3 +15368,47 @@ fn test_typed_array_array_methods_and_is_primitive() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_for_in_break_and_continue_cleanup() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            function beforeBreak() {
+                var out = [];
+                for (var k in { a: 1, b: 2, c: 3 }) {
+                    if (k === "b") break;
+                    out.push(k);
+                }
+                return out.join(",");
+            }
+            function skipA() {
+                var out = [];
+                for (var k in { a: 1, b: 2, c: 3 }) {
+                    if (k === "a") continue;
+                    out.push(k);
+                }
+                return out.join(",");
+            }
+            function nested() {
+                var out = [];
+                for (var k in { a: 1, b: 2 }) {
+                    for (var j in { x: 1, y: 2 }) {
+                        if (j === "y") break;
+                        out.push(k + j);
+                    }
+                    if (k === "a") continue;
+                }
+                return out.join(",");
+            }
+            [
+                beforeBreak() === "a",
+                skipA() === "b,c",
+                nested() === "ax,bx"
+            ].join("|") === "true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

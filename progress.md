@@ -1742,6 +1742,25 @@ Integration suite: **825 passed, 0 failed, 3 ignored**.
 
 Integration suite: **825 passed, 0 failed, 3 ignored**.
 
+### Phase 1 — for-in break/continue cleanup + harness equality helpers (2026-11-13)
+
+- **Root-caused a long-standing for-in bug**: break/continue sentinel jumps
+  were emitted with placeholder operands and never patched, so they jumped to
+  pc 0 (infinite loop at top level, "Return: stack too deep" panic inside
+  functions).
+- `ForIn` now patches sentinel break/continue targets explicitly:
+  - continue jumps to the next-key opcode;
+  - break jumps to a cleanup stub that pops the `[enumerable_object, index]`
+    pair left by `ForInInit`/`ForInNext` before leaving the loop.
+- Added the missing Test262 globals `isSameValue(a, b)` and
+  `isConstructor(value)`, completing `propertyHelper.js` (which previously
+  hung in `isEnumerable`).
+- Test262: Object **2048 → 2229/3411**; Date 357/594; Math 217/327; Array
+  measured 2536/3081 (same run).
+- Regression: `test_for_in_break_and_continue_cleanup`.
+
+Integration suite: **826 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

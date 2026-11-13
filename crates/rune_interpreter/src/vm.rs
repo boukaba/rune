@@ -3322,6 +3322,12 @@ impl Vm {
         if let Some(ip) = find_handle(&self.builtins, "test262_isPrimitive") {
             self.globals.insert("isPrimitive".to_string(), ip);
         }
+        if let Some(sv) = find_handle(&self.builtins, "test262_isSameValue") {
+            self.globals.insert("isSameValue".to_string(), sv);
+        }
+        if let Some(ic) = find_handle(&self.builtins, "test262_isConstructor") {
+            self.globals.insert("isConstructor".to_string(), ic);
+        }
         self.globals.insert("NaN".to_string(), nan_val);
         let inf_val = Value::from_float64(f64::INFINITY);
         self.globals.insert("Infinity".to_string(), inf_val);

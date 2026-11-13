@@ -23523,6 +23523,16 @@ pub fn default_builtins() -> Vec<Builtin> {
         },
         Builtin {
             length: 2,
+            name: "test262_isSameValue",
+            func: test262_is_same_value,
+        },
+        Builtin {
+            length: 1,
+            name: "test262_isConstructor",
+            func: test262_is_constructor,
+        },
+        Builtin {
+            length: 2,
             name: "assert_throws",
             func: assert_throws,
         },
@@ -23869,6 +23879,29 @@ pub fn assert_compare_array(
         }
     }
     Value::undefined()
+}
+
+/// Test262 `isSameValue(a, b)` helper (boolean).
+pub fn test262_is_same_value(
+    _gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    _vm: &mut Vm,
+) -> Value {
+    let a = args.first().copied().unwrap_or(Value::undefined());
+    let b = args.get(1).copied().unwrap_or(Value::undefined());
+    Value::boolean(same_value(a, b))
+}
+
+/// Test262 `isConstructor(value)` helper.
+pub fn test262_is_constructor(
+    _gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let v = args.first().copied().unwrap_or(Value::undefined());
+    Value::boolean(crate::vm::value_is_constructor(vm, v))
 }
 
 /// Test262 `isPrimitive(value)` helper.

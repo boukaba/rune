@@ -2389,13 +2389,29 @@ impl Emitter {
                 self.emit_statement(body);
                 self.active_loop_has_env.pop();
                 self.active_loop_labels.pop();
-                self.pending_loop_jumps.pop();
+                let jumps = self.pending_loop_jumps.pop().unwrap_or_default();
                 self.loop_cont_stack.pop();
                 self.loop_exit_stack.pop();
                 self.emit(Opcode::Jump, vec![next_pos as i64]);
-                let exit = self.current();
-                // Done case of ForInNext lands here.
-                self.patch(next_pos, exit);
+                let done = self.current();
+                // Done case of ForInNext lands here, then jumps over the
+                // break-cleanup stub.
+                self.patch(next_pos, done);
+                self.emit(Opcode::Jump, vec![0]);
+                let jump_over_cleanup = self.current() - 1;
+                let cleanup = self.current();
+                // Break must discard the [enumerable_object, next_index] pair
+                // left by ForInInit/ForInNext before leaving the loop.
+                self.emit(Opcode::Pop, vec![]);
+                self.emit(Opcode::Pop, vec![]);
+                let after_loop = self.current();
+                self.patch(jump_over_cleanup, after_loop);
+                for (pos, kind) in jumps {
+                    match kind {
+                        LoopJumpKind::Break => self.patch(pos, cleanup),
+                        LoopJumpKind::Continue => self.patch(pos, next_pos),
+                    }
+                }
             }
             Stmt::ForOf(lhs, iterable, body, _) => {
                 // for (x of iterable) { body }

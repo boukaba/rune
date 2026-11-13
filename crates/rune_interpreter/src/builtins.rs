@@ -18739,6 +18739,189 @@ pub fn promise_static_all_settled(
     result_val
 }
 
+/// Build an AggregateError-shaped object carrying the rejection reasons.
+fn aggregate_error(gc: &mut SemiSpace, errors: Value, vm: &mut Vm) -> Value {
+    let err = crate::errors::error_object(
+        gc,
+        &vm.error_protos,
+        crate::errors::ErrorKind::Error,
+        "All promises were rejected",
+    );
+    let Some(ptr) = err.heap_ptr() else {
+        return err;
+    };
+    let obj = ptr as *mut JSObject;
+    let name_str = HeapString::allocate(gc, "AggregateError") as *mut u8;
+    let obj = resolve_forwarded(obj as *mut u8) as *mut JSObject;
+    let shape = unsafe { JSObject::shape_ptr(obj) };
+    if let Some(slot) = shape.lookup(&PropertyKey::from_string("name")) {
+        unsafe { JSObject::set_slot(obj, slot, Value::from_heap_ptr(name_str)) };
+    }
+    unsafe {
+        JSObject::add_property(
+            obj,
+            PropertyKey::from_string("errors"),
+            "errors".to_string(),
+            errors,
+        );
+    }
+    Value::from_heap_ptr(obj as *mut u8)
+}
+
+/// Per-index continuation for Promise.any.
+pub fn promise_any_element(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let state_val = args.first().copied().unwrap_or(Value::undefined());
+    let index = args.get(1).copied().and_then(|v| v.as_smi()).unwrap_or(0) as usize;
+    let fulfilled = args.get(2).copied().and_then(|v| v.as_smi()).unwrap_or(0) != 0;
+    let outcome = args.get(3).copied().unwrap_or(Value::undefined());
+    let Some(state_ptr) = state_val.heap_ptr() else {
+        return Value::undefined();
+    };
+    let state = state_ptr as *mut RuneArray;
+    let result = unsafe { RuneArray::get_element(state, 2) };
+    let Some(result_ptr) = result.heap_ptr() else {
+        return Value::undefined();
+    };
+    let settled = unsafe { RuneArray::get_element(state, 3) }
+        .as_smi()
+        .unwrap_or(0)
+        != 0;
+    if fulfilled {
+        if !settled && unsafe { Promise::state(result_ptr) == PROMISE_PENDING } {
+            unsafe {
+                RuneArray::set_element(state, 3, Value::smi(1));
+                Promise::set_state(result_ptr, PROMISE_FULFILLED);
+                Promise::set_result(result_ptr, outcome);
+            }
+            settle_promise_reactions(vm, result_ptr, outcome, true);
+        }
+        return Value::undefined();
+    }
+    let errors = unsafe { RuneArray::get_element(state, 0) };
+    if let Some(errors_ptr) = errors.heap_ptr() {
+        unsafe { RuneArray::set_element(errors_ptr as *mut RuneArray, index, outcome) };
+    }
+    let remaining = unsafe { RuneArray::get_element(state, 1) }
+        .as_smi()
+        .unwrap_or(0);
+    let next = remaining.saturating_sub(1);
+    unsafe { RuneArray::set_element(state, 1, Value::smi(next)) };
+    if next == 0 && !settled && unsafe { Promise::state(result_ptr) == PROMISE_PENDING } {
+        let error = aggregate_error(gc, errors, vm);
+        let error = if let Some(p) = error.heap_ptr() {
+            Value::from_heap_ptr(resolve_forwarded(p))
+        } else {
+            error
+        };
+        unsafe {
+            RuneArray::set_element(state, 3, Value::smi(1));
+            Promise::set_state(result_ptr, PROMISE_REJECTED);
+            Promise::set_result(result_ptr, error);
+        }
+        settle_promise_reactions(vm, result_ptr, error, false);
+    }
+    Value::undefined()
+}
+
+/// Promise.any: first fulfillment wins; all rejections become one
+/// AggregateError with ordered reasons.
+pub fn promise_static_any(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let iterable = args.first().copied().unwrap_or(Value::undefined());
+    let proto = vm.promise_prototype.heap_ptr();
+    let result_ptr = Promise::allocate(gc, proto);
+    let result_val = Value::from_heap_ptr(result_ptr);
+    let Some(len) = crate::vm::array_like_length(iterable) else {
+        unsafe { Promise::set_state(result_ptr, PROMISE_REJECTED) };
+        return result_val;
+    };
+
+    if len == 0 {
+        let errors = RuneArray::allocate(gc, &[]);
+        unsafe {
+            RuneArray::set_shape_ptr(errors, *DENSE_ARRAY_SHAPE as *const Shape);
+            if let Some(proto) = vm.array_prototype.heap_ptr() {
+                RuneArray::set_prototype(errors, proto);
+            }
+        }
+        let error = aggregate_error(gc, Value::from_heap_ptr(errors as *mut u8), vm);
+        unsafe {
+            Promise::set_state(result_ptr, PROMISE_REJECTED);
+            Promise::set_result(result_ptr, error);
+        }
+        return result_val;
+    }
+
+    let root_base = vm.temp_roots.len();
+    vm.temp_roots.push(result_val);
+    let errors_arr = RuneArray::allocate(gc, &vec![Value::undefined(); len as usize]);
+    unsafe {
+        RuneArray::set_shape_ptr(errors_arr, *DENSE_ARRAY_SHAPE as *const Shape);
+        if let Some(proto) = vm.array_prototype.heap_ptr() {
+            RuneArray::set_prototype(errors_arr, proto);
+        }
+    }
+    let errors_val = Value::from_heap_ptr(errors_arr as *mut u8);
+    vm.temp_roots.push(errors_val);
+    let state_arr = RuneArray::allocate(
+        gc,
+        &[
+            errors_val,
+            Value::smi(len as i32),
+            result_val,
+            Value::smi(0),
+        ],
+    );
+    unsafe {
+        RuneArray::set_shape_ptr(state_arr, *DENSE_ARRAY_SHAPE as *const Shape);
+        if let Some(proto) = vm.array_prototype.heap_ptr() {
+            RuneArray::set_prototype(state_arr, proto);
+        }
+    }
+    let state_val = Value::from_heap_ptr(state_arr as *mut u8);
+    vm.temp_roots.push(state_val);
+
+    let instrs = vec![
+        Instruction::new(Opcode::LoadUndefined, vec![]),
+        Instruction::new(Opcode::LoadCaptured, vec![0, 3]),
+        Instruction::new(Opcode::LoadCaptured, vec![0, 0]),
+        Instruction::new(Opcode::LoadCaptured, vec![0, 1]),
+        Instruction::new(Opcode::LoadCaptured, vec![0, 2]),
+        Instruction::new(Opcode::LoadLocal, vec![0]),
+        Instruction::new(Opcode::Call, vec![4]),
+        Instruction::new(Opcode::Return, vec![]),
+    ];
+    let inner = BytecodeProgram::new(instrs, vec![], vec![]);
+    let outer = Box::new(BytecodeProgram::new(vec![], vec![], vec![inner]));
+    let prog_ptr = Box::leak(outer) as *const BytecodeProgram as *const u8;
+    let element_handle = vm.find_builtin_handle("_promise_any_element");
+
+    for i in 0..len {
+        let mut callbacks = [Value::undefined(); 2];
+        for (slot, flag) in [(0usize, 1i32), (1, 0)] {
+            let env = EnvObject::allocate(gc, 4, std::ptr::null_mut());
+            let func = Func::allocate(gc, 0, prog_ptr, false, env as *mut u8);
+            let env = resolve_forwarded(env as *mut u8) as *mut EnvObject;
+            let func = resolve_forwarded(func as *mut u8) as *mut Func;
+            let state_now = resolve_forwarded(state_val.heap_ptr().unwrap()) as *mut RuneArray;
+            unsafe {
+                EnvObject::set_slot(env, 0, Value::from_heap_ptr(state_now as *mut u8));
+                EnvObject::set_slot(env, 1, Value::smi(i as i32));
+                EnvObject::set_slot(env, 2, Value::smi(flag));
+                EnvObject::set_slot(env, 3, element_handle);
+                Func::set_env_ptr(func, env as *mut u8);
+            }
+            callbacks[slot] = Value::from_heap_ptr(func as *mut u8);
+            vm.temp_roots.push(callbacks[slot]);
+        }
+        let item = crate::vm::array_like_index(iterable, i).unwrap_or(Value::undefined());
+        let input = promise_static_resolve(gc, Value::undefined(), &[item], vm);
+        promise_prototype_then(gc, input, &[callbacks[0], callbacks[1]], vm);
+        vm.temp_roots.truncate(root_base + 2);
+    }
+    vm.temp_roots.truncate(root_base);
+    result_val
+}
+
 pub fn promise_static_race(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let iterable = args.first().copied().unwrap_or(Value::undefined());
     let proto = vm.promise_prototype.heap_ptr();
@@ -19524,6 +19707,16 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 4,
             name: "_promise_all_settled_element",
             func: promise_all_settled_element,
+        },
+        Builtin {
+            length: 1,
+            name: "Promise_any",
+            func: promise_static_any,
+        },
+        Builtin {
+            length: 4,
+            name: "_promise_any_element",
+            func: promise_any_element,
         },
         Builtin {
             length: 1,

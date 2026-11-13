@@ -2271,6 +2271,12 @@ impl Vm {
             if let Some(r) = find_handle(&self.builtins, "Promise_allSettled") {
                 ctor_entries.push(("allSettled", r));
             }
+            if let Some(r) = find_handle(&self.builtins, "Promise_allSettled") {
+                ctor_entries.push(("allSettled", r));
+            }
+            if let Some(r) = find_handle(&self.builtins, "Promise_any") {
+                ctor_entries.push(("any", r));
+            }
             if let Some(r) = find_handle(&self.builtins, "Promise_race") {
                 ctor_entries.push(("race", r));
             }

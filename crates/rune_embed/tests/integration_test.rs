@@ -13873,3 +13873,44 @@ fn test_embedding_host_functions() {
     });
     assert_eq!(ctx.eval("next() + next()").unwrap().as_smi(), Some(3));
 }
+
+#[test]
+fn test_promise_any_first_fulfillment_and_aggregate_error() {
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+        var out = "";
+        Promise.any([Promise.reject("a"), Promise.resolve(2)]).then(function (v) {
+            out = "ok:" + v;
+        });
+        var errOut = "";
+        Promise.any([Promise.reject("x"), Promise.reject("y")]).catch(function (e) {
+            errOut = e.name + ":" + e.errors.join(",");
+        });
+        var empty = "";
+        Promise.any([]).catch(function (e) { empty = e.name + ":" + e.errors.length; });
+        "";
+        "#,
+    )
+    .unwrap();
+    assert_eq!(eval_str(&mut ctx, "out"), "ok:2");
+    assert_eq!(eval_str(&mut ctx, "errOut"), "AggregateError:x,y");
+    assert_eq!(eval_str(&mut ctx, "empty"), "AggregateError:0");
+}
+
+#[test]
+fn test_promise_any_pending_input() {
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+        var resolve;
+        var pending = new Promise(function (r) { resolve = r; });
+        var out = "";
+        Promise.any([pending, Promise.reject("no")]).then(function (v) { out = "v" + v; });
+        resolve(7);
+        "";
+        "#,
+    )
+    .unwrap();
+    assert_eq!(eval_str(&mut ctx, "out"), "v7");
+}

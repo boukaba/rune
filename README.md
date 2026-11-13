@@ -78,7 +78,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 - **Control flow:** if/else, while, do/while (break/continue), for (continue runs the update), for-in, for..of (break/continue, member LHS), switch, try/catch/finally
 - **Generators:** function*, yield, next() (basic)
 - **Async/await:** `async function`, `async () =>`, `await expr` — generator-based, synchronous until first await, Promise-based continuation
-- **Promise:** constructor, resolve/reject, `.then`/`.catch`/`.finally`, `Promise.resolve`/`.reject`/`.all`/`.race`, microtask queue, **thenable unwrapping**
+- **Promise:** constructor, resolve/reject, `.then`/`.catch`/`.finally`, `Promise.resolve`/`.reject`/`.all`/`.allSettled`/`.any`/`.race`, microtask queue, **thenable unwrapping**
 - **Classes:** declarations, expressions (named & anonymous), default constructor, prototype methods, `extends` (heritage), `super()` calls, `super.prop` access, `super.prop = val` assignment, compound assignment `super.prop += val`, `static` methods, getter/setter syntax (`get`/`set`), **computed property names**, **private fields (`#`)**, **private methods + accessors (`#m() {}`, `get #x() {}`)**, **static private fields/methods**, **object-literal accessors (`{ get a() {} }`)**, **`this.prop++`** in methods
 - **ESM modules:** `import`/`export` — default/named/namespace imports (`import x from`, `import { a, b as c }`, `import * as ns`), default/named exports, re-exports (`export { x } from`, `export * from`, `export * as ns from`), live bindings (exported `let`/`var`/`const` stay linked — import-time reads see current values), hoisted function/var exports available during circular evaluation, TDZ on imported `let`/`const` (ReferenceError before initialization), single evaluation per specifier (dependency graph resolved once), `Context::eval_module(entry, resolver)` + `Context::module_export(spec, name)`, CLI runs `.mjs` files (and falls back from script-parse errors to module eval)
 - **Error objects:** TypeError, ReferenceError with `.name`/`.message`
@@ -187,7 +187,7 @@ Immutable, content-addressed shapes guarantee O(1) property access at any polymo
 
 ### AOT-First Persistent Compilation (AFPC)
 
-Rune caches compiled code across restarts with **source/ABI-scoped validity**: shapes are immutable and content-addressed, so shape identity is stable, but native code is valid only for the exact source hash and engine/OS/arch tag recorded in the cache header (unlike V8/JSC, whose shape transitions invalidate cached dispatch). Cache format is versioned (`AFPC_VERSION = 8`); stale or foreign caches fall back to compilation.
+Rune caches compiled code across restarts with **source/ABI-scoped validity**: shapes are immutable and content-addressed, so shape identity is stable, but native code is valid only for the exact source hash and engine/OS/arch tag recorded in the cache header (unlike V8/JSC, whose shape transitions invalidate cached dispatch). Cache format is versioned (`AFPC_VERSION = 9`); stale or foreign caches fall back to compilation.
 
 1. **First run:** Parse → emit → JIT-compile → persist (bytecode + shapes + ICs + native code)
 2. **Subsequent runs:** mmap cache → restore shapes/ICs, install native entries, execute immediately (cache load 26µs vs 355µs compile — 13.5×)

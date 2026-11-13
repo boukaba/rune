@@ -565,7 +565,23 @@ event loop (a blocking transport stalls timers); no `Request`/`Headers`/
 rejections carry strings, not `Error` objects; fetch is installed by
 `rune_runtime`, not by the plain `rune` CLI yet.
 
-Next: CLI/runtime integration + stable headers.
+### Phase 2 — Promise.any + targeted conformance baseline (2026-11-13)
+
+- **`Promise.any`** implemented: first fulfillment settles the result, remaining
+  inputs are ignored; all rejections build an `AggregateError`-shaped object
+  (name `AggregateError`, ordered `errors`, message) and reject the result;
+  empty input rejects immediately; pending inputs work.
+- Two integration tests cover first fulfillment, ordered aggregate errors,
+  empty input, and pending inputs.
+- **Targeted test262 baseline** recorded in
+  `docs/conformance-2026-11-13.md`: `built-ins/Promise` = **353 passed, 285
+  failed, 65 skipped, 703 total** (50.2% of suite, 55.3% of executed). This is
+  explicitly not the 90% core gate; failure buckets and runner limitations are
+  documented.
+
+Integration suite: **768 passed, 0 failed, 3 ignored**. `rune_runtime`: 7.
+AFPC format is now v9 because the builtin table gained `Promise.any` and
+`_promise_any_element`; v8 caches are rejected.
 
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,

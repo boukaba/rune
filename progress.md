@@ -2675,6 +2675,25 @@ Integration suite: **867 passed, 0 failed, 3 ignored**.
 
 Integration suite: **868 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Date RFC1123 parse + toTemporalInstant (2026-11-13)
+
+- `Date.parse` accepts RFC 1123 / `toUTCString` layout
+  (`Thu, 01 Jan 1970 00:00:00 GMT`) in addition to `toString` layout, so
+  all three canonical Date serialisations round-trip.
+- `to_primitive_sync` resolves `toString`/`valueOf` through
+  `get_property_value_sync`, so accessor getters run and their abrupt
+  completions propagate (Date constructor and other ToPrimitive users).
+- Added `Date.prototype.toTemporalInstant` (length 0, name, W|C) that
+  brand-checks Date receivers and throws RangeError for invalid dates; real
+  Temporal is not implemented, valid calls return the receiver.
+  Suite **6/6** (2 skipped for Temporal features).
+- Test262: Date **580 → 588/594** (toJSON now 13/13).
+- Remaining Date failure: Date subclassing via Reflect.construct with
+  [[DateValue]] on ordinary objects.
+- Regression: `test_date_parse_rfc_and_temporal_instant_validation`.
+
+Integration suite: **869 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

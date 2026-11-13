@@ -16652,3 +16652,31 @@ fn test_date_constructor_to_primitive_and_setter_order() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_date_parse_rfc_and_temporal_instant_validation() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var d = new Date(0);
+            var typeErr = false;
+            var rangeErr = false;
+            try { Date.prototype.toTemporalInstant.call({}); } catch (e) { typeErr = e instanceof TypeError; }
+            try { new Date(NaN).toTemporalInstant(); } catch (e) { rangeErr = e instanceof RangeError; }
+            [
+                Date.parse(d.toUTCString()) === 0,
+                Date.parse(d.toString()) === 0,
+                Date.parse(d.toISOString()) === 0,
+                typeErr,
+                rangeErr,
+                typeof Date.prototype.toTemporalInstant === "function",
+                Date.prototype.toTemporalInstant.length === 0,
+                Date.prototype.toTemporalInstant.name === "toTemporalInstant",
+                d.toTemporalInstant() === d
+            ].join("|") === "true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

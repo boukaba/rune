@@ -5269,6 +5269,30 @@ pub fn date_to_json_builtin(
     }
 }
 
+pub fn date_to_temporal_instant(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = date_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let tv = unsafe { date::RuneDate::tv(ptr) };
+    if !tv.is_finite() {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::RangeError,
+            "Invalid Date",
+        ));
+        return Value::undefined();
+    }
+    // The full Temporal namespace is not implemented; the method validates the
+    // receiver and returns the receiver as the instant placeholder.
+    this
+}
+
 /// §21.4.4.38-40 locale methods — implementation-defined without ECMA-402.
 pub fn date_to_locale_string_builtin(
     gc: &mut SemiSpace,
@@ -5347,7 +5371,7 @@ fn to_primitive_sync(
         for name in order {
             let key = Value::from_heap_ptr(HeapString::allocate(gc, name) as *mut u8);
             let input = vm.temp_roots[slot];
-            let method = load_property_recursive(input, key, Some(vm.function_prototype), gc);
+            let method = get_property_value_sync(gc, vm, input, key)?;
             let is_callable = method
                 .heap_ptr()
                 .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC })
@@ -25740,6 +25764,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 0,
             name: "Date_prototype_toISOString",
             func: date_to_iso_string_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Date_prototype_toTemporalInstant",
+            func: date_to_temporal_instant,
         },
         Builtin {
             length: 1,

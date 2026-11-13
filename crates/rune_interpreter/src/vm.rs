@@ -2481,6 +2481,7 @@ impl Vm {
                 ("toLocaleTimeString", "Date_prototype_toLocaleTimeString"),
                 ("toString", "Date_prototype_toString"),
                 ("toTimeString", "Date_prototype_toTimeString"),
+                ("toTemporalInstant", "Date_prototype_toTemporalInstant"),
                 ("toUTCString", "Date_prototype_toUTCString"),
                 ("valueOf", "Date_prototype_valueOf"),
             ] {

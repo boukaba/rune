@@ -574,19 +574,32 @@ fn parse_legacy_to_string_format(s: &str) -> f64 {
     if tokens.len() != 6 {
         return f64::NAN;
     }
-    if !WEEKDAY_NAMES.contains(&tokens[0]) {
+    let weekday = tokens[0].trim_end_matches(',');
+    if !WEEKDAY_NAMES.contains(&weekday) {
         return f64::NAN;
     }
-    let Some(month_idx) = MONTH_NAMES.iter().position(|m| *m == tokens[1]) else {
-        return f64::NAN;
-    };
-    let month = (month_idx + 1) as i64;
-    let Ok(day) = tokens[2].parse::<i64>() else {
-        return f64::NAN;
-    };
-    let Ok(year) = tokens[3].parse::<i64>() else {
-        return f64::NAN;
-    };
+    // Accept both "Mon Aug 19 2026" (toString) and
+    // "Mon, 19 Aug 2026" (toUTCString / RFC 1123) layouts.
+    let (month, day, year) =
+        if let Some(month_idx) = MONTH_NAMES.iter().position(|m| *m == tokens[1]) {
+            let Ok(day) = tokens[2].parse::<i64>() else {
+                return f64::NAN;
+            };
+            let Ok(year) = tokens[3].parse::<i64>() else {
+                return f64::NAN;
+            };
+            ((month_idx + 1) as i64, day, year)
+        } else if let Some(month_idx) = MONTH_NAMES.iter().position(|m| *m == tokens[2]) {
+            let Ok(day) = tokens[1].parse::<i64>() else {
+                return f64::NAN;
+            };
+            let Ok(year) = tokens[3].parse::<i64>() else {
+                return f64::NAN;
+            };
+            ((month_idx + 1) as i64, day, year)
+        } else {
+            return f64::NAN;
+        };
     let parts: Vec<&str> = tokens[4].split(':').collect();
     if parts.len() != 3 {
         return f64::NAN;

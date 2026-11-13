@@ -709,7 +709,7 @@ Integration suite: **773 passed, 0 failed, 3 ignored**, both normally and under
 
 ### Phase 1 — JIT differential + branching-trace gate (2026-11-13)
 
-- New `tests/jit_differential.rs` runs a 12-script hot corpus with JIT disabled
+- New `tests/jit_differential.rs` runs a 13-script hot corpus with JIT disabled
   and enabled, comparing observable results. It immediately found a silent
   trace-JIT miscompile: an `if/else` inside a hot loop returned a completely
   different value (`425` vs `373250`).
@@ -723,7 +723,7 @@ Integration suite: **773 passed, 0 failed, 3 ignored**, both normally and under
 - This is conservative by design: "bail to interpreter" is correct until branch
   traces are modeled/proven.
 
-Verification: workspace green; JIT differential 12/12 on AArch64; integration
+Verification: workspace green; JIT differential 13/13 on AArch64; integration
 773; full 512-stress 773.
 
 

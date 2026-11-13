@@ -16148,3 +16148,34 @@ fn test_reflect_property_methods() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_reflect_delete_property_and_own_keys() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var o = { b: 2, a: 1 };
+            var sym = Symbol("s");
+            o[2] = "two";
+            o[sym] = 3;
+            var keys = Reflect.ownKeys(o);
+            var deleted = Reflect.deleteProperty(o, "b");
+            var missing = Reflect.deleteProperty(o, "nope");
+            var holes = Reflect.ownKeys([, , 2]);
+            var frozenValue = 1;
+            Object.freeze(o);
+            var frozenDelete = Reflect.deleteProperty(o, "a");
+            [
+                deleted === true && o.b === undefined,
+                missing === true,
+                keys[0] === "2" && keys[1] === "b" && keys[2] === "a",
+                keys[3] === sym,
+                holes.join(",") === "2,length",
+                frozenDelete === false && o.a === 1
+            ].join("|") === "true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

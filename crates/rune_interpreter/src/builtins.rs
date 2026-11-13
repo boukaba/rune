@@ -3692,22 +3692,118 @@ pub fn reflect_prevent_extensions(
     }
 }
 
+pub fn reflect_delete_property(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(target) = reflect_target(gc, args, vm) else {
+        return Value::undefined();
+    };
+    let key_val = reflect_key_value(gc, args.get(1).copied().unwrap_or(Value::undefined()));
+    let Some(key) = crate::vm::value_to_prop_key(key_val) else {
+        return Value::boolean(true);
+    };
+    let Some(ptr) = target.heap_ptr() else {
+        return Value::boolean(true);
+    };
+    if unsafe { (*(ptr as *const GcHeader)).tag() } != TAG_OBJECT {
+        return Value::boolean(false);
+    }
+    let obj = ptr as *mut JSObject;
+    let shape = unsafe { JSObject::shape_ptr(obj) };
+    let Some(slot) = shape.lookup(&key) else {
+        return Value::boolean(true);
+    };
+    if shape.attr_at(slot) & rune_core::shape::ATTR_CONFIGURABLE == 0 {
+        return Value::boolean(false);
+    }
+    unsafe { JSObject::remove_property(obj, &key) };
+    Value::boolean(true)
+}
+
+fn collect_shape_keys(
+    gc: &mut SemiSpace,
+    shape: &Shape,
+    count: usize,
+    numeric: &mut Vec<(u64, Value)>,
+    strings: &mut Vec<Value>,
+    symbols: &mut Vec<Value>,
+) {
+    for i in 0..count {
+        let pk = shape.entries[i].0;
+        if pk.is_symbol() {
+            symbols.push(Value::symbol(pk.symbol_id().unwrap()));
+            continue;
+        }
+        let name = shape.key_name_at(i).unwrap_or("").to_string();
+        if name.starts_with('\0') {
+            continue;
+        }
+        if let Ok(n) = name.parse::<u64>() {
+            numeric.push((
+                n,
+                Value::from_heap_ptr(HeapString::allocate(gc, &name) as *mut u8),
+            ));
+        } else {
+            strings.push(Value::from_heap_ptr(
+                HeapString::allocate(gc, &name) as *mut u8
+            ));
+        }
+    }
+}
+
 pub fn reflect_own_keys(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let Some(target) = reflect_target(gc, args, vm) else {
         return Value::undefined();
     };
-    let entries = match object_own_entries_mode(gc, target, vm, false) {
-        Ok(e) => e,
-        Err(()) => return Value::undefined(),
+    let Some(ptr) = target.heap_ptr() else {
+        return build_array(gc, &[], vm);
     };
-    let vals: Vec<Value> = entries
-        .iter()
-        .map(|(k, _)| Value::from_heap_ptr(HeapString::allocate(gc, k) as *mut u8))
-        .collect();
+    let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+    let mut numeric: Vec<(u64, Value)> = Vec::new();
+    let mut strings: Vec<Value> = Vec::new();
+    let mut symbols: Vec<Value> = Vec::new();
+    match tag {
+        TAG_OBJECT => {
+            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+            let count = unsafe { JSObject::slot_count(ptr as *mut JSObject) };
+            collect_shape_keys(gc, shape, count, &mut numeric, &mut strings, &mut symbols);
+        }
+        TAG_ARRAY => {
+            let len = unsafe { RuneArray::length(ptr as *mut RuneArray) } as usize;
+            for i in 0..len {
+                let elem = unsafe { RuneArray::get_element(ptr as *mut RuneArray, i) };
+                if elem.raw() == Value::empty_sentinel().raw() {
+                    continue;
+                }
+                numeric.push((
+                    i as u64,
+                    Value::from_heap_ptr(HeapString::allocate(gc, &i.to_string()) as *mut u8),
+                ));
+            }
+            strings.push(Value::from_heap_ptr(
+                HeapString::allocate(gc, "length") as *mut u8
+            ));
+            let extra = unsafe { RuneArray::extra_props(ptr as *mut RuneArray) };
+            if !extra.is_null() {
+                let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                let count = unsafe { JSObject::slot_count(extra as *mut JSObject) };
+                collect_shape_keys(gc, shape, count, &mut numeric, &mut strings, &mut symbols);
+            }
+        }
+        _ => {}
+    }
+    numeric.sort_by_key(|(n, _)| *n);
+    numeric.dedup_by_key(|(n, _)| *n);
+    let mut vals: Vec<Value> = numeric.into_iter().map(|(_, v)| v).collect();
+    vals.extend(strings);
+    vals.extend(symbols);
     build_array(gc, &vals, vm)
 }
 
-/// Reflect.apply(target, thisArgument, argumentsList).
+/// Reflect.apply(target, thisArgument, argumentsList)./// Reflect.apply(target, thisArgument, argumentsList)./// Reflect.apply(target, thisArgument, argumentsList).
 pub fn reflect_apply(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let target = args.first().copied().unwrap_or(Value::undefined());
     let callable = target
@@ -23878,6 +23974,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 1,
             name: "Reflect_preventExtensions",
             func: reflect_prevent_extensions,
+        },
+        Builtin {
+            length: 2,
+            name: "Reflect_deleteProperty",
+            func: reflect_delete_property,
         },
         Builtin {
             length: 1,

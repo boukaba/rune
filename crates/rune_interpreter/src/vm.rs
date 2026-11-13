@@ -2931,6 +2931,7 @@ impl Vm {
                 ("isExtensible", "Reflect_isExtensible"),
                 ("preventExtensions", "Reflect_preventExtensions"),
                 ("ownKeys", "Reflect_ownKeys"),
+                ("deleteProperty", "Reflect_deleteProperty"),
             ] {
                 if let Some(h) = find_handle(&self.builtins, handle) {
                     reflect_entries.push((name, h));

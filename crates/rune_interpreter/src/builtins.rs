@@ -8906,7 +8906,7 @@ fn object_own_entries_mode(
 }
 
 /// Build a dense RuneArray from element values, wired to Array.prototype.
-fn build_array(gc: &mut SemiSpace, elements: &[Value], vm: &Vm) -> Value {
+pub(crate) fn build_array(gc: &mut SemiSpace, elements: &[Value], vm: &Vm) -> Value {
     let arr = RuneArray::allocate(gc, elements);
     unsafe {
         let arr_u8 = arr as *mut u8;

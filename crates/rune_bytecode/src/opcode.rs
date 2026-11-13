@@ -69,6 +69,7 @@ pub enum Opcode {
     DefineProperty,
     DefineAccessor,
     // Template literals
+    LoadTemplateObject,
     ToString,
     StringConcat,
     // Globals

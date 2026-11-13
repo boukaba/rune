@@ -1026,6 +1026,8 @@ pub struct Vm {
     /// Operand-stack length to preserve when the nested run_loop floor is hit
     /// (builtins holding temporary roots above the caller's frame base).
     pub return_stack_floor: Option<usize>,
+    /// Per-(program, template-site) tagged-template object cache.
+    pub template_cache: std::collections::HashMap<(usize, usize), Value>,
     /// While a generator's nested run_loop is active: the frame index the
     /// generator frame occupies. Return inside it must NOT run the module-
     /// style caller-stack truncation (the real caller lives outside this
@@ -1357,6 +1359,7 @@ impl Vm {
             globals_override: None,
             return_frame_floor: 0,
             return_stack_floor: None,
+            template_cache: std::collections::HashMap::new(),
             nested_gen_floor: None,
             generator_return_sentinel: None,
             generator_return_value: None,
@@ -4753,6 +4756,9 @@ impl Vm {
         }
         if let Some(ref pa) = self.pending_assert {
             gc.push_root(&pa.expected_error as *const Value as *mut u64);
+        }
+        for value in self.template_cache.values() {
+            gc.push_root(value as *const Value as *mut u64);
         }
         if let Some(ref ppc) = self.pending_promise_ctor {
             gc.push_root(&ppc.promise as *const Value as *mut u64);
@@ -8230,6 +8236,64 @@ impl Vm {
                         self.push(Value::undefined());
                     }
                     self.frames[fi].pc = pc + 1;
+                }
+                Opcode::LoadTemplateObject => {
+                    let pool_idx = instr.operands[0] as usize;
+                    let key = (prog as *const BytecodeProgram as usize, pool_idx);
+                    if let Some(cached) = self.template_cache.get(&key).copied() {
+                        self.push(cached);
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    }
+                    let encoded = self.frames[fi]
+                        .prog_str(pool_idx)
+                        .map(|s| s.to_string())
+                        .unwrap_or_default();
+                    let mut parts: Vec<&str> = encoded.split('\u{1}').collect();
+                    if parts.last().is_some_and(|p| p.starts_with('@')) {
+                        parts.pop();
+                    }
+                    let cooked_vals: Vec<Value> = parts
+                        .iter()
+                        .map(|p| Value::from_heap_ptr(HeapString::allocate(gc, p) as *mut u8))
+                        .collect();
+                    let raw_vals = cooked_vals.clone();
+                    let cooked = crate::builtins::build_array(gc, &cooked_vals, self);
+                    let raw = crate::builtins::build_array(gc, &raw_vals, self);
+                    if let Some(cptr) = cooked.heap_ptr() {
+                        let arr = cptr as *mut RuneArray;
+                        let mut extra = unsafe { RuneArray::extra_props(arr) };
+                        if extra.is_null() {
+                            let obj = JSObject::allocate(gc, Shape::empty(), &[]);
+                            let cptr =
+                                unsafe { rune_core::gc::resolve_forwarded(cptr) } as *mut RuneArray;
+                            unsafe { RuneArray::set_extra_props(cptr, obj as *mut u8) };
+                            extra = unsafe { RuneArray::extra_props(cptr) };
+                        }
+                        unsafe {
+                            JSObject::add_property_with_attrs(
+                                extra as *mut JSObject,
+                                PropertyKey::from_string("raw"),
+                                "raw".to_string(),
+                                raw,
+                                rune_core::shape::ATTR_WRITABLE
+                                    | rune_core::shape::ATTR_CONFIGURABLE,
+                            );
+                        }
+                        let extra_val = Value::from_heap_ptr(extra);
+                        let _ = crate::builtins::object_freeze(
+                            gc,
+                            Value::undefined(),
+                            &[extra_val],
+                            self,
+                        );
+                    }
+                    let _ = crate::builtins::object_freeze(gc, Value::undefined(), &[raw], self);
+                    let _ = crate::builtins::object_freeze(gc, Value::undefined(), &[cooked], self);
+                    self.template_cache.insert(key, cooked);
+                    self.push(cooked);
+                    self.frames[fi].pc = pc + 1;
+                    continue;
                 }
                 Opcode::ToString => {
                     let val = self.pop();

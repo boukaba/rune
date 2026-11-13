@@ -100,6 +100,7 @@ pub struct Emitter {
     /// `export {a as b}`): stored name → export names. After each module-level
     /// store of the stored name, an ExportSync for each export name is emitted.
     module_export_renames: HashMap<String, Vec<String>>,
+    template_site_counter: usize,
 }
 
 impl Default for Emitter {
@@ -143,6 +144,7 @@ impl Emitter {
             module_imports: HashMap::new(),
             hoisted_fn_nodes: HashSet::new(),
             module_export_renames: HashMap::new(),
+            template_site_counter: 0,
         }
     }
 
@@ -3525,25 +3527,14 @@ impl Emitter {
                         self.emit_expression(tag);
                     }
                 }
-                // Template object: array-backed so cooked indexed reads work;
-                // `raw` is attached as an extra property.
-                self.emit(Opcode::NewArray, vec![0]);
-                for part in parts {
-                    let idx = self.intern_string(part) as i64;
-                    self.emit(Opcode::LoadStringConst, vec![idx]);
-                    self.emit(Opcode::ArrayPush, vec![]);
-                }
-                self.emit(Opcode::Dup, vec![]);
-                let raw_key = self.intern_string("raw") as i64;
-                self.emit(Opcode::LoadStringConst, vec![raw_key]);
-                self.emit(Opcode::NewArray, vec![0]);
-                for part in parts {
-                    let idx = self.intern_string(part) as i64;
-                    self.emit(Opcode::LoadStringConst, vec![idx]);
-                    self.emit(Opcode::ArrayPush, vec![]);
-                }
-                self.emit(Opcode::StoreProperty, vec![]);
-                self.emit(Opcode::Pop, vec![]);
+                let encoded = format!(
+                    "{}\u{1}@{}",
+                    parts.join("\u{1}"),
+                    self.template_site_counter
+                );
+                self.template_site_counter += 1;
+                let idx = self.intern_string(&encoded) as i64;
+                self.emit(Opcode::LoadTemplateObject, vec![idx]);
                 for e in exprs {
                     self.emit_expression(e);
                 }

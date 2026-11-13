@@ -16304,11 +16304,22 @@ fn test_tagged_template() {
                     strings.raw[0] + subs[0] + strings.raw[1];
             }
             var obj = { v: 2, m: function (s) { return this.v + s[0]; } };
+            var captured;
+            function cap(s) { captured = s; return s[0]; }
+            cap`a${1}b`;
+            var rawDesc = Object.getOwnPropertyDescriptor(captured, "raw");
             [
                 tag`a${1}b` === "a1b|a1b",
                 String.raw`x${2}y` === "x2y",
-                obj.m`z` === "2z"
-            ].join("|") === "true|true|true";
+                obj.m`z` === "2z",
+                Array.isArray(captured),
+                Array.isArray(captured.raw),
+                Object.isFrozen(captured),
+                Object.isFrozen(captured.raw),
+                rawDesc.enumerable === false &&
+                    rawDesc.writable === false &&
+                    rawDesc.configurable === false
+            ].join("|") === "true|true|true|true|true|true|true|true";
             "#,
         )
         .unwrap();

@@ -2331,6 +2331,23 @@ Integration suite: **857 passed, 0 failed, 3 ignored**.
 
 Integration suite: **858 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Template-object cache + freeze (2026-11-13)
+
+- Added `Opcode::LoadTemplateObject` and a `Vm.template_cache` keyed by
+  (program, unique template-site id); template objects are now shared across
+  evaluations of the same site.
+- Template objects and their `raw` arrays are frozen; `raw` is attached as a
+  non-enumerable, writable/configurable then frozen extra property (matching
+  the spec descriptor).
+- The emitter encodes cooked parts with a per-site suffix so identical source
+  at different sites does not alias the cache.
+- Test262: tagged-template **11 → 12/27**, String **847 → 848/1223**.
+- Known: tagged templates with substitutions inside blocks/functions hit a
+  lexer TemplateTail-mode parse bug; invalid-escape cooked/raw distinction,
+  template-map identity, and `new tag\`…\`` remain unsupported.
+
+Integration suite: **858 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

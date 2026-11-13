@@ -62,7 +62,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 | `rune_jit_baseline` | Baseline JIT (AArch64; runtime opt-in, off by default) — 62 opcodes whitelisted, function tier-up at 50 calls, N=16 vector IC table, **inlining** (Phase F: hot callees spliced inline, ~5% gain), **float self-tagging** (NaN-boxed Values, 0 heap allocation for floats) |
 | `rune_embed` | Embedding API (`Context::eval`), AFPC cache save/load, host functions |
 | `rune_runtime` | Runtime facade: timer event loop (`setTimeout`/`clearTimeout`), host `fetch` jobs with pluggable transport, retained callbacks |
-| `rune_cli` | CLI binary with `--cache`, `--snapshot`, `--ic-stats`, `--trace-stats`; installs runtime timers/fetch for scripts |
+| `rune_cli` | CLI binary with `--cache`, `--snapshot`, `--ic-stats`, `--trace-stats`; installs runtime timers/fetch for scripts, with a real ureq HTTP/HTTPS transport |
 | `rune_bench` | Criterion benchmarks with V8 comparison scripts |
 
 ## What Works

@@ -620,8 +620,19 @@ The `rune` binary now uses the runtime event loop:
 Integration suite: **769 passed, 0 failed, 3 ignored**; `rune_runtime`: 7;
 `rune_cli` integration: 3.
 
-Known limits: no CLI flag/config for a real fetch transport yet; timer waits
-still block the thread; test262 deliberately does not get runtime globals.
+Known limits: timers still block while waiting; test262 deliberately does not
+get runtime globals.
+
+### Phase 3 — real CLI HTTP fetch transport (2026-11-13)
+
+- The CLI installs a real `ureq`-backed transport for `fetch`: HTTP and HTTPS,
+  redirects/TLS defaults, 30s timeout, request method/headers/body, response
+  status/statusText/headers/text. Non-2xx responses still become Response
+  objects; transport failures reject the fetch Promise.
+- Unit test runs a one-shot HTTP/1.1 server on `127.0.0.1:0` and asserts
+  status/body/header round-trip without external network.
+- `rune_runtime` itself remains transport-agnostic; embedders still choose
+  their transport via `set_fetcher`.
 
 ### Phase 1 — stable array headers (2026-11-13)
 

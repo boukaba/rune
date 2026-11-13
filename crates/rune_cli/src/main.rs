@@ -62,7 +62,9 @@ fn main() {
     let mut runtime_jobs = if source_args.first().is_some_and(|a| a == "test262") {
         None
     } else {
-        Some(rune_runtime::install(&mut ctx))
+        let mut jobs = rune_runtime::install(&mut ctx);
+        jobs.set_fetcher(http_fetch);
+        Some(jobs)
     };
 
     if let Some(source) = inline_source {
@@ -282,5 +284,83 @@ fn main() {
     }
     if jit_stats {
         eprintln!("{}", ctx.vm().dump_jit_stats());
+    }
+}
+
+/// Default CLI fetch transport: real HTTP/HTTPS via ureq. Redirects and TLS
+/// are the crate defaults; the response body is exposed as text.
+fn http_fetch(req: &rune_runtime::FetchRequest) -> Result<rune_runtime::FetchResponse, String> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(30))
+        .build();
+    let mut request = agent.request(&req.method, &req.url);
+    for (name, value) in &req.headers {
+        request = request.set(name, value);
+    }
+    let response = if let Some(body) = &req.body {
+        request.send_string(body)
+    } else {
+        request.call()
+    };
+    let response = match response {
+        Ok(response) => response,
+        Err(ureq::Error::Status(_, response)) => response,
+        Err(err) => return Err(err.to_string()),
+    };
+    let status = response.status();
+    let status_text = response.status_text().to_string();
+    let mut headers = Vec::new();
+    for name in response.headers_names() {
+        if let Some(value) = response.header(&name) {
+            headers.push((name, value.to_string()));
+        }
+    }
+    let body = response
+        .into_string()
+        .map_err(|e| format!("fetch body: {e}"))?;
+    Ok(rune_runtime::FetchResponse {
+        status,
+        status_text,
+        headers,
+        body,
+    })
+}
+
+#[cfg(test)]
+mod http_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    #[test]
+    fn http_fetch_round_trip() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf);
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+                )
+                .expect("write");
+        });
+        let response = http_fetch(&rune_runtime::FetchRequest {
+            url: format!("http://{addr}/"),
+            method: "GET".to_string(),
+            headers: Vec::new(),
+            body: None,
+        })
+        .expect("fetch");
+        server.join().expect("server");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, "hello");
+        assert!(
+            response
+                .headers
+                .iter()
+                .any(|(k, v)| k == "content-type" && v == "text/plain")
+        );
     }
 }

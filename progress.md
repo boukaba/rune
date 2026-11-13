@@ -1421,6 +1421,20 @@ Integration suite: **806 passed, 0 failed, 3 ignored**.
 
 Integration suite: **807 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — descriptor fields from exotic receiver objects (2026-11-13)
+
+- ToPropertyDescriptor field lookup (`get`/`set`/`value`/`writable`/
+  `enumerable`/`configurable`) now reads Function/Date/RegExp/Array
+  `extra_props` in addition to plain-object shapes. Descriptor objects built on
+  Date/RegExp/arrays/functions are now honored.
+- Test262: Object **1808 → 1860/3411**; `Object.create` **211 → 231/320**;
+  `Object.defineProperty` **524 → 566/1131**.
+- Regression: `test_exotic_descriptor_objects`.
+- Known gap: accessor-held descriptor fields (a getter on the descriptor
+  object) are still treated as absent (sync Get gap).
+
+Integration suite: **808 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

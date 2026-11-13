@@ -14919,3 +14919,30 @@ fn test_weak_collection_prototypes_and_symbol_keys() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_exotic_descriptor_objects() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var re = new RegExp();
+            re.enumerable = true;
+            var created = Object.create({}, { prop: re });
+            var date = new Date();
+            date.value = 42;
+            date.enumerable = true;
+            date.writable = true;
+            date.configurable = true;
+            var target = {};
+            Object.defineProperty(target, "d", date);
+            [
+                created.propertyIsEnumerable("prop"),
+                target.d === 42,
+                Object.prototype.hasOwnProperty.call(target, "d")
+            ].join("|") === "true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

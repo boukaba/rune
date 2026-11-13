@@ -7395,6 +7395,24 @@ fn desc_field(desc_obj: Value, name: &str) -> (bool, Value) {
         ep
     } else if dtag == TAG_OBJECT {
         dptr
+    } else if dtag == TAG_DATE {
+        let ep = unsafe { rune_core::date::RuneDate::extra_props(dptr) };
+        if ep.is_null() {
+            return (false, Value::undefined());
+        }
+        ep
+    } else if dtag == TAG_REGEXP {
+        let ep = unsafe { rune_core::regexp::RegExp::extra_props(dptr) };
+        if ep.is_null() {
+            return (false, Value::undefined());
+        }
+        ep
+    } else if dtag == TAG_ARRAY {
+        let ep = unsafe { RuneArray::extra_props(dptr as *mut RuneArray) };
+        if ep.is_null() {
+            return (false, Value::undefined());
+        }
+        ep
     } else {
         return (false, Value::undefined());
     };

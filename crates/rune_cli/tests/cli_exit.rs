@@ -128,3 +128,17 @@ fn build_and_run_module_bundle() {
     assert!(stdout.contains("x 42"), "unexpected output: {stdout}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn instruction_budget_stops_infinite_loop() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rune"))
+        .args(["--max-instructions=5000", "-e", "while (true) {}"])
+        .output()
+        .expect("spawn rune");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("instruction budget exceeded"),
+        "unexpected stderr: {stderr}"
+    );
+}

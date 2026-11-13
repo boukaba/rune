@@ -876,6 +876,23 @@ Integration suite: **783 passed, 0 failed, 3 ignored**.
 
 CLI tests: **7 tests** (1 HTTP unit + 6 integration); integration suite 783.
 
+### Phase 4 — instruction budget, fuzzing, security model (2026-11-13)
+
+- `Context::set_instruction_budget` + `rune --max-instructions=N` add a
+  deterministic interpreter work limit. Exhaustion raises a catchable
+  `RangeError` once and resets to unlimited so error handling can run. JIT
+  code is not budgeted (documented).
+- New deterministic token-soup parser corpus (300 random programs) asserts
+  malformed input produces parse/runtime errors without panics or hangs.
+- New `docs/security-model.md` records enforced controls (budget, fetch policy,
+  bundle hash/ABI integrity, GC stress/fuzz/JIT differential) and explicit gaps
+  (no sandbox, DNS rebinding/redirect/proxy/TLS policy, per-script heap cap,
+  bundle signing, formal JIT proof).
+- CLI budget test; integration budget + parser-fuzz regressions.
+
+Integration suite: **785 passed, 0 failed, 3 ignored**; CLI **8 tests**
+(1 HTTP unit + 7 integration).
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

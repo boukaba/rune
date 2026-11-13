@@ -14244,3 +14244,99 @@ fn test_undeclared_identifier_reference_errors() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_instruction_budget_halts_infinite_loops() {
+    let mut ctx = Context::new_small();
+    ctx.set_instruction_budget(5000);
+    let err = ctx.eval("while (true) {}").expect_err("budget must trip");
+    assert!(
+        err.contains("instruction budget exceeded"),
+        "unexpected error: {err}"
+    );
+    // Normal execution still works after the (reset) trip.
+    assert_eq!(ctx.eval("1 + 1").unwrap().as_smi(), Some(2));
+
+    ctx.set_instruction_budget(5000);
+    let caught = ctx
+        .eval(
+            "var caught = false; try { while (true) {} } catch (e) { caught = e instanceof RangeError; } caught;",
+        )
+        .unwrap();
+    assert_eq!(caught.to_boolean(), Some(true));
+}
+
+#[test]
+fn test_parser_fuzz_corpus_does_not_panic() {
+    // Deterministic token-soup fuzzing: malformed programs must produce parse
+    // or runtime errors, never panic or hang the engine.
+    const TOKENS: &[&str] = &[
+        "{",
+        "}",
+        "(",
+        ")",
+        "[",
+        "]",
+        ";",
+        ",",
+        ".",
+        ":",
+        "?",
+        "+",
+        "-",
+        "*",
+        "/",
+        "%",
+        "<",
+        ">",
+        "=",
+        "!",
+        "&",
+        "|",
+        "^",
+        "~",
+        "==",
+        "===",
+        "=>",
+        "let",
+        "var",
+        "const",
+        "function",
+        "return",
+        "if",
+        "else",
+        "for",
+        "while",
+        "true",
+        "false",
+        "null",
+        "undefined",
+        "0",
+        "1",
+        "42",
+        "'x'",
+        "\"y\"",
+        "a",
+        "b",
+        "print",
+        "\n",
+    ];
+    let mut ctx = Context::new_small();
+    let mut state = 0x1234_5678_9abc_def0u64;
+    for _ in 0..300 {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let len = 1 + (state as usize % 80);
+        let mut src = String::new();
+        for _ in 0..len {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            src.push_str(TOKENS[(state as usize) % TOKENS.len()]);
+            src.push(' ');
+        }
+        ctx.set_instruction_budget(10_000);
+        let _ = ctx.eval(&src);
+    }
+}

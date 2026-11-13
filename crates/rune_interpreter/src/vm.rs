@@ -1219,6 +1219,10 @@ pub struct Vm {
     /// Boxed primitive receivers for the currently active array operations.
     /// Cleared when a new top-level array operation starts; bounded by nesting.
     pub(crate) array_receiver_roots: Vec<Value>,
+    /// Deterministic interpreter instruction budget (`u64::MAX` = unlimited).
+    /// When exhausted, a catchable RangeError is raised once and the budget is
+    /// reset to unlimited so error handling can run.
+    pub instruction_budget: u64,
     /// Values temporarily held by a builtin across allocations (e.g. the
     /// result promise and resolve/reject bridges of Promise.race). Registered
     /// as GC roots like any other VM state; builtins truncate to their entry
@@ -1427,6 +1431,7 @@ impl Vm {
             pending_array_op: None,
             pending_array_ops: Vec::new(),
             array_receiver_roots: Vec::new(),
+            instruction_budget: u64::MAX,
             temp_roots: Vec::new(),
             pending_call: None,
             pending_promise_ctor: None,
@@ -5999,6 +6004,22 @@ impl Vm {
     }
     pub fn run_loop(&mut self, gc: &mut SemiSpace) -> Exit {
         'run: loop {
+            if self.instruction_budget != u64::MAX {
+                if self.instruction_budget == 0 {
+                    self.instruction_budget = u64::MAX;
+                    let err = crate::errors::error_object(
+                        gc,
+                        &self.error_protos,
+                        crate::errors::ErrorKind::RangeError,
+                        "execution instruction budget exceeded",
+                    );
+                    if let Some(exit) = self.handle_throw(gc, err) {
+                        return exit;
+                    }
+                    continue;
+                }
+                self.instruction_budget -= 1;
+            }
             let fi = self.frames.len() - 1;
             let pc = self.frames[fi].pc;
             let prog_ptr = self.frames[fi].prog;

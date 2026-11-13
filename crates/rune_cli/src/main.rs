@@ -54,6 +54,7 @@ fn main() {
     let mut enable_jit = false;
     let mut allow_private_fetch = false;
     let mut build_out: Option<String> = None;
+    let mut max_instructions: Option<u64> = None;
 
     let mut source_args: Vec<String> = Vec::new();
     let mut i = 0;
@@ -95,6 +96,13 @@ fn main() {
             }
         } else if let Some(rest) = arg.strip_prefix("--out=") {
             build_out = Some(rest.to_string());
+        } else if arg == "--max-instructions" {
+            i += 1;
+            if i < args.len() {
+                max_instructions = args[i].parse().ok();
+            }
+        } else if let Some(rest) = arg.strip_prefix("--max-instructions=") {
+            max_instructions = rest.parse().ok();
         } else if arg == "--stencil-jit" {
             stencil_jit = true;
         } else if arg == "--no-stencil-jit" {
@@ -109,6 +117,9 @@ fn main() {
     ctx.enable_inlining = enable_inlining;
     ctx.stencil_jit = stencil_jit;
     ctx.enable_jit = enable_jit;
+    if let Some(limit) = max_instructions {
+        ctx.set_instruction_budget(limit);
+    }
     // Install timer/fetch host globals and the event-loop job queues. The
     // test262 harness keeps a bare context; scripts get the runtime globals.
     let mut runtime_jobs = if source_args.first().is_some_and(|a| a == "test262") {

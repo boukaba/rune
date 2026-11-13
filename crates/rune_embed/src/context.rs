@@ -69,6 +69,12 @@ impl Context {
         self.vm.drain_microtask_queue(&mut self.gc);
     }
 
+    /// Bound interpreter work deterministically. Zero is treated as one.
+    /// JIT-compiled code is opt-in and does not decrement this counter.
+    pub fn set_instruction_budget(&mut self, instructions: u64) {
+        self.vm.instruction_budget = instructions.max(1);
+    }
+
     /// Register a Rust host function and install it as a JS global. The
     /// closure receives `(gc, this, args, vm)` and may use the normal VM
     /// services; it is callable from JS like any other function.

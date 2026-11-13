@@ -860,11 +860,21 @@ Integration suite: **783 passed, 0 failed, 3 ignored**.
   cached native code/ICs, executes the cached bytecode **without parsing the
   source**, then drains timers/microtasks.
 - CLI integration test builds and runs a fib script (`fib 12 = 144`).
-- Known limits: script-only (ESM dependency graphs are not bundled), no
-  standalone single-binary output, and no source-map/line diagnostics for
-  bundle execution yet.
+- Bundle format upgraded to `RUNEAPP2`: script bundles carry an AFPC cache;
+  module bundles carry the entry source plus a **specifier → source map** for
+  the reachable static import graph. `rune build app.mjs` walks dependencies
+  with `rune_module::module_dependencies`, resolves relative paths, and writes
+  a self-contained source bundle. `rune run` executes it with an in-memory
+  resolver, so no filesystem/module resolution is needed and live bindings are
+  re-established by the engine at run time.
+- Module bundle test: `main.mjs` imports a mutable binding from `dep.mjs`,
+  mutates it, and observes the live update (`x 42`).
+- Known limits: module bundles are **source bundles** (no module-bytecode AOT
+  cache), duplicate specifiers from different directories collide by design,
+  bare package specifiers are unsupported, and there is no standalone binary
+  or source-map/line diagnostics for bundles yet.
 
-CLI tests: **6 tests** (1 HTTP unit + 5 integration); integration suite 783.
+CLI tests: **7 tests** (1 HTTP unit + 6 integration); integration suite 783.
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:

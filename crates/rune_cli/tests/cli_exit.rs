@@ -83,3 +83,48 @@ fn build_and_run_application_bundle() {
     assert!(stdout.contains("fib 144"), "unexpected output: {stdout}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn build_and_run_module_bundle() {
+    let dir = std::env::temp_dir().join(format!("rune-esm-bundle-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let dep = dir.join("dep.mjs");
+    let main = dir.join("main.mjs");
+    let bundle = dir.join("app.runeapp");
+    std::fs::write(
+        &dep,
+        "export let x = 41;\nexport function bump() { x = x + 1; }\n",
+    )
+    .expect("write dep");
+    std::fs::write(
+        &main,
+        "import { x, bump } from './dep.mjs';\nbump();\nprint('x', x);\n",
+    )
+    .expect("write main");
+    let build = Command::new(env!("CARGO_BIN_EXE_rune"))
+        .args([
+            "build",
+            main.to_str().unwrap(),
+            "--out",
+            bundle.to_str().unwrap(),
+        ])
+        .output()
+        .expect("spawn build");
+    assert!(
+        build.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let run = Command::new(env!("CARGO_BIN_EXE_rune"))
+        .args(["run", bundle.to_str().unwrap()])
+        .output()
+        .expect("spawn run");
+    assert!(
+        run.status.success(),
+        "run failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(stdout.contains("x 42"), "unexpected output: {stdout}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

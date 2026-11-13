@@ -1,5 +1,46 @@
 mod test262;
 
+/// Resolve a module specifier relative to the importing file and return its
+/// canonical path. Bare package specifiers are not supported by bundles.
+fn resolve_module_path(referrer: &str, specifier: &str) -> Result<std::path::PathBuf, String> {
+    if !specifier.starts_with('.') && !specifier.starts_with('/') {
+        return Err(format!(
+            "bare module specifier {specifier:?} is not supported"
+        ));
+    }
+    let parent = std::path::Path::new(referrer)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let mut path = parent.join(specifier);
+    if path.extension().is_none() {
+        path.set_extension("js");
+    }
+    path.canonicalize()
+        .map_err(|e| format!("cannot resolve module {specifier:?}: {e}"))
+}
+
+/// Collect the source of every static dependency reachable from the entry.
+fn collect_module_graph(
+    entry_path: &str,
+    entry_source: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let mut modules: Vec<(String, String)> = Vec::new();
+    let mut stack: Vec<(String, String)> = vec![(entry_path.to_string(), entry_source.to_string())];
+    while let Some((path, source)) = stack.pop() {
+        for specifier in rune_module::module_dependencies(&source)? {
+            if modules.iter().any(|(name, _)| name == &specifier) {
+                continue;
+            }
+            let dep_path = resolve_module_path(&path, &specifier)?;
+            let dep_source = std::fs::read_to_string(&dep_path)
+                .map_err(|e| format!("cannot read {}: {e}", dep_path.display()))?;
+            modules.push((specifier.clone(), dep_source.clone()));
+            stack.push((dep_path.to_string_lossy().into_owned(), dep_source));
+        }
+    }
+    Ok(modules)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut ic_stats = false;
@@ -120,16 +161,32 @@ fn main() {
                         .to_string_lossy()
                         .into_owned()
                 });
-                let bytecode = match ctx.compile(&source) {
-                    Ok(bytecode) => bytecode,
-                    Err(error) => {
-                        eprintln!("Error: {error}");
-                        std::process::exit(1);
-                    }
+                let is_module = entry.ends_with(".mjs")
+                    || rune_module::module_dependencies(&source)
+                        .map(|deps| !deps.is_empty())
+                        .unwrap_or(false);
+                let written = if is_module {
+                    let modules = match collect_module_graph(entry, &source) {
+                        Ok(modules) => modules,
+                        Err(error) => {
+                            eprintln!("Error: {error}");
+                            std::process::exit(1);
+                        }
+                    };
+                    rune_embed::bundle::save_module_bundle(&out, &source, &modules)
+                } else {
+                    let bytecode = match ctx.compile(&source) {
+                        Ok(bytecode) => bytecode,
+                        Err(error) => {
+                            eprintln!("Error: {error}");
+                            std::process::exit(1);
+                        }
+                    };
+                    let mut cache = rune_embed::afpc::AfpcCache::from_runtime(bytecode, Vec::new());
+                    cache.source_hash = rune_embed::afpc::source_hash(&source);
+                    rune_embed::bundle::save_bundle(&out, &source, &cache)
                 };
-                let mut cache = rune_embed::afpc::AfpcCache::from_runtime(bytecode, Vec::new());
-                cache.source_hash = rune_embed::afpc::source_hash(&source);
-                match rune_embed::bundle::save_bundle(&out, &source, &cache) {
+                match written {
                     Ok(size) => println!("built {out} ({size} bytes)"),
                     Err(error) => {
                         eprintln!("Error: cannot write {out}: {error}");
@@ -146,14 +203,25 @@ fn main() {
                     eprintln!("Error: invalid or incompatible bundle {path}");
                     std::process::exit(1);
                 };
-                let cache = bundle.cache;
-                cache.restore_shapes();
-                if !cache.compiled_funcs.is_empty() {
-                    let native = rune_embed::afpc::InstalledNativeCode::from_cache(&cache);
-                    ctx.install_native_code(native);
-                }
-                ctx.set_ics(cache.ic_table);
-                let result = ctx.eval_bytecode_owned(cache.bytecode);
+                let result = if let Some(cache) = bundle.cache {
+                    cache.restore_shapes();
+                    if !cache.compiled_funcs.is_empty() {
+                        let native = rune_embed::afpc::InstalledNativeCode::from_cache(&cache);
+                        ctx.install_native_code(native);
+                    }
+                    ctx.set_ics(cache.ic_table);
+                    ctx.eval_bytecode_owned(cache.bytecode)
+                } else {
+                    let modules = bundle.modules;
+                    let mut resolver = |spec: &str, _referrer: &str| -> Result<String, String> {
+                        modules
+                            .iter()
+                            .find(|(name, _)| name == spec)
+                            .map(|(_, source)| source.clone())
+                            .ok_or_else(|| format!("module {spec} is not bundled"))
+                    };
+                    ctx.eval_module(&bundle.source, &mut resolver)
+                };
                 if result.is_ok() {
                     if let Some(jobs) = runtime_jobs.as_mut() {
                         if let Err(error) = jobs.run_jobs(&mut ctx) {

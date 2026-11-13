@@ -707,6 +707,25 @@ Objects now use the same stable-header discipline as arrays:
 Integration suite: **773 passed, 0 failed, 3 ignored**, both normally and under
 `RUNE_GC_STRESS=512`; dedicated GC stress 4/4.
 
+### Phase 1 — JIT differential + branching-trace gate (2026-11-13)
+
+- New `tests/jit_differential.rs` runs a 12-script hot corpus with JIT disabled
+  and enabled, comparing observable results. It immediately found a silent
+  trace-JIT miscompile: an `if/else` inside a hot loop returned a completely
+  different value (`425` vs `373250`).
+- Root-cause containment: the trace recorder does not soundly model branches in
+  a loop body yet. Trace eligibility now counts conditional jumps and refuses
+  recording when a body contains more than the loop’s own condition (one). Such
+  loops stay interpreted; function tier-up and simple numeric traces remain.
+- The differential corpus now covers arithmetic, recursion, property load/store,
+  strings, closures, arrays, method calls, exceptions, bitwise/modulo, inner
+  branches, and a branching hot function called 500 times.
+- This is conservative by design: "bail to interpreter" is correct until branch
+  traces are modeled/proven.
+
+Verification: workspace green; JIT differential 12/12 on AArch64; integration
+773; full 512-stress 773.
+
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:

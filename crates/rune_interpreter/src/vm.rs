@@ -8243,6 +8243,7 @@ impl Vm {
                         if *entry == 50 {
                             unsafe {
                                 let instrs = (*prog_ptr).instructions.as_ptr();
+                                let mut conditional_jumps = 0usize;
                                 for i in target..=pc {
                                     let op = (*instrs.add(i)).opcode;
                                     match op {
@@ -8274,6 +8275,21 @@ impl Vm {
                                         Opcode::MakeEnv | Opcode::RestoreEnv => {
                                             trace_eligible = false;
                                             break;
+                                        }
+                                        // One conditional jump is the loop
+                                        // condition. Additional branches in the
+                                        // body are not soundly modeled by the
+                                        // trace recorder yet (silent wrong
+                                        // results on if/else), so bail to the
+                                        // interpreter for those loops.
+                                        Opcode::JumpIfTrue
+                                        | Opcode::JumpIfFalse
+                                        | Opcode::JumpIfNullOrUndefined => {
+                                            conditional_jumps += 1;
+                                            if conditional_jumps > 1 {
+                                                trace_eligible = false;
+                                                break;
+                                            }
                                         }
                                         _ => {}
                                     }

@@ -79,6 +79,12 @@ int rune_context_set_property(void *ctx, RuneValue object, const char *key,
 /* Release a retained value handle (handle == 0 is a no-op). */
 int rune_context_release_value(void *ctx, RuneValue value);
 
+/* Install timers/promise jobs (idempotent). */
+int rune_context_install_runtime(void *ctx);
+
+/* Run due timers and queued promise jobs. */
+int rune_context_run_jobs(void *ctx, char **error);
+
 /* Call a retained JavaScript function. Arguments may be primitives or
  * retained handles; the result has the same ownership rules as eval_value. */
 int rune_context_call_value(void *ctx, RuneValue func, const RuneValue *args,

@@ -7,12 +7,22 @@ use crate::value::{HostCallback, RuneValue, retained_to_c, value_from_c, value_t
 use rune_core::gc::{GcHeader, TAG_FUNC, TAG_STRING};
 use rune_core::value::Value;
 use rune_embed::Context;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 const STATUS_OK: i32 = 0;
 const STATUS_ERROR: i32 = 1;
 const STATUS_INVALID: i32 = -1;
+
+thread_local! {
+    /// Runtime jobs are kept beside (not inside) the opaque Context pointer.
+    /// The C API is documented as single-threaded, so a per-thread table keyed
+    /// by the context address is sufficient.
+    static RUNTIME_JOBS: RefCell<HashMap<usize, rune_runtime::RuntimeJobs>> =
+        RefCell::new(HashMap::new());
+}
 
 fn into_c_string(text: String) -> *mut c_char {
     CString::new(text.replace('\0', "\\0"))
@@ -56,6 +66,9 @@ pub extern "C" fn rune_context_create_with_heap(bytes: usize) -> *mut c_void {
 #[unsafe(no_mangle)]
 pub extern "C" fn rune_context_destroy(ctx: *mut c_void) {
     if !ctx.is_null() {
+        RUNTIME_JOBS.with(|jobs| {
+            jobs.borrow_mut().remove(&(ctx as usize));
+        });
         unsafe {
             let _ = Box::from_raw(ctx as *mut Context);
         }
@@ -401,6 +414,56 @@ pub unsafe extern "C" fn rune_context_call_value(
         }
         Err(_) => {
             unsafe { write_out(error, into_c_string("engine panic".to_string())) };
+            STATUS_ERROR
+        }
+    }
+}
+
+/// Install timers/promise jobs for this context (idempotent).
+///
+/// # Safety
+/// `ctx` must be a live context pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rune_context_install_runtime(ctx: *mut c_void) -> i32 {
+    if ctx.is_null() {
+        return STATUS_INVALID;
+    }
+    let ctx_ref = unsafe { &mut *(ctx as *mut Context) };
+    RUNTIME_JOBS.with(|jobs| {
+        let mut jobs = jobs.borrow_mut();
+        if let std::collections::hash_map::Entry::Vacant(entry) = jobs.entry(ctx as usize) {
+            entry.insert(rune_runtime::install(ctx_ref));
+        }
+    });
+    STATUS_OK
+}
+
+/// Run due timers and queued promise jobs. Returns 1 and fills `error` on a
+/// callback failure. Requires `rune_context_install_runtime`.
+///
+/// # Safety
+/// `ctx` must be a live context pointer; `error` may be NULL or a writable slot.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rune_context_run_jobs(ctx: *mut c_void, error: *mut *mut c_char) -> i32 {
+    if !error.is_null() {
+        unsafe { *error = std::ptr::null_mut() };
+    }
+    if ctx.is_null() {
+        return STATUS_INVALID;
+    }
+    let mut jobs = RUNTIME_JOBS.with(|jobs| jobs.borrow_mut().remove(&(ctx as usize)));
+    let Some(mut jobs) = jobs.take() else {
+        return STATUS_INVALID;
+    };
+    let outcome = {
+        let ctx_ref = unsafe { &mut *(ctx as *mut Context) };
+        jobs.run_jobs(ctx_ref)
+    };
+    RUNTIME_JOBS.with(|slot| slot.borrow_mut().insert(ctx as usize, jobs));
+    match outcome {
+        Ok(()) => STATUS_OK,
+        Err(message) => {
+            unsafe { write_out(error, into_c_string(message)) };
             STATUS_ERROR
         }
     }
@@ -953,6 +1016,41 @@ mod property_tests {
             rune_context_release_value(ctx, length);
             rune_context_release_value(ctx, second);
         }
+        rune_context_destroy(ctx);
+    }
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use super::*;
+
+    #[test]
+    fn installs_and_runs_timers() {
+        let ctx = rune_context_create();
+        assert_eq!(unsafe { rune_context_install_runtime(ctx) }, 0);
+        let source =
+            CString::new("var done = 0; setTimeout(function () { done = 1; }, 0);").unwrap();
+        let mut error: *mut c_char = std::ptr::null_mut();
+        let status =
+            unsafe { rune_context_eval(ctx, source.as_ptr(), std::ptr::null_mut(), &mut error) };
+        assert_eq!(status, 0);
+        if !error.is_null() {
+            unsafe { rune_free_string(error) };
+        }
+        assert_eq!(unsafe { rune_context_run_jobs(ctx, &mut error) }, 0);
+        if !error.is_null() {
+            unsafe { rune_free_string(error) };
+        }
+
+        let check = CString::new("done").unwrap();
+        let mut result: *mut c_char = std::ptr::null_mut();
+        let status = unsafe { rune_context_eval(ctx, check.as_ptr(), &mut result, &mut error) };
+        assert_eq!(status, 0);
+        let text = unsafe { CStr::from_ptr(result) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { rune_free_string(result) };
+        assert_eq!(text, "1");
         rune_context_destroy(ctx);
     }
 }

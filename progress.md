@@ -1118,6 +1118,20 @@ Integration suite: **793 passed, 0 failed, 3 ignored**.
 
 Integration suite: **794 passed, 0 failed, 3 ignored**.
 
+### Phase 3 — C runtime jobs/timers (2026-11-13)
+
+- C ABI: `rune_context_install_runtime(ctx)` installs `rune_runtime` globals
+  (timers, fetch plumbing) and `rune_context_run_jobs(ctx, &error)` runs due
+  timers and drains promise jobs.
+- Runtime jobs live in a per-thread table keyed by the opaque context address
+  (the API is documented single-threaded/non-reentrant); destroy removes the
+  entry.
+- C example now prints `timer: 1` after scheduling and draining a 0ms timer.
+- Fetch remains installed but has no C transport; requests reject.
+- Tests: **7** C API tests.
+
+Integration suite: **794 passed, 0 failed, 3 ignored**; `rune_capi` **7 tests**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

@@ -72,6 +72,21 @@ int main(void) {
     rune_free_string(error);
     rune_context_release_value(ctx, obj);
     rune_context_release_value(ctx, prop);
+
+    /* Timers: install runtime jobs, schedule, then drain. */
+    rune_context_install_runtime(ctx);
+    text = NULL;
+    error = NULL;
+    if (rune_context_eval(ctx, "var ticked = 0; setTimeout(function(){ ticked = 1; }, 0);",
+                          NULL, &error) == 0 &&
+        rune_context_run_jobs(ctx, &error) == 0 &&
+        rune_context_eval(ctx, "ticked", &text, &error) == 0) {
+        printf("timer: %s\n", text);
+    } else {
+        printf("timer error: %s\n", error ? error : "unknown");
+    }
+    rune_free_string(text);
+    rune_free_string(error);
     rune_context_destroy(ctx);
     return 0;
 }

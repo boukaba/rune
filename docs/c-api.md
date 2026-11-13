@@ -31,6 +31,8 @@ cc app.c -Icrates/rune_capi/include -Ltarget/release -lrune_capi \
 | `rune_context_value_to_string(ctx, value, &out)` | Stringify a primitive or retained value. |
 | `rune_context_release_value(ctx, value)` | Release a heap handle; `handle == 0` is a no-op. |
 | `rune_context_call_value(ctx, func, args, argc, &result, &error)` | Call a retained JS function. |
+| `rune_context_install_runtime(ctx)` | Install timers/promise jobs (idempotent). |
+| `rune_context_run_jobs(ctx, &error)` | Run due timers and queued promise jobs. |
 | `rune_context_get_property(ctx, object, key, &result, &error)` | Read a data property from a retained object/array. |
 | `rune_context_set_property(ctx, object, key, value, &error)` | Write a data property. |
 | `rune_free_string(text)` | Frees result/error strings. |
@@ -68,6 +70,22 @@ Handles may be passed back as arguments to `rune_context_call_value`. They
 cannot be used while an evaluation is already on the stack (the C API is not
 re-entrant); call from host code after `eval` returns.
 
+## Timers and promise jobs
+
+`rune_context_install_runtime` installs the `rune_runtime` globals
+(`setTimeout`/`clearTimeout`, fetch plumbing). Call
+`rune_context_run_jobs` after evaluation to run due timers and drain promise
+jobs; it sleeps only until the earliest due timer.
+
+```c
+rune_context_install_runtime(ctx);
+rune_context_eval(ctx, "setTimeout(function(){ done = 1; }, 0);", NULL, &error);
+rune_context_run_jobs(ctx, &error);
+```
+
+Fetch is installed but has no transport in the C API by default; requests
+reject. The C API is single-threaded and not re-entrant.
+
 ## Host functions
 
 `rune_context_register_host_fn` installs a global function. The callback
@@ -104,7 +122,8 @@ pointer must remain valid for the context's lifetime.
   borrowed for the callback duration.
 - `get_property`/`set_property` support data properties; JS accessors are
   rejected.
-- Timers, `fetch`, and the event-loop jobs are not installed by the C API.
+- Timers/promise jobs are available via `install_runtime`/`run_jobs`; fetch has
+  no transport configured in the C API and rejects.
 - Contexts are single-threaded; do not share one context across threads.
 - Raw invalid pointers are undefined behavior (standard C ABI rules); the API
   null-checks but cannot validate arbitrary addresses.

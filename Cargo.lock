@@ -804,6 +804,7 @@ dependencies = [
  "rune_core",
  "rune_embed",
  "rune_interpreter",
+ "rune_runtime",
 ]
 
 [[package]]

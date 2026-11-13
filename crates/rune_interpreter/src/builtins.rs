@@ -3376,6 +3376,29 @@ fn map_strong_receiver(gc: &mut SemiSpace, this: Value, vm: &mut Vm) -> Option<*
     Some(ptr)
 }
 
+/// Set prototype methods reject WeakSet receivers.
+fn set_strong_receiver(gc: &mut SemiSpace, this: Value, vm: &mut Vm) -> Option<*mut u8> {
+    let ptr = set_receiver(gc, this, vm)?;
+    if unsafe { RuneSet::is_weak(ptr) } {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Set.prototype method called on incompatible receiver",
+        ));
+        return None;
+    }
+    Some(ptr)
+}
+
+/// Set.prototype.size getter (§27.2.3.9).
+pub fn set_size_getter(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    let Some(set_ptr) = set_strong_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    Value::smi(unsafe { RuneSet::size(set_ptr) } as i32)
+}
+
 fn set_receiver(gc: &mut SemiSpace, this: Value, vm: &mut Vm) -> Option<*mut u8> {
     if let Some(ptr) = this.heap_ptr() {
         if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_SET {
@@ -3567,7 +3590,7 @@ pub fn map_clear_builtin(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &
 
 /// §27.2.3.1 Set.prototype.add
 pub fn set_add_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some(_set_ptr) = set_receiver(gc, this, vm) else {
+    let Some(_set_ptr) = set_strong_receiver(gc, this, vm) else {
         return Value::undefined();
     };
     let value = args.first().copied().unwrap_or(Value::undefined());
@@ -3578,7 +3601,7 @@ pub fn set_add_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
 
 /// §27.2.3.9 Set.prototype.has
 pub fn set_has_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some(set_ptr) = set_receiver(gc, this, vm) else {
+    let Some(set_ptr) = set_strong_receiver(gc, this, vm) else {
         return Value::undefined();
     };
     let value = args.first().copied().unwrap_or(Value::undefined());
@@ -3587,7 +3610,7 @@ pub fn set_has_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
 
 /// §27.2.3.3 Set.prototype.delete — removes the element, returns true if present.
 pub fn set_delete_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some(set_ptr) = set_receiver(gc, this, vm) else {
+    let Some(set_ptr) = set_strong_receiver(gc, this, vm) else {
         return Value::undefined();
     };
     let value = args.first().copied().unwrap_or(Value::undefined());
@@ -3712,7 +3735,9 @@ pub fn weakset_add(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
         ));
         return Value::undefined();
     }
-    set_add_builtin(gc, this, args, vm)
+    let mut slot = this;
+    set_add_internal(gc, &mut slot, key);
+    this
 }
 
 pub fn weakset_has(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
@@ -3724,7 +3749,8 @@ pub fn weakset_has(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
     if !key.is_heap_object() && !key.is_symbol() {
         return Value::boolean(false);
     }
-    set_has_builtin(gc, this, args, vm)
+    let set_ptr = this.heap_ptr().unwrap();
+    Value::boolean(key_index(unsafe { RuneSet::entries(set_ptr) }, key, false).is_some())
 }
 
 pub fn weakset_delete(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
@@ -3736,12 +3762,20 @@ pub fn weakset_delete(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
     if !key.is_heap_object() && !key.is_symbol() {
         return Value::boolean(false);
     }
-    set_delete_builtin(gc, this, args, vm)
+    let set_ptr = this.heap_ptr().unwrap();
+    let entries_ptr = unsafe { RuneSet::entries(set_ptr) };
+    if let Some(i) = key_index(entries_ptr, key, false) {
+        let entries = entries_ptr as *mut RuneArray;
+        unsafe { RuneArray::set_element(entries, i, Value::empty_sentinel()) };
+        unsafe { RuneSet::set_size(set_ptr, RuneSet::size(set_ptr) - 1) };
+        return Value::boolean(true);
+    }
+    Value::boolean(false)
 }
 
 /// §27.2.3.2 Set.prototype.clear
 pub fn set_clear_builtin(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
-    let Some(set_ptr) = set_receiver(gc, this, vm) else {
+    let Some(set_ptr) = set_strong_receiver(gc, this, vm) else {
         return Value::undefined();
     };
     let entries_ptr = unsafe { RuneSet::entries(set_ptr) };
@@ -3798,21 +3832,21 @@ pub fn map_values_builtin(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: 
 
 /// §27.2.3.5 Set.prototype.entries (yields [v, v]) / keys / values
 pub fn set_entries_builtin(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
-    let Some(_set_ptr) = set_receiver(gc, this, vm) else {
+    let Some(_set_ptr) = set_strong_receiver(gc, this, vm) else {
         return Value::undefined();
     };
     make_collection_iterator(gc, vm, this, 0, "Set_iterator_next", "Set Iterator")
 }
 
 pub fn set_keys_builtin(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
-    let Some(_set_ptr) = set_receiver(gc, this, vm) else {
+    let Some(_set_ptr) = set_strong_receiver(gc, this, vm) else {
         return Value::undefined();
     };
     make_collection_iterator(gc, vm, this, 1, "Set_iterator_next", "Set Iterator")
 }
 
 pub fn set_values_builtin(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
-    let Some(_set_ptr) = set_receiver(gc, this, vm) else {
+    let Some(_set_ptr) = set_strong_receiver(gc, this, vm) else {
         return Value::undefined();
     };
     make_collection_iterator(gc, vm, this, 2, "Set_iterator_next", "Set Iterator")
@@ -6294,7 +6328,7 @@ pub fn map_foreach_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: 
 
 /// §27.2.3.8 Set.prototype.forEach(callback, thisArg)
 pub fn set_foreach_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some(set_ptr) = set_receiver(gc, this, vm) else {
+    let Some(set_ptr) = set_strong_receiver(gc, this, vm) else {
         return Value::undefined();
     };
     let callback = args.first().copied().unwrap_or(Value::undefined());
@@ -23403,6 +23437,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 0,
             name: "get size",
             func: map_size_getter,
+        },
+        Builtin {
+            length: 0,
+            name: "get set size",
+            func: set_size_getter,
         },
         Builtin {
             length: 2,

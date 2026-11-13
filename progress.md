@@ -2135,6 +2135,21 @@ Integration suite: **846 passed, 0 failed, 3 ignored**.
 
 Integration suite: **847 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Set brand checks + size accessor (2026-11-13)
+
+- `Set.prototype` methods now reject WeakSet receivers through a strong
+  receiver check; WeakSet methods use internal set operations directly.
+- `Set.prototype.size` is now a real accessor (`get size`, length 0, no setter,
+  configurable-only) and rejects WeakSet/primitive receivers.
+- `Set.prototype[@@iterator]` now equals `values` with writable/configurable
+  non-enumerable attributes; `@@toStringTag` is configurable-only.
+- Test262: `Set/prototype/size` **0 → 6/6**, Set **163 → 176/383**.
+- Regression: `test_set_size_and_brand_checks` (WeakSet smoke coverage retained).
+- Known remaining Set failures: constructor iterator abrupt/close and
+  `forEach` mutation-snapshot semantics, `Symbol.species`.
+
+Integration suite: **848 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

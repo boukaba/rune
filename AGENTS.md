@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Set brand/size (2026-11-13)**: strong receiver, size accessor, symbol attrs. Set **176/383**. Integration **848**.
 - **Map brand/size (2026-11-13)**: strong receiver, size accessor, symbol attrs. Map **179/204**. Integration **847**.
 - **Map upsert (2026-11-13)**: getOrInsert/getOrInsertComputed with brand checks. getOrInsert **14/14**, Map **161/204**. Integration **846**.
 - **Map.groupBy (2026-11-13)**: SameValueZero, insertion order, iterable drain. Map/groupBy **14/14**, Map **140/204**. Integration **845**.

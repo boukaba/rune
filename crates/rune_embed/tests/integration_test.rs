@@ -15996,3 +15996,38 @@ fn test_map_size_and_brand_checks() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_set_size_and_brand_checks() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var s = new Set([1, 2, 3]);
+            var desc = Object.getOwnPropertyDescriptor(Set.prototype, "size");
+            var weakSetRejected = false;
+            try { desc.get.call(new WeakSet()); } catch (e) { weakSetRejected = e instanceof TypeError; }
+            var methodsRejected = true;
+            ["add", "has", "delete", "clear", "forEach", "keys", "values", "entries"].forEach(function (name) {
+                try { Set.prototype[name].call(new WeakSet(), 1); methodsRejected = false; } catch (e) {}
+            });
+            var ws = new WeakSet();
+            var key = {};
+            ws.add(key);
+            [
+                s.size === 3,
+                desc.get.length === 0,
+                desc.get.name === "get size",
+                desc.set === undefined,
+                desc.configurable === true && desc.enumerable === false,
+                weakSetRejected,
+                methodsRejected,
+                ws.has(key) === true,
+                Set.prototype[Symbol.toStringTag] === "Set",
+                Set.prototype[Symbol.iterator] === Set.prototype.values
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

@@ -70,6 +70,8 @@ pub struct Emitter {
     /// these from nested closures must throw TypeError; the lexical slot's
     /// const flag is not visible through the env.
     script_const_names: HashSet<String>,
+    /// 1 while compiling a function body (0 at script/module top level).
+    function_depth: usize,
     loop_exit_stack: Vec<usize>,
     loop_cont_stack: Vec<usize>,
     /// Pending `break`/`continue` jump positions of the innermost do-while loop,
@@ -130,6 +132,7 @@ impl Emitter {
             env_scope_is_per_iter: Vec::new(),
             lexical_scope_shadowing: Vec::new(),
             script_scope_depth: None,
+            function_depth: 0,
             script_const_names: HashSet::new(),
             loop_exit_stack: Vec::new(),
             loop_cont_stack: Vec::new(),
@@ -642,6 +645,8 @@ impl Emitter {
         sub.env_scope_stack = self.env_scope_stack.clone();
         sub.env_scope_is_per_iter = self.env_scope_is_per_iter.clone();
         sub.script_const_names = self.script_const_names.clone();
+        sub.function_depth = self.function_depth + 1;
+        sub.function_depth = self.function_depth + 1;
         sub.lexical_scope_shadowing = self.lexical_scope_shadowing.clone();
         sub.script_scope_depth = self.script_scope_depth;
         sub.private_field_names = self.private_field_names.clone();
@@ -2367,10 +2372,13 @@ impl Emitter {
             Stmt::Empty(_) => {}
             Stmt::ForIn(lhs, obj, body, _) => {
                 // for (var key in obj) { body }
-                // Register the loop variable as a local
-                if let Expr::Identifier(name, _) = lhs.as_ref() {
-                    if !self.locals.contains(&name.to_string()) {
-                        self.locals.push(name.to_string());
+                // Register the loop variable as a local inside functions.
+                // At script top level it must flow to the global binding.
+                if self.function_depth > 0 {
+                    if let Expr::Identifier(name, _) = lhs.as_ref() {
+                        if !self.locals.contains(&name.to_string()) {
+                            self.locals.push(name.to_string());
+                        }
                     }
                 }
                 self.emit_expression(obj);
@@ -2427,10 +2435,12 @@ impl Emitter {
             }
             Stmt::ForOf(lhs, iterable, body, _) => {
                 // for (x of iterable) { body }
-                // Register the loop variable as a local
-                if let Expr::Identifier(name, _) = lhs.as_ref() {
-                    if !self.locals.contains(&name.to_string()) {
-                        self.locals.push(name.to_string());
+                // Register the loop variable as a local inside functions.
+                if self.function_depth > 0 {
+                    if let Expr::Identifier(name, _) = lhs.as_ref() {
+                        if !self.locals.contains(&name.to_string()) {
+                            self.locals.push(name.to_string());
+                        }
                     }
                 }
                 self.emit_expression(iterable);

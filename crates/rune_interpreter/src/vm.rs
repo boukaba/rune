@@ -6556,6 +6556,16 @@ impl Vm {
         // bypassing IC/accessor paths so a descriptor-shaped accessor cannot
         // shadow the magic property.
         if is_proto_key(raw_key) {
+            if let Some(ptr) = obj.heap_ptr() {
+                if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_OBJECT {
+                    let o = ptr as *mut JSObject;
+                    let shape = unsafe { JSObject::shape_ptr(o) };
+                    let key = PropertyKey::from_string("__proto__");
+                    if let Some(slot) = shape.lookup(&key) {
+                        return PropGetOut::Ready(unsafe { JSObject::get_slot(o, slot) });
+                    }
+                }
+            }
             let proto = if crate::vm::value_is_string(obj) {
                 self.string_prototype.heap_ptr()
             } else if let Some(_ptr) = obj.heap_ptr() {

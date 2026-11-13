@@ -18121,11 +18121,27 @@ pub fn parse_float_builtin(
 /// JSON.parse(text) — parse a JSON string into Rune values.
 pub fn json_parse(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let text = args.first().copied().unwrap_or(Value::undefined());
-    let s = value_to_js_string(text);
+    let prim = match to_primitive_sync(gc, vm, text, "string") {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    if prim.as_symbol_id().is_some() {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Cannot convert a Symbol value to a string",
+        ));
+        return Value::undefined();
+    }
+    let s = value_to_js_string(prim);
     let chars = s.chars().collect::<Vec<char>>();
     let mut pos = 0;
     fn skip_ws(chars: &[char], pos: &mut usize) {
-        while *pos < chars.len() && chars[*pos].is_ascii_whitespace() {
+        while *pos < chars.len() && matches!(chars[*pos], ' ' | '\t' | '\n' | '\r') {
             *pos += 1;
         }
     }
@@ -18189,11 +18205,10 @@ pub fn json_parse(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm)
                             'u' => {
                                 if *pos + 4 < chars.len() {
                                     let hex: String = chars[*pos + 1..*pos + 5].iter().collect();
-                                    if let Ok(code) = u32::from_str_radix(&hex, 16) {
-                                        if let Some(ch) = char::from_u32(code) {
-                                            s.push(ch);
-                                        }
-                                    }
+                                    let Ok(code) = u32::from_str_radix(&hex, 16) else {
+                                        return None;
+                                    };
+                                    s.push(char::from_u32(code)?);
                                     *pos += 4;
                                 } else {
                                     return None;
@@ -18202,6 +18217,9 @@ pub fn json_parse(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm)
                             _ => return None,
                         }
                     } else {
+                        if (chars[*pos] as u32) < 0x20 {
+                            return None;
+                        }
                         s.push(chars[*pos]);
                     }
                     *pos += 1;
@@ -18218,11 +18236,23 @@ pub fn json_parse(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm)
                 if chars[*pos] == '-' {
                     *pos += 1;
                 }
-                while *pos < chars.len() && chars[*pos].is_ascii_digit() {
+                if *pos >= chars.len() {
+                    return None;
+                }
+                if chars[*pos] == '0' {
                     *pos += 1;
+                } else if chars[*pos].is_ascii_digit() {
+                    while *pos < chars.len() && chars[*pos].is_ascii_digit() {
+                        *pos += 1;
+                    }
+                } else {
+                    return None;
                 }
                 if *pos < chars.len() && chars[*pos] == '.' {
                     *pos += 1;
+                    if *pos >= chars.len() || !chars[*pos].is_ascii_digit() {
+                        return None;
+                    }
                     while *pos < chars.len() && chars[*pos].is_ascii_digit() {
                         *pos += 1;
                     }
@@ -18232,17 +18262,22 @@ pub fn json_parse(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm)
                     if *pos < chars.len() && (chars[*pos] == '+' || chars[*pos] == '-') {
                         *pos += 1;
                     }
+                    if *pos >= chars.len() || !chars[*pos].is_ascii_digit() {
+                        return None;
+                    }
                     while *pos < chars.len() && chars[*pos].is_ascii_digit() {
                         *pos += 1;
                     }
                 }
                 let num_str: String = chars[num_start..*pos].iter().collect();
-                if let Ok(n) = num_str.parse::<i32>() {
-                    Some(Value::smi(n))
-                } else if let Ok(f) = num_str.parse::<f64>() {
-                    Some(Value::from_float64(f))
+                let Ok(f) = num_str.parse::<f64>() else {
+                    return None;
+                };
+                if !num_str.starts_with('-') && f.fract() == 0.0 && f >= 0.0 && f <= i32::MAX as f64
+                {
+                    Some(Value::smi(f as i32))
                 } else {
-                    None
+                    Some(Value::from_float64(f))
                 }
             }
             '[' => {
@@ -18312,11 +18347,10 @@ pub fn json_parse(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm)
                                         if *pos + 4 < chars.len() {
                                             let hex: String =
                                                 chars[*pos + 1..*pos + 5].iter().collect();
-                                            if let Ok(code) = u32::from_str_radix(&hex, 16) {
-                                                if let Some(ch) = char::from_u32(code) {
-                                                    key.push(ch);
-                                                }
-                                            }
+                                            let Ok(code) = u32::from_str_radix(&hex, 16) else {
+                                                return None;
+                                            };
+                                            key.push(char::from_u32(code)?);
                                             *pos += 4;
                                         } else {
                                             return None;
@@ -18325,6 +18359,9 @@ pub fn json_parse(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm)
                                     _ => return None,
                                 }
                             } else {
+                                if (chars[*pos] as u32) < 0x20 {
+                                    return None;
+                                }
                                 key.push(chars[*pos]);
                             }
                             *pos += 1;
@@ -18406,11 +18443,38 @@ pub fn json_parse(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm)
     if vm.pending_exception.is_some() {
         return parsed;
     }
+    skip_ws(&chars, &mut pos);
+    if pos != chars.len() {
+        let err = crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::SyntaxError,
+            "JSON.parse: unexpected non-whitespace character after JSON data",
+        );
+        vm.set_pending_exception(err);
+        return Value::undefined();
+    }
     let reviver = args.get(1).copied().unwrap_or(Value::undefined());
     if !is_callable_value(reviver) {
         return parsed;
     }
+    let context = JSObject::allocate(gc, Shape::empty(), &[]);
+    unsafe {
+        JSObject::add_property(
+            context,
+            PropertyKey::from_string("source"),
+            "source".to_string(),
+            Value::undefined(),
+        );
+    }
+    vm.temp_roots.push(Value::from_heap_ptr(context as *mut u8));
     let holder = make_simple_object(gc, "", parsed);
+    if let Some(hp) = holder.heap_ptr() {
+        if let Some(proto) = object_proto {
+            unsafe { JSObject::set_prototype(hp as *mut JSObject, proto) };
+        }
+    }
+    vm.temp_roots.push(holder);
     let root_key = Value::from_heap_ptr(HeapString::allocate(gc, "") as *mut u8);
     fn internalize(
         gc: &mut SemiSpace,
@@ -18418,11 +18482,13 @@ pub fn json_parse(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm)
         holder: Value,
         key: Value,
         reviver: Value,
+        context: Value,
     ) -> Result<Value, Value> {
         let base = vm.temp_roots.len();
         vm.temp_roots.push(holder);
         vm.temp_roots.push(key);
         vm.temp_roots.push(reviver);
+        vm.temp_roots.push(context);
         let result = (|| -> Result<Value, Value> {
             let holder = vm.temp_roots[base];
             let key = vm.temp_roots[base + 1];
@@ -18445,7 +18511,8 @@ pub fn json_parse(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm)
                         let idx = Value::from_heap_ptr(
                             HeapString::allocate(gc, &i.to_string()) as *mut u8
                         );
-                        let new_el = internalize(gc, vm, val, idx, reviver)?;
+                        let new_el =
+                            internalize(gc, vm, val, idx, reviver, vm.temp_roots[base + 3])?;
                         val = vm.temp_roots[val_slot];
                         if new_el.is_undefined() {
                             let ok = crate::builtins::reflect_delete_property(
@@ -18495,7 +18562,7 @@ pub fn json_parse(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm)
                     for name in names {
                         val = vm.temp_roots[val_slot];
                         let k = Value::from_heap_ptr(HeapString::allocate(gc, &name) as *mut u8);
-                        let new_el = internalize(gc, vm, val, k, reviver)?;
+                        let new_el = internalize(gc, vm, val, k, reviver, vm.temp_roots[base + 3])?;
                         val = vm.temp_roots[val_slot];
                         if new_el.is_undefined() {
                             let ok = crate::builtins::reflect_delete_property(
@@ -18515,12 +18582,17 @@ pub fn json_parse(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm)
             let holder = vm.temp_roots[base];
             let key = vm.temp_roots[base + 1];
             let reviver = vm.temp_roots[base + 2];
-            vm.call_value_sync(gc, reviver, holder, &[key, val])
+            vm.call_value_sync(gc, reviver, holder, &[key, val, vm.temp_roots[base + 3]])
         })();
         vm.temp_roots.truncate(base);
         result
     }
-    match internalize(gc, vm, holder, root_key, reviver) {
+    let context = vm.temp_roots[vm.temp_roots.len() - 2];
+    let holder = vm.temp_roots[vm.temp_roots.len() - 1];
+    let result = internalize(gc, vm, holder, root_key, reviver, context);
+    vm.temp_roots.pop();
+    vm.temp_roots.pop();
+    match result {
         Ok(v) => v,
         Err(e) => {
             vm.set_pending_exception(e);

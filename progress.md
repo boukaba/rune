@@ -2788,6 +2788,29 @@ Integration suite: **872 passed, 0 failed, 3 ignored**.
 
 Integration suite: **873 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Strict JSON.parse + reviver context (2026-11-13)
+
+- `JSON.parse` input conversion uses synchronous ToPrimitive(string); Symbols
+  throw TypeError instead of stringifying.
+- Lexical strictness:
+  - whitespace is exactly Space/Tab/CR/LF (form feed/vertical tab rejected);
+  - unescaped U+0000–U+001F inside strings (values and keys) is a SyntaxError;
+  - `\u` escapes with non-hex digits or lone surrogates are SyntaxErrors;
+  - numbers follow the JSON grammar (no leading zeros, no `1.`, `1e`, `.5`);
+  - `-0` is preserved as negative zero;
+  - trailing non-whitespace tokens are SyntaxErrors.
+- `JSON.parse('{"__proto__":2}')` creates an own data property; reading
+  `.__proto__` now returns that own property instead of the internal prototype.
+- Reviver invocation passes the ES2025 context object as the third argument
+  (`{source}` currently undefined); holder/context are GC-rooted and the root
+  wrapper gets Object.prototype.
+- Test262: JSON **66 → 94/165**, JSON.parse **37 → 60/77**.
+- Remaining parse failures: reviver source-text context, Proxy-based
+  define/delete failure tests, forward-modification edge cases.
+- Regression: `test_json_parse_strictness_and_proto`.
+
+Integration suite: **874 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

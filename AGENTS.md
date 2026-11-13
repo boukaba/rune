@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Strict JSON.parse + reviver context (2026-11-13)**: grammar strictness, -0, __proto__ own props, ToPrimitive input, reviver context. JSON **94/165**. Integration **874**.
 - **Regex capture clearing + indices (2026-11-13)**: ClearCaptures, last-iteration captures, d/indices. RegExp **578/1879**, named-groups 10/10. Integration **873**.
 - **Named capture groups (2026-11-13)**: `(?<name>)`, `\k<name>`, `groups` object, `$<name>`, stable capture indices, unmatched=undefined. RegExp **568/1879**. Integration **872**.
 - **Builtin-handle tag + Number formatting (2026-11-13)**: BUILTIN_TAG, negative number methods/typeof/calls, half-up toExponential. Number **337/340**, String **959/1223**. Integration **871**.

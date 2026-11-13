@@ -16784,3 +16784,31 @@ fn test_regexp_capture_clearing_and_indices() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_json_parse_strictness_and_proto() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            function throws(fn, kind) { try { fn(); return false; } catch (e) { return e instanceof kind; } }
+            var protoObj = JSON.parse('{"__proto__":2}');
+            var contextArg = null;
+            JSON.parse("1", function (k, v, ctx) { if (k === "") contextArg = ctx; return v; });
+            [
+                throws(function () { JSON.parse("12 \t 34"); }, SyntaxError),
+                throws(function () { JSON.parse("\u000c1234"); }, SyntaxError),
+                throws(function () { JSON.parse('"\\u0X50"'); }, SyntaxError),
+                throws(function () { JSON.parse(Symbol()); }, TypeError),
+                Object.prototype.hasOwnProperty.call(protoObj, "__proto__"),
+                protoObj.__proto__ === 2,
+                Object.getPrototypeOf(protoObj) === Object.prototype,
+                Object.is(JSON.parse("-0"), -0),
+                JSON.parse({ toString: function () { return "1"; } }) === 1,
+                typeof contextArg === "object" && contextArg !== null
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

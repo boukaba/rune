@@ -33,6 +33,10 @@ not a security boundary.
   before the transport and rejects the returned Promise.
 - **Bundle integrity.** `RUNEAPP2` bundles embed a source hash plus an
   engine/ABI tag; stale or foreign bundles are rejected rather than executed.
+- **Standalone executables.** `rune build --standalone` writes a copy of the
+  interpreter with the bundle and a length/`RUNEXE01` trailer appended. The
+  result is unsigned and has no authenticity check; platforms that require a
+  code signature must re-sign the produced binary.
 - **GC stress and fuzzing.** CI runs `RUNE_GC_STRESS`, a deterministic
   token-soup parser corpus, and JIT-on/off differential tests.
 - **Offline builds.** The workspace builds/tests with a workspace-local

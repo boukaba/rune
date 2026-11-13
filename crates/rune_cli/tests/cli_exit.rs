@@ -164,3 +164,35 @@ fn time_budget_stops_infinite_loop() {
         "unexpected stderr: {stderr}"
     );
 }
+
+#[test]
+fn standalone_script_builds_and_runs_without_args() {
+    let dir = std::env::temp_dir().join(format!("rune-standalone-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = dir.join("main.js");
+    std::fs::write(&script, "print('standalone', 6 * 7);").unwrap();
+    let app = dir.join("app");
+    let build = Command::new(env!("CARGO_BIN_EXE_rune"))
+        .args([
+            "build",
+            script.to_str().unwrap(),
+            "--standalone",
+            "--out",
+            app.to_str().unwrap(),
+        ])
+        .output()
+        .expect("spawn build");
+    assert!(
+        build.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let run = Command::new(&app).output().expect("spawn standalone app");
+    assert!(
+        run.status.success(),
+        "run failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(stdout.contains("standalone 42"), "stdout: {stdout}");
+}

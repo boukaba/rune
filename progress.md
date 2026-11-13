@@ -956,6 +956,23 @@ Integration suite: **789 passed, 0 failed, 3 ignored**.
 
 Integration suite: **789 passed, 0 failed, 3 ignored**; CLI **9 tests**.
 
+### Phase 3 — standalone executables (2026-11-13)
+
+- `rune build --standalone --out app` copies the running interpreter, appends
+  the bundle payload, and writes a 16-byte length/`RUNEXE01` trailer. Invoking
+  the result with no arguments detects and executes the embedded bundle;
+  normal CLI behavior is unchanged when no trailer is present.
+- Works for script bundles and precompiled ESM bundles; the produced file is
+  executable (`0755`) and self-contained. The debug build is ~14.5 MB.
+- Not signed: the executable is exactly the interpreter image plus payload, so
+  no authenticity check exists. Appending bytes to a signed macOS binary is
+  outside Apple's signing model; ad-hoc local execution works, distribution
+  should re-sign after building.
+- CLI test builds and runs a standalone script with no args.
+
+Integration suite: **789 passed, 0 failed, 3 ignored**; CLI **10 tests**
+(1 HTTP unit + 9 integration).
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

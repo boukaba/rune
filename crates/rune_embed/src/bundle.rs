@@ -7,8 +7,10 @@
 //!   [flags & 1] AFPC cache bytes (to end of file)
 //!
 //! Script bundles carry compiled bytecode/native code and execute without
-//! parsing source. Module bundles carry the entry source plus a specifier →
-//! source map for the import graph and recompile at run time.
+//! parsing source. Module bundles carry the entry source plus a precompiled
+//! graph (`FLAG_MODULE_CACHE`). `save_standalone` appends a bundle and a
+//! length/magic trailer to a copy of the interpreter, producing an executable
+//! that runs the bundle when invoked with no arguments.
 
 use crate::afpc::{self, AfpcCache};
 use rune_bytecode::opcode::BytecodeProgram;
@@ -19,6 +21,8 @@ const MAGIC: &[u8; 8] = b"RUNEAPP2";
 const FLAG_CACHE: u32 = 1;
 const FLAG_MODULES: u32 = 2;
 const FLAG_MODULE_CACHE: u32 = 4;
+const EXE_TRAILER: &[u8; 8] = b"RUNEXE01";
+const EXE_TRAILER_LEN: usize = 16;
 
 /// Precompiled ESM graph: program order matches `specifiers`.
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -54,13 +58,12 @@ fn read_section<'a>(data: &'a [u8], cursor: &mut usize) -> Option<&'a [u8]> {
     Some(section)
 }
 
-fn write_bundle(
-    path: &Path,
+fn encode_bundle(
     source: &str,
     cache: Option<&AfpcCache>,
     modules: &[(String, String)],
     module_cache: Option<&ModuleProgramCache>,
-) -> io::Result<usize> {
+) -> io::Result<Vec<u8>> {
     let cache_bytes = match cache {
         Some(cache) => Some(
             afpc::serialize_afpc_cache(cache)
@@ -103,8 +106,32 @@ fn write_bundle(
     if let Some(bytes) = module_cache_bytes {
         out.extend_from_slice(&bytes);
     }
+    Ok(out)
+}
+
+fn write_bundle(
+    path: &Path,
+    source: &str,
+    cache: Option<&AfpcCache>,
+    modules: &[(String, String)],
+    module_cache: Option<&ModuleProgramCache>,
+) -> io::Result<usize> {
+    let out = encode_bundle(source, cache, modules, module_cache)?;
     std::fs::write(path, &out)?;
     Ok(out.len())
+}
+
+/// Encode a compiled script bundle without writing it.
+pub fn script_bundle_bytes(source: &str, cache: &AfpcCache) -> io::Result<Vec<u8>> {
+    encode_bundle(source, Some(cache), &[], None)
+}
+
+/// Encode an AOT module bundle without writing it.
+pub fn module_bytecode_bundle_bytes(
+    source: &str,
+    cache: &ModuleProgramCache,
+) -> io::Result<Vec<u8>> {
+    encode_bundle(source, None, &[], Some(cache))
 }
 
 /// Write a compiled script bundle (source + AFPC cache).
@@ -130,14 +157,66 @@ pub fn save_module_bytecode_bundle<P: AsRef<Path>>(
     write_bundle(path.as_ref(), source, None, &[], Some(cache))
 }
 
+/// Append a bundle payload and trailer to an interpreter binary image.
+pub fn executable_with_bundle(exe: &[u8], bundle: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(exe.len() + bundle.len() + EXE_TRAILER_LEN);
+    out.extend_from_slice(exe);
+    out.extend_from_slice(bundle);
+    out.extend_from_slice(&(bundle.len() as u64).to_le_bytes());
+    out.extend_from_slice(EXE_TRAILER);
+    out
+}
+
+/// Locate an appended bundle in an executable image.
+pub fn find_embedded_bundle(data: &[u8]) -> Option<&[u8]> {
+    if data.len() < EXE_TRAILER_LEN {
+        return None;
+    }
+    let trailer = &data[data.len() - EXE_TRAILER_LEN..];
+    if &trailer[8..] != EXE_TRAILER {
+        return None;
+    }
+    let len = u64::from_le_bytes(trailer[..8].try_into().ok()?) as usize;
+    let end = data.len() - EXE_TRAILER_LEN;
+    if len > end {
+        return None;
+    }
+    Some(&data[end - len..end])
+}
+
+/// Read and decode a bundle appended to the current executable.
+pub fn load_embedded_bundle() -> Option<Bundle> {
+    let exe = std::env::current_exe().ok()?;
+    let data = std::fs::read(exe).ok()?;
+    decode_bundle(find_embedded_bundle(&data)?)
+}
+
+/// Build a standalone executable by copying `exe` and appending a bundle.
+pub fn save_standalone<P: AsRef<Path>>(path: P, exe: &[u8], bundle: &[u8]) -> io::Result<usize> {
+    let out = executable_with_bundle(exe, bundle);
+    std::fs::write(path.as_ref(), &out)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(path.as_ref())?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path.as_ref(), perms)?;
+    }
+    Ok(out.len())
+}
+
 pub fn load_bundle<P: AsRef<Path>>(path: P) -> Option<Bundle> {
-    let data = std::fs::read(path).ok()?;
+    decode_bundle(&std::fs::read(path).ok()?)
+}
+
+/// Decode a bundle from an in-memory image.
+pub fn decode_bundle(data: &[u8]) -> Option<Bundle> {
     if data.len() < 16 || &data[..8] != MAGIC {
         return None;
     }
     let flags = u32::from_le_bytes(data[8..12].try_into().ok()?);
     let mut cursor = 12usize;
-    let source = String::from_utf8(read_section(&data, &mut cursor)?.to_vec()).ok()?;
+    let source = String::from_utf8(read_section(data, &mut cursor)?.to_vec()).ok()?;
     let mut modules = Vec::new();
     if flags & FLAG_MODULES != 0 {
         if cursor + 4 > data.len() {
@@ -146,8 +225,8 @@ pub fn load_bundle<P: AsRef<Path>>(path: P) -> Option<Bundle> {
         let count = u32::from_le_bytes(data[cursor..cursor + 4].try_into().ok()?) as usize;
         cursor += 4;
         for _ in 0..count {
-            let spec = String::from_utf8(read_section(&data, &mut cursor)?.to_vec()).ok()?;
-            let src = String::from_utf8(read_section(&data, &mut cursor)?.to_vec()).ok()?;
+            let spec = String::from_utf8(read_section(data, &mut cursor)?.to_vec()).ok()?;
+            let src = String::from_utf8(read_section(data, &mut cursor)?.to_vec()).ok()?;
             modules.push((spec, src));
         }
     }

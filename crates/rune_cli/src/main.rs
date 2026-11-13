@@ -41,6 +41,40 @@ fn collect_module_graph(
     Ok(modules)
 }
 
+fn run_bundle(
+    ctx: &mut rune_embed::Context,
+    jobs: &mut Option<rune_runtime::RuntimeJobs>,
+    bundle: rune_embed::bundle::Bundle,
+) -> Result<rune_core::value::Value, String> {
+    let result = if let Some(module_cache) = bundle.module_cache {
+        ctx.execute_module_graph(module_cache.programs, module_cache.specifiers)
+    } else if let Some(cache) = bundle.cache {
+        cache.restore_shapes();
+        if !cache.compiled_funcs.is_empty() {
+            let native = rune_embed::afpc::InstalledNativeCode::from_cache(&cache);
+            ctx.install_native_code(native);
+        }
+        ctx.set_ics(cache.ic_table);
+        ctx.eval_bytecode_owned(cache.bytecode)
+    } else {
+        let modules = bundle.modules;
+        let mut resolver = |spec: &str, _referrer: &str| -> Result<String, String> {
+            modules
+                .iter()
+                .find(|(name, _)| name == spec)
+                .map(|(_, source)| source.clone())
+                .ok_or_else(|| format!("module {spec} is not bundled"))
+        };
+        ctx.eval_module(&bundle.source, &mut resolver)
+    };
+    if result.is_ok() {
+        if let Some(jobs) = jobs.as_mut() {
+            jobs.run_jobs(ctx)?;
+        }
+    }
+    result
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut ic_stats = false;
@@ -56,6 +90,7 @@ fn main() {
     let mut build_out: Option<String> = None;
     let mut max_instructions: Option<u64> = None;
     let mut timeout_ms: Option<u64> = None;
+    let mut standalone = false;
 
     let mut source_args: Vec<String> = Vec::new();
     let mut i = 0;
@@ -111,6 +146,8 @@ fn main() {
             }
         } else if let Some(rest) = arg.strip_prefix("--timeout-ms=") {
             timeout_ms = rest.parse().ok();
+        } else if arg == "--standalone" {
+            standalone = true;
         } else if arg == "--stencil-jit" {
             stencil_jit = true;
         } else if arg == "--no-stencil-jit" {
@@ -145,6 +182,19 @@ fn main() {
         Some(jobs)
     };
 
+    if args.is_empty() {
+        if let Some(bundle) = rune_embed::bundle::load_embedded_bundle() {
+            match run_bundle(&mut ctx, &mut runtime_jobs, bundle) {
+                Ok(value) => println!("=> {:?}", value),
+                Err(error) => {
+                    eprintln!("Error: {error}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+    }
+
     if let Some(source) = inline_source {
         let result = ctx.eval(&source);
         match result {
@@ -167,7 +217,7 @@ fn main() {
         match source_args[0].as_str() {
             "build" => {
                 let Some(entry) = source_args.get(1) else {
-                    eprintln!("usage: rune build <script.js> [--out <app.runeapp>]");
+                    eprintln!("usage: rune build <script.js> [--out <app.runeapp>] [--standalone]");
                     std::process::exit(1);
                 };
                 let source = match std::fs::read_to_string(entry) {
@@ -187,7 +237,7 @@ fn main() {
                     || rune_module::module_dependencies(&source)
                         .map(|deps| !deps.is_empty())
                         .unwrap_or(false);
-                let written = if is_module {
+                let bundle_bytes: Result<Vec<u8>, String> = if is_module {
                     let modules = match collect_module_graph(entry, &source) {
                         Ok(modules) => modules,
                         Err(error) => {
@@ -208,7 +258,8 @@ fn main() {
                                 programs,
                                 specifiers,
                             };
-                            rune_embed::bundle::save_module_bytecode_bundle(&out, &source, &cache)
+                            rune_embed::bundle::module_bytecode_bundle_bytes(&source, &cache)
+                                .map_err(|error| error.to_string())
                         }
                         Err(error) => {
                             eprintln!("Error: {error}");
@@ -225,7 +276,27 @@ fn main() {
                     };
                     let mut cache = rune_embed::afpc::AfpcCache::from_runtime(bytecode, Vec::new());
                     cache.source_hash = rune_embed::afpc::source_hash(&source);
-                    rune_embed::bundle::save_bundle(&out, &source, &cache)
+                    rune_embed::bundle::script_bundle_bytes(&source, &cache)
+                        .map_err(|error| error.to_string())
+                };
+                let written = match bundle_bytes {
+                    Ok(bytes) => {
+                        if standalone {
+                            let exe = std::env::current_exe()
+                                .and_then(std::fs::read)
+                                .map_err(|error| error.to_string());
+                            match exe {
+                                Ok(exe) => rune_embed::bundle::save_standalone(&out, &exe, &bytes)
+                                    .map_err(|error| error.to_string()),
+                                Err(error) => Err(error),
+                            }
+                        } else {
+                            std::fs::write(&out, &bytes)
+                                .map(|_| bytes.len())
+                                .map_err(|error| error.to_string())
+                        }
+                    }
+                    Err(error) => Err(error),
                 };
                 match written {
                     Ok(size) => println!("built {out} ({size} bytes)"),
@@ -244,35 +315,7 @@ fn main() {
                     eprintln!("Error: invalid or incompatible bundle {path}");
                     std::process::exit(1);
                 };
-                let result = if let Some(module_cache) = bundle.module_cache {
-                    ctx.execute_module_graph(module_cache.programs, module_cache.specifiers)
-                } else if let Some(cache) = bundle.cache {
-                    cache.restore_shapes();
-                    if !cache.compiled_funcs.is_empty() {
-                        let native = rune_embed::afpc::InstalledNativeCode::from_cache(&cache);
-                        ctx.install_native_code(native);
-                    }
-                    ctx.set_ics(cache.ic_table);
-                    ctx.eval_bytecode_owned(cache.bytecode)
-                } else {
-                    let modules = bundle.modules;
-                    let mut resolver = |spec: &str, _referrer: &str| -> Result<String, String> {
-                        modules
-                            .iter()
-                            .find(|(name, _)| name == spec)
-                            .map(|(_, source)| source.clone())
-                            .ok_or_else(|| format!("module {spec} is not bundled"))
-                    };
-                    ctx.eval_module(&bundle.source, &mut resolver)
-                };
-                if result.is_ok() {
-                    if let Some(jobs) = runtime_jobs.as_mut() {
-                        if let Err(error) = jobs.run_jobs(&mut ctx) {
-                            eprintln!("Error: {error}");
-                            std::process::exit(1);
-                        }
-                    }
-                }
+                let result = run_bundle(&mut ctx, &mut runtime_jobs, bundle);
                 match result {
                     Ok(value) => println!("=> {:?}", value),
                     Err(error) => {

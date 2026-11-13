@@ -16884,6 +16884,29 @@ fn alloc_regexp_from_string(
     Value::from_heap_ptr(ptr)
 }
 
+fn utf16_len(s: &str) -> usize {
+    s.encode_utf16().count()
+}
+
+fn utf16_index_of_byte(s: &str, byte: usize) -> usize {
+    let end = byte.min(s.len());
+    s[..end].encode_utf16().count()
+}
+
+fn byte_for_utf16_index(s: &str, index: usize) -> usize {
+    let mut units = 0usize;
+    for (b, ch) in s.char_indices() {
+        if units >= index {
+            return b;
+        }
+        units += ch.len_utf16();
+        if units > index {
+            return b;
+        }
+    }
+    s.len()
+}
+
 fn make_match_result_array(
     gc: &mut SemiSpace,
     groups: &[(usize, usize)],
@@ -28347,14 +28370,21 @@ pub fn build_object_constructor(gc: &mut SemiSpace) -> Value {
 pub fn regexp_exec(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let regexp_ptr = match get_regexp_this(this) {
         Some(p) => p,
-        None => return Value::null(),
+        None => {
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "RegExp.prototype.exec called on incompatible receiver",
+            ));
+            return Value::undefined();
+        }
     };
-    let input = args
-        .first()
-        .map(|v| string_from_value(*v))
-        .unwrap_or_default();
-    let s = input;
-    let len = s.chars().count();
+    let input = args.first().copied().unwrap_or(Value::undefined());
+    let Some(s) = to_primitive_string(gc, input, vm) else {
+        return Value::undefined();
+    };
+    let len = utf16_len(&s);
 
     let global = unsafe { RegExp::has_flag(regexp_ptr, 0) };
     let sticky = unsafe { RegExp::has_flag(regexp_ptr, 5) };
@@ -28384,35 +28414,59 @@ pub fn regexp_exec(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
     // §22.2.7.2 step 9.a: lastIndex beyond the string → reset + null.
     if last > len {
         if global || sticky {
-            regexp_set_last_index_value(gc, regexp_ptr, Value::smi(0));
+            if let Err(e) = regexp_set_last_index_checked(gc, vm, regexp_ptr, Value::smi(0)) {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
         }
         return Value::null();
     }
-    match regexp_exec_internal(gc, regexp_ptr, &s, last) {
+    let last_byte = byte_for_utf16_index(&s, last);
+    match regexp_exec_internal(gc, regexp_ptr, &s, last_byte) {
         Some(groups) => {
             let (start, end) = groups[0];
             // §22.2.7.2 step 10: sticky requires the match to start
             // exactly at lastIndex; any later match is a failure.
-            if sticky && start != last {
-                regexp_set_last_index_value(gc, regexp_ptr, Value::smi(0));
+            if sticky && start != last_byte {
+                if let Err(e) = regexp_set_last_index_checked(gc, vm, regexp_ptr, Value::smi(0)) {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
                 return Value::null();
             }
             // §22.2.7.2 step 12: global/sticky advance lastIndex to the
             // match end (zero-length matches keep the same lastIndex; the
             // caller advances to avoid infinite loops).
             if global || sticky {
-                regexp_set_last_index_value(gc, regexp_ptr, Value::smi(end as i32));
+                if let Err(e) = regexp_set_last_index_checked(
+                    gc,
+                    vm,
+                    regexp_ptr,
+                    Value::smi(utf16_index_of_byte(&s, end) as i32),
+                ) {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
             }
-            make_match_result_array(gc, &groups, &s, start, vm.array_prototype, &named, unsafe {
-                RegExp::has_flag(regexp_ptr, 6)
-            })
+            make_match_result_array(
+                gc,
+                &groups,
+                &s,
+                utf16_index_of_byte(&s, start),
+                vm.array_prototype,
+                &named,
+                unsafe { RegExp::has_flag(regexp_ptr, 6) },
+            )
         }
         None => {
             // PikeVM already searched leftmost from `last`; failure means
             // no match anywhere at/after lastIndex. Global/sticky reset
             // lastIndex per RegExpBuiltinExec.
             if global || sticky {
-                regexp_set_last_index_value(gc, regexp_ptr, Value::smi(0));
+                if let Err(e) = regexp_set_last_index_checked(gc, vm, regexp_ptr, Value::smi(0)) {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
             }
             Value::null()
         }
@@ -28430,6 +28484,31 @@ pub(crate) fn regexp_last_index_value(ptr: *mut u8) -> Value {
         }
     }
     Value::smi(unsafe { RegExp::last_index(ptr) } as i32)
+}
+
+fn regexp_set_last_index_checked(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    ptr: *mut u8,
+    value: Value,
+) -> Result<(), Value> {
+    let extra = unsafe { RegExp::extra_props(ptr) };
+    if !extra.is_null() {
+        let eobj = extra as *mut JSObject;
+        let shape = unsafe { JSObject::shape_ptr(eobj) };
+        if let Some(slot) = shape.lookup(&PropertyKey::from_string("lastIndex")) {
+            if shape.attr_at(slot) & rune_core::shape::ATTR_WRITABLE == 0 {
+                return Err(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "Cannot assign to read only property 'lastIndex'",
+                ));
+            }
+        }
+    }
+    regexp_set_last_index_value(gc, ptr, value);
+    Ok(())
 }
 
 pub(crate) fn regexp_set_last_index_value(gc: &mut SemiSpace, ptr: *mut u8, value: Value) {
@@ -28781,14 +28860,19 @@ pub fn regexp_symbol_search(gc: &mut SemiSpace, this: Value, args: &[Value], vm:
 /// Global/sticky regexps advance lastIndex exactly like exec.
 pub fn regexp_test(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let Some(regexp_ptr) = get_regexp_this(this) else {
-        return Value::boolean(false);
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "RegExp.prototype.test called on incompatible receiver",
+        ));
+        return Value::undefined();
     };
-    let input = args
-        .first()
-        .map(|v| string_from_value(*v))
-        .unwrap_or_default();
-    let s = input;
-    let char_len = s.chars().count();
+    let input = args.first().copied().unwrap_or(Value::undefined());
+    let Some(s) = to_primitive_string(gc, input, vm) else {
+        return Value::undefined();
+    };
+    let char_len = utf16_len(&s);
     let flags = unsafe { RegExp::flags(regexp_ptr) };
     let global = unsafe { RegExp::has_flag(regexp_ptr, 0) };
     let sticky = unsafe { RegExp::has_flag(regexp_ptr, 5) };
@@ -28812,7 +28896,10 @@ pub fn regexp_test(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
     };
     if last > char_len {
         if global || sticky {
-            regexp_set_last_index_value(gc, regexp_ptr, Value::smi(0));
+            if let Err(e) = regexp_set_last_index_checked(gc, vm, regexp_ptr, Value::smi(0)) {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
         }
         return Value::boolean(false);
     }
@@ -28820,25 +28907,43 @@ pub fn regexp_test(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
     let pattern = unsafe { HeapString::to_string(pattern_ptr as *mut HeapString) };
     let Some(program) = rune_regex::cache::program(&pattern) else {
         if global || sticky {
-            regexp_set_last_index_value(gc, regexp_ptr, Value::smi(0));
+            if let Err(e) = regexp_set_last_index_checked(gc, vm, regexp_ptr, Value::smi(0)) {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
         }
         return Value::boolean(false);
     };
-    match program.exec(&s, last, flags) {
+    let last_byte = byte_for_utf16_index(&s, last);
+    match program.exec(&s, last_byte, flags) {
         Some(m) => {
             let (start, end) = m.groups[0];
-            if sticky && start != last {
-                regexp_set_last_index_value(gc, regexp_ptr, Value::smi(0));
+            if sticky && start != last_byte {
+                if let Err(e) = regexp_set_last_index_checked(gc, vm, regexp_ptr, Value::smi(0)) {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
                 return Value::boolean(false);
             }
             if global || sticky {
-                regexp_set_last_index_value(gc, regexp_ptr, Value::smi(end as i32));
+                if let Err(e) = regexp_set_last_index_checked(
+                    gc,
+                    vm,
+                    regexp_ptr,
+                    Value::smi(utf16_index_of_byte(&s, end) as i32),
+                ) {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
             }
             Value::boolean(true)
         }
         None => {
             if global || sticky {
-                regexp_set_last_index_value(gc, regexp_ptr, Value::smi(0));
+                if let Err(e) = regexp_set_last_index_checked(gc, vm, regexp_ptr, Value::smi(0)) {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
             }
             Value::boolean(false)
         }

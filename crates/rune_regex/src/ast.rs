@@ -25,6 +25,8 @@ pub enum RegexExpr {
     BackrefMulti(Vec<usize>),
     /// Zero-width reset of capture slots (start of a repeated copy).
     ClearCaptures(Vec<usize>),
+    /// Lazy quantifier marker (shortest-match preference).
+    Lazy(Box<RegexExpr>),
     /// Zero-width lookahead assertion: the inner expression must match
     /// starting at the current position (negated = negative lookahead).
     /// Captures inside a positive lookahead participate in the match.
@@ -61,6 +63,7 @@ fn walk_named(expr: &RegexExpr, out: &mut Vec<(String, usize)>) {
         RegexExpr::Star(e)
         | RegexExpr::Plus(e)
         | RegexExpr::Optional(e)
+        | RegexExpr::Lazy(e)
         | RegexExpr::Lookahead { expr: e, .. } => walk_named(e, out),
         _ => {}
     }
@@ -95,6 +98,7 @@ fn collect_caps(expr: &RegexExpr, out: &mut Vec<usize>) {
         RegexExpr::Star(e)
         | RegexExpr::Plus(e)
         | RegexExpr::Optional(e)
+        | RegexExpr::Lazy(e)
         | RegexExpr::Lookahead { expr: e, .. } => collect_caps(e, out),
         _ => {}
     }

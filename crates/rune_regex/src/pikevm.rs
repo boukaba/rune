@@ -174,7 +174,13 @@ impl PikeVm {
                         let m = build_groups(&t.saves, pos, cur_pos, nfa.num_captures);
                         let should_replace = match &longest {
                             None => true,
-                            Some(prev) => cur_pos > prev.groups[0].1,
+                            Some(prev) => {
+                                if nfa.has_lazy {
+                                    cur_pos < prev.groups[0].1
+                                } else {
+                                    cur_pos > prev.groups[0].1
+                                }
+                            }
                         };
                         if should_replace {
                             longest = Some(m);

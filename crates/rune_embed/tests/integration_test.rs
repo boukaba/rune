@@ -16953,3 +16953,31 @@ fn test_regexp_unicode_properties_and_flags() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_regexp_exec_lastindex_utf16_and_lazy() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var unicode = /b/gu;
+            var match = unicode.exec("\u{1F600}b");
+            var y = /c/y;
+            Object.defineProperty(y, "lastIndex", { writable: false });
+            var nonWritableThrew = false;
+            try { y.exec("abc"); } catch (e) { nonWritableThrew = e instanceof TypeError; }
+            var brandThrew = false;
+            try { RegExp.prototype.exec.call({}, ""); } catch (e) { brandThrew = e instanceof TypeError; }
+            [
+                match !== null && match.index === 2,
+                unicode.lastIndex === 3,
+                /a[a-z]{2,4}?/.exec("abcdef")[0] === "abc",
+                new RegExp("(.|\\r|\\n)*").exec()[0] === "undefined",
+                nonWritableThrew,
+                brandThrew
+            ].join("|") === "true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

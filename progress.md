@@ -2942,6 +2942,27 @@ Integration suite: **878 passed, 0 failed, 3 ignored**.
 
 Integration suite: **879 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — RegExp exec/test lastIndex, laziness, brand checks (2026-11-14)
+
+- `RegExp.prototype.exec`/`test` now:
+  - throw TypeError on incompatible receivers (brand check);
+  - coerce the input through the re-entrant ToString (`exec()` with no
+    argument coerces `undefined`, and object `toString` runs);
+  - treat `lastIndex` and `match.index` as UTF-16 code-unit indices while the
+    engine matches in UTF-8 bytes (both directions converted);
+  - throw TypeError when advancing/resetting a non-writable `lastIndex`.
+- Lazy quantifiers are represented in the AST (`Lazy`) and PikeVM selects the
+  shortest match for patterns containing them (`/a[a-z]{2,4}?/` → `abc`).
+- Test262: RegExp/prototype **204 → 246/487**, exec **52 → 73/79**,
+  test **42 → 45/45**, String **1068/1223**, JSON **127/165**.
+- Remaining exec failures: alternation precedence (`/1|12/` should prefer the
+  first alternative, not the longest), backtracking-dependent nested
+  quantifiers, lone-surrogate capture values, and one closure-parameter test.
+- Regressions: `test_regexp_exec_lastindex_utf16_and_lazy`,
+  `test_regexp_unicode_properties_and_flags`.
+
+Integration suite: **880 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

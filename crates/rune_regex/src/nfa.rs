@@ -57,6 +57,19 @@ pub struct Nfa {
     pub states: Vec<State>,
     pub num_captures: usize,
     pub anchored_start: bool,
+    pub has_lazy: bool,
+}
+
+fn contains_lazy(expr: &RegexExpr) -> bool {
+    match expr {
+        RegexExpr::Lazy(_) => true,
+        RegexExpr::Group(inner, _, _) => contains_lazy(inner),
+        RegexExpr::Concat(parts) => parts.iter().any(contains_lazy),
+        RegexExpr::Alt(a, b) => contains_lazy(a) || contains_lazy(b),
+        RegexExpr::Star(e) | RegexExpr::Plus(e) | RegexExpr::Optional(e) => contains_lazy(e),
+        RegexExpr::Lookahead { expr, .. } => contains_lazy(expr),
+        _ => false,
+    }
 }
 
 fn starts_anchored(expr: &RegexExpr) -> bool {
@@ -132,6 +145,7 @@ fn compile_expr(
             states[s2b].is_match = false;
             (s_start, s_end)
         }
+        RegexExpr::Lazy(inner) => compile_expr(inner, states, group_count),
         RegexExpr::Star(inner) => {
             let s_start = alloc_state(states);
             let (s_in, s_out) = compile_expr(inner, states, group_count);
@@ -289,5 +303,6 @@ pub fn compile(expr: &RegexExpr) -> Nfa {
         states,
         num_captures: group_count,
         anchored_start: starts_anchored(expr),
+        has_lazy: contains_lazy(expr),
     }
 }

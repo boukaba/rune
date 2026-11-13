@@ -96,9 +96,20 @@ fn clear_before(node: RegexExpr) -> RegexExpr {
     }
 }
 
-fn skip_lazy(chars: &[char], i: &mut usize) {
+fn take_lazy(chars: &[char], i: &mut usize) -> bool {
     if *i < chars.len() && chars[*i] == '?' {
         *i += 1;
+        true
+    } else {
+        false
+    }
+}
+
+fn with_lazy(node: RegexExpr, lazy: bool) -> RegexExpr {
+    if lazy {
+        RegexExpr::Lazy(Box::new(node))
+    } else {
+        node
     }
 }
 
@@ -112,18 +123,18 @@ fn parse_repetition(
         match chars[*i] {
             '*' => {
                 *i += 1;
-                skip_lazy(chars, i);
-                return Ok(RegexExpr::Star(Box::new(node)));
+                let lazy = take_lazy(chars, i);
+                return Ok(with_lazy(RegexExpr::Star(Box::new(node)), lazy));
             }
             '+' => {
                 *i += 1;
-                skip_lazy(chars, i);
-                return Ok(RegexExpr::Plus(Box::new(node)));
+                let lazy = take_lazy(chars, i);
+                return Ok(with_lazy(RegexExpr::Plus(Box::new(node)), lazy));
             }
             '?' => {
                 *i += 1;
-                skip_lazy(chars, i);
-                return Ok(RegexExpr::Optional(Box::new(node)));
+                let lazy = take_lazy(chars, i);
+                return Ok(with_lazy(RegexExpr::Optional(Box::new(node)), lazy));
             }
             '{' => {
                 // {n}, {n,}, {n,m} quantifier. If the braces don't enclose a
@@ -157,7 +168,7 @@ fn parse_repetition(
                         // {n,} — unbounded upper
                         if *i < chars.len() && chars[*i] == '}' {
                             *i += 1;
-                            skip_lazy(chars, i);
+                            let lazy = take_lazy(chars, i);
                             if n > MAX_EXPANDED_QUANTIFIER {
                                 return Ok(too_large_quantifier());
                             }
@@ -166,11 +177,12 @@ fn parse_repetition(
                             if n > 0 {
                                 nodes.push(RegexExpr::Star(Box::new(node)));
                             }
-                            return Ok(if nodes.len() == 1 {
+                            let expanded = if nodes.len() == 1 {
                                 nodes.remove(0)
                             } else {
                                 RegexExpr::Concat(nodes)
-                            });
+                            };
+                            return Ok(with_lazy(expanded, lazy));
                         }
                         *i = save;
                         return Ok(node);
@@ -186,18 +198,19 @@ fn parse_repetition(
                 if has_m && m < n {
                     return Err("Invalid quantifier range".into());
                 }
-                skip_lazy(chars, i);
+                let lazy = take_lazy(chars, i);
                 if m == n {
                     if n > MAX_EXPANDED_QUANTIFIER {
                         return Ok(too_large_quantifier());
                     }
                     let mut nodes: Vec<RegexExpr> =
                         (0..n).map(|_| clear_before(node.clone())).collect();
-                    return Ok(if nodes.len() == 1 {
+                    let expanded = if nodes.len() == 1 {
                         nodes.remove(0)
                     } else {
                         RegexExpr::Concat(nodes)
-                    });
+                    };
+                    return Ok(with_lazy(expanded, lazy));
                 }
                 // {n,m}: n copies + (m - n) optional copies.
                 if n > MAX_EXPANDED_QUANTIFIER || m > MAX_EXPANDED_QUANTIFIER {
@@ -210,7 +223,7 @@ fn parse_repetition(
                 for _ in n..m {
                     nodes.push(RegexExpr::Optional(Box::new(node.clone())));
                 }
-                return Ok(RegexExpr::Concat(nodes));
+                return Ok(with_lazy(RegexExpr::Concat(nodes), lazy));
             }
             _ => {}
         }

@@ -1534,6 +1534,25 @@ Integration suite: **813 passed, 0 failed, 3 ignored**.
 
 Integration suite: **814 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Number statics + radix toString (2026-11-13)
+
+- Added `Number.isFinite`, `Number.isInteger`, `Number.isNaN`,
+  `Number.isSafeInteger`, plus `parseInt`/`parseFloat` aliases.
+- `Number.prototype.toString(radix)` now implements radix conversion
+  (2–36, RangeError outside, fraction digits, NaN/Infinity/-0 handling).
+- `%Number.prototype%` carries its spec [[NumberData]] slot (+0) and
+  `%Boolean.prototype%` its [[BooleanData]] slot (false), so
+  `Number.prototype.toString(33)`, `new Number(x)` and
+  `Boolean.prototype.valueOf()` behave as number/boolean objects.
+- Test262: Number **134 → 201/340**; `Number.prototype.toString`
+  **9 → 47/90**.
+- Regression: `test_number_statics_and_radix`.
+- Known gaps: radix fractions/large magnitudes are approximate (32 fractional
+  digits, u64 integer path); `toFixed`/`toPrecision`/`toExponential` still
+  absent.
+
+Integration suite: **815 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

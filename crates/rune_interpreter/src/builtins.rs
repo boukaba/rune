@@ -1286,6 +1286,40 @@ fn array_to_string(arr: *mut RuneArray) -> String {
 
 /// Number(value) — converts a value to a number.
 /// Per §21.1.2.1: calls ToNumber via ToPrimitive with NUMBER hint.
+/// §21.1.2.1 Number.isFinite(value).
+pub fn number_is_finite(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let v = args.first().copied().unwrap_or(Value::undefined());
+    let num = v.as_smi().map(|s| s as f64).or_else(|| v.as_float64());
+    Value::boolean(num.is_some_and(|n| n.is_finite()))
+}
+
+/// §21.1.2.2 Number.isInteger(value).
+pub fn number_is_integer(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let v = args.first().copied().unwrap_or(Value::undefined());
+    let num = v.as_smi().map(|s| s as f64).or_else(|| v.as_float64());
+    Value::boolean(num.is_some_and(|n| n.is_finite() && n.trunc() == n))
+}
+
+/// §21.1.2.3 Number.isNaN(value).
+pub fn number_is_nan(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let v = args.first().copied().unwrap_or(Value::undefined());
+    Value::boolean(v.as_float64().is_some_and(|n| n.is_nan()))
+}
+
+/// §21.1.2.5 Number.isSafeInteger(value).
+pub fn number_is_safe_integer(
+    _gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    _vm: &mut Vm,
+) -> Value {
+    let v = args.first().copied().unwrap_or(Value::undefined());
+    let num = v.as_smi().map(|s| s as f64).or_else(|| v.as_float64());
+    Value::boolean(
+        num.is_some_and(|n| n.is_finite() && n.trunc() == n && n.abs() <= 9_007_199_254_740_991.0),
+    )
+}
+
 pub fn number_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     // §21.1.2.1: If no arguments, return +0
     let val = match args.first().copied() {
@@ -1444,10 +1478,69 @@ pub fn number_prototype_value_of(
         .unwrap_or(Value::undefined())
 }
 
+fn format_radix(mut x: f64, radix: u32) -> String {
+    if x.is_nan() {
+        return "NaN".to_string();
+    }
+    if x.is_infinite() {
+        return if x < 0.0 { "-Infinity" } else { "Infinity" }.to_string();
+    }
+    if x == 0.0 {
+        return "0".to_string();
+    }
+    let negative = x < 0.0;
+    if negative {
+        x = -x;
+    }
+    let integer = x.trunc();
+    let mut frac = x - integer;
+    let mut digits = [0u8; 64];
+    let mut n = 0usize;
+    let mut ip = integer as u64;
+    if ip == 0 {
+        digits[0] = b'0';
+        n = 1;
+    } else {
+        while ip > 0 {
+            digits[n] = if ip % radix as u64 > 9 {
+                b'a' + (ip % radix as u64 - 10) as u8
+            } else {
+                b'0' + (ip % radix as u64) as u8
+            };
+            n += 1;
+            ip /= radix as u64;
+        }
+    }
+    let mut out = String::new();
+    if negative {
+        out.push('-');
+    }
+    for i in (0..n).rev() {
+        out.push(digits[i] as char);
+    }
+    if frac > 0.0 {
+        out.push('.');
+        let mut count = 0;
+        while frac > 0.0 && count < 32 {
+            frac *= radix as f64;
+            let d = frac.floor();
+            frac -= d;
+            let d = d as u64;
+            out.push(if d > 9 {
+                (b'a' + (d - 10) as u8) as char
+            } else {
+                (b'0' + d as u8) as char
+            });
+            count += 1;
+        }
+    }
+    out
+}
+
 pub fn number_prototype_to_string(
     gc: &mut SemiSpace,
     this: Value,
-    _args: &[Value],
+    args: &[Value],
     vm: &mut Vm,
 ) -> Value {
     let v = if this.as_smi().is_some() || this.as_float64().is_some() {
@@ -1464,7 +1557,39 @@ pub fn number_prototype_to_string(
         };
         v
     };
-    let s = value_to_js_string(v);
+    let radix = match args.first() {
+        None => 10u32,
+        Some(r) if r.is_undefined() => 10,
+        Some(r) => {
+            let n = match to_integer_sync(gc, vm, *r) {
+                Ok(n) => n,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            };
+            if !(2.0..=36.0).contains(&n) {
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::RangeError,
+                    "toString() radix must be between 2 and 36",
+                ));
+                return Value::undefined();
+            }
+            n as u32
+        }
+    };
+    let num = v
+        .as_smi()
+        .map(|s| s as f64)
+        .or_else(|| v.as_float64())
+        .unwrap_or(f64::NAN);
+    let s = if radix == 10 {
+        value_to_js_string(v)
+    } else {
+        format_radix(num, radix)
+    };
     Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8)
 }
 
@@ -21084,6 +21209,26 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 1,
             name: "Number",
             func: number_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "Number_isFinite",
+            func: number_is_finite,
+        },
+        Builtin {
+            length: 1,
+            name: "Number_isInteger",
+            func: number_is_integer,
+        },
+        Builtin {
+            length: 1,
+            name: "Number_isNaN",
+            func: number_is_nan,
+        },
+        Builtin {
+            length: 1,
+            name: "Number_isSafeInteger",
+            func: number_is_safe_integer,
         },
         Builtin {
             length: 0,

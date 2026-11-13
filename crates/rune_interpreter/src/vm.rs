@@ -1939,30 +1939,44 @@ impl Vm {
             let num_proto = make_object(gc, &[("toString", to_string), ("valueOf", value_of)]);
             self.number_prototype = num_proto;
             let num_name = Value::from_heap_ptr(HeapString::allocate(gc, "Number") as *mut u8);
-            let num_ctor = make_object(
-                gc,
-                &[
-                    ("prototype", num_proto),
-                    ("EPSILON", Value::from_float64(f64::EPSILON)),
-                    (
-                        "MAX_SAFE_INTEGER",
-                        Value::from_float64(9_007_199_254_740_991.0),
-                    ),
-                    (
-                        "MIN_SAFE_INTEGER",
-                        Value::from_float64(-9_007_199_254_740_991.0),
-                    ),
-                    ("MAX_VALUE", Value::from_float64(f64::MAX)),
-                    ("MIN_VALUE", Value::from_float64(f64::MIN_POSITIVE)),
-                    ("NaN", Value::from_float64(f64::NAN)),
-                    ("NEGATIVE_INFINITY", Value::from_float64(f64::NEG_INFINITY)),
-                    ("POSITIVE_INFINITY", Value::from_float64(f64::INFINITY)),
-                    ("length", Value::smi(1)),
-                    ("name", num_name),
-                ],
-            );
+            let mut num_entries: Vec<(&str, Value)> = vec![("prototype", num_proto)];
+            num_entries.push(("EPSILON", Value::from_float64(f64::EPSILON)));
+            num_entries.push((
+                "MAX_SAFE_INTEGER",
+                Value::from_float64(9_007_199_254_740_991.0),
+            ));
+            num_entries.push((
+                "MIN_SAFE_INTEGER",
+                Value::from_float64(-9_007_199_254_740_991.0),
+            ));
+            num_entries.push(("MAX_VALUE", Value::from_float64(f64::MAX)));
+            num_entries.push(("MIN_VALUE", Value::from_float64(f64::MIN_POSITIVE)));
+            num_entries.push(("NaN", Value::from_float64(f64::NAN)));
+            num_entries.push(("NEGATIVE_INFINITY", Value::from_float64(f64::NEG_INFINITY)));
+            num_entries.push(("POSITIVE_INFINITY", Value::from_float64(f64::INFINITY)));
+            for (name, handle) in [
+                ("isFinite", "Number_isFinite"),
+                ("isInteger", "Number_isInteger"),
+                ("isNaN", "Number_isNaN"),
+                ("isSafeInteger", "Number_isSafeInteger"),
+                ("parseInt", "parseInt"),
+                ("parseFloat", "parseFloat"),
+            ] {
+                if let Some(h) = find_handle(&self.builtins, handle) {
+                    num_entries.push((name, h));
+                }
+            }
+            num_entries.push(("length", Value::smi(1)));
+            num_entries.push(("name", num_name));
+            let num_ctor = make_object(gc, &num_entries);
             if let Some(proto_ptr) = num_proto.heap_ptr() {
                 unsafe {
+                    JSObject::add_property(
+                        proto_ptr as *mut JSObject,
+                        PropertyKey::from_string(crate::builtins::NUMBER_WRAPPER_KEY),
+                        crate::builtins::NUMBER_WRAPPER_KEY.to_string(),
+                        Value::smi(0),
+                    );
                     JSObject::add_property(
                         proto_ptr as *mut JSObject,
                         PropertyKey::from_string("constructor"),
@@ -1994,6 +2008,12 @@ impl Vm {
             );
             if let Some(proto_ptr) = bool_proto.heap_ptr() {
                 unsafe {
+                    JSObject::add_property(
+                        proto_ptr as *mut JSObject,
+                        PropertyKey::from_string(crate::builtins::BOOLEAN_WRAPPER_KEY),
+                        crate::builtins::BOOLEAN_WRAPPER_KEY.to_string(),
+                        Value::boolean(false),
+                    );
                     JSObject::add_property(
                         proto_ptr as *mut JSObject,
                         PropertyKey::from_string("constructor"),

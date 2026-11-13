@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Number statics + radix (2026-11-13)**: isFinite/isInteger/isNaN/isSafeInteger, radix toString, Number/Boolean prototype internal slots. Number 134→**201/340**. Integration **815**.
 - **Symbol equality/intrinsics (2026-11-13)**: SameValue compares symbols by id; primitive getPrototypeOf; description getter; String(Symbol). Symbol 21→**28/98**, Map 98. Integration **814**.
 - **Promise species + extras define/delete (2026-11-13)**: then validates constructor/@@species; Promise extras support defineProperty/delete. Promise 377→**383/703**. Integration **813**.
 - **Promise own properties (2026-11-13)**: Promise gains tracable extra_props; set/get/keys/gOPD. Promise 374→**377/703**, Object 1860→**1866**. Integration **812**.

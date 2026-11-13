@@ -15089,3 +15089,28 @@ fn test_symbol_prototype_intrinsics() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_number_statics_and_radix() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            [
+                Number.isNaN(NaN),
+                !Number.isNaN("NaN"),
+                Number.isFinite(1) && !Number.isFinite(Infinity),
+                Number.isInteger(1) && !Number.isInteger(1.5),
+                Number.isSafeInteger(9007199254740991),
+                !Number.isSafeInteger(9007199254740992),
+                (10).toString(2) === "1010",
+                (255).toString(16) === "ff",
+                Number.prototype.toString(33) === "0",
+                (new Number(10)).toString(2) === "1010",
+                Boolean.prototype.valueOf() === false
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

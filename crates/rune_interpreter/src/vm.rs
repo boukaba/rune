@@ -14390,6 +14390,23 @@ pub(crate) const MAX_PROTOTYPE_DEPTH: usize = 256;
 /// Implements OrdinaryGet (§10.1.8.1): check own property, then recurse on [[Prototype]].
 /// For dense arrays: numeric keys access elements directly; non-numeric walks to prototype.
 /// Returns undefined if the chain exceeds MAX_PROTOTYPE_DEPTH (prevents infinite loops on cycles).
+/// Allocate (if needed) and return the extra-properties object for a promise.
+pub(crate) fn promise_extra_object(
+    gc: &mut SemiSpace,
+    ptr: *mut u8,
+) -> *mut rune_core::object::JSObject {
+    let ptr = unsafe { rune_core::gc::resolve_forwarded(ptr) };
+    let existing = unsafe { Promise::extra_props(ptr) };
+    if !existing.is_null() {
+        return existing as *mut rune_core::object::JSObject;
+    }
+    let shape = Shape::intern(Vec::new(), Vec::new());
+    let obj = JSObject::allocate(gc, shape, &[]);
+    let resolved = unsafe { rune_core::gc::resolve_forwarded(ptr) };
+    unsafe { Promise::set_extra_props(resolved, obj as *mut u8) };
+    obj
+}
+
 pub(crate) fn load_property_recursive(
     obj: Value,
     raw_key: Value,
@@ -14549,6 +14566,14 @@ pub(crate) fn load_property_recursive(
                 }
                 return Value::undefined();
             } else if tag == TAG_PROMISE {
+                let extra = unsafe { Promise::extra_props(ptr) };
+                if !extra.is_null() {
+                    let result =
+                        load_property_recursive(Value::from_heap_ptr(extra), raw_key, None, gc);
+                    if !result.is_undefined() {
+                        return result;
+                    }
+                }
                 let proto = unsafe { Promise::prototype(ptr) };
                 if !proto.is_null() {
                     current = Value::from_heap_ptr(proto);
@@ -14981,6 +15006,11 @@ pub(crate) fn do_store_property(
 ) -> bool {
     if let Some(ptr) = obj.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_PROMISE {
+            let extra = promise_extra_object(gc, ptr);
+            let extra_val = Value::from_heap_ptr(extra as *mut u8);
+            return do_store_property(extra_val, raw_key, value, gc, vm);
+        }
         if tag == TAG_OBJECT {
             if is_proto_key(raw_key) {
                 // __proto__ assignment = SetPrototypeOf (fails on

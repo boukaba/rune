@@ -363,6 +363,8 @@ impl SemiSpace {
                         self.forward_value(proto_ptr);
                         let reactions_ptr = scan_ptr.add(size_of::<GcHeader>() + 24) as *mut u64;
                         self.forward_value(reactions_ptr);
+                        let extra_ptr = scan_ptr.add(size_of::<GcHeader>() + 32) as *mut u64;
+                        self.forward_value(extra_ptr);
                     }
                     TAG_REGEXP => {
                         let pattern_ptr = scan_ptr.add(size_of::<GcHeader>()) as *mut u64;

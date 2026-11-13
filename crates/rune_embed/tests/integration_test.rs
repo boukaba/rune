@@ -15014,3 +15014,30 @@ fn test_function_string_coercion() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_promise_own_properties() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var p = Promise.resolve(1);
+            p.custom = 42;
+            p.other = "x";
+            var d = Object.getOwnPropertyDescriptor(p, "custom");
+            [
+                p.custom === 42,
+                p.other === "x",
+                p instanceof Promise,
+                Object.prototype.hasOwnProperty.call(p, "custom"),
+                Object.keys(p).indexOf("custom") >= 0,
+                d.value === 42,
+                d.writable === true,
+                d.enumerable === true,
+                d.configurable === true
+            ].join("|") === "true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

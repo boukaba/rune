@@ -6509,6 +6509,17 @@ pub fn object_prototype_has_own_property(
     };
     let key_is_str = |s: &str| key_str.as_deref() == Some(s);
     let found = match tag {
+        TAG_PROMISE => {
+            let extra = unsafe { Promise::extra_props(ptr) };
+            if extra.is_null() {
+                false
+            } else if let Some(key) = value_to_prop_key(key) {
+                let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                shape.lookup(&key).is_some()
+            } else {
+                false
+            }
+        }
         TAG_ARRAY => {
             if let Some(index) = value_to_array_index(key) {
                 // B1e: an own overlay entry (accessor pair or data) counts
@@ -6907,6 +6918,14 @@ fn object_own_entries(
     if let Some(ptr) = val.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         match tag {
+            TAG_PROMISE => {
+                let extra = unsafe { Promise::extra_props(ptr) };
+                if extra.is_null() {
+                    Ok(Vec::new())
+                } else {
+                    object_own_entries(gc, Value::from_heap_ptr(extra), vm)
+                }
+            }
             TAG_OBJECT => {
                 let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
                 let count = unsafe { JSObject::slot_count(ptr as *mut JSObject) };
@@ -8739,6 +8758,18 @@ pub fn object_get_own_property_descriptor(
     // read as absent → undefined).
     if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_ARRAY {
         return array_own_property_descriptor(gc, ptr, raw_key, vm.object_prototype.heap_ptr());
+    }
+    if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_PROMISE {
+        let extra = unsafe { Promise::extra_props(ptr) };
+        if extra.is_null() {
+            return Value::undefined();
+        }
+        return object_get_own_property_descriptor(
+            gc,
+            _this,
+            &[Value::from_heap_ptr(extra), raw_key],
+            vm,
+        );
     }
     if unsafe { (*(ptr as *const GcHeader)).tag() } != TAG_OBJECT {
         return Value::undefined();

@@ -13,10 +13,11 @@ pub const PROMISE_REJECTED: u32 = 2;
 /// ```
 ///
 /// reactions points to a TAG_ARRAY of [callback, chained_promise] pairs.
+/// extra_props points to a JSObject holding user-defined own properties.
 ///
-/// Size: 40 bytes.
+/// Size: 48 bytes.
 pub struct Promise;
-pub(crate) const PROMISE_SIZE: usize = 40;
+pub(crate) const PROMISE_SIZE: usize = 48;
 
 impl Promise {
     pub fn allocate(gc: &mut SemiSpace, proto: Option<*mut u8>) -> *mut u8 {
@@ -51,6 +52,8 @@ impl Promise {
             *proto_ptr = proto_resolved.unwrap_or(std::ptr::null_mut());
             let reactions_ptr = ptr.add(std::mem::size_of::<GcHeader>() + 24) as *mut *mut u8;
             *reactions_ptr = reactions_arr as *mut u8;
+            let extra_ptr = ptr.add(std::mem::size_of::<GcHeader>() + 32) as *mut *mut u8;
+            *extra_ptr = std::ptr::null_mut();
         }
         ptr
     }
@@ -91,5 +94,21 @@ impl Promise {
 
     pub unsafe fn reactions(ptr: *mut u8) -> *mut u8 {
         unsafe { *(ptr.add(std::mem::size_of::<GcHeader>() + 24) as *const *mut u8) }
+    }
+}
+
+impl Promise {
+    pub unsafe fn extra_props(ptr: *mut u8) -> *mut u8 {
+        unsafe {
+            crate::gc::resolve_forwarded(
+                *(ptr.add(std::mem::size_of::<GcHeader>() + 32) as *const *mut u8),
+            )
+        }
+    }
+
+    pub unsafe fn set_extra_props(ptr: *mut u8, props: *mut u8) {
+        unsafe {
+            *(ptr.add(std::mem::size_of::<GcHeader>() + 32) as *mut *mut u8) = props;
+        }
     }
 }

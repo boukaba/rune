@@ -1484,6 +1484,22 @@ Integration suite: **810 passed, 0 failed, 3 ignored**.
 
 Integration suite: **811 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Promise own properties (2026-11-13)
+
+- Promise heap layout extended to 48 bytes with an `extra_props` JSObject slot;
+  GC traces the new pointer and allocation initializes it to null.
+- The property funnel now supports user-defined own properties on promises:
+  - `p.foo = v` allocates the extras object and stores through OrdinarySet;
+  - reads and prototype fallback work via `load_property_recursive`;
+  - `hasOwnProperty`, `Object.keys` and `getOwnPropertyDescriptor` include
+    promise extras.
+- Test262: Promise **374 → 377/703**; Object **1860 → 1866/3411**.
+- Regression: `test_promise_own_properties`.
+- Known gaps: `delete` and `defineProperty` do not yet target promise extras;
+  Promise capability/species construction remains the largest async blocker.
+
+Integration suite: **812 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

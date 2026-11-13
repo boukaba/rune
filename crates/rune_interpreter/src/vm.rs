@@ -1579,6 +1579,9 @@ impl Vm {
             if let Some(jh) = find_handle(&self.builtins, "Array_prototype_join") {
                 proto_entries.push(("join", jh));
             }
+            if let Some(ts) = find_handle(&self.builtins, "Array_prototype_toString") {
+                proto_entries.push(("toString", ts));
+            }
             if let Some(fnd) = find_h {
                 proto_entries.push(("find", fnd));
             }
@@ -1748,6 +1751,14 @@ impl Vm {
                 str_proto_entries.push(("search", sh));
             }
             let str_proto = make_object(gc, &str_proto_entries);
+            if let Some(obj_proto) = self.object_prototype.heap_ptr() {
+                unsafe {
+                    JSObject::set_prototype(
+                        str_proto.heap_ptr().unwrap() as *mut JSObject,
+                        obj_proto,
+                    );
+                }
+            }
             self.builtin_wrappers
                 .insert("String.prototype".to_string(), str_proto);
             self.string_prototype = str_proto;
@@ -2484,6 +2495,39 @@ impl Vm {
         let obj_proto_shape = Shape::empty();
         let obj_proto_ptr = JSObject::allocate(gc, obj_proto_shape, &[]);
         self.object_prototype = Value::from_heap_ptr(obj_proto_ptr as *mut u8);
+        if let Some(str_proto) = self.string_prototype.heap_ptr() {
+            unsafe {
+                JSObject::set_prototype(str_proto as *mut JSObject, obj_proto_ptr as *mut u8);
+            }
+        }
+        // Builtin prototypes inherit Object.prototype (instanceof Object,
+        // inherited methods). Array/String were chained earlier; finish the
+        // tag-specific ones here.
+        let obj_proto_u8 = obj_proto_ptr as *mut u8;
+        for proto in [
+            self.function_prototype,
+            self.regexp_prototype,
+            self.error_protos
+                .first()
+                .copied()
+                .unwrap_or(Value::undefined()),
+        ] {
+            if let Some(ptr) = proto.heap_ptr() {
+                unsafe { JSObject::set_prototype(ptr as *mut JSObject, obj_proto_u8) };
+            }
+        }
+        if let Some(ptr) = self.promise_prototype.heap_ptr() {
+            unsafe { Promise::set_prototype(ptr, obj_proto_u8) };
+        }
+        if let Some(ptr) = self.map_prototype.heap_ptr() {
+            unsafe { RuneMap::set_prototype(ptr, obj_proto_u8) };
+        }
+        if let Some(ptr) = self.set_prototype.heap_ptr() {
+            unsafe { RuneSet::set_prototype(ptr, obj_proto_u8) };
+        }
+        if let Some(ptr) = self.date_prototype.heap_ptr() {
+            unsafe { date::RuneDate::set_prototype(ptr, obj_proto_u8) };
+        }
         // Object.prototype methods: toString / hasOwnProperty / isPrototypeOf
         {
             let to_string_handle = find_handle(&self.builtins, "Object_prototype_toString");
@@ -13518,17 +13562,39 @@ pub(crate) fn load_property_recursive(
                 current = Value::from_heap_ptr(proto);
                 continue;
             } else if tag == TAG_STRING_OBJ {
-                // String wrapper: own "length" property, then walk to String.prototype
+                // String wrapper: numeric index, own "length", then prototype.
+                if let Some(index) = raw_key.as_smi() {
+                    if index >= 0 {
+                        let str_ptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
+                        let s = unsafe { HeapString::to_string(str_ptr as *mut HeapString) };
+                        if let Some(unit) = s.encode_utf16().nth(index as usize) {
+                            let ch = char::from_u32(unit as u32).unwrap_or('\u{FFFD}');
+                            return Value::from_heap_ptr(
+                                HeapString::allocate(gc, &ch.to_string()) as *mut u8
+                            );
+                        }
+                    }
+                    return Value::undefined();
+                }
                 if let Some(key_ptr) = raw_key.heap_ptr() {
                     let key_tag = unsafe { (*(key_ptr as *const GcHeader)).tag() };
                     if key_tag == TAG_STRING {
                         let key_str = unsafe { HeapString::to_string(key_ptr as *mut HeapString) };
+                        let str_ptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
+                        let s = unsafe { HeapString::to_string(str_ptr as *mut HeapString) };
                         if key_str == "length" {
-                            let str_ptr =
-                                unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
-                            let s = unsafe { HeapString::to_string(str_ptr as *mut HeapString) };
                             let len = s.encode_utf16().count();
                             return Value::smi(len as i32);
+                        }
+                        if let Ok(index) = key_str.parse::<usize>() {
+                            if let Some(unit) = s.encode_utf16().nth(index) {
+                                let ch = char::from_u32(unit as u32).unwrap_or('\u{FFFD}');
+                                return Value::from_heap_ptr(HeapString::allocate(
+                                    gc,
+                                    &ch.to_string(),
+                                )
+                                    as *mut u8);
+                            }
                         }
                     }
                 }
@@ -14613,10 +14679,25 @@ pub(crate) fn has_property(obj: Value, raw_key: Value, function_prototype: Optio
             false
         } else if tag == TAG_STRING {
             if let Some(index) = value_to_array_index(raw_key) {
-                let len = unsafe { HeapString::len(ptr as *mut HeapString) };
-                return index < len;
+                let units = unsafe { HeapString::to_string(ptr as *mut HeapString) }
+                    .encode_utf16()
+                    .count();
+                return index < units;
             }
-            // Walk String.prototype for non-numeric keys
+            // Walk String.prototype for non-numeric keys.
+            false
+        } else if tag == TAG_STRING_OBJ {
+            if let Some(index) = value_to_array_index(raw_key) {
+                let sp = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
+                let units = unsafe { HeapString::to_string(sp as *mut HeapString) }
+                    .encode_utf16()
+                    .count();
+                return index < units;
+            }
+            let proto = unsafe { StringObject::prototype(ptr as *mut StringObject) };
+            if !proto.is_null() {
+                return has_property(Value::from_heap_ptr(proto), raw_key, function_prototype);
+            }
             false
         } else {
             false
@@ -14624,6 +14705,27 @@ pub(crate) fn has_property(obj: Value, raw_key: Value, function_prototype: Optio
     } else {
         false
     }
+}
+
+/// Prototype pointer for any heap object tag, used by `instanceof` and
+/// `Object.getPrototypeOf`. Returns None for primitives/internal objects with
+/// no prototype.
+pub(crate) fn value_prototype(value: Value) -> Option<*mut u8> {
+    let ptr = value.heap_ptr()?;
+    let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+    let proto = match tag {
+        TAG_OBJECT | TAG_ARRAY | TAG_FUNC => unsafe { JSObject::prototype(ptr as *mut JSObject) },
+        TAG_STRING_OBJ => unsafe { StringObject::prototype(ptr as *mut StringObject) },
+        TAG_MAP => unsafe { RuneMap::prototype(ptr) },
+        TAG_SET => unsafe { RuneSet::prototype(ptr) },
+        TAG_DATE => unsafe { date::RuneDate::prototype(ptr) },
+        TAG_TYPED_ARRAY => unsafe { typedarray::RuneTypedArray::prototype(ptr) },
+        TAG_REGEXP => unsafe { rune_core::regexp::RegExp::prototype(ptr) },
+        TAG_PROMISE => unsafe { Promise::prototype(ptr) },
+        TAG_ARRAY_BUFFER => unsafe { typedarray::RuneArrayBuffer::prototype(ptr) },
+        _ => return None,
+    };
+    if proto.is_null() { None } else { Some(proto) }
 }
 
 /// OrdinaryHasInstance per §13.10.2: walk lhs prototype chain looking for rhs_proto.
@@ -14635,33 +14737,13 @@ fn ordinary_has_instance(lhs: Value, rhs_proto_ptr: *mut u8) -> bool {
             return false;
         }
         depth += 1;
-        if let Some(ptr) = current.heap_ptr() {
-            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-            let proto = if tag == TAG_OBJECT || tag == TAG_ARRAY {
-                unsafe { JSObject::prototype(ptr as *mut JSObject) }
-            } else if tag == TAG_MAP {
-                unsafe { RuneMap::prototype(ptr) }
-            } else if tag == TAG_SET {
-                unsafe { RuneSet::prototype(ptr) }
-            } else if tag == TAG_DATE {
-                unsafe { date::RuneDate::prototype(ptr) }
-            } else if tag == TAG_TYPED_ARRAY {
-                unsafe { typedarray::RuneTypedArray::prototype(ptr) }
-            } else if tag == TAG_REGEXP {
-                unsafe { rune_core::regexp::RegExp::prototype(ptr) }
-            } else {
-                return false;
-            };
-            if proto.is_null() {
-                return false;
-            }
-            if proto == rhs_proto_ptr {
-                return true;
-            }
-            current = Value::from_heap_ptr(proto);
-        } else {
+        let Some(proto) = value_prototype(current) else {
             return false;
+        };
+        if proto == rhs_proto_ptr {
+            return true;
         }
+        current = Value::from_heap_ptr(proto);
     }
 }
 
@@ -14730,6 +14812,34 @@ pub(crate) fn array_like_length(this: Value) -> Option<u32> {
     let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
     match tag {
         TAG_ARRAY => Some(unsafe { RuneArray::length(ptr as *mut RuneArray) }),
+        TAG_STRING => Some(
+            unsafe { HeapString::to_string(ptr as *mut HeapString) }
+                .encode_utf16()
+                .count() as u32,
+        ),
+        TAG_STRING_OBJ => {
+            let sp = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
+            Some(
+                unsafe { HeapString::to_string(sp as *mut HeapString) }
+                    .encode_utf16()
+                    .count() as u32,
+            )
+        }
+        TAG_FUNC => {
+            let extra = unsafe { Func::extra_props(ptr as *mut Func) };
+            if extra.is_null() {
+                return Some(0);
+            }
+            let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+            let key = PropertyKey::from_string("length");
+            shape.lookup(&key).map(|slot| {
+                let val = unsafe { JSObject::get_slot(extra as *mut JSObject, slot) };
+                val.as_smi()
+                    .map(|n| n.max(0) as u32)
+                    .or_else(|| val.as_float64().map(|f| f.max(0.0) as u32))
+                    .unwrap_or(0)
+            })
+        }
         TAG_OBJECT => {
             let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
             let key = PropertyKey::from_string("length");
@@ -14781,6 +14891,17 @@ pub(crate) fn array_like_index(this: Value, i: u32) -> Option<Value> {
             shape
                 .lookup(&key)
                 .map(|slot| unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) })
+        }
+        TAG_FUNC => {
+            let extra = unsafe { Func::extra_props(ptr as *mut Func) };
+            if extra.is_null() {
+                return None;
+            }
+            let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+            let key = PropertyKey::from_string(&i.to_string());
+            shape
+                .lookup(&key)
+                .map(|slot| unsafe { JSObject::get_slot(extra as *mut JSObject, slot) })
         }
         _ => None,
     }

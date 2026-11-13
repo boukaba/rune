@@ -745,6 +745,28 @@ Verification: workspace green; JIT differential 13/13 on AArch64; integration
 `rune_runtime`: 10 tests; CLI: 5 tests (1 HTTP unit + 4 integration).
 Integration suite: **773 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — prototype-chain + Array.toString conformance (2026-11-13)
+
+- Generic `value_prototype` resolves every heap tag (Object/Array/Func,
+  StringObject, Map/Set, Date, Promise, RegExp, TypedArray, ArrayBuffer).
+  `instanceof` and `Object.getPrototypeOf` now use it instead of assuming
+  `TAG_OBJECT` layout.
+- `String.prototype` is chained to `Object.prototype`; String wrappers now
+  report `instanceof String`/`instanceof Object` and correct prototypes.
+  Promise/Map/Set/Date/RegExp/Function prototypes are chained as well.
+- `Array.prototype.toString` now exists (arrays/array-likes join, other
+  receivers fall back to `Object.prototype.toString`). `String(array)` and
+  `print(array)` use the array join form instead of `[object Object]`.
+- Array-like element/length handling now covers String wrappers (indexed
+  characters, length) and function objects (own `length`, indexed extra props).
+- Measured: test262 `built-ins/Promise` **373/703 (53.1%; was 364)**,
+  `built-ins/Array/prototype/map` **184/216 (85.2%; was 181)**.
+- Regressions: `test_builtin_prototype_chains_and_string_wrapper`,
+  `test_array_to_string_and_string_coercion`,
+  `test_array_methods_on_string_and_function_array_likes`.
+
+Integration suite: **776 passed, 0 failed, 3 ignored**; full 512-stress 776.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

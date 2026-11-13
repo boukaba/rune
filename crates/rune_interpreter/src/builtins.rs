@@ -82,6 +82,8 @@ pub fn value_to_js_string(v: Value) -> String {
         } else if tag == TAG_STRING_OBJ {
             let str_ptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
             unsafe { HeapString::to_string(str_ptr as *mut HeapString) }
+        } else if tag == TAG_ARRAY {
+            array_to_string(ptr as *mut RuneArray)
         } else if tag == TAG_DATE {
             date::to_date_string(unsafe { date::RuneDate::tv(ptr) })
         } else {
@@ -1030,6 +1032,9 @@ pub(crate) fn to_primitive_string(gc: &mut SemiSpace, val: Value, vm: &mut Vm) -
         let str_ptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
         return Some(unsafe { HeapString::to_string(str_ptr as *mut HeapString) });
     }
+    if tag == TAG_ARRAY {
+        return Some(array_to_string(ptr as *mut RuneArray));
+    }
     if tag == TAG_DATE {
         // §7.1.1.1: Date's default hint is string → ToDateString
         return Some(date::to_date_string(unsafe { date::RuneDate::tv(ptr) }));
@@ -1130,6 +1135,9 @@ pub(crate) fn to_primitive_string_sync(val: Value, gc: &mut SemiSpace, vm: &mut 
     if tag == TAG_STRING_OBJ {
         let str_ptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
         return unsafe { HeapString::to_string(str_ptr as *mut HeapString) };
+    }
+    if tag == TAG_ARRAY {
+        return array_to_string(ptr as *mut RuneArray);
     }
     if tag == TAG_DATE {
         return date::to_date_string(unsafe { date::RuneDate::tv(ptr) });
@@ -6018,11 +6026,16 @@ pub fn object_get_prototype_of(
         ));
         return Value::undefined();
     };
-    let proto = unsafe { JSObject::prototype(ptr as *mut JSObject) };
-    if proto.is_null() {
-        return Value::null();
+    if let Some(proto) = crate::vm::value_prototype(obj) {
+        return Value::from_heap_ptr(proto);
     }
-    Value::from_heap_ptr(proto)
+    // Primitive strings still expose String.prototype.
+    if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_STRING {
+        if let Some(proto) = vm.string_prototype.heap_ptr() {
+            return Value::from_heap_ptr(proto);
+        }
+    }
+    Value::null()
 }
 
 /// §20.3.4.5 Object.prototype.isPrototypeOf(obj) — true iff the receiver is
@@ -9877,6 +9890,27 @@ fn length_walk_value(this: Value) -> Value {
                 .count()
         };
         return length_value(len as u64);
+    }
+    if tag == TAG_STRING_OBJ {
+        let sp = unsafe {
+            rune_core::string_object::StringObject::string_ptr(
+                ptr as *mut rune_core::string_object::StringObject,
+            )
+        };
+        let len = unsafe { HeapString::to_string(sp as *mut HeapString) }
+            .encode_utf16()
+            .count();
+        return length_value(len as u64);
+    }
+    if tag == TAG_FUNC {
+        let extra = unsafe { Func::extra_props(ptr as *mut Func) };
+        if !extra.is_null() {
+            let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+            if let Some(slot) = shape.lookup(&PropertyKey::from_string("length")) {
+                return unsafe { JSObject::get_slot(extra as *mut JSObject, slot) };
+            }
+        }
+        return Value::smi(0);
     }
     if tag != TAG_OBJECT {
         return Value::undefined();
@@ -15628,6 +15662,20 @@ pub fn array_last_index_of(gc: &mut SemiSpace, this: Value, args: &[Value], vm: 
 
 /// Array.prototype.join(separator) — §23.1.3.17. Concatenates the array
 /// elements (undefined/null → "") separated by the separator (default ",").
+/// §23.1.3.31 Array.prototype.toString — arrays/array-likes use join;
+/// other objects fall back to Object.prototype.toString.
+pub fn array_prototype_to_string(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    if crate::vm::array_like_length(this).is_some() {
+        return array_join(gc, this, &[], vm);
+    }
+    object_prototype_to_string(gc, this, &[], vm)
+}
+
 pub fn array_join(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
@@ -20497,6 +20545,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 1,
             name: "Array_prototype_join",
             func: array_join,
+        },
+        Builtin {
+            length: 0,
+            name: "Array_prototype_toString",
+            func: array_prototype_to_string,
         },
         Builtin {
             length: 1,

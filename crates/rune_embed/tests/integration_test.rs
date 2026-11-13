@@ -14025,3 +14025,59 @@ fn test_jit_property_slots_follow_stable_objects() {
         .unwrap();
     assert_eq!(r.as_smi(), Some(600));
 }
+
+#[test]
+fn test_builtin_prototype_chains_and_string_wrapper() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var s = new String("abc");
+            var p = new Promise(function (resolve) { resolve(1); });
+            var m = new Map();
+            var d = new Date(0);
+            [
+                s instanceof String,
+                s instanceof Object,
+                Object.getPrototypeOf(s) === String.prototype,
+                Object.getPrototypeOf(String.prototype) === Object.prototype,
+                p instanceof Object,
+                m instanceof Object,
+                d instanceof Object
+            ].join("|") === "true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}
+
+#[test]
+fn test_array_to_string_and_string_coercion() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            [[1, 2, 3].toString(), String([4, 5, 6]), [].toString.call({})].join("|") === "1,2,3|4,5,6|[object Object]";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}
+
+#[test]
+fn test_array_methods_on_string_and_function_array_likes() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var s = new String("abc");
+            var mappedString = Array.prototype.map.call(s, function (v) { return v; }).join("");
+            var f = function (a, b) { return a + b; };
+            f[0] = 11; f[1] = 9;
+            var mappedFunction = Array.prototype.map.call(f, function (v) { return v; }).join(",");
+            [mappedString, mappedFunction].join("|") === "abc|11,9";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

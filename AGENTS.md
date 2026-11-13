@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Prototype/Array.toString conformance (2026-11-13)**: generic `value_prototype` for every heap tag powers `instanceof` + `Object.getPrototypeOf`; String/Promise/Map/Set/Date/RegExp/Function prototypes chain to Object.prototype; `Array.prototype.toString` + `String(array)`/`print(array)` join; String-wrapper and function array-likes covered. test262 Promise 364→**373/703 (53.1%)**, map 181→**184/216**. Integration **776 passed**.
 - **JIT differential + branch gate (2026-11-13)**: `tests/jit_differential.rs` compares a 13-script hot corpus with JIT off/on. It found a silent trace miscompile for `if/else` inside hot loops. Trace eligibility now refuses loop bodies with more than one conditional jump (the loop condition), so branching loops stay interpreted; function tier-up and simple numeric traces remain. This is conservative "bail to interpreter" until a sound branch model exists.
 - **Embedding host functions**: `Context::register_host_fn(name, length, FnMut(gc,this,args,vm))` installs a real TAG_FUNC wrapper; synthetic program forwards `(id, call-site this, arguments array)` to `_host_invoke`; works as callbacks/`.call`/`apply`/`bind`; closures may capture Rust state. Metadata `length`/`name`; host table on Vm.
 - **Retained runtime values**: `Context::retain_value`/`retained_value`/`release_value` root host callbacks/arguments across jobs; `Vm::retained_values` traced in `register_roots`.
@@ -100,7 +101,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 - **GC**: forced-collection stress harness + CI job; aggressive Promise.all stress on 16 MiB at interval 48.
 - **Stable object/array headers**: initial values are inline; growth converts to a separate slot buffer and never moves the header. GC distinguishes inline/grown/buffer layouts; object self-pointers are repaired in to-space. JIT x86-64/AArch64 property IC and trace-IC slot offsets updated; AFPC v10. Regression + 100K-object stress + full 512-stress green.
 - Verification: integration **773 passed, 0 failed, 3 ignored**; `rune_runtime` **10 passed**; full workspace green; fmt/clippy/no-default clean.
-- Known gaps: host closure captures not GC-rooted by engine; same-host-function re-entry rejected; CLI fetch uses a real HTTP/HTTPS transport with literal private-network blocking and an opt-in allowlist policy; DNS rebinding/proxy/redirect policy still open; `rune_runtime` embedders choose their own; no snapshots/AOT product path; test262 90% gate not met; targeted `built-ins/Promise` baseline is 364/703 (51.8%).
+- Known gaps: host closure captures not GC-rooted by engine; same-host-function re-entry rejected; CLI fetch uses a real HTTP/HTTPS transport with literal private-network blocking and an opt-in allowlist policy; DNS rebinding/proxy/redirect policy still open; `rune_runtime` embedders choose their own; no snapshots/AOT product path; test262 90% gate not met; targeted `built-ins/Promise` baseline is 373/703 (53.1%).
 
 ### Goal
 Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8× vs Node) with enough stdlib to run real workloads. v0.4 = stdlib breadth (14 builtins). v0.5 = Promise + async patterns.

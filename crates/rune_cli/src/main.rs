@@ -62,13 +62,19 @@ fn main() {
         let result = ctx.eval(&source);
         match result {
             Ok(val) => println!("=> {:?}", val),
-            Err(e) => eprintln!("Error: {e}"),
+            Err(e) => {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
         }
     } else if source_args.is_empty() {
         let source = "1 + 2;";
         match ctx.eval(source) {
             Ok(val) => println!("=> {:?}", val),
-            Err(e) => eprintln!("Error: {e}"),
+            Err(e) => {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
         }
     } else {
         match source_args[0].as_str() {
@@ -245,7 +251,10 @@ fn main() {
                             let _ = std::fs::write(snap_path, &source);
                         }
                     }
-                    Err(e) => eprintln!("Error: {e}"),
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        std::process::exit(1);
+                    }
                 }
             }
         }

@@ -358,6 +358,14 @@ Manual check: compile `print("first",111)` into a cache, edit to
 `print("second",222)`, rerun — now prints `second 222` instead of the stale
 program.
 
+### Phase 1 hardening — CLI exit status (2026-11-13)
+
+The CLI now exits with status 1 for parse and uncaught runtime errors instead of
+printing the error and returning success. Successful scripts still exit 0.
+This matters for shell pipelines, CI, and serverless/local runners that rely on
+process status rather than stderr text. Two CLI integration tests spawn the
+built binary and check both paths.
+
 Next: Phase 1 foundations — stable object/array headers (replace the interim
 forwarding layer), then the runtime/Web API layer.
 

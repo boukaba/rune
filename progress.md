@@ -318,8 +318,27 @@ Known gaps: thenables inside `all`/`race` (`promise_static_resolve` currently
 returns `undefined` while parking a thenable callback, so combinators attaching
 to its return see no promise); `allSettled`/`any` are absent.
 
-Next: Phase 1 foundations — stable object/array layout, GC stress, then the
-runtime/Web API layer.
+### Phase 1 start — GC stress harness (2026-11-13)
+
+Added a forced-collection mode that exercises object movement far more often
+than normal allocation pressure:
+
+- `SemiSpace::set_gc_every(n)` collects every `n` allocations (still refreshing
+  VM roots through the root provider) and is opt-in; production contexts keep
+  OOM-only collections.
+- `Context::enable_gc_stress(n)` exposes it to tests, and the
+  `RUNE_GC_STRESS` environment variable enables it for every test context
+  after builtin initialization.
+- Four dedicated stress tests cover method receivers + arrow `this`, nested
+  array callbacks, growth aliases, `Promise.all` with pending inputs, and
+  async/await resumption with allocations in the loop.
+- The entire integration suite also passes with `RUNE_GC_STRESS=512`:
+  **757 passed, 0 failed, 3 ignored**.
+- CI has a new `gc-stress` job running the integration suite under the forced
+  collector plus the dedicated stress tests.
+
+Next: Phase 1 foundations — stable object/array headers (replace the interim
+forwarding layer), then the runtime/Web API layer.
 
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,

@@ -93,6 +93,10 @@ pub struct SemiSpace {
     /// Optional root provider called before each collection to refresh
     /// the root set (handles Vec reallocation invalidating root pointers).
     pub root_provider: Option<*mut dyn RootProvider>,
+    /// Test/diagnostic hook: collect after this many allocations even when
+    /// the semispace has room. `None` keeps the normal OOM-only policy.
+    gc_every: Option<u32>,
+    alloc_since_gc: u32,
 }
 
 unsafe impl Send for SemiSpace {}
@@ -116,6 +120,8 @@ impl SemiSpace {
             roots: Vec::new(),
             semispace_size: size,
             root_provider: None,
+            gc_every: None,
+            alloc_since_gc: 0,
         }
     }
 
@@ -137,6 +143,13 @@ impl SemiSpace {
     }
 
     /// Bytes remaining in the active semispace.
+    /// Force a collection every `every` allocations. Intended for GC-stress
+    /// tests; production contexts leave this disabled (OOM-only collections).
+    pub fn set_gc_every(&mut self, every: u32) {
+        self.gc_every = if every == 0 { None } else { Some(every) };
+        self.alloc_since_gc = 0;
+    }
+
     pub fn remaining(&self) -> usize {
         unsafe { self.limit.offset_from(self.bump) as usize }
     }
@@ -147,6 +160,20 @@ impl SemiSpace {
     /// before any allocation that may trigger GC.
     pub fn alloc(&mut self, size: usize) -> *mut u8 {
         let aligned = align_up(size, 16);
+        if let Some(every) = self.gc_every {
+            self.alloc_since_gc = self.alloc_since_gc.saturating_add(1);
+            if self.alloc_since_gc >= every {
+                self.alloc_since_gc = 0;
+                if let Some(provider) = self.root_provider {
+                    unsafe {
+                        (*provider).register_roots(self);
+                    }
+                }
+                if !self.roots.is_empty() {
+                    self.collect();
+                }
+            }
+        }
         let ptr = self.bump;
         let next = unsafe { ptr.add(aligned) };
         if next > self.limit {

@@ -50,6 +50,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --workspace
 
+  gc-stress:
+    name: cargo test (GC stress)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: RUNE_GC_STRESS=512 cargo test -p rune_embed --test integration_test
+      - run: cargo test -p rune_embed --test gc_stress_test
+
   test-no-jit:
     name: cargo test (no JIT)
     runs-on: ubuntu-latest

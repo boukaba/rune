@@ -50,6 +50,12 @@ impl Context {
         Self::new_with_semispace(64 * 1024 * 1024) // 64 MiB for conformance
     }
 
+    /// Enable test-only GC stress: collect every `every` allocations even when
+    /// the heap has room. Use a tiny/small semispace for maximum rotation.
+    pub fn enable_gc_stress(&mut self, every: u32) {
+        self.gc.set_gc_every(every);
+    }
+
     fn new_with_semispace(size: usize) -> Self {
         let mut ctx = Context {
             gc: SemiSpace::with_size(size),
@@ -76,6 +82,14 @@ impl Context {
             ctx.allocate_string("function"),
             ctx.allocate_string("symbol"),
         ];
+        // Test hook: enabling stress through the environment exercises every
+        // context created by the integration suite (after initialization, so
+        // partially-built builtins are not exposed to forced collections).
+        if let Ok(raw) = std::env::var("RUNE_GC_STRESS") {
+            if let Ok(every) = raw.parse::<u32>() {
+                ctx.enable_gc_stress(every);
+            }
+        }
         ctx
     }
 

@@ -2804,6 +2804,13 @@ impl Vm {
         if let Some(ptr) = self.date_prototype.heap_ptr() {
             unsafe { date::RuneDate::set_prototype(ptr, obj_proto_u8) };
         }
+        // Weak prototypes were created before Object.prototype existed.
+        for proto in [self.weakmap_prototype, self.weakset_prototype] {
+            if let Some(ptr) = proto.heap_ptr() {
+                unsafe { JSObject::set_prototype(ptr as *mut JSObject, obj_proto_u8) };
+            }
+        }
+
         // Namespace objects (Math/JSON/console) are created before
         // Object.prototype exists; chain them once it does.
         for name in ["Math", "JSON", "console"] {
@@ -3087,7 +3094,9 @@ impl Vm {
             }
             let mut wrappers: Vec<Value> = Vec::new();
             wrappers.extend(self.error_ctors.iter().copied());
-            for name in ["Object", "Array", "Boolean", "Function"] {
+            for name in [
+                "Object", "Array", "Boolean", "Function", "WeakMap", "WeakSet",
+            ] {
                 if let Some(v) = self.builtin_wrappers.get(name).copied() {
                     wrappers.push(v);
                 }
@@ -3157,6 +3166,8 @@ impl Vm {
             (self.symbol_prototype, self.symbol_ctor),
             (self.map_prototype, self.map_constructor),
             (self.set_prototype, self.set_constructor),
+            (self.weakmap_prototype, self.weakmap_constructor),
+            (self.weakset_prototype, self.weakset_constructor),
             (self.date_prototype, self.date_constructor),
             (
                 self.regexp_prototype,

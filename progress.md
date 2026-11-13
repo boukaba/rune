@@ -1403,6 +1403,24 @@ Integration suite: **805 passed, 0 failed, 3 ignored**.
 
 Integration suite: **806 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — weak constructor/prototype chains + symbol keys (2026-11-13)
+
+- WeakMap/WeakSet constructors now chain to `%Function.prototype%` and are
+  included in the callable-wrapper set (`typeof` "function",
+  `instanceof Function`).
+- Weak prototypes chain to `Object.prototype` and expose
+  `prototype.constructor`.
+- Weak keys accept non-registered symbols in addition to objects (registered
+  symbols are not rejected yet); primitive get/has/delete return
+  undefined/false.
+- Test262: WeakMap **75 → 86/141**; WeakSet **50 → 60/85**.
+- Regression: `test_weak_collection_prototypes_and_symbol_keys`.
+- Known gaps: registered symbols as weak keys are accepted (spec TypeError);
+  `getOrInsertComputed` proposal (≈15 tests) unimplemented; entries remain
+  strong references.
+
+Integration suite: **807 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

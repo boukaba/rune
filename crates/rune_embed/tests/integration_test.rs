@@ -14892,3 +14892,30 @@ fn test_weakmap_weakset_basics() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_weak_collection_prototypes_and_symbol_keys() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var sym = Symbol("key");
+            var wm = new WeakMap();
+            wm.set(sym, 7);
+            var ws = new WeakSet();
+            ws.add(sym);
+            [
+                typeof WeakMap === "function",
+                Object.getPrototypeOf(WeakMap) === Function.prototype,
+                Object.getPrototypeOf(WeakSet) === Function.prototype,
+                Object.getPrototypeOf(WeakMap.prototype) === Object.prototype,
+                WeakMap.prototype.constructor === WeakMap,
+                wm.get(sym) === 7,
+                wm.has(sym) === true,
+                ws.has(sym) === true
+            ].join("|") === "true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

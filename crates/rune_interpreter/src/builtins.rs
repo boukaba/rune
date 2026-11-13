@@ -3148,7 +3148,7 @@ pub fn weakmap_get(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
         return Value::undefined();
     }
     let key = args.first().copied().unwrap_or(Value::undefined());
-    if !key.is_heap_object() {
+    if !key.is_heap_object() && !key.is_symbol() {
         return Value::undefined();
     }
     map_get_builtin(gc, this, args, vm)
@@ -3160,7 +3160,7 @@ pub fn weakmap_set(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
         return Value::undefined();
     }
     let key = args.first().copied().unwrap_or(Value::undefined());
-    if !key.is_heap_object() {
+    if !key.is_heap_object() && !key.is_symbol() {
         vm.set_pending_exception(crate::errors::error_object(
             gc,
             &vm.error_protos,
@@ -3178,7 +3178,7 @@ pub fn weakmap_has(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
         return Value::undefined();
     }
     let key = args.first().copied().unwrap_or(Value::undefined());
-    if !key.is_heap_object() {
+    if !key.is_heap_object() && !key.is_symbol() {
         return Value::boolean(false);
     }
     map_has_builtin(gc, this, args, vm)
@@ -3190,7 +3190,7 @@ pub fn weakmap_delete(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
         return Value::undefined();
     }
     let key = args.first().copied().unwrap_or(Value::undefined());
-    if !key.is_heap_object() {
+    if !key.is_heap_object() && !key.is_symbol() {
         return Value::boolean(false);
     }
     map_delete_builtin(gc, this, args, vm)
@@ -3202,7 +3202,7 @@ pub fn weakset_add(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
         return Value::undefined();
     }
     let key = args.first().copied().unwrap_or(Value::undefined());
-    if !key.is_heap_object() {
+    if !key.is_heap_object() && !key.is_symbol() {
         vm.set_pending_exception(crate::errors::error_object(
             gc,
             &vm.error_protos,
@@ -3220,7 +3220,7 @@ pub fn weakset_has(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
         return Value::undefined();
     }
     let key = args.first().copied().unwrap_or(Value::undefined());
-    if !key.is_heap_object() {
+    if !key.is_heap_object() && !key.is_symbol() {
         return Value::boolean(false);
     }
     set_has_builtin(gc, this, args, vm)
@@ -3232,7 +3232,7 @@ pub fn weakset_delete(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
         return Value::undefined();
     }
     let key = args.first().copied().unwrap_or(Value::undefined());
-    if !key.is_heap_object() {
+    if !key.is_heap_object() && !key.is_symbol() {
         return Value::boolean(false);
     }
     set_delete_builtin(gc, this, args, vm)

@@ -16435,3 +16435,41 @@ fn test_symbol_wrappers_and_species() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_error_descriptors_to_string_and_wrapper_equality() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var e = new Error("msg");
+            var msgDesc = Object.getOwnPropertyDescriptor(e, "message");
+            var nameDesc = Object.getOwnPropertyDescriptor(Error.prototype, "name");
+            var getterThrew = false;
+            try {
+                Error.prototype.toString.call({
+                    get name() { throw new TypeError("name"); }
+                });
+            } catch (ex) { getterThrew = ex instanceof TypeError; }
+            var primitiveThrew = false;
+            try {
+                Error.prototype.toString.call({
+                    message: { toString: function () { throw new TypeError("msg"); } }
+                });
+            } catch (ex) { primitiveThrew = ex instanceof TypeError; }
+            [
+                msgDesc.enumerable === false && msgDesc.writable === true,
+                nameDesc.enumerable === false && nameDesc.writable === true,
+                Error.isError(e),
+                Boolean.prototype == false,
+                new Boolean(0) == false,
+                new Number(2) == 2,
+                new String("x") == "x",
+                getterThrew,
+                primitiveThrew
+            ].join("|") === "true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

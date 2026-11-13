@@ -3325,12 +3325,33 @@ impl Vm {
             }
             if let Some(h) = find_handle(&self.builtins, "isError") {
                 unsafe {
-                    JSObject::add_property(
+                    JSObject::add_property_with_attrs(
                         err_ctor.heap_ptr().unwrap() as *mut JSObject,
                         PropertyKey::from_string("isError"),
                         "isError".to_string(),
                         h,
+                        rune_core::shape::ATTR_WRITABLE | rune_core::shape::ATTR_CONFIGURABLE,
                     );
+                }
+            }
+            // Error.prototype.name is writable+configurable (non-enumerable),
+            // unlike ordinary builtin `name` properties.
+            for proto in &self.error_protos {
+                if let Some(ptr) = proto.heap_ptr() {
+                    if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_OBJECT {
+                        let obj = ptr as *mut JSObject;
+                        let key = PropertyKey::from_string("name");
+                        let shape = unsafe { JSObject::shape_ptr(obj) };
+                        if let Some(slot) = shape.lookup(&key) {
+                            let new_shape = rune_core::shape::Shape::with_replaced_attr(
+                                shape,
+                                slot,
+                                rune_core::shape::ATTR_WRITABLE
+                                    | rune_core::shape::ATTR_CONFIGURABLE,
+                            );
+                            unsafe { JSObject::set_shape_ptr(obj, new_shape) };
+                        }
+                    }
                 }
             }
             // Native error types (skip Error at index 0)
@@ -14670,6 +14691,15 @@ fn values_loosely_equal(a: Value, b: Value) -> bool {
             },
         );
     }
+    // §7.2.13 step 10-11: wrapper objects use their internal primitive
+    // (full OrdinaryToPrimitive with user valueOf/toString is not available
+    // in this synchronous comparison path).
+    if let Some(pa) = equality_object_primitive(a) {
+        return values_loosely_equal(pa, b);
+    }
+    if let Some(pb) = equality_object_primitive(b) {
+        return values_loosely_equal(a, pb);
+    }
     // §7.2.13 step 8-9: Number vs String → compare ToNumber(string) with number
     let (num_val, str_val) = if (a.is_smi() || a.is_float64()) && values_is_string(b) {
         (a, b)
@@ -14690,6 +14720,19 @@ fn values_loosely_equal(a: Value, b: Value) -> bool {
         return true;
     }
     na == nb
+}
+
+fn equality_object_primitive(v: Value) -> Option<Value> {
+    let ptr = v.heap_ptr()?;
+    let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+    if tag == TAG_STRING_OBJ {
+        let sptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
+        return Some(Value::from_heap_ptr(sptr));
+    }
+    if tag == TAG_OBJECT {
+        return crate::builtins::wrapper_primitive(v);
+    }
+    None
 }
 
 fn values_is_string(v: Value) -> bool {

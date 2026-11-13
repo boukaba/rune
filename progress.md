@@ -2451,6 +2451,28 @@ Integration suite: **860 passed, 0 failed, 3 ignored**.
 
 Integration suite: **861 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Error descriptors/toString + wrapper equality (2026-11-13)
+
+- Error instances define `message` with writable/configurable/non-enumerable
+  attributes; `Error.prototype.name` (and native error prototypes) is
+  writable+configurable; `Error.isError` is non-enumerable.
+- `Error.prototype.toString` now:
+  - Gets `name`/`message` through accessor-aware sync Get (getter throws
+    propagate);
+  - applies ToPrimitive/ToString to both values (throwing object toString and
+    Symbol values throw TypeError).
+- Loose equality (`==`/`!=`) now unwraps Boolean/Number wrappers and String
+  wrapper objects to their internal primitive before comparison, fixing
+  `Boolean.prototype == false`, `new Number(2) == 2`, `new String("x") == "x"`.
+- Test262: Error **43 → 51/93** (all non-skipped pass), Object
+  **2674 → 2693/3411**, Number **317 → 320/340**, Boolean **43 → 45/51**.
+- Regression: `test_error_descriptors_to_string_and_wrapper_equality`.
+- Known: StringObject wrappers still lack named-property storage (so
+  transferred-method brand checks on `new String` can silently no-op); exact
+  toExponential/toPrecision rounding; `new Function` is not constructible.
+
+Integration suite: **862 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

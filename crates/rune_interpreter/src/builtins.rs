@@ -7631,17 +7631,38 @@ pub fn error_constructor(
                 (PropertyKey::from_string("cause"), 1usize),
             ];
             let key_names = vec!["message".to_string(), "cause".to_string()];
-            (Shape::intern(entries, key_names), 2usize)
+            (
+                Shape::intern_with_attrs(
+                    entries,
+                    key_names,
+                    vec![
+                        rune_core::shape::ATTR_WRITABLE | rune_core::shape::ATTR_CONFIGURABLE,
+                        rune_core::shape::ATTR_WRITABLE | rune_core::shape::ATTR_CONFIGURABLE,
+                    ],
+                ),
+                2usize,
+            )
         }
         (true, false) => {
             let entries = vec![(PropertyKey::from_string("message"), 0usize)];
             let key_names = vec!["message".to_string()];
-            (Shape::intern(entries, key_names), 1usize)
+            (
+                Shape::intern_with_attrs(
+                    entries,
+                    key_names,
+                    vec![rune_core::shape::ATTR_WRITABLE | rune_core::shape::ATTR_CONFIGURABLE],
+                ),
+                1usize,
+            )
         }
         (false, true) => {
             let entries = vec![(PropertyKey::from_string("cause"), 0usize)];
             let key_names = vec!["cause".to_string()];
-            let shape = Shape::intern(entries, key_names);
+            let shape = Shape::intern_with_attrs(
+                entries,
+                key_names,
+                vec![rune_core::shape::ATTR_WRITABLE | rune_core::shape::ATTR_CONFIGURABLE],
+            );
             (shape, 1usize)
         }
         (false, false) => (Shape::empty(), 0usize),
@@ -7765,31 +7786,57 @@ pub fn error_prototype_to_string(
         ));
         return Value::undefined();
     }
-    // Push `this` onto the operand stack: register_roots re-forwards it on
-    // every collection, so re-reading it after any allocation is safe.
     let base = vm.stack.len();
     vm.push(this);
-    // Allocate the key strings up front so no allocation happens between
-    // the two property reads.
-    let name_key = Value::from_heap_ptr(crate::vm::heap_string(gc, "name"));
-    let msg_key = Value::from_heap_ptr(crate::vm::heap_string(gc, "message"));
+    let to_text = |gc: &mut SemiSpace, vm: &mut Vm, v: Value, fallback: &str| -> Option<String> {
+        if v.is_undefined() {
+            return Some(fallback.to_string());
+        }
+        let prim = match to_primitive_sync(gc, vm, v, "string") {
+            Ok(p) => p,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return None;
+            }
+        };
+        if prim.as_symbol_id().is_some() {
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Cannot convert a Symbol value to a string",
+            ));
+            return None;
+        }
+        Some(value_to_js_string(prim))
+    };
     let this_val = vm.stack[base];
-    // name: Get(O, "name"); undefined → "Error".
-    let name = load_property_recursive(this_val, name_key, Some(vm.function_prototype), gc);
-    let name_str = if name.is_undefined() {
-        "Error".to_string()
-    } else {
-        value_to_js_string(name)
+    let name = match get_value_sync(gc, vm, this_val, "name") {
+        Ok(v) => v,
+        Err(e) => {
+            vm.stack.truncate(base);
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
     };
-    // message: Get(O, "message"); undefined → "".
+    let Some(name_str) = to_text(gc, vm, name, "Error") else {
+        vm.stack.truncate(base);
+        return Value::undefined();
+    };
     let this_val2 = vm.stack[base];
-    let msg = load_property_recursive(this_val2, msg_key, Some(vm.function_prototype), gc);
-    vm.stack.truncate(base);
-    let msg_str = if msg.is_undefined() {
-        String::new()
-    } else {
-        value_to_js_string(msg)
+    let msg = match get_value_sync(gc, vm, this_val2, "message") {
+        Ok(v) => v,
+        Err(e) => {
+            vm.stack.truncate(base);
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
     };
+    let Some(msg_str) = to_text(gc, vm, msg, "") else {
+        vm.stack.truncate(base);
+        return Value::undefined();
+    };
+    vm.stack.truncate(base);
     let result = if name_str.is_empty() {
         msg_str
     } else if msg_str.is_empty() {

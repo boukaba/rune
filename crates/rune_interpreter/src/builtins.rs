@@ -18488,6 +18488,15 @@ pub(crate) fn promise_resolve_for_combinator(gc: &mut SemiSpace, val: Value, vm:
         let then_str = HeapString::allocate(gc, "then");
         let then_key = Value::from_heap_ptr(then_str as *mut u8);
         let then_val = load_property_recursive(val, then_key, Some(vm.function_prototype), gc);
+        if let Some(exc) = vm.pending_exception.take() {
+            let ptr = Promise::allocate(gc, vm.promise_prototype.heap_ptr());
+            unsafe {
+                Promise::set_state(ptr, PROMISE_REJECTED);
+                Promise::set_result(ptr, exc);
+            }
+            vm.temp_roots.truncate(root_base);
+            return Value::from_heap_ptr(ptr);
+        }
         if let Some(tp) = then_val.heap_ptr() {
             if unsafe { (*(tp as *const GcHeader)).tag() } == TAG_FUNC {
                 vm.temp_roots.push(then_val);
@@ -18557,19 +18566,30 @@ pub(crate) fn resolve_promise_with(gc: &mut SemiSpace, target: Value, result: Va
     // Non-thenable results fulfill immediately (PromiseResolveThenableJob is
     // only for thenables). This also avoids creating an internal `.then` chain
     // for every ordinary callback return.
-    let thenable = if let Some(ptr) = result.heap_ptr() {
+    let mut thenable = false;
+    if let Some(ptr) = result.heap_ptr() {
         if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_PROMISE {
-            true
+            thenable = true;
         } else {
             let key = Value::from_heap_ptr(HeapString::allocate(gc, "then") as *mut u8);
             let then_val = load_property_recursive(result, key, Some(vm.function_prototype), gc);
-            then_val
+            if let Some(exc) = vm.pending_exception.take() {
+                let target_now = vm.temp_roots[root_base];
+                if let Some(tptr) = target_now.heap_ptr() {
+                    unsafe {
+                        Promise::set_state(tptr, PROMISE_REJECTED);
+                        Promise::set_result(tptr, exc);
+                    }
+                    settle_promise_reactions(vm, tptr, exc, false);
+                }
+                vm.temp_roots.truncate(root_base);
+                return;
+            }
+            thenable = then_val
                 .heap_ptr()
-                .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC)
+                .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC);
         }
-    } else {
-        false
-    };
+    }
     if !thenable {
         let target_now = vm.temp_roots[root_base];
         let result_now = vm.temp_roots[root_base + 1];
@@ -18621,6 +18641,18 @@ pub fn promise_static_resolve(
         let then_str = HeapString::allocate(gc, "then");
         let then_key = Value::from_heap_ptr(then_str as *mut u8);
         let then_val = load_property_recursive(val, then_key, Some(vm.function_prototype), gc);
+        if let Some(exc) = vm.pending_exception.take() {
+            let base = vm.temp_roots.len();
+            vm.temp_roots.push(exc);
+            let ptr = Promise::allocate(gc, vm.promise_prototype.heap_ptr());
+            let exc_now = vm.temp_roots[base];
+            vm.temp_roots.truncate(base);
+            unsafe {
+                Promise::set_state(ptr, PROMISE_REJECTED);
+                Promise::set_result(ptr, exc_now);
+            }
+            return Value::from_heap_ptr(ptr);
+        }
         if let Some(then_ptr) = then_val.heap_ptr() {
             let then_tag = unsafe { (*(then_ptr as *const GcHeader)).tag() };
             if then_tag == TAG_FUNC {

@@ -841,8 +841,9 @@ Integration suite: **782 passed, 0 failed, 3 ignored**; full 512-stress 782.
   concentrated in thenable jobs, poisoned `then`, resolve-self, and combinator
   species/constructor cases.
 - Targeted map suite remains **199/216 (92.1%)**.
-- Limitation: timers are not installed in the child, so async tests that require
-  `setTimeout` are not exercised; only microtask completion is awaited.
+- The child also installs the runtime timer/fetch job queues, so timer-driven
+  async callbacks are run through `RuntimeJobs`; no network transport is
+  configured, and only currently-due timers execute.
 
 Integration suite: **783 passed, 0 failed, 3 ignored**.
 

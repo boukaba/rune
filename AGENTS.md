@@ -90,7 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
-- **Real async test262 execution (2026-11-13)**: child installs `$DONE` host fn, drains microtasks, honors async failures. Honest Promise **340/703 (48.4%)**, map **199/216 (92.1%)**, integration **783**. Timers still not exercised in child.
+- **Real async test262 execution (2026-11-13)**: child installs `$DONE` host fn, drains microtasks, honors async failures. Honest Promise **340/703 (48.4%)**, map **199/216 (92.1%)**, integration **783**. Timer jobs are installed in the child; fetch remains unconfigured.
 - **Undeclared identifiers + async harness honesty (2026-11-13)**: LoadGlobal throws ReferenceError, soft typeof lookup, top-level var bindings seeded undefined, Promise statics precheck resolve/iterable, test262 `$DONE` shim; map **199/216 (92.1%)**, honest Promise **340/703 (48.4%)**, integration **783**.
 - **AggregateError + array tail (2026-11-13)**: real AggregateError ctor/prototype (Promise.any identity), @@toStringTag for Math/JSON/custom, primitive thisArg boxing for sloppy callbacks, full ToNumber for array-like lengths. test262 map 191→**199/216 (92.1%)**, Promise 373→**371/703 (52.8%)** after removing wrong-reason async passes; integration **783 passed**.
 - **Boolean/Number wrappers + primitive receivers (2026-11-13)**: real wrapper objects, Number/Boolean prototypes, Function.prototype-based `instanceof`/`getPrototypeOf`, ToObject boxing for array methods, hidden-slot filtering/JSON primitives. map 184→**191/216 (88.4%)**; integration **779 passed**. All arithmetic unwraps wrapper primitives; boxed receivers live in a bounded root list.

@@ -138,6 +138,7 @@ fn main() {
                             // 64 MiB heap: spec-correct multi-MB results (B1f-3
                             // 1M-element maps) don't fit the 16 MiB default.
                             let mut ctx = rune_embed::Context::new_large();
+                            let mut jobs = rune_runtime::install(&mut ctx);
                             let done = std::rc::Rc::new(std::cell::RefCell::new(None::<String>));
                             let done_sink = done.clone();
                             ctx.register_host_fn("$DONE", 1, move |_gc, _this, args, _vm| {
@@ -154,7 +155,9 @@ fn main() {
                             });
                             let eval = ctx.eval(&src).map(|_| ());
                             if eval.is_ok() {
-                                ctx.drain_microtasks();
+                                // Timers plus promise microtasks; `$DONE` may be
+                                // called from either channel.
+                                jobs.run_jobs(&mut ctx)?;
                                 if let Some(error) = done.borrow_mut().take() {
                                     return Err(error);
                                 }

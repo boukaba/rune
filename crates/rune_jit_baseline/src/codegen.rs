@@ -705,19 +705,17 @@ impl CodeGen {
                     // CMP r8, r9
                     self.mem.emit_cmp_r64_r64(8, 9);
                     let jne_shape_patch = self.mem.emit_jne_rel32(0);
-                    // MOV [rdx + 32 + offset*8], rcx (store value)
-                    let disp = 32 + offset * 8;
-                    if disp <= i8::MAX as u32 {
-                        self.mem.emit_rex_w();
-                        self.mem.emit_byte(0x89);
-                        self.mem.emit_byte(0x4A);
-                        self.mem.emit_byte(disp as u8);
-                    } else {
-                        self.mem.emit_rex_w();
-                        self.mem.emit_byte(0x89);
-                        self.mem.emit_byte(0x8A);
-                        self.mem.emit_u32(disp);
-                    }
+                    // MOV r10, [rdx + 32] (stable slot buffer)
+                    self.mem.emit_byte(0x4C);
+                    self.mem.emit_byte(0x8B);
+                    self.mem.emit_byte(0x92);
+                    self.mem.emit_u32(32);
+                    // MOV [r10 + 40 + offset*8], rcx (store value)
+                    let disp = 40 + offset * 8;
+                    self.mem.emit_byte(0x49);
+                    self.mem.emit_byte(0x89);
+                    self.mem.emit_byte(0x8A);
+                    self.mem.emit_u32(disp);
                     // Push value back
                     self.mem.emit_mov_r64_rm64(0, 1); // rax = rcx (value)
                     self.emit_jit_stack_push();
@@ -791,19 +789,16 @@ impl CodeGen {
                     // CMP rdx, r8
                     self.mem.emit_cmp_r64_r64(2, 8);
                     let jne_shape_miss = self.mem.emit_jne_rel32(0);
-                    // MOV rax, [rax + 32 + offset*8]
-                    let slot_disp: i32 = (32 + offset * 8) as i32;
-                    if (-128..=127).contains(&(slot_disp as i8)) {
-                        self.mem.emit_rex_w();
-                        self.mem.emit_byte(0x8B);
-                        self.mem.emit_byte(0x40); // mod=01, reg=0, r/m=0
-                        self.mem.emit_byte(slot_disp as u8);
-                    } else {
-                        self.mem.emit_rex_w();
-                        self.mem.emit_byte(0x8B);
-                        self.mem.emit_byte(0x80); // mod=10, reg=0, r/m=0
-                        self.mem.emit_u32(slot_disp as u32);
-                    }
+                    // MOV rax, [rax + 32] (stable slot buffer)
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0x8B);
+                    self.mem.emit_byte(0x80);
+                    self.mem.emit_u32(32);
+                    // MOV rax, [rax + 40 + offset*8]
+                    self.mem.emit_rex_w();
+                    self.mem.emit_byte(0x8B);
+                    self.mem.emit_byte(0x80);
+                    self.mem.emit_u32(40 + offset * 8);
                     self.emit_jit_stack_push();
                     // JMP done (skip miss handler)
                     let jmp_done_patch = self.mem.emit_jmp_rel32(0);

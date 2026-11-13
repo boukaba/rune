@@ -24,8 +24,8 @@ use std::path::Path;
 /// Magic bytes identifying an AFPC cache file.
 const AFPC_MAGIC: &[u8; 4] = b"AFPC";
 /// Cache format version. Bump when the serialized schema changes.
-/// v9: builtin table gained Promise.any/_promise_any_element.
-const AFPC_VERSION: u32 = 9;
+/// v10: stable JSObject slot buffers; native property offsets changed.
+const AFPC_VERSION: u32 = 10;
 
 /// Stable source fingerprint (FNV-1a). A cache is valid only for the exact
 /// source text it was compiled from; the CLI checks this before executing.

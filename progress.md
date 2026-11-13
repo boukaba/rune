@@ -678,8 +678,34 @@ alias class for array storage:
 
 Integration suite: **770 passed, 0 failed, 3 ignored**.
 
-Known gap: object/JSObject growth still uses the interim forwarding path;
-stable object headers are the remaining structural piece.
+Known gap: none for self-moving growth — object headers were completed in the
+next slice.
+
+### Phase 1 — stable object headers (2026-11-13)
+
+Objects now use the same stable-header discipline as arrays:
+
+- Initial objects keep slots inline at offset 40 with an `INLINE_SLOTS_BIT`.
+  The pointer at offset 32 is a **self-pointer** while inline, so JIT/IC slot
+  access remains one uniform `load [obj+32]; load/store [buffer+40+offset*8]`.
+- Growth allocates a separate slot buffer, copies the live window, clears the
+  inline bit, and updates the header's buffer pointer. The object header address
+  never changes; variable/object/nested aliases observe grown objects
+  immediately.
+- GC scans inline objects (prototype + values, repairing the self-pointer in
+  to-space), grown objects (prototype + buffer pointer), and slot buffers
+  (values). `SemiSpace` scratch roots protect input Values/header across
+  allocation.
+- JIT x86-64 and AArch64 property IC load/store paths now access the stable
+  buffer (`[obj+32]` then `+40+offset*8`); trace IC tables and slot offsets were
+  updated to match. Full hot-function property test passes with JIT enabled.
+- AFPC bumped to **v10** because native property offsets changed.
+- Regressions: `test_object_header_stable_across_growth`,
+  `test_jit_property_slots_follow_stable_objects`, plus the 100K-object GC
+  stress family.
+
+Integration suite: **773 passed, 0 failed, 3 ignored**, both normally and under
+`RUNE_GC_STRESS=512`; dedicated GC stress 4/4.
 
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,

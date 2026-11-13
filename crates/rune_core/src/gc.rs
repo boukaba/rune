@@ -268,15 +268,23 @@ impl SemiSpace {
 
                 match tag {
                     TAG_OBJECT => {
-                        // Forward prototype pointer (if non-null)
+                        let word = *(scan_ptr.add(16) as *const u32);
+                        let cap = (word
+                            & !(crate::object::EXTENSIBLE_BIT | crate::object::INLINE_SLOTS_BIT))
+                            as usize;
                         let proto_ptr = scan_ptr.add(OBJECT_PROTOTYPE_OFFSET) as *mut u64;
                         self.forward_value(proto_ptr);
-                        // Forward property slots
-                        let slots_ptr = scan_ptr.add(OBJECT_SLOTS_OFFSET) as *mut u64;
-                        // Object layout: offset +16 = capacity, offset +20 = slot_count
-                        let cap = *(scan_ptr.add(16) as *const u32) as usize;
-                        for i in 0..cap {
-                            self.forward_value(slots_ptr.add(i));
+                        if word & crate::object::INLINE_SLOTS_BIT != 0 {
+                            // Values are inline; keep the JIT self-pointer
+                            // valid in to-space and trace the slots.
+                            *(scan_ptr.add(OBJECT_SLOTS_OFFSET) as *mut u64) = scan_ptr as u64;
+                            let slots = scan_ptr.add(crate::object::OBJECT_HEADER_END) as *mut u64;
+                            for i in 0..cap {
+                                self.forward_value(slots.add(i));
+                            }
+                        } else {
+                            let slots_ptr = scan_ptr.add(OBJECT_SLOTS_OFFSET) as *mut u64;
+                            self.forward_value(slots_ptr);
                         }
                     }
                     TAG_ARRAY => {
@@ -421,10 +429,15 @@ impl SemiSpace {
                 }
                 TAG_FLOAT64 => obj_start.add(align_up(size_of::<GcHeader>() + 8, 16)),
                 TAG_OBJECT => {
-                    let capacity_ptr = obj_start.add(16) as *const u32;
-                    // Mask the object-extensibility bit (object::EXTENSIBLE_BIT).
-                    let capacity = (*capacity_ptr & !crate::object::EXTENSIBLE_BIT) as usize;
-                    let total = OBJECT_SLOTS_OFFSET + capacity * size_of::<u64>();
+                    let raw = *(obj_start.add(16) as *const u32);
+                    let capacity = (raw
+                        & !(crate::object::EXTENSIBLE_BIT | crate::object::INLINE_SLOTS_BIT))
+                        as usize;
+                    let total = if raw & crate::object::INLINE_SLOTS_BIT != 0 {
+                        crate::object::OBJECT_HEADER_END + capacity * size_of::<u64>()
+                    } else {
+                        crate::object::OBJECT_HEADER_END
+                    };
                     obj_start.add(align_up(total, 16))
                 }
                 TAG_ARRAY => {

@@ -12561,7 +12561,7 @@ impl Vm {
                         }
                         entries[count] = rune_jit_baseline::ic::TraceIcEntry {
                             shape_id: k.shape_id,
-                            slot_offset: 32 + (v.offset as u64) * 8,
+                            slot_offset: 40 + (v.offset as u64) * 8,
                         };
                         count += 1;
                     }

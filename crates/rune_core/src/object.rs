@@ -1,7 +1,6 @@
 use crate::gc::{GcHeader, SemiSpace, TAG_OBJECT, size_of};
 use crate::shape::Shape;
 use crate::value::Value;
-use std::ptr;
 
 /// Memory layout offsets (in bytes) for a JSObject:
 ///   [0..8)   GcHeader
@@ -9,11 +8,18 @@ use std::ptr;
 ///   [16..20) capacity: u32 (total slot capacity including reserved)
 ///   [20..24) slot_count: u32 (used slots)
 ///   [24..32) prototype: *mut u8 (heap pointer or null)
-///   [32..)   slots: Value[]
-pub const OBJECT_HEADER_END: usize = 32;
+///   [32..40) slots: *mut SlotBuffer (stable across growth)
+///
+/// Slot values live in an internal TAG_ARRAY buffer with values at offset 40;
+/// object growth replaces the buffer, never the object header.
+pub const OBJECT_HEADER_END: usize = 40;
 
 /// Number of extra slots to reserve beyond the initial shape's property count.
 const RESERVED_SLOTS: usize = 8;
+
+/// Initial objects keep slots inline at offset 40. Growth converts them to a
+/// stable slot buffer and clears this bit; the object header never moves.
+pub const INLINE_SLOTS_BIT: u32 = 1 << 30;
 
 /// Object extensibility (§10.1.9 [[Extensible]]): stored as the top bit of
 /// the capacity word (capacities never approach 2^31). Set by
@@ -32,32 +38,30 @@ impl JSObject {
     ) -> *mut JSObject {
         let slot_count = slot_values.len();
         let capacity = slot_count + RESERVED_SLOTS;
-        let obj_size = OBJECT_HEADER_END + capacity * size_of::<Value>();
-        let ptr = ss.alloc(obj_size);
+        let scratch_base = ss.scratch_len();
+        for value in slot_values {
+            ss.push_scratch_root(*value);
+        }
+        let ptr = ss.alloc(OBJECT_HEADER_END + capacity * size_of::<Value>());
         unsafe {
             let header = &mut *(ptr as *mut GcHeader);
             header.word = std::sync::atomic::AtomicU64::new(TAG_OBJECT);
-
-            let shape_ptr = ptr.add(8) as *mut *const Shape;
-            *shape_ptr = shape as *const Shape;
-
-            let cap_ptr = ptr.add(16) as *mut u32;
-            *cap_ptr = capacity as u32;
-
-            let sc_ptr = ptr.add(20) as *mut u32;
-            *sc_ptr = slot_count as u32;
-
-            // Prototype starts as null (no prototype)
-            let proto_ptr = ptr.add(24) as *mut *mut u8;
-            *proto_ptr = std::ptr::null_mut();
-
-            let slots_ptr = ptr.add(OBJECT_HEADER_END) as *mut Value;
-            ptr::copy_nonoverlapping(slot_values.as_ptr(), slots_ptr, slot_count);
-            // Zero out reserved slots
+            *(ptr.add(8) as *mut *const Shape) = shape as *const Shape;
+            *(ptr.add(16) as *mut u32) = (capacity as u32) | INLINE_SLOTS_BIT;
+            *(ptr.add(20) as *mut u32) = slot_count as u32;
+            *(ptr.add(24) as *mut *mut u8) = std::ptr::null_mut();
+            // Inline objects keep a self pointer at 32 so JIT slot access can
+            // use one uniform [ptr] then [ptr + 40 + offset*8] sequence.
+            *(ptr.add(32) as *mut *mut u8) = ptr;
+            let slots = ptr.add(OBJECT_HEADER_END) as *mut Value;
+            for i in 0..slot_count {
+                *slots.add(i) = ss.scratch_value(scratch_base + i);
+            }
             for i in slot_count..capacity {
-                *slots_ptr.add(i) = Value::undefined();
+                *slots.add(i) = Value::undefined();
             }
         }
+        ss.truncate_scratch(scratch_base);
         ptr as *mut JSObject
     }
 
@@ -65,8 +69,8 @@ impl JSObject {
         unsafe {
             let ptr = ptr as *mut u8;
             let cap_ptr = ptr.add(16) as *const u32;
-            // Mask the extensibility bit (see EXTENSIBLE_BIT).
-            (*cap_ptr & !EXTENSIBLE_BIT) as usize
+            // Mask extensibility/inline flags.
+            (*cap_ptr & !(EXTENSIBLE_BIT | INLINE_SLOTS_BIT)) as usize
         }
     }
 
@@ -117,37 +121,46 @@ impl JSObject {
         }
     }
 
-    /// Grow the object to ~2x capacity, copying header + all slots.
-    /// Returns (resolved_old_ptr, new_object). The old header is marked
-    /// forwarded (single hop — callers must refresh immediately and rewrite
-    /// roots, mirroring RuneArray::grow). The extensibility bit survives;
-    /// new tail slots read undefined.
+    /// Grow to ~2x capacity. Inline slots convert to a stable slot buffer;
+    /// the object header never moves. Returns (header, same_header).
     pub unsafe fn grow(ss: &mut SemiSpace, ptr: *mut JSObject) -> (*mut u8, *mut JSObject) {
         unsafe {
-            let old_cap = Self::capacity(ptr);
-            let count = Self::slot_count(ptr);
+            let obj = crate::gc::resolve_forwarded(ptr as *mut u8) as *mut JSObject;
+            let old_cap = Self::capacity(obj);
+            let count = Self::slot_count(obj);
+            let old_word = *((obj as *mut u8).add(16) as *const u32);
+            let inline = old_word & INLINE_SLOTS_BIT != 0;
             let new_cap = (old_cap * 2).max(old_cap + 8);
-            let total = OBJECT_HEADER_END + new_cap * size_of::<Value>();
-            let new_ptr = ss.alloc(total);
-            // GC during alloc may have moved `ptr` (from-space, forwarded),
-            // and an earlier growth may already have forwarded it. Resolve
-            // the full chain before copying.
-            let src = crate::gc::resolve_forwarded(ptr as *mut u8);
-            // Copy header (GcHeader + shape + capacity + count + prototype).
-            std::ptr::copy_nonoverlapping(src, new_ptr, OBJECT_HEADER_END);
-            // Capacity word carries EXTENSIBLE_BIT — preserve the flag.
-            let old_word = *(src.add(16) as *const u32);
-            *(new_ptr.add(16) as *mut u32) = (new_cap as u32) | (old_word & EXTENSIBLE_BIT);
-            // Copy live slots; fresh tail reads undefined.
-            let old_slots = src.add(OBJECT_HEADER_END) as *const Value;
-            let new_slots = new_ptr.add(OBJECT_HEADER_END) as *mut Value;
-            std::ptr::copy_nonoverlapping(old_slots, new_slots, count.min(old_cap));
-            for i in count.min(old_cap)..new_cap {
+            let scratch_base = ss.scratch_len();
+            ss.push_scratch_root(Value::from_heap_ptr(obj as *mut u8));
+            let old_buffer = if inline {
+                std::ptr::null_mut()
+            } else {
+                *((obj as *mut u8).add(32) as *const *mut u8)
+            };
+            let new_buffer = crate::array::RuneArray::slot_buffer_alloc(ss, new_cap);
+            let obj_now = ss
+                .scratch_value(scratch_base)
+                .heap_ptr()
+                .unwrap_or(std::ptr::null_mut()) as *mut JSObject;
+            let new_slots = new_buffer.add(crate::array::BUFFER_HEAD_END) as *mut Value;
+            let copied = count.min(old_cap);
+            if inline {
+                let old_slots = (obj_now as *mut u8).add(OBJECT_HEADER_END) as *const Value;
+                std::ptr::copy_nonoverlapping(old_slots, new_slots, copied);
+            } else if !old_buffer.is_null() {
+                let old_buffer = crate::gc::resolve_forwarded(old_buffer);
+                let old_slots = old_buffer.add(crate::array::BUFFER_HEAD_END) as *const Value;
+                std::ptr::copy_nonoverlapping(old_slots, new_slots, copied);
+            }
+            for i in copied..new_cap {
                 *new_slots.add(i) = Value::undefined();
             }
-            // Mark the old location forwarded so stragglers resolve.
-            (*(src as *const GcHeader)).set_forwarding(new_ptr);
-            (src, new_ptr as *mut JSObject)
+            *((obj_now as *mut u8).add(16) as *mut u32) =
+                (new_cap as u32) | (old_word & EXTENSIBLE_BIT);
+            *((obj_now as *mut u8).add(32) as *mut *mut u8) = new_buffer;
+            ss.truncate_scratch(scratch_base);
+            (obj_now as *mut u8, obj_now)
         }
     }
 
@@ -182,7 +195,15 @@ impl JSObject {
     pub unsafe fn slots_ptr(ptr: *mut JSObject) -> *mut Value {
         unsafe {
             let ptr_bytes = ptr as *mut u8;
-            ptr_bytes.add(OBJECT_HEADER_END) as *mut Value
+            let word = *(ptr_bytes.add(16) as *const u32);
+            if word & INLINE_SLOTS_BIT != 0 {
+                return ptr_bytes.add(OBJECT_HEADER_END) as *mut Value;
+            }
+            let raw = *(ptr_bytes.add(32) as *const *mut u8);
+            if raw.is_null() {
+                return std::ptr::null_mut();
+            }
+            crate::gc::resolve_forwarded(raw).add(crate::array::BUFFER_HEAD_END) as *mut Value
         }
     }
 

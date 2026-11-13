@@ -52,6 +52,8 @@ conversation.
 ## Phase 1 — Engine hardening (2–6 months)
 
 - **Memory:** stable object/array headers with separate slot storage;
+  **status 2026-11-13: landed for both objects and arrays (inline→slot buffer
+  growth, JIT/IC offsets updated, AFPC v10);**
   generational nursery/old space; write barriers; incremental marking; weak
   refs/finalization; bounded shape arena. Evaluate MMTk before building a
   full collector.

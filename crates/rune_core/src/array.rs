@@ -66,7 +66,7 @@ impl RuneArray {
         unsafe { crate::gc::resolve_forwarded(arr as *mut u8) as *mut RuneArray }
     }
     /// Allocate an internal slot buffer with `cap` inline Value slots.
-    unsafe fn slot_buffer_alloc(ss: &mut SemiSpace, cap: usize) -> *mut u8 {
+    pub(crate) unsafe fn slot_buffer_alloc(ss: &mut SemiSpace, cap: usize) -> *mut u8 {
         unsafe {
             let ptr = ss.alloc(BUFFER_HEAD_END + cap * size_of::<Value>());
             let header = &mut *(ptr as *mut GcHeader);

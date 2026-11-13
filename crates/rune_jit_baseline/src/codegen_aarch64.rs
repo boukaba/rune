@@ -2030,7 +2030,8 @@ impl Aarch64CodeGen {
                                 ldr_off(&mut self.mem, 1, 1, 24);
                             }
                         }
-                        ldr_reg(&mut self.mem, 0, 1, 6); // x0 = [x1 + x6]
+                        ldr_off(&mut self.mem, 4, 1, 32); // x4 = slot buffer
+                        ldr_reg(&mut self.mem, 0, 4, 6); // x0 = [buffer + slot]
                         self.push();
                         done_patches.push(self.mem.current_offset());
                         emit(&mut self.mem, 0x14000000); // B → done
@@ -2049,7 +2050,8 @@ impl Aarch64CodeGen {
                                 ldr_off(&mut self.mem, 1, 1, 24);
                             }
                         }
-                        ldr_off(&mut self.mem, 0, 1, 32 + offset * 8);
+                        ldr_off(&mut self.mem, 1, 1, 32);
+                        ldr_off(&mut self.mem, 0, 1, 40 + offset * 8);
                         self.push();
                         done_patches.push(self.mem.current_offset());
                         emit(&mut self.mem, 0x14000000); // B → done
@@ -2149,7 +2151,8 @@ impl Aarch64CodeGen {
                             self.mem.patch_u32(eq, 0x54000000 | ((d & 0x7FFFF) << 5));
                         }
                         miss_patches.push((b_miss, 0x14000000));
-                        str_reg(&mut self.mem, 1, 2, 6); // [x2 + x6] = value
+                        ldr_off(&mut self.mem, 4, 2, 32); // x4 = slot buffer
+                        str_reg(&mut self.mem, 1, 4, 6); // [buffer + slot] = value
                         mov_reg(&mut self.mem, 0, 1);
                         self.push();
                         done_patches.push(self.mem.current_offset());
@@ -2164,7 +2167,8 @@ impl Aarch64CodeGen {
                         cmp_reg(&mut self.mem, 3, 6);
                         miss_patches.push((self.mem.current_offset(), 0x54000001));
                         emit(&mut self.mem, 0x54000001); // B.NE → miss
-                        str_off(&mut self.mem, 1, 2, 32 + offset * 8);
+                        ldr_off(&mut self.mem, 2, 2, 32);
+                        str_off(&mut self.mem, 1, 2, 40 + offset * 8);
                         mov_reg(&mut self.mem, 0, 1);
                         self.push();
                         done_patches.push(self.mem.current_offset());

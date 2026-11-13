@@ -13985,3 +13985,43 @@ fn test_promise_chaining_adopts_promises_and_thenables() {
     assert_eq!(eval_str(&mut ctx, "out"), "chain3");
     assert_eq!(eval_str(&mut ctx, "nested"), "xy");
 }
+
+#[test]
+fn test_object_header_stable_across_growth() {
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+        var o = { a: 1 };
+        var alias = o;
+        var holder = { obj: o };
+        for (var i = 0; i < 300; i++) { o["k" + i] = i; }
+        [alias === o, alias.a, holder.obj.k0, holder.obj.k299].join("|");
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "[alias === o, alias.a, holder.obj.k0, holder.obj.k299].join('|')"
+        ),
+        "true|1|0|299"
+    );
+}
+
+#[test]
+fn test_jit_property_slots_follow_stable_objects() {
+    let mut ctx = Context::new();
+    ctx.enable_jit = true;
+    let r = ctx
+        .eval(
+            r#"
+            function f(o) { return o.a + o.b; }
+            var o = { a: 1, b: 2 };
+            var s = 0;
+            for (var i = 0; i < 200; i++) { s += f(o); }
+            s;
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.as_smi(), Some(600));
+}

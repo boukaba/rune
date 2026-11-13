@@ -16332,3 +16332,36 @@ fn test_tagged_template() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_json_reviver_and_raw_json() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var calls = [];
+            var parsed = JSON.parse('{"a":1,"b":[2,3],"2":0,"1":0}', function (k, v) {
+                calls.push(k);
+                if (k === "a") return 10;
+                return v;
+            });
+            var raw = JSON.rawJSON('{"x":1}');
+            var rawThrew = false;
+            try { JSON.rawJSON("{"); } catch (e) { rawThrew = e instanceof SyntaxError; }
+            var plain = { rawJSON: "123" };
+            [
+                parsed.a === 10 && parsed.b[0] === 2 && parsed.b[1] === 3,
+                calls.join(",") === "1,2,a,0,1,b,",
+                JSON.isRawJSON(raw),
+                !JSON.isRawJSON(plain),
+                Object.getPrototypeOf(raw) === null,
+                raw.rawJSON === '{"x":1}',
+                JSON.stringify(raw) === '{"x":1}',
+                JSON.stringify({ a: raw }) === '{"a":{"x":1}}',
+                rawThrew
+            ].join("|") === "true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

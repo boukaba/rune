@@ -17289,6 +17289,23 @@ pub fn json_parse(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm)
                     return None;
                 }
                 *pos += 1;
+                // Duplicate keys: later value wins, original insertion order.
+                {
+                    let mut seen: Vec<(String, usize)> = Vec::new();
+                    let mut out_keys = Vec::with_capacity(keys.len());
+                    let mut out_vals = Vec::with_capacity(values.len());
+                    for (k, v) in keys.into_iter().zip(values.into_iter()) {
+                        if let Some((_, idx)) = seen.iter().find(|(name, _)| *name == k) {
+                            out_vals[*idx] = v;
+                        } else {
+                            seen.push((k.clone(), out_vals.len()));
+                            out_keys.push(k);
+                            out_vals.push(v);
+                        }
+                    }
+                    keys = out_keys;
+                    values = out_vals;
+                }
                 // Build object with string-keyed properties
                 let shape_entries: Vec<(PropertyKey, usize)> = keys
                     .iter()
@@ -17309,12 +17326,213 @@ pub fn json_parse(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm)
             _ => None,
         }
     }
-    parse_value(gc, &chars, &mut pos, array_proto, object_proto).unwrap_or_else(|| {
-        let msg_ptr = HeapString::allocate(gc, "JSON.parse: unexpected end of JSON input");
-        let err = make_simple_object(gc, "message", Value::from_heap_ptr(msg_ptr as *mut u8));
-        vm.set_pending_exception(err);
-        Value::undefined()
-    })
+    let parsed =
+        parse_value(gc, &chars, &mut pos, array_proto, object_proto).unwrap_or_else(|| {
+            let err = crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::SyntaxError,
+                "JSON.parse: unexpected end of JSON input",
+            );
+            vm.set_pending_exception(err);
+            Value::undefined()
+        });
+    if vm.pending_exception.is_some() {
+        return parsed;
+    }
+    let reviver = args.get(1).copied().unwrap_or(Value::undefined());
+    if !is_callable_value(reviver) {
+        return parsed;
+    }
+    let holder = make_simple_object(gc, "", parsed);
+    let root_key = Value::from_heap_ptr(HeapString::allocate(gc, "") as *mut u8);
+    fn internalize(
+        gc: &mut SemiSpace,
+        vm: &mut Vm,
+        holder: Value,
+        key: Value,
+        reviver: Value,
+    ) -> Result<Value, Value> {
+        let base = vm.temp_roots.len();
+        vm.temp_roots.push(holder);
+        vm.temp_roots.push(key);
+        vm.temp_roots.push(reviver);
+        let result = (|| -> Result<Value, Value> {
+            let holder = vm.temp_roots[base];
+            let key = vm.temp_roots[base + 1];
+            let reviver = vm.temp_roots[base + 2];
+            let mut val = get_property_value_sync(gc, vm, holder, key)?;
+            vm.temp_roots.push(val);
+            let val_slot = vm.temp_roots.len() - 1;
+            if let Some(ptr) = val.heap_ptr() {
+                let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+                if tag == TAG_ARRAY {
+                    let len_val = get_value_sync(gc, vm, val, "length")?;
+                    let len_num = to_number_sync(gc, vm, len_val)?;
+                    let len = if len_num.is_nan() || len_num <= 0.0 {
+                        0usize
+                    } else {
+                        len_num as usize
+                    };
+                    for i in 0..len {
+                        val = vm.temp_roots[val_slot];
+                        let idx = Value::from_heap_ptr(
+                            HeapString::allocate(gc, &i.to_string()) as *mut u8
+                        );
+                        let new_el = internalize(gc, vm, val, idx, reviver)?;
+                        val = vm.temp_roots[val_slot];
+                        if new_el.is_undefined() {
+                            let ok = crate::builtins::reflect_delete_property(
+                                gc,
+                                Value::undefined(),
+                                &[val, idx],
+                                vm,
+                            );
+                            let _ = ok;
+                        } else {
+                            // CreateDataProperty failure is ignored by
+                            // InternalizeJSONProperty (no throw).
+                            let _ = crate::vm::do_store_property(val, idx, new_el, gc, vm);
+                        }
+                    }
+                } else if tag == TAG_OBJECT {
+                    let keys_arr = object_keys(gc, Value::undefined(), &[val], vm);
+                    let mut names: Vec<String> = Vec::new();
+                    if let Some(kp) = keys_arr.heap_ptr() {
+                        if unsafe { (*(kp as *const GcHeader)).tag() } == TAG_ARRAY {
+                            let arr = kp as *mut RuneArray;
+                            let n = unsafe { RuneArray::length(arr) } as usize;
+                            for i in 0..n {
+                                let kv = unsafe { RuneArray::get_element(arr, i) };
+                                if let Some(sp) = kv.heap_ptr() {
+                                    names.push(unsafe {
+                                        HeapString::to_string(sp as *mut HeapString)
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    // EnumerableOwnPropertyNames: canonical array indices first,
+                    // ascending; remaining string keys keep insertion order.
+                    let index_of = |n: &str| -> Option<u32> {
+                        if n.is_empty() || (n.len() > 1 && n.starts_with('0')) {
+                            return None;
+                        }
+                        n.parse::<u32>().ok().filter(|v| *v < u32::MAX)
+                    };
+                    names.sort_by(|a, b| match (index_of(a), index_of(b)) {
+                        (Some(x), Some(y)) => x.cmp(&y),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => std::cmp::Ordering::Equal,
+                    });
+                    for name in names {
+                        val = vm.temp_roots[val_slot];
+                        let k = Value::from_heap_ptr(HeapString::allocate(gc, &name) as *mut u8);
+                        let new_el = internalize(gc, vm, val, k, reviver)?;
+                        val = vm.temp_roots[val_slot];
+                        if new_el.is_undefined() {
+                            let ok = crate::builtins::reflect_delete_property(
+                                gc,
+                                Value::undefined(),
+                                &[val, k],
+                                vm,
+                            );
+                            let _ = ok;
+                        } else {
+                            let _ = crate::vm::do_store_property(val, k, new_el, gc, vm);
+                        }
+                    }
+                }
+            }
+            val = vm.temp_roots[val_slot];
+            let holder = vm.temp_roots[base];
+            let key = vm.temp_roots[base + 1];
+            let reviver = vm.temp_roots[base + 2];
+            vm.call_value_sync(gc, reviver, holder, &[key, val])
+        })();
+        vm.temp_roots.truncate(base);
+        result
+    }
+    match internalize(gc, vm, holder, root_key, reviver) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            Value::undefined()
+        }
+    }
+}
+
+const RAW_JSON_SLOT: &str = "\u{0}rawJSON";
+
+/// JSON.isRawJSON(value) — true only for raw-JSON wrappers (§25.5.2).
+pub fn json_is_raw_json(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let Some(ptr) = args.first().and_then(|v| v.heap_ptr()) else {
+        return Value::boolean(false);
+    };
+    if unsafe { (*(ptr as *const GcHeader)).tag() } != TAG_OBJECT {
+        return Value::boolean(false);
+    }
+    let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+    Value::boolean(
+        shape
+            .lookup(&PropertyKey::from_string(RAW_JSON_SLOT))
+            .is_some(),
+    )
+}
+
+/// JSON.rawJSON(text) — wrap already-serialized JSON text.
+pub fn json_raw_json(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let text = args.first().copied().unwrap_or(Value::undefined());
+    let prim = match to_primitive_sync(gc, vm, text, "string") {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    if prim.as_symbol_id().is_some() {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Cannot convert a Symbol value to a string",
+        ));
+        return Value::undefined();
+    }
+    let s = value_to_js_string(prim);
+    if s.is_empty() || s.trim() != s {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::SyntaxError,
+            "JSON.rawJSON text must be valid JSON",
+        ));
+        return Value::undefined();
+    }
+    let text_val = Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8);
+    let _ = json_parse(gc, Value::undefined(), &[text_val], vm);
+    if vm.pending_exception.is_some() {
+        return Value::undefined();
+    }
+    let obj = JSObject::allocate(gc, Shape::empty(), &[]);
+    unsafe {
+        JSObject::set_extensible(obj, true);
+        JSObject::add_property(
+            obj,
+            PropertyKey::from_string("rawJSON"),
+            "rawJSON".to_string(),
+            text_val,
+        );
+        JSObject::add_property_with_attrs(
+            obj,
+            PropertyKey::from_string(RAW_JSON_SLOT),
+            "\u{0}".to_string(),
+            text_val,
+            rune_core::shape::ATTR_WRITABLE | rune_core::shape::ATTR_CONFIGURABLE,
+        );
+    }
+    Value::from_heap_ptr(obj as *mut u8)
 }
 
 /// JSON.stringify(value) — serialize a JS value to a JSON string.
@@ -17404,6 +17622,15 @@ pub fn json_stringify(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
                 return Ok(format!("[{}]", parts.join(",")));
             }
             if tag == TAG_OBJECT {
+                let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                if let Some(slot) = shape.lookup(&PropertyKey::from_string(RAW_JSON_SLOT)) {
+                    let raw = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+                    if let Some(rp) = raw.heap_ptr() {
+                        if unsafe { (*(rp as *const GcHeader)).tag() } == TAG_STRING {
+                            return Ok(unsafe { HeapString::to_string(rp as *mut HeapString) });
+                        }
+                    }
+                }
                 if let Some(primitive) = wrapper_primitive(val) {
                     return stringify_val(gc, primitive, stack, vm);
                 }
@@ -25652,6 +25879,16 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 3,
             name: "JSON_stringify",
             func: json_stringify,
+        },
+        Builtin {
+            length: 1,
+            name: "JSON_isRawJSON",
+            func: json_is_raw_json,
+        },
+        Builtin {
+            length: 1,
+            name: "JSON_rawJSON",
+            func: json_raw_json,
         },
         // Array.prototype methods
         Builtin {

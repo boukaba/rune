@@ -1617,7 +1617,13 @@ impl Parser {
             TokenKind::New => {
                 self.advance();
                 // Parse callee as a member expression (dot/bracket postfix only, NO calls)
-                let callee = Box::new(self.parse_member_expr());
+                let mut callee = Box::new(self.parse_member_expr());
+                while matches!(
+                    self.tok.kind,
+                    TokenKind::TemplateNoSub | TokenKind::TemplateHead
+                ) {
+                    callee = Box::new(self.parse_tagged_template_after(*callee));
+                }
                 let args = if self.tok.kind == TokenKind::LParen {
                     self.advance();
                     let mut a = Vec::new();
@@ -2915,60 +2921,61 @@ impl Parser {
         Expr::OptionalChain(Box::new(base), links, span)
     }
 
+    fn parse_tagged_template_after(&mut self, lhs: Expr) -> Expr {
+        if self.tok.kind == TokenKind::TemplateNoSub {
+            let t = self.tok.clone();
+            self.advance();
+            return Expr::TaggedTemplate {
+                tag: Box::new(lhs),
+                parts: vec![t.value],
+                exprs: vec![],
+                span: Span {
+                    start: 0,
+                    end: t.span.end,
+                },
+            };
+        }
+        let t = self.tok.clone();
+        self.advance();
+        let mut parts = vec![t.value];
+        let mut exprs = Vec::new();
+        let expr = self.parse_expr(0);
+        exprs.push(expr);
+        loop {
+            match &self.tok.kind {
+                TokenKind::TemplateMiddle => {
+                    let mid = self.tok.clone();
+                    self.advance();
+                    parts.push(mid.value);
+                    let e = self.parse_expr(0);
+                    exprs.push(e);
+                }
+                TokenKind::TemplateTail => {
+                    let tail = self.tok.clone();
+                    self.advance();
+                    parts.push(tail.value);
+                    break;
+                }
+                _ => {
+                    self.error("Expected template continuation after expression".into());
+                    break;
+                }
+            }
+        }
+        let end = self.span().end;
+        Expr::TaggedTemplate {
+            tag: Box::new(lhs),
+            parts,
+            exprs,
+            span: Span { start: 0, end },
+        }
+    }
+
     fn parse_postfix(&mut self, mut lhs: Expr) -> Expr {
         loop {
             match self.tok.kind {
-                TokenKind::TemplateNoSub => {
-                    let t = self.tok.clone();
-                    self.advance();
-                    let span = Span {
-                        start: 0,
-                        end: t.span.end,
-                    };
-                    lhs = Expr::TaggedTemplate {
-                        tag: Box::new(lhs),
-                        parts: vec![t.value],
-                        exprs: vec![],
-                        span,
-                    };
-                }
-                TokenKind::TemplateHead => {
-                    let t = self.tok.clone();
-                    self.advance();
-                    let mut parts = vec![t.value];
-                    let mut exprs = Vec::new();
-                    let expr = self.parse_expr(0);
-                    exprs.push(expr);
-                    loop {
-                        match &self.tok.kind {
-                            TokenKind::TemplateMiddle => {
-                                let mid = self.tok.clone();
-                                self.advance();
-                                parts.push(mid.value);
-                                let e = self.parse_expr(0);
-                                exprs.push(e);
-                            }
-                            TokenKind::TemplateTail => {
-                                let tail = self.tok.clone();
-                                self.advance();
-                                parts.push(tail.value);
-                                break;
-                            }
-                            _ => {
-                                self.error(
-                                    "Expected template continuation after expression".into(),
-                                );
-                                break;
-                            }
-                        }
-                    }
-                    let end = self.span().end;
-                    lhs = Expr::TaggedTemplate {
-                        tag: Box::new(lhs),
-                        parts,
-                        exprs,
-                        span: Span { start: 0, end },
-                    };
+                TokenKind::TemplateNoSub | TokenKind::TemplateHead => {
+                    lhs = self.parse_tagged_template_after(lhs);
                 }
                 TokenKind::LParen => {
                     let args = self.parse_call_args();

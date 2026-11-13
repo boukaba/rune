@@ -2367,6 +2367,32 @@ Integration suite: **858 passed, 0 failed, 3 ignored**.
 
 Integration suite: **858 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — `new` tagged templates + JSON reviver/rawJSON (2026-11-13)
+
+- `new tag\`…\`` now parses with tagged-template precedence (apply the tag,
+  then construct its result); constructor arguments after the template work.
+  Tagged-template suite **17 → 18/27**.
+- JSON.parse:
+  - duplicate object keys keep the last value at the original insertion order;
+  - reviver is invoked bottom-up with EnumerableOwnPropertyNames ordering
+    (integer keys ascending, then strings), root key `""`;
+  - reviver results are written with CreateDataProperty; `undefined` results
+    delete; define/delete failures are ignored per InternalizeJSONProperty.
+- Invalid JSON now throws a real `SyntaxError` instance instead of a
+  message-only object.
+- Added `JSON.isRawJSON` and `JSON.rawJSON`:
+  - public own `rawJSON` property, null prototype, extensible object;
+  - hidden `[[IsRawJSON]]` marker;
+  - JSON.stringify emits the raw text verbatim (including nested positions);
+  - invalid/non-JSON text propagates SyntaxError.
+- Test262: JSON **38 → 60/165**, isRawJSON **4/6**, rawJSON **6/10**.
+- Regression: `test_json_reviver_and_raw_json`.
+- Known: JSON reviver context/source-text tests need `context` argument
+  support; Proxy-based reviver tests unsupported; `rawJSON` invalid-text
+  corpus and for-of `const` without initializer remain.
+
+Integration suite: **859 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

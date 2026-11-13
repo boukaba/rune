@@ -2900,6 +2900,12 @@ impl Vm {
             if let Some(stringify_handle) = find_handle(&self.builtins, "JSON_stringify") {
                 json_entries.push(("stringify", stringify_handle));
             }
+            if let Some(is_raw) = find_handle(&self.builtins, "JSON_isRawJSON") {
+                json_entries.push(("isRawJSON", is_raw));
+            }
+            if let Some(raw) = find_handle(&self.builtins, "JSON_rawJSON") {
+                json_entries.push(("rawJSON", raw));
+            }
             let json_obj = make_object(gc, &json_entries);
             if let Some(ptr) = json_obj.heap_ptr() {
                 let tag = Value::from_heap_ptr(HeapString::allocate(gc, "JSON") as *mut u8);

@@ -828,6 +828,24 @@ Integration suite: **782 passed, 0 failed, 3 ignored**; full 512-stress 782.
   TypeError.
 - Array map suite: **199/216 (92.1%)**; integration **783 passed**.
 
+### Phase 2 — real async test262 execution (2026-11-13)
+
+- `test262-exec` now installs `$DONE` as a host function, evaluates the test,
+  drains the promise microtask queue, and fails the test when `$DONE(error)`
+  reported a failure. Previous runs had no asynchronous completion channel and
+  only checked the synchronous prefix.
+- The runner no longer injects a JavaScript `$DONE` shim; the host function is
+  the single implementation.
+- Honest Promise baseline after enabling async completion: **340/703 (48.4%)**.
+  The drop from 371 reflects assertions that now actually run; new failures are
+  concentrated in thenable jobs, poisoned `then`, resolve-self, and combinator
+  species/constructor cases.
+- Targeted map suite remains **199/216 (92.1%)**.
+- Limitation: timers are not installed in the child, so async tests that require
+  `setTimeout` are not exercised; only microtask completion is awaited.
+
+Integration suite: **783 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

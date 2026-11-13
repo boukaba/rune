@@ -9,10 +9,10 @@ Command:
 Result:
 
 ```text
-Results: 371 passed, 267 failed, 65 skipped, 703 total
+Results: 340 passed, 298 failed, 65 skipped, 703 total
 ```
 
-This is **52.8% of the suite** and **58.2% of executed tests** (638). It is a
+This is **48.4% of the suite** and **53.3% of executed tests** (638). It is a
 targeted baseline, not the core-suite 90% gate from the production roadmap.
 
 Observed failure categories in the tail of this run:
@@ -23,11 +23,10 @@ Observed failure categories in the tail of this run:
 - `Symbol.species` return-value/name cases;
 - async/iterator harness helpers not available in the standalone runner.
 
-Follow-up fixes (prototype-chain dispatch for `instanceof`/`Object.getPrototypeOf`,
-String-wrapper prototypes, `Array.prototype.toString`, array-like String/function
-receivers, wrappers, AggregateError) moved the suite to 375; then correct
-undeclared-identifier semantics plus a real `$DONE` shim exposed four
-wrong-reason passes, so the honest baseline is **371**. The targeted
+Follow-up fixes (prototype-chain dispatch, wrappers, AggregateError, undeclared
+identifiers) moved the suite upward; then the runner began actually draining
+microtasks and honoring `$DONE(error)`. The honest async-completion baseline is
+**340**, because assertions that were previously never reached now run. The targeted
 `built-ins/Array/prototype/map` suite is 199/216 (92.1%).
 
 The suite includes `Promise.any` and combinator-thenable tests; the numbers

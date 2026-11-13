@@ -138,7 +138,28 @@ fn main() {
                             // 64 MiB heap: spec-correct multi-MB results (B1f-3
                             // 1M-element maps) don't fit the 16 MiB default.
                             let mut ctx = rune_embed::Context::new_large();
-                            ctx.eval(&src).map(|_| ())
+                            let done = std::rc::Rc::new(std::cell::RefCell::new(None::<String>));
+                            let done_sink = done.clone();
+                            ctx.register_host_fn("$DONE", 1, move |_gc, _this, args, _vm| {
+                                if let Some(error) = args.first() {
+                                    if !error.is_undefined() {
+                                        let text =
+                                            rune_interpreter::builtins::value_to_js_string(*error);
+                                        if done_sink.borrow().is_none() {
+                                            *done_sink.borrow_mut() = Some(text);
+                                        }
+                                    }
+                                }
+                                rune_core::value::Value::undefined()
+                            });
+                            let eval = ctx.eval(&src).map(|_| ());
+                            if eval.is_ok() {
+                                ctx.drain_microtasks();
+                                if let Some(error) = done.borrow_mut().take() {
+                                    return Err(error);
+                                }
+                            }
+                            eval
                         }
                     }));
                 let code = match result {

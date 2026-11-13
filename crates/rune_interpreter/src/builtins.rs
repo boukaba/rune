@@ -7507,6 +7507,82 @@ fn define_target(
     }
 }
 
+/// Resolve the shape object used for [[DefineOwnProperty]] on exotic
+/// receivers that keep named properties in an `extra_props` JSObject
+/// (functions, Date, RegExp). Allocates the extra-props object on demand.
+fn define_extra_target(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    what: &str,
+    target: Value,
+) -> Result<*mut JSObject, Value> {
+    if target.is_null() || target.is_undefined() {
+        return Err(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            &format!("{what} called on null or undefined"),
+        ));
+    }
+    let ptr = target.heap_ptr().ok_or_else(|| {
+        crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            &format!("{what} called on non-object"),
+        )
+    })?;
+    let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+    let existing = match tag {
+        TAG_OBJECT => Some(ptr as *mut JSObject),
+        TAG_FUNC => {
+            let p = unsafe {
+                rune_core::function::Func::extra_props(ptr as *mut rune_core::function::Func)
+            };
+            (!p.is_null()).then_some(p as *mut JSObject)
+        }
+        TAG_DATE => {
+            let p = unsafe { rune_core::date::RuneDate::extra_props(ptr) };
+            (!p.is_null()).then_some(p as *mut JSObject)
+        }
+        TAG_REGEXP => {
+            let p = unsafe { rune_core::regexp::RegExp::extra_props(ptr) };
+            (!p.is_null()).then_some(p as *mut JSObject)
+        }
+        _ => None,
+    };
+    if let Some(obj) = existing {
+        return Ok(obj);
+    }
+    if !matches!(tag, TAG_FUNC | TAG_DATE | TAG_REGEXP) {
+        return Err(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            &format!("{what} called on non-object"),
+        ));
+    }
+    // Allocate the extra-props object; keep the target alive through the
+    // caller's stack/args rooting and re-resolve it afterwards.
+    let props = JSObject::allocate(gc, Shape::empty(), &[]);
+    if let Some(proto) = vm.object_prototype.heap_ptr() {
+        unsafe { JSObject::set_prototype(props, proto) };
+    }
+    let live = unsafe { rune_core::gc::resolve_forwarded(ptr) };
+    unsafe {
+        match tag {
+            TAG_FUNC => rune_core::function::Func::set_extra_props(
+                live as *mut rune_core::function::Func,
+                props as *mut u8,
+            ),
+            TAG_DATE => rune_core::date::RuneDate::set_extra_props(live, props as *mut u8),
+            TAG_REGEXP => rune_core::regexp::RegExp::set_extra_props(live, props as *mut u8),
+            _ => {}
+        }
+    }
+    Ok(props)
+}
+
 fn define_array_type_err(gc: &mut SemiSpace, vm: &Vm, msg: &str) -> Value {
     crate::errors::error_object(
         gc,
@@ -8091,7 +8167,7 @@ pub fn object_define_property(
             }
         }
     }
-    let obj_ptr = match define_target(gc, vm, "Object.defineProperty", target) {
+    let obj_ptr = match define_extra_target(gc, vm, "Object.defineProperty", target) {
         Ok(p) => p,
         Err(e) => {
             vm.set_pending_exception(e);
@@ -8115,7 +8191,7 @@ pub fn object_define_properties(
     vm: &mut Vm,
 ) -> Value {
     let target = args.first().copied().unwrap_or(Value::undefined());
-    if let Err(e) = define_target(gc, vm, "Object.defineProperties", target) {
+    if let Err(e) = define_extra_target(gc, vm, "Object.defineProperties", target) {
         vm.set_pending_exception(e);
         return Value::undefined();
     }
@@ -8174,7 +8250,15 @@ pub fn object_define_properties(
                 return Value::undefined();
             }
         };
-        let live_ptr = vm.stack[target_slot].heap_ptr().unwrap() as *mut JSObject;
+        let live_target = vm.stack[target_slot];
+        let live_ptr = match define_extra_target(gc, vm, "Object.defineProperties", live_target) {
+            Ok(p) => p,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                vm.stack.truncate(target_slot);
+                return Value::undefined();
+            }
+        };
         if let Err(e) = define_own_property(gc, vm, live_ptr, pkey, name, &desc) {
             vm.set_pending_exception(e);
             let current = vm.stack[target_slot];

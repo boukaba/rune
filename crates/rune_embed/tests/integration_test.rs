@@ -14723,3 +14723,25 @@ fn test_builtin_methods_instanceof_function() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_builtin_property_descriptor_attributes() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var method = Object.getOwnPropertyDescriptor(Date.prototype, "getDate");
+            var ctor = Object.getOwnPropertyDescriptor(Array.prototype, "constructor");
+            var constant = Object.getOwnPropertyDescriptor(Math, "PI");
+            var proto = Object.getOwnPropertyDescriptor(Array, "prototype");
+            [
+                method.writable === true && method.enumerable === false && method.configurable === true,
+                ctor.writable === true && ctor.enumerable === false && ctor.configurable === true,
+                constant.writable === false && constant.enumerable === false && constant.configurable === false,
+                proto.writable === false && proto.enumerable === false && proto.configurable === false
+            ].join("|") === "true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

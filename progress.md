@@ -1266,6 +1266,27 @@ Integration suite: **798 passed, 0 failed, 3 ignored**.
 
 Integration suite: **799 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — spec-shaped built-in property attributes (2026-11-13)
+
+- `make_object` (all intrinsic constructors/namespaces/prototypes) now interns
+  shapes with real attributes instead of all-default enumerable properties:
+  - methods: writable + configurable, non-enumerable;
+  - `prototype`: non-writable/non-enumerable/non-configurable;
+  - `length`/`name`: configurable, non-writable, non-enumerable;
+  - ALL_CAPS constants (Math/Number): immutable.
+- `.constructor` back-references installed on prototypes use the same
+  writable/configurable, non-enumerable attributes.
+- Test262: Object **1583 → 1719/3411**;
+  `Object.getOwnPropertyDescriptor` **65 → 195/310**;
+  `Object.defineProperty` **524/1131**.
+- Regression: `test_builtin_property_descriptor_attributes`.
+- Known gaps: properties added later through `add_property` (Array
+  `values`/`keys`/`entries`, Object.prototype methods, `__proto__` accessor)
+  still use default enumerable attributes; ALL_CAPS is a heuristic for
+  immutable constants.
+
+Integration suite: **800 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

@@ -1491,7 +1491,13 @@ impl Vm {
         }
         let live = self.ensure_object_capacity(gc, proto_obj);
         unsafe {
-            JSObject::add_property(live, key, "constructor".to_string(), ctor_val);
+            JSObject::add_property_with_attrs(
+                live,
+                key,
+                "constructor".to_string(),
+                ctor_val,
+                rune_core::shape::ATTR_WRITABLE | rune_core::shape::ATTR_CONFIGURABLE,
+            );
         }
     }
 
@@ -1509,7 +1515,27 @@ impl Vm {
                 .map(|(i, (k, _))| (PropertyKey::from_string(k), i))
                 .collect();
             let key_names: Vec<String> = pairs.iter().map(|(k, _)| k.to_string()).collect();
-            let shape = Shape::intern(keys, key_names);
+            // Built-in properties are non-enumerable. Methods are writable and
+            // configurable; "prototype" is neither; "length"/"name" are
+            // configurable but non-writable; ALL_CAPS constants are immutable.
+            let attrs: Vec<rune_core::shape::PropAttr> = pairs
+                .iter()
+                .map(|(k, _)| {
+                    if *k == "prototype" {
+                        0
+                    } else if *k == "length" || *k == "name" {
+                        rune_core::shape::ATTR_CONFIGURABLE
+                    } else if k
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+                    {
+                        0
+                    } else {
+                        rune_core::shape::ATTR_WRITABLE | rune_core::shape::ATTR_CONFIGURABLE
+                    }
+                })
+                .collect();
+            let shape = Shape::intern_with_attrs(keys, key_names, attrs);
             let vals: Vec<Value> = pairs.iter().map(|(_, v)| *v).collect();
             let obj_ptr = JSObject::allocate(gc, shape, &vals);
             Value::from_heap_ptr(obj_ptr as *mut u8)

@@ -193,6 +193,11 @@ fn build_test_source(test: &TestCase) -> Result<String, String> {
         full_source.push('\n');
     }
 
+    // doneprintHandle.js is skipped, but async tests call `$DONE` directly.
+    // Provide the standard shim so a missing harness file does not surface as
+    // a ReferenceError (the runner has no asynchronous completion channel).
+    full_source
+        .push_str("var $DONE = function (error) { if (error !== undefined) { throw error; } };\n");
     full_source.push_str(&source);
     Ok(full_source)
 }

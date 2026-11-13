@@ -949,7 +949,7 @@ fn test_error_objects_real() {
         .unwrap();
     assert!(r.to_bool(), "caught error instanceof TypeError");
     let r = ctx
-        .eval("var s = ''; try { null.x; } catch (e) { s = String(e); } s === 'TypeError: Cannot read properties of null (reading \'x\')';")
+        .eval("var s = ''; try { null.x; } catch (e) { s = String(e); } s === 'TypeError: Cannot read properties of null (reading \\'x\\')';")
         .unwrap();
     assert!(r.to_bool(), "String(err) uses name: message");
     // Throw paths are catchable in-frame with identity intact.
@@ -9590,8 +9590,14 @@ fn test_optional_chaining_basic() {
     assert!(ctx.eval("o?.x?.y").unwrap().is_undefined());
     assert!(ctx.eval("null?.a").unwrap().is_undefined());
     assert!(ctx.eval("undefined?.b").unwrap().is_undefined());
-    // undeclared global loads are undefined, so the chain short-circuits
-    assert!(ctx.eval("var_not_declared_zz?.x").unwrap().is_undefined());
+    // Env-declared undefined short-circuits; an unresolvable identifier still
+    // throws ReferenceError even under `?.` (base expression resolution first).
+    assert!(
+        ctx.eval("var declared_undef; declared_undef?.x")
+            .unwrap()
+            .is_undefined()
+    );
+    assert!(ctx.eval("var_not_declared_zz?.x").is_err());
 }
 
 #[test]
@@ -14213,6 +14219,26 @@ fn test_object_to_string_tags() {
                 Object.prototype.toString.call(JSON),
                 Object.prototype.toString.call(custom)
             ].join("|") === "[object Math]|[object JSON]|[object Custom]";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}
+
+#[test]
+fn test_undeclared_identifier_reference_errors() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var caught = false;
+            try { never_declared_value; } catch (e) { caught = e instanceof ReferenceError; }
+            var declared_undefined;
+            typeof never_declared_value === "undefined" &&
+                caught &&
+                declared_undefined === undefined &&
+                (implicit_global_assignment = 7) === 7 &&
+                implicit_global_assignment === 7;
             "#,
         )
         .unwrap();

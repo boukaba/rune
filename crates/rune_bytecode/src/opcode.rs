@@ -73,6 +73,9 @@ pub enum Opcode {
     StringConcat,
     // Globals
     LoadGlobal,
+    /// `typeof <identifier>` lookup: missing names yield undefined, not a
+    /// ReferenceError.
+    LoadGlobalSoft,
     StoreGlobal,
     // Control flow
     Jump,

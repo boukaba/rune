@@ -811,6 +811,23 @@ Integration suite: **779 passed, 0 failed, 3 ignored**; full 512-stress 779.
 
 Integration suite: **782 passed, 0 failed, 3 ignored**; full 512-stress 782.
 
+### Phase 2 — undeclared identifiers + honest async harness (2026-11-13)
+
+- `LoadGlobal` now throws a catchable **ReferenceError** for undeclared names
+  (correct sloppy/strict script semantics). A new `LoadGlobalSoft` backs
+  `typeof <unresolved identifier>`, which still yields `"undefined"`.
+- Top-level `var` declarations without initializers create a global binding
+  with `undefined` (previously absent, so reads looked undeclared).
+- Optional chaining now correctly still throws when its base identifier is
+  unresolvable; declared-undefined bases short-circuit.
+- test262 runner injects the standard `$DONE` shim because `doneprintHandle.js`
+  is skipped. This exposed four Promise tests that previously "passed" only
+  because `$DONE` was undefined and their assertions never ran. Promise's
+  honest baseline is **371/703 (52.8%)**, not 375; Promise statics now also
+  precheck non-callable `resolve` and non-iterable inputs and reject with
+  TypeError.
+- Array map suite: **199/216 (92.1%)**; integration **783 passed**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

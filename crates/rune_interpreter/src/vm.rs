@@ -7840,52 +7840,105 @@ impl Vm {
                 }
                 Opcode::LoadGlobal => {
                     let name_idx = instr.operands[0] as usize;
-                    if let Some(name) = self.frames[fi].prog_str(name_idx) {
-                        let val = if self.module_mi_of_frame(fi).is_some() {
-                            self.load_global_from_module_frame(gc, fi, &name)
-                                .or_else(|| self.globals.get(&name).copied())
-                                .or_else(|| self.builtin_wrappers.get(&name).copied())
-                                .or_else(|| self.get_builtin(&name))
-                                .unwrap_or(Value::undefined())
-                        } else if let Some(mi) = self.globals_override {
-                            let env_v = self.module_records[mi].env.get(&name).copied();
-                            if let Some(v) = env_v {
-                                if v == Value::empty_sentinel() {
-                                    let exc = self.tdz_error(gc, &name);
-                                    if let Some(exit) = self.handle_throw(gc, exc) {
-                                        return exit;
-                                    }
-                                    self.push(Value::undefined());
-                                    self.frames[fi].pc = pc + 1;
-                                    continue;
+                    let Some(name) = self.frames[fi].prog_str(name_idx) else {
+                        self.push(Value::undefined());
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    };
+                    let global_chain = |vm: &Vm| {
+                        vm.globals
+                            .get(&name)
+                            .copied()
+                            .or_else(|| vm.builtin_wrappers.get(&name).copied())
+                            .or_else(|| vm.get_builtin(&name))
+                    };
+                    let value = if self.module_mi_of_frame(fi).is_some() {
+                        self.load_global_from_module_frame(gc, fi, &name)
+                            .or_else(|| global_chain(self))
+                    } else if let Some(mi) = self.globals_override {
+                        match self.module_records[mi].env.get(&name).copied() {
+                            Some(v) if v == Value::empty_sentinel() => {
+                                let exc = self.tdz_error(gc, &name);
+                                if let Some(exit) = self.handle_throw(gc, exc) {
+                                    return exit;
                                 }
-                                v
-                            } else {
+                                self.push(Value::undefined());
+                                self.frames[fi].pc = pc + 1;
+                                continue;
+                            }
+                            Some(v) => Some(v),
+                            None => global_chain(self),
+                        }
+                    } else {
+                        self.load_global_from_module_frame(gc, fi, &name)
+                            .or_else(|| global_chain(self))
+                    };
+                    if let Some(exc) = self.pending_exception.take() {
+                        if let Some(exit) = self.handle_throw(gc, exc) {
+                            return exit;
+                        }
+                        self.push(Value::undefined());
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    }
+                    match value {
+                        Some(v) => self.push(v),
+                        None => {
+                            let exc = crate::errors::error_object(
+                                gc,
+                                &self.error_protos,
+                                crate::errors::ErrorKind::ReferenceError,
+                                &format!("{name} is not defined"),
+                            );
+                            if let Some(exit) = self.handle_throw(gc, exc) {
+                                return exit;
+                            }
+                            continue;
+                        }
+                    }
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::LoadGlobalSoft => {
+                    let name_idx = instr.operands[0] as usize;
+                    let value = if let Some(name) = self.frames[fi].prog_str(name_idx) {
+                        let value = if self.module_mi_of_frame(fi).is_some() {
+                            self.load_global_from_module_frame(gc, fi, &name)
+                                .or_else(|| {
+                                    self.globals
+                                        .get(&name)
+                                        .copied()
+                                        .or_else(|| self.builtin_wrappers.get(&name).copied())
+                                        .or_else(|| self.get_builtin(&name))
+                                })
+                        } else if let Some(mi) = self.globals_override {
+                            self.module_records[mi].env.get(&name).copied().or_else(|| {
                                 self.globals
                                     .get(&name)
                                     .copied()
                                     .or_else(|| self.builtin_wrappers.get(&name).copied())
                                     .or_else(|| self.get_builtin(&name))
-                                    .unwrap_or(Value::undefined())
-                            }
+                            })
                         } else {
                             self.load_global_from_module_frame(gc, fi, &name)
-                                .or_else(|| self.globals.get(&name).copied())
-                                .or_else(|| self.builtin_wrappers.get(&name).copied())
-                                .or_else(|| self.get_builtin(&name))
-                                .unwrap_or(Value::undefined())
+                                .or_else(|| {
+                                    self.globals
+                                        .get(&name)
+                                        .copied()
+                                        .or_else(|| self.builtin_wrappers.get(&name).copied())
+                                        .or_else(|| self.get_builtin(&name))
+                                })
                         };
-                        if let Some(exc) = self.pending_exception.take() {
-                            if let Some(exit) = self.handle_throw(gc, exc) {
-                                return exit;
-                            }
-                            self.push(Value::undefined());
-                            self.frames[fi].pc = pc + 1;
-                            continue;
-                        }
-                        self.push(val);
+                        value.unwrap_or(Value::undefined())
                     } else {
+                        Value::undefined()
+                    };
+                    if let Some(exc) = self.pending_exception.take() {
+                        if let Some(exit) = self.handle_throw(gc, exc) {
+                            return exit;
+                        }
                         self.push(Value::undefined());
+                    } else {
+                        self.push(value);
                     }
                     self.frames[fi].pc = pc + 1;
                 }

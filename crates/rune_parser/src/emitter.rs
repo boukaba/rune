@@ -2024,6 +2024,14 @@ impl Emitter {
                             if !is_top_level && !self.locals.contains(&decl.name.to_string()) {
                                 self.locals.push(decl.name.to_string());
                             }
+                            if decl.init.is_none() && is_top_level {
+                                // §9.1.1.1: uninitialized top-level `var` still
+                                // creates a binding with value undefined.
+                                self.emit(Opcode::LoadUndefined, vec![]);
+                                let name_idx = self.intern_string(&decl.name) as i64;
+                                self.emit(Opcode::StoreGlobal, vec![name_idx]);
+                                self.emit(Opcode::Pop, vec![]);
+                            }
                             if let Some(init) = &decl.init {
                                 self.emit_expression(init);
                                 if let Some((depth, env_slot)) = self.env_captured_slot(&decl.name)
@@ -2555,6 +2563,27 @@ impl Emitter {
                 self.emit(Opcode::LoadThis, vec![]);
             }
             Expr::Unary(op, arg, _) => {
+                // `typeof <unresolved identifier>` must not throw; use the
+                // soft global lookup. Locals/lexicals/module imports keep the
+                // normal load (TDZ still throws).
+                if *op == UnaryOp::Typeof {
+                    if let Expr::Identifier(name, _) = arg.as_ref() {
+                        let known = self.env_captured_slot(name).is_some()
+                            || self.lexical_slot(name).is_some()
+                            || self.local_index(name).is_some()
+                            || (self.module_mode && self.module_imports.contains_key(name));
+                        if known {
+                            self.emit_expression(arg);
+                        } else {
+                            let name_idx = self.intern_string(name) as i64;
+                            self.emit(Opcode::LoadGlobalSoft, vec![name_idx]);
+                        }
+                    } else {
+                        self.emit_expression(arg);
+                    }
+                    self.emit(Opcode::TypeOf, vec![]);
+                    return;
+                }
                 // delete needs special handling: don't emit_expression(arg) which would
                 // evaluate the member expression (including LoadProperty)
                 if *op == UnaryOp::Delete {

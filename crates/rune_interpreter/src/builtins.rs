@@ -18742,8 +18742,53 @@ pub fn promise_all_element(
     Value::undefined()
 }
 
-pub fn promise_static_all(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+fn promise_static_precheck(
+    gc: &mut SemiSpace,
+    this: Value,
+    iterable: Value,
+    vm: &mut Vm,
+) -> Option<Value> {
+    let reject = |gc: &mut SemiSpace, vm: &mut Vm, message: &str| {
+        let ptr = Promise::allocate(gc, vm.promise_prototype.heap_ptr());
+        let err = crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            message,
+        );
+        unsafe {
+            Promise::set_state(ptr, PROMISE_REJECTED);
+            Promise::set_result(ptr, err);
+        }
+        Value::from_heap_ptr(ptr)
+    };
+    if let Some(ctor) = this.heap_ptr() {
+        let tag = unsafe { (*(ctor as *const GcHeader)).tag() };
+        if tag == TAG_OBJECT {
+            let shape = unsafe { JSObject::shape_ptr(ctor as *mut JSObject) };
+            if let Some(slot) = shape.lookup(&PropertyKey::from_string("resolve")) {
+                let resolve = unsafe { JSObject::get_slot(ctor as *mut JSObject, slot) };
+                let callable = resolve.as_smi().is_some_and(|n| n < 0)
+                    || resolve
+                        .heap_ptr()
+                        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC);
+                if !callable {
+                    return Some(reject(gc, vm, "Promise resolve is not callable"));
+                }
+            }
+        }
+    }
+    if crate::vm::array_like_length(iterable).is_none() {
+        return Some(reject(gc, vm, "object is not iterable"));
+    }
+    None
+}
+
+pub fn promise_static_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let iterable = args.first().copied().unwrap_or(Value::undefined());
+    if let Some(rejected) = promise_static_precheck(gc, this, iterable, vm) {
+        return rejected;
+    }
     let proto = vm.promise_prototype.heap_ptr();
     let result_ptr = Promise::allocate(gc, proto);
     let result_val = Value::from_heap_ptr(result_ptr);
@@ -19033,11 +19078,14 @@ pub fn promise_all_settled_element(
 
 pub fn promise_static_all_settled(
     gc: &mut SemiSpace,
-    _this: Value,
+    this: Value,
     args: &[Value],
     vm: &mut Vm,
 ) -> Value {
     let iterable = args.first().copied().unwrap_or(Value::undefined());
+    if let Some(rejected) = promise_static_precheck(gc, this, iterable, vm) {
+        return rejected;
+    }
     let proto = vm.promise_prototype.heap_ptr();
     let result_ptr = Promise::allocate(gc, proto);
     let result_val = Value::from_heap_ptr(result_ptr);
@@ -19277,8 +19325,11 @@ pub fn promise_any_element(gc: &mut SemiSpace, _this: Value, args: &[Value], vm:
 
 /// Promise.any: first fulfillment wins; all rejections become one
 /// AggregateError with ordered reasons.
-pub fn promise_static_any(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+pub fn promise_static_any(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let iterable = args.first().copied().unwrap_or(Value::undefined());
+    if let Some(rejected) = promise_static_precheck(gc, this, iterable, vm) {
+        return rejected;
+    }
     let proto = vm.promise_prototype.heap_ptr();
     let result_ptr = Promise::allocate(gc, proto);
     let result_val = Value::from_heap_ptr(result_ptr);
@@ -19374,8 +19425,11 @@ pub fn promise_static_any(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: 
     result_val
 }
 
-pub fn promise_static_race(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+pub fn promise_static_race(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let iterable = args.first().copied().unwrap_or(Value::undefined());
+    if let Some(rejected) = promise_static_precheck(gc, this, iterable, vm) {
+        return rejected;
+    }
     let proto = vm.promise_prototype.heap_ptr();
     let result_ptr = Promise::allocate(gc, proto);
     let result_val = Value::from_heap_ptr(result_ptr);

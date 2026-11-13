@@ -1105,6 +1105,8 @@ pub struct Vm {
     /// URL constructor builtin handle and %URL.prototype%.
     pub url_constructor: Value,
     pub url_prototype: Value,
+    pub url_search_params_constructor: Value,
+    pub url_search_params_prototype: Value,
     pub regexp_prototype: Value,
     /// Symbol constructor object (`Symbol` global) with well-known symbol statics.
     pub symbol_ctor: Value,
@@ -1340,6 +1342,8 @@ impl Vm {
             function_prototype: Value::undefined(),
             url_constructor: Value::undefined(),
             url_prototype: Value::undefined(),
+            url_search_params_constructor: Value::undefined(),
+            url_search_params_prototype: Value::undefined(),
             regexp_prototype: Value::undefined(),
             symbol_ctor: Value::undefined(),
             map_constructor: Value::undefined(),
@@ -2375,6 +2379,27 @@ impl Vm {
         }
         if let Some(url) = find_handle(&self.builtins, "URL") {
             self.url_constructor = url;
+        }
+        // URLSearchParams prototype with append/get/getAll/has/delete/set/toString.
+        {
+            let mut entries: Vec<(&str, Value)> = Vec::new();
+            for (method, handle) in [
+                ("append", "URLSearchParams_prototype_append"),
+                ("get", "URLSearchParams_prototype_get"),
+                ("getAll", "URLSearchParams_prototype_getAll"),
+                ("has", "URLSearchParams_prototype_has"),
+                ("delete", "URLSearchParams_prototype_delete"),
+                ("set", "URLSearchParams_prototype_set"),
+                ("toString", "URLSearchParams_prototype_toString"),
+            ] {
+                if let Some(h) = find_handle(&self.builtins, handle) {
+                    entries.push((method, h));
+                }
+            }
+            self.url_search_params_prototype = make_object(gc, &entries);
+            if let Some(ctor) = find_handle(&self.builtins, "URLSearchParams") {
+                self.url_search_params_constructor = ctor;
+            }
         }
 
         // Function.prototype with .call() method; its constructor is the
@@ -3549,6 +3574,8 @@ impl Vm {
         gc.push_root(&self.function_prototype as *const Value as *mut u64);
         gc.push_root(&self.url_constructor as *const Value as *mut u64);
         gc.push_root(&self.url_prototype as *const Value as *mut u64);
+        gc.push_root(&self.url_search_params_constructor as *const Value as *mut u64);
+        gc.push_root(&self.url_search_params_prototype as *const Value as *mut u64);
         gc.push_root(&self.regexp_prototype as *const Value as *mut u64);
         gc.push_root(&self.symbol_ctor as *const Value as *mut u64);
         gc.push_root(&self.symbol_prototype as *const Value as *mut u64);
@@ -8909,6 +8936,18 @@ impl Vm {
                     let mut args: Vec<Value> = (0..argc).map(|_| self.pop()).collect();
                     args.reverse();
                     let constructor = self.pop();
+                    if constructor == self.url_search_params_constructor {
+                        let obj = crate::builtins::url_search_params_construct(gc, &args, self);
+                        if let Some(exc) = self.pending_exception.take() {
+                            if let Some(exit) = self.handle_throw(gc, exc) {
+                                return exit;
+                            }
+                            continue;
+                        }
+                        self.push(obj);
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    }
                     if constructor == self.url_constructor {
                         let obj = crate::builtins::url_construct(gc, &args, self);
                         if let Some(exc) = self.pending_exception.take() {

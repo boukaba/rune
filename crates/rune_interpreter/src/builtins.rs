@@ -342,8 +342,18 @@ pub(crate) fn url_construct(gc: &mut SemiSpace, args: &[Value], vm: &mut Vm) -> 
     };
 
     let keys = [
-        "href", "origin", "protocol", "username", "password", "host", "hostname", "port",
-        "pathname", "search", "hash",
+        "href",
+        "origin",
+        "protocol",
+        "username",
+        "password",
+        "host",
+        "hostname",
+        "port",
+        "pathname",
+        "search",
+        "hash",
+        "searchParams",
     ];
     let entries: Vec<(PropertyKey, usize)> = keys
         .iter()
@@ -351,7 +361,7 @@ pub(crate) fn url_construct(gc: &mut SemiSpace, args: &[Value], vm: &mut Vm) -> 
         .map(|(i, k)| (PropertyKey::from_string(k), i))
         .collect();
     let shape = Shape::intern(entries, keys.iter().map(|k| k.to_string()).collect());
-    let obj = JSObject::allocate(gc, shape, &[Value::undefined(); 11]);
+    let obj = JSObject::allocate(gc, shape, &[Value::undefined(); 12]);
     let root_base = vm.temp_roots.len();
     vm.temp_roots.push(Value::from_heap_ptr(obj as *mut u8));
 
@@ -380,6 +390,11 @@ pub(crate) fn url_construct(gc: &mut SemiSpace, args: &[Value], vm: &mut Vm) -> 
             .unwrap_or(std::ptr::null_mut()) as *mut JSObject;
         unsafe { JSObject::set_slot(obj_now, idx, val) };
     }
+    let params = url_search_params_from_query(gc, vm, url.query());
+    let obj_now = vm.temp_roots[root_base]
+        .heap_ptr()
+        .unwrap_or(std::ptr::null_mut()) as *mut JSObject;
+    unsafe { JSObject::set_slot(obj_now, 11, params) };
     let obj_now = vm.temp_roots[root_base]
         .heap_ptr()
         .unwrap_or(std::ptr::null_mut()) as *mut JSObject;
@@ -413,6 +428,369 @@ pub fn url_to_string(_gc: &mut SemiSpace, this: Value, _args: &[Value], _vm: &mu
 
 pub fn url_to_json(_gc: &mut SemiSpace, this: Value, _args: &[Value], _vm: &mut Vm) -> Value {
     url_href(_gc, this)
+}
+
+// ---------------------------------------------------------------------------
+// URLSearchParams
+// ---------------------------------------------------------------------------
+
+const PARAMS_HIDDEN_KEY: &str = "__rune_params";
+
+fn params_hidden_slot(obj: *mut JSObject) -> Option<usize> {
+    let shape = unsafe { JSObject::shape_ptr(obj) };
+    shape.lookup(&PropertyKey::from_string(PARAMS_HIDDEN_KEY))
+}
+
+fn params_array_of(this: Value) -> Option<*mut RuneArray> {
+    let ptr = this.heap_ptr()?;
+    if unsafe { (*(ptr as *const GcHeader)).tag() } != TAG_OBJECT {
+        return None;
+    }
+    let obj = ptr as *mut JSObject;
+    let slot = params_hidden_slot(obj)?;
+    unsafe { JSObject::get_slot(obj, slot) }
+        .heap_ptr()
+        .map(|p| p as *mut RuneArray)
+}
+
+fn params_pairs(this: Value) -> Vec<(String, String)> {
+    let Some(arr) = params_array_of(this) else {
+        return Vec::new();
+    };
+    let len = unsafe { RuneArray::length(arr) } as usize;
+    let mut out = Vec::with_capacity(len / 2);
+    let mut i = 0;
+    while i + 1 < len {
+        let k = unsafe { RuneArray::get_element(arr, i) };
+        let v = unsafe { RuneArray::get_element(arr, i + 1) };
+        out.push((value_to_js_string(k), value_to_js_string(v)));
+        i += 2;
+    }
+    out
+}
+
+fn set_params_hidden(this: Value, arr: Value) {
+    let Some(ptr) = this.heap_ptr() else {
+        return;
+    };
+    let obj = ptr as *mut JSObject;
+    if let Some(slot) = params_hidden_slot(obj) {
+        unsafe { JSObject::set_slot(obj, slot, arr) };
+    }
+}
+
+fn form_encode(text: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::new();
+    for b in text.as_bytes() {
+        match *b {
+            b' ' => out.push('+'),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'*' | b'-' | b'.' | b'_' => {
+                out.push(*b as char)
+            }
+            _ => {
+                out.push('%');
+                out.push(HEX[(b >> 4) as usize] as char);
+                out.push(HEX[(b & 15) as usize] as char);
+            }
+        }
+    }
+    out
+}
+
+fn form_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hi = (bytes[i + 1] as char).to_digit(16);
+                let lo = (bytes[i + 2] as char).to_digit(16);
+                if let (Some(hi), Some(lo)) = (hi, lo) {
+                    out.push((hi * 16 + lo) as u8);
+                    i += 3;
+                } else {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn params_pairs_from_query(query: &str) -> Vec<(String, String)> {
+    let q = query.strip_prefix('?').unwrap_or(query);
+    if q.is_empty() {
+        return Vec::new();
+    }
+    q.split('&')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut it = part.splitn(2, '=');
+            let k = form_decode(it.next().unwrap_or(""));
+            let v = form_decode(it.next().unwrap_or(""));
+            (k, v)
+        })
+        .collect()
+}
+
+/// Build a flat `[k,v,k,v,...]` array and root it while strings are allocated.
+fn params_array_from_pairs(gc: &mut SemiSpace, vm: &mut Vm, pairs: &[(String, String)]) -> Value {
+    if pairs.is_empty() {
+        let arr = RuneArray::allocate(gc, &[]);
+        unsafe {
+            RuneArray::set_shape_ptr(arr, *DENSE_ARRAY_SHAPE as *const Shape);
+        }
+        return Value::from_heap_ptr(arr as *mut u8);
+    }
+    let blanks = vec![Value::undefined(); pairs.len() * 2];
+    let arr = RuneArray::allocate(gc, &blanks);
+    unsafe {
+        RuneArray::set_shape_ptr(arr, *DENSE_ARRAY_SHAPE as *const Shape);
+    }
+    let root_base = vm.temp_roots.len();
+    vm.temp_roots.push(Value::from_heap_ptr(arr as *mut u8));
+    for (i, (k, v)) in pairs.iter().enumerate() {
+        let kp = HeapString::allocate(gc, k) as *mut u8;
+        let vp = HeapString::allocate(gc, v) as *mut u8;
+        let arr_now = vm.temp_roots[root_base]
+            .heap_ptr()
+            .unwrap_or(std::ptr::null_mut()) as *mut RuneArray;
+        unsafe {
+            RuneArray::set_element(arr_now, i * 2, Value::from_heap_ptr(kp));
+            RuneArray::set_element(arr_now, i * 2 + 1, Value::from_heap_ptr(vp));
+        }
+    }
+    let arr_now = vm.temp_roots[root_base]
+        .heap_ptr()
+        .unwrap_or(std::ptr::null_mut()) as *mut RuneArray;
+    vm.temp_roots.truncate(root_base);
+    Value::from_heap_ptr(arr_now as *mut u8)
+}
+
+fn params_instance(gc: &mut SemiSpace, vm: &mut Vm, pairs: &[(String, String)]) -> Value {
+    let arr = params_array_from_pairs(gc, vm, pairs);
+    let entries = vec![(PropertyKey::from_string(PARAMS_HIDDEN_KEY), 0usize)];
+    let shape = Shape::intern_with_attrs(
+        entries,
+        vec![PARAMS_HIDDEN_KEY.to_string()],
+        vec![rune_core::shape::ATTR_CONFIGURABLE],
+    );
+    let obj = JSObject::allocate(gc, shape, &[arr]);
+    if let Some(proto) = vm.url_search_params_prototype.heap_ptr() {
+        unsafe { JSObject::set_prototype(obj, proto) };
+    }
+    Value::from_heap_ptr(obj as *mut u8)
+}
+
+fn params_require(_gc: &mut SemiSpace, this: Value, vm: &mut Vm) -> Option<()> {
+    if params_array_of(this).is_some() {
+        Some(())
+    } else {
+        vm.set_pending_exception(crate::errors::error_object(
+            _gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "URLSearchParams method called on incompatible receiver",
+        ));
+        None
+    }
+}
+
+pub fn url_search_params_construct(gc: &mut SemiSpace, args: &[Value], vm: &mut Vm) -> Value {
+    let input = args.first().copied().unwrap_or(Value::undefined());
+    let pairs = if input.is_undefined() {
+        Vec::new()
+    } else if input
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_ARRAY })
+    {
+        let arr = input.heap_ptr().unwrap() as *mut RuneArray;
+        let len = unsafe { RuneArray::length(arr) } as usize;
+        let mut pairs = Vec::new();
+        for i in 0..len {
+            let item = unsafe { RuneArray::get_element(arr, i) };
+            if let Some(ip) = item.heap_ptr() {
+                if unsafe { (*(ip as *const GcHeader)).tag() } == TAG_ARRAY {
+                    let pair = ip as *mut RuneArray;
+                    let k = unsafe { RuneArray::get_element(pair, 0) };
+                    let v = unsafe { RuneArray::get_element(pair, 1) };
+                    pairs.push((value_to_js_string(k), value_to_js_string(v)));
+                }
+            }
+        }
+        pairs
+    } else {
+        params_pairs_from_query(&value_to_js_string(input))
+    };
+    params_instance(gc, vm, &pairs)
+}
+
+pub fn url_search_params_constructor_builtin(
+    gc: &mut SemiSpace,
+    _this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    vm.set_pending_exception(crate::errors::error_object(
+        gc,
+        &vm.error_protos,
+        crate::errors::ErrorKind::TypeError,
+        "Constructor URLSearchParams requires 'new'",
+    ));
+    Value::undefined()
+}
+
+pub fn url_search_params_append(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    if params_require(gc, this, vm).is_none() {
+        return Value::undefined();
+    }
+    let k = value_to_js_string(args.first().copied().unwrap_or(Value::undefined()));
+    let v = value_to_js_string(args.get(1).copied().unwrap_or(Value::undefined()));
+    let mut arr = params_array_of(this).unwrap() as *mut u8;
+    let kp = HeapString::allocate(gc, &k) as *mut u8;
+    let vp = HeapString::allocate(gc, &v) as *mut u8;
+    let parsed = value_to_js_string(this);
+    let _ = parsed;
+    let arr_now = arr as *mut RuneArray;
+    let r1 = unsafe { RuneArray::push(gc, arr_now, Value::from_heap_ptr(kp)) };
+    let r2 = unsafe { RuneArray::push(gc, r1, Value::from_heap_ptr(vp)) };
+    set_params_hidden(this, Value::from_heap_ptr(r2 as *mut u8));
+    arr = r2 as *mut u8;
+    let _ = arr;
+    Value::undefined()
+}
+
+pub fn url_search_params_get(
+    _gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    _vm: &mut Vm,
+) -> Value {
+    let key = value_to_js_string(args.first().copied().unwrap_or(Value::undefined()));
+    for (k, v) in params_pairs(this) {
+        if k == key {
+            return Value::from_heap_ptr(HeapString::allocate(_gc, &v) as *mut u8);
+        }
+    }
+    Value::null()
+}
+
+pub fn url_search_params_get_all(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let key = value_to_js_string(args.first().copied().unwrap_or(Value::undefined()));
+    let vals: Vec<Value> = params_pairs(this)
+        .into_iter()
+        .filter(|(k, _)| k == &key)
+        .map(|(_, v)| Value::from_heap_ptr(HeapString::allocate(gc, &v) as *mut u8))
+        .collect();
+    let arr = RuneArray::allocate(gc, &vals);
+    unsafe {
+        RuneArray::set_shape_ptr(arr, *DENSE_ARRAY_SHAPE as *const Shape);
+        if let Some(proto) = vm.array_prototype.heap_ptr() {
+            RuneArray::set_prototype(arr, proto);
+        }
+    }
+    Value::from_heap_ptr(arr as *mut u8)
+}
+
+pub fn url_search_params_has(
+    _gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    _vm: &mut Vm,
+) -> Value {
+    let key = value_to_js_string(args.first().copied().unwrap_or(Value::undefined()));
+    Value::boolean(params_pairs(this).into_iter().any(|(k, _)| k == key))
+}
+
+pub fn url_search_params_delete(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    if params_require(gc, this, vm).is_none() {
+        return Value::undefined();
+    }
+    let key = value_to_js_string(args.first().copied().unwrap_or(Value::undefined()));
+    let pairs: Vec<(String, String)> = params_pairs(this)
+        .into_iter()
+        .filter(|(k, _)| k != &key)
+        .collect();
+    let arr = params_array_from_pairs(gc, vm, &pairs);
+    set_params_hidden(this, arr);
+    Value::undefined()
+}
+
+pub fn url_search_params_set(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    if params_require(gc, this, vm).is_none() {
+        return Value::undefined();
+    }
+    let key = value_to_js_string(args.first().copied().unwrap_or(Value::undefined()));
+    let val = value_to_js_string(args.get(1).copied().unwrap_or(Value::undefined()));
+    let mut pairs = params_pairs(this);
+    let mut replaced = false;
+    let mut out = Vec::with_capacity(pairs.len() + 1);
+    for (k, v) in pairs.drain(..) {
+        if k == key {
+            if !replaced {
+                out.push((k, val.clone()));
+                replaced = true;
+            }
+        } else {
+            out.push((k, v));
+        }
+    }
+    if !replaced {
+        out.push((key, val));
+    }
+    let arr = params_array_from_pairs(gc, vm, &out);
+    set_params_hidden(this, arr);
+    Value::undefined()
+}
+
+pub fn url_search_params_to_string(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    _vm: &mut Vm,
+) -> Value {
+    let text = params_pairs(this)
+        .into_iter()
+        .map(|(k, v)| format!("{}={}", form_encode(&k), form_encode(&v)))
+        .collect::<Vec<_>>()
+        .join("&");
+    Value::from_heap_ptr(HeapString::allocate(gc, &text) as *mut u8)
+}
+
+fn url_search_params_from_query(gc: &mut SemiSpace, vm: &mut Vm, query: Option<&str>) -> Value {
+    let pairs = query.map(params_pairs_from_query).unwrap_or_default();
+    params_instance(gc, vm, &pairs)
 }
 
 /// Try to convert a value to a string by calling ToPrimitive with string hint.
@@ -18324,6 +18702,46 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 0,
             name: "URL_prototype_toJSON",
             func: url_to_json,
+        },
+        Builtin {
+            length: 0,
+            name: "URLSearchParams",
+            func: url_search_params_constructor_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "URLSearchParams_prototype_append",
+            func: url_search_params_append,
+        },
+        Builtin {
+            length: 1,
+            name: "URLSearchParams_prototype_get",
+            func: url_search_params_get,
+        },
+        Builtin {
+            length: 1,
+            name: "URLSearchParams_prototype_getAll",
+            func: url_search_params_get_all,
+        },
+        Builtin {
+            length: 1,
+            name: "URLSearchParams_prototype_has",
+            func: url_search_params_has,
+        },
+        Builtin {
+            length: 1,
+            name: "URLSearchParams_prototype_delete",
+            func: url_search_params_delete,
+        },
+        Builtin {
+            length: 2,
+            name: "URLSearchParams_prototype_set",
+            func: url_search_params_set,
+        },
+        Builtin {
+            length: 0,
+            name: "URLSearchParams_prototype_toString",
+            func: url_search_params_to_string,
         },
         Builtin {
             length: 0,

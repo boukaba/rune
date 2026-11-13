@@ -13795,3 +13795,32 @@ fn test_url_constructor_and_fields() {
     );
     let _ = r;
 }
+
+#[test]
+fn test_url_search_params_core() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var q = new URLSearchParams("a=1&b=hello+world&a=2");
+            var parts = [q.get("a"), q.getAll("a").join(","), q.has("b"), q.toString()];
+            q.append("c", "x y");
+            q.set("a", "9");
+            parts.push(q.toString());
+            q.delete("b");
+            parts.push(q.toString());
+            var u = new URL("https://example.com/y?a=1&b=2");
+            parts.push(u.searchParams.get("b"));
+            var called = "";
+            try { URLSearchParams("a=1"); } catch (e) { called = e.name; }
+            parts.push(called);
+            parts.join("|");
+        "#,
+        )
+        .unwrap();
+    assert_eq!(
+        eval_str(&mut ctx, "parts.join('|')"),
+        "1|1,2|true|a=1&b=hello+world&a=2|a=9&b=hello+world&c=x+y|a=9&c=x+y|2|TypeError"
+    );
+    let _ = r;
+}

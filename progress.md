@@ -451,8 +451,26 @@ input, and call-without-new. Integration suite: **763 passed, 0 failed,
 Known gaps: `URLSearchParams`, URL property setters, `URL.canParse`, and
 `URL.prototype` exposure through the constructor handle are not implemented.
 
-Next: `URLSearchParams`/`TextEncoder`, then the runtime crate and stable
-headers.
+### Phase 2 — URLSearchParams (2026-11-13)
+
+`URLSearchParams` now supports the core form-encoded surface:
+
+- Constructor from a query string (`?a=1&b=hello+world`) or an array of
+  `[key, value]` pairs; invalid calls without `new` throw.
+- `append`, `get`, `getAll`, `has`, `delete`, `set`, `toString`.
+- `URL` instances now expose a `searchParams` object built from the query.
+- Flat pair storage is hidden on the instance and GC-traced; rebuild methods
+  reallocate the store, append updates the hidden slot when the array grows.
+- Form decoding handles `+` and percent escapes; encoding emits `+` for spaces
+  and uppercase percent escapes.
+
+Integration suite: **764 passed, 0 failed, 3 ignored**.
+
+Known gaps: `sort`, `forEach`, `keys`/`values`/`entries` iteration, `size`, and
+live URL binding (mutating `u.searchParams` does not update `u.search`/`href`)
+are not implemented. `TextEncoder`/`TextDecoder` remain.
+
+Next: TextEncoder/TextDecoder, then the runtime crate and stable headers.
 
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,

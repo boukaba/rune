@@ -13737,3 +13737,33 @@ fn test_console_and_base64_uri_helpers() {
     );
     let _ = r;
 }
+
+#[test]
+fn test_function_length_and_name_metadata() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            function f(a, b) {}
+            function g(a, b = 1, c) {}
+            var o = { m(x, y) {} };
+            var bound = f.bind(null, 1);
+            [f.length, f.name, g.length, g.name, o.m.length, o.m.name,
+             bound.length, bound.name, Object.keys(f).join(",")].join("|");
+        "#,
+        )
+        .unwrap();
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "[f.length, f.name, g.length, g.name, o.m.length, o.m.name, bound.length, bound.name].join('|')"
+        ),
+        "2|f|1|g|2|m|1|bound f"
+    );
+    assert_eq!(
+        eval_str(&mut ctx, "Object.keys(f).join(',')"),
+        "",
+        "length/name must be non-enumerable"
+    );
+    let _ = r;
+}

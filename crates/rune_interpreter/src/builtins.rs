@@ -17818,6 +17818,40 @@ pub fn promise_static_all(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: 
     result_val
 }
 
+/// Read a function's own `length`/`name` metadata (empty/0 when absent).
+fn function_metadata(target: Value) -> (u32, String) {
+    let Some(ptr) = target.heap_ptr() else {
+        return (0, String::new());
+    };
+    if unsafe { (*(ptr as *const GcHeader)).tag() } != TAG_FUNC {
+        return (0, String::new());
+    }
+    let func = ptr as *mut Func;
+    let props = unsafe { Func::extra_props(func) };
+    if props.is_null() {
+        return (0, String::new());
+    }
+    let obj = props as *mut JSObject;
+    let shape = unsafe { JSObject::shape_ptr(obj) };
+    let mut length = 0u32;
+    let mut name = String::new();
+    if let Some(slot) = shape.lookup(&PropertyKey::from_string("length")) {
+        length = unsafe { JSObject::get_slot(obj, slot) }
+            .as_smi()
+            .unwrap_or(0)
+            .max(0) as u32;
+    }
+    if let Some(slot) = shape.lookup(&PropertyKey::from_string("name")) {
+        let v = unsafe { JSObject::get_slot(obj, slot) };
+        if let Some(sp) = v.heap_ptr() {
+            if unsafe { (*(sp as *const GcHeader)).tag() } == TAG_STRING {
+                name = unsafe { HeapString::to_string(sp as *mut HeapString) };
+            }
+        }
+    }
+    (length, name)
+}
+
 /// Function.prototype.bind(thisArg[, ...boundArgs]).
 ///
 /// The bound function is a real TAG_FUNC whose synthetic program forwards to
@@ -17880,6 +17914,10 @@ pub fn function_bind(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
         EnvObject::set_slot(env, 3, invoke_handle);
         Func::set_env_ptr(func, env as *mut u8);
     }
+    let (target_len, target_name) = function_metadata(target);
+    let bound_len = target_len.saturating_sub(bound_rest.len() as u32);
+    let bound_name = format!("bound {target_name}");
+    let func = vm.set_function_metadata(gc, func, bound_len, &bound_name);
     Value::from_heap_ptr(func as *mut u8)
 }
 

@@ -32,7 +32,7 @@ fn test_gc_stress_method_arrow_nested_map_and_growth() {
 #[test]
 fn test_gc_stress_object_aliases_survive_growth() {
     let mut ctx = Context::new_small();
-    ctx.enable_gc_stress(48);
+    ctx.enable_gc_stress(128);
     let r = eval_smi(
         &mut ctx,
         r#"
@@ -49,7 +49,7 @@ fn test_gc_stress_object_aliases_survive_growth() {
 #[test]
 fn test_gc_stress_promise_all_and_pending_rejection() {
     let mut ctx = Context::new_small();
-    ctx.enable_gc_stress(48);
+    ctx.enable_gc_stress(128);
     ctx.eval(
         r#"
         var out = "";

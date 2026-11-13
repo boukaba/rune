@@ -227,6 +227,11 @@ pub struct BytecodeProgram {
     pub is_module: bool,
     /// ESM linkage metadata; `None` for scripts and function programs.
     pub module: Option<ModuleInfo>,
+    /// Number of formal parameters counted by Function.prototype.length
+    /// (stops at the first default or destructuring-with-default).
+    pub param_count: u32,
+    /// Source-level function name for Function.prototype.name ("" anonymous).
+    pub display_name: String,
 }
 
 /// Linkage metadata for an ESM module program.
@@ -280,6 +285,8 @@ impl BytecodeProgram {
             regex_pool: vec![],
             is_module: false,
             module: None,
+            param_count: 0,
+            display_name: String::new(),
         }
     }
 

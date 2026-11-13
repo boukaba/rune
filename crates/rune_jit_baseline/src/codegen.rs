@@ -1302,6 +1302,9 @@ mod tests {
             is_class_constructor: false,
             local_names: vec![],
             captured_env_size: 0,
+            module: None,
+            param_count: 0,
+            display_name: String::new(),
         }
     }
 

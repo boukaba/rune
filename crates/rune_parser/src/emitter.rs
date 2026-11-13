@@ -579,6 +579,19 @@ impl Emitter {
         }
     }
 
+    /// Function.prototype.length: number of parameters before the first
+    /// default/rest parameter (destructuring counts as one unless it defaults).
+    fn function_length(func: &FnNode) -> u32 {
+        let mut n = 0u32;
+        for p in &func.params {
+            match p {
+                Pattern::Identifier(_, _, Some(_)) | Pattern::Default(_, _) => break,
+                _ => n += 1,
+            }
+        }
+        n
+    }
+
     /// Compile a function node into a nested BytecodeProgram and return its index.
     fn compile_function(&mut self, func: &FnNode) -> usize {
         let mut sub = Emitter::new();
@@ -706,7 +719,13 @@ impl Emitter {
                 }
             }
         }
-        let program = sub.into_bytecode();
+        let mut program = sub.into_bytecode();
+        program.param_count = Self::function_length(func);
+        program.display_name = func
+            .name
+            .as_ref()
+            .map(|n| n.to_string())
+            .unwrap_or_default();
         let idx = self.nested_funcs.len();
         self.nested_funcs.push(program);
         idx
@@ -818,7 +837,14 @@ impl Emitter {
             }
         }
         // The caller appends into the target program's functions list.
-        sub.into_bytecode()
+        let mut program = sub.into_bytecode();
+        program.param_count = Self::function_length(func);
+        program.display_name = func
+            .name
+            .as_ref()
+            .map(|n| n.to_string())
+            .unwrap_or_default();
+        program
     }
 
     /// Emit bytecode for a class node.

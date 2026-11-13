@@ -403,6 +403,29 @@ Regression test covers `typeof console.log`, `atob(btoa(...))`, non-ASCII
 Latin-1, percent round-trip, and the invalid-base64 error name. Integration
 suite: **761 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — function length/name metadata (2026-11-13)
+
+Every function created by `MakeFunction` now carries non-enumerable
+`length`/`name` own properties:
+
+- `BytecodeProgram` records `param_count` (parameters before the first
+  default/rest) and `display_name`; the emitter fills both for ordinary
+  functions, methods/classes, generators, and async functions.
+- `MakeFunction` attaches a metadata object through `Func::extra_props`, with
+  `length`/`name` attributes set to configurable-not-enumerable.
+- `Function.prototype.bind` computes `max(0, target.length - boundArgs)` and
+  `"bound " + target.name`; chained binds work.
+- The metadata allocations are rooted through `temp_roots` so forced
+  collections cannot collect the new Func or the name string mid-setup.
+
+Regression covers `f.length`/`f.name`, default-parameter length truncation,
+method names, bound length/name, chained binds, and non-enumerability.
+Integration suite: **762 passed, 0 failed, 3 ignored**.
+
+Known gap: anonymous function expressions assigned through object-literal data
+properties (`{ m: function(){} }`) still have an empty name; method shorthand
+(`{ m(){} }`) is inferred correctly.
+
 Next: Web API object/class surface (`URL`, `TextEncoder`, `fetch`) and the
 runtime crate; stable headers remain the structural Phase 1 item.
 

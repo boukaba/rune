@@ -185,7 +185,7 @@ Immutable, content-addressed shapes guarantee O(1) property access at any polymo
 
 ### AOT-First Persistent Compilation (AFPC)
 
-Rune caches compiled code across restarts with **source/ABI-scoped validity**: shapes are immutable and content-addressed, so shape identity is stable, but native code is valid only for the exact source hash and engine/OS/arch tag recorded in the cache header (unlike V8/JSC, whose shape transitions invalidate cached dispatch). Cache format is versioned (`AFPC_VERSION = 6`); stale or foreign caches fall back to compilation.
+Rune caches compiled code across restarts with **source/ABI-scoped validity**: shapes are immutable and content-addressed, so shape identity is stable, but native code is valid only for the exact source hash and engine/OS/arch tag recorded in the cache header (unlike V8/JSC, whose shape transitions invalidate cached dispatch). Cache format is versioned (`AFPC_VERSION = 7`); stale or foreign caches fall back to compilation.
 
 1. **First run:** Parse → emit → JIT-compile → persist (bytecode + shapes + ICs + native code)
 2. **Subsequent runs:** mmap cache → restore shapes/ICs, install native entries, execute immediately (cache load 26µs vs 355µs compile — 13.5×)

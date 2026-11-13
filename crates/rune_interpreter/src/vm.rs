@@ -3734,6 +3734,58 @@ impl Vm {
         }
     }
 
+    /// Attach non-enumerable `length` and `name` own properties to a function.
+    /// The Func and the name string are rooted through `temp_roots` while the
+    /// metadata allocations may collect; the object is filled after all
+    /// allocations so no stale Value is stored into its slots.
+    pub(crate) fn set_function_metadata(
+        &mut self,
+        gc: &mut SemiSpace,
+        func: *mut Func,
+        length: u32,
+        name: &str,
+    ) -> *mut Func {
+        let root_base = self.temp_roots.len();
+        let func_val =
+            Value::from_heap_ptr(unsafe { rune_core::gc::resolve_forwarded(func as *mut u8) });
+        self.temp_roots.push(func_val);
+        let entries = vec![
+            (PropertyKey::from_string("length"), 0usize),
+            (PropertyKey::from_string("name"), 1usize),
+        ];
+        let shape = Shape::intern_with_attrs(
+            entries,
+            vec!["length".to_string(), "name".to_string()],
+            vec![
+                rune_core::shape::ATTR_CONFIGURABLE,
+                rune_core::shape::ATTR_CONFIGURABLE,
+            ],
+        );
+        let obj = JSObject::allocate(
+            gc,
+            shape,
+            &[
+                Value::smi(length.min(i32::MAX as u32) as i32),
+                Value::undefined(),
+            ],
+        );
+        self.temp_roots.push(Value::from_heap_ptr(obj as *mut u8));
+        let name_str = HeapString::allocate(gc, name) as *mut u8;
+        let name_val = Value::from_heap_ptr(name_str);
+        let func_now = self.temp_roots[root_base]
+            .heap_ptr()
+            .unwrap_or(std::ptr::null_mut()) as *mut Func;
+        let obj_now = self.temp_roots[root_base + 1]
+            .heap_ptr()
+            .unwrap_or(std::ptr::null_mut()) as *mut JSObject;
+        unsafe {
+            JSObject::set_slot(obj_now, 1, name_val);
+            Func::set_extra_props(func_now, obj_now as *mut u8);
+        }
+        self.temp_roots.truncate(root_base);
+        func_now
+    }
+
     /// Install a new array machine. If an outer machine is already live
     /// (a callback invoked another array method), suspend it instead of
     /// overwriting it; `finish_array_op` restores it when the inner machine
@@ -8532,6 +8584,14 @@ impl Vm {
                             Value::undefined()
                         };
                         Func::set_lexical_this(resolved_ptr, lexical_this);
+                        if let Some(func_prog) = prog.functions.get(func_idx as usize) {
+                            resolved_ptr = self.set_function_metadata(
+                                gc,
+                                resolved_ptr,
+                                func_prog.param_count,
+                                &func_prog.display_name,
+                            );
+                        }
                         self.push(Value::from_heap_ptr(resolved_ptr as *mut u8));
                     }
                     self.frames[fi].pc = pc + 1;

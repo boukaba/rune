@@ -15343,3 +15343,28 @@ fn test_typed_array_array_like_coercions() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_typed_array_array_methods_and_is_primitive() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var seen = [];
+            var a = new Uint8Array([1, 2, 3]);
+            a.forEach(function (v, i) { seen.push(v + i); });
+            [
+                seen.join(",") === "1,3,5",
+                a.some(function (v) { return v === 2; }),
+                a.every(function (v) { return v > 0; }),
+                a.reduce(function (x, y) { return x + y; }, 0) === 6,
+                isPrimitive(1),
+                isPrimitive("x"),
+                !isPrimitive({}),
+                isPrimitive(null)
+            ].join("|") === "true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

@@ -2433,6 +2433,23 @@ impl Vm {
                 ("values", "TypedArray_prototype_values"),
                 ("keys", "TypedArray_prototype_keys"),
                 ("entries", "TypedArray_prototype_entries"),
+                ("forEach", "Array_prototype_forEach"),
+                ("map", "Array_prototype_map"),
+                ("filter", "Array_prototype_filter"),
+                ("some", "Array_prototype_some"),
+                ("every", "Array_prototype_every"),
+                ("find", "Array_prototype_find"),
+                ("findIndex", "Array_prototype_findIndex"),
+                ("findLast", "Array_prototype_findLast"),
+                ("findLastIndex", "Array_prototype_findLastIndex"),
+                ("reduce", "Array_prototype_reduce"),
+                ("reduceRight", "Array_prototype_reduceRight"),
+                ("lastIndexOf", "Array_prototype_lastIndexOf"),
+                ("join", "Array_prototype_join"),
+                ("reverse", "Array_prototype_reverse"),
+                ("sort", "Array_prototype_sort"),
+                ("copyWithin", "Array_prototype_copyWithin"),
+                ("toLocaleString", "Array_prototype_toLocaleString"),
             ] {
                 if let Some(h) = find_handle(&self.builtins, handle) {
                     ta_base_entries.push((name, h));
@@ -3301,6 +3318,9 @@ impl Vm {
         }
         if let Some(ca) = find_handle(&self.builtins, "test262_compareArray") {
             self.globals.insert("compareArray".to_string(), ca);
+        }
+        if let Some(ip) = find_handle(&self.builtins, "test262_isPrimitive") {
+            self.globals.insert("isPrimitive".to_string(), ip);
         }
         self.globals.insert("NaN".to_string(), nan_val);
         let inf_val = Value::from_float64(f64::INFINITY);

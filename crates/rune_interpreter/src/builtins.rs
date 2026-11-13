@@ -23517,6 +23517,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             func: test262_compare_array,
         },
         Builtin {
+            length: 1,
+            name: "test262_isPrimitive",
+            func: test262_is_primitive,
+        },
+        Builtin {
             length: 2,
             name: "assert_throws",
             func: assert_throws,
@@ -23864,6 +23869,21 @@ pub fn assert_compare_array(
         }
     }
     Value::undefined()
+}
+
+/// Test262 `isPrimitive(value)` helper.
+pub fn test262_is_primitive(
+    _gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    _vm: &mut Vm,
+) -> Value {
+    let v = args.first().copied().unwrap_or(Value::undefined());
+    let primitive = v.heap_ptr().is_none_or(|ptr| {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        tag == TAG_STRING
+    });
+    Value::boolean(primitive)
 }
 
 /// Test262 `compareArray(a, b)` helper returning a boolean.

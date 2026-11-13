@@ -1707,6 +1707,22 @@ Integration suite: **823 passed, 0 failed, 3 ignored**.
 
 Integration suite: **824 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — TypedArray Array-method surface + isPrimitive (2026-11-13)
+
+- `%TypedArray%.prototype` now exposes Array-compatible methods backed by the
+  existing Array builtins: forEach/map/filter/some/every/find/findIndex/
+  findLast/findLastIndex/reduce/reduceRight/lastIndexOf/join/reverse/sort/
+  copyWithin/toLocaleString.
+- Added the Test262 global `isPrimitive(value)` helper (missing from the
+  emulated assert.js), which unblocked `testTypedArray.js` argument factories.
+- Test262: TypedArray **15 → 89/829**.
+- Regression: `test_typed_array_array_methods_and_is_primitive`.
+- Known gaps: typed-array `map`/`filter` currently return plain Arrays (species
+  semantics absent); iterable constructor arguments whose iterator is a JS
+  function are not drained yet (harness `makeIterable` factories still fail).
+
+Integration suite: **825 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

@@ -1308,6 +1308,23 @@ Integration suite: **800 passed, 0 failed, 3 ignored**.
 
 Integration suite: **801 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — descriptor objects + built-in method attributes (2026-11-13)
+
+- `Object.getOwnPropertyDescriptor` result objects now inherit
+  `Object.prototype` (both plain and dense-array descriptor paths). Previously
+  `desc.hasOwnProperty(...)` was undefined, failing every Sputnik 4-x check.
+- `Object.prototype` methods are installed with writable+configurable,
+  non-enumerable attributes; `__proto__` is configurable/non-enumerable.
+  Array `values`/`keys`/`entries` and `@@iterator` use the same shape.
+- Test262: Object **1729 → 1791/3411**;
+  `Object.getOwnPropertyDescriptor` **201 → 232/310**.
+- Regression: `test_property_descriptor_objects_inherit_object_prototype`.
+- Known gaps: global-object descriptors (`this.undefined`, etc.) still absent;
+  some built-in constructor/`prototype` descriptors need per-property spec
+  attributes.
+
+Integration suite: **802 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

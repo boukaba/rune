@@ -2356,39 +2356,29 @@ impl Vm {
             self.value_key = Value::from_heap_ptr(HeapString::allocate(gc, "value") as *mut u8);
             self.next_key = Value::from_heap_ptr(HeapString::allocate(gc, "next") as *mut u8);
             if self.array_prototype.is_heap_object() {
-                unsafe {
-                    let proto_ptr = self.array_prototype.heap_ptr().unwrap() as *mut JSObject;
-                    if let Some(h) = find_handle(&self.builtins, "Array_prototype_values") {
-                        JSObject::add_property(
-                            proto_ptr,
-                            PropertyKey::from_string("values"),
-                            "values".to_string(),
-                            h,
-                        );
-                    }
-                    if let Some(h) = find_handle(&self.builtins, "Array_prototype_keys") {
-                        JSObject::add_property(
-                            proto_ptr,
-                            PropertyKey::from_string("keys"),
-                            "keys".to_string(),
-                            h,
-                        );
-                    }
-                    if let Some(h) = find_handle(&self.builtins, "Array_prototype_entries") {
-                        JSObject::add_property(
-                            proto_ptr,
-                            PropertyKey::from_string("entries"),
-                            "entries".to_string(),
-                            h,
-                        );
-                    }
-                    if let Some(h) = find_handle(&self.builtins, "Array_prototype_iterator") {
-                        JSObject::add_property(
-                            proto_ptr,
-                            PropertyKey::from_symbol(rune_core::symbol::SYM_ITERATOR),
-                            "\u{0}".to_string(),
-                            h,
-                        );
+                let attrs = rune_core::shape::ATTR_WRITABLE | rune_core::shape::ATTR_CONFIGURABLE;
+                for (name, key, sym) in [
+                    ("values", "Array_prototype_values", false),
+                    ("keys", "Array_prototype_keys", false),
+                    ("entries", "Array_prototype_entries", false),
+                    ("", "Array_prototype_iterator", true),
+                ] {
+                    if let Some(h) = find_handle(&self.builtins, key) {
+                        let ptr = self.array_prototype.heap_ptr().unwrap() as *mut JSObject;
+                        let live = self.ensure_object_capacity(gc, ptr);
+                        let pkey = if sym {
+                            PropertyKey::from_symbol(rune_core::symbol::SYM_ITERATOR)
+                        } else {
+                            PropertyKey::from_string(name)
+                        };
+                        let key_name = if sym {
+                            "\u{0}".to_string()
+                        } else {
+                            name.to_string()
+                        };
+                        unsafe {
+                            JSObject::add_property_with_attrs(live, pkey, key_name, h, attrs);
+                        }
                     }
                 }
             }
@@ -2734,66 +2724,37 @@ impl Vm {
 
         // Object.prototype methods: toString / hasOwnProperty / isPrototypeOf
         {
-            let to_string_handle = find_handle(&self.builtins, "Object_prototype_toString");
-            let has_own_handle = find_handle(&self.builtins, "Object_prototype_hasOwnProperty");
-            let is_proto_handle = find_handle(&self.builtins, "Object_prototype_isPrototypeOf");
+            let attrs = rune_core::shape::ATTR_WRITABLE | rune_core::shape::ATTR_CONFIGURABLE;
             let obj_proto_ptr = self.object_prototype.heap_ptr().unwrap() as *mut JSObject;
-            if let Some(h) = to_string_handle {
+            let add = |vm: &mut Self, gc: &mut SemiSpace, name: &str, h: Value| {
+                let live = vm.ensure_object_capacity(gc, obj_proto_ptr);
                 unsafe {
-                    JSObject::add_property(
-                        obj_proto_ptr,
-                        PropertyKey::from_string("toString"),
-                        "toString".to_string(),
+                    JSObject::add_property_with_attrs(
+                        live,
+                        PropertyKey::from_string(name),
+                        name.to_string(),
                         h,
+                        attrs,
                     );
                 }
-            }
-            if let Some(h) = has_own_handle {
-                unsafe {
-                    JSObject::add_property(
-                        obj_proto_ptr,
-                        PropertyKey::from_string("hasOwnProperty"),
-                        "hasOwnProperty".to_string(),
-                        h,
-                    );
-                }
-            }
-            if let Some(h) = is_proto_handle {
-                unsafe {
-                    JSObject::add_property(
-                        obj_proto_ptr,
-                        PropertyKey::from_string("isPrototypeOf"),
-                        "isPrototypeOf".to_string(),
-                        h,
-                    );
-                }
-            }
-            if let Some(h) = find_handle(&self.builtins, "Object_prototype_toLocaleString") {
-                unsafe {
-                    JSObject::add_property(
-                        obj_proto_ptr,
-                        PropertyKey::from_string("toLocaleString"),
-                        "toLocaleString".to_string(),
-                        h,
-                    );
-                }
-            }
+            };
             for (name, key) in [
+                ("toString", "Object_prototype_toString"),
+                ("hasOwnProperty", "Object_prototype_hasOwnProperty"),
+                ("isPrototypeOf", "Object_prototype_isPrototypeOf"),
+                ("toLocaleString", "Object_prototype_toLocaleString"),
                 ("__lookupGetter__", "Object_prototype_lookupGetter"),
                 ("__lookupSetter__", "Object_prototype_lookupSetter"),
                 ("__defineGetter__", "Object_prototype_defineGetter"),
                 ("__defineSetter__", "Object_prototype_defineSetter"),
+                (
+                    "propertyIsEnumerable",
+                    "Object_prototype_propertyIsEnumerable",
+                ),
+                ("valueOf", "Object_prototype_valueOf"),
             ] {
                 if let Some(h) = find_handle(&self.builtins, key) {
-                    let live = self.ensure_object_capacity(gc, obj_proto_ptr);
-                    unsafe {
-                        JSObject::add_property(
-                            live,
-                            PropertyKey::from_string(name),
-                            name.to_string(),
-                            h,
-                        );
-                    }
+                    add(self, gc, name, h);
                 }
             }
             let proto_getter = find_handle(&self.builtins, "Object_prototype_proto_get");
@@ -2802,33 +2763,12 @@ impl Vm {
                 let pair = rune_core::accessor::AccessorPair::allocate(gc, getter, setter);
                 let live = self.ensure_object_capacity(gc, obj_proto_ptr);
                 unsafe {
-                    JSObject::add_property(
+                    JSObject::add_property_with_attrs(
                         live,
                         PropertyKey::from_string("__proto__"),
                         "__proto__".to_string(),
                         Value::from_heap_ptr(pair),
-                    );
-                }
-            }
-            if let Some(h) = find_handle(&self.builtins, "Object_prototype_propertyIsEnumerable") {
-                let live = self.ensure_object_capacity(gc, obj_proto_ptr);
-                unsafe {
-                    JSObject::add_property(
-                        live,
-                        PropertyKey::from_string("propertyIsEnumerable"),
-                        "propertyIsEnumerable".to_string(),
-                        h,
-                    );
-                }
-            }
-            if let Some(h) = find_handle(&self.builtins, "Object_prototype_valueOf") {
-                let live = self.ensure_object_capacity(gc, obj_proto_ptr);
-                unsafe {
-                    JSObject::add_property(
-                        live,
-                        PropertyKey::from_string("valueOf"),
-                        "valueOf".to_string(),
-                        h,
+                        rune_core::shape::ATTR_CONFIGURABLE,
                     );
                 }
             }

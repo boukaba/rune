@@ -8380,7 +8380,12 @@ pub fn object_define_properties(
 /// their attrs, whole-array seal bit overriding), then dense elements (holes
 /// → undefined) with whole-array freeze/seal bits overriding; huge named
 /// indices and other named extras read through extra_props.
-fn array_own_property_descriptor(gc: &mut SemiSpace, ptr: *mut u8, raw_key: Value) -> Value {
+fn array_own_property_descriptor(
+    gc: &mut SemiSpace,
+    ptr: *mut u8,
+    raw_key: Value,
+    proto: Option<*mut u8>,
+) -> Value {
     let arr = ptr as *mut RuneArray;
     // "length" (string key only — canonical indices never spell it).
     if let Some(kptr) = raw_key.heap_ptr() {
@@ -8392,7 +8397,7 @@ fn array_own_property_descriptor(gc: &mut SemiSpace, ptr: *mut u8, raw_key: Valu
                 if unsafe { RuneArray::length_is_writable(arr) } {
                     attr |= rune_core::shape::ATTR_WRITABLE;
                 }
-                return make_descriptor_object(gc, length_value(len as u64), attr);
+                return make_descriptor_object(gc, length_value(len as u64), attr, proto);
             }
         }
     }
@@ -8408,7 +8413,7 @@ fn array_own_property_descriptor(gc: &mut SemiSpace, ptr: *mut u8, raw_key: Valu
                     attr &= !rune_core::shape::ATTR_CONFIGURABLE;
                 }
                 let v = unsafe { JSObject::get_slot(extra as *mut JSObject, slot) };
-                return make_descriptor_object(gc, v, attr);
+                return make_descriptor_object(gc, v, attr, proto);
             }
         }
     }
@@ -8426,7 +8431,7 @@ fn array_own_property_descriptor(gc: &mut SemiSpace, ptr: *mut u8, raw_key: Valu
                 if unsafe { RuneArray::elems_are_nonwritable(arr) } {
                     attr &= !rune_core::shape::ATTR_WRITABLE;
                 }
-                return make_descriptor_object(gc, elem, attr);
+                return make_descriptor_object(gc, elem, attr, proto);
             }
         }
     }
@@ -8459,7 +8464,7 @@ pub fn object_get_own_property_descriptor(
     // B1f-5: descriptors on dense arrays (§10.1.5.1 via the exotic — holes
     // read as absent → undefined).
     if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_ARRAY {
-        return array_own_property_descriptor(gc, ptr, raw_key);
+        return array_own_property_descriptor(gc, ptr, raw_key, vm.object_prototype.heap_ptr());
     }
     if unsafe { (*(ptr as *const GcHeader)).tag() } != TAG_OBJECT {
         return Value::undefined();
@@ -8475,13 +8480,18 @@ pub fn object_get_own_property_descriptor(
     };
     let attr = shape.attr_at(slot);
     let val = unsafe { JSObject::get_slot(obj, slot) };
-    make_descriptor_object(gc, val, attr)
+    make_descriptor_object(gc, val, attr, vm.object_prototype.heap_ptr())
 }
 
 /// Build a fresh `{enumerable, configurable, value/writable | get/set}`
 /// descriptor object from a stored value + attribute byte (B1f-5: shared by
 /// plain objects and dense arrays).
-fn make_descriptor_object(gc: &mut SemiSpace, val: Value, attr: u8) -> Value {
+fn make_descriptor_object(
+    gc: &mut SemiSpace,
+    val: Value,
+    attr: u8,
+    proto: Option<*mut u8>,
+) -> Value {
     let pairs: Vec<(&str, Value)> = vec![
         (
             "enumerable",
@@ -8525,6 +8535,9 @@ fn make_descriptor_object(gc: &mut SemiSpace, val: Value, attr: u8) -> Value {
         .collect();
     let shape = Shape::intern(entries, names);
     let obj = JSObject::allocate(gc, shape, &vals);
+    if let Some(proto) = proto {
+        unsafe { JSObject::set_prototype(obj, proto) };
+    }
     Value::from_heap_ptr(obj as *mut u8)
 }
 

@@ -14767,3 +14767,24 @@ fn test_function_prototype_chain_and_string_own_methods() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_property_descriptor_objects_inherit_object_prototype() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var d = Object.getOwnPropertyDescriptor(Number, "length");
+            var e = Object.getOwnPropertyDescriptor([1], "0");
+            [
+                Object.getPrototypeOf(d) === Object.prototype,
+                d.hasOwnProperty("writable"),
+                d.hasOwnProperty("value") && d.hasOwnProperty("get") === false,
+                Object.getPrototypeOf(e) === Object.prototype,
+                e.hasOwnProperty("value") && e.enumerable === true
+            ].join("|") === "true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

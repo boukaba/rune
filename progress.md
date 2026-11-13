@@ -2694,6 +2694,26 @@ Integration suite: **868 passed, 0 failed, 3 ignored**.
 
 Integration suite: **869 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Script-level var hoisting (2026-11-13)
+
+- New bytecode `DeclareGlobal` and a script pre-pass: every top-level and
+  nested-block `var` name is bound to `undefined` before any statement runs
+  (including `if (false)` bodies, loop headers, try/switch blocks), while
+  existing global bindings are preserved via `entry().or_insert`.
+- Fixes `print(x); var x;` (ReferenceError) and `typeof`/reference use before
+  the declaration; `built-ins/Boolean` 47 → **48/51**.
+- Regression: `test_script_var_hoisting`.
+- Investigation for this round also confirmed a **known encoding limitation**:
+  negative Smi numbers and builtin function handles share the negative-Smi
+  representation, so `(-10).toPrecision(2)` resolves Function.prototype and
+  fails. The attempted "box all negative numbers as f64 / add Value::handle"
+  invariant broke 10+ integration expectations and JIT output, so it was
+  reverted; fixing this needs a distinct builtin-handle tag (or heap function
+  wrappers) across interpreter, JIT, and ABI. This blocks several remaining
+  Number formatting tests.
+
+Integration suite: **870 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

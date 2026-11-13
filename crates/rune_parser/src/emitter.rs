@@ -192,6 +192,16 @@ impl Emitter {
             self.emit(Opcode::Return, vec![]);
             return;
         }
+        // Script-level var hoisting: var bindings exist (undefined) before any
+        // statement runs. Function/class declarations are hoisted separately.
+        let mut var_names: Vec<String> = Vec::new();
+        for stmt in &prog.body {
+            collect_var_names_stmt(stmt, &mut var_names);
+        }
+        for name in &var_names {
+            let idx = self.intern_string(name) as i64;
+            self.emit(Opcode::DeclareGlobal, vec![idx]);
+        }
         // --- Escape analysis at SCRIPT level ---
         // A top-level function/class declaration stored only in a Frame local
         // is invisible to inner functions (they resolve free identifiers via

@@ -78,6 +78,8 @@ pub enum Opcode {
     /// ReferenceError.
     LoadGlobalSoft,
     StoreGlobal,
+    /// Create a global var binding as undefined if absent (var hoisting).
+    DeclareGlobal,
     // Control flow
     Jump,
     JumpIfTrue,

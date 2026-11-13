@@ -16680,3 +16680,23 @@ fn test_date_parse_rfc_and_temporal_instant_validation() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_script_var_hoisting() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var before = x;
+            var inBlock = y;
+            var inFor = z;
+            if (false) { var y = 1; }
+            for (var z = 0; false;) {}
+            var x = 5;
+            [before === undefined, inBlock === undefined, inFor === undefined, x === 5].join("|")
+                === "true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

@@ -9459,6 +9459,13 @@ impl Vm {
                     }
                     self.frames[fi].pc = pc + 1;
                 }
+                Opcode::DeclareGlobal => {
+                    let name_idx = instr.operands[0] as usize;
+                    if let Some(name) = self.frames[fi].prog_str(name_idx) {
+                        self.globals.entry(name).or_insert_with(Value::undefined);
+                    }
+                    self.frames[fi].pc = pc + 1;
+                }
                 Opcode::StoreGlobal => {
                     let name_idx = instr.operands[0] as usize;
                     let value = self.pop();

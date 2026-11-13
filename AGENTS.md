@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Date setters sync ToNumber (2026-11-13)**: ToPrimitive/ToNumber via re-entrant calls. Date 458→**519/594**. Integration **839**.
 - **Descriptor accessors via sync calls (2026-11-13)**: re-entrant `call_value_sync` + throw isolation. Object 2546→**2609/3411**. Integration **838**.
 - **RegExp split tail fix (2026-11-13)**: end zero-width matches skipped. String split 92→**93/120**. Integration **837**.
 - **RegExp @@split (2026-11-13)**: limit/captures/zero-length handling. RegExp/prototype 177→**189/487**. Integration **837**.

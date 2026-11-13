@@ -4394,6 +4394,106 @@ pub fn date_to_locale_time_string_builtin(
     date_to_time_string_builtin(gc, this, _args, vm)
 }
 
+/// OrdinaryToPrimitive executed through the synchronous re-entrant call path.
+fn to_primitive_sync(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    input: Value,
+    hint: &str,
+) -> Result<Value, Value> {
+    if !is_object_value(input) {
+        return Ok(input);
+    }
+    let hint_key = Value::from_heap_ptr(HeapString::allocate(gc, hint) as *mut u8);
+    match get_symbol_method(
+        gc,
+        input,
+        rune_core::symbol::SYM_TO_PRIMITIVE,
+        Some(vm.function_prototype),
+    ) {
+        SymbolMethodResult::Found(method) => {
+            let result = vm.call_value_sync(gc, method, input, &[hint_key])?;
+            if is_object_value(result) {
+                return Err(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "Cannot convert object to primitive value",
+                ));
+            }
+            return Ok(result);
+        }
+        SymbolMethodResult::NotCallable => {
+            return Err(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "@@toPrimitive is not callable",
+            ));
+        }
+        SymbolMethodResult::NotFound => {}
+    }
+    let order: [&str; 2] = if hint == "string" {
+        ["toString", "valueOf"]
+    } else {
+        ["valueOf", "toString"]
+    };
+    for name in order {
+        let key = Value::from_heap_ptr(HeapString::allocate(gc, name) as *mut u8);
+        let method = load_property_recursive(input, key, Some(vm.function_prototype), gc);
+        let is_callable = method
+            .heap_ptr()
+            .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC })
+            || method.as_smi().is_some_and(|s| s < 0);
+        if !is_callable {
+            continue;
+        }
+        let result = vm.call_value_sync(gc, method, input, &[])?;
+        if !is_object_value(result) {
+            return Ok(result);
+        }
+    }
+    Err(crate::errors::error_object(
+        gc,
+        &vm.error_protos,
+        crate::errors::ErrorKind::TypeError,
+        "Cannot convert object to primitive value",
+    ))
+}
+
+fn to_number_sync(gc: &mut SemiSpace, vm: &mut Vm, input: Value) -> Result<f64, Value> {
+    if input.as_symbol_id().is_some() {
+        return Err(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Cannot convert a Symbol value to a number",
+        ));
+    }
+    let prim = to_primitive_sync(gc, vm, input, "number")?;
+    if prim.as_symbol_id().is_some() {
+        return Err(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Cannot convert a Symbol value to a number",
+        ));
+    }
+    Ok(to_number(prim))
+}
+
+macro_rules! date_arg_number {
+    ($gc:ident, $vm:ident, $v:expr $(,)?) => {
+        match to_number_sync($gc, $vm, $v) {
+            Ok(n) => n,
+            Err(e) => {
+                $vm.set_pending_exception(e);
+                f64::NAN
+            }
+        }
+    };
+}
+
 /// §21.4.4.20 Date.prototype.setDate ( date )
 pub fn date_set_date_builtin(
     gc: &mut SemiSpace,
@@ -4405,7 +4505,9 @@ pub fn date_set_date_builtin(
         return Value::undefined();
     };
     let tv = unsafe { date::RuneDate::tv(ptr) };
-    let dt = to_number(
+    let dt = date_arg_number!(
+        gc,
+        vm,
         args.first()
             .copied()
             .unwrap_or(Value::from_float64(f64::NAN)),
@@ -4422,6 +4524,9 @@ pub fn date_set_date_builtin(
         date::time_within_day(tv),
     );
     let u = date::time_clip(new_date);
+    if vm.pending_exception.is_some() {
+        return Value::undefined();
+    }
     unsafe { date::RuneDate::set_tv(ptr, u) };
     date_number(u)
 }
@@ -4437,21 +4542,26 @@ pub fn date_set_full_year_builtin(
         return Value::undefined();
     };
     let tv = unsafe { date::RuneDate::tv(ptr) };
-    let y = to_number(
+    let y = date_arg_number!(
+        gc,
+        vm,
         args.first()
             .copied()
             .unwrap_or(Value::from_float64(f64::NAN)),
     );
     let base = if tv.is_nan() { 0.0 } else { tv };
-    let m = args
-        .get(1)
-        .map_or(date::month_from_time(base) as f64, |x| to_number(*x));
-    let dt = args
-        .get(2)
-        .map_or(date::date_from_time(base) as f64, |x| to_number(*x));
+    let m = args.get(1).map_or(date::month_from_time(base) as f64, |x| {
+        date_arg_number!(gc, vm, *x)
+    });
+    let dt = args.get(2).map_or(date::date_from_time(base) as f64, |x| {
+        date_arg_number!(gc, vm, *x)
+    });
     let yr = date::make_full_year(y);
     let new_date = date::make_date(date::make_day(yr, m, dt), date::time_within_day(base));
     let u = date::time_clip(new_date);
+    if vm.pending_exception.is_some() {
+        return Value::undefined();
+    }
     unsafe { date::RuneDate::set_tv(ptr, u) };
     date_number(u)
 }
@@ -4467,7 +4577,9 @@ pub fn date_set_hours_builtin(
         return Value::undefined();
     };
     let tv = unsafe { date::RuneDate::tv(ptr) };
-    let h = to_number(
+    let h = date_arg_number!(
+        gc,
+        vm,
         args.first()
             .copied()
             .unwrap_or(Value::from_float64(f64::NAN)),
@@ -4475,19 +4587,24 @@ pub fn date_set_hours_builtin(
     if tv.is_nan() {
         return Value::from_float64(f64::NAN);
     }
-    let m = args
-        .get(1)
-        .map_or(date::min_from_time(tv) as f64, |x| to_number(*x));
-    let s = args
-        .get(2)
-        .map_or(date::sec_from_time(tv) as f64, |x| to_number(*x));
+    let m = args.get(1).map_or(date::min_from_time(tv) as f64, |x| {
+        date_arg_number!(gc, vm, *x)
+    });
+    let s = args.get(2).map_or(date::sec_from_time(tv) as f64, |x| {
+        date_arg_number!(gc, vm, *x)
+    });
     let ms = args
         .get(3)
-        .map_or(date::millisec_from_time(tv) as f64, |x| to_number(*x));
+        .map_or(date::millisec_from_time(tv) as f64, |x| {
+            date_arg_number!(gc, vm, *x)
+        });
     let u = date::time_clip(date::make_date(
         date::day(tv) as f64,
         date::make_time(h, m, s, ms),
     ));
+    if vm.pending_exception.is_some() {
+        return Value::undefined();
+    }
     unsafe { date::RuneDate::set_tv(ptr, u) };
     date_number(u)
 }
@@ -4503,7 +4620,9 @@ pub fn date_set_milliseconds_builtin(
         return Value::undefined();
     };
     let tv = unsafe { date::RuneDate::tv(ptr) };
-    let ms = to_number(
+    let ms = date_arg_number!(
+        gc,
+        vm,
         args.first()
             .copied()
             .unwrap_or(Value::from_float64(f64::NAN)),
@@ -4520,6 +4639,9 @@ pub fn date_set_milliseconds_builtin(
             ms,
         ),
     ));
+    if vm.pending_exception.is_some() {
+        return Value::undefined();
+    }
     unsafe { date::RuneDate::set_tv(ptr, u) };
     date_number(u)
 }
@@ -4535,7 +4657,9 @@ pub fn date_set_minutes_builtin(
         return Value::undefined();
     };
     let tv = unsafe { date::RuneDate::tv(ptr) };
-    let m = to_number(
+    let m = date_arg_number!(
+        gc,
+        vm,
         args.first()
             .copied()
             .unwrap_or(Value::from_float64(f64::NAN)),
@@ -4543,16 +4667,21 @@ pub fn date_set_minutes_builtin(
     if tv.is_nan() {
         return Value::from_float64(f64::NAN);
     }
-    let s = args
-        .get(1)
-        .map_or(date::sec_from_time(tv) as f64, |x| to_number(*x));
+    let s = args.get(1).map_or(date::sec_from_time(tv) as f64, |x| {
+        date_arg_number!(gc, vm, *x)
+    });
     let ms = args
         .get(2)
-        .map_or(date::millisec_from_time(tv) as f64, |x| to_number(*x));
+        .map_or(date::millisec_from_time(tv) as f64, |x| {
+            date_arg_number!(gc, vm, *x)
+        });
     let u = date::time_clip(date::make_date(
         date::day(tv) as f64,
         date::make_time(date::hour_from_time(tv) as f64, m, s, ms),
     ));
+    if vm.pending_exception.is_some() {
+        return Value::undefined();
+    }
     unsafe { date::RuneDate::set_tv(ptr, u) };
     date_number(u)
 }
@@ -4568,7 +4697,9 @@ pub fn date_set_month_builtin(
         return Value::undefined();
     };
     let tv = unsafe { date::RuneDate::tv(ptr) };
-    let m = to_number(
+    let m = date_arg_number!(
+        gc,
+        vm,
         args.first()
             .copied()
             .unwrap_or(Value::from_float64(f64::NAN)),
@@ -4576,14 +4707,17 @@ pub fn date_set_month_builtin(
     if tv.is_nan() {
         return Value::from_float64(f64::NAN);
     }
-    let dt = args
-        .get(1)
-        .map_or(date::date_from_time(tv) as f64, |x| to_number(*x));
+    let dt = args.get(1).map_or(date::date_from_time(tv) as f64, |x| {
+        date_arg_number!(gc, vm, *x)
+    });
     let new_date = date::make_date(
         date::make_day(date::year_from_time(tv) as f64, m, dt),
         date::time_within_day(tv),
     );
     let u = date::time_clip(new_date);
+    if vm.pending_exception.is_some() {
+        return Value::undefined();
+    }
     unsafe { date::RuneDate::set_tv(ptr, u) };
     date_number(u)
 }
@@ -4599,7 +4733,9 @@ pub fn date_set_seconds_builtin(
         return Value::undefined();
     };
     let tv = unsafe { date::RuneDate::tv(ptr) };
-    let s = to_number(
+    let s = date_arg_number!(
+        gc,
+        vm,
         args.first()
             .copied()
             .unwrap_or(Value::from_float64(f64::NAN)),
@@ -4609,7 +4745,9 @@ pub fn date_set_seconds_builtin(
     }
     let ms = args
         .get(1)
-        .map_or(date::millisec_from_time(tv) as f64, |x| to_number(*x));
+        .map_or(date::millisec_from_time(tv) as f64, |x| {
+            date_arg_number!(gc, vm, *x)
+        });
     let u = date::time_clip(date::make_date(
         date::day(tv) as f64,
         date::make_time(
@@ -4619,6 +4757,9 @@ pub fn date_set_seconds_builtin(
             ms,
         ),
     ));
+    if vm.pending_exception.is_some() {
+        return Value::undefined();
+    }
     unsafe { date::RuneDate::set_tv(ptr, u) };
     date_number(u)
 }
@@ -4633,12 +4774,17 @@ pub fn date_set_time_builtin(
     let Some(ptr) = date_receiver(gc, this, vm) else {
         return Value::undefined();
     };
-    let t = to_number(
+    let t = date_arg_number!(
+        gc,
+        vm,
         args.first()
             .copied()
             .unwrap_or(Value::from_float64(f64::NAN)),
     );
     let v = date::time_clip(t);
+    if vm.pending_exception.is_some() {
+        return Value::undefined();
+    }
     unsafe { date::RuneDate::set_tv(ptr, v) };
     date_number(v)
 }
@@ -4654,7 +4800,9 @@ pub fn date_set_utc_date_builtin(
         return Value::undefined();
     };
     let tv = unsafe { date::RuneDate::tv(ptr) };
-    let dt = to_number(
+    let dt = date_arg_number!(
+        gc,
+        vm,
         args.first()
             .copied()
             .unwrap_or(Value::from_float64(f64::NAN)),
@@ -4670,6 +4818,9 @@ pub fn date_set_utc_date_builtin(
         ),
         date::time_within_day(tv),
     ));
+    if vm.pending_exception.is_some() {
+        return Value::undefined();
+    }
     unsafe { date::RuneDate::set_tv(ptr, v) };
     date_number(v)
 }
@@ -4686,22 +4837,27 @@ pub fn date_set_utc_full_year_builtin(
     };
     let tv = unsafe { date::RuneDate::tv(ptr) };
     let base = if tv.is_nan() { 0.0 } else { tv };
-    let y = to_number(
+    let y = date_arg_number!(
+        gc,
+        vm,
         args.first()
             .copied()
             .unwrap_or(Value::from_float64(f64::NAN)),
     );
-    let m = args
-        .get(1)
-        .map_or(date::month_from_time(base) as f64, |x| to_number(*x));
-    let dt = args
-        .get(2)
-        .map_or(date::date_from_time(base) as f64, |x| to_number(*x));
+    let m = args.get(1).map_or(date::month_from_time(base) as f64, |x| {
+        date_arg_number!(gc, vm, *x)
+    });
+    let dt = args.get(2).map_or(date::date_from_time(base) as f64, |x| {
+        date_arg_number!(gc, vm, *x)
+    });
     let yr = date::make_full_year(y);
     let v = date::time_clip(date::make_date(
         date::make_day(yr, m, dt),
         date::time_within_day(base),
     ));
+    if vm.pending_exception.is_some() {
+        return Value::undefined();
+    }
     unsafe { date::RuneDate::set_tv(ptr, v) };
     date_number(v)
 }
@@ -4717,7 +4873,9 @@ pub fn date_set_utc_hours_builtin(
         return Value::undefined();
     };
     let tv = unsafe { date::RuneDate::tv(ptr) };
-    let h = to_number(
+    let h = date_arg_number!(
+        gc,
+        vm,
         args.first()
             .copied()
             .unwrap_or(Value::from_float64(f64::NAN)),
@@ -4725,19 +4883,24 @@ pub fn date_set_utc_hours_builtin(
     if tv.is_nan() {
         return Value::from_float64(f64::NAN);
     }
-    let m = args
-        .get(1)
-        .map_or(date::min_from_time(tv) as f64, |x| to_number(*x));
-    let s = args
-        .get(2)
-        .map_or(date::sec_from_time(tv) as f64, |x| to_number(*x));
+    let m = args.get(1).map_or(date::min_from_time(tv) as f64, |x| {
+        date_arg_number!(gc, vm, *x)
+    });
+    let s = args.get(2).map_or(date::sec_from_time(tv) as f64, |x| {
+        date_arg_number!(gc, vm, *x)
+    });
     let ms = args
         .get(3)
-        .map_or(date::millisec_from_time(tv) as f64, |x| to_number(*x));
+        .map_or(date::millisec_from_time(tv) as f64, |x| {
+            date_arg_number!(gc, vm, *x)
+        });
     let v = date::time_clip(date::make_date(
         date::day(tv) as f64,
         date::make_time(h, m, s, ms),
     ));
+    if vm.pending_exception.is_some() {
+        return Value::undefined();
+    }
     unsafe { date::RuneDate::set_tv(ptr, v) };
     date_number(v)
 }
@@ -4753,7 +4916,9 @@ pub fn date_set_utc_milliseconds_builtin(
         return Value::undefined();
     };
     let tv = unsafe { date::RuneDate::tv(ptr) };
-    let ms = to_number(
+    let ms = date_arg_number!(
+        gc,
+        vm,
         args.first()
             .copied()
             .unwrap_or(Value::from_float64(f64::NAN)),
@@ -4770,6 +4935,9 @@ pub fn date_set_utc_milliseconds_builtin(
             ms,
         ),
     ));
+    if vm.pending_exception.is_some() {
+        return Value::undefined();
+    }
     unsafe { date::RuneDate::set_tv(ptr, v) };
     date_number(v)
 }
@@ -4785,7 +4953,9 @@ pub fn date_set_utc_minutes_builtin(
         return Value::undefined();
     };
     let tv = unsafe { date::RuneDate::tv(ptr) };
-    let m = to_number(
+    let m = date_arg_number!(
+        gc,
+        vm,
         args.first()
             .copied()
             .unwrap_or(Value::from_float64(f64::NAN)),
@@ -4793,16 +4963,21 @@ pub fn date_set_utc_minutes_builtin(
     if tv.is_nan() {
         return Value::from_float64(f64::NAN);
     }
-    let s = args
-        .get(1)
-        .map_or(date::sec_from_time(tv) as f64, |x| to_number(*x));
+    let s = args.get(1).map_or(date::sec_from_time(tv) as f64, |x| {
+        date_arg_number!(gc, vm, *x)
+    });
     let ms = args
         .get(2)
-        .map_or(date::millisec_from_time(tv) as f64, |x| to_number(*x));
+        .map_or(date::millisec_from_time(tv) as f64, |x| {
+            date_arg_number!(gc, vm, *x)
+        });
     let v = date::time_clip(date::make_date(
         date::day(tv) as f64,
         date::make_time(date::hour_from_time(tv) as f64, m, s, ms),
     ));
+    if vm.pending_exception.is_some() {
+        return Value::undefined();
+    }
     unsafe { date::RuneDate::set_tv(ptr, v) };
     date_number(v)
 }
@@ -4818,7 +4993,9 @@ pub fn date_set_utc_month_builtin(
         return Value::undefined();
     };
     let tv = unsafe { date::RuneDate::tv(ptr) };
-    let m = to_number(
+    let m = date_arg_number!(
+        gc,
+        vm,
         args.first()
             .copied()
             .unwrap_or(Value::from_float64(f64::NAN)),
@@ -4826,13 +5003,16 @@ pub fn date_set_utc_month_builtin(
     if tv.is_nan() {
         return Value::from_float64(f64::NAN);
     }
-    let dt = args
-        .get(1)
-        .map_or(date::date_from_time(tv) as f64, |x| to_number(*x));
+    let dt = args.get(1).map_or(date::date_from_time(tv) as f64, |x| {
+        date_arg_number!(gc, vm, *x)
+    });
     let v = date::time_clip(date::make_date(
         date::make_day(date::year_from_time(tv) as f64, m, dt),
         date::time_within_day(tv),
     ));
+    if vm.pending_exception.is_some() {
+        return Value::undefined();
+    }
     unsafe { date::RuneDate::set_tv(ptr, v) };
     date_number(v)
 }
@@ -4848,7 +5028,9 @@ pub fn date_set_utc_seconds_builtin(
         return Value::undefined();
     };
     let tv = unsafe { date::RuneDate::tv(ptr) };
-    let s = to_number(
+    let s = date_arg_number!(
+        gc,
+        vm,
         args.first()
             .copied()
             .unwrap_or(Value::from_float64(f64::NAN)),
@@ -4858,7 +5040,9 @@ pub fn date_set_utc_seconds_builtin(
     }
     let ms = args
         .get(1)
-        .map_or(date::millisec_from_time(tv) as f64, |x| to_number(*x));
+        .map_or(date::millisec_from_time(tv) as f64, |x| {
+            date_arg_number!(gc, vm, *x)
+        });
     let v = date::time_clip(date::make_date(
         date::day(tv) as f64,
         date::make_time(
@@ -4868,6 +5052,9 @@ pub fn date_set_utc_seconds_builtin(
             ms,
         ),
     ));
+    if vm.pending_exception.is_some() {
+        return Value::undefined();
+    }
     unsafe { date::RuneDate::set_tv(ptr, v) };
     date_number(v)
 }

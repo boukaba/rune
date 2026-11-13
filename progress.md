@@ -1976,6 +1976,22 @@ Integration suite: **837 passed, 0 failed, 3 ignored**.
 
 Integration suite: **838 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Synchronous ToPrimitive/ToNumber + Date setters (2026-11-13)
+
+- Added `to_primitive_sync` / `to_number_sync` using the re-entrant
+  `call_value_sync` path: `@@toPrimitive` dispatch, OrdinaryToPrimitive method
+  order, non-callable skips, object-result TypeErrors, and Symbol ToNumber
+  rejection.
+- All Date setters now use `date_arg_number!` (sync ToNumber) for their
+  arguments and abort before mutation if coercion threw.
+- Test262: Date **458 → 519/594**; `setHours` **21/23 → 22/23**.
+- Regression: `test_date_setter_sync_to_number`.
+- Known gaps: ordering of coercion vs invalid-date early return still differs in
+  a few setter cases; default-hint Date ToPrimitive paths only cover settled
+  cases.
+
+Integration suite: **839 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

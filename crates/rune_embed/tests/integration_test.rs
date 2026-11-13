@@ -15713,3 +15713,30 @@ fn test_descriptor_accessor_fields() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_date_setter_sync_to_number() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var d = new Date(0);
+            d.setHours({ valueOf: function () { return 5; } });
+            var coerced = d.getHours() === 5;
+            var before = d.getTime();
+            var threw = false;
+            try {
+                d.setHours(0, 0, 0, { valueOf: function () { throw new TypeError("boom"); } });
+            } catch (e) {
+                threw = e instanceof TypeError;
+            }
+            [
+                coerced,
+                threw,
+                d.getTime() === before
+            ].join("|") === "true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

@@ -17,3 +17,13 @@ fn uncaught_error_exits_nonzero() {
 fn successful_script_exits_zero() {
     assert!(run(&["-e", "print('ok')"]).success());
 }
+
+#[test]
+fn timers_run_after_eval_in_cli() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rune"))
+        .args(["-e", "setTimeout(function () { print('timer ran'); }, 0);"])
+        .output()
+        .expect("spawn rune");
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("timer ran"));
+}

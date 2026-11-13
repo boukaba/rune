@@ -57,6 +57,13 @@ fn main() {
     ctx.enable_inlining = enable_inlining;
     ctx.stencil_jit = stencil_jit;
     ctx.enable_jit = enable_jit;
+    // Install timer/fetch host globals and the event-loop job queues. The
+    // test262 harness keeps a bare context; scripts get the runtime globals.
+    let mut runtime_jobs = if source_args.first().is_some_and(|a| a == "test262") {
+        None
+    } else {
+        Some(rune_runtime::install(&mut ctx))
+    };
 
     if let Some(source) = inline_source {
         let result = ctx.eval(&source);
@@ -257,6 +264,13 @@ fn main() {
                     }
                 }
             }
+        }
+    }
+
+    if let Some(ref mut jobs) = runtime_jobs {
+        if let Err(e) = jobs.run_jobs(&mut ctx) {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
         }
     }
 

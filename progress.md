@@ -603,6 +603,26 @@ Integration suite: **769 passed, 0 failed, 3 ignored**. Targeted Promise
 test262 improved from 353 to **364 passed / 703 total (51.8%)**; the report is
 updated in `docs/conformance-2026-11-13.md`.
 
+### Phase 3 — CLI runtime integration (2026-11-13)
+
+The `rune` binary now uses the runtime event loop:
+
+- `rune_runtime` was refactored into `install(&mut Context) -> RuntimeJobs` plus
+  a thin `Runtime` wrapper. `RuntimeJobs::run_jobs(&mut Context)` drains fetch
+  jobs, timers, and microtasks for any context.
+- The CLI installs runtime globals for scripts (not for the test262 harness,
+  which keeps a bare context) and drains jobs after evaluation. `rune -e
+  'setTimeout(...)'` and file scripts run timers after synchronous code;
+  `fetch` is available and rejects with `"fetch transport not configured"`
+  until an embedder installs a transport.
+- New CLI integration test runs a timer from `-e` and checks stdout.
+
+Integration suite: **769 passed, 0 failed, 3 ignored**; `rune_runtime`: 7;
+`rune_cli` integration: 3.
+
+Known limits: no CLI flag/config for a real fetch transport yet; timer waits
+still block the thread; test262 deliberately does not get runtime globals.
+
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:

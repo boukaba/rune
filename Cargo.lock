@@ -734,6 +734,7 @@ dependencies = [
  "rune_interpreter",
  "rune_module",
  "rune_parser",
+ "rune_runtime",
  "serde_json",
  "tracing",
  "tracing-subscriber",

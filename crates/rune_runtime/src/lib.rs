@@ -57,13 +57,18 @@ struct FetchJob {
     reject: usize,
 }
 
-/// A Rune runtime with a host event loop.
-pub struct Runtime {
-    ctx: Context,
+/// Installed host jobs: timers and fetch work attached to a Context.
+pub struct RuntimeJobs {
     timers: Rc<RefCell<TimerQueue>>,
     fetches: Rc<RefCell<VecDeque<FetchJob>>>,
     fetcher: Fetcher,
     response_factory: usize,
+}
+
+/// A Rune runtime with a host event loop.
+pub struct Runtime {
+    ctx: Context,
+    jobs: RuntimeJobs,
 }
 
 impl Default for Runtime {
@@ -72,135 +77,141 @@ impl Default for Runtime {
     }
 }
 
+/// Install `setTimeout`/`clearTimeout`/`fetch` host globals on `ctx` and return
+/// the job queues. Call `RuntimeJobs::run_jobs(&mut ctx)` after evaluation to
+/// drain timers, fetch jobs, and microtasks.
+pub fn install(ctx: &mut Context) -> RuntimeJobs {
+    let timers = Rc::new(RefCell::new(TimerQueue::default()));
+
+    let queue = timers.clone();
+    ctx.register_host_fn("setTimeout", 1, move |_gc, _this, args, vm| {
+        let callback = args.first().copied().unwrap_or(Value::undefined());
+        if !is_callable(callback) {
+            return Value::undefined();
+        }
+        let delay = args.get(1).and_then(|v| v.as_smi()).unwrap_or(0).max(0) as u64;
+        let callback_root = vm.retain_value(callback);
+        let arg_roots: Vec<usize> = args.iter().skip(2).map(|v| vm.retain_value(*v)).collect();
+        let mut q = queue.borrow_mut();
+        let id = q.next_id;
+        q.next_id = q.next_id.wrapping_add(1);
+        q.timers.push(Timer {
+            id,
+            callback: callback_root,
+            args: arg_roots,
+            due: Instant::now() + Duration::from_millis(delay),
+            cancelled: false,
+        });
+        Value::smi(id)
+    });
+
+    let queue = timers.clone();
+    ctx.register_host_fn("clearTimeout", 1, move |_gc, _this, args, vm| {
+        let id = args.first().and_then(|v| v.as_smi()).unwrap_or(-1);
+        let mut q = queue.borrow_mut();
+        for timer in &mut q.timers {
+            if timer.id == id && !timer.cancelled {
+                timer.cancelled = true;
+                vm.release_value(timer.callback);
+                for root in &timer.args {
+                    vm.release_value(*root);
+                }
+            }
+        }
+        Value::undefined()
+    });
+
+    let fetches = Rc::new(RefCell::new(VecDeque::new()));
+    let queue = fetches.clone();
+    ctx.register_host_fn("fetch", 1, move |gc, _this, args, vm| {
+        let input = args.first().copied().unwrap_or(Value::undefined());
+        let url = input_url(input);
+        let mut request = FetchRequest {
+            url,
+            method: "GET".to_string(),
+            headers: Vec::new(),
+            body: None,
+        };
+        if let Some(init) = args.get(1).copied().and_then(heap_object) {
+            if let Some(m) = get_own(init, "method").map(value_to_js_string) {
+                request.method = m.to_ascii_uppercase();
+            }
+            if let Some(btxt) = get_own(init, "body") {
+                if !btxt.is_undefined() && !btxt.is_null() {
+                    request.body = Some(value_to_js_string(btxt));
+                }
+            }
+            if let Some(hobj) = get_own(init, "headers").and_then(heap_object) {
+                let shape = unsafe { JSObject::shape_ptr(hobj) };
+                for name in &shape.key_names {
+                    if let Some(slot) = shape.lookup(&PropertyKey::from_string(name)) {
+                        let v = unsafe { JSObject::get_slot(hobj, slot) };
+                        request.headers.push((name.clone(), value_to_js_string(v)));
+                    }
+                }
+            }
+        }
+        let (promise, resolve, reject) = vm.new_pending_promise(gc);
+        let resolve_root = vm.retain_value(resolve);
+        let reject_root = vm.retain_value(reject);
+        queue.borrow_mut().push_back(FetchJob {
+            request,
+            resolve: resolve_root,
+            reject: reject_root,
+        });
+        promise
+    });
+
+    let factory_src = r#"
+                var __rune_make_response = function (body, status, statusText, url, ok, headersText) {
+                    var h = {};
+                    var lines = headersText ? headersText.split("\n") : [];
+                    for (var i = 0; i < lines.length; i++) {
+                        var line = lines[i];
+                        if (!line) { continue; }
+                        var p = line.indexOf("\t");
+                        if (p < 0) { continue; }
+                        h[line.slice(0, p).toLowerCase()] = line.slice(p + 1);
+                    }
+                    return {
+                        status: status,
+                        statusText: statusText,
+                        ok: ok,
+                        url: url,
+                        headers: {
+                            get: function (n) {
+                                var k = String(n).toLowerCase();
+                                return h[k] === undefined ? null : h[k];
+                            },
+                            has: function (n) {
+                                return h[String(n).toLowerCase()] !== undefined;
+                            }
+                        },
+                        text: function () { return Promise.resolve(body); },
+                        json: function () { return Promise.resolve(JSON.parse(body)); }
+                    };
+                };
+            "#;
+    ctx.eval(factory_src)
+        .expect("response factory script parses");
+    let factory = ctx
+        .eval("__rune_make_response")
+        .expect("response factory installs");
+    let response_factory = ctx.retain_value(factory);
+    RuntimeJobs {
+        timers,
+        fetches,
+        fetcher: Box::new(|_| Err("fetch transport not configured".to_string())),
+        response_factory,
+    }
+}
+
 impl Runtime {
     /// Create a runtime with the standard Web timer globals installed.
     pub fn new() -> Self {
         let mut ctx = Context::new();
-        let timers = Rc::new(RefCell::new(TimerQueue::default()));
-
-        let queue = timers.clone();
-        ctx.register_host_fn("setTimeout", 1, move |_gc, _this, args, vm| {
-            let callback = args.first().copied().unwrap_or(Value::undefined());
-            if !is_callable(callback) {
-                return Value::undefined();
-            }
-            let delay = args.get(1).and_then(|v| v.as_smi()).unwrap_or(0).max(0) as u64;
-            let callback_root = vm.retain_value(callback);
-            let arg_roots: Vec<usize> = args.iter().skip(2).map(|v| vm.retain_value(*v)).collect();
-            let mut q = queue.borrow_mut();
-            let id = q.next_id;
-            q.next_id = q.next_id.wrapping_add(1);
-            q.timers.push(Timer {
-                id,
-                callback: callback_root,
-                args: arg_roots,
-                due: Instant::now() + Duration::from_millis(delay),
-                cancelled: false,
-            });
-            Value::smi(id)
-        });
-
-        let queue = timers.clone();
-        ctx.register_host_fn("clearTimeout", 1, move |_gc, _this, args, vm| {
-            let id = args.first().and_then(|v| v.as_smi()).unwrap_or(-1);
-            let mut q = queue.borrow_mut();
-            for timer in &mut q.timers {
-                if timer.id == id && !timer.cancelled {
-                    timer.cancelled = true;
-                    vm.release_value(timer.callback);
-                    for root in &timer.args {
-                        vm.release_value(*root);
-                    }
-                }
-            }
-            Value::undefined()
-        });
-
-        let fetches = Rc::new(RefCell::new(VecDeque::new()));
-        let queue = fetches.clone();
-        ctx.register_host_fn("fetch", 1, move |gc, _this, args, vm| {
-            let input = args.first().copied().unwrap_or(Value::undefined());
-            let url = input_url(input);
-            let mut request = FetchRequest {
-                url,
-                method: "GET".to_string(),
-                headers: Vec::new(),
-                body: None,
-            };
-            if let Some(init) = args.get(1).copied().and_then(heap_object) {
-                if let Some(m) = get_own(init, "method").map(value_to_js_string) {
-                    request.method = m.to_ascii_uppercase();
-                }
-                if let Some(btxt) = get_own(init, "body") {
-                    if !btxt.is_undefined() && !btxt.is_null() {
-                        request.body = Some(value_to_js_string(btxt));
-                    }
-                }
-                if let Some(hobj) = get_own(init, "headers").and_then(heap_object) {
-                    let shape = unsafe { JSObject::shape_ptr(hobj) };
-                    for name in &shape.key_names {
-                        if let Some(slot) = shape.lookup(&PropertyKey::from_string(name)) {
-                            let v = unsafe { JSObject::get_slot(hobj, slot) };
-                            request.headers.push((name.clone(), value_to_js_string(v)));
-                        }
-                    }
-                }
-            }
-            let (promise, resolve, reject) = vm.new_pending_promise(gc);
-            let resolve_root = vm.retain_value(resolve);
-            let reject_root = vm.retain_value(reject);
-            queue.borrow_mut().push_back(FetchJob {
-                request,
-                resolve: resolve_root,
-                reject: reject_root,
-            });
-            promise
-        });
-
-        let factory_src = r#"
-            var __rune_make_response = function (body, status, statusText, url, ok, headersText) {
-                var h = {};
-                var lines = headersText ? headersText.split("\n") : [];
-                for (var i = 0; i < lines.length; i++) {
-                    var line = lines[i];
-                    if (!line) { continue; }
-                    var p = line.indexOf("\t");
-                    if (p < 0) { continue; }
-                    h[line.slice(0, p).toLowerCase()] = line.slice(p + 1);
-                }
-                return {
-                    status: status,
-                    statusText: statusText,
-                    ok: ok,
-                    url: url,
-                    headers: {
-                        get: function (n) {
-                            var k = String(n).toLowerCase();
-                            return h[k] === undefined ? null : h[k];
-                        },
-                        has: function (n) {
-                            return h[String(n).toLowerCase()] !== undefined;
-                        }
-                    },
-                    text: function () { return Promise.resolve(body); },
-                    json: function () { return Promise.resolve(JSON.parse(body)); }
-                };
-            };
-        "#;
-        ctx.eval(factory_src)
-            .expect("response factory script parses");
-        let factory = ctx
-            .eval("__rune_make_response")
-            .expect("response factory installs");
-        let response_factory = ctx.retain_value(factory);
-
-        Self {
-            ctx,
-            timers,
-            fetches,
-            fetcher: Box::new(|_| Err("fetch transport not configured".to_string())),
-            response_factory,
-        }
+        let jobs = install(&mut ctx);
+        Self { ctx, jobs }
     }
 
     /// Install the host transport used by `fetch` jobs.
@@ -208,13 +219,13 @@ impl Runtime {
     where
         F: FnMut(&FetchRequest) -> Result<FetchResponse, String> + 'static,
     {
-        self.fetcher = Box::new(fetcher);
+        self.jobs.set_fetcher(fetcher);
     }
 
     /// Evaluate a script, then run the timer/microtask jobs it queued.
     pub fn eval(&mut self, source: &str) -> Result<Value, String> {
         let value = self.ctx.eval(source)?;
-        self.run_jobs()?;
+        self.jobs.run_jobs(&mut self.ctx)?;
         Ok(value)
     }
 
@@ -227,41 +238,54 @@ impl Runtime {
         &self.ctx
     }
 
-    /// Run all currently queued timers in due-time order, draining microtasks
-    /// after each callback. Timers added by callbacks are processed too.
+    /// Run all currently queued timers/fetch jobs, draining microtasks after
+    /// each callback. Timers added by callbacks are processed too.
     pub fn run_jobs(&mut self) -> Result<(), String> {
+        self.jobs.run_jobs(&mut self.ctx)
+    }
+}
+
+impl RuntimeJobs {
+    /// Install the host transport used by `fetch` jobs.
+    pub fn set_fetcher<F>(&mut self, fetcher: F)
+    where
+        F: FnMut(&FetchRequest) -> Result<FetchResponse, String> + 'static,
+    {
+        self.fetcher = Box::new(fetcher);
+    }
+
+    pub fn run_jobs(&mut self, ctx: &mut Context) -> Result<(), String> {
         loop {
             // Host I/O jobs run before timers; their resolution may queue
             // microtasks/timers that the next iterations process.
             let fetch = self.fetches.borrow_mut().pop_front();
             if let Some(job) = fetch {
                 let result = (self.fetcher)(&job.request);
-                let resolve = self.ctx.retained_value(job.resolve);
-                let reject = self.ctx.retained_value(job.reject);
-                self.ctx.release_value(job.resolve);
-                self.ctx.release_value(job.reject);
+                let resolve = ctx.retained_value(job.resolve);
+                let reject = ctx.retained_value(job.reject);
+                ctx.release_value(job.resolve);
+                ctx.release_value(job.reject);
                 match result {
                     Ok(response) => {
-                        let body = self.ctx.allocate_string(&response.body);
+                        let body = ctx.allocate_string(&response.body);
                         let status = Value::smi(response.status as i32);
-                        let status_text = self.ctx.allocate_string(&response.status_text);
-                        let url = self.ctx.allocate_string(&job.request.url);
+                        let status_text = ctx.allocate_string(&response.status_text);
+                        let url = ctx.allocate_string(&job.request.url);
                         let ok = Value::boolean(response.status < 400);
-                        let headers_text =
-                            self.ctx.allocate_string(&headers_blob(&response.headers));
-                        let factory = self.ctx.retained_value(self.response_factory);
-                        let response = self.ctx.call_value(
+                        let headers_text = ctx.allocate_string(&headers_blob(&response.headers));
+                        let factory = ctx.retained_value(self.response_factory);
+                        let response = ctx.call_value(
                             factory,
                             &[body, status, status_text, url, ok, headers_text],
                         )?;
-                        self.ctx.call_value(resolve, &[response])?;
+                        ctx.call_value(resolve, &[response])?;
                     }
                     Err(err) => {
-                        let msg = self.ctx.allocate_string(&err);
-                        self.ctx.call_value(reject, &[msg])?;
+                        let msg = ctx.allocate_string(&err);
+                        ctx.call_value(reject, &[msg])?;
                     }
                 }
-                self.ctx.drain_microtasks();
+                ctx.drain_microtasks();
                 continue;
             }
             let next = {
@@ -288,18 +312,18 @@ impl Runtime {
             if timer.due > now {
                 std::thread::sleep(timer.due - now);
             }
-            let callback = self.ctx.retained_value(timer.callback);
+            let callback = ctx.retained_value(timer.callback);
             let args: Vec<Value> = timer
                 .args
                 .iter()
-                .map(|id| self.ctx.retained_value(*id))
+                .map(|id| ctx.retained_value(*id))
                 .collect();
-            self.ctx.release_value(timer.callback);
+            ctx.release_value(timer.callback);
             for root in &timer.args {
-                self.ctx.release_value(*root);
+                ctx.release_value(*root);
             }
-            self.ctx.call_value(callback, &args)?;
-            self.ctx.drain_microtasks();
+            ctx.call_value(callback, &args)?;
+            ctx.drain_microtasks();
         }
         Ok(())
     }

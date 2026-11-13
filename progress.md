@@ -536,7 +536,36 @@ happens while sleeping; no `setInterval`/`queueMicrotask`/AbortSignal; passing
 a non-callable to `setTimeout` returns `undefined` instead of throwing
 `TypeError`; no `fetch`/HTTP/snapshot integration yet.
 
-Next: `fetch`/HTTP transport design, then stable headers.
+### Phase 3 — runtime fetch transport (2026-11-13)
+
+`rune_runtime` now has a host-driven `fetch`:
+
+- `fetch(input[, init])` accepts a string URL or a `URL` object, plus
+  `{ method, body, headers }`. It returns a real pending Promise created
+  through `Vm::new_pending_promise`.
+- Requests are queued as host jobs with the resolve/reject bridges retained as
+  GC roots; `Runtime::run_jobs` invokes a pluggable transport and resolves the
+  Promise. `Runtime::set_fetcher` installs the transport; the default rejects
+  with `"fetch transport not configured"`.
+- Responses are built by a JS factory into `{ status, statusText, ok, url,
+  headers.get/has, text(), json() }`; `text()`/`json()` return Promises and
+  participate in the microtask queue.
+- Rejections reject the fetch Promise with the transport error string, so
+  `.catch` receives it.
+- Seven `rune_runtime` tests now cover timers, args/clear, nested timers,
+  promise microtasks, host functions, successful fetch, rejection, URL-object
+  input, POST body and headers.
+
+Integration suite: **766 passed, 0 failed, 3 ignored**; runtime package: **7
+passed**.
+
+Known limits: the transport is host-supplied and called synchronously from the
+event loop (a blocking transport stalls timers); no `Request`/`Headers`/
+`Response` constructors, streaming, AbortSignal, redirects, or binary bodies;
+rejections carry strings, not `Error` objects; fetch is installed by
+`rune_runtime`, not by the plain `rune` CLI yet.
+
+Next: CLI/runtime integration + stable headers.
 
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,

@@ -2922,6 +2922,26 @@ impl Vm {
         }
     }
 
+    /// Create a pending promise plus resolve/reject bridge functions. The
+    /// caller roots the returned values if it stores them across jobs.
+    pub fn new_pending_promise(&mut self, gc: &mut SemiSpace) -> (Value, Value, Value) {
+        let proto = self.promise_prototype.heap_ptr();
+        let ptr = Promise::allocate(gc, proto);
+        let promise = Value::from_heap_ptr(ptr);
+        let root_base = self.temp_roots.len();
+        self.temp_roots.push(promise);
+        let resolve_h = self.find_builtin_handle("_promise_resolve");
+        let reject_h = self.find_builtin_handle("_promise_reject");
+        let resolve = self.create_promise_bridge(gc, promise, resolve_h);
+        self.temp_roots.push(resolve);
+        let promise_now = self.temp_roots[root_base];
+        let reject = self.create_promise_bridge(gc, promise_now, reject_h);
+        let promise_now = self.temp_roots[root_base];
+        let resolve_now = self.temp_roots[root_base + 1];
+        self.temp_roots.truncate(root_base);
+        (promise_now, resolve_now, reject)
+    }
+
     pub fn create_promise_bridge(
         &self,
         gc: &mut SemiSpace,
@@ -2942,7 +2962,11 @@ impl Vm {
             } else {
                 env
             };
-            EnvObject::set_slot(env_ptr, 0, promise);
+            let promise_now = match promise.heap_ptr() {
+                Some(p) => Value::from_heap_ptr(rune_core::gc::resolve_forwarded(p)),
+                None => promise,
+            };
+            EnvObject::set_slot(env_ptr, 0, promise_now);
             EnvObject::set_slot(env_ptr, 1, builtin_handle);
             let func_ptr = if (*(func as *const GcHeader)).is_forwarded() {
                 (*(func as *const GcHeader)).forwarding_addr() as *mut Func

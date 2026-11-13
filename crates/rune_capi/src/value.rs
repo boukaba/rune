@@ -1,6 +1,6 @@
 //! C-facing value representation and host-callback support.
 
-use rune_core::gc::{GcHeader, SemiSpace, TAG_STRING};
+use rune_core::gc::{GcHeader, SemiSpace, TAG_ARRAY, TAG_FUNC, TAG_OBJECT, TAG_STRING};
 use rune_core::string::HeapString;
 use rune_core::value::Value;
 use std::ffi::{CStr, CString, c_char, c_void};
@@ -11,6 +11,7 @@ pub const RUNE_BOOLEAN: u32 = 2;
 pub const RUNE_NUMBER: u32 = 3;
 pub const RUNE_STRING: u32 = 4;
 pub const RUNE_OBJECT: u32 = 5;
+pub const RUNE_FUNCTION: u32 = 6;
 
 /// Fixed-layout value passed across the C boundary. `string` is borrowed for
 /// the duration of a host callback (or copied by the engine from a return
@@ -22,6 +23,7 @@ pub struct RuneValue {
     pub boolean: i32,
     pub number: f64,
     pub string: *const c_char,
+    pub handle: u64,
 }
 
 impl RuneValue {
@@ -31,6 +33,7 @@ impl RuneValue {
             boolean: 0,
             number: 0.0,
             string: std::ptr::null(),
+            handle: 0,
         }
     }
 
@@ -40,6 +43,7 @@ impl RuneValue {
             boolean: 0,
             number: 0.0,
             string: std::ptr::null(),
+            handle: 0,
         }
     }
 }
@@ -58,6 +62,7 @@ pub fn value_to_c(value: Value, strings: &mut Vec<CString>) -> RuneValue {
             boolean: 0,
             number: 0.0,
             string: std::ptr::null(),
+            handle: 0,
         };
     }
     if let Some(boolean) = value.to_boolean() {
@@ -66,6 +71,7 @@ pub fn value_to_c(value: Value, strings: &mut Vec<CString>) -> RuneValue {
             boolean: i32::from(boolean),
             number: 0.0,
             string: std::ptr::null(),
+            handle: 0,
         };
     }
     if let Some(smi) = value.as_smi() {
@@ -74,6 +80,7 @@ pub fn value_to_c(value: Value, strings: &mut Vec<CString>) -> RuneValue {
             boolean: 0,
             number: smi as f64,
             string: std::ptr::null(),
+            handle: 0,
         };
     }
     if let Some(float) = value.as_float64() {
@@ -82,6 +89,7 @@ pub fn value_to_c(value: Value, strings: &mut Vec<CString>) -> RuneValue {
             boolean: 0,
             number: float,
             string: std::ptr::null(),
+            handle: 0,
         };
     }
     if let Some(ptr) = value.heap_ptr() {
@@ -95,10 +103,26 @@ pub fn value_to_c(value: Value, strings: &mut Vec<CString>) -> RuneValue {
                 boolean: 0,
                 number: 0.0,
                 string: c_string,
+                handle: 0,
             };
         }
     }
     RuneValue::object()
+}
+
+/// Convert a retained heap value to a C value carrying its handle.
+pub fn retained_to_c(value: Value, handle: usize) -> RuneValue {
+    let mut out = RuneValue::undefined();
+    out.handle = handle as u64 + 1;
+    if let Some(ptr) = value.heap_ptr() {
+        out.kind = match unsafe { (*(ptr as *const GcHeader)).tag() } {
+            TAG_STRING => RUNE_STRING,
+            TAG_FUNC => RUNE_FUNCTION,
+            TAG_ARRAY | TAG_OBJECT => RUNE_OBJECT,
+            _ => RUNE_OBJECT,
+        };
+    }
+    out
 }
 
 /// Convert a host-returned value back into an engine value.

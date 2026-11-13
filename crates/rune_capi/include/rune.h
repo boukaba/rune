@@ -9,7 +9,7 @@ extern "C" {
 #endif
 
 /* ABI version for the C surface. */
-#define RUNE_ABI_VERSION 1
+#define RUNE_ABI_VERSION 2
 
 /* Value kinds passed to host callbacks. */
 #define RUNE_UNDEFINED 0
@@ -18,6 +18,7 @@ extern "C" {
 #define RUNE_NUMBER 3
 #define RUNE_STRING 4
 #define RUNE_OBJECT 5
+#define RUNE_FUNCTION 6
 
 /* Fixed-layout value. In callback arguments `string` is borrowed for the
  * duration of the call. Returned strings are copied immediately. Objects are
@@ -27,6 +28,9 @@ typedef struct {
     int32_t boolean;
     double number;
     const char *string;
+    /* Non-zero for a retained heap value (string/object/array/function).
+     * Release with rune_context_release_value. */
+    uint64_t handle;
 } RuneValue;
 
 /* Host callback: `user` is the pointer given to rune_context_register_host_fn.
@@ -55,6 +59,22 @@ void rune_context_set_jit(void *ctx, int enabled);
  * arguments. The callback and user pointer must outlive the context. */
 int rune_context_register_host_fn(void *ctx, const char *name, uint32_t length,
                                   void *user, RuneHostCallback callback);
+
+/* Evaluate and return a value. Heap results carry a retained handle in
+ * .handle; release it with rune_context_release_value. */
+int rune_context_eval_value(void *ctx, const char *source, RuneValue *result,
+                            char **error);
+
+/* Stringify a primitive or retained value. */
+int rune_context_value_to_string(void *ctx, RuneValue value, char **out);
+
+/* Release a retained value handle (handle == 0 is a no-op). */
+int rune_context_release_value(void *ctx, RuneValue value);
+
+/* Call a retained JavaScript function. Arguments may be primitives or
+ * retained handles; the result has the same ownership rules as eval_value. */
+int rune_context_call_value(void *ctx, RuneValue func, const RuneValue *args,
+                            size_t argc, RuneValue *result, char **error);
 
 /* Evaluate UTF-8 source. On success returns 0 and stores the JS string
  * representation of the result in *result (may be NULL on error). On a

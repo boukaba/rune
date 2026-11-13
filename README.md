@@ -75,7 +75,10 @@ rune_free_string(error);
 rune_context_destroy(ctx);
 ```
 
-See [`docs/c-api.md`](docs/c-api.md) for the full contract and limitations.
+ABI 2 adds retained value handles: `rune_context_eval_value` returns heap
+values as handles, `rune_context_call_value` invokes retained JS functions, and
+`rune_context_value_to_string`/`release_value` manage them. See
+[`docs/c-api.md`](docs/c-api.md) for the full contract and limitations.
 
 | Crate | Purpose |
 |---|---|

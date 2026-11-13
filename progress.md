@@ -1032,6 +1032,21 @@ Integration suite: **789 passed, 0 failed, 3 ignored**; `rune_capi` **4 tests**.
   non-spec synchronous behavior) and added `test_promise_resolve_defers_thenable_job`.
 - Measured: Promise **359/703 (51.1%; was 357)**, integration **792**.
 
+### Phase 3 — C value handles (2026-11-13)
+
+- C ABI bumped to 2: `RuneValue` gains a `handle` field and `RUNE_FUNCTION`.
+  `rune_context_eval_value` returns primitives directly and heap values as
+  retained handles; `rune_context_call_value` invokes retained JS functions
+  with primitive/retained arguments; `rune_context_value_to_string` and
+  `rune_context_release_value` manage values.
+- Handles are `Context`-retained slots, valid until release/destroy; the API is
+  not re-entrant, so handles are used after `eval` returns.
+- C example now demonstrates both a registered host callback (`host: 42`) and
+  `eval_value` + `call_value` (`call: 42`).
+- Tests: 5 C API tests incl. function call return, string conversion, release.
+
+Integration suite: **792 passed, 0 failed, 3 ignored**; `rune_capi` **5 tests**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

@@ -12,7 +12,7 @@ cc app.c -Icrates/rune_capi/include -Ltarget/release -lrune_capi \
 ```
 
 `rune_capi` builds a `cdylib`, `staticlib`, and `rlib`. The ABI version is
-`RUNE_ABI_VERSION` (currently 1).
+`RUNE_ABI_VERSION` (currently 2).
 
 ## Contract
 
@@ -27,11 +27,39 @@ cc app.c -Icrates/rune_capi/include -Ltarget/release -lrune_capi \
 | `rune_context_set_jit(ctx, enabled)` | Opt-in JIT (off by default). |
 | `rune_context_register_host_fn(ctx, name, length, user, cb)` | Installs a global host function backed by a C callback. |
 | `rune_context_eval(ctx, src, &result, &error)` | 0 success, 1 parse/runtime/panic error, -1 invalid argument. |
+| `rune_context_eval_value(ctx, src, &value, &error)` | Evaluate and return a primitive or retained heap handle. |
+| `rune_context_value_to_string(ctx, value, &out)` | Stringify a primitive or retained value. |
+| `rune_context_release_value(ctx, value)` | Release a heap handle; `handle == 0` is a no-op. |
+| `rune_context_call_value(ctx, func, args, argc, &result, &error)` | Call a retained JS function. |
 | `rune_free_string(text)` | Frees result/error strings. |
 
 Results are returned as JavaScript string representations. Callers own result
 and error strings; pass NULL output slots if a value is not needed. Rust panics
 are caught and reported as `"engine panic"` rather than unwinding across FFI.
+
+## Value handles (ABI 2)
+
+`RuneValue.handle` is non-zero for heap results (strings, objects, arrays,
+functions) and stores a `Context`-retained slot. Handles are valid until
+`rune_context_release_value` or context destruction; the engine does not
+finalize them automatically. Primitives (`undefined`, null, boolean, number)
+carry their value directly and a zero handle.
+
+```c
+RuneValue fn, args[2], result;
+char *text = NULL, *error = NULL;
+if (rune_context_eval_value(ctx, "(function (a,b){ return a+b; })", &fn, &error) == 0) {
+    args[0] = (RuneValue){ RUNE_NUMBER, 0, 20.0, NULL, 0 };
+    args[1] = (RuneValue){ RUNE_NUMBER, 0, 22.0, NULL, 0 };
+    rune_context_call_value(ctx, fn, args, 2, &result, &error);
+    rune_context_value_to_string(ctx, result, &text);   /* "42" */
+}
+rune_context_release_value(ctx, fn);
+```
+
+Handles may be passed back as arguments to `rune_context_call_value`. They
+cannot be used while an evaluation is already on the stack (the C API is not
+re-entrant); call from host code after `eval` returns.
 
 ## Host functions
 
@@ -63,10 +91,11 @@ pointer must remain valid for the context's lifetime.
 
 ## Limitations
 
-- Host callbacks support numbers, booleans, null/undefined, and strings.
-  Objects/arrays/symbols are passed as opaque `RUNE_OBJECT` and cannot be
-  inspected or returned yet.
-- Results are stringified; there is no retained `Value` handle API.
+- Host-callback arguments support numbers, booleans, null/undefined, and
+  strings; objects/arrays/symbols arrive as opaque `RUNE_OBJECT` with no
+  handle. Retained handles are available from `eval_value`, not from callback
+  arguments yet.
+- No `get_property`/`set_property` or object-inspection API yet.
 - Timers, `fetch`, and the event-loop jobs are not installed by the C API.
 - Contexts are single-threaded; do not share one context across threads.
 - Raw invalid pointers are undefined behavior (standard C ABI rules); the API

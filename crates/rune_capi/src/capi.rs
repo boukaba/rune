@@ -3,7 +3,9 @@
 //! The boundary uses only opaque pointers, C strings, integers, and status
 //! codes. Panics are caught so they never unwind across FFI.
 
-use crate::value::{HostCallback, RuneValue, value_from_c, value_to_c};
+use crate::value::{HostCallback, RuneValue, retained_to_c, value_from_c, value_to_c};
+use rune_core::gc::{GcHeader, TAG_FUNC};
+use rune_core::value::Value;
 use rune_embed::Context;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -124,6 +126,180 @@ pub unsafe extern "C" fn rune_context_register_host_fn(
         value_from_c(gc, result)
     });
     STATUS_OK
+}
+
+fn value_to_output(ctx: &mut Context, value: Value) -> RuneValue {
+    if value.heap_ptr().is_some() {
+        let id = ctx.retain_value(value);
+        retained_to_c(value, id)
+    } else {
+        let mut strings = Vec::new();
+        value_to_c(value, &mut strings)
+    }
+}
+
+fn primitive_from_c(gc: &mut rune_core::gc::SemiSpace, value: RuneValue) -> Result<Value, i32> {
+    match value.kind {
+        crate::value::RUNE_UNDEFINED
+        | crate::value::RUNE_NULL
+        | crate::value::RUNE_BOOLEAN
+        | crate::value::RUNE_NUMBER
+        | crate::value::RUNE_STRING => Ok(value_from_c(gc, value)),
+        _ => Err(STATUS_INVALID),
+    }
+}
+
+/// Evaluate source and return a retained value handle for heap results.
+///
+/// # Safety
+/// Same pointer/contract requirements as `rune_context_eval`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rune_context_eval_value(
+    ctx: *mut c_void,
+    source: *const c_char,
+    result: *mut RuneValue,
+    error: *mut *mut c_char,
+) -> i32 {
+    if !error.is_null() {
+        unsafe { *error = std::ptr::null_mut() };
+    }
+    if ctx.is_null() || source.is_null() || result.is_null() {
+        return STATUS_INVALID;
+    }
+    let ctx = unsafe { &mut *(ctx as *mut Context) };
+    let source = unsafe { CStr::from_ptr(source) };
+    let Ok(source) = source.to_str() else {
+        unsafe {
+            write_out(
+                error,
+                into_c_string("source is not valid UTF-8".to_string()),
+            )
+        };
+        return STATUS_ERROR;
+    };
+    match catch_unwind(AssertUnwindSafe(|| ctx.eval(source))) {
+        Ok(Ok(value)) => {
+            let out = value_to_output(ctx, value);
+            unsafe { *result = out };
+            STATUS_OK
+        }
+        Ok(Err(message)) => {
+            unsafe { write_out(error, into_c_string(message)) };
+            STATUS_ERROR
+        }
+        Err(_) => {
+            unsafe { write_out(error, into_c_string("engine panic".to_string())) };
+            STATUS_ERROR
+        }
+    }
+}
+
+/// Stringify a primitive or retained value.
+///
+/// # Safety
+/// `ctx` must be live; `out` must be a writable slot.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rune_context_value_to_string(
+    ctx: *mut c_void,
+    value: RuneValue,
+    out: *mut *mut c_char,
+) -> i32 {
+    if !out.is_null() {
+        unsafe { *out = std::ptr::null_mut() };
+    }
+    if ctx.is_null() || out.is_null() {
+        return STATUS_INVALID;
+    }
+    let ctx = unsafe { &mut *(ctx as *mut Context) };
+    let value = if value.handle != 0 {
+        ctx.retained_value(value.handle as usize - 1)
+    } else {
+        value_from_c(ctx.gc(), value)
+    };
+    let text = rune_interpreter::builtins::value_to_js_string(value);
+    unsafe { write_out(out, into_c_string(text)) };
+    STATUS_OK
+}
+
+/// Release a retained heap value handle.
+///
+/// # Safety
+/// `ctx` must be live; values with `handle == 0` are a no-op.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rune_context_release_value(ctx: *mut c_void, value: RuneValue) -> i32 {
+    if ctx.is_null() {
+        return STATUS_INVALID;
+    }
+    if value.handle == 0 {
+        return STATUS_OK;
+    }
+    let ctx = unsafe { &mut *(ctx as *mut Context) };
+    ctx.release_value(value.handle as usize - 1);
+    STATUS_OK
+}
+
+/// Call a retained JavaScript function with primitive/retained arguments.
+///
+/// # Safety
+/// `ctx` must be live; `func` must be a function value returned by this API;
+/// `args` must point to `argc` RuneValues.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rune_context_call_value(
+    ctx: *mut c_void,
+    func: RuneValue,
+    args: *const RuneValue,
+    argc: usize,
+    result: *mut RuneValue,
+    error: *mut *mut c_char,
+) -> i32 {
+    if !error.is_null() {
+        unsafe { *error = std::ptr::null_mut() };
+    }
+    if ctx.is_null() || result.is_null() {
+        return STATUS_INVALID;
+    }
+    if func.handle == 0 {
+        return STATUS_INVALID;
+    }
+    let ctx = unsafe { &mut *(ctx as *mut Context) };
+    let function = ctx.retained_value(func.handle as usize - 1);
+    let is_func = function
+        .heap_ptr()
+        .is_some_and(|ptr| unsafe { (*(ptr as *const GcHeader)).tag() == TAG_FUNC });
+    if !is_func {
+        return STATUS_INVALID;
+    }
+    let mut call_args = Vec::with_capacity(argc);
+    if argc > 0 && args.is_null() {
+        return STATUS_INVALID;
+    }
+    for i in 0..argc {
+        let arg = unsafe { *args.add(i) };
+        if arg.handle != 0 {
+            call_args.push(ctx.retained_value(arg.handle as usize - 1));
+            continue;
+        }
+        match primitive_from_c(ctx.gc(), arg) {
+            Ok(value) => call_args.push(value),
+            Err(status) => return status,
+        }
+    }
+    let outcome = catch_unwind(AssertUnwindSafe(|| ctx.call_value(function, &call_args)));
+    match outcome {
+        Ok(Ok(value)) => {
+            let out = value_to_output(ctx, value);
+            unsafe { *result = out };
+            STATUS_OK
+        }
+        Ok(Err(message)) => {
+            unsafe { write_out(error, into_c_string(message)) };
+            STATUS_ERROR
+        }
+        Err(_) => {
+            unsafe { write_out(error, into_c_string("engine panic".to_string())) };
+            STATUS_ERROR
+        }
+    }
 }
 
 /// Evaluate source. See `include/rune.h` for the status/out-param contract.
@@ -297,6 +473,7 @@ mod host_fn_tests {
             boolean: 0,
             number: total,
             string: std::ptr::null(),
+            handle: 0,
         }
     }
 
@@ -310,6 +487,7 @@ mod host_fn_tests {
             boolean: 0,
             number: 0.0,
             string: c"from-c".as_ptr(),
+            handle: 0,
         }
     }
 
@@ -330,6 +508,7 @@ mod host_fn_tests {
             boolean: 0,
             number: total as f64,
             string: std::ptr::null(),
+            handle: 0,
         }
     }
 
@@ -343,6 +522,7 @@ mod host_fn_tests {
             boolean: 1,
             number: 0.0,
             string: std::ptr::null(),
+            handle: 0,
         }
     }
 
@@ -421,6 +601,93 @@ mod host_fn_tests {
         assert_eq!(eval(ctx, "greet()"), (0, Some("from-c".to_string())));
         assert_eq!(eval(ctx, "arglen('ab', 'cde')"), (0, Some("5".to_string())));
         assert_eq!(eval(ctx, "truth()"), (0, Some("true".to_string())));
+        rune_context_destroy(ctx);
+    }
+}
+
+#[cfg(test)]
+mod value_handle_tests {
+    use super::*;
+    use crate::value::{RUNE_FUNCTION, RUNE_NUMBER, RUNE_STRING, RuneValue};
+
+    fn number(n: f64) -> RuneValue {
+        RuneValue {
+            kind: RUNE_NUMBER,
+            boolean: 0,
+            number: n,
+            string: std::ptr::null(),
+            handle: 0,
+        }
+    }
+
+    unsafe fn eval_value(ctx: *mut c_void, source: &str) -> (i32, RuneValue) {
+        let source = CString::new(source).unwrap();
+        let mut out = RuneValue::undefined();
+        let mut error: *mut c_char = std::ptr::null_mut();
+        let status = unsafe {
+            rune_context_eval_value(
+                ctx,
+                source.as_ptr(),
+                &mut out as *mut RuneValue,
+                &mut error as *mut *mut c_char,
+            )
+        };
+        if !error.is_null() {
+            unsafe { rune_free_string(error) };
+        }
+        (status, out)
+    }
+
+    unsafe fn to_string(ctx: *mut c_void, value: RuneValue) -> Option<String> {
+        let mut out: *mut c_char = std::ptr::null_mut();
+        let status = unsafe { rune_context_value_to_string(ctx, value, &mut out) };
+        if status != 0 || out.is_null() {
+            return None;
+        }
+        let text = unsafe { CStr::from_ptr(out) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { rune_free_string(out) };
+        Some(text)
+    }
+
+    #[test]
+    fn handles_call_js_functions_and_release() {
+        let ctx = rune_context_create();
+        let (status, function) = unsafe { eval_value(ctx, "(function (a, b) { return a + b; })") };
+        assert_eq!(status, 0);
+        assert_eq!(function.kind, RUNE_FUNCTION);
+        assert_ne!(function.handle, 0);
+
+        let args = [number(20.0), number(22.0)];
+        let mut result = RuneValue::undefined();
+        let mut error: *mut c_char = std::ptr::null_mut();
+        let status = unsafe {
+            rune_context_call_value(
+                ctx,
+                function,
+                args.as_ptr(),
+                args.len(),
+                &mut result as *mut RuneValue,
+                &mut error as *mut *mut c_char,
+            )
+        };
+        assert_eq!(status, 0);
+        assert_eq!(result.kind, RUNE_NUMBER);
+        assert_eq!(result.number, 42.0);
+
+        let (status, string) = unsafe { eval_value(ctx, "'hello' + ' ' + 'rune'") };
+        assert_eq!(status, 0);
+        assert_eq!(string.kind, RUNE_STRING);
+        assert_eq!(
+            unsafe { to_string(ctx, string) }.as_deref(),
+            Some("hello rune")
+        );
+        unsafe {
+            rune_context_release_value(ctx, string);
+            rune_context_release_value(ctx, function);
+            rune_context_release_value(ctx, result);
+        }
         rune_context_destroy(ctx);
     }
 }

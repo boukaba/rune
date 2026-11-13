@@ -9135,6 +9135,7 @@ impl Vm {
                     };
                     // B1f: may grow below (refresh on push).
                     let mut obj = self.pop();
+                    let key_opt = key_val.and_then(value_to_prop_key);
                     let key_str = if let Some(kv) = key_val {
                         // Computed key: popped from the stack
                         Some(property_key_string(kv))
@@ -9147,7 +9148,8 @@ impl Vm {
                         if let Some(ptr) = obj.heap_ptr() {
                             let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
                             if tag == TAG_OBJECT {
-                                let key = PropertyKey::from_string(&key_str);
+                                let key =
+                                    key_opt.unwrap_or_else(|| PropertyKey::from_string(&key_str));
                                 let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
                                 if let Some(slot) = shape.lookup(&key) {
                                     unsafe {
@@ -9168,10 +9170,11 @@ impl Vm {
                                 }
                             } else if tag == TAG_FUNC {
                                 // For functions, delegate to do_store_property
-                                let raw_key = Value::from_heap_ptr(HeapString::allocate(
-                                    gc, &key_str,
-                                )
-                                    as *mut u8);
+                                let raw_key = key_val.unwrap_or_else(|| {
+                                    Value::from_heap_ptr(
+                                        HeapString::allocate(gc, &key_str) as *mut u8
+                                    )
+                                });
                                 do_store_property(obj, raw_key, value, gc, self);
                             }
                         }
@@ -9189,6 +9192,7 @@ impl Vm {
                     };
                     // B1f: may grow below (refresh on push).
                     let mut obj = self.pop();
+                    let key_opt = key_val.and_then(value_to_prop_key);
                     let key_str = if let Some(kv) = key_val {
                         // Computed key: popped from the stack
                         Some(property_key_string(kv))
@@ -9203,7 +9207,8 @@ impl Vm {
                             if tag == TAG_OBJECT || tag == TAG_FUNC {
                                 let acc_ptr = AccessorPair::allocate(gc, getter, setter);
                                 let acc_val = Value::from_heap_ptr(acc_ptr);
-                                let key = PropertyKey::from_string(&key_str);
+                                let key =
+                                    key_opt.unwrap_or_else(|| PropertyKey::from_string(&key_str));
                                 // Re-resolve obj pointer after allocation (GC may have moved it)
                                 let ptr = obj.heap_ptr().unwrap();
                                 let ptr = if unsafe { (*(ptr as *const GcHeader)).is_forwarded() } {
@@ -9264,10 +9269,11 @@ impl Vm {
                                     }
                                 } else {
                                     // TAG_FUNC (after re-resolution tag may have changed)
-                                    let raw_key = Value::from_heap_ptr(HeapString::allocate(
-                                        gc, &key_str,
-                                    )
-                                        as *mut u8);
+                                    let raw_key = key_val.unwrap_or_else(|| {
+                                        Value::from_heap_ptr(
+                                            HeapString::allocate(gc, &key_str) as *mut u8
+                                        )
+                                    });
                                     do_store_property(obj, raw_key, acc_val, gc, self);
                                 }
                             }

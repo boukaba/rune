@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Symbol accessors + String search methods (2026-11-13)**: computed symbol accessors, IsRegExp/ToPrimitive search args, charAt/pad. String **1062/1223**. Integration **878**.
 - **String ToPrimitive/split/replace protocols (2026-11-13)**: observable ToPrimitive, symbol receivers, UTF-16 split, replace order/$0. String **1036/1223**, split **110/120**, replace **43/55**. Integration **877**.
 - **JSON.stringify edges/order (2026-11-13)**: wrapper toJSON, exotic {}, numeric PropertyList, key order, NUL keys. JSON **127/165**, stringify **48/66**. Integration **876**.
 - **Spec-shaped JSON.stringify (2026-11-13)**: replacer/toJSON/wrappers/space/circular. JSON **119/165**, stringify **40/66**. Integration **875**.

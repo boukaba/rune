@@ -2890,6 +2890,27 @@ Integration suite: **876 passed, 0 failed, 3 ignored**.
 
 Integration suite: **877 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Symbol accessors + String search methods (2026-11-13)
+
+- `DefineProperty`/`DefineAccessor` now honour computed **symbol** keys
+  (`{ get [Symbol.toPrimitive]() {} }`), preserving accessors and their
+  getter/setter halves instead of stringifying the key.
+- `String.prototype.startsWith`/`includes`/`endsWith`:
+  - run `IsRegExp` (observable `@@match` Get, getter throws propagate) before
+    ToString(searchString);
+  - convert searchString through the re-entrant ToPrimitive;
+  - convert position through ToNumber with clamping and Symbol TypeErrors.
+- `String.prototype.charAt` returns `""` for negative/out-of-range positions
+  and indexes UTF-16 code units.
+- Empty `fillString` in `padStart`/`padEnd` returns the original string.
+- Test262: String **1036 → 1062/1223**; startsWith **21/21**, includes **27/27**,
+  endsWith **27/27**, trimStart/trimEnd **23/23** each, charAt **29/30**,
+  padStart/End **10/13** each.
+- Regression: `test_string_search_methods_and_symbol_accessors`; corrected the
+  legacy `padEnd(3, '')` expectation to the spec result `"ab"`.
+
+Integration suite: **878 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

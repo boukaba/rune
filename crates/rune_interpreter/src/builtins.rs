@@ -15445,20 +15445,19 @@ pub fn string_char_at(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let index = match args.first() {
-        Some(&v) => to_int_sync!(gc, vm, v).max(0.0) as usize,
-        None => 0,
-    };
     let Some(s) = to_primitive_string(gc, this, vm) else {
         return Value::undefined();
     };
-    if index >= s.chars().count() {
-        let empty = HeapString::allocate(gc, "");
-        return Value::from_heap_ptr(empty as *mut u8);
+    let index = match args.first() {
+        Some(&v) => to_int_sync!(gc, vm, v),
+        None => 0.0,
+    };
+    let units = s.encode_utf16().collect::<Vec<u16>>();
+    if !index.is_finite() || index < 0.0 || index >= units.len() as f64 {
+        return Value::from_heap_ptr(HeapString::allocate(gc, "") as *mut u8);
     }
-    let ch = s.chars().nth(index).unwrap();
-    let result = HeapString::allocate(gc, &ch.to_string());
-    Value::from_heap_ptr(result as *mut u8)
+    let result = String::from_utf16_lossy(&[units[index as usize]]);
+    Value::from_heap_ptr(HeapString::allocate(gc, &result) as *mut u8)
 }
 
 /// String.prototype.slice(start, end) — returns a substring.
@@ -15508,6 +15507,99 @@ pub fn string_slice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
 fn arg_to_string(gc: &mut SemiSpace, v: Option<Value>, vm: &mut Vm) -> String {
     let val = v.unwrap_or(Value::undefined());
     to_primitive_string_sync(val, gc, vm)
+}
+
+fn value_truthy(v: Value) -> bool {
+    if v.is_undefined() || v.is_null() {
+        return false;
+    }
+    if let Some(b) = v.to_boolean() {
+        return b;
+    }
+    if let Some(n) = v.as_smi() {
+        return n != 0;
+    }
+    if let Some(f) = v.as_float64() {
+        return f != 0.0 && !f.is_nan();
+    }
+    if let Some(ptr) = v.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_STRING {
+            return !unsafe { HeapString::to_string(ptr as *mut HeapString) }.is_empty();
+        }
+        return true;
+    }
+    true
+}
+
+fn is_regexp_value(gc: &mut SemiSpace, vm: &mut Vm, v: Value) -> Result<bool, Value> {
+    let Some(ptr) = v.heap_ptr() else {
+        return Ok(false);
+    };
+    let _ = ptr;
+    if !is_object_value(v) {
+        return Ok(false);
+    }
+    let matcher = get_property_value_sync(gc, vm, v, Value::symbol(rune_core::symbol::SYM_MATCH))?;
+    Ok(value_truthy(matcher))
+}
+
+fn string_search_units(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    arg: Option<Value>,
+) -> Result<Vec<u16>, Value> {
+    let v = arg.unwrap_or(Value::undefined());
+    if is_regexp_value(gc, vm, v)? {
+        return Err(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "First argument must not be a regular expression",
+        ));
+    }
+    let prim = to_primitive_sync(gc, vm, v, "string")?;
+    if prim.as_symbol_id().is_some() {
+        return Err(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Cannot convert a Symbol value to a string",
+        ));
+    }
+    Ok(value_to_js_string(prim).encode_utf16().collect())
+}
+
+fn string_position(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    arg: Option<Value>,
+    default: f64,
+) -> Result<f64, Value> {
+    match arg {
+        None => Ok(default),
+        Some(v) if v.is_undefined() => Ok(default),
+        Some(v) => {
+            let n = to_number_sync(gc, vm, v)?;
+            Ok(if n.is_nan() || n == 0.0 {
+                0.0
+            } else {
+                n.trunc()
+            })
+        }
+    }
+}
+
+fn clamp_position(n: f64, len: usize) -> usize {
+    if n.is_infinite() {
+        return if n.is_sign_negative() { 0 } else { len };
+    }
+    if n <= 0.0 {
+        0
+    } else if n >= len as f64 {
+        len
+    } else {
+        n as usize
+    }
 }
 
 /// String.prototype.indexOf(searchString, position) — returns the index of the first occurrence.
@@ -15604,17 +15696,18 @@ pub fn string_includes(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
         return Value::undefined();
     };
     let units = s.encode_utf16().collect::<Vec<u16>>();
-    let search_str = arg_to_string(gc, args.first().copied(), vm);
-    let search_units = search_str.encode_utf16().collect::<Vec<u16>>();
-    let pos = args.get(1).copied().unwrap_or(Value::undefined());
-    let start = if pos.is_undefined() {
-        0
-    } else {
-        let f = to_int_sync!(gc, vm, pos);
-        if f.is_nan() || f < 0.0 {
-            0
-        } else {
-            (f as usize).min(units.len())
+    let search_units = match string_search_units(gc, vm, args.first().copied()) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let start = match string_position(gc, vm, args.get(1).copied(), 0.0) {
+        Ok(n) => clamp_position(n, units.len()),
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
         }
     };
     if search_units.is_empty() {
@@ -15639,17 +15732,18 @@ pub fn string_starts_with(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
         return Value::undefined();
     };
     let units = s.encode_utf16().collect::<Vec<u16>>();
-    let search_str = arg_to_string(gc, args.first().copied(), vm);
-    let search_units = search_str.encode_utf16().collect::<Vec<u16>>();
-    let pos = args.get(1).copied().unwrap_or(Value::undefined());
-    let start = if pos.is_undefined() {
-        0
-    } else {
-        let f = to_int_sync!(gc, vm, pos);
-        if f.is_nan() || f < 0.0 {
-            0
-        } else {
-            (f as usize).min(units.len())
+    let search_units = match string_search_units(gc, vm, args.first().copied()) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let start = match string_position(gc, vm, args.get(1).copied(), 0.0) {
+        Ok(n) => clamp_position(n, units.len()),
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
         }
     };
     Value::boolean(units[start..].starts_with(&search_units))
@@ -15664,17 +15758,18 @@ pub fn string_ends_with(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
         return Value::undefined();
     };
     let units = s.encode_utf16().collect::<Vec<u16>>();
-    let search_str = arg_to_string(gc, args.first().copied(), vm);
-    let search_units = search_str.encode_utf16().collect::<Vec<u16>>();
-    let end_pos = args.get(1).copied().unwrap_or(Value::undefined());
-    let end = if end_pos.is_undefined() {
-        units.len()
-    } else {
-        let f = to_int_sync!(gc, vm, end_pos);
-        if f.is_nan() || f < 0.0 {
-            0
-        } else {
-            (f as usize).min(units.len())
+    let search_units = match string_search_units(gc, vm, args.first().copied()) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let end = match string_position(gc, vm, args.get(1).copied(), units.len() as f64) {
+        Ok(n) => clamp_position(n, units.len()),
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
         }
     };
     Value::boolean(units[..end].ends_with(&search_units))
@@ -16041,11 +16136,9 @@ fn string_pad(gc: &mut SemiSpace, vm: &mut Vm, this: Value, args: &[Value], at_e
         Some(v) if !v.is_undefined() => arg_to_string(gc, Some(*v), vm),
         _ => " ".to_string(),
     };
-    let fill = if fill.is_empty() {
-        " ".to_string()
-    } else {
-        fill
-    };
+    if fill.is_empty() {
+        return Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8);
+    }
     let fill_units = fill.encode_utf16().collect::<Vec<u16>>();
     let pad_len = target_len - units.len();
     let mut pad = Vec::with_capacity(pad_len);

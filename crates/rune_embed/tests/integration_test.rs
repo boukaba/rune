@@ -11617,7 +11617,7 @@ fn test_string_pad_utf16() {
                 r.heap_ptr().unwrap() as *mut rune_core::string::HeapString
             )
         },
-        "ab "
+        "ab"
     );
 }
 
@@ -16887,6 +16887,44 @@ fn test_string_toprimitive_split_replace_contracts() {
                 "ab3c".replace({ toString: function () { return "3"; } }, "<foo>") === "ab<foo>c",
                 threw,
                 symThrew
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}
+
+#[test]
+fn test_string_search_methods_and_symbol_accessors() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var regexpTypeError = false;
+            try { "abc".startsWith(/a/); } catch (e) { regexpTypeError = e instanceof TypeError; }
+            var matchTypeError = false;
+            try { "abc".includes({ [Symbol.match]: true }); } catch (e) { matchTypeError = e instanceof TypeError; }
+            var getterThrew = false;
+            var matcher = {};
+            Object.defineProperty(matcher, Symbol.match, { get: function () { throw new RangeError("getter"); } });
+            try { "abc".endsWith(matcher); } catch (e) { getterThrew = e instanceof RangeError; }
+            var tp = 0;
+            var thisVal = {
+                get [Symbol.toPrimitive]() { tp += 1; return undefined; },
+                get toString() { return function () { return " 42"; }; }
+            };
+            [
+                "abc".startsWith("a"),
+                "abc".includes("b"),
+                "abc".endsWith("c"),
+                regexpTypeError,
+                matchTypeError,
+                getterThrew,
+                String.prototype.trimStart.call(thisVal) === "42",
+                tp === 1,
+                "wizard".charAt(1) === "i",
+                "abc".charAt(-1) === "",
+                "abc".padStart(5, "") === "abc"
             ].join("|") === "true|true|true|true|true|true|true|true|true|true|true";
             "#,
         )

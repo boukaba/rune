@@ -1941,6 +1941,20 @@ Integration suite: **836 passed, 0 failed, 3 ignored**.
 
 Integration suite: **837 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — RegExp split zero-width tail alignment (2026-11-13)
+
+- `@@split` now skips zero-width matches **at the end of the input** in addition
+  to `end == p`, matching the `"x".split(/()/) → ["x"]` and
+  `"x".split(/$/) → ["x"]` cases while keeping `"?."`'s trailing empty.
+- Test262: String/prototype/split **92 → 93/120**; String **832 → 833/1223**;
+  RegExp/prototype stays **189/487**.
+- Extended `test_regexp_symbol_split` with `/()/` and `/(?:)/` assertions.
+- Attempted an ordinary-data-property `lastIndex` (raw values, exec-time
+  coercion) but measured **RegExp/prototype 189 → 183**; that change was
+  reverted before commit. Tracked for a smaller, targeted retry.
+
+Integration suite: **837 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

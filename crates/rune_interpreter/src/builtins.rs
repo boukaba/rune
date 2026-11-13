@@ -24486,7 +24486,7 @@ pub fn regexp_symbol_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: 
             continue;
         };
         let (start, end) = groups[0];
-        if end == p {
+        if end == p || (start == end && start >= input.len()) {
             q = advance(q);
             continue;
         }

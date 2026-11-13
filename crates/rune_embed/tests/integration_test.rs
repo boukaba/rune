@@ -15667,8 +15667,10 @@ fn test_regexp_symbol_split() {
                 "a1b2c".split(/(\d)/).join(",") === "a,1,b,2,c",
                 "abc".split(/b/, 1).join(",") === "a",
                 JSON.stringify("x".split(/$/)) === '["x"]',
-                JSON.stringify("x".split(/.?/)) === '["",""]'
-            ].join("|") === "true|true|true|true|true|true|true|true";
+                JSON.stringify("x".split(/.?/)) === '["",""]',
+                "x".split(/()/).length === 1,
+                "ab".split(/(?:)/).join(",") === "a,b"
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true";
             "#,
         )
         .unwrap();

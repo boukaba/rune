@@ -15506,3 +15506,27 @@ fn test_builtin_constructor_metadata() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_delete_builtin_metadata() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var f = Date.prototype.setHours;
+            var hadLength = f.hasOwnProperty("length");
+            var deleted = delete f.length;
+            [
+                hadLength,
+                deleted,
+                !f.hasOwnProperty("length"),
+                Object.getOwnPropertyDescriptor(f, "length") === undefined,
+                f.length === undefined,
+                delete f.name,
+                !f.hasOwnProperty("name")
+            ].join("|") === "true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

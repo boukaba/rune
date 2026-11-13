@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Deletable builtin metadata (2026-11-13)**: delete length/name honored by get/has/gOPD. Date 363→**453/594**, String 761→**828/1223**. Integration **831**.
 - **Builtin names + ctor metadata (2026-11-13)**: spec `.name` and constructor `name`/`length` own properties. Object 2500→**2502/3411**. Integration **830**.
 - **Builtin [[Length]] fixed (2026-11-13)**: registration preserved spec lengths instead of hard-coded 1. String 722→**760/1223**, Number 223→**247/340**. Integration **829**.
 - **Array named ownership fixed (2026-11-13)**: hasOwnProperty/propertyIsEnumerable read extra-props overlay. Object 2436→**2495/3411**. Integration **828**.

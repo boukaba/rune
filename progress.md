@@ -1820,6 +1820,23 @@ Integration suite: **829 passed, 0 failed, 3 ignored**.
 
 Integration suite: **830 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Deletable builtin metadata (2026-11-13)
+
+- `delete f.length` / `delete f.name` on builtin functions previously reported
+  success but left the virtual metadata visible, so `verifyProperty` failed
+  every builtin `length`/`name` descriptor test.
+- Added `Vm::deleted_builtin_metadata` (id → deleted length/name bits);
+  deletion, property get, `hasOwnProperty`, and `getOwnPropertyDescriptor` all
+  honor it and fall back to `%Function.prototype%`.
+- Test262: Date **363 → 453/594**, String **761 → 828/1223**,
+  Math **227 → 297/327**, Array **2542 → 2617/3081**,
+  Object **2502 → 2546/3411**, Number **247 → 267/340**,
+  Function **177 → 185/509**.
+- Regression: `test_delete_builtin_metadata`.
+- Known gap: `Object.getOwnPropertyNames` does not yet filter deleted metadata.
+
+Integration suite: **831 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

@@ -7056,7 +7056,11 @@ pub fn object_prototype_has_own_property(
             if let Some(kptr) = key.heap_ptr() {
                 if unsafe { (*(kptr as *const GcHeader)).tag() } == TAG_STRING {
                     let name = unsafe { HeapString::to_string(kptr as *mut HeapString) };
-                    return Value::boolean(name == "length" || name == "name");
+                    if name == "length" || name == "name" {
+                        let id = (-sid as usize) - 1;
+                        let bit = if name == "length" { 1u8 } else { 2u8 };
+                        return Value::boolean(!vm.deleted_builtin_metadata.contains(&(id, bit)));
+                    }
                 }
             }
         }
@@ -9337,10 +9341,23 @@ pub fn object_get_own_property_descriptor(
             if id >= vm.builtins.len() {
                 return Value::undefined();
             }
+            let bit = if name == "length" {
+                1u8
+            } else if name == "name" {
+                2u8
+            } else {
+                0u8
+            };
+            if bit != 0 && vm.deleted_builtin_metadata.contains(&(id, bit)) {
+                return Value::undefined();
+            }
             let value = if name == "length" {
                 Value::smi(vm.builtins[id].length as i32)
             } else if name == "name" {
-                Value::from_heap_ptr(HeapString::allocate(gc, vm.builtins[id].name) as *mut u8)
+                Value::from_heap_ptr(HeapString::allocate(
+                    gc,
+                    crate::vm::builtin_display_name(vm.builtins[id].name),
+                ) as *mut u8)
             } else {
                 return Value::undefined();
             };

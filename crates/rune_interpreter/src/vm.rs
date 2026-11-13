@@ -1283,6 +1283,9 @@ pub struct Vm {
     /// Counter for allocating unique private name IDs (class fields).
     /// Incremented per PrivateNameScope allocation.
     next_private_name_id: u64,
+    /// Builtin metadata properties (`length`/`name`) deleted by JS.
+    /// Bit 0 = length, bit 1 = name; keyed by builtin id.
+    pub(crate) deleted_builtin_metadata: HashSet<(usize, u8)>,
 }
 
 impl Default for Vm {
@@ -1474,6 +1477,7 @@ impl Vm {
             pending_primitive_conversion: None,
             assert_called: false,
             next_private_name_id: 1,
+            deleted_builtin_metadata: HashSet::new(),
         }
     }
 
@@ -6249,14 +6253,25 @@ impl Vm {
                         None => None,
                     };
                     if let Some(k) = key_str {
-                        if k == "name" {
-                            let hs = HeapString::allocate(
-                                gc,
-                                builtin_display_name(self.builtins[id].name),
-                            ) as *mut u8;
-                            return PropGetOut::Ready(Value::from_heap_ptr(hs));
-                        } else if k == "length" {
-                            return PropGetOut::Ready(Value::smi(self.builtins[id].length as i32));
+                        let bit = if k == "length" {
+                            1u8
+                        } else if k == "name" {
+                            2u8
+                        } else {
+                            0u8
+                        };
+                        if bit == 0 || !self.deleted_builtin_metadata.contains(&(id, bit)) {
+                            if k == "name" {
+                                let hs = HeapString::allocate(
+                                    gc,
+                                    builtin_display_name(self.builtins[id].name),
+                                ) as *mut u8;
+                                return PropGetOut::Ready(Value::from_heap_ptr(hs));
+                            } else if k == "length" {
+                                return PropGetOut::Ready(Value::smi(
+                                    self.builtins[id].length as i32,
+                                ));
+                            }
                         }
                     }
                 }
@@ -8349,7 +8364,28 @@ impl Vm {
                 Opcode::DeleteProperty => {
                     let raw_key = self.pop();
                     let obj = self.pop();
-                    let result = if let Some(ptr) = obj.heap_ptr() {
+                    let result = if let Some(sid) = obj.as_smi() {
+                        if sid < 0 {
+                            let id = (-sid as usize) - 1;
+                            if let Some(kptr) = raw_key.heap_ptr() {
+                                if unsafe { (*(kptr as *const GcHeader)).tag() } == TAG_STRING {
+                                    let k =
+                                        unsafe { HeapString::to_string(kptr as *mut HeapString) };
+                                    let bit = if k == "length" {
+                                        1u8
+                                    } else if k == "name" {
+                                        2u8
+                                    } else {
+                                        0u8
+                                    };
+                                    if bit != 0 {
+                                        self.deleted_builtin_metadata.insert((id, bit));
+                                    }
+                                }
+                            }
+                        }
+                        Value::boolean(true)
+                    } else if let Some(ptr) = obj.heap_ptr() {
                         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
                         if tag == TAG_OBJECT {
                             let mut deleted = true;

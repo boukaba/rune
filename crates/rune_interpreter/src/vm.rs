@@ -2238,6 +2238,9 @@ impl Vm {
             if let Some(r) = find_handle(&self.builtins, "Promise_all") {
                 ctor_entries.push(("all", r));
             }
+            if let Some(r) = find_handle(&self.builtins, "Promise_allSettled") {
+                ctor_entries.push(("allSettled", r));
+            }
             if let Some(r) = find_handle(&self.builtins, "Promise_race") {
                 ctor_entries.push(("race", r));
             }
@@ -4048,9 +4051,6 @@ impl Vm {
             if state.pinned_depth == usize::MAX {
                 state.pinned_depth = depth;
             }
-        }
-        if let Some(ref mut state) = self.pending_promise_ctor {
-            state.source_frame_depth = depth;
         }
         if let Some(ref mut state) = self.pending_finally_op {
             state.source_frame_depth = depth;

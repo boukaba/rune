@@ -366,6 +366,27 @@ This matters for shell pipelines, CI, and serverless/local runners that rely on
 process status rather than stderr text. Two CLI integration tests spawn the
 built binary and check both paths.
 
+### Phase 1 — Promise.allSettled + microtask continuation isolation (2026-11-13)
+
+Two changes:
+
+- **`Promise.allSettled`** implemented with per-index fulfilled/rejected
+  callbacks. Each result is `{status:"fulfilled", value}` or
+  `{status:"rejected", reason}`; the aggregate never rejects and preserves
+  input order. Pending inputs, already-rejected inputs, empty input, and mixed
+  values are covered.
+- **Microtask depth isolation (P0):** `rebase_pending_depths` was moving
+  `pending_promise_ctor.source_frame_depth` whenever a nested callback frame
+  was pushed. An array method inside a `.then` callback therefore looked like
+  the completion of the microtask itself: the microtask promise was resolved
+  with the map callback's value, the array machine stayed live, and later calls
+  in the callback were skipped by the pending-owning call gate. The promise
+  constructor now records its awaiting depth at creation and is no longer
+  rebound. `Promise.resolve([1,2]).then(v => v.map(x => x+1).join(","))` works
+  again, as does `new Promise` inside an ordinary function.
+
+Integration suite: **760 passed, 0 failed, 3 ignored**.
+
 Next: Phase 1 foundations — stable object/array headers (replace the interim
 forwarding layer), then the runtime/Web API layer.
 

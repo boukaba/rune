@@ -17123,7 +17123,7 @@ pub fn promise_constructor(gc: &mut SemiSpace, _this: Value, args: &[Value], vm:
     let resolve_func = vm.create_promise_bridge(gc, promise_val, resolve_handle);
     let reject_func = vm.create_promise_bridge(gc, promise_val, reject_handle);
     vm.pending_promise_ctor = Some(crate::vm::PendingPromiseCtor {
-        source_frame_depth: 0,
+        source_frame_depth: vm.frame_depth(),
         promise: promise_val,
         resolve_handle,
         reject_handle,
@@ -17422,7 +17422,7 @@ pub fn promise_static_resolve(
                 let resolve_bridge = vm.create_promise_bridge(gc, promise_val, resolve_h);
                 let reject_bridge = vm.create_promise_bridge(gc, promise_val, reject_h);
                 vm.pending_promise_ctor = Some(crate::vm::PendingPromiseCtor {
-                    source_frame_depth: 0,
+                    source_frame_depth: vm.frame_depth(),
                     promise: promise_val,
                     resolve_handle: resolve_h,
                     reject_handle: reject_h,
@@ -17719,6 +17719,157 @@ pub fn bound_invoke(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut V
 }
 
 /// Promise.race(iterable) — settles with the first settled promise or value.
+/// Internal per-index continuation for Promise.allSettled: record
+/// `{status, value|reason}` and settle the aggregate when all inputs settle.
+pub fn promise_all_settled_element(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let state_val = args.first().copied().unwrap_or(Value::undefined());
+    let index = args.get(1).copied().and_then(|v| v.as_smi()).unwrap_or(0) as usize;
+    let fulfilled = args.get(2).copied().and_then(|v| v.as_smi()).unwrap_or(0) != 0;
+    let outcome = args.get(3).copied().unwrap_or(Value::undefined());
+    let Some(state_ptr) = state_val.heap_ptr() else {
+        return Value::undefined();
+    };
+    let state = state_ptr as *mut RuneArray;
+    let values = unsafe { RuneArray::get_element(state, 0) };
+    if let Some(values_ptr) = values.heap_ptr() {
+        let status = if fulfilled { "fulfilled" } else { "rejected" };
+        let status_str = HeapString::allocate(gc, status) as *mut u8;
+        let status_val = Value::from_heap_ptr(status_str);
+        let key = if fulfilled { "value" } else { "reason" };
+        let entries = vec![
+            (PropertyKey::from_string("status"), 0usize),
+            (PropertyKey::from_string(key), 1usize),
+        ];
+        let shape = Shape::intern(entries, vec!["status".to_string(), key.to_string()]);
+        let obj = JSObject::allocate(gc, shape, &[status_val, outcome]);
+        if let Some(proto) = vm.object_prototype.heap_ptr() {
+            unsafe { JSObject::set_prototype(obj, proto) };
+        }
+        unsafe {
+            RuneArray::set_element(
+                values_ptr as *mut RuneArray,
+                index,
+                Value::from_heap_ptr(obj as *mut u8),
+            );
+        }
+    }
+    let remaining = unsafe { RuneArray::get_element(state, 1) }
+        .as_smi()
+        .unwrap_or(0);
+    let next = remaining.saturating_sub(1);
+    unsafe {
+        RuneArray::set_element(state, 1, Value::smi(next));
+    }
+    if next == 0 {
+        let result = unsafe { RuneArray::get_element(state, 2) };
+        if let Some(ptr) = result.heap_ptr() {
+            if unsafe { Promise::state(ptr) == PROMISE_PENDING } {
+                unsafe {
+                    Promise::set_state(ptr, PROMISE_FULFILLED);
+                    Promise::set_result(ptr, values);
+                }
+                settle_promise_reactions(vm, ptr, values, true);
+            }
+        }
+    }
+    Value::undefined()
+}
+
+pub fn promise_static_all_settled(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let iterable = args.first().copied().unwrap_or(Value::undefined());
+    let proto = vm.promise_prototype.heap_ptr();
+    let result_ptr = Promise::allocate(gc, proto);
+    let result_val = Value::from_heap_ptr(result_ptr);
+    let Some(len) = crate::vm::array_like_length(iterable) else {
+        unsafe { Promise::set_state(result_ptr, PROMISE_FULFILLED) };
+        return result_val;
+    };
+    if len == 0 {
+        let arr = RuneArray::allocate(gc, &[]);
+        unsafe {
+            RuneArray::set_shape_ptr(arr, *DENSE_ARRAY_SHAPE as *const Shape);
+            if let Some(proto) = vm.array_prototype.heap_ptr() {
+                RuneArray::set_prototype(arr, proto);
+            }
+            Promise::set_state(result_ptr, PROMISE_FULFILLED);
+            Promise::set_result(result_ptr, Value::from_heap_ptr(arr as *mut u8));
+        }
+        return result_val;
+    }
+
+    let root_base = vm.temp_roots.len();
+    vm.temp_roots.push(result_val);
+    let values_arr = RuneArray::allocate(gc, &vec![Value::undefined(); len as usize]);
+    unsafe {
+        RuneArray::set_shape_ptr(values_arr, *DENSE_ARRAY_SHAPE as *const Shape);
+        if let Some(proto) = vm.array_prototype.heap_ptr() {
+            RuneArray::set_prototype(values_arr, proto);
+        }
+    }
+    let values_val = Value::from_heap_ptr(values_arr as *mut u8);
+    vm.temp_roots.push(values_val);
+    let state_arr = RuneArray::allocate(gc, &[values_val, Value::smi(len as i32), result_val]);
+    unsafe {
+        RuneArray::set_shape_ptr(state_arr, *DENSE_ARRAY_SHAPE as *const Shape);
+        if let Some(proto) = vm.array_prototype.heap_ptr() {
+            RuneArray::set_prototype(state_arr, proto);
+        }
+    }
+    let state_val = Value::from_heap_ptr(state_arr as *mut u8);
+    vm.temp_roots.push(state_val);
+
+    let instrs = vec![
+        Instruction::new(Opcode::LoadUndefined, vec![]),
+        Instruction::new(Opcode::LoadCaptured, vec![0, 3]),
+        Instruction::new(Opcode::LoadCaptured, vec![0, 0]),
+        Instruction::new(Opcode::LoadCaptured, vec![0, 1]),
+        Instruction::new(Opcode::LoadCaptured, vec![0, 2]),
+        Instruction::new(Opcode::LoadLocal, vec![0]),
+        Instruction::new(Opcode::Call, vec![4]),
+        Instruction::new(Opcode::Return, vec![]),
+    ];
+    let inner = BytecodeProgram::new(instrs, vec![], vec![]);
+    let outer = Box::new(BytecodeProgram::new(vec![], vec![], vec![inner]));
+    let prog_ptr = Box::leak(outer) as *const BytecodeProgram as *const u8;
+    let element_handle = vm.find_builtin_handle("_promise_all_settled_element");
+
+    for i in 0..len {
+        let mut callbacks = [Value::undefined(); 2];
+        for (slot, flag) in [(0usize, 1i32), (1, 0)] {
+            let env = EnvObject::allocate(gc, 4, std::ptr::null_mut());
+            let func = Func::allocate(gc, 0, prog_ptr, false, env as *mut u8);
+            let env = resolve_forwarded(env as *mut u8) as *mut EnvObject;
+            let func = resolve_forwarded(func as *mut u8) as *mut Func;
+            let state_now = resolve_forwarded(state_val.heap_ptr().unwrap()) as *mut RuneArray;
+            unsafe {
+                EnvObject::set_slot(env, 0, Value::from_heap_ptr(state_now as *mut u8));
+                EnvObject::set_slot(env, 1, Value::smi(i as i32));
+                EnvObject::set_slot(env, 2, Value::smi(flag));
+                EnvObject::set_slot(env, 3, element_handle);
+                Func::set_env_ptr(func, env as *mut u8);
+            }
+            callbacks[slot] = Value::from_heap_ptr(func as *mut u8);
+            vm.temp_roots.push(callbacks[slot]);
+        }
+        let item = crate::vm::array_like_index(iterable, i).unwrap_or(Value::undefined());
+        let input = promise_static_resolve(gc, Value::undefined(), &[item], vm);
+        promise_prototype_then(gc, input, &[callbacks[0], callbacks[1]], vm);
+        vm.temp_roots.truncate(root_base + 2);
+    }
+    vm.temp_roots.truncate(root_base);
+    result_val
+}
+
 pub fn promise_static_race(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let iterable = args.first().copied().unwrap_or(Value::undefined());
     let proto = vm.promise_prototype.heap_ptr();
@@ -18389,6 +18540,16 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 1,
             name: "Promise_all",
             func: promise_static_all,
+        },
+        Builtin {
+            length: 1,
+            name: "Promise_allSettled",
+            func: promise_static_all_settled,
+        },
+        Builtin {
+            length: 4,
+            name: "_promise_all_settled_element",
+            func: promise_all_settled_element,
         },
         Builtin {
             length: 1,

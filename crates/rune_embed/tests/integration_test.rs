@@ -13653,3 +13653,60 @@ fn test_promise_all_pending_order_and_rejection() {
     .unwrap();
     assert_eq!(eval_str(&mut ctx2, "err"), "nope");
 }
+
+#[test]
+fn test_array_methods_inside_promise_callback() {
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+        var out = "";
+        Promise.resolve([1, 2]).then(function (v) {
+            var mapped = v.map(function (x) { return x + 1; });
+            out = mapped.join(",");
+        });
+        "";
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        eval_str(&mut ctx, "out"),
+        "2,3",
+        "nested array machine must not steal the microtask continuation"
+    );
+}
+
+#[test]
+fn test_promise_constructor_inside_function() {
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+        function make() {
+            return new Promise(function (resolve) { resolve(5); });
+        }
+        var out = 0;
+        make().then(function (v) { out = v; });
+        0;
+        "#,
+    )
+    .unwrap();
+    assert_eq!(ctx.eval("out").unwrap().as_smi(), Some(5));
+}
+
+#[test]
+fn test_promise_all_settled_pending_and_rejected() {
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+        var resolve;
+        var pending = new Promise(function (r) { resolve = r; });
+        var out = "";
+        Promise.allSettled([1, pending, Promise.reject(new Error("bad"))]).then(function (v) {
+            out = v[0].status + "," + v[1].value + "," + v[2].status + "," + v[2].reason.message;
+        });
+        resolve(2);
+        "";
+        "#,
+    )
+    .unwrap();
+    assert_eq!(eval_str(&mut ctx, "out"), "fulfilled,2,rejected,bad");
+}

@@ -6548,7 +6548,30 @@ pub fn object_prototype_property_is_enumerable(
                 return Value::boolean(false);
             };
             let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
-            shape.lookup(&pk).is_some()
+            shape
+                .lookup(&pk)
+                .is_some_and(|slot| shape.attr_at(slot) & rune_core::shape::ATTR_ENUMERABLE != 0)
+        }
+        TAG_FUNC | TAG_DATE | TAG_REGEXP => {
+            let Some(pk) = value_to_prop_key(key) else {
+                return Value::boolean(false);
+            };
+            let props = unsafe {
+                match tag {
+                    TAG_FUNC => rune_core::function::Func::extra_props(
+                        ptr as *mut rune_core::function::Func,
+                    ) as *mut JSObject,
+                    TAG_DATE => rune_core::date::RuneDate::extra_props(ptr) as *mut JSObject,
+                    _ => rune_core::regexp::RegExp::extra_props(ptr) as *mut JSObject,
+                }
+            };
+            if props.is_null() {
+                return Value::boolean(false);
+            }
+            let shape = unsafe { JSObject::shape_ptr(props) };
+            shape
+                .lookup(&pk)
+                .is_some_and(|slot| shape.attr_at(slot) & rune_core::shape::ATTR_ENUMERABLE != 0)
         }
         _ => false,
     };
@@ -21256,6 +21279,46 @@ pub fn default_builtins() -> Vec<Builtin> {
         },
         Builtin {
             length: 0,
+            name: "RegExp_prototype_global",
+            func: regexp_global,
+        },
+        Builtin {
+            length: 0,
+            name: "RegExp_prototype_ignoreCase",
+            func: regexp_ignore_case,
+        },
+        Builtin {
+            length: 0,
+            name: "RegExp_prototype_multiline",
+            func: regexp_multiline,
+        },
+        Builtin {
+            length: 0,
+            name: "RegExp_prototype_dotAll",
+            func: regexp_dot_all,
+        },
+        Builtin {
+            length: 0,
+            name: "RegExp_prototype_unicode",
+            func: regexp_unicode,
+        },
+        Builtin {
+            length: 0,
+            name: "RegExp_prototype_sticky",
+            func: regexp_sticky,
+        },
+        Builtin {
+            length: 0,
+            name: "RegExp_prototype_hasIndices",
+            func: regexp_has_indices,
+        },
+        Builtin {
+            length: 0,
+            name: "RegExp_prototype_unicodeSets",
+            func: regexp_unicode_sets,
+        },
+        Builtin {
+            length: 0,
             name: "RegExp_prototype_lastIndex",
             func: regexp_last_index,
         },
@@ -22727,6 +22790,37 @@ pub fn regexp_flags(gc: &mut SemiSpace, this: Value, _args: &[Value], _vm: &mut 
     }
     Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8)
 }
+
+fn regexp_flag_bit(
+    _gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    _vm: &mut Vm,
+    bit: u32,
+) -> Value {
+    let Some(regexp_ptr) = get_regexp_this(this) else {
+        return Value::undefined();
+    };
+    let flags = unsafe { RegExp::flags(regexp_ptr) };
+    Value::boolean(flags & bit != 0)
+}
+
+macro_rules! regexp_flag_getter {
+    ($name:ident, $bit:expr) => {
+        pub fn $name(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+            regexp_flag_bit(gc, this, args, vm, $bit)
+        }
+    };
+}
+
+regexp_flag_getter!(regexp_global, 1);
+regexp_flag_getter!(regexp_ignore_case, 2);
+regexp_flag_getter!(regexp_multiline, 4);
+regexp_flag_getter!(regexp_dot_all, 8);
+regexp_flag_getter!(regexp_unicode, 16);
+regexp_flag_getter!(regexp_sticky, 32);
+regexp_flag_getter!(regexp_has_indices, 64);
+regexp_flag_getter!(regexp_unicode_sets, 128);
 
 /// RegExp.prototype.lastIndex getter — returns the lastIndex value.
 pub fn regexp_last_index(_gc: &mut SemiSpace, this: Value, _args: &[Value], _vm: &mut Vm) -> Value {

@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **RegExp flag accessors (2026-11-13)**: 8 prototype accessors + builtin getter dispatch + propertyIsEnumerable attrs. RegExp prototype 96→**117/487**; Object 1805. Integration **804**.
 - **Global mirror + callable constructors (2026-11-13)**: globalThis exposes globals/wrappers for reads, hasOwnProperty and gOPD; Object/Array/Boolean/Function are callable (`typeof`, instanceof Function). Object 1791→**1801/3411**, gOPD 232→235. Integration **803**.
 - **Descriptor objects + builtin attrs (2026-11-13)**: gOPD descriptor objects inherit Object.prototype; Object.prototype methods/Array iterators non-enum writable/config. Object 1729→**1791/3411**, gOPD 201→**232/310**. Integration **802**.
 - **Prototype-chain completeness (2026-11-13)**: function `.prototype` objects chain to Object.prototype; string primitive reads walk to Object.prototype; hasOwnProperty handles string indices/length and Function/Date/RegExp extras. Object 1719→**1729/3411**, String 668→673, Function 157→165, Promise 365→369. Integration **801**.

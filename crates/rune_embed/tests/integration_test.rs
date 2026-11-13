@@ -14813,3 +14813,29 @@ fn test_global_object_mirror_and_callable_constructors() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_regexp_flag_accessors() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var re = /a/gim;
+            var d = Object.getOwnPropertyDescriptor(RegExp.prototype, "global");
+            [
+                re.global === true,
+                re.ignoreCase === true,
+                re.multiline === true,
+                re.sticky === false,
+                re.unicode === false,
+                re.flags === "gim",
+                typeof d.get === "function",
+                d.enumerable === false,
+                d.configurable === true,
+                RegExp.prototype.propertyIsEnumerable("global") === false
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

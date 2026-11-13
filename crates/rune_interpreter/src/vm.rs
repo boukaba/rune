@@ -2479,6 +2479,22 @@ impl Vm {
             if let Some(h) = li_h {
                 proto_entries.push(("lastIndex", h));
             }
+            for (name, key) in [
+                ("global", "RegExp_prototype_global"),
+                ("ignoreCase", "RegExp_prototype_ignoreCase"),
+                ("multiline", "RegExp_prototype_multiline"),
+                ("dotAll", "RegExp_prototype_dotAll"),
+                ("unicode", "RegExp_prototype_unicode"),
+                ("sticky", "RegExp_prototype_sticky"),
+                ("hasIndices", "RegExp_prototype_hasIndices"),
+                ("unicodeSets", "RegExp_prototype_unicodeSets"),
+            ] {
+                if let Some(getter) = find_handle(&self.builtins, key) {
+                    let pair =
+                        rune_core::accessor::AccessorPair::allocate(gc, getter, Value::undefined());
+                    proto_entries.push((name, Value::from_heap_ptr(pair)));
+                }
+            }
             let re_ctor_handle =
                 find_handle(&self.builtins, "RegExp").unwrap_or(Value::undefined());
             proto_entries.push(("constructor", re_ctor_handle));
@@ -4947,6 +4963,15 @@ impl Vm {
             if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_ACCESSOR {
                 let getter = unsafe { AccessorPair::getter(ptr) };
                 if !getter.is_undefined() {
+                    if let Some(sid) = getter.as_smi() {
+                        if sid < 0 {
+                            let id = (-sid as usize) - 1;
+                            if id < self.builtins.len() {
+                                let result = (self.builtins[id].func)(_gc, this, &[], self);
+                                return (result, false);
+                            }
+                        }
+                    }
                     if let Some(gptr) = getter.heap_ptr() {
                         if unsafe { (*(gptr as *const GcHeader)).tag() } == TAG_FUNC {
                             let func_ptr = gptr;

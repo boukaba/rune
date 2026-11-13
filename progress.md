@@ -1346,6 +1346,26 @@ Integration suite: **802 passed, 0 failed, 3 ignored**.
 
 Integration suite: **803 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — RegExp flag accessors + enumerability (2026-11-13)
+
+- Added `RegExp.prototype` accessor properties for `global`, `ignoreCase`,
+  `multiline`, `dotAll`, `unicode`, `sticky`, `hasIndices`, `unicodeSets`,
+  backed by the existing flag bits. Reads on RegExp instances now work
+  (`.flags` already did).
+- `AccessorPair` getters that are builtin handles are now invoked
+  synchronously by `resolve_accessor_for_read` (previously only JS-function
+  getters were dispatched), unblocking all inherited builtin accessors.
+- `propertyIsEnumerable` now consults shape attributes instead of treating
+  every own property as enumerable; Function/Date/RegExp `extra_props` are
+  covered.
+- Test262: RegExp prototype **96 → 117/487**; Object **1801 → 1805/3411**.
+- Regression: `test_regexp_flag_accessors`.
+- Known gaps: flag getters on incompatible receivers should throw TypeError
+  (currently undefined); 442 `property-escapes` tests need Unicode property
+  data.
+
+Integration suite: **804 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

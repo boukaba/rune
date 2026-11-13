@@ -16622,3 +16622,33 @@ fn test_date_to_json_to_primitive_and_full_year() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_date_constructor_to_primitive_and_setter_order() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var order = [];
+            var d = new Date(NaN);
+            var arg = function (name) {
+                return { valueOf: function () { order.push(name); return 0; } };
+            };
+            var ret = d.setHours(arg("h"), arg("m"), arg("s"), arg("ms"));
+            var p = new Date({ toString: function () { return "1970-01-01T00:00:01Z"; } });
+            var v = new Date({ valueOf: function () { return 1000; } });
+            var u = Date.UTC({ valueOf: function () { return 1970; } }, 0, 1);
+            [
+                order.join(",") === "h,m,s,ms",
+                ret !== ret,
+                1 / new Date(-0).getTime() === Infinity,
+                p.getTime() === 1000,
+                v.getTime() === 1000,
+                u === 0,
+                Date.parse({ toString: function () { return "1970-01-01T00:00:00Z"; } }) === 0
+            ].join("|") === "true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

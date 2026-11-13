@@ -2650,6 +2650,31 @@ Integration suite: **866 passed, 0 failed, 3 ignored**.
 
 Integration suite: **867 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Date constructor/UTC + setter coercion order (2026-11-13)
+
+- Single-argument `new Date(value)` now performs full ToPrimitive(default)
+  for objects via synchronous re-entrant calls, parses String primitives, and
+  ToNumbers other primitives; Symbol arguments throw TypeError.
+- Multi-argument `new Date(...)` and `Date.UTC(...)` coerce supplied arguments
+  in order through synchronous ToNumber (user valueOf, throwing order,
+  defaults), then apply `make_day`/`make_time`.
+- `Date.parse` converts via synchronous ToPrimitive(string) and throws on
+  Symbols.
+- `TimeClip` normalises −0 to +0.
+- All date setters now coerce optional arguments *before* the invalid-date
+  check (setHours/Minutes/Seconds/Month and UTC variants), fixing eight
+  `arg-coercion-order` suites.
+- Builtin metadata fixes: negative-Smi builtin functions are extensible,
+  report `[object Function]`, and `Object.getPrototypeOf` returns
+  Function.prototype; `make_object` treats only numeric ALL_CAPS entries as
+  immutable constants (Date.UTC now writable/configurable).
+- Test262: Date **544 → 580/594**.
+- Remaining Date failures: `toTemporalInstant` (Temporal absent),
+  Date.parse zero-year, toJSON abrupt-getter, Date subclassing.
+- Regression: `test_date_constructor_to_primitive_and_setter_order`.
+
+Integration suite: **868 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

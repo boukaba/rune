@@ -285,7 +285,11 @@ pub fn time_clip(time: f64) -> f64 {
     if time.abs() > MAX_TIME_VALUE {
         return f64::NAN;
     }
-    time.trunc()
+    let t = time.trunc();
+    if t == 0.0 {
+        return 0.0;
+    }
+    t
 }
 
 /// ToIntegerOrInfinity (§7.1.5) applied by MakeTime/MakeDay.

@@ -1550,7 +1550,7 @@ impl Vm {
             // configurable but non-writable; ALL_CAPS constants are immutable.
             let attrs: Vec<rune_core::shape::PropAttr> = pairs
                 .iter()
-                .map(|(k, _)| {
+                .map(|(k, v)| {
                     if *k == "prototype" || *k == "NaN" || *k == "Infinity" {
                         0
                     } else if *k == "length" || *k == "name" {
@@ -1558,6 +1558,8 @@ impl Vm {
                     } else if k
                         .chars()
                         .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+                        && v.heap_ptr().is_none()
+                        && v.as_smi().is_none_or(|s| s >= 0)
                     {
                         0
                     } else {

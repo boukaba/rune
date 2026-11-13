@@ -4658,66 +4658,64 @@ pub fn set_iterator_next(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &
 /// and stores it. Synchronous only (no pending state machine): object args
 /// use the sync ToPrimitive path, matching the engine's existing simplifications.
 pub fn date_constructor(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let throw = |vm: &mut Vm, e: Value| {
+        vm.set_pending_exception(e);
+        Value::undefined()
+    };
     let tv = match args.len() {
         0 => date::now_ms(),
         1 => {
             let v = args[0];
-            if let Some(ptr) = v.heap_ptr() {
-                let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-                if tag == TAG_DATE {
-                    // Copy the [[DateValue]] of another Date.
-                    unsafe { date::RuneDate::tv(ptr) }
-                } else if tag == TAG_STRING {
-                    let s = unsafe { HeapString::to_string(ptr as *mut HeapString) };
-                    date::time_clip(date::parse_date_string(&s))
-                } else if tag == TAG_STRING_OBJ {
-                    let str_ptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
-                    let s = unsafe { HeapString::to_string(str_ptr as *mut HeapString) };
-                    date::time_clip(date::parse_date_string(&s))
-                } else if tag == TAG_ARRAY {
-                    let s = array_to_string(ptr as *mut RuneArray);
-                    date::time_clip(date::parse_date_string(&s))
-                } else if tag == TAG_OBJECT {
-                    // ToPrimitive (default hint) via the sync path, then parse.
-                    let s = to_primitive_string_sync(v, gc, vm);
+            let tag = v
+                .heap_ptr()
+                .map(|ptr| unsafe { (*(ptr as *const GcHeader)).tag() });
+            if tag == Some(TAG_DATE) {
+                unsafe { date::RuneDate::tv(v.heap_ptr().unwrap()) }
+            } else if tag == Some(TAG_STRING) {
+                let s = unsafe { HeapString::to_string(v.heap_ptr().unwrap() as *mut HeapString) };
+                date::time_clip(date::parse_date_string(&s))
+            } else if is_object_value(v) {
+                let prim = match to_primitive_sync(gc, vm, v, "default") {
+                    Ok(p) => p,
+                    Err(e) => return throw(vm, e),
+                };
+                if prim
+                    .heap_ptr()
+                    .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_STRING })
+                {
+                    let s = unsafe {
+                        HeapString::to_string(prim.heap_ptr().unwrap() as *mut HeapString)
+                    };
                     date::time_clip(date::parse_date_string(&s))
                 } else {
-                    date::time_clip(to_number(v))
+                    match to_number_sync(gc, vm, prim) {
+                        Ok(n) => date::time_clip(n),
+                        Err(e) => return throw(vm, e),
+                    }
                 }
-            } else if v.is_symbol() {
-                // ToNumber(symbol) should throw TypeError; known gap (NaN).
-                f64::NAN
             } else {
-                date::time_clip(to_number(v))
+                match to_number_sync(gc, vm, v) {
+                    Ok(n) => date::time_clip(n),
+                    Err(e) => return throw(vm, e),
+                }
             }
         }
         _ => {
-            let y = to_number(args[0]);
-            let m = to_number(args.get(1).copied().unwrap_or(Value::smi(0)));
-            let dt = match args.get(2) {
-                Some(x) => to_number(*x),
-                None => 1.0,
-            };
-            let h = match args.get(3) {
-                Some(x) => to_number(*x),
-                None => 0.0,
-            };
-            let min = match args.get(4) {
-                Some(x) => to_number(*x),
-                None => 0.0,
-            };
-            let sec = match args.get(5) {
-                Some(x) => to_number(*x),
-                None => 0.0,
-            };
-            let ms = match args.get(6) {
-                Some(x) => to_number(*x),
-                None => 0.0,
-            };
-            let yr = date::make_full_year(y);
-            let final_date =
-                date::make_date(date::make_day(yr, m, dt), date::make_time(h, min, sec, ms));
-            // UTC(t) = t in the UTC-only implementation.
+            let defaults = [f64::NAN, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
+            let mut nums = defaults;
+            for (i, slot) in nums.iter_mut().enumerate() {
+                if let Some(arg) = args.get(i).copied() {
+                    *slot = match to_number_sync(gc, vm, arg) {
+                        Ok(n) => n,
+                        Err(e) => return throw(vm, e),
+                    };
+                }
+            }
+            let yr = date::make_full_year(nums[0]);
+            let final_date = date::make_date(
+                date::make_day(yr, nums[1], nums[2]),
+                date::make_time(nums[3], nums[4], nums[5], nums[6]),
+            );
             date::time_clip(final_date)
         }
     };
@@ -4735,30 +4733,54 @@ pub fn date_now_builtin(_gc: &mut SemiSpace, _this: Value, _args: &[Value], _vm:
 }
 
 /// §21.4.3.2 Date.parse ( string )
-pub fn date_parse_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+pub fn date_parse_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let s = match args.first().copied() {
-        Some(v) => to_primitive_string_sync(v, gc, _vm),
+        Some(v) => {
+            let prim = match to_primitive_sync(gc, vm, v, "string") {
+                Ok(p) => p,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            };
+            if prim.as_symbol_id().is_some() {
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "Cannot convert a Symbol value to a string",
+                ));
+                return Value::undefined();
+            }
+            value_to_js_string(prim)
+        }
         None => String::new(),
     };
     date_number(date::parse_date_string(&s))
 }
 
 /// §21.4.3.4 Date.UTC ( year [ , month [ , date [ , hours [ , minutes [ , seconds [ , ms ] ] ] ] ] ] )
-pub fn date_utc_builtin(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+pub fn date_utc_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if args.is_empty() {
         return date_number(f64::NAN);
     }
-    let y = to_number(args[0]);
-    let m = args.get(1).map_or(0.0, |x| to_number(*x));
-    let dt = args.get(2).map_or(1.0, |x| to_number(*x));
-    let h = args.get(3).map_or(0.0, |x| to_number(*x));
-    let min = args.get(4).map_or(0.0, |x| to_number(*x));
-    let sec = args.get(5).map_or(0.0, |x| to_number(*x));
-    let ms = args.get(6).map_or(0.0, |x| to_number(*x));
-    let yr = date::make_full_year(y);
+    let defaults = [f64::NAN, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
+    let mut nums = defaults;
+    for (i, slot) in nums.iter_mut().enumerate() {
+        if let Some(arg) = args.get(i).copied() {
+            *slot = match to_number_sync(gc, vm, arg) {
+                Ok(n) => n,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            };
+        }
+    }
+    let yr = date::make_full_year(nums[0]);
     date_number(date::time_clip(date::make_date(
-        date::make_day(yr, m, dt),
-        date::make_time(h, min, sec, ms),
+        date::make_day(yr, nums[1], nums[2]),
+        date::make_time(nums[3], nums[4], nums[5], nums[6]),
     )))
 }
 
@@ -5290,25 +5312,14 @@ fn to_primitive_sync(
     let result = (|| {
         let hint_key = Value::from_heap_ptr(HeapString::allocate(gc, hint) as *mut u8);
         let input = vm.temp_roots[slot];
-        match get_symbol_method(
-            gc,
-            input,
-            rune_core::symbol::SYM_TO_PRIMITIVE,
-            Some(vm.function_prototype),
-        ) {
-            SymbolMethodResult::Found(method) => {
-                let result = vm.call_value_sync(gc, method, input, &[hint_key])?;
-                if is_object_value(result) {
-                    return Err(crate::errors::error_object(
-                        gc,
-                        &vm.error_protos,
-                        crate::errors::ErrorKind::TypeError,
-                        "Cannot convert object to primitive value",
-                    ));
-                }
-                return Ok(result);
-            }
-            SymbolMethodResult::NotCallable => {
+        let to_prim_key = Value::symbol(rune_core::symbol::SYM_TO_PRIMITIVE);
+        let method = get_property_value_sync(gc, vm, input, to_prim_key)?;
+        if !method.is_undefined() && !method.is_null() {
+            let callable = method
+                .heap_ptr()
+                .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC })
+                || method.as_smi().is_some_and(|s| s < 0);
+            if !callable {
                 return Err(crate::errors::error_object(
                     gc,
                     &vm.error_protos,
@@ -5316,7 +5327,17 @@ fn to_primitive_sync(
                     "@@toPrimitive is not callable",
                 ));
             }
-            SymbolMethodResult::NotFound => {}
+            let input = vm.temp_roots[slot];
+            let result = vm.call_value_sync(gc, method, input, &[hint_key])?;
+            if is_object_value(result) {
+                return Err(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "Cannot convert object to primitive value",
+                ));
+            }
+            return Ok(result);
         }
         let order: [&str; 2] = if hint == "string" {
             ["toString", "valueOf"]
@@ -5474,9 +5495,6 @@ pub fn date_set_hours_builtin(
             .copied()
             .unwrap_or(Value::from_float64(f64::NAN)),
     );
-    if tv.is_nan() {
-        return Value::from_float64(f64::NAN);
-    }
     let m = args.get(1).map_or(date::min_from_time(tv) as f64, |x| {
         date_arg_number!(gc, vm, *x)
     });
@@ -5488,6 +5506,9 @@ pub fn date_set_hours_builtin(
         .map_or(date::millisec_from_time(tv) as f64, |x| {
             date_arg_number!(gc, vm, *x)
         });
+    if tv.is_nan() {
+        return Value::from_float64(f64::NAN);
+    }
     let u = date::time_clip(date::make_date(
         date::day(tv) as f64,
         date::make_time(h, m, s, ms),
@@ -5554,9 +5575,6 @@ pub fn date_set_minutes_builtin(
             .copied()
             .unwrap_or(Value::from_float64(f64::NAN)),
     );
-    if tv.is_nan() {
-        return Value::from_float64(f64::NAN);
-    }
     let s = args.get(1).map_or(date::sec_from_time(tv) as f64, |x| {
         date_arg_number!(gc, vm, *x)
     });
@@ -5565,6 +5583,9 @@ pub fn date_set_minutes_builtin(
         .map_or(date::millisec_from_time(tv) as f64, |x| {
             date_arg_number!(gc, vm, *x)
         });
+    if tv.is_nan() {
+        return Value::from_float64(f64::NAN);
+    }
     let u = date::time_clip(date::make_date(
         date::day(tv) as f64,
         date::make_time(date::hour_from_time(tv) as f64, m, s, ms),
@@ -5594,12 +5615,12 @@ pub fn date_set_month_builtin(
             .copied()
             .unwrap_or(Value::from_float64(f64::NAN)),
     );
-    if tv.is_nan() {
-        return Value::from_float64(f64::NAN);
-    }
     let dt = args.get(1).map_or(date::date_from_time(tv) as f64, |x| {
         date_arg_number!(gc, vm, *x)
     });
+    if tv.is_nan() {
+        return Value::from_float64(f64::NAN);
+    }
     let new_date = date::make_date(
         date::make_day(date::year_from_time(tv) as f64, m, dt),
         date::time_within_day(tv),
@@ -5630,14 +5651,14 @@ pub fn date_set_seconds_builtin(
             .copied()
             .unwrap_or(Value::from_float64(f64::NAN)),
     );
-    if tv.is_nan() {
-        return Value::from_float64(f64::NAN);
-    }
     let ms = args
         .get(1)
         .map_or(date::millisec_from_time(tv) as f64, |x| {
             date_arg_number!(gc, vm, *x)
         });
+    if tv.is_nan() {
+        return Value::from_float64(f64::NAN);
+    }
     let u = date::time_clip(date::make_date(
         date::day(tv) as f64,
         date::make_time(
@@ -5770,9 +5791,6 @@ pub fn date_set_utc_hours_builtin(
             .copied()
             .unwrap_or(Value::from_float64(f64::NAN)),
     );
-    if tv.is_nan() {
-        return Value::from_float64(f64::NAN);
-    }
     let m = args.get(1).map_or(date::min_from_time(tv) as f64, |x| {
         date_arg_number!(gc, vm, *x)
     });
@@ -5784,6 +5802,9 @@ pub fn date_set_utc_hours_builtin(
         .map_or(date::millisec_from_time(tv) as f64, |x| {
             date_arg_number!(gc, vm, *x)
         });
+    if tv.is_nan() {
+        return Value::from_float64(f64::NAN);
+    }
     let v = date::time_clip(date::make_date(
         date::day(tv) as f64,
         date::make_time(h, m, s, ms),
@@ -5850,9 +5871,6 @@ pub fn date_set_utc_minutes_builtin(
             .copied()
             .unwrap_or(Value::from_float64(f64::NAN)),
     );
-    if tv.is_nan() {
-        return Value::from_float64(f64::NAN);
-    }
     let s = args.get(1).map_or(date::sec_from_time(tv) as f64, |x| {
         date_arg_number!(gc, vm, *x)
     });
@@ -5861,6 +5879,9 @@ pub fn date_set_utc_minutes_builtin(
         .map_or(date::millisec_from_time(tv) as f64, |x| {
             date_arg_number!(gc, vm, *x)
         });
+    if tv.is_nan() {
+        return Value::from_float64(f64::NAN);
+    }
     let v = date::time_clip(date::make_date(
         date::day(tv) as f64,
         date::make_time(date::hour_from_time(tv) as f64, m, s, ms),
@@ -5890,12 +5911,12 @@ pub fn date_set_utc_month_builtin(
             .copied()
             .unwrap_or(Value::from_float64(f64::NAN)),
     );
-    if tv.is_nan() {
-        return Value::from_float64(f64::NAN);
-    }
     let dt = args.get(1).map_or(date::date_from_time(tv) as f64, |x| {
         date_arg_number!(gc, vm, *x)
     });
+    if tv.is_nan() {
+        return Value::from_float64(f64::NAN);
+    }
     let v = date::time_clip(date::make_date(
         date::make_day(date::year_from_time(tv) as f64, m, dt),
         date::time_within_day(tv),
@@ -5925,14 +5946,14 @@ pub fn date_set_utc_seconds_builtin(
             .copied()
             .unwrap_or(Value::from_float64(f64::NAN)),
     );
-    if tv.is_nan() {
-        return Value::from_float64(f64::NAN);
-    }
     let ms = args
         .get(1)
         .map_or(date::millisec_from_time(tv) as f64, |x| {
             date_arg_number!(gc, vm, *x)
         });
+    if tv.is_nan() {
+        return Value::from_float64(f64::NAN);
+    }
     let v = date::time_clip(date::make_date(
         date::day(tv) as f64,
         date::make_time(
@@ -7978,6 +7999,8 @@ pub fn object_prototype_to_string(
             return Value::from_heap_ptr(crate::vm::heap_string(gc, &out));
         }
         "Object".to_string()
+    } else if this.as_smi().is_some_and(|s| s < 0) {
+        "Function".to_string()
     } else if this.is_smi() || this.as_float64().is_some() {
         if let Some(tag) = to_string_tag_on_chain(vm.number_prototype) {
             let out = format!("[object {tag}]");
@@ -8734,6 +8757,9 @@ pub fn object_get_prototype_of(
     }
     if obj.is_boolean() {
         return vm.boolean_prototype;
+    }
+    if obj.as_smi().is_some_and(|s| s < 0) {
+        return vm.function_prototype;
     }
     if obj.as_smi().is_some() {
         return vm.number_prototype;
@@ -11815,6 +11841,11 @@ macro_rules! integrity_test_builtin {
             let _ = gc;
             let _ = vm;
             let target = args.first().copied().unwrap_or(Value::undefined());
+            if target.as_smi().is_some_and(|s| s < 0) {
+                // Builtin function handles are functions: extensible, not
+                // sealed/frozen.
+                return Value::boolean($kind == 0);
+            }
             let Some(ptr) = target.heap_ptr() else {
                 return Value::boolean($kind != 0);
             };

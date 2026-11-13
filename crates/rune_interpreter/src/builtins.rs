@@ -18223,7 +18223,7 @@ pub fn promise_prototype_finally(
 /// during setup. Native promises pass through; thenables get a pending promise
 /// whose `then(resolve, reject)` runs as a microtask; other values are wrapped
 /// in a fulfilled promise.
-fn promise_resolve_for_combinator(gc: &mut SemiSpace, val: Value, vm: &mut Vm) -> Value {
+pub(crate) fn promise_resolve_for_combinator(gc: &mut SemiSpace, val: Value, vm: &mut Vm) -> Value {
     if let Some(ptr) = val.heap_ptr() {
         if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_PROMISE {
             return val;
@@ -18270,6 +18270,82 @@ fn promise_resolve_for_combinator(gc: &mut SemiSpace, val: Value, vm: &mut Vm) -
         Promise::set_result(ptr, val);
     }
     Value::from_heap_ptr(ptr)
+}
+
+/// Resolve a promise with the ECMAScript resolution procedure: native
+/// promises and thenables are adopted, and even plain values settle through a
+/// microtask. Used when a `.then` callback returns a value/promise.
+pub(crate) fn resolve_promise_with(gc: &mut SemiSpace, target: Value, result: Value, vm: &mut Vm) {
+    let Some(target_ptr) = target.heap_ptr() else {
+        return;
+    };
+    if unsafe { (*(target_ptr as *const GcHeader)).tag() } != TAG_PROMISE
+        || unsafe { Promise::state(target_ptr) != PROMISE_PENDING }
+    {
+        return;
+    }
+    if result == target {
+        let err = crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Chaining cycle detected for promise",
+        );
+        unsafe {
+            Promise::set_state(target_ptr, PROMISE_REJECTED);
+            Promise::set_result(target_ptr, err);
+        }
+        settle_promise_reactions(vm, target_ptr, err, false);
+        return;
+    }
+    let root_base = vm.temp_roots.len();
+    vm.temp_roots.push(target);
+    vm.temp_roots.push(result);
+    // Non-thenable results fulfill immediately (PromiseResolveThenableJob is
+    // only for thenables). This also avoids creating an internal `.then` chain
+    // for every ordinary callback return.
+    let thenable = if let Some(ptr) = result.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_PROMISE {
+            true
+        } else {
+            let key = Value::from_heap_ptr(HeapString::allocate(gc, "then") as *mut u8);
+            let then_val = load_property_recursive(result, key, Some(vm.function_prototype), gc);
+            then_val
+                .heap_ptr()
+                .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC)
+        }
+    } else {
+        false
+    };
+    if !thenable {
+        let target_now = vm.temp_roots[root_base];
+        let result_now = vm.temp_roots[root_base + 1];
+        if let Some(ptr) = target_now.heap_ptr() {
+            if unsafe { Promise::state(ptr) == PROMISE_PENDING } {
+                unsafe {
+                    Promise::set_state(ptr, PROMISE_FULFILLED);
+                    Promise::set_result(ptr, result_now);
+                }
+                settle_promise_reactions(vm, ptr, result_now, true);
+            }
+        }
+        vm.temp_roots.truncate(root_base);
+        return;
+    }
+    let resolve_h = vm.find_builtin_handle("_promise_resolve");
+    let reject_h = vm.find_builtin_handle("_promise_reject");
+    let target_now = vm.temp_roots[root_base];
+    let resolve = vm.create_promise_bridge(gc, target_now, resolve_h);
+    vm.temp_roots.push(resolve);
+    let reject = vm.create_promise_bridge(gc, target_now, reject_h);
+    vm.temp_roots.push(reject);
+    let input = promise_resolve_for_combinator(gc, result, vm);
+    vm.temp_roots.push(input);
+    let input_now = vm.temp_roots[root_base + 4];
+    let resolve_now = vm.temp_roots[root_base + 2];
+    let reject_now = vm.temp_roots[root_base + 3];
+    promise_prototype_then(gc, input_now, &[resolve_now, reject_now], vm);
+    vm.temp_roots.truncate(root_base);
 }
 
 pub fn promise_static_resolve(

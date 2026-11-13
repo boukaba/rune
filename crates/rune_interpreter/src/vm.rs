@@ -11506,20 +11506,12 @@ impl Vm {
                             if self.frames.len() == ppc.source_frame_depth {
                                 let ppc = self.pending_promise_ctor.take().unwrap();
                                 if ppc.resolve_with_result {
-                                    if let Some(ptr) = ppc.promise.heap_ptr() {
-                                        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-                                        if tag == TAG_PROMISE
-                                            && unsafe { Promise::state(ptr) == PROMISE_PENDING }
-                                        {
-                                            unsafe {
-                                                Promise::set_state(ptr, PROMISE_FULFILLED);
-                                                Promise::set_result(ptr, result);
-                                            }
-                                            crate::builtins::settle_promise_reactions(
-                                                self, ptr, result, true,
-                                            );
-                                        }
-                                    }
+                                    crate::builtins::resolve_promise_with(
+                                        gc,
+                                        ppc.promise,
+                                        result,
+                                        self,
+                                    );
                                 }
                                 // The async-function await bridge is a .then
                                 // callback whose PendingPromiseCtor is this

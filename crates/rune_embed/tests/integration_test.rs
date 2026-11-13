@@ -13963,3 +13963,25 @@ fn test_array_header_stable_across_growth() {
         "true|302|196|598"
     );
 }
+
+#[test]
+fn test_promise_chaining_adopts_promises_and_thenables() {
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+        var out = "";
+        Promise.resolve(1)
+            .then(function (v) { return Promise.resolve(v + 1); })
+            .then(function (v) { return { then: function (r) { r(v + 1); } }; })
+            .then(function (v) { out = "chain" + v; });
+        var nested = "";
+        Promise.resolve(0)
+            .then(function () { return Promise.resolve("x").then(function (v) { return v + "y"; }); })
+            .then(function (v) { nested = v; });
+        "";
+        "#,
+    )
+    .unwrap();
+    assert_eq!(eval_str(&mut ctx, "out"), "chain3");
+    assert_eq!(eval_str(&mut ctx, "nested"), "xy");
+}

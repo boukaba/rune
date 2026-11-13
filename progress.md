@@ -634,6 +634,25 @@ get runtime globals.
 - `rune_runtime` itself remains transport-agnostic; embedders still choose
   their transport via `set_fetcher`.
 
+### Phase 2 — Promise callback result adoption (2026-11-13)
+
+`.then` callbacks now run the ECMAScript resolution procedure on their return
+value:
+
+- Non-thenable results fulfill the chained promise directly.
+- Native promises and thenables are adopted: the chained promise settles only
+  when the returned promise/thenable settles. This fixes chains such as
+  `fetch(url).then(r => r.text()).then(...)`.
+- A self-returning cycle rejects with a TypeError instead of hanging.
+- This also fixes returning a pending promise/thenable from `.then`, where the
+  old path stored the promise object as the fulfillment value.
+
+Regression: `test_promise_chaining_adopts_promises_and_thenables` (native
+promise, thenable, nested promise). Integration suite: **771 passed, 0 failed,
+3 ignored**, including the full `RUNE_GC_STRESS=512` run. The targeted Promise
+test262 count remains 364/703; the suite's remaining failures are dominated by
+executor/species/harness cases, not this adoption path.
+
 ### Phase 1 — stable array headers (2026-11-13)
 
 Arrays no longer move when they grow. This removes the last self-moving-growth

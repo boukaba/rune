@@ -3264,6 +3264,67 @@ impl Vm {
                 }
             }
             self.callable_wrappers = wrappers;
+            // Constructor metadata: spec name + [[Length]] as non-enumerable,
+            // non-writable, configurable own properties.
+            let mut ctor_meta: Vec<(Value, &'static str, i32)> = Vec::new();
+            for (name, length) in [
+                ("Object", 1),
+                ("Array", 1),
+                ("Boolean", 1),
+                ("Function", 1),
+                ("WeakMap", 0),
+                ("WeakSet", 0),
+                ("String", 1),
+                ("Number", 1),
+                ("Symbol", 0),
+                ("Promise", 1),
+                ("Map", 0),
+                ("Set", 0),
+                ("Date", 7),
+                ("ArrayBuffer", 1),
+                ("RegExp", 2),
+                ("AggregateError", 2),
+            ] {
+                if let Some(v) = self.builtin_wrappers.get(name).copied() {
+                    ctor_meta.push((v, name, length));
+                }
+            }
+            for kind in 0..typedarray::NUM_KINDS {
+                let kind = typedarray::TypedArrayKind::from_index(kind);
+                if let Some(v) = self.builtin_wrappers.get(kind.name()).copied() {
+                    ctor_meta.push((v, kind.name(), 3));
+                }
+            }
+            for (v, spec_name, length) in ctor_meta {
+                if let Some(ptr) = v.heap_ptr() {
+                    let optr = ptr as *mut JSObject;
+                    unsafe {
+                        let name_key = PropertyKey::from_string("name");
+                        let len_key = PropertyKey::from_string("length");
+                        let shape = JSObject::shape_ptr(optr);
+                        if shape.lookup(&name_key).is_none() {
+                            let hs = HeapString::allocate(gc, spec_name) as *mut u8;
+                            JSObject::add_property_with_attrs(
+                                optr,
+                                name_key,
+                                "name".to_string(),
+                                Value::from_heap_ptr(hs),
+                                rune_core::shape::ATTR_CONFIGURABLE,
+                            );
+                        }
+                        let shape = JSObject::shape_ptr(optr);
+                        if shape.lookup(&len_key).is_none() {
+                            JSObject::add_property_with_attrs(
+                                optr,
+                                len_key,
+                                "length".to_string(),
+                                Value::smi(length),
+                                rune_core::shape::ATTR_CONFIGURABLE,
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         // Built-in `prototype.constructor` back-references. Without these,
@@ -6189,7 +6250,10 @@ impl Vm {
                     };
                     if let Some(k) = key_str {
                         if k == "name" {
-                            let hs = HeapString::allocate(gc, self.builtins[id].name) as *mut u8;
+                            let hs = HeapString::allocate(
+                                gc,
+                                builtin_display_name(self.builtins[id].name),
+                            ) as *mut u8;
                             return PropGetOut::Ready(Value::from_heap_ptr(hs));
                         } else if k == "length" {
                             return PropGetOut::Ready(Value::smi(self.builtins[id].length as i32));
@@ -14175,6 +14239,18 @@ fn try_convert_object_to_string(val: Value, gc: &mut SemiSpace, vm: &mut Vm) -> 
 /// Uses the sync version (user-defined toString/valueOf fall through to [object Object]).
 fn arg_to_js_string_for_ctor(val: Value, gc: &mut SemiSpace, vm: &mut Vm) -> String {
     to_primitive_string_sync(val, gc, vm)
+}
+
+/// Public spec name for a built-in, derived from the internal identifier
+/// (`Object_defineProperty` → `defineProperty`, `Array_prototype_map` → `map`).
+pub(crate) fn builtin_display_name(name: &'static str) -> &'static str {
+    if let Some(pos) = name.find("_prototype_") {
+        &name[pos + "_prototype_".len()..]
+    } else if let Some(pos) = name.find('_') {
+        &name[pos + 1..]
+    } else {
+        name
+    }
 }
 
 pub(crate) fn value_to_prop_key(val: Value) -> Option<PropertyKey> {

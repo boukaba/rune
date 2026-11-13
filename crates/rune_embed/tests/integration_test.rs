@@ -15481,3 +15481,28 @@ fn test_builtin_function_lengths() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_builtin_constructor_metadata() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            [
+                Object.name === "Object",
+                Object.length === 1,
+                Date.name === "Date",
+                Date.length === 7,
+                RegExp.length === 2,
+                Uint8Array.name === "Uint8Array",
+                Uint8Array.length === 3,
+                Map.name === "Map",
+                Map.length === 0,
+                Object.defineProperty.name === "defineProperty",
+                [].forEach.name === "forEach"
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

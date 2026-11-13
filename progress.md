@@ -1903,6 +1903,27 @@ Integration suite: **834 passed, 0 failed, 3 ignored**.
 
 Integration suite: **835 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — RegExp.prototype[@@replace] + builtin symbol dispatch (2026-11-13)
+
+- Added `RegExp.prototype[Symbol.replace]` (length 2, spec display name):
+  non-global first-match replacement, global iteration with `$&`/`$1`
+  expansion, zero-length advancement, and non-global function replacers via
+  the existing replace-callback machine.
+- Root-caused a dispatch gap: `dispatch_symbol_method` only looked for
+  `@@match`/`@@search`/`@@replace`/`@@split` on ordinary objects and only
+  handled JS-function methods, so RegExp's builtin symbol methods were never
+  invoked from String methods. It now recognizes RegExp patterns, invokes
+  builtin symbol methods directly (returning their result), and String.replace
+  passes the replacement argument through.
+- Test262: RegExp/prototype **164 → 177/487**, `Symbol.replace` **17/70**;
+  String **828 → 834/1223**.
+- Regression: `test_regexp_symbol_replace`; corrected
+  `test_regexp_match_global_lastindex` to expect the spec lastIndex reset `0`.
+- Known gap: global regexps with **function replacers** still need a
+  per-match callback continuation stack.
+
+Integration suite: **836 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

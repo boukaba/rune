@@ -6303,20 +6303,32 @@ fn dispatch_symbol_method(
     this: Value,
     extra_args: &[Value],
     vm: &mut Vm,
-) -> Result<Option<()>, ()> {
+) -> Result<Option<Value>, ()> {
     if let Some(ptr) = pattern.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-        if tag == TAG_OBJECT {
+        if tag == TAG_OBJECT || tag == TAG_REGEXP {
             match get_symbol_method(gc, pattern, symbol_id, Some(vm.function_prototype)) {
                 SymbolMethodResult::Found(m) => {
                     let mut args = Vec::with_capacity(1 + extra_args.len());
                     args.push(this);
                     args.extend_from_slice(extra_args);
+                    if let Some(sid) = m.as_smi() {
+                        if sid < 0 {
+                            let id = (-sid as usize) - 1;
+                            if id < vm.builtins.len() {
+                                let result = (vm.builtins[id].func)(gc, pattern, &args, vm);
+                                if vm.pending_exception.is_some() {
+                                    return Err(());
+                                }
+                                return Ok(Some(result));
+                            }
+                        }
+                    }
                     vm.pending_symbol_dispatch = Some(crate::vm::PendingSymbolDispatch {
                         source_frame_depth: vm.frame_depth(),
                     });
                     vm.push_callback_call(gc, m, pattern, args);
-                    Ok(None)
+                    Ok(Some(Value::undefined()))
                 }
                 SymbolMethodResult::NotCallable => {
                     let name = match symbol_id {
@@ -6334,13 +6346,13 @@ fn dispatch_symbol_method(
                     ));
                     Err(())
                 }
-                SymbolMethodResult::NotFound => Ok(Some(())),
+                SymbolMethodResult::NotFound => Ok(None),
             }
         } else {
-            Ok(Some(()))
+            Ok(None)
         }
     } else {
-        Ok(Some(()))
+        Ok(None)
     }
 }
 
@@ -13755,10 +13767,10 @@ pub fn string_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
 
     // §22.1.3.17 step 3: if separator is an object with a callable @@split,
     // dispatch to it with (this, limit).
-    if let Ok(Some(())) = dispatch_symbol_method(gc, separator, SYM_SPLIT, this, &[limit], vm) {
-        // fall through to legacy
-    } else {
-        return Value::undefined();
+    match dispatch_symbol_method(gc, separator, SYM_SPLIT, this, &[limit], vm) {
+        Ok(Some(v)) => return v,
+        Ok(None) => {}
+        Err(()) => return Value::undefined(),
     }
 
     let lim = if limit.is_undefined() {
@@ -13898,10 +13910,17 @@ pub fn string_replace(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
     });
 
     // §21.1.3.18 step 4: @@replace dispatch on the searchValue.
-    if let Ok(Some(())) = dispatch_symbol_method(gc, search, SYM_REPLACE, this, &[], vm) {
-        // fall through to legacy
-    } else {
-        return Value::undefined();
+    match dispatch_symbol_method(
+        gc,
+        search,
+        SYM_REPLACE,
+        this,
+        &[replacement_fn.unwrap_or(Value::undefined())],
+        vm,
+    ) {
+        Ok(Some(v)) => return v,
+        Ok(None) => {}
+        Err(()) => return Value::undefined(),
     }
 
     // Check if search is a RegExp
@@ -14307,10 +14326,10 @@ pub fn string_match(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
     // §21.1.3.39 step 2: if regexp is an object with a callable @@match,
     // dispatch to it and return its result.
     if let Some(v) = regexp_val {
-        if let Ok(Some(())) = dispatch_symbol_method(gc, v, SYM_MATCH, this, &[], vm) {
-            // fall through to legacy
-        } else {
-            return Value::undefined();
+        match dispatch_symbol_method(gc, v, SYM_MATCH, this, &[], vm) {
+            Ok(Some(v)) => return v,
+            Ok(None) => {}
+            Err(()) => return Value::undefined(),
         }
     }
 
@@ -14398,10 +14417,10 @@ pub fn string_search(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
 
     // §21.1.3.22 step 2: @@search dispatch.
     if let Some(v) = regexp_val {
-        if let Ok(Some(())) = dispatch_symbol_method(gc, v, SYM_SEARCH, this, &[], vm) {
-            // fall through to legacy
-        } else {
-            return Value::undefined();
+        match dispatch_symbol_method(gc, v, SYM_SEARCH, this, &[], vm) {
+            Ok(Some(v)) => return v,
+            Ok(None) => {}
+            Err(()) => return Value::undefined(),
         }
     }
 
@@ -22736,6 +22755,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             func: regexp_symbol_search,
         },
         Builtin {
+            length: 2,
+            name: "RegExp_prototype_[Symbol.replace]",
+            func: regexp_symbol_replace,
+        },
+        Builtin {
             length: 0,
             name: "Date_prototype_toTimeString",
             func: date_to_time_string_builtin,
@@ -24398,6 +24422,118 @@ pub fn regexp_symbol_match(gc: &mut SemiSpace, this: Value, args: &[Value], vm: 
         .map(|s| Value::from_heap_ptr(HeapString::allocate(gc, s) as *mut u8))
         .collect();
     build_array(gc, &vals, vm)
+}
+
+/// §22.2.6.11 RegExp.prototype[@@replace](string, replaceValue)
+pub fn regexp_symbol_replace(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(rx) = get_regexp_this(this) else {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "RegExp.prototype[Symbol.replace] called on incompatible receiver",
+        ));
+        return Value::undefined();
+    };
+    let input = args
+        .first()
+        .map(|v| string_from_value(*v))
+        .unwrap_or_default();
+    let replacement = args.get(1).copied().unwrap_or(Value::undefined());
+    let is_fn = replacement
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC);
+    let global = unsafe { RegExp::has_flag(rx, 0) };
+    if !global {
+        unsafe { RegExp::set_last_index(rx, 0) };
+        let Some(groups) = regexp_exec_internal(gc, rx, &input, 0) else {
+            return Value::from_heap_ptr(HeapString::allocate(gc, &input) as *mut u8);
+        };
+        let (start, end) = groups[0];
+        if is_fn {
+            let mut fn_args = Vec::with_capacity(groups.len() + 2);
+            fn_args.push(Value::from_heap_ptr(
+                HeapString::allocate(gc, &input[start..end]) as *mut u8,
+            ));
+            for &(gs, ge) in groups.iter().skip(1) {
+                fn_args.push(Value::from_heap_ptr(
+                    HeapString::allocate(gc, &input[gs..ge]) as *mut u8,
+                ));
+            }
+            fn_args.push(Value::smi(start as i32));
+            fn_args.push(Value::from_heap_ptr(
+                HeapString::allocate(gc, &input) as *mut u8
+            ));
+            vm.pending_replace_op = Some(crate::vm::PendingReplaceOp {
+                source_frame_depth: 0,
+                input: input.clone(),
+                groups,
+            });
+            vm.push_callback_call(gc, replacement, Value::undefined(), fn_args);
+            return Value::undefined();
+        }
+        let repl = arg_to_string(gc, Some(replacement), vm);
+        let expanded = expand_replacement(&input, &groups, &repl);
+        let result = input[..start].to_string() + &expanded + &input[end..];
+        return Value::from_heap_ptr(HeapString::allocate(gc, &result) as *mut u8);
+    }
+    // Global: iterate matches from the beginning.
+    let mut out = String::new();
+    let mut pos = 0usize;
+    let mut matched = false;
+    loop {
+        if pos > input.len() {
+            break;
+        }
+        let Some(groups) = regexp_exec_internal(gc, rx, &input, pos) else {
+            break;
+        };
+        matched = true;
+        let (start, end) = groups[0];
+        if start > pos {
+            out.push_str(&input[pos..start]);
+        }
+        if is_fn {
+            // Function replacers for global regexps need a per-match callback
+            // continuation stack; unsupported here.
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "RegExp[Symbol.replace] with a function replacer and global flag is not supported",
+            ));
+            return Value::undefined();
+        }
+        let repl = arg_to_string(gc, Some(replacement), vm);
+        out.push_str(&expand_replacement(&input, &groups, &repl));
+        pos = end;
+        if start == end {
+            if pos < input.len() {
+                let step = input[pos..]
+                    .chars()
+                    .next()
+                    .map(|c| c.len_utf8())
+                    .unwrap_or(1);
+                out.push_str(&input[pos..pos + step]);
+                pos += step;
+            } else {
+                break;
+            }
+        }
+    }
+    if matched {
+        if pos <= input.len() {
+            out.push_str(&input[pos..]);
+        }
+        unsafe { RegExp::set_last_index(rx, 0) };
+        return Value::from_heap_ptr(HeapString::allocate(gc, &out) as *mut u8);
+    }
+    Value::from_heap_ptr(HeapString::allocate(gc, &input) as *mut u8)
 }
 
 /// §22.2.6.9 RegExp.prototype[@@search](string)

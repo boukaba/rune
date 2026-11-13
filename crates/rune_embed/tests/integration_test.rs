@@ -8323,7 +8323,7 @@ fn test_regexp_match_global_lastindex() {
             &mut ctx,
             r#"var r = /a/g; "aba".match(r).length + "/" + r.lastIndex;"#
         ),
-        "2/3"
+        "2/0"
     );
     assert_eq!(
         eval_str(
@@ -15623,6 +15623,29 @@ fn test_regexp_symbol_match_and_search() {
                 /b/[Symbol.search]("abc") === 1,
                 /z/[Symbol.search]("abc") === -1
             ].join("|") === "true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}
+
+#[test]
+fn test_regexp_symbol_replace() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var method = RegExp.prototype[Symbol.replace];
+            [
+                typeof method === "function",
+                method.name === "[Symbol.replace]",
+                method.length === 2,
+                "aXa".replace(/a/g, "Y") === "YXY",
+                "abc".replace(/b/, "[$&]") === "a[b]c",
+                "abc".replace(/(b)/, "$1$1") === "abbc",
+                "abc".replace(/b/, function (m) { return m.toUpperCase(); }) === "aBc",
+                /a/g[Symbol.replace]("aXa", "Y") === "YXY"
+            ].join("|") === "true|true|true|true|true|true|true|true";
             "#,
         )
         .unwrap();

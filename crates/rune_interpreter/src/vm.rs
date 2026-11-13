@@ -1214,6 +1214,9 @@ pub struct Vm {
     /// its original frame depth. This replaces the old single-flight behavior
     /// that silently truncated nested iteration.
     pub(crate) pending_array_ops: Vec<ArrayOpState>,
+    /// Boxed primitive receivers for the currently active array operations.
+    /// Cleared when a new top-level array operation starts; bounded by nesting.
+    pub(crate) array_receiver_roots: Vec<Value>,
     /// Values temporarily held by a builtin across allocations (e.g. the
     /// result promise and resolve/reject bridges of Promise.race). Registered
     /// as GC roots like any other VM state; builtins truncate to their entry
@@ -1419,6 +1422,7 @@ impl Vm {
             pending_exception: None,
             pending_array_op: None,
             pending_array_ops: Vec::new(),
+            array_receiver_roots: Vec::new(),
             temp_roots: Vec::new(),
             pending_call: None,
             pending_promise_ctor: None,
@@ -3912,6 +3916,9 @@ impl Vm {
     /// data (`usize`, `bool`, `String`, state enums) needs nothing. When
     /// adding a machine, add its fields here — nowhere else.
     fn root_pending_values(&self, gc: &mut SemiSpace) {
+        for value in &self.array_receiver_roots {
+            gc.push_root(value as *const Value as *mut u64);
+        }
         for op in self
             .pending_array_op
             .iter()
@@ -6218,7 +6225,7 @@ impl Vm {
                         }
                         continue;
                     }
-                    let n = to_number(a);
+                    let n = to_number_with_wrapper(a);
                     let result = number_result(gc, n);
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
@@ -6250,7 +6257,7 @@ impl Vm {
                             }
                             continue;
                         }
-                        let n = to_number(a);
+                        let n = to_number_with_wrapper(a);
                         Value::from_float64(-n)
                     };
                     self.push(result);
@@ -6353,8 +6360,8 @@ impl Vm {
                             }
                             continue;
                         }
-                        let av = to_number(a);
-                        let bv = to_number(b);
+                        let av = to_number_with_wrapper(a);
+                        let bv = to_number_with_wrapper(b);
                         number_result(gc, av + bv)
                     };
                     self.push(result);
@@ -6386,8 +6393,8 @@ impl Vm {
                             }
                             continue;
                         }
-                        let av = to_number(a);
-                        let bv = to_number(b);
+                        let av = to_number_with_wrapper(a);
+                        let bv = to_number_with_wrapper(b);
                         number_result(gc, av - bv)
                     };
                     self.push(result);
@@ -6419,8 +6426,8 @@ impl Vm {
                             }
                             continue;
                         }
-                        let av = to_number(a);
-                        let bv = to_number(b);
+                        let av = to_number_with_wrapper(a);
+                        let bv = to_number_with_wrapper(b);
                         number_result(gc, av * bv)
                     };
                     self.push(result);
@@ -6441,8 +6448,8 @@ impl Vm {
                         }
                         continue;
                     }
-                    let av = to_number(a);
-                    let bv = to_number(b);
+                    let av = to_number_with_wrapper(a);
+                    let bv = to_number_with_wrapper(b);
                     let result = number_result(gc, av / bv);
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
@@ -6474,8 +6481,8 @@ impl Vm {
                             }
                             continue;
                         }
-                        let av = to_number(a);
-                        let bv = to_number(b);
+                        let av = to_number_with_wrapper(a);
+                        let bv = to_number_with_wrapper(b);
                         number_result(gc, av % bv)
                     };
                     self.push(result);
@@ -6513,8 +6520,8 @@ impl Vm {
                             }
                             continue;
                         }
-                        let av = to_number(a);
-                        let bv = to_number(b);
+                        let av = to_number_with_wrapper(a);
+                        let bv = to_number_with_wrapper(b);
                         number_result(gc, av.powf(bv))
                     };
                     self.push(result);
@@ -6714,8 +6721,8 @@ impl Vm {
                             if let Some(v) = compare_strings_lt(a, b) {
                                 Value::boolean(v)
                             } else {
-                                let av = to_number(a);
-                                let bv = to_number(b);
+                                let av = to_number_with_wrapper(a);
+                                let bv = to_number_with_wrapper(b);
                                 if av.is_nan() || bv.is_nan() {
                                     Value::undefined()
                                 } else {
@@ -6736,8 +6743,8 @@ impl Vm {
                             if let Some(v) = compare_strings_lt(b, a) {
                                 Value::boolean(v)
                             } else {
-                                let av = to_number(a);
-                                let bv = to_number(b);
+                                let av = to_number_with_wrapper(a);
+                                let bv = to_number_with_wrapper(b);
                                 if av.is_nan() || bv.is_nan() {
                                     Value::undefined()
                                 } else {
@@ -6761,8 +6768,8 @@ impl Vm {
                                 // Both are strings: if b < a then a <= b is false, else equal → true
                                 Value::boolean(!v)
                             } else {
-                                let av = to_number(a);
-                                let bv = to_number(b);
+                                let av = to_number_with_wrapper(a);
+                                let bv = to_number_with_wrapper(b);
                                 if av.is_nan() || bv.is_nan() {
                                     Value::boolean(false)
                                 } else {
@@ -6785,8 +6792,8 @@ impl Vm {
                             } else if let Some(v) = compare_strings_lt(a, b) {
                                 Value::boolean(!v)
                             } else {
-                                let av = to_number(a);
-                                let bv = to_number(b);
+                                let av = to_number_with_wrapper(a);
+                                let bv = to_number_with_wrapper(b);
                                 if av.is_nan() || bv.is_nan() {
                                     Value::boolean(false)
                                 } else {
@@ -14440,6 +14447,15 @@ pub(crate) fn do_store_property(
 
 /// Convert a Value to an f64 for numeric operations.
 /// Returns NaN for non-numeric types (undefined, null, objects, strings).
+/// ToNumber with wrapper unwrapping (Number/Boolean wrapper objects hold
+/// their primitive in an internal slot; valueOf semantics for arithmetic).
+pub(crate) fn to_number_with_wrapper(v: Value) -> f64 {
+    if let Some(primitive) = crate::builtins::wrapper_primitive(v) {
+        return to_number(primitive);
+    }
+    to_number(v)
+}
+
 pub(crate) fn to_number(v: Value) -> f64 {
     if let Some(n) = v.as_smi() {
         n as f64
@@ -15661,8 +15677,8 @@ pub extern "C" fn rune_jit_float64_add_helper(
         let ptr = HeapString::allocate(gc, &(sa + &sb));
         return Value::from_heap_ptr(ptr as *mut u8).raw();
     }
-    let av = to_number(a);
-    let bv = to_number(b);
+    let av = to_number_with_wrapper(a);
+    let bv = to_number_with_wrapper(b);
     number_result(gc, av + bv).raw()
 }
 
@@ -16074,8 +16090,8 @@ pub extern "C" fn rune_jit_float64_div_exp_helper(
     let gc = unsafe { &mut *(gc_ptr as *mut SemiSpace) };
     let a = Value::from_raw(a_raw);
     let b = Value::from_raw(b_raw);
-    let av = to_number(a);
-    let bv = to_number(b);
+    let av = to_number_with_wrapper(a);
+    let bv = to_number_with_wrapper(b);
     match op {
         0 => number_result(gc, av / bv).raw(),
         1 => number_result(gc, av.powf(bv)).raw(),

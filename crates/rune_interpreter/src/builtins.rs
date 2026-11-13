@@ -15864,8 +15864,11 @@ fn array_iter_prologue(
         .heap_ptr()
         .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_STRING);
     if this.heap_ptr().is_none() || primitive_string {
+        if vm.pending_array_op.is_none() && vm.pending_array_ops.is_empty() {
+            vm.array_receiver_roots.clear();
+        }
         this = crate::vm::to_object_value(gc, this, vm);
-        vm.retained_values.push(this);
+        vm.array_receiver_roots.push(this);
     }
     // B1f-3: LengthOfArrayLike via the B1f-1 chain reader (own + inherited data
     // lengths, ToLength-clamped u64; symbol lengths throw anywhere on the chain

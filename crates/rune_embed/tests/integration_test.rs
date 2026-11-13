@@ -14103,8 +14103,12 @@ fn test_boolean_and_number_wrappers() {
                 Object.keys(b).length === 0,
                 JSON.stringify(b) === "true",
                 JSON.stringify(n) === "3.5",
-                (new Number(3) + 2) === 5
-            ].join("|") === "true|true|true|true|true|true|true|true|true|true|true|true|true";
+                (new Number(3) + 2) === 5,
+                (new Number(3) * 2) === 6,
+                (new Number(8) / 2) === 4,
+                (new Number(7) % 4) === 3,
+                (new Boolean(true) * 3) === 3
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true|true|true|true|true|true|true|true";
             "#,
         )
         .unwrap();

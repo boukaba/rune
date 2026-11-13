@@ -780,11 +780,14 @@ Integration suite: **776 passed, 0 failed, 3 ignored**; full 512-stress 776.
 - `ToObject` boxes String/Boolean/Number receivers for `Array.prototype.*`
   methods, so `map.call(false, ...)`, `map.call("abc", ...)` and primitive
   wrapper array-likes observe boxed callback receivers and correct elements.
-  Boxed receivers are retained for the operation (known bounded-lifetime leak).
+  Boxed receivers are retained for the operation in a bounded root list.
 - Hidden wrapper slots are filtered from `Object.keys`/JSON; wrappers serialize
   as their primitive (`JSON.stringify(new Number(3)) === "3"`).
-- Add works through wrapper `valueOf`; non-Add arithmetic still needs a
-  number-hint ToPrimitive pass (`new Number(3) * 2` currently NaN).
+- All arithmetic (`+ - * / % **`, bitwise/unary) unwraps wrapper primitive
+  slots through `to_number_with_wrapper`; `new Number(3) * 2 === 6`.
+- Boxed primitive receivers are held in a bounded `array_receiver_roots` list
+  (cleared when a top-level array operation starts) instead of growing
+  `retained_values` permanently.
 
 Measured: `built-ins/Array/prototype/map` **191/216 (88.4%; was 184)**;
 Promise unchanged at 373/703. New regressions: wrapper semantics, primitive

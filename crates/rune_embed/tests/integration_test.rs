@@ -15600,3 +15600,31 @@ fn test_function_symbol_has_instance() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_regexp_symbol_match_and_search() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var match = RegExp.prototype[Symbol.match];
+            var search = RegExp.prototype[Symbol.search];
+            var one = /b/[Symbol.match]("abc");
+            var all = /a/g[Symbol.match]("aXa");
+            [
+                typeof match === "function",
+                match.name === "[Symbol.match]",
+                match.length === 1,
+                typeof search === "function",
+                search.name === "[Symbol.search]",
+                one[0] === "b",
+                one.index === 1,
+                all.length === 2,
+                /b/[Symbol.search]("abc") === 1,
+                /z/[Symbol.search]("abc") === -1
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

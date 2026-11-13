@@ -1885,6 +1885,24 @@ Integration suite: **833 passed, 0 failed, 3 ignored**.
 
 Integration suite: **834 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — RegExp.prototype[@@match] / [@@search] (2026-11-13)
+
+- Added `RegExp.prototype[Symbol.match]` and `[Symbol.search]` under the
+  well-known symbols (`length: 1`, spec display names).
+- `@@match`: non-global delegates to `exec`; global loops `RegExpBuiltinExec`
+  from `lastIndex`, collects each match string, handles zero-length advancement
+  and resets `lastIndex` on failure.
+- `@@search`: saves `lastIndex`, searches from 0 with the internal engine, and
+  restores the previous value.
+- String `match`/`search` now route through these methods.
+- Test262: RegExp/prototype **148 → 164/487**; `Symbol.match` **20/53**,
+  `Symbol.search` **8/23**.
+- Regression: `test_regexp_symbol_match_and_search`.
+- Known gaps: generic `this` objects with user `exec`, and `lastIndex` is still
+  coerced on assignment rather than during `RegExpBuiltinExec`.
+
+Integration suite: **835 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

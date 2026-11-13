@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **RegExp @@match/@@search (2026-11-13)**: symbol methods with lastIndex handling. RegExp/prototype 148→**164/487**. Integration **835**.
 - **Function @@hasInstance (2026-11-13)**: OrdinaryHasInstance method with spec metadata. Function 187→**193/509**. Integration **834**.
 - **Date @@toPrimitive (2026-11-13)**: hint validation + Date fast paths + builtin method fallback. Date 453→**458/594**. Integration **833**.
 - **Function.prototype metadata (2026-11-13)**: length 0/name ""; deleted builtin length falls back to 0. Function 185→**187/509**. Integration **832**.

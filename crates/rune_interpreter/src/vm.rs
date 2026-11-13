@@ -2693,6 +2693,26 @@ impl Vm {
                 find_handle(&self.builtins, "RegExp").unwrap_or(Value::undefined());
             proto_entries.push(("constructor", re_ctor_handle));
             let re_proto = make_object(gc, &proto_entries);
+            if let Some(h) = find_handle(&self.builtins, "RegExp_prototype_[Symbol.match]") {
+                unsafe {
+                    JSObject::add_property(
+                        re_proto.heap_ptr().unwrap() as *mut JSObject,
+                        PropertyKey::from_symbol(rune_core::symbol::SYM_MATCH),
+                        "\u{0}".to_string(),
+                        h,
+                    );
+                }
+            }
+            if let Some(h) = find_handle(&self.builtins, "RegExp_prototype_[Symbol.search]") {
+                unsafe {
+                    JSObject::add_property(
+                        re_proto.heap_ptr().unwrap() as *mut JSObject,
+                        PropertyKey::from_symbol(rune_core::symbol::SYM_SEARCH),
+                        "\u{0}".to_string(),
+                        h,
+                    );
+                }
+            }
             self.regexp_prototype = re_proto;
             let re_ctor = make_object(gc, &[("prototype", re_proto)]);
             self.builtin_wrappers.insert("RegExp".to_string(), re_ctor);

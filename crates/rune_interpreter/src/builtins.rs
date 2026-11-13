@@ -22726,6 +22726,16 @@ pub fn default_builtins() -> Vec<Builtin> {
             func: function_has_instance_builtin,
         },
         Builtin {
+            length: 1,
+            name: "RegExp_prototype_[Symbol.match]",
+            func: regexp_symbol_match,
+        },
+        Builtin {
+            length: 1,
+            name: "RegExp_prototype_[Symbol.search]",
+            func: regexp_symbol_search,
+        },
+        Builtin {
             length: 0,
             name: "Date_prototype_toTimeString",
             func: date_to_time_string_builtin,
@@ -24319,6 +24329,100 @@ pub fn regexp_exec(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
             }
         }
     }
+}
+
+/// §22.2.6.8 RegExp.prototype[@@match](string)
+pub fn regexp_symbol_match(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some(rx) = get_regexp_this(this) else {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "RegExp.prototype[Symbol.match] called on incompatible receiver",
+        ));
+        return Value::undefined();
+    };
+    let input = args
+        .first()
+        .map(|v| string_from_value(*v))
+        .unwrap_or_default();
+    let global = unsafe { RegExp::has_flag(rx, 0) };
+    if !global {
+        unsafe { RegExp::set_last_index(rx, 0) };
+        return regexp_exec(gc, this, args, vm);
+    }
+    unsafe { RegExp::set_last_index(rx, 0) };
+    let asym = input.as_bytes();
+    let mut matched: Vec<String> = Vec::new();
+    loop {
+        let last = unsafe { RegExp::last_index(rx) } as usize;
+        if last > asym.len() {
+            unsafe { RegExp::set_last_index(rx, 0) };
+            break;
+        }
+        match regexp_exec_internal(gc, rx, &input, last) {
+            Some(groups) => {
+                let (start, end) = groups[0];
+                matched.push(input.get(start..end).unwrap_or("").to_string());
+                let next = if start == end {
+                    if end < asym.len() {
+                        let step = input[end..]
+                            .chars()
+                            .next()
+                            .map(|c| c.len_utf8())
+                            .unwrap_or(1);
+                        end + step
+                    } else {
+                        end
+                    }
+                } else {
+                    end
+                };
+                unsafe { RegExp::set_last_index(rx, next as u32) };
+                if start == end && next >= asym.len() {
+                    unsafe { RegExp::set_last_index(rx, 0) };
+                    break;
+                }
+            }
+            None => {
+                unsafe { RegExp::set_last_index(rx, 0) };
+                break;
+            }
+        }
+    }
+    if matched.is_empty() {
+        return Value::null();
+    }
+    let vals: Vec<Value> = matched
+        .iter()
+        .map(|s| Value::from_heap_ptr(HeapString::allocate(gc, s) as *mut u8))
+        .collect();
+    build_array(gc, &vals, vm)
+}
+
+/// §22.2.6.9 RegExp.prototype[@@search](string)
+pub fn regexp_symbol_search(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some(rx) = get_regexp_this(this) else {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "RegExp.prototype[Symbol.search] called on incompatible receiver",
+        ));
+        return Value::undefined();
+    };
+    let input = args
+        .first()
+        .map(|v| string_from_value(*v))
+        .unwrap_or_default();
+    let prev = unsafe { RegExp::last_index(rx) };
+    unsafe { RegExp::set_last_index(rx, 0) };
+    let result = match regexp_exec_internal(gc, rx, &input, 0) {
+        Some(groups) => Value::smi(groups[0].0 as i32),
+        None => Value::smi(-1),
+    };
+    unsafe { RegExp::set_last_index(rx, prev) };
+    result
 }
 
 /// RegExp.prototype.test(string) — return true if pattern matches.

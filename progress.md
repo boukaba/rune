@@ -1924,6 +1924,23 @@ Integration suite: **835 passed, 0 failed, 3 ignored**.
 
 Integration suite: **836 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — RegExp.prototype[@@split] (2026-11-13)
+
+- Added `RegExp.prototype[Symbol.split]` (length 2, spec display name):
+  global/limit-aware splitting over the internal engine, capture groups,
+  empty-input handling, zero-length match advancement, and the
+  `$`-vs-`.?` trailing-empty rule matching test262.
+- String `split` dispatches through this method for RegExp separators.
+- Test262: RegExp/prototype **177 → 189/487**, `Symbol.split` **13/44**,
+  String/prototype/split **92/120**.
+- String overall is **832/1223** (was 834 before @@split; a couple of legacy
+  separator cases regressed and are noted for follow-up).
+- Regression: `test_regexp_symbol_split`.
+- Known gaps: custom `@@split` species constructors, generic `this` objects,
+  and full zero-width/capture edge alignment.
+
+Integration suite: **837 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

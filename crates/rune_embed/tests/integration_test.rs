@@ -15651,3 +15651,26 @@ fn test_regexp_symbol_replace() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_regexp_symbol_split() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var method = RegExp.prototype[Symbol.split];
+            [
+                typeof method === "function",
+                method.name === "[Symbol.split]",
+                method.length === 2,
+                "a1b2c".split(/\d/).join(",") === "a,b,c",
+                "a1b2c".split(/(\d)/).join(",") === "a,1,b,2,c",
+                "abc".split(/b/, 1).join(",") === "a",
+                JSON.stringify("x".split(/$/)) === '["x"]',
+                JSON.stringify("x".split(/.?/)) === '["",""]'
+            ].join("|") === "true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

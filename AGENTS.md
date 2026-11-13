@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **RegExp @@split (2026-11-13)**: limit/captures/zero-length handling. RegExp/prototype 177→**189/487**. Integration **837**.
 - **RegExp @@replace + builtin dispatch (2026-11-13)**: symbol methods now dispatched from String.replace. RegExp/prototype 164→**177/487**, String 828→**834/1223**. Integration **836**.
 - **RegExp @@match/@@search (2026-11-13)**: symbol methods with lastIndex handling. RegExp/prototype 148→**164/487**. Integration **835**.
 - **Function @@hasInstance (2026-11-13)**: OrdinaryHasInstance method with spec metadata. Function 187→**193/509**. Integration **834**.

@@ -22760,6 +22760,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             func: regexp_symbol_replace,
         },
         Builtin {
+            length: 2,
+            name: "RegExp_prototype_[Symbol.split]",
+            func: regexp_symbol_split,
+        },
+        Builtin {
             length: 0,
             name: "Date_prototype_toTimeString",
             func: date_to_time_string_builtin,
@@ -24422,6 +24427,102 @@ pub fn regexp_symbol_match(gc: &mut SemiSpace, this: Value, args: &[Value], vm: 
         .map(|s| Value::from_heap_ptr(HeapString::allocate(gc, s) as *mut u8))
         .collect();
     build_array(gc, &vals, vm)
+}
+
+/// §22.2.6.14 RegExp.prototype[@@split](string, limit)
+pub fn regexp_symbol_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some(rx) = get_regexp_this(this) else {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "RegExp.prototype[Symbol.split] called on incompatible receiver",
+        ));
+        return Value::undefined();
+    };
+    let input = args
+        .first()
+        .map(|v| string_from_value(*v))
+        .unwrap_or_default();
+    let limit = args
+        .get(1)
+        .map(|v| match v.as_smi() {
+            Some(n) if n > 0 => n as usize,
+            Some(_) => 0,
+            None => match v.as_float64() {
+                Some(f) if f > 0.0 => f as usize,
+                Some(_) => 0,
+                None => u32::MAX as usize,
+            },
+        })
+        .unwrap_or(u32::MAX as usize);
+    if limit == 0 {
+        return build_array(gc, &[], vm);
+    }
+    unsafe { RegExp::set_last_index(rx, 0) };
+    if input.is_empty() {
+        let matched = regexp_exec_internal(gc, rx, &input, 0).is_some();
+        let vals: Vec<Value> = if matched {
+            Vec::new()
+        } else {
+            vec![Value::from_heap_ptr(HeapString::allocate(gc, "") as *mut u8)]
+        };
+        return build_array(gc, &vals, vm);
+    }
+    let advance = |i: usize| -> usize {
+        if i >= input.len() {
+            return input.len() + 1;
+        }
+        let step = input[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+        i + step
+    };
+    let mut out: Vec<Value> = Vec::new();
+    let mut p = 0usize;
+    let mut q = 0usize;
+    let mut accepted_nonempty = false;
+    while q <= input.len() {
+        let Some(groups) = regexp_exec_internal(gc, rx, &input, q) else {
+            q = advance(q);
+            continue;
+        };
+        let (start, end) = groups[0];
+        if end == p {
+            q = advance(q);
+            continue;
+        }
+        if out.len() >= limit {
+            break;
+        }
+        out.push(Value::from_heap_ptr(
+            HeapString::allocate(gc, &input[p..start]) as *mut u8,
+        ));
+        if end > start {
+            accepted_nonempty = true;
+        }
+        p = end;
+        for &(gs, ge) in groups.iter().skip(1) {
+            if gs == 0 && ge == 0 {
+                out.push(Value::undefined());
+            } else {
+                out.push(Value::from_heap_ptr(
+                    HeapString::allocate(gc, &input[gs..ge]) as *mut u8,
+                ));
+            }
+            if out.len() >= limit {
+                break;
+            }
+        }
+        q = p;
+        if out.len() >= limit {
+            break;
+        }
+    }
+    if (p < input.len() || accepted_nonempty) && out.len() < limit {
+        out.push(Value::from_heap_ptr(
+            HeapString::allocate(gc, &input[p..]) as *mut u8
+        ));
+    }
+    build_array(gc, &out, vm)
 }
 
 /// §22.2.6.11 RegExp.prototype[@@replace](string, replaceValue)

@@ -2723,6 +2723,16 @@ impl Vm {
                     );
                 }
             }
+            if let Some(h) = find_handle(&self.builtins, "RegExp_prototype_[Symbol.split]") {
+                unsafe {
+                    JSObject::add_property(
+                        re_proto.heap_ptr().unwrap() as *mut JSObject,
+                        PropertyKey::from_symbol(rune_core::symbol::SYM_SPLIT),
+                        "\u{0}".to_string(),
+                        h,
+                    );
+                }
+            }
             self.regexp_prototype = re_proto;
             let re_ctor = make_object(gc, &[("prototype", re_proto)]);
             self.builtin_wrappers.insert("RegExp".to_string(), re_ctor);

@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **WeakMap/WeakSet (2026-11-13)**: strong-backed weak collections with reduced API, weak brand bit, object-key/TypeError rules. WeakMap **75/141**, WeakSet **50/85**. Integration **806**.
 - **RegExp flag receivers (2026-11-13)**: accessor pending exceptions route through handle_throw; flag getters undefined on RegExp.prototype, TypeError otherwise; Object.keys includes exotic extras. RegExp prototype 117→**123/487**; Object 1808. Integration **805**.
 - **RegExp flag accessors (2026-11-13)**: 8 prototype accessors + builtin getter dispatch + propertyIsEnumerable attrs. RegExp prototype 96→**117/487**; Object 1805. Integration **804**.
 - **Global mirror + callable constructors (2026-11-13)**: globalThis exposes globals/wrappers for reads, hasOwnProperty and gOPD; Object/Array/Boolean/Function are callable (`typeof`, instanceof Function). Object 1791→**1801/3411**, gOPD 232→235. Integration **803**.

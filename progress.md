@@ -1384,6 +1384,25 @@ Integration suite: **804 passed, 0 failed, 3 ignored**.
 
 Integration suite: **805 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — WeakMap / WeakSet (2026-11-13)
+
+- Added `WeakMap` and `WeakSet` constructors/prototypes with the reduced API
+  surface (`get`/`set`/`has`/`delete`, `add`/`has`/`delete`). Storage reuses
+  RuneMap/RuneSet with a weak-brand bit in the pad word; `size` and iteration
+  stay hidden.
+- Weak methods enforce receiver brand and object-only keys:
+  - primitive keys on `set`/`add` throw TypeError;
+  - `get`/`has`/`delete` with primitive keys return undefined/false;
+  - `Object.prototype.toString` reports `[object WeakMap]`/`[object WeakSet]`.
+- Test262: WeakMap **0 → 75/141**; WeakSet **0 → 50/85**; Map 97/204;
+  Set 139/383.
+- Regression: `test_weakmap_weakset_basics`.
+- Known limitation: entries are stored strongly (no ephemeron/weak GC
+  semantics); `Map.prototype` methods still accept WeakMap-branded storage
+  (brand check is one-way).
+
+Integration suite: **806 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

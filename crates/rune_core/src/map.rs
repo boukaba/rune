@@ -121,3 +121,39 @@ impl RuneSet {
         }
     }
 }
+
+impl RuneMap {
+    /// Weak collections share the Map/Set layout; the pad word's high bit
+    /// records the weak brand so `size` and iteration surface stay hidden.
+    pub unsafe fn set_weak(ptr: *mut u8, weak: bool) {
+        unsafe {
+            let m = ptr as *mut RuneMap;
+            if weak {
+                (*m)._pad |= 0x8000_0000;
+            } else {
+                (*m)._pad &= 0x7fff_ffff;
+            }
+        }
+    }
+
+    pub unsafe fn is_weak(ptr: *mut u8) -> bool {
+        unsafe { (*(ptr as *mut RuneMap))._pad & 0x8000_0000 != 0 }
+    }
+}
+
+impl RuneSet {
+    pub unsafe fn set_weak(ptr: *mut u8, weak: bool) {
+        unsafe {
+            let s = ptr as *mut RuneSet;
+            if weak {
+                (*s)._pad |= 0x8000_0000;
+            } else {
+                (*s)._pad &= 0x7fff_ffff;
+            }
+        }
+    }
+
+    pub unsafe fn is_weak(ptr: *mut u8) -> bool {
+        unsafe { (*(ptr as *mut RuneSet))._pad & 0x8000_0000 != 0 }
+    }
+}

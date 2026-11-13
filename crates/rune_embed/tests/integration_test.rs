@@ -14859,3 +14859,36 @@ fn test_regexp_flag_getter_receiver_rules() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_weakmap_weakset_basics() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var key = {};
+            var wm = new WeakMap([[key, 1]]);
+            var primitiveThrew = false;
+            try { wm.set(1, 2); } catch (e) { primitiveThrew = e instanceof TypeError; }
+            var ws = new WeakSet([key]);
+            var weakSetThrew = false;
+            try { ws.add(1); } catch (e) { weakSetThrew = e instanceof TypeError; }
+            [
+                wm instanceof WeakMap,
+                wm.get(key) === 1,
+                wm.has(key) === true,
+                wm.delete(key) === true,
+                wm.has(key) === false,
+                wm.size === undefined,
+                Object.prototype.toString.call(wm) === "[object WeakMap]",
+                primitiveThrew,
+                ws instanceof WeakSet,
+                ws.has(key) === true,
+                weakSetThrew,
+                ws.size === undefined
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

@@ -3120,6 +3120,124 @@ pub fn set_delete_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
     Value::boolean(false)
 }
 
+fn weak_collection_this(this: Value, is_map: bool) -> Option<*mut u8> {
+    let ptr = this.heap_ptr()?;
+    let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+    if is_map {
+        if tag == TAG_MAP && unsafe { RuneMap::is_weak(ptr) } {
+            return Some(ptr);
+        }
+    } else if tag == TAG_SET && unsafe { RuneSet::is_weak(ptr) } {
+        return Some(ptr);
+    }
+    None
+}
+
+fn weak_brand_error(gc: &mut SemiSpace, vm: &mut Vm) {
+    vm.set_pending_exception(crate::errors::error_object(
+        gc,
+        &vm.error_protos,
+        crate::errors::ErrorKind::TypeError,
+        "WeakMap/WeakSet method called on incompatible receiver",
+    ));
+}
+
+pub fn weakmap_get(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if weak_collection_this(this, true).is_none() {
+        weak_brand_error(gc, vm);
+        return Value::undefined();
+    }
+    let key = args.first().copied().unwrap_or(Value::undefined());
+    if !key.is_heap_object() {
+        return Value::undefined();
+    }
+    map_get_builtin(gc, this, args, vm)
+}
+
+pub fn weakmap_set(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if weak_collection_this(this, true).is_none() {
+        weak_brand_error(gc, vm);
+        return Value::undefined();
+    }
+    let key = args.first().copied().unwrap_or(Value::undefined());
+    if !key.is_heap_object() {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Invalid value used as weak map key",
+        ));
+        return Value::undefined();
+    }
+    map_set_builtin(gc, this, args, vm)
+}
+
+pub fn weakmap_has(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if weak_collection_this(this, true).is_none() {
+        weak_brand_error(gc, vm);
+        return Value::undefined();
+    }
+    let key = args.first().copied().unwrap_or(Value::undefined());
+    if !key.is_heap_object() {
+        return Value::boolean(false);
+    }
+    map_has_builtin(gc, this, args, vm)
+}
+
+pub fn weakmap_delete(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if weak_collection_this(this, true).is_none() {
+        weak_brand_error(gc, vm);
+        return Value::undefined();
+    }
+    let key = args.first().copied().unwrap_or(Value::undefined());
+    if !key.is_heap_object() {
+        return Value::boolean(false);
+    }
+    map_delete_builtin(gc, this, args, vm)
+}
+
+pub fn weakset_add(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if weak_collection_this(this, false).is_none() {
+        weak_brand_error(gc, vm);
+        return Value::undefined();
+    }
+    let key = args.first().copied().unwrap_or(Value::undefined());
+    if !key.is_heap_object() {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Invalid value used in weak set",
+        ));
+        return Value::undefined();
+    }
+    set_add_builtin(gc, this, args, vm)
+}
+
+pub fn weakset_has(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if weak_collection_this(this, false).is_none() {
+        weak_brand_error(gc, vm);
+        return Value::undefined();
+    }
+    let key = args.first().copied().unwrap_or(Value::undefined());
+    if !key.is_heap_object() {
+        return Value::boolean(false);
+    }
+    set_has_builtin(gc, this, args, vm)
+}
+
+pub fn weakset_delete(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if weak_collection_this(this, false).is_none() {
+        weak_brand_error(gc, vm);
+        return Value::undefined();
+    }
+    let key = args.first().copied().unwrap_or(Value::undefined());
+    if !key.is_heap_object() {
+        return Value::boolean(false);
+    }
+    set_delete_builtin(gc, this, args, vm)
+}
+
 /// §27.2.3.2 Set.prototype.clear
 pub fn set_clear_builtin(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
     let Some(set_ptr) = set_receiver(gc, this, vm) else {
@@ -20891,6 +21009,41 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 1,
             name: "Map_prototype_delete",
             func: map_delete_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "WeakMap_prototype_get",
+            func: weakmap_get,
+        },
+        Builtin {
+            length: 2,
+            name: "WeakMap_prototype_set",
+            func: weakmap_set,
+        },
+        Builtin {
+            length: 1,
+            name: "WeakMap_prototype_has",
+            func: weakmap_has,
+        },
+        Builtin {
+            length: 1,
+            name: "WeakMap_prototype_delete",
+            func: weakmap_delete,
+        },
+        Builtin {
+            length: 1,
+            name: "WeakSet_prototype_add",
+            func: weakset_add,
+        },
+        Builtin {
+            length: 1,
+            name: "WeakSet_prototype_has",
+            func: weakset_has,
+        },
+        Builtin {
+            length: 1,
+            name: "WeakSet_prototype_delete",
+            func: weakset_delete,
         },
         Builtin {
             length: 0,

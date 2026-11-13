@@ -1132,6 +1132,10 @@ pub struct Vm {
     pub set_constructor: Value,
     pub map_prototype: Value,
     pub set_prototype: Value,
+    pub weakmap_constructor: Value,
+    pub weakmap_prototype: Value,
+    pub weakset_constructor: Value,
+    pub weakset_prototype: Value,
     pub date_constructor: Value,
     pub date_prototype: Value,
     pub regexp_constructor: Value,
@@ -1399,6 +1403,10 @@ impl Vm {
             set_constructor: Value::undefined(),
             map_prototype: Value::undefined(),
             set_prototype: Value::undefined(),
+            weakmap_constructor: Value::undefined(),
+            weakmap_prototype: Value::undefined(),
+            weakset_constructor: Value::undefined(),
+            weakset_prototype: Value::undefined(),
             date_constructor: Value::undefined(),
             date_prototype: Value::undefined(),
             regexp_constructor: Value::undefined(),
@@ -2158,6 +2166,78 @@ impl Vm {
             self.builtin_wrappers.insert("Set".to_string(), set_ctor);
             self.set_constructor = set_ctor;
             self.set_prototype = set_proto;
+
+            // WeakMap / WeakSet — same RuneMap/RuneSet storage with distinct
+            // prototypes and a reduced method surface (strong-ref limitation
+            // documented).
+            let mut wm_entries: Vec<(&str, Value)> = Vec::new();
+            for (name, handle) in [
+                ("get", "WeakMap_prototype_get"),
+                ("set", "WeakMap_prototype_set"),
+                ("has", "WeakMap_prototype_has"),
+                ("delete", "WeakMap_prototype_delete"),
+            ] {
+                if let Some(h) = find_handle(&self.builtins, handle) {
+                    wm_entries.push((name, h));
+                }
+            }
+            let wm_proto = make_object(gc, &wm_entries);
+            unsafe {
+                let ptr = wm_proto.heap_ptr().unwrap() as *mut JSObject;
+                let tag = HeapString::allocate(gc, "WeakMap") as *mut u8;
+                JSObject::add_property(
+                    ptr,
+                    PropertyKey::from_symbol(rune_core::symbol::SYM_TO_STRING_TAG),
+                    "\u{0}".to_string(),
+                    Value::from_heap_ptr(tag),
+                );
+            }
+            let wm_name = Value::from_heap_ptr(HeapString::allocate(gc, "WeakMap") as *mut u8);
+            let wm_ctor = make_object(
+                gc,
+                &[
+                    ("prototype", wm_proto),
+                    ("length", Value::smi(0)),
+                    ("name", wm_name),
+                ],
+            );
+            self.builtin_wrappers.insert("WeakMap".to_string(), wm_ctor);
+            self.weakmap_constructor = wm_ctor;
+            self.weakmap_prototype = wm_proto;
+
+            let mut ws_entries: Vec<(&str, Value)> = Vec::new();
+            for (name, handle) in [
+                ("add", "WeakSet_prototype_add"),
+                ("has", "WeakSet_prototype_has"),
+                ("delete", "WeakSet_prototype_delete"),
+            ] {
+                if let Some(h) = find_handle(&self.builtins, handle) {
+                    ws_entries.push((name, h));
+                }
+            }
+            let ws_proto = make_object(gc, &ws_entries);
+            unsafe {
+                let ptr = ws_proto.heap_ptr().unwrap() as *mut JSObject;
+                let tag = HeapString::allocate(gc, "WeakSet") as *mut u8;
+                JSObject::add_property(
+                    ptr,
+                    PropertyKey::from_symbol(rune_core::symbol::SYM_TO_STRING_TAG),
+                    "\u{0}".to_string(),
+                    Value::from_heap_ptr(tag),
+                );
+            }
+            let ws_name = Value::from_heap_ptr(HeapString::allocate(gc, "WeakSet") as *mut u8);
+            let ws_ctor = make_object(
+                gc,
+                &[
+                    ("prototype", ws_proto),
+                    ("length", Value::smi(0)),
+                    ("name", ws_name),
+                ],
+            );
+            self.builtin_wrappers.insert("WeakSet".to_string(), ws_ctor);
+            self.weakset_constructor = ws_ctor;
+            self.weakset_prototype = ws_proto;
         }
 
         // Date constructor and prototype
@@ -3108,6 +3188,11 @@ impl Vm {
 
         // Global constants: NaN, Infinity, undefined
         let nan_val = Value::from_float64(f64::NAN);
+        for name in ["WeakMap", "WeakSet"] {
+            if let Some(v) = self.builtin_wrappers.get(name).copied() {
+                self.globals.insert(name.to_string(), v);
+            }
+        }
         self.globals.insert("NaN".to_string(), nan_val);
         let inf_val = Value::from_float64(f64::INFINITY);
         self.globals.insert("Infinity".to_string(), inf_val);
@@ -4084,6 +4169,10 @@ impl Vm {
         gc.push_root(&self.set_constructor as *const Value as *mut u64);
         gc.push_root(&self.map_prototype as *const Value as *mut u64);
         gc.push_root(&self.set_prototype as *const Value as *mut u64);
+        gc.push_root(&self.weakmap_constructor as *const Value as *mut u64);
+        gc.push_root(&self.weakmap_prototype as *const Value as *mut u64);
+        gc.push_root(&self.weakset_constructor as *const Value as *mut u64);
+        gc.push_root(&self.weakset_prototype as *const Value as *mut u64);
         gc.push_root(&self.date_constructor as *const Value as *mut u64);
         gc.push_root(&self.regexp_constructor as *const Value as *mut u64);
         gc.push_root(&self.date_prototype as *const Value as *mut u64);
@@ -10004,6 +10093,46 @@ impl Vm {
                     }
                     // Map/Set constructor [[Construct]]: allocate the tagged
                     // collection object and fill it from the iterable argument.
+                    if constructor == self.weakmap_constructor
+                        || constructor == self.weakset_constructor
+                    {
+                        let is_map = constructor == self.weakmap_constructor;
+                        let proto = if is_map {
+                            self.weakmap_prototype.heap_ptr()
+                        } else {
+                            self.weakset_prototype.heap_ptr()
+                        };
+                        let obj_ptr = if is_map {
+                            RuneMap::allocate(gc, proto.unwrap_or(std::ptr::null_mut()))
+                        } else {
+                            RuneSet::allocate(gc, proto.unwrap_or(std::ptr::null_mut()))
+                        };
+                        unsafe {
+                            if is_map {
+                                RuneMap::set_weak(obj_ptr, true);
+                            } else {
+                                RuneSet::set_weak(obj_ptr, true);
+                            }
+                        }
+                        let obj_val = Value::from_heap_ptr(obj_ptr);
+                        let _ = if is_map {
+                            crate::builtins::map_constructor(gc, obj_val, &args, self)
+                        } else {
+                            crate::builtins::set_constructor(gc, obj_val, &args, self)
+                        };
+                        if let Some(exc) = self.pending_exception.take() {
+                            if let Some(exit) = self.handle_throw(gc, exc) {
+                                return exit;
+                            }
+                            continue;
+                        }
+                        if self.pending_collection_ctor.is_some() {
+                            continue;
+                        }
+                        self.push(obj_val);
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    }
                     if constructor == self.map_constructor || constructor == self.set_constructor {
                         let is_map = constructor == self.map_constructor;
                         let proto_ptr = if is_map {
@@ -14450,7 +14579,7 @@ pub(crate) fn load_property_recursive(
                 if let Some(key_ptr) = raw_key.heap_ptr() {
                     if unsafe { (*(key_ptr as *const GcHeader)).tag() == TAG_STRING } {
                         let key_str = unsafe { HeapString::to_string(key_ptr as *mut HeapString) };
-                        if key_str == "size" {
+                        if key_str == "size" && !unsafe { RuneMap::is_weak(ptr) } {
                             return Value::smi(unsafe { RuneMap::size(ptr) } as i32);
                         }
                     }
@@ -14466,7 +14595,7 @@ pub(crate) fn load_property_recursive(
                 if let Some(key_ptr) = raw_key.heap_ptr() {
                     if unsafe { (*(key_ptr as *const GcHeader)).tag() == TAG_STRING } {
                         let key_str = unsafe { HeapString::to_string(key_ptr as *mut HeapString) };
-                        if key_str == "size" {
+                        if key_str == "size" && !unsafe { RuneSet::is_weak(ptr) } {
                             return Value::smi(unsafe { RuneSet::size(ptr) } as i32);
                         }
                     }

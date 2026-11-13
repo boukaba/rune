@@ -368,8 +368,13 @@ impl Lexer {
                                     .map(|s| s.iter().collect::<String>());
                                 if let Some(hex) = hex {
                                     if let Ok(codepoint) = u32::from_str_radix(&hex, 16) {
-                                        value.push(char::from_u32(codepoint).unwrap_or('\u{FFFD}'));
                                         self.pos += 4;
+                                        let ch = self
+                                            .combine_surrogate_escape(codepoint)
+                                            .unwrap_or_else(|| {
+                                                char::from_u32(codepoint).unwrap_or('\u{FFFD}')
+                                            });
+                                        value.push(ch);
                                     }
                                 }
                             }
@@ -451,8 +456,12 @@ impl Lexer {
                                 .map(|s| s.iter().collect::<String>());
                             if let Some(hex) = hex {
                                 if let Ok(codepoint) = u32::from_str_radix(&hex, 16) {
-                                    value.push(char::from_u32(codepoint).unwrap_or('\u{FFFD}'));
                                     self.pos += 4;
+                                    let ch =
+                                        self.combine_surrogate_escape(codepoint).unwrap_or_else(
+                                            || char::from_u32(codepoint).unwrap_or('\u{FFFD}'),
+                                        );
+                                    value.push(ch);
                                 }
                             }
                         }
@@ -532,8 +541,12 @@ impl Lexer {
                                 .map(|s| s.iter().collect::<String>());
                             if let Some(hex) = hex {
                                 if let Ok(codepoint) = u32::from_str_radix(&hex, 16) {
-                                    value.push(char::from_u32(codepoint).unwrap_or('\u{FFFD}'));
                                     self.pos += 4;
+                                    let ch =
+                                        self.combine_surrogate_escape(codepoint).unwrap_or_else(
+                                            || char::from_u32(codepoint).unwrap_or('\u{FFFD}'),
+                                        );
+                                    value.push(ch);
                                 }
                             }
                         }
@@ -919,6 +932,32 @@ impl Lexer {
         is_eof
     }
 
+    /// Combine a high surrogate with a following `\uXXXX` low surrogate escape.
+    /// Does not consume input unless a complete valid pair is present.
+    fn combine_surrogate_escape(&mut self, cp: u32) -> Option<char> {
+        if !(0xD800..=0xDBFF).contains(&cp) {
+            return None;
+        }
+        if self.chars.get(self.pos) != Some(&'\\') || self.chars.get(self.pos + 1) != Some(&'u') {
+            return None;
+        }
+        let mut low_hex = String::new();
+        for k in 0..4 {
+            match self.chars.get(self.pos + 2 + k) {
+                Some(c) => low_hex.push(*c),
+                None => return None,
+            }
+        }
+        let low = u32::from_str_radix(&low_hex, 16).ok()?;
+        if !(0xDC00..=0xDFFF).contains(&low) {
+            return None;
+        }
+        let combined = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+        let ch = char::from_u32(combined)?;
+        self.pos += 6;
+        Some(ch)
+    }
+
     /// Scan a regex literal: /pattern/flags
     /// Assumes the opening `/` has been consumed (pos is after it).
     fn scan_regex(&mut self) -> Token {
@@ -984,7 +1023,7 @@ impl Lexer {
         let mut flags = String::new();
         while let Some(c) = self.peek() {
             match c {
-                'g' | 'i' | 'm' | 's' | 'u' | 'y' | 'd' => {
+                'g' | 'i' | 'm' | 's' | 'u' | 'y' | 'd' | 'v' => {
                     flags.push(c);
                     self.advance();
                 }

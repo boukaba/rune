@@ -2911,6 +2911,37 @@ Integration suite: **877 passed, 0 failed, 3 ignored**.
 
 Integration suite: **878 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — RegExp Unicode escapes, properties and indices (2026-11-13)
+
+- Regex parser:
+  - `\uXXXX`, `\u{...}`, `\xXX`, `\cX`, `\n/\r/\t/\f/\v/\0` escapes;
+  - `\p{...}` / `\P{...}` Unicode property escapes via `regex-syntax` HIR
+    classes (general categories, scripts, Script_Extensions, binary properties);
+  - Unicode `\s` (WhiteSpace + LineTerminator ranges) and the `v` flag in
+    regex literals;
+  - huge `{n}`/`{n,m}` quantifiers collapse to a non-matching node instead of
+    allocating an unbounded AST (fixes a memory-abort);
+  - lazy `?` suffixes are consumed (`{n,}?`, `a*?`) — matching remains greedy.
+- String literals combine surrogate-pair escapes (`"\ud834\udf06"` → one
+  code point) in all three string scanners.
+- PikeVM returns UTF-8 byte offsets (so slicing match results on non-ASCII text
+  no longer panics), uses sparse queues instead of dense per-start vectors,
+  skips impossible start positions via a first-edge filter, and `^` scans only
+  position 0 when `m` is absent.
+- Thread-local compiled-program cache (bounded 4096) plus a RegExp test fast
+  path that skips match-array construction.
+- Test262: RegExp/prototype **204 → 206/487**, CharacterClassEscapes
+  **0 → 6/12**, quantifier-integer-limit passes, String **1062 → 1068/1223**,
+  JSON **127/165**.
+- Known gaps: generated `property-escapes/generated` files run 1.1M-codepoint
+  harness loops (most exceed the 2 s test262 timeout) and `regex-syntax`'s
+  Unicode 14 tables predate the test262 Unicode version, so exact acceptance
+  tables mismatch; lazy quantifiers still select the longest match; `\w`/`\W`
+  remain ASCII (plus underscore) under `u`/`v`.
+- Regression: `test_regexp_unicode_properties_and_flags`.
+
+Integration suite: **879 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

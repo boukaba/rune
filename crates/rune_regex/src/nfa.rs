@@ -56,6 +56,17 @@ pub struct Nfa {
     pub start: usize,
     pub states: Vec<State>,
     pub num_captures: usize,
+    pub anchored_start: bool,
+}
+
+fn starts_anchored(expr: &RegexExpr) -> bool {
+    match expr {
+        RegexExpr::AnchorStart => true,
+        RegexExpr::Group(inner, _, _) => starts_anchored(inner),
+        RegexExpr::Concat(parts) => parts.first().is_some_and(starts_anchored),
+        RegexExpr::Alt(a, b) => starts_anchored(a) && starts_anchored(b),
+        _ => false,
+    }
 }
 
 fn alloc_state(states: &mut Vec<State>) -> usize {
@@ -277,5 +288,6 @@ pub fn compile(expr: &RegexExpr) -> Nfa {
         start: s_start,
         states,
         num_captures: group_count,
+        anchored_start: starts_anchored(expr),
     }
 }

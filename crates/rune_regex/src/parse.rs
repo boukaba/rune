@@ -1,5 +1,17 @@
 use crate::ast::RegexExpr;
 
+/// Quantifiers above this bound are kept non-matching instead of being
+/// expanded into an unbounded AST: no real string can satisfy them and
+/// expansion would allocate gigabytes.
+const MAX_EXPANDED_QUANTIFIER: usize = 1_000_000;
+
+fn too_large_quantifier() -> RegexExpr {
+    RegexExpr::CharClass {
+        negated: false,
+        ranges: Vec::new(),
+    }
+}
+
 pub fn parse_regex(pattern: &str) -> Result<RegexExpr, String> {
     let chars: Vec<char> = pattern.chars().collect();
     let mut i = 0;
@@ -84,6 +96,12 @@ fn clear_before(node: RegexExpr) -> RegexExpr {
     }
 }
 
+fn skip_lazy(chars: &[char], i: &mut usize) {
+    if *i < chars.len() && chars[*i] == '?' {
+        *i += 1;
+    }
+}
+
 fn parse_repetition(
     chars: &[char],
     i: &mut usize,
@@ -94,14 +112,17 @@ fn parse_repetition(
         match chars[*i] {
             '*' => {
                 *i += 1;
+                skip_lazy(chars, i);
                 return Ok(RegexExpr::Star(Box::new(node)));
             }
             '+' => {
                 *i += 1;
+                skip_lazy(chars, i);
                 return Ok(RegexExpr::Plus(Box::new(node)));
             }
             '?' => {
                 *i += 1;
+                skip_lazy(chars, i);
                 return Ok(RegexExpr::Optional(Box::new(node)));
             }
             '{' => {
@@ -136,6 +157,10 @@ fn parse_repetition(
                         // {n,} — unbounded upper
                         if *i < chars.len() && chars[*i] == '}' {
                             *i += 1;
+                            skip_lazy(chars, i);
+                            if n > MAX_EXPANDED_QUANTIFIER {
+                                return Ok(too_large_quantifier());
+                            }
                             let mut nodes: Vec<RegexExpr> =
                                 (0..n).map(|_| clear_before(node.clone())).collect();
                             if n > 0 {
@@ -161,7 +186,11 @@ fn parse_repetition(
                 if has_m && m < n {
                     return Err("Invalid quantifier range".into());
                 }
+                skip_lazy(chars, i);
                 if m == n {
+                    if n > MAX_EXPANDED_QUANTIFIER {
+                        return Ok(too_large_quantifier());
+                    }
                     let mut nodes: Vec<RegexExpr> =
                         (0..n).map(|_| clear_before(node.clone())).collect();
                     return Ok(if nodes.len() == 1 {
@@ -171,6 +200,9 @@ fn parse_repetition(
                     });
                 }
                 // {n,m}: n copies + (m - n) optional copies.
+                if n > MAX_EXPANDED_QUANTIFIER || m > MAX_EXPANDED_QUANTIFIER {
+                    return Ok(too_large_quantifier());
+                }
                 let mut nodes: Vec<RegexExpr> = Vec::new();
                 for _ in 0..n {
                     nodes.push(node.clone());
@@ -184,6 +216,98 @@ fn parse_repetition(
         }
     }
     Ok(node)
+}
+
+fn unicode_class_ranges(name: &str) -> Result<Vec<(char, char)>, String> {
+    let pattern = format!("\\p{{{name}}}");
+    let hir = regex_syntax::Parser::new()
+        .parse(&pattern)
+        .map_err(|_| format!("Invalid Unicode property escape: {name}"))?;
+    match hir.kind() {
+        regex_syntax::hir::HirKind::Class(regex_syntax::hir::Class::Unicode(cls)) => {
+            Ok(cls.ranges().iter().map(|r| (r.start(), r.end())).collect())
+        }
+        _ => Err(format!("Invalid Unicode property escape: {name}")),
+    }
+}
+
+fn complement_ranges(ranges: &[(char, char)]) -> Vec<(char, char)> {
+    let mut sorted: Vec<(char, char)> = ranges.to_vec();
+    sorted.sort_by_key(|r| r.0);
+    let mut out = Vec::new();
+    let mut next = 0u32;
+    for (start, end) in sorted {
+        let s = start as u32;
+        let e = end as u32;
+        if s > next {
+            if let (Some(a), Some(b)) = (char::from_u32(next), char::from_u32(s - 1)) {
+                out.push((a, b));
+            }
+        }
+        next = next.max(e.saturating_add(1));
+    }
+    if next <= 0x10FFFF {
+        if let Some(a) = char::from_u32(next) {
+            out.push((a, '\u{10FFFF}'));
+        }
+    }
+    out
+}
+
+fn hex_digit(c: char) -> Option<u32> {
+    c.to_digit(16)
+}
+
+fn parse_hex(chars: &[char], i: &mut usize, count: usize) -> Result<u32, String> {
+    let mut value = 0u32;
+    for _ in 0..count {
+        if *i >= chars.len() {
+            return Err("Invalid escape".into());
+        }
+        let digit = hex_digit(chars[*i]).ok_or_else(|| "Invalid escape".to_string())?;
+        value = value * 16 + digit;
+        *i += 1;
+    }
+    Ok(value)
+}
+
+fn parse_unicode_escape(chars: &[char], i: &mut usize) -> Result<char, String> {
+    if *i < chars.len() && chars[*i] == '{' {
+        *i += 1;
+        let mut value = 0u32;
+        let mut digits = 0;
+        while *i < chars.len() && chars[*i] != '}' {
+            let digit = hex_digit(chars[*i]).ok_or_else(|| "Invalid escape".to_string())?;
+            value = value * 16 + digit;
+            digits += 1;
+            if digits > 6 {
+                return Err("Invalid escape".into());
+            }
+            *i += 1;
+        }
+        if *i >= chars.len() || chars[*i] != '}' || digits == 0 {
+            return Err("Invalid escape".into());
+        }
+        *i += 1;
+        return char::from_u32(value).ok_or_else(|| "Invalid escape".to_string());
+    }
+    let first = parse_hex(chars, i, 4)?;
+    if (0xD800..=0xDBFF).contains(&first) {
+        // Combine a following \uDC00-\uDFFF escape into one code point.
+        if *i + 1 < chars.len() && chars[*i] == '\\' && chars[*i + 1] == 'u' {
+            let save = *i;
+            *i += 2;
+            if let Ok(low) = parse_hex(chars, i, 4) {
+                if (0xDC00..=0xDFFF).contains(&low) {
+                    let cp = 0x10000 + ((first - 0xD800) << 10) + (low - 0xDC00);
+                    return char::from_u32(cp).ok_or_else(|| "Invalid escape".to_string());
+                }
+            }
+            *i = save;
+        }
+        return Ok('\u{FFFD}');
+    }
+    Ok(char::from_u32(first).unwrap_or('\u{FFFD}'))
 }
 
 fn parse_atom(chars: &[char], i: &mut usize, captures: &mut usize) -> Result<RegexExpr, String> {
@@ -217,11 +341,16 @@ fn parse_atom(chars: &[char], i: &mut usize, captures: &mut usize) -> Result<Reg
                         'd' => vec![('0', '9')],
                         'w' => vec![('0', '9'), ('A', 'Z'), ('a', 'z'), ('_', '_')],
                         's' => vec![
+                            ('\t', '\r'),
                             (' ', ' '),
-                            ('\t', '\t'),
-                            ('\n', '\n'),
-                            ('\r', '\r'),
-                            ('\x0C', '\x0C'),
+                            ('\u{00A0}', '\u{00A0}'),
+                            ('\u{1680}', '\u{1680}'),
+                            ('\u{2000}', '\u{200A}'),
+                            ('\u{2028}', '\u{2029}'),
+                            ('\u{202F}', '\u{202F}'),
+                            ('\u{205F}', '\u{205F}'),
+                            ('\u{3000}', '\u{3000}'),
+                            ('\u{FEFF}', '\u{FEFF}'),
                         ],
                         _ => unreachable!(),
                     };
@@ -236,6 +365,53 @@ fn parse_atom(chars: &[char], i: &mut usize, captures: &mut usize) -> Result<Reg
                     }
                 }
                 'b' | 'B' => Ok(RegexExpr::WordBoundary { negated: c == 'B' }),
+                'n' => Ok(RegexExpr::Literal('\n')),
+                'r' => Ok(RegexExpr::Literal('\r')),
+                't' => Ok(RegexExpr::Literal('\t')),
+                'f' => Ok(RegexExpr::Literal('\x0C')),
+                'v' => Ok(RegexExpr::Literal('\x0B')),
+                'x' => Ok(RegexExpr::Literal(parse_hex(chars, i, 2)? as u8 as char)),
+                'u' => Ok(RegexExpr::Literal(parse_unicode_escape(chars, i)?)),
+                'c' => {
+                    if *i >= chars.len() {
+                        return Err("Invalid control escape".into());
+                    }
+                    let ch = chars[*i];
+                    *i += 1;
+                    if ch.is_ascii_alphabetic() {
+                        Ok(RegexExpr::Literal(
+                            char::from_u32((ch.to_ascii_uppercase() as u32) % 32).unwrap(),
+                        ))
+                    } else {
+                        Ok(RegexExpr::Literal('c'))
+                    }
+                }
+                'p' | 'P' => {
+                    if *i >= chars.len() || chars[*i] != '{' {
+                        return Err("Invalid Unicode property escape".into());
+                    }
+                    *i += 1;
+                    let mut name = String::new();
+                    while *i < chars.len() && chars[*i] != '}' {
+                        name.push(chars[*i]);
+                        *i += 1;
+                    }
+                    if *i >= chars.len() {
+                        return Err("Unterminated Unicode property escape".into());
+                    }
+                    *i += 1;
+                    let ranges = unicode_class_ranges(&name)?;
+                    let negated = c == 'P';
+                    let ranges = if negated {
+                        complement_ranges(&ranges)
+                    } else {
+                        ranges
+                    };
+                    Ok(RegexExpr::CharClass {
+                        negated: false,
+                        ranges,
+                    })
+                }
                 'k' => {
                     if *i < chars.len() && chars[*i] == '<' {
                         *i += 1;
@@ -256,11 +432,6 @@ fn parse_atom(chars: &[char], i: &mut usize, captures: &mut usize) -> Result<Reg
                         Ok(RegexExpr::Literal('k'))
                     }
                 }
-                'n' => Ok(RegexExpr::Literal('\n')),
-                'r' => Ok(RegexExpr::Literal('\r')),
-                't' => Ok(RegexExpr::Literal('\t')),
-                'f' => Ok(RegexExpr::Literal('\x0C')),
-                'v' => Ok(RegexExpr::Literal('\x0B')),
                 _ => Ok(RegexExpr::Literal(c)),
             }
         }

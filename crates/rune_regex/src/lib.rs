@@ -1,5 +1,6 @@
 pub mod ast;
 pub mod backtrack;
+pub mod cache;
 pub mod nfa;
 pub mod parse;
 pub mod pikevm;

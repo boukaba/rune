@@ -16865,16 +16865,7 @@ fn regexp_exec_internal(
 ) -> Option<Vec<(usize, usize)>> {
     let pattern = unsafe { HeapString::to_string(RegExp::pattern(regexp_ptr) as *mut HeapString) };
     let flags = unsafe { RegExp::flags(regexp_ptr) };
-    match rune_regex::parse_regex(&pattern) {
-        Ok(expr) => {
-            let nfa = rune_regex::nfa::compile(&expr);
-            let pike_vm = rune_regex::pikevm::PikeVm::new();
-            pike_vm
-                .exec_with_flags(&nfa, input, start_pos, flags)
-                .map(|m| m.groups)
-        }
-        Err(_) => None,
-    }
+    rune_regex::cache::exec(&pattern, flags, input, start_pos).map(|m| m.groups)
 }
 
 fn alloc_regexp_from_string(
@@ -28369,9 +28360,7 @@ pub fn regexp_exec(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
     let sticky = unsafe { RegExp::has_flag(regexp_ptr, 5) };
     let pattern_ptr = unsafe { RegExp::pattern(regexp_ptr) };
     let pattern = unsafe { HeapString::to_string(pattern_ptr as *mut HeapString) };
-    let named: Vec<(String, usize)> = rune_regex::parse_regex(&pattern)
-        .map(|e| rune_regex::ast::named_captures(&e))
-        .unwrap_or_default();
+    let named: Vec<(String, usize)> = rune_regex::cache::named_captures(&pattern);
 
     // RegExpBuiltinExec reads/ToLengths lastIndex even for non-global regexps
     // (the value is then ignored unless global/sticky).
@@ -28382,7 +28371,7 @@ pub fn regexp_exec(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
             return Value::undefined();
         }
     };
-    let mut last = if global || sticky {
+    let last = if global || sticky {
         if last_index_number.is_nan() || last_index_number <= 0.0 {
             0usize
         } else {
@@ -28392,48 +28381,40 @@ pub fn regexp_exec(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
         0
     };
 
-    loop {
-        // §22.2.7.2 step 9.a: lastIndex beyond the string → reset + null.
-        if last > len {
+    // §22.2.7.2 step 9.a: lastIndex beyond the string → reset + null.
+    if last > len {
+        if global || sticky {
+            regexp_set_last_index_value(gc, regexp_ptr, Value::smi(0));
+        }
+        return Value::null();
+    }
+    match regexp_exec_internal(gc, regexp_ptr, &s, last) {
+        Some(groups) => {
+            let (start, end) = groups[0];
+            // §22.2.7.2 step 10: sticky requires the match to start
+            // exactly at lastIndex; any later match is a failure.
+            if sticky && start != last {
+                regexp_set_last_index_value(gc, regexp_ptr, Value::smi(0));
+                return Value::null();
+            }
+            // §22.2.7.2 step 12: global/sticky advance lastIndex to the
+            // match end (zero-length matches keep the same lastIndex; the
+            // caller advances to avoid infinite loops).
+            if global || sticky {
+                regexp_set_last_index_value(gc, regexp_ptr, Value::smi(end as i32));
+            }
+            make_match_result_array(gc, &groups, &s, start, vm.array_prototype, &named, unsafe {
+                RegExp::has_flag(regexp_ptr, 6)
+            })
+        }
+        None => {
+            // PikeVM already searched leftmost from `last`; failure means
+            // no match anywhere at/after lastIndex. Global/sticky reset
+            // lastIndex per RegExpBuiltinExec.
             if global || sticky {
                 regexp_set_last_index_value(gc, regexp_ptr, Value::smi(0));
             }
-            return Value::null();
-        }
-        match regexp_exec_internal(gc, regexp_ptr, &s, last) {
-            Some(groups) => {
-                let (start, end) = groups[0];
-                // §22.2.7.2 step 10: sticky requires the match to start
-                // exactly at lastIndex; any later match is a failure.
-                if sticky && start != last {
-                    regexp_set_last_index_value(gc, regexp_ptr, Value::smi(0));
-                    return Value::null();
-                }
-                // §22.2.7.2 step 12: global/sticky advance lastIndex to the
-                // match end (zero-length matches keep the same lastIndex; the
-                // caller advances to avoid infinite loops).
-                if global || sticky {
-                    regexp_set_last_index_value(gc, regexp_ptr, Value::smi(end as i32));
-                }
-                return make_match_result_array(
-                    gc,
-                    &groups,
-                    &s,
-                    start,
-                    vm.array_prototype,
-                    &named,
-                    unsafe { RegExp::has_flag(regexp_ptr, 6) },
-                );
-            }
-            None => {
-                // Failure: sticky returns null immediately (lastIndex = 0);
-                // otherwise advance one code unit and retry.
-                if sticky {
-                    regexp_set_last_index_value(gc, regexp_ptr, Value::smi(0));
-                    return Value::null();
-                }
-                last += 1;
-            }
+            Value::null()
         }
     }
 }
@@ -28799,11 +28780,68 @@ pub fn regexp_symbol_search(gc: &mut SemiSpace, this: Value, args: &[Value], vm:
 /// RegExp.prototype.test(string) — return true if pattern matches.
 /// Global/sticky regexps advance lastIndex exactly like exec.
 pub fn regexp_test(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let result = regexp_exec(gc, this, args, vm);
-    if result.is_null() {
-        Value::boolean(false)
+    let Some(regexp_ptr) = get_regexp_this(this) else {
+        return Value::boolean(false);
+    };
+    let input = args
+        .first()
+        .map(|v| string_from_value(*v))
+        .unwrap_or_default();
+    let s = input;
+    let char_len = s.chars().count();
+    let flags = unsafe { RegExp::flags(regexp_ptr) };
+    let global = unsafe { RegExp::has_flag(regexp_ptr, 0) };
+    let sticky = unsafe { RegExp::has_flag(regexp_ptr, 5) };
+
+    // ToLength(lastIndex) is observable even for non-global regexps.
+    let last_index = match to_number_sync(gc, vm, regexp_last_index_value(regexp_ptr)) {
+        Ok(n) => n,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let last = if global || sticky {
+        if last_index.is_nan() || last_index <= 0.0 {
+            0usize
+        } else {
+            last_index as usize
+        }
     } else {
-        Value::boolean(true)
+        0
+    };
+    if last > char_len {
+        if global || sticky {
+            regexp_set_last_index_value(gc, regexp_ptr, Value::smi(0));
+        }
+        return Value::boolean(false);
+    }
+    let pattern_ptr = unsafe { RegExp::pattern(regexp_ptr) };
+    let pattern = unsafe { HeapString::to_string(pattern_ptr as *mut HeapString) };
+    let Some(program) = rune_regex::cache::program(&pattern) else {
+        if global || sticky {
+            regexp_set_last_index_value(gc, regexp_ptr, Value::smi(0));
+        }
+        return Value::boolean(false);
+    };
+    match program.exec(&s, last, flags) {
+        Some(m) => {
+            let (start, end) = m.groups[0];
+            if sticky && start != last {
+                regexp_set_last_index_value(gc, regexp_ptr, Value::smi(0));
+                return Value::boolean(false);
+            }
+            if global || sticky {
+                regexp_set_last_index_value(gc, regexp_ptr, Value::smi(end as i32));
+            }
+            Value::boolean(true)
+        }
+        None => {
+            if global || sticky {
+                regexp_set_last_index_value(gc, regexp_ptr, Value::smi(0));
+            }
+            Value::boolean(false)
+        }
     }
 }
 

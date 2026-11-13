@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::nfa::{Edge, Nfa};
 
 pub struct PikeVm;
@@ -24,6 +26,64 @@ impl Default for PikeVm {
     }
 }
 
+/// Collect the consuming edges reachable from the start without consuming.
+/// `None` means no safe filter (empty match possible or data-dependent edge).
+fn first_edges(nfa: &Nfa) -> Option<Vec<Edge>> {
+    let mut out = Vec::new();
+    let mut seen = vec![false; nfa.states.len()];
+    let mut stack = vec![nfa.start];
+    while let Some(pc) = stack.pop() {
+        if seen[pc] {
+            continue;
+        }
+        seen[pc] = true;
+        let state = &nfa.states[pc];
+        if state.is_match {
+            return None;
+        }
+        for edge in &state.edges {
+            match edge {
+                Edge::Char(..) | Edge::CharClass { .. } | Edge::Dot(..) => out.push(edge.clone()),
+                Edge::Save(_, t) | Edge::Epsilon(t) | Edge::Clear { target: t, .. } => {
+                    stack.push(*t)
+                }
+                Edge::WordBoundary { target, .. } => stack.push(*target),
+                Edge::AnchorStart(t) | Edge::AnchorEnd(t) => stack.push(*t),
+                Edge::Lookahead { target, .. } => stack.push(*target),
+                Edge::Backref { .. } | Edge::BackrefMulti { .. } => return None,
+            }
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+fn first_edge_matches(edge: &Edge, c: char, flags: u32) -> bool {
+    match edge {
+        Edge::Char(ch, _) => {
+            if flags & 2 != 0 {
+                ch.eq_ignore_ascii_case(&c)
+            } else {
+                *ch == c
+            }
+        }
+        Edge::CharClass {
+            negated, ranges, ..
+        } => {
+            let mut inside = ranges.iter().any(|(lo, hi)| c >= *lo && c <= *hi);
+            if flags & 2 != 0 && !inside {
+                let lower = c.to_ascii_lowercase();
+                let upper = c.to_ascii_uppercase();
+                inside = ranges
+                    .iter()
+                    .any(|(lo, hi)| lower >= *lo && lower <= *hi || upper >= *lo && upper <= *hi);
+            }
+            *negated != inside
+        }
+        Edge::Dot(_) => flags & 8 != 0 || c != '\n',
+        _ => true,
+    }
+}
+
 impl PikeVm {
     pub fn new() -> Self {
         PikeVm
@@ -41,24 +101,70 @@ impl PikeVm {
         flags: u32,
     ) -> Option<Match> {
         let chars: Vec<char> = text.chars().collect();
+        let mut char_bytes = Vec::with_capacity(chars.len() + 1);
+        let mut byte_pos = 0usize;
+        for c in &chars {
+            char_bytes.push(byte_pos);
+            byte_pos += c.len_utf8();
+        }
+        char_bytes.push(byte_pos);
+        // Callers pass byte offsets (JS string indices in Rune's UTF-8 model).
+        let start = if start == 0 {
+            0
+        } else {
+            let b = start.min(text.len());
+            let mut boundary = b;
+            while boundary > 0 && !text.is_char_boundary(boundary) {
+                boundary -= 1;
+            }
+            text[..boundary].chars().count()
+        };
         if start > chars.len() {
             return None;
         }
 
         let num_slots = (nfa.num_captures + 1) * 2;
 
-        // Leftmost start loop — try each position as match start (ECMAScript leftmost)
-        for pos in start..=chars.len() {
+        // Leftmost start loop — try each position as match start (ECMAScript leftmost).
+        // A leading ^ can only match at position 0.
+        let anchored = nfa.anchored_start && flags & 4 == 0;
+        let end_pos = if anchored { 0 } else { chars.len() };
+        if anchored && start > 0 {
+            return None;
+        }
+        let first = first_edges(nfa);
+        for pos in start..=end_pos {
+            if let Some(edges) = &first {
+                if pos < chars.len()
+                    && !edges
+                        .iter()
+                        .any(|e| first_edge_matches(e, chars[pos], flags))
+                {
+                    continue;
+                }
+            }
             let remaining = chars.len() - pos;
-            // queues[offset] = threads that are at absolute pos = pos+offset and are ready to be expanded
-            let mut queues: Vec<Vec<Thread>> = vec![Vec::new(); remaining + 1];
-            add_thread(&mut queues[0], nfa, nfa.start, &vec![None; num_slots]);
+            // Sparse queues: only offsets that actually received a thread are
+            // allocated. Dense queues made a failing scan O(n^2) memory.
+            let mut queues: HashMap<usize, Vec<Thread>> = HashMap::new();
+            queues.entry(0).or_default();
+            add_thread(
+                queues.get_mut(&0).unwrap(),
+                nfa,
+                nfa.start,
+                &vec![None; num_slots],
+            );
             let mut longest: Option<Match> = None;
 
-            for offset in 0..queues.len() {
+            let mut offset = 0usize;
+            while offset <= remaining {
                 let cur_pos = pos + offset;
-                let cur_threads = std::mem::take(&mut queues[offset]);
+                let cur_threads = queues.remove(&offset).unwrap_or_default();
                 if cur_threads.is_empty() {
+                    if queues.is_empty() {
+                        break;
+                    }
+                    offset += 1;
                     continue;
                 }
                 let expanded = follow_nonconsuming(&cur_threads, nfa, cur_pos, &chars, flags);
@@ -89,7 +195,12 @@ impl PikeVm {
                                     *ch == c
                                 };
                                 if eq {
-                                    add_thread(&mut queues[offset + 1], nfa, *target, &t.saves);
+                                    add_thread(
+                                        queues.entry(offset + 1).or_default(),
+                                        nfa,
+                                        *target,
+                                        &t.saves,
+                                    );
                                 }
                             }
                             Edge::CharClass {
@@ -108,12 +219,22 @@ impl PikeVm {
                                     });
                                 }
                                 if *negated != in_class {
-                                    add_thread(&mut queues[offset + 1], nfa, *target, &t.saves);
+                                    add_thread(
+                                        queues.entry(offset + 1).or_default(),
+                                        nfa,
+                                        *target,
+                                        &t.saves,
+                                    );
                                 }
                             }
                             Edge::Dot(target) => {
                                 if flags & 8 != 0 || c != '\n' {
-                                    add_thread(&mut queues[offset + 1], nfa, *target, &t.saves);
+                                    add_thread(
+                                        queues.entry(offset + 1).or_default(),
+                                        nfa,
+                                        *target,
+                                        &t.saves,
+                                    );
                                 }
                             }
                             Edge::Backref { index, target } => {
@@ -149,9 +270,9 @@ impl PikeVm {
                                             }
                                             if ok {
                                                 // Enqueue after consuming cap_len chars
-                                                if offset + cap_len < queues.len() {
+                                                if offset + cap_len <= remaining {
                                                     add_thread(
-                                                        &mut queues[offset + cap_len],
+                                                        queues.entry(offset + cap_len).or_default(),
                                                         nfa,
                                                         *target,
                                                         &t.saves,
@@ -195,9 +316,9 @@ impl PikeVm {
                                         }
                                     }
                                     if ok {
-                                        if offset + cap_len < queues.len() {
+                                        if offset + cap_len <= remaining {
                                             add_thread(
-                                                &mut queues[offset + cap_len],
+                                                queues.entry(offset + cap_len).or_default(),
                                                 nfa,
                                                 *target,
                                                 &t.saves,
@@ -211,8 +332,15 @@ impl PikeVm {
                         }
                     }
                 }
+                offset += 1;
             }
-            if let Some(m) = longest {
+            if let Some(mut m) = longest {
+                for group in m.groups.iter_mut() {
+                    if group.0 != usize::MAX {
+                        group.0 = char_bytes[group.0];
+                        group.1 = char_bytes[group.1];
+                    }
+                }
                 return Some(m);
             }
         }

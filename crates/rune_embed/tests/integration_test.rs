@@ -16931,3 +16931,25 @@ fn test_string_search_methods_and_symbol_accessors() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_regexp_unicode_properties_and_flags() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            [
+                /\p{Letter}/u.test("A"),
+                /\P{Letter}/u.test("1"),
+                /\p{Script=Greek}/u.test("\u03B1"),
+                /^\s+$/u.test("\u00A0"),
+                /^\d/v.test("5"),
+                /a{2,}?/.test("aa"),
+                new RegExp("b{9007199254740991}").test("b") === false,
+                /\u{1F600}/u.exec("\u{1F600}")[0] === "\u{1F600}"
+            ].join("|") === "true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

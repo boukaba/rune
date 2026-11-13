@@ -937,6 +937,7 @@ dependencies = [
 name = "rune_regex"
 version = "0.1.0"
 dependencies = [
+ "regex-syntax",
  "rune_core",
  "tracing",
 ]

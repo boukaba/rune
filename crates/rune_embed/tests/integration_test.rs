@@ -16091,3 +16091,32 @@ fn test_collection_constructor_adder_and_live_foreach() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_reflect_construct_and_apply() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            function F(x) { this.x = x; }
+            var a = Reflect.construct(F, [5]);
+            function ReturnsObject() { return { y: 2 }; }
+            var b = Reflect.construct(ReturnsObject, []);
+            function NewTarget() {}
+            var c = Reflect.construct(F, [7], NewTarget);
+            var applied = Reflect.apply(function (x, y) { return this.k + x + y; }, { k: 1 }, [2, 3]);
+            [
+                typeof Reflect === "object",
+                typeof Reflect.construct === "function",
+                Reflect.construct.length === 2,
+                a.x === 5 && a instanceof F,
+                b.y === 2,
+                Object.getPrototypeOf(c) === NewTarget.prototype,
+                applied === 6,
+                Reflect.apply.length === 3
+            ].join("|") === "true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

@@ -2187,6 +2187,27 @@ Integration suite: **849 passed, 0 failed, 3 ignored**.
 
 Integration suite: **850 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Reflect.construct / Reflect.apply (2026-11-13)
+
+- Added a `Reflect` namespace with `construct` and `apply`:
+  - `Reflect.construct(target, argsList[, newTarget])` validates both as
+    constructors, reads an array-like argument list, runs the constructor
+    through a new `Vm::construct_value_sync` nested loop, and applies
+    `newTarget.prototype` to the result;
+  - `Reflect.apply(target, thisArg, argsList)` with callable validation and
+    sync invocation.
+- `construct_value_sync` substitutes the constructed `this` when the body
+  returns a primitive (New-semantics leniency).
+- Test262: Map `is-a-constructor` and Set `is-a-constructor` now pass; Map
+  **195 → 196/204**, Set **191 → 192/383**.
+- Regression: `test_reflect_construct_and_apply`.
+- Negative: mirroring all builtin wrappers onto `globalThis` overflowed the
+  reserved global-object slot capacity and did not fix `verifyProperty`
+  writable checks (global assignment still routes through the globals map), so
+  that experiment was reverted.
+
+Integration suite: **851 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

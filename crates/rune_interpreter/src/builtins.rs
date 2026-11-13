@@ -3432,6 +3432,134 @@ pub fn map_set_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
     this
 }
 
+/// Reflect.construct(target, argumentsList[, newTarget]).
+pub fn reflect_construct(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let target = args.first().copied().unwrap_or(Value::undefined());
+    if !crate::vm::value_is_constructor(vm, target) {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Reflect.construct target is not a constructor",
+        ));
+        return Value::undefined();
+    }
+    let new_target = args.get(2).copied().unwrap_or(target);
+    if !crate::vm::value_is_constructor(vm, new_target) {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Reflect.construct newTarget is not a constructor",
+        ));
+        return Value::undefined();
+    }
+    let list = args.get(1).copied().unwrap_or(Value::undefined());
+    let len = crate::vm::array_like_length(list).unwrap_or(0) as usize;
+    let mut call_args = Vec::with_capacity(len);
+    for i in 0..len {
+        call_args.push(crate::vm::array_like_index(list, i as u32).unwrap_or(Value::undefined()));
+    }
+    let result = if let Some(ptr) = target.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_FUNC {
+            match vm.construct_value_sync(gc, target, call_args) {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            }
+        } else if target == vm.map_constructor {
+            let map = RuneMap::allocate(
+                gc,
+                vm.map_prototype.heap_ptr().unwrap_or(std::ptr::null_mut()),
+            );
+            let map_val = Value::from_heap_ptr(map);
+            let outcome = fill_collection_sync(gc, vm, map_val, list, true);
+            match outcome {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            }
+        } else if target == vm.set_constructor {
+            let set = RuneSet::allocate(
+                gc,
+                vm.set_prototype.heap_ptr().unwrap_or(std::ptr::null_mut()),
+            );
+            let set_val = Value::from_heap_ptr(set);
+            match fill_collection_sync(gc, vm, set_val, list, false) {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            }
+        } else {
+            match vm.construct_value_sync(gc, target, call_args) {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            }
+        }
+    } else {
+        match vm.construct_value_sync(gc, target, call_args) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
+    };
+    // OrdinaryCreateFromConstructor(newTarget): use newTarget.prototype when
+    // it is an object.
+    if result.is_heap_object() {
+        let proto_key = Value::from_heap_ptr(HeapString::allocate(gc, "prototype") as *mut u8);
+        let proto = load_property_recursive(new_target, proto_key, Some(vm.function_prototype), gc);
+        if let Some(pp) = proto.heap_ptr() {
+            unsafe {
+                JSObject::set_prototype(result.heap_ptr().unwrap() as *mut JSObject, pp);
+            }
+        }
+    }
+    result
+}
+
+/// Reflect.apply(target, thisArgument, argumentsList).
+pub fn reflect_apply(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let target = args.first().copied().unwrap_or(Value::undefined());
+    let callable = target
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC)
+        || target.as_smi().is_some_and(|s| s < 0);
+    if !callable {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Reflect.apply target is not callable",
+        ));
+        return Value::undefined();
+    }
+    let this_arg = args.get(1).copied().unwrap_or(Value::undefined());
+    let list = args.get(2).copied().unwrap_or(Value::undefined());
+    let len = crate::vm::array_like_length(list).unwrap_or(0) as usize;
+    let mut call_args = Vec::with_capacity(len);
+    for i in 0..len {
+        call_args.push(crate::vm::array_like_index(list, i as u32).unwrap_or(Value::undefined()));
+    }
+    match vm.call_value_sync(gc, target, this_arg, &call_args) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            Value::undefined()
+        }
+    }
+}
+
 /// Map/Set [@@species] getter: returns the receiver.
 pub fn collection_species_get(
     _gc: &mut SemiSpace,
@@ -23515,6 +23643,16 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 2,
             name: "Map_prototype_set",
             func: map_set_builtin,
+        },
+        Builtin {
+            length: 2,
+            name: "Reflect_construct",
+            func: reflect_construct,
+        },
+        Builtin {
+            length: 3,
+            name: "Reflect_apply",
+            func: reflect_apply,
         },
         Builtin {
             length: 0,

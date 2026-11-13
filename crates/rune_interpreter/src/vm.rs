@@ -2912,6 +2912,30 @@ impl Vm {
             self.builtin_wrappers.insert("JSON".to_string(), json_obj);
         }
 
+        // Reflect namespace
+        {
+            let mut reflect_entries: Vec<(&str, Value)> = Vec::new();
+            for (name, handle) in [
+                ("construct", "Reflect_construct"),
+                ("apply", "Reflect_apply"),
+            ] {
+                if let Some(h) = find_handle(&self.builtins, handle) {
+                    reflect_entries.push((name, h));
+                }
+            }
+            let reflect_obj = make_object(gc, &reflect_entries);
+            unsafe {
+                if let Some(proto) = self.object_prototype.heap_ptr() {
+                    JSObject::set_prototype(
+                        reflect_obj.heap_ptr().unwrap() as *mut JSObject,
+                        proto,
+                    );
+                }
+            }
+            self.builtin_wrappers
+                .insert("Reflect".to_string(), reflect_obj);
+        }
+
         // console namespace: log/error and the usual aliases.
         if let Some(log_handle) = find_handle(&self.builtins, "console_log") {
             let mut console_entries: Vec<(&str, Value)> = vec![("log", log_handle)];
@@ -5193,6 +5217,62 @@ impl Vm {
                 crate::errors::ErrorKind::TypeError,
                 "unexpected yield during synchronous call",
             )),
+        }
+    }
+
+    /// Reflect.construct for user functions: push the constructor frame,
+    /// run a nested interpreter loop scoped by `return_frame_floor`, and map
+    /// the exit to a result/exception.
+    pub(crate) fn construct_value_sync(
+        &mut self,
+        gc: &mut SemiSpace,
+        ctor: Value,
+        args: Vec<Value>,
+    ) -> Result<Value, Value> {
+        match self.push_construct_frame(gc, ctor, args) {
+            ConstructOut::Done(v) => Ok(v),
+            ConstructOut::Fail(e) => Err(e),
+            ConstructOut::Pushed(this_val) => {
+                let floor = self.frames.len() - 1;
+                let base = self.stack.len();
+                let this_slot = self.temp_roots.len();
+                self.temp_roots.push(this_val);
+                let saved_floor = self.return_frame_floor;
+                let saved_stack_floor = self.return_stack_floor;
+                self.return_frame_floor = floor;
+                self.return_stack_floor = Some(base);
+                let saved_assert = self.pending_assert.take();
+                let exit = self.run_loop(gc);
+                self.pending_assert = saved_assert;
+                self.return_frame_floor = saved_floor;
+                self.return_stack_floor = saved_stack_floor;
+                self.frames.truncate(floor);
+                self.stack.truncate(base);
+                match exit {
+                    Exit::Return(v) => {
+                        let v = if v.is_heap_object() {
+                            v
+                        } else {
+                            self.temp_roots[this_slot]
+                        };
+                        self.temp_roots.truncate(this_slot);
+                        Ok(v)
+                    }
+                    Exit::Throw(e) => {
+                        self.temp_roots.truncate(this_slot);
+                        Err(e)
+                    }
+                    Exit::Yield(_) => {
+                        self.temp_roots.truncate(this_slot);
+                        Err(crate::errors::error_object(
+                            gc,
+                            &self.error_protos,
+                            crate::errors::ErrorKind::TypeError,
+                            "unexpected yield during construction",
+                        ))
+                    }
+                }
+            }
         }
     }
 

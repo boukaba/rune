@@ -8185,6 +8185,69 @@ fn object_own_entries(
 }
 
 /// Object.groupBy(items, callbackfn) — §20.1.2.13.
+fn finish_grouped_object(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    groups: &std::collections::HashMap<String, Vec<usize>>,
+    keys: &[String],
+    root_base: usize,
+) -> Value {
+    let mut numeric: Vec<String> = keys
+        .iter()
+        .filter(|k| k.parse::<u64>().is_ok())
+        .cloned()
+        .collect();
+    numeric.sort_by_key(|k| k.parse::<u64>().unwrap());
+    let mut sorted = numeric;
+    for k in keys {
+        if k.parse::<u64>().is_err() {
+            sorted.push(k.clone());
+        }
+    }
+    let group = JSObject::allocate(gc, Shape::empty(), &[]);
+    let group_val = Value::from_heap_ptr(group as *mut u8);
+    let gslot = vm.temp_roots.len();
+    vm.temp_roots.push(group_val);
+    for key in sorted {
+        let indices = groups.get(&key).cloned().unwrap_or_default();
+        let arr = RuneArray::allocate(gc, &[]);
+        unsafe {
+            let aptr = arr as *mut u8;
+            *(aptr.add(8) as *mut *const Shape) = *DENSE_ARRAY_SHAPE as *const Shape;
+            if let Some(proto) = vm.array_prototype.heap_ptr() {
+                *(aptr.add(24) as *mut *mut u8) = proto;
+            }
+        }
+        let aslot = vm.temp_roots.len();
+        vm.temp_roots.push(Value::from_heap_ptr(arr as *mut u8));
+        for idx in indices {
+            let value = vm.temp_roots[idx];
+            let arr_ptr = unsafe {
+                rune_core::gc::resolve_forwarded(vm.temp_roots[aslot].heap_ptr().unwrap())
+            } as *mut RuneArray;
+            let new_arr = unsafe { RuneArray::push(gc, arr_ptr, value) };
+            vm.temp_roots[aslot] = Value::from_heap_ptr(new_arr as *mut u8);
+        }
+        let group_live = unsafe {
+            rune_core::gc::resolve_forwarded(vm.temp_roots[gslot].heap_ptr().unwrap())
+                as *mut JSObject
+        };
+        unsafe {
+            JSObject::add_property_with_attrs(
+                group_live,
+                PropertyKey::from_string(&key),
+                key.clone(),
+                vm.temp_roots[aslot],
+                rune_core::shape::ATTR_DEFAULT,
+            );
+        }
+        vm.temp_roots.truncate(aslot);
+    }
+    let result = vm.temp_roots[gslot];
+    vm.temp_roots.truncate(root_base);
+    result
+}
+
 pub fn object_group_by(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let items = args.first().copied().unwrap_or(Value::undefined());
     let callback = args.get(1).copied().unwrap_or(Value::undefined());
@@ -8240,8 +8303,6 @@ pub fn object_group_by(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mu
             }
         };
         if prim.as_symbol_id().is_some() {
-            // Symbol keys are valid group keys; stringify for the grouping map
-            // would collapse identity, so keep a description-like unique name.
             let s = format!("@@symbol:{}", prim.as_symbol_id().unwrap());
             add_value(vm, s, value);
         } else {
@@ -8249,9 +8310,9 @@ pub fn object_group_by(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mu
         }
         true
     };
+    // Strings iterate by code point (§22.1.5.2.1).
     if let Some(ptr) = items.heap_ptr() {
-        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-        if tag == TAG_STRING {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_STRING {
             let text = unsafe { HeapString::to_string(ptr as *mut HeapString) };
             for (i, ch) in text.chars().enumerate() {
                 let value =
@@ -8260,51 +8321,64 @@ pub fn object_group_by(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mu
                     return Value::undefined();
                 }
             }
-            let mut sorted = keys.clone();
-            sorted.sort_by_key(|k| k.parse::<u64>().ok());
-            let group = JSObject::allocate(gc, Shape::empty(), &[]);
-            let group_val = Value::from_heap_ptr(group as *mut u8);
-            let gslot = vm.temp_roots.len();
-            vm.temp_roots.push(group_val);
-            for key in sorted {
-                let indices = groups.get(&key).cloned().unwrap_or_default();
-                let arr = RuneArray::allocate(gc, &[]);
-                unsafe {
-                    let aptr = arr as *mut u8;
-                    *(aptr.add(8) as *mut *const Shape) = *DENSE_ARRAY_SHAPE as *const Shape;
-                    if let Some(proto) = vm.array_prototype.heap_ptr() {
-                        *(aptr.add(24) as *mut *mut u8) = proto;
-                    }
-                }
-                let aslot = vm.temp_roots.len();
-                vm.temp_roots.push(Value::from_heap_ptr(arr as *mut u8));
-                for idx in indices {
-                    let value = vm.temp_roots[idx];
-                    let arr_ptr = unsafe {
-                        rune_core::gc::resolve_forwarded(vm.temp_roots[aslot].heap_ptr().unwrap())
-                    } as *mut RuneArray;
-                    let new_arr = unsafe { RuneArray::push(gc, arr_ptr, value) };
-                    vm.temp_roots[aslot] = Value::from_heap_ptr(new_arr as *mut u8);
-                }
-                let group_live = unsafe {
-                    rune_core::gc::resolve_forwarded(vm.temp_roots[gslot].heap_ptr().unwrap())
-                        as *mut JSObject
-                };
-                unsafe {
-                    JSObject::add_property_with_attrs(
-                        group_live,
-                        PropertyKey::from_string(&key),
-                        key.clone(),
-                        vm.temp_roots[aslot],
-                        rune_core::shape::ATTR_DEFAULT,
-                    );
-                }
-                vm.temp_roots.truncate(aslot);
-            }
-            let result = vm.temp_roots[gslot];
-            vm.temp_roots.truncate(root_base);
-            return result;
+            return finish_grouped_object(gc, vm, &groups, &keys, root_base);
         }
+    }
+    // Prefer the iterator protocol for any other object.
+    match get_iter_method(vm, gc, items) {
+        SymbolMethodResult::Found(method) => {
+            let iterator = match vm.call_value_sync(gc, method, items, &[]) {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.temp_roots.truncate(root_base);
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            };
+            let islot = vm.temp_roots.len();
+            vm.temp_roots.push(iterator);
+            let mut index = 0usize;
+            loop {
+                let iter = vm.temp_roots[islot];
+                let next_key = Value::from_heap_ptr(HeapString::allocate(gc, "next") as *mut u8);
+                let next = load_property_recursive(iter, next_key, Some(vm.function_prototype), gc);
+                let result = match vm.call_value_sync(gc, next, iter, &[]) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        vm.temp_roots.truncate(root_base);
+                        vm.set_pending_exception(e);
+                        return Value::undefined();
+                    }
+                };
+                let done_key = Value::from_heap_ptr(HeapString::allocate(gc, "done") as *mut u8);
+                let done =
+                    load_property_recursive(result, done_key, Some(vm.function_prototype), gc)
+                        .to_boolean()
+                        .unwrap_or(false);
+                if done {
+                    break;
+                }
+                let value_key = Value::from_heap_ptr(HeapString::allocate(gc, "value") as *mut u8);
+                let value =
+                    load_property_recursive(result, value_key, Some(vm.function_prototype), gc);
+                if !call_for(gc, vm, value, index) {
+                    return Value::undefined();
+                }
+                index += 1;
+            }
+            return finish_grouped_object(gc, vm, &groups, &keys, root_base);
+        }
+        SymbolMethodResult::NotCallable => {
+            vm.temp_roots.truncate(root_base);
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Object.groupBy requires an iterable",
+            ));
+            return Value::undefined();
+        }
+        SymbolMethodResult::NotFound => {}
     }
     let Some(len) = crate::vm::array_like_length(items) else {
         vm.temp_roots.truncate(root_base);
@@ -8323,63 +8397,10 @@ pub fn object_group_by(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mu
             return Value::undefined();
         }
     }
-    let mut numeric: Vec<String> = keys
-        .iter()
-        .filter(|k| k.parse::<u64>().is_ok())
-        .cloned()
-        .collect();
-    numeric.sort_by_key(|k| k.parse::<u64>().unwrap());
-    let mut sorted = numeric;
-    for k in &keys {
-        if k.parse::<u64>().is_err() {
-            sorted.push(k.clone());
-        }
-    }
-    let group = JSObject::allocate(gc, Shape::empty(), &[]);
-    let group_val = Value::from_heap_ptr(group as *mut u8);
-    let gslot = vm.temp_roots.len();
-    vm.temp_roots.push(group_val);
-    for key in sorted {
-        let indices = groups.get(&key).cloned().unwrap_or_default();
-        let arr = RuneArray::allocate(gc, &[]);
-        unsafe {
-            let aptr = arr as *mut u8;
-            *(aptr.add(8) as *mut *const Shape) = *DENSE_ARRAY_SHAPE as *const Shape;
-            if let Some(proto) = vm.array_prototype.heap_ptr() {
-                *(aptr.add(24) as *mut *mut u8) = proto;
-            }
-        }
-        let aslot = vm.temp_roots.len();
-        vm.temp_roots.push(Value::from_heap_ptr(arr as *mut u8));
-        for idx in indices {
-            let value = vm.temp_roots[idx];
-            let arr_ptr = unsafe {
-                rune_core::gc::resolve_forwarded(vm.temp_roots[aslot].heap_ptr().unwrap())
-            } as *mut RuneArray;
-            let new_arr = unsafe { RuneArray::push(gc, arr_ptr, value) };
-            vm.temp_roots[aslot] = Value::from_heap_ptr(new_arr as *mut u8);
-        }
-        let group_live = unsafe {
-            rune_core::gc::resolve_forwarded(vm.temp_roots[gslot].heap_ptr().unwrap())
-                as *mut JSObject
-        };
-        unsafe {
-            JSObject::add_property_with_attrs(
-                group_live,
-                PropertyKey::from_string(&key),
-                key.clone(),
-                vm.temp_roots[aslot],
-                rune_core::shape::ATTR_DEFAULT,
-            );
-        }
-        vm.temp_roots.truncate(aslot);
-    }
-    let result = vm.temp_roots[gslot];
-    vm.temp_roots.truncate(root_base);
-    result
+    finish_grouped_object(gc, vm, &groups, &keys, root_base)
 }
 
-/// Object.fromEntries(iterable)/// Object.fromEntries(iterable) — §20.1.2.7. Sync-only: accepts an array of
+/// Object.fromEntries(iterable)/// Object.fromEntries(iterable)/// Object.fromEntries(iterable) — §20.1.2.7. Sync-only: accepts an array of
 /// [key, value] pairs (general iterables drain via JS callbacks and are not
 /// supported inside sync builtins — documented gap).
 pub fn object_from_entries(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
@@ -8393,7 +8414,6 @@ pub fn object_from_entries(gc: &mut SemiSpace, _this: Value, args: &[Value], vm:
         ));
         return Value::undefined();
     }
-    // Step 2: fresh ordinary object
     let shape = Shape::empty();
     let obj_ptr = JSObject::allocate(gc, shape, &[]);
     unsafe {
@@ -8402,48 +8422,137 @@ pub fn object_from_entries(gc: &mut SemiSpace, _this: Value, args: &[Value], vm:
         }
     }
     let obj = Value::from_heap_ptr(obj_ptr as *mut u8);
-    // AddEntriesFromIterable — array-of-pairs support only
-    if let Some(ptr) = iterable.heap_ptr() {
-        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-        if tag == TAG_ARRAY {
-            let len = unsafe { RuneArray::length(ptr as *mut RuneArray) };
-            for i in 0..len {
-                let entry = crate::vm::array_like_index(iterable, i).unwrap_or(Value::undefined());
-                let key_v = crate::vm::array_like_index(entry, 0).unwrap_or(Value::undefined());
-                let val_v = crate::vm::array_like_index(entry, 1).unwrap_or(Value::undefined());
-                // ToPropertyKey(key): strings direct, numbers ToString'd
-                let key_str = match key_v.as_smi() {
-                    Some(n) => n.to_string(),
-                    None => {
-                        if let Some(f) = key_v.as_float64() {
-                            f.to_string()
-                        } else if let Some(kp) = key_v.heap_ptr() {
-                            let ktag = unsafe { (*(kp as *const GcHeader)).tag() };
-                            if ktag == TAG_STRING {
-                                unsafe { HeapString::to_string(kp as *mut HeapString) }
-                            } else {
-                                continue;
-                            }
-                        } else {
-                            continue;
-                        }
-                    }
-                };
+    let root_base = vm.temp_roots.len();
+    vm.temp_roots.push(obj);
+    let add_entry =
+        |gc: &mut SemiSpace, vm: &mut Vm, obj_slot: usize, entry: Value| -> Result<(), Value> {
+            if entry.heap_ptr().is_none() {
+                return Err(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "Iterator value is not an entry object",
+                ));
+            }
+            let zero = Value::from_heap_ptr(HeapString::allocate(gc, "0") as *mut u8);
+            let one = Value::from_heap_ptr(HeapString::allocate(gc, "1") as *mut u8);
+            let key_v = load_property_recursive(entry, zero, Some(vm.function_prototype), gc);
+            let val_v = load_property_recursive(entry, one, Some(vm.function_prototype), gc);
+            let prim = if key_v.as_symbol_id().is_some() {
+                key_v
+            } else {
+                to_primitive_sync(gc, vm, key_v, "string")?
+            };
+            let obj_live = unsafe {
+                rune_core::gc::resolve_forwarded(vm.temp_roots[obj_slot].heap_ptr().unwrap())
+                    as *mut JSObject
+            };
+            let (pk, key_name) = if let Some(id) = prim.as_symbol_id() {
+                (PropertyKey::from_symbol(id), String::new())
+            } else {
+                let key_str = value_to_js_string(prim);
+                (PropertyKey::from_string(&key_str), key_str)
+            };
+            let shape = unsafe { JSObject::shape_ptr(obj_live) };
+            if let Some(slot) = shape.lookup(&pk) {
+                unsafe { JSObject::set_slot(obj_live, slot, val_v) };
+            } else {
                 unsafe {
-                    JSObject::add_property(
-                        obj_ptr,
-                        PropertyKey::from_string(&key_str),
-                        key_str,
+                    JSObject::add_property_with_attrs(
+                        obj_live,
+                        pk,
+                        key_name,
                         val_v,
+                        rune_core::shape::ATTR_DEFAULT,
                     );
                 }
             }
+            Ok(())
+        };
+    let method = match get_iter_method(vm, gc, iterable) {
+        SymbolMethodResult::Found(m) => m,
+        SymbolMethodResult::NotCallable => {
+            vm.temp_roots.truncate(root_base);
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Object.fromEntries requires an iterable",
+            ));
+            return Value::undefined();
+        }
+        SymbolMethodResult::NotFound => {
+            // Fall back to the array-like path for legacy arrays.
+            if let Some(ptr) = iterable.heap_ptr() {
+                if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_ARRAY {
+                    let len = unsafe { RuneArray::length(ptr as *mut RuneArray) };
+                    for i in 0..len {
+                        let entry =
+                            crate::vm::array_like_index(iterable, i).unwrap_or(Value::undefined());
+                        if let Err(e) = add_entry(gc, vm, root_base, entry) {
+                            vm.temp_roots.truncate(root_base);
+                            vm.set_pending_exception(e);
+                            return Value::undefined();
+                        }
+                    }
+                    let out = vm.temp_roots[root_base];
+                    vm.temp_roots.truncate(root_base);
+                    return out;
+                }
+            }
+            vm.temp_roots.truncate(root_base);
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Object.fromEntries requires an iterable",
+            ));
+            return Value::undefined();
+        }
+    };
+    let iterator = match vm.call_value_sync(gc, method, iterable, &[]) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.temp_roots.truncate(root_base);
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let islot = vm.temp_roots.len();
+    vm.temp_roots.push(iterator);
+    loop {
+        let iter = vm.temp_roots[islot];
+        let next_key = Value::from_heap_ptr(HeapString::allocate(gc, "next") as *mut u8);
+        let next = load_property_recursive(iter, next_key, Some(vm.function_prototype), gc);
+        let result = match vm.call_value_sync(gc, next, iter, &[]) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.temp_roots.truncate(root_base);
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        };
+        let done_key = Value::from_heap_ptr(HeapString::allocate(gc, "done") as *mut u8);
+        let done = load_property_recursive(result, done_key, Some(vm.function_prototype), gc)
+            .to_boolean()
+            .unwrap_or(false);
+        if done {
+            break;
+        }
+        let value_key = Value::from_heap_ptr(HeapString::allocate(gc, "value") as *mut u8);
+        let entry = load_property_recursive(result, value_key, Some(vm.function_prototype), gc);
+        if let Err(e) = add_entry(gc, vm, root_base, entry) {
+            vm.temp_roots.truncate(root_base);
+            vm.set_pending_exception(e);
+            return Value::undefined();
         }
     }
-    obj
+    let out = vm.temp_roots[root_base];
+    vm.temp_roots.truncate(root_base);
+    out
 }
 
-/// Object.hasOwn(obj, key) — §20.1.2.14: HasOwnProperty after ToObject.
+/// Object.hasOwn(obj, key)/// Object.hasOwn(obj, key) — §20.1.2.14: HasOwnProperty after ToObject.
 pub fn object_has_own(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let target = args.first().copied().unwrap_or(Value::undefined());
     if target.is_null() || target.is_undefined() {

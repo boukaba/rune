@@ -2047,6 +2047,23 @@ Integration suite: **841 passed, 0 failed, 3 ignored**.
 
 Integration suite: **842 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Iterable Object.fromEntries + groupBy iterators (2026-11-13)
+
+- `Object.fromEntries` now drains the iterator protocol through
+  `call_value_sync` (arrays, Maps, Sets, generators), reads entry `"0"`/`"1"`
+  with ordinary Get, performs synchronous ToPropertyKey (including symbols),
+  roots the result object in `temp_roots`, and **overwrites duplicate keys**
+  instead of appending duplicate slots.
+- `Object.groupBy` now prefers the iterator protocol too (same sync drain),
+  keeping the array-like and code-point-string fallbacks.
+- Test262: `Object/fromEntries` **8 → 14/25**, Object **2629 → 2635/3411**.
+- Regression: `test_object_from_entries_iterables`.
+- Known gaps: IteratorClose on abrupt is not implemented, so the
+  `iterator-closed-*` and throwing-next `fromEntries` cases still fail;
+  `groupBy` remaining two failures are the same iterator/assert interaction.
+
+Integration suite: **843 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

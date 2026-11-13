@@ -15822,3 +15822,32 @@ fn test_object_group_by() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_object_from_entries_iterables() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var arr = Object.fromEntries([["a", 1], ["b", 2], ["b", 3]]);
+            var map = Object.fromEntries(new Map([["x", 7]]));
+            var sym = Symbol("s");
+            var symbolEntry = Object.fromEntries([[sym, 9]]);
+            function* gen() { yield ["g", 11]; }
+            var generated = Object.fromEntries(gen());
+            var keyed = Object.fromEntries([[
+                { [Symbol.toPrimitive]: function (hint) { return hint === "string" ? "k" : "bad"; } },
+                13
+            ]]);
+            [
+                arr.a === 1 && arr.b === 3,
+                map.x === 7,
+                symbolEntry[sym] === 9,
+                generated.g === 11,
+                keyed.k === 13
+            ].join("|") === "true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

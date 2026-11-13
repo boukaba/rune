@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Prototype constructor backrefs (2026-11-13)**: all built-in prototypes get `.constructor` (Object/Array/String/Number/Boolean/Symbol/Map/Set/Date/RegExp/Promise/Function/Error family); RegExp uses wrapper. String 454→**524/1223**, split 11→**78/120**, Object 1520→1529. Integration **795**.
 - **Top-level lexical capture (2026-11-13)**: top-level `let`/`const` now live in the script capture env when closures exist; TDZ through env sentinels; captured top-level const writes throw TypeError. **Function-local const writes are now enforced too**, and local/param shadowing no longer resolves through an ancestor env (per-iteration env depth preserved). Integration **794**. Block-shadow const analysis remains function-wide.
 - **Deferred thenable jobs (2026-11-13)**: `Promise.resolve(thenable)` queues the then call as a microtask (spec PromiseResolveThenableJob); throwing then rejects. Promise **359/703 (51.1%)**; integration **792**. Corrected the old sync expectation.
 - **Promise generic methods/self-resolution (2026-11-13)**: spec `catch` via `Invoke(then)` with primitive boxing, `then` non-Promise TypeError, generic non-callable `finally`, self-resolution TypeErrors. Promise **357/703 (50.8%)**; integration **791**.

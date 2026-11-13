@@ -1469,6 +1469,32 @@ impl Vm {
 
     /// Build pre-wired constructor objects (Object, etc.) in the GC heap.
     /// Must be called after all builtins are registered.
+    fn set_prototype_constructor(&mut self, gc: &mut SemiSpace, proto: Value, ctor: Value) {
+        let Some(proto_ptr) = proto.heap_ptr() else {
+            return;
+        };
+        let ctor_val = if let Some(ptr) = ctor.heap_ptr() {
+            Value::from_heap_ptr(unsafe { rune_core::gc::resolve_forwarded(ptr) })
+        } else if ctor.as_smi().is_some() {
+            ctor
+        } else {
+            return;
+        };
+        if unsafe { (*(proto_ptr as *const GcHeader)).tag() } != TAG_OBJECT {
+            return;
+        }
+        let key = PropertyKey::from_string("constructor");
+        let proto_obj = unsafe { rune_core::gc::resolve_forwarded(proto_ptr) } as *mut JSObject;
+        if let Some(slot) = unsafe { JSObject::shape_ptr(proto_obj) }.lookup(&key) {
+            unsafe { JSObject::set_slot(proto_obj, slot, ctor_val) };
+            return;
+        }
+        let live = self.ensure_object_capacity(gc, proto_obj);
+        unsafe {
+            JSObject::add_property(live, key, "constructor".to_string(), ctor_val);
+        }
+    }
+
     pub fn init_builtin_wrappers(&mut self, gc: &mut SemiSpace) {
         fn find_handle(builtins: &[Builtin], name: &str) -> Option<Value> {
             builtins
@@ -2961,6 +2987,47 @@ impl Vm {
                 }
             }
             self.callable_wrappers = wrappers;
+        }
+
+        // Built-in `prototype.constructor` back-references. Without these,
+        // `[].constructor === Array`, `new String("x").split().constructor`,
+        // and Sputnik-style identity checks fail.
+        let ctor_pairs: Vec<(Value, Value)> = vec![
+            (self.object_prototype, self.object_constructor),
+            (self.array_prototype, self.array_constructor),
+            (self.string_prototype, self.string_constructor),
+            (self.number_prototype, self.number_constructor),
+            (self.boolean_prototype, self.boolean_constructor),
+            (self.symbol_prototype, self.symbol_ctor),
+            (self.map_prototype, self.map_constructor),
+            (self.set_prototype, self.set_constructor),
+            (self.date_prototype, self.date_constructor),
+            (
+                self.regexp_prototype,
+                self.builtin_wrappers
+                    .get("RegExp")
+                    .copied()
+                    .unwrap_or(self.regexp_constructor),
+            ),
+            (self.promise_prototype, self.promise_constructor),
+            (
+                self.function_prototype,
+                self.builtin_wrappers
+                    .get("Function")
+                    .copied()
+                    .unwrap_or(Value::undefined()),
+            ),
+        ];
+        for (proto, ctor) in ctor_pairs {
+            self.set_prototype_constructor(gc, proto, ctor);
+        }
+        for (proto, ctor) in self
+            .error_protos
+            .clone()
+            .into_iter()
+            .zip(self.error_ctors.clone())
+        {
+            self.set_prototype_constructor(gc, proto, ctor);
         }
 
         // Global constants: NaN, Infinity, undefined

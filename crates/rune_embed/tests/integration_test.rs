@@ -14567,3 +14567,28 @@ fn test_function_local_const_captured_write_rejected() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_builtin_prototype_constructor_backrefs() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            [
+                [].constructor === Array,
+                "x".constructor === String,
+                ({}).constructor === Object,
+                (/x/).constructor === RegExp,
+                (new Map()).constructor === Map,
+                (new Set()).constructor === Set,
+                (new Date(0)).constructor === Date,
+                (function () {}).constructor === Function,
+                (new Error("x")).constructor === Error,
+                (new TypeError("x")).constructor === TypeError,
+                Promise.resolve(1).constructor === Promise
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

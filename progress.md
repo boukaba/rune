@@ -1147,6 +1147,22 @@ Integration suite: **794 passed, 0 failed, 3 ignored**; `rune_capi` **7 tests**.
 
 Integration suite: **794 passed, 0 failed, 3 ignored**; `rune_capi` **8 tests**.
 
+### Phase 2 — built-in prototype constructor back-references (2026-11-13)
+
+- Every reachable built-in prototype now has a `constructor` back-reference:
+  Object, Array, String, Number, Boolean, Symbol, Map, Set, Date, RegExp,
+  Promise, Function, and the Error family (including TypeError etc).
+- Existing `RegExp.prototype.constructor` (a bare builtin handle) is overwritten
+  with the callable `RegExp` wrapper so identity checks work.
+- Array/String test262 gains: String **524/1223 (was 454)**, Array
+  **2469/3081**, Object **1529/3411**; `String.prototype.split` jumped from
+  ~11 to **78/120**.
+- Regression: `test_builtin_prototype_constructor_backrefs`.
+- Note: prototype methods/constructor are still enumerable in Rune shapes
+  (pre-existing model; no `enumerable: false` metadata).
+
+Integration suite: **795 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

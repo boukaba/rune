@@ -274,6 +274,11 @@ a function. Integration suite: **754 passed, 0 failed, 3 ignored**.
 Known gaps in this slice: `new Bound(...)` constructor semantics and
 `bound.length`/`bound.name` metadata are not yet implemented.
 
+Current differential corpus status (55 everyday programs vs Node 22):
+**53/55 exact matches**. The two remaining diffs are both `console.log(-0)`
+formatting — Rune's `print` uses `String(-0) === "0"` per §7.1.12.1, while
+Node's console prints `-0`; neither is an engine semantics difference.
+
 Next: `Promise.race`/`allSettled`, then begin Phase 1 (runtime and stable
 layout work).
 

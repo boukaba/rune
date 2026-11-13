@@ -1590,6 +1590,9 @@ impl Vm {
             if let Some(h) = find_handle(&self.builtins, "Object_fromEntries") {
                 obj_entries.push(("fromEntries", h));
             }
+            if let Some(h) = find_handle(&self.builtins, "Object_groupBy") {
+                obj_entries.push(("groupBy", h));
+            }
             if let Some(h) = find_handle(&self.builtins, "Object_hasOwn") {
                 obj_entries.push(("hasOwn", h));
             }

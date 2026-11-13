@@ -8184,7 +8184,202 @@ fn object_own_entries(
     object_own_entries_mode(gc, val, vm, true)
 }
 
-/// Object.fromEntries(iterable) — §20.1.2.7. Sync-only: accepts an array of
+/// Object.groupBy(items, callbackfn) — §20.1.2.13.
+pub fn object_group_by(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let items = args.first().copied().unwrap_or(Value::undefined());
+    let callback = args.get(1).copied().unwrap_or(Value::undefined());
+    let callable = callback
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC)
+        || callback.as_smi().is_some_and(|s| s < 0);
+    if !callable {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Object.groupBy callback must be callable",
+        ));
+        return Value::undefined();
+    }
+    let mut keys: Vec<String> = Vec::new();
+    let mut groups: std::collections::HashMap<String, Vec<usize>> =
+        std::collections::HashMap::new();
+    let root_base = vm.temp_roots.len();
+    let mut add_value = |vm: &mut Vm, key: String, value: Value| {
+        let idx = vm.temp_roots.len();
+        vm.temp_roots.push(value);
+        if !groups.contains_key(&key) {
+            keys.push(key.clone());
+        }
+        groups.entry(key).or_default().push(idx);
+    };
+    let mut call_for = |gc: &mut SemiSpace, vm: &mut Vm, value: Value, index: usize| -> bool {
+        let result = match vm.call_value_sync(
+            gc,
+            callback,
+            Value::undefined(),
+            &[value, Value::smi(index as i32)],
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.temp_roots.truncate(root_base);
+                vm.set_pending_exception(e);
+                return false;
+            }
+        };
+        let prim = if result.as_symbol_id().is_some() {
+            result
+        } else {
+            match to_primitive_sync(gc, vm, result, "string") {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.temp_roots.truncate(root_base);
+                    vm.set_pending_exception(e);
+                    return false;
+                }
+            }
+        };
+        if prim.as_symbol_id().is_some() {
+            // Symbol keys are valid group keys; stringify for the grouping map
+            // would collapse identity, so keep a description-like unique name.
+            let s = format!("@@symbol:{}", prim.as_symbol_id().unwrap());
+            add_value(vm, s, value);
+        } else {
+            add_value(vm, value_to_js_string(prim), value);
+        }
+        true
+    };
+    if let Some(ptr) = items.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_STRING {
+            let text = unsafe { HeapString::to_string(ptr as *mut HeapString) };
+            for (i, ch) in text.chars().enumerate() {
+                let value =
+                    Value::from_heap_ptr(HeapString::allocate(gc, &ch.to_string()) as *mut u8);
+                if !call_for(gc, vm, value, i) {
+                    return Value::undefined();
+                }
+            }
+            let mut sorted = keys.clone();
+            sorted.sort_by_key(|k| k.parse::<u64>().ok());
+            let group = JSObject::allocate(gc, Shape::empty(), &[]);
+            let group_val = Value::from_heap_ptr(group as *mut u8);
+            let gslot = vm.temp_roots.len();
+            vm.temp_roots.push(group_val);
+            for key in sorted {
+                let indices = groups.get(&key).cloned().unwrap_or_default();
+                let arr = RuneArray::allocate(gc, &[]);
+                unsafe {
+                    let aptr = arr as *mut u8;
+                    *(aptr.add(8) as *mut *const Shape) = *DENSE_ARRAY_SHAPE as *const Shape;
+                    if let Some(proto) = vm.array_prototype.heap_ptr() {
+                        *(aptr.add(24) as *mut *mut u8) = proto;
+                    }
+                }
+                let aslot = vm.temp_roots.len();
+                vm.temp_roots.push(Value::from_heap_ptr(arr as *mut u8));
+                for idx in indices {
+                    let value = vm.temp_roots[idx];
+                    let arr_ptr = unsafe {
+                        rune_core::gc::resolve_forwarded(vm.temp_roots[aslot].heap_ptr().unwrap())
+                    } as *mut RuneArray;
+                    let new_arr = unsafe { RuneArray::push(gc, arr_ptr, value) };
+                    vm.temp_roots[aslot] = Value::from_heap_ptr(new_arr as *mut u8);
+                }
+                let group_live = unsafe {
+                    rune_core::gc::resolve_forwarded(vm.temp_roots[gslot].heap_ptr().unwrap())
+                        as *mut JSObject
+                };
+                unsafe {
+                    JSObject::add_property_with_attrs(
+                        group_live,
+                        PropertyKey::from_string(&key),
+                        key.clone(),
+                        vm.temp_roots[aslot],
+                        rune_core::shape::ATTR_DEFAULT,
+                    );
+                }
+                vm.temp_roots.truncate(aslot);
+            }
+            let result = vm.temp_roots[gslot];
+            vm.temp_roots.truncate(root_base);
+            return result;
+        }
+    }
+    let Some(len) = crate::vm::array_like_length(items) else {
+        vm.temp_roots.truncate(root_base);
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Object.groupBy requires an iterable",
+        ));
+        return Value::undefined();
+    };
+    for i in 0..len {
+        let value =
+            load_property_recursive(items, Value::smi(i as i32), Some(vm.function_prototype), gc);
+        if !call_for(gc, vm, value, i as usize) {
+            return Value::undefined();
+        }
+    }
+    let mut numeric: Vec<String> = keys
+        .iter()
+        .filter(|k| k.parse::<u64>().is_ok())
+        .cloned()
+        .collect();
+    numeric.sort_by_key(|k| k.parse::<u64>().unwrap());
+    let mut sorted = numeric;
+    for k in &keys {
+        if k.parse::<u64>().is_err() {
+            sorted.push(k.clone());
+        }
+    }
+    let group = JSObject::allocate(gc, Shape::empty(), &[]);
+    let group_val = Value::from_heap_ptr(group as *mut u8);
+    let gslot = vm.temp_roots.len();
+    vm.temp_roots.push(group_val);
+    for key in sorted {
+        let indices = groups.get(&key).cloned().unwrap_or_default();
+        let arr = RuneArray::allocate(gc, &[]);
+        unsafe {
+            let aptr = arr as *mut u8;
+            *(aptr.add(8) as *mut *const Shape) = *DENSE_ARRAY_SHAPE as *const Shape;
+            if let Some(proto) = vm.array_prototype.heap_ptr() {
+                *(aptr.add(24) as *mut *mut u8) = proto;
+            }
+        }
+        let aslot = vm.temp_roots.len();
+        vm.temp_roots.push(Value::from_heap_ptr(arr as *mut u8));
+        for idx in indices {
+            let value = vm.temp_roots[idx];
+            let arr_ptr = unsafe {
+                rune_core::gc::resolve_forwarded(vm.temp_roots[aslot].heap_ptr().unwrap())
+            } as *mut RuneArray;
+            let new_arr = unsafe { RuneArray::push(gc, arr_ptr, value) };
+            vm.temp_roots[aslot] = Value::from_heap_ptr(new_arr as *mut u8);
+        }
+        let group_live = unsafe {
+            rune_core::gc::resolve_forwarded(vm.temp_roots[gslot].heap_ptr().unwrap())
+                as *mut JSObject
+        };
+        unsafe {
+            JSObject::add_property_with_attrs(
+                group_live,
+                PropertyKey::from_string(&key),
+                key.clone(),
+                vm.temp_roots[aslot],
+                rune_core::shape::ATTR_DEFAULT,
+            );
+        }
+        vm.temp_roots.truncate(aslot);
+    }
+    let result = vm.temp_roots[gslot];
+    vm.temp_roots.truncate(root_base);
+    result
+}
+
+/// Object.fromEntries(iterable)/// Object.fromEntries(iterable) — §20.1.2.7. Sync-only: accepts an array of
 /// [key, value] pairs (general iterables drain via JS callbacks and are not
 /// supported inside sync builtins — documented gap).
 pub fn object_from_entries(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
@@ -23459,6 +23654,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 2,
             name: "Object_getOwnPropertyDescriptor",
             func: object_get_own_property_descriptor,
+        },
+        Builtin {
+            length: 2,
+            name: "Object_groupBy",
+            func: object_group_by,
         },
         Builtin {
             length: 1,

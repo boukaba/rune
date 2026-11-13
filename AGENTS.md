@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Object.groupBy (2026-11-13)**: sync callbacks, sorted integer keys, null proto. Object 2619→**2629/3411**. Integration **842**.
 - **Object.getOwnPropertyDescriptors (2026-11-13)**: all own keys + descriptor objects. Object 2609→**2619/3411**. Integration **841**.
 - **RegExp lastIndex data property (2026-11-13)**: raw values + exec-time ToNumber through sync calls. RegExp/prototype 189→**194/487**, exec 48/79. Integration **840**.
 - **Date setters sync ToNumber (2026-11-13)**: ToPrimitive/ToNumber via re-entrant calls. Date 458→**519/594**. Integration **839**.

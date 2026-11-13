@@ -2030,6 +2030,23 @@ Integration suite: **840 passed, 0 failed, 3 ignored**.
 
 Integration suite: **841 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Object.groupBy (2026-11-13)
+
+- Implemented `Object.groupBy(items, callback)`:
+  - null-prototype result object;
+  - array/array-like iteration plus **string code-point** iteration;
+  - sync callback calls via `call_value_sync` with `(value, index)`;
+  - keys converted through synchronous ToPropertyKey;
+  - integer-like keys sorted ascending, other keys in first-occurrence order;
+  - group arrays get `Array.prototype`.
+- Test262: `Object/groupBy` **10 → 12/14** (two non-array-like iterator cases
+  remain), Object **2619 → 2629/3411**.
+- Regression: `test_object_group_by`.
+- Known gaps: generic JS iterables and symbol-key identity grouping; values are
+  rooted via `temp_roots` during callbacks.
+
+Integration suite: **842 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

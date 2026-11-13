@@ -15796,3 +15796,29 @@ fn test_object_get_own_property_descriptors() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_object_group_by() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var g = Object.groupBy([1, 2, 3], function (n) { return n % 2 ? "odd" : "even"; });
+            var lens = Object.groupBy(["hello", "test", "world"], function (s) { return s.length; });
+            var chars = Object.groupBy("🥰💩🙏😈", function (c) { return c < "🙏" ? "before" : "after"; });
+            [
+                Object.groupBy.length === 2,
+                Object.getPrototypeOf(g) === null,
+                Object.keys(g).join(",") === "odd,even",
+                g.odd.join(",") === "1,3",
+                g.even.join(",") === "2",
+                Object.keys(lens).join(",") === "4,5",
+                lens[4].join(",") === "test",
+                lens[5].join(",") === "hello,world",
+                chars.before.length === 2 && chars.after.length === 2
+            ].join("|") === "true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

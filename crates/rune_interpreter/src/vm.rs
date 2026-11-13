@@ -1507,7 +1507,16 @@ impl Vm {
         let key = PropertyKey::from_string("constructor");
         let proto_obj = unsafe { rune_core::gc::resolve_forwarded(proto_ptr) } as *mut JSObject;
         if let Some(slot) = unsafe { JSObject::shape_ptr(proto_obj) }.lookup(&key) {
-            unsafe { JSObject::set_slot(proto_obj, slot, ctor_val) };
+            let shape = unsafe { JSObject::shape_ptr(proto_obj) };
+            let new_shape = rune_core::shape::Shape::with_replaced_attr(
+                shape,
+                slot,
+                rune_core::shape::ATTR_WRITABLE | rune_core::shape::ATTR_CONFIGURABLE,
+            );
+            unsafe {
+                JSObject::set_shape_ptr(proto_obj, new_shape);
+                JSObject::set_slot(proto_obj, slot, ctor_val);
+            }
             return;
         }
         let live = self.ensure_object_capacity(gc, proto_obj);
@@ -1542,7 +1551,7 @@ impl Vm {
             let attrs: Vec<rune_core::shape::PropAttr> = pairs
                 .iter()
                 .map(|(k, _)| {
-                    if *k == "prototype" {
+                    if *k == "prototype" || *k == "NaN" || *k == "Infinity" {
                         0
                     } else if *k == "length" || *k == "name" {
                         rune_core::shape::ATTR_CONFIGURABLE
@@ -1979,7 +1988,7 @@ impl Vm {
                 Value::from_float64(-9_007_199_254_740_991.0),
             ));
             num_entries.push(("MAX_VALUE", Value::from_float64(f64::MAX)));
-            num_entries.push(("MIN_VALUE", Value::from_float64(f64::MIN_POSITIVE)));
+            num_entries.push(("MIN_VALUE", Value::from_float64(f64::from_bits(1))));
             num_entries.push(("NaN", Value::from_float64(f64::NAN)));
             num_entries.push(("NEGATIVE_INFINITY", Value::from_float64(f64::NEG_INFINITY)));
             num_entries.push(("POSITIVE_INFINITY", Value::from_float64(f64::INFINITY)));
@@ -10805,10 +10814,7 @@ impl Vm {
                     }
                     // §20.3.2.1: `new Boolean(x)` creates a wrapper.
                     if constructor == self.boolean_constructor {
-                        let b = args
-                            .first()
-                            .map(|v| v.to_boolean().unwrap_or(true))
-                            .unwrap_or(false);
+                        let b = args.first().map(|v| v.to_bool()).unwrap_or(false);
                         let wrapper = make_wrapper_value(
                             gc,
                             crate::builtins::BOOLEAN_WRAPPER_KEY,
@@ -16152,32 +16158,7 @@ pub(crate) fn to_number(v: Value) -> f64 {
                 let str_ptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
                 unsafe { HeapString::to_string(str_ptr as *mut HeapString) }
             };
-            let trimmed = s.trim();
-            if trimmed.is_empty() {
-                return 0.0;
-            }
-            if let Ok(n) = trimmed.parse::<f64>() {
-                return n;
-            }
-            // Hex literals like "0x1F"
-            let upper = trimmed.to_uppercase();
-            if let Some(rest) = upper.strip_prefix("0X") {
-                if let Ok(n) = u64::from_str_radix(rest, 16) {
-                    return n as f64;
-                }
-            }
-            // Infinity
-            if trimmed.eq_ignore_ascii_case("infinity")
-                || trimmed == "+Infinity"
-                || trimmed == "-Infinity"
-            {
-                return if trimmed.starts_with('-') {
-                    f64::NEG_INFINITY
-                } else {
-                    f64::INFINITY
-                };
-            }
-            f64::NAN
+            crate::builtins::string_to_number(&s)
         } else if tag == TAG_FLOAT64 {
             unsafe { *(ptr.add(std::mem::size_of::<GcHeader>()) as *const f64) }
         } else if tag == TAG_DATE {
@@ -16293,6 +16274,7 @@ pub(crate) fn value_is_constructor(vm: &Vm, v: Value) -> bool {
         if v == vm.array_constructor
             || v == vm.object_constructor
             || v == vm.number_constructor
+            || v == vm.boolean_constructor
             || v == vm.string_constructor
             || v == vm.date_constructor
             || v == vm.regexp_constructor

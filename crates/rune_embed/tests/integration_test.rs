@@ -16365,3 +16365,40 @@ fn test_json_reviver_and_raw_json() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_boolean_number_coercion_and_descriptors() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var sum = 0;
+            for (const x of [1, 2, 3]) sum += x;
+            var nconstructor = Object.getOwnPropertyDescriptor(Number.prototype, "constructor");
+            var nglobal = Object.getOwnPropertyDescriptor(globalThis, "Number");
+            var nanDesc = Object.getOwnPropertyDescriptor(Number, "NaN");
+            [
+                Boolean(undefined) === false,
+                Boolean(0) === false,
+                Boolean("") === false,
+                Boolean("x") === true,
+                new Boolean(0).valueOf() === false,
+                new Boolean(1).valueOf() === true,
+                (0).toString(4) === "0",
+                (25).toString(4) === "121",
+                Number("INFINITY") !== Number("INFINITY"),
+                Number("Infinity") === Infinity,
+                Number("0b101") === 5,
+                Number("0o17") === 15,
+                Number({ valueOf: function () { return "1"; } }) === 1,
+                Number.MIN_VALUE === 5e-324,
+                sum === 6,
+                nconstructor.enumerable === false,
+                nglobal.writable === true && nglobal.configurable === true,
+                nanDesc.writable === false && nanDesc.configurable === false
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

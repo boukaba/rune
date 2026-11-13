@@ -282,10 +282,7 @@ impl Lexer {
         }
 
         // Decimal fraction?
-        if !is_hex
-            && self.peek() == Some('.')
-            && self.peek_next().is_some_and(|c| c.is_ascii_digit())
-        {
+        if !is_hex && self.peek() == Some('.') {
             self.advance();
             while let Some(ch) = self.peek() {
                 if ch.is_ascii_digit() || ch == '_' {

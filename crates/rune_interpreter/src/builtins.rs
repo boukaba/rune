@@ -1262,6 +1262,15 @@ pub(crate) fn string_to_number(s: &str) -> f64 {
     if trimmed.is_empty() {
         return 0.0;
     }
+    // Rust's f64 parser accepts case-insensitive "infinity"; ECMAScript does
+    // not (only the exact spellings below are valid).
+    if trimmed.eq_ignore_ascii_case("infinity")
+        && trimmed != "Infinity"
+        && trimmed != "+Infinity"
+        && trimmed != "-Infinity"
+    {
+        return f64::NAN;
+    }
     if let Ok(n) = trimmed.parse::<f64>() {
         return n;
     }
@@ -1271,7 +1280,17 @@ pub(crate) fn string_to_number(s: &str) -> f64 {
             return n as f64;
         }
     }
-    if trimmed.eq_ignore_ascii_case("infinity") || trimmed == "+Infinity" {
+    if let Some(rest) = upper.strip_prefix("0B") {
+        if let Ok(n) = u64::from_str_radix(rest, 2) {
+            return n as f64;
+        }
+    }
+    if let Some(rest) = upper.strip_prefix("0O") {
+        if let Ok(n) = u64::from_str_radix(rest, 8) {
+            return n as f64;
+        }
+    }
+    if trimmed == "Infinity" || trimmed == "+Infinity" {
         return f64::INFINITY;
     }
     if trimmed == "-Infinity" {
@@ -1338,58 +1357,16 @@ pub fn number_is_safe_integer(
 }
 
 pub fn number_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    // §21.1.2.1: If no arguments, return +0
-    let val = match args.first().copied() {
-        Some(v) => v,
-        None => return Value::smi(0),
+    let Some(val) = args.first().copied() else {
+        return Value::smi(0);
     };
-    if val.is_symbol() {
-        vm.set_pending_exception(crate::errors::error_object(
-            gc,
-            &vm.error_protos,
-            crate::errors::ErrorKind::TypeError,
-            "Cannot convert a Symbol value to a number",
-        ));
-        return Value::undefined();
-    }
-    if val.is_undefined() {
-        return Value::from_float64(f64::NAN);
-    }
-    if val.is_null() || val.is_boolean() {
-        let n = if val.is_null() || val.to_boolean() == Some(false) {
-            0.0
-        } else {
-            1.0
-        };
-        return Value::from_float64(n);
-    }
-    if let Some(n) = val.as_smi() {
-        return Value::smi(n);
-    }
-    if let Some(f) = val.as_float64() {
-        return Value::from_float64(f);
-    }
-    if let Some(ptr) = val.heap_ptr() {
-        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-        if tag == TAG_STRING {
-            let s = unsafe { HeapString::to_string(ptr as *mut HeapString) };
-            return Value::from_float64(string_to_number(&s));
-        }
-        if tag == TAG_STRING_OBJ {
-            let str_ptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
-            let s = unsafe { HeapString::to_string(str_ptr as *mut HeapString) };
-            return Value::from_float64(string_to_number(&s));
-        }
-        if tag == TAG_ARRAY {
-            let s = array_to_string(ptr as *mut RuneArray);
-            return Value::from_float64(string_to_number(&s));
-        }
-        if tag == TAG_OBJECT {
-            let s = to_primitive_string_sync(val, gc, vm);
-            return Value::from_float64(string_to_number(&s));
+    match to_number_sync(gc, vm, val) {
+        Ok(n) => Value::from_float64(n),
+        Err(e) => {
+            vm.set_pending_exception(e);
+            Value::undefined()
         }
     }
-    Value::from_float64(f64::NAN)
 }
 
 pub const BOOLEAN_WRAPPER_KEY: &str = "\u{0}boolean";
@@ -1397,10 +1374,7 @@ pub const NUMBER_WRAPPER_KEY: &str = "\u{0}number";
 
 /// Boolean(value) — ToBoolean (§20.3.1.1).
 pub fn boolean_builtin(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
-    let b = args
-        .first()
-        .map(|v| v.to_boolean().unwrap_or(true))
-        .unwrap_or(false);
+    let b = args.first().map(|v| v.to_bool()).unwrap_or(false);
     Value::boolean(b)
 }
 

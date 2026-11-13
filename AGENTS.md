@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **ToBoolean/ToNumber/numeric lexing (2026-11-13)**: Boolean ctor/wrapper, Number ToNumber and numeric literals, trailing-dot member, descriptor attrs. Number **317/340**, Boolean **43/51**, Object **2672/3411**. Integration **860**.
 - **JSON reviver/rawJSON + new tagged (2026-11-13)**: reviver ordering/writes, real SyntaxError, rawJSON wrappers, `new tag` precedence. JSON **60/165**, tagged-template **18/27**. Integration **859**.
 - **Template lookahead + frozen arrays (2026-11-13)**: peek_token restores template brace state; frozen arrays reject named props. Tagged-template **17/27**, Object **2661/3411**. Integration **858**.
 - **Template cache/freeze (2026-11-13)**: per-site cache, frozen raw. Tagged-template **12/27**, String **848/1223**. Integration **858**.

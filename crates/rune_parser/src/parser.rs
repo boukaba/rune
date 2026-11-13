@@ -11,6 +11,9 @@ pub struct Parser {
     /// parsing a for-head LHS must not consume `in` as a binary operator
     /// (as in `for (x in obj)`).
     no_in_depth: usize,
+    /// True while parsing a `for` head declaration: `const x of …` / `in …`
+    /// may omit the initializer.
+    for_head_depth: usize,
 }
 
 impl Parser {
@@ -23,6 +26,7 @@ impl Parser {
             errors: Vec::new(),
             module: false,
             no_in_depth: 0,
+            for_head_depth: 0,
         }
     }
 
@@ -37,6 +41,7 @@ impl Parser {
             errors: Vec::new(),
             module: true,
             no_in_depth: 0,
+            for_head_depth: 0,
         }
     }
 
@@ -901,7 +906,11 @@ impl Parser {
             };
             // Pattern consts are initialized by their consuming construct
             // (for-of/for-in desugaring binds them per iteration).
-            if kind == VarKind::Const && init.is_none() && pattern.is_none() {
+            if kind == VarKind::Const
+                && init.is_none()
+                && pattern.is_none()
+                && self.for_head_depth == 0
+            {
                 self.error("const declaration must be initialized".to_string());
             }
             decls.push(Decl {
@@ -1160,7 +1169,19 @@ impl Parser {
             self.tok.kind,
             TokenKind::Var | TokenKind::Let | TokenKind::Const
         ) {
+            self.for_head_depth += 1;
             let var_stmt = self.parse_var_decl();
+            self.for_head_depth -= 1;
+            if self.tok.kind != TokenKind::In && self.tok.kind != TokenKind::Of {
+                if let Stmt::Var(VarKind::Const, decls, _) = &var_stmt {
+                    if decls
+                        .iter()
+                        .any(|d| d.init.is_none() && d.pattern.is_none())
+                    {
+                        self.error("const declaration must be initialized".to_string());
+                    }
+                }
+            }
             if self.tok.kind == TokenKind::In {
                 // for (var x in obj)
                 self.advance();

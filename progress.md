@@ -2393,6 +2393,36 @@ Integration suite: **858 passed, 0 failed, 3 ignored**.
 
 Integration suite: **859 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — ToBoolean/ToNumber + numeric lexing + descriptors (2026-11-13)
+
+- `for (const x of …)` / `for (const k in …)` now parse without an
+  initializer (still rejected in C-style for heads).
+- Boolean: `Boolean(value)` and `new Boolean(value)` use `Value::to_bool`
+  (undefined/null/0/NaN/"" → false) instead of defaulting non-booleans to true;
+  `Boolean` is recognised by `isConstructor`.
+- Number:
+  - constructor uses synchronous ToNumber (object `valueOf`/`toString` order
+    and throw propagation);
+  - `to_number` string handling delegates to the central `string_to_number`;
+  - binary/octal strings (`0b`, `0o`) parse;
+  - case-insensitive `"INFINITY"` is NaN (only exact `Infinity` spellings);
+  - `Number.MIN_VALUE` is the smallest subnormal (`f64::from_bits(1)`).
+- Lexer: a decimal point after an integer is always part of the literal, so
+  `0..toString()`, `1..toString()` parse as member calls (huge Number.toString
+  test recovery).
+- Descriptors:
+  - `prototype.constructor` backrefs are non-enumerable/writable/configurable
+    even when the prototype created it earlier;
+  - `NaN`/`Infinity` in builtin namespaces are non-writable/non-configurable;
+  - global builtin constructors expose writable/configurable descriptors.
+- Test262: Number **268 → 317/340**, Boolean **31 → 43/51**, Object
+  **2661 → 2672/3411**, Array 2618 → 2619/3081, JSON/isRawJSON 5/6.
+- Regression: `test_boolean_number_coercion_and_descriptors`.
+- Known: exact toExponential/toPrecision decimal rounding and remaining
+  formatting edge cases; some const/global parse cases.
+
+Integration suite: **860 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

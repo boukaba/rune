@@ -868,8 +868,10 @@ impl Lexer {
     /// Peek at the next token without consuming it.
     pub fn peek_token(&mut self) -> Token {
         let saved = self.pos;
+        let saved_stack = self.template_brace_stack.clone();
         let token = self.next_token();
         self.pos = saved;
+        self.template_brace_stack = saved_stack;
         token
     }
 

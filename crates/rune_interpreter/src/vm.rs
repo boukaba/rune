@@ -8260,6 +8260,13 @@ impl Vm {
                     let raw_vals = cooked_vals.clone();
                     let cooked = crate::builtins::build_array(gc, &cooked_vals, self);
                     let raw = crate::builtins::build_array(gc, &raw_vals, self);
+                    // Root both arrays: attaching `raw` and freezing allocate and
+                    // may collect, so re-read the refreshed values afterwards.
+                    self.temp_roots.push(cooked);
+                    self.temp_roots.push(raw);
+                    let root_base = self.temp_roots.len() - 2;
+                    let cooked = self.temp_roots[root_base];
+                    let raw = self.temp_roots[root_base + 1];
                     if let Some(cptr) = cooked.heap_ptr() {
                         let arr = cptr as *mut RuneArray;
                         let mut extra = unsafe { RuneArray::extra_props(arr) };
@@ -15967,6 +15974,10 @@ pub(crate) fn do_store_property(
                     unsafe {
                         let mut props = RuneArray::extra_props(arr_ptr as *mut RuneArray);
                         if props.is_null() {
+                            // New named property on a frozen/sealed array.
+                            if !RuneArray::is_extensible(arr_ptr as *mut RuneArray) {
+                                return false;
+                            }
                             let new_obj = JSObject::allocate(gc, Shape::empty(), &[]);
                             let gc_tag = (*(arr_ptr as *const GcHeader)).tag();
                             if gc_tag == TAG_ARRAY && (*(arr_ptr as *const GcHeader)).is_forwarded()
@@ -15978,6 +15989,14 @@ pub(crate) fn do_store_property(
                                 new_obj as *mut u8,
                             );
                             props = new_obj as *mut u8;
+                        }
+                        if !RuneArray::is_extensible(arr_ptr as *mut RuneArray) {
+                            if let Some(key) = value_to_prop_key(raw_key) {
+                                let eshape = JSObject::shape_ptr(props as *mut JSObject);
+                                if eshape.lookup(&key).is_none() {
+                                    return false;
+                                }
+                            }
                         }
                         do_store_property(Value::from_heap_ptr(props), raw_key, value, gc, vm);
                     }

@@ -16308,18 +16308,25 @@ fn test_tagged_template() {
             function cap(s) { captured = s; return s[0]; }
             cap`a${1}b`;
             var rawDesc = Object.getOwnPropertyDescriptor(captured, "raw");
+            var blockValue;
+            { blockValue = tag`c${2}d`; }
+            captured.test262Prop = true;
+            captured.raw.test262Prop = true;
             [
                 tag`a${1}b` === "a1b|a1b",
                 String.raw`x${2}y` === "x2y",
                 obj.m`z` === "2z",
+                blockValue === "c2d|c2d",
                 Array.isArray(captured),
                 Array.isArray(captured.raw),
                 Object.isFrozen(captured),
                 Object.isFrozen(captured.raw),
+                captured.test262Prop === undefined,
+                captured.raw.test262Prop === undefined,
                 rawDesc.enumerable === false &&
                     rawDesc.writable === false &&
                     rawDesc.configurable === false
-            ].join("|") === "true|true|true|true|true|true|true|true";
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true|true";
             "#,
         )
         .unwrap();

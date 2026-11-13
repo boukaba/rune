@@ -8914,9 +8914,39 @@ impl Vm {
                                     let shape =
                                         unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
                                     if let Some(slot) = shape.lookup(&key) {
-                                        unsafe {
-                                            JSObject::set_slot(ptr as *mut JSObject, slot, acc_val)
+                                        let current = unsafe {
+                                            JSObject::get_slot(ptr as *mut JSObject, slot)
                                         };
+                                        if let Some(cur_ptr) =
+                                            current.heap_ptr().filter(|p| unsafe {
+                                                (*(*p as *const GcHeader)).tag() == TAG_ACCESSOR
+                                            })
+                                        {
+                                            // Literal accessors merge: undefined half means
+                                            // "not provided" ({ get x(){}, set x(v){} }).
+                                            let new_get = if getter.is_undefined() {
+                                                unsafe { AccessorPair::getter(cur_ptr) }
+                                            } else {
+                                                getter
+                                            };
+                                            let new_set = if setter.is_undefined() {
+                                                unsafe { AccessorPair::setter(cur_ptr) }
+                                            } else {
+                                                setter
+                                            };
+                                            unsafe {
+                                                *(cur_ptr.add(8) as *mut Value) = new_get;
+                                                *(cur_ptr.add(16) as *mut Value) = new_set;
+                                            }
+                                        } else {
+                                            unsafe {
+                                                JSObject::set_slot(
+                                                    ptr as *mut JSObject,
+                                                    slot,
+                                                    acc_val,
+                                                )
+                                            };
+                                        }
                                     } else {
                                         let live =
                                             self.ensure_object_capacity(gc, ptr as *mut JSObject);

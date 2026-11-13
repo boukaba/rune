@@ -16235,3 +16235,26 @@ fn test_reflect_receiver_and_define_boolean() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_object_literal_getter_setter_pair() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var o = {
+                get x() { return this._x; },
+                set x(v) { this._x = v * 2; }
+            };
+            o.x = 5;
+            var d = Object.getOwnPropertyDescriptor(o, "x");
+            [
+                typeof d.get === "function",
+                typeof d.set === "function",
+                o.x === 10
+            ].join("|") === "true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

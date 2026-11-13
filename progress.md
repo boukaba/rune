@@ -2281,6 +2281,19 @@ Integration suite: **854 passed, 0 failed, 3 ignored**.
 
 Integration suite: **855 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Object-literal accessor pairs (2026-11-13)
+
+- `DefineAccessor` now merges with an existing accessor pair: an undefined
+  half in the new descriptor means "not provided", so
+  `{ get x(){…}, set x(v){…} }` preserves both halves instead of dropping the
+  getter.
+- Test262: Object **2655 → 2659/3411**.
+- Regression: `test_object_literal_getter_setter_pair`.
+- Known: accessor function `.name` remains `"x"` rather than `"get x"` /
+  `"set x"`.
+
+Integration suite: **856 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

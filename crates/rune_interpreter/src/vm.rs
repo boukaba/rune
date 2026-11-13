@@ -4380,6 +4380,54 @@ impl Vm {
         Ok(value)
     }
 
+    /// Synchronous data-property write for embedders. Setter accessors that
+    /// require a JS frame are rejected instead of leaving the VM suspended.
+    pub fn set_property_sync(
+        &mut self,
+        gc: &mut SemiSpace,
+        object: Value,
+        key: &str,
+        value: Value,
+    ) -> Result<(), String> {
+        let key = Value::from_heap_ptr(heap_string(gc, key));
+        let frames = self.frames.len();
+        let stack = self.stack.len();
+        let site = PropSetSite {
+            ic_index: -1,
+            prog_ptr: std::ptr::null(),
+            pc: 0,
+            is_strict: true,
+        };
+        let outcome = self.vm_set_property(gc, object, key, value, site);
+        match outcome {
+            PropSetOut::Ready(_) => {
+                if let Some(exception) = self.pending_exception.take() {
+                    return Err(crate::builtins::error_to_string(gc, exception)
+                        .unwrap_or_else(|| "property write failed".to_string()));
+                }
+                Ok(())
+            }
+            PropSetOut::Wait => {
+                self.frames.truncate(frames);
+                self.stack.truncate(stack);
+                self.pending_call = None;
+                Err("property setter requires asynchronous execution".to_string())
+            }
+            PropSetOut::Bail(Some(Exit::Throw(exception))) => {
+                self.frames.truncate(frames);
+                self.stack.truncate(stack);
+                Err(crate::builtins::error_to_string(gc, exception)
+                    .unwrap_or_else(|| "property write failed".to_string()))
+            }
+            PropSetOut::Bail(_) => {
+                self.frames.truncate(frames);
+                self.stack.truncate(stack);
+                self.pending_call = None;
+                Err("property write requires asynchronous execution".to_string())
+            }
+        }
+    }
+
     pub fn current_call_is_constructor(&self) -> bool {
         self.frames
             .last()

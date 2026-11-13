@@ -32,6 +32,7 @@ cc app.c -Icrates/rune_capi/include -Ltarget/release -lrune_capi \
 | `rune_context_release_value(ctx, value)` | Release a heap handle; `handle == 0` is a no-op. |
 | `rune_context_call_value(ctx, func, args, argc, &result, &error)` | Call a retained JS function. |
 | `rune_context_get_property(ctx, object, key, &result, &error)` | Read a data property from a retained object/array. |
+| `rune_context_set_property(ctx, object, key, value, &error)` | Write a data property. |
 | `rune_free_string(text)` | Frees result/error strings. |
 
 Results are returned as JavaScript string representations. Callers own result
@@ -59,8 +60,9 @@ rune_context_release_value(ctx, fn);
 ```
 
 `rune_context_get_property` reads own/prototype data properties and array
-elements/length synchronously; JS getters are rejected because the C API cannot
-suspend the interpreter.
+elements/length synchronously; `rune_context_set_property` writes data
+properties (values may be primitives or retained handles). JS getters/setters
+are rejected because the C API cannot suspend the interpreter.
 
 Handles may be passed back as arguments to `rune_context_call_value`. They
 cannot be used while an evaluation is already on the stack (the C API is not
@@ -100,8 +102,8 @@ pointer must remain valid for the context's lifetime.
   strings; object/array/function arguments carry retained handles
   (`RUNE_OBJECT`/`RUNE_FUNCTION`) that callers must release. Strings remain
   borrowed for the callback duration.
-- `get_property` supports data properties; JS getters/accessors are rejected.
-  There is no `set_property` yet.
+- `get_property`/`set_property` support data properties; JS accessors are
+  rejected.
 - Timers, `fetch`, and the event-loop jobs are not installed by the C API.
 - Contexts are single-threaded; do not share one context across threads.
 - Raw invalid pointers are undefined behavior (standard C ABI rules); the API

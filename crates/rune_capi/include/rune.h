@@ -72,6 +72,10 @@ int rune_context_value_to_string(void *ctx, RuneValue value, char **out);
 int rune_context_get_property(void *ctx, RuneValue object, const char *key,
                               RuneValue *result, char **error);
 
+/* Write a data property; value may be a primitive or retained handle. */
+int rune_context_set_property(void *ctx, RuneValue object, const char *key,
+                              RuneValue value, char **error);
+
 /* Release a retained value handle (handle == 0 is a no-op). */
 int rune_context_release_value(void *ctx, RuneValue value);
 

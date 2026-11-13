@@ -58,6 +58,18 @@ int main(void) {
     }
     rune_free_string(text);
     rune_free_string(error);
+
+    RuneValue new_value = { RUNE_NUMBER, 0, 43.0, NULL, 0 };
+    prop.handle = 0;
+    text = NULL;
+    error = NULL;
+    if (rune_context_set_property(ctx, obj, "x", new_value, &error) == 0 &&
+        rune_context_get_property(ctx, obj, "x", &prop, &error) == 0 &&
+        rune_context_value_to_string(ctx, prop, &text) == 0) {
+        printf("set: %s\n", text);
+    }
+    rune_free_string(text);
+    rune_free_string(error);
     rune_context_release_value(ctx, obj);
     rune_context_release_value(ctx, prop);
     rune_context_destroy(ctx);

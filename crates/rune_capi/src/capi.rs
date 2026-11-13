@@ -133,7 +133,11 @@ pub unsafe extern "C" fn rune_context_register_host_fn(
             })
             .collect();
         let result = unsafe { callback(user, c_args.len(), c_args.as_ptr()) };
-        value_from_c(gc, result)
+        if result.handle != 0 {
+            vm.retained_value(result.handle as usize - 1)
+        } else {
+            value_from_c(gc, result)
+        }
     });
     STATUS_OK
 }
@@ -263,6 +267,53 @@ pub unsafe extern "C" fn rune_context_get_property(
             unsafe { *result = out };
             STATUS_OK
         }
+        Ok(Err(message)) => {
+            unsafe { write_out(error, into_c_string(message)) };
+            STATUS_ERROR
+        }
+        Err(_) => {
+            unsafe { write_out(error, into_c_string("engine panic".to_string())) };
+            STATUS_ERROR
+        }
+    }
+}
+
+/// Write a data property on a retained object/array. JS setters are rejected
+/// because the C API cannot suspend the interpreter.
+///
+/// # Safety
+/// `ctx` must be live; `object` must be a retained heap value; `key` must be a
+/// NUL-terminated UTF-8 string; `value` must be a primitive or retained handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rune_context_set_property(
+    ctx: *mut c_void,
+    object: RuneValue,
+    key: *const c_char,
+    value: RuneValue,
+    error: *mut *mut c_char,
+) -> i32 {
+    if !error.is_null() {
+        unsafe { *error = std::ptr::null_mut() };
+    }
+    if ctx.is_null() || key.is_null() || object.handle == 0 {
+        return STATUS_INVALID;
+    }
+    let ctx = unsafe { &mut *(ctx as *mut Context) };
+    let key = unsafe { CStr::from_ptr(key) };
+    let Ok(key) = key.to_str() else {
+        return STATUS_INVALID;
+    };
+    let object = ctx.retained_value(object.handle as usize - 1);
+    let value = if value.handle != 0 {
+        ctx.retained_value(value.handle as usize - 1)
+    } else {
+        match primitive_from_c(ctx.gc(), value) {
+            Ok(value) => value,
+            Err(status) => return status,
+        }
+    };
+    match catch_unwind(AssertUnwindSafe(|| ctx.set_property(object, key, value))) {
+        Ok(Ok(())) => STATUS_OK,
         Ok(Err(message)) => {
             unsafe { write_out(error, into_c_string(message)) };
             STATUS_ERROR
@@ -753,6 +804,17 @@ mod property_tests {
 
     static CAPTURED: AtomicU64 = AtomicU64::new(0);
 
+    unsafe extern "C" fn identity_cb(
+        _user: *mut c_void,
+        argc: usize,
+        argv: *const RuneValue,
+    ) -> RuneValue {
+        if argc == 0 {
+            return RuneValue::undefined();
+        }
+        unsafe { *argv }
+    }
+
     unsafe extern "C" fn capture_cb(
         _user: *mut c_void,
         argc: usize,
@@ -843,6 +905,48 @@ mod property_tests {
         assert_eq!(length.number, 3.0);
         let second = unsafe { get(ctx, array, "1") };
         assert_eq!(second.number, 20.0);
+
+        let key = CString::new("1").unwrap();
+        let value = RuneValue {
+            kind: RUNE_NUMBER,
+            boolean: 0,
+            number: 99.0,
+            string: std::ptr::null(),
+            handle: 0,
+        };
+        let mut error: *mut c_char = std::ptr::null_mut();
+        let status = unsafe {
+            rune_context_set_property(
+                ctx,
+                array,
+                key.as_ptr(),
+                value,
+                &mut error as *mut *mut c_char,
+            )
+        };
+        assert_eq!(status, 0);
+        let changed = unsafe { get(ctx, array, "1") };
+        assert_eq!(changed.number, 99.0);
+
+        unsafe {
+            rune_context_register_host_fn(
+                ctx,
+                c"identity".as_ptr(),
+                1,
+                std::ptr::null_mut(),
+                Some(identity_cb),
+            );
+        }
+        let source = CString::new("var o = { y: 7 }; identity(o) === o;").unwrap();
+        let mut answer: *mut c_char = std::ptr::null_mut();
+        let status = unsafe { rune_context_eval(ctx, source.as_ptr(), &mut answer, &mut error) };
+        assert_eq!(status, 0);
+        let text = unsafe { CStr::from_ptr(answer) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { rune_free_string(answer) };
+        assert_eq!(text, "true");
+
         unsafe {
             rune_context_release_value(ctx, obj);
             rune_context_release_value(ctx, array);

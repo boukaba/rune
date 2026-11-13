@@ -400,6 +400,12 @@ impl Context {
         self.vm.get_property_sync(&mut self.gc, object, key)
     }
 
+    /// Write a data property synchronously (embedder helper). JS setters are
+    /// rejected because they require a running interpreter frame.
+    pub fn set_property(&mut self, object: Value, key: &str, value: Value) -> Result<(), String> {
+        self.vm.set_property_sync(&mut self.gc, object, key, value)
+    }
+
     pub fn gc(&mut self) -> &mut SemiSpace {
         &mut self.gc
     }

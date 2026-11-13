@@ -1063,6 +1063,20 @@ Integration suite: **792 passed, 0 failed, 3 ignored**; `rune_capi` **5 tests**.
 
 Integration suite: **792 passed, 0 failed, 3 ignored**; `rune_capi` **6 tests**.
 
+### Phase 3 — C property writes + callback object returns (2026-11-13)
+
+- Added `Context::set_property`/`Vm::set_property_sync`: synchronous data
+  property writes via the normal property funnel with a synthetic non-IC site.
+  JS setter accessors/`Wait` outcomes are detected and rejected with cleanup.
+- C ABI: `rune_context_set_property(ctx, object, key, value, &error)`.
+- Host callbacks may now **return retained object/array/function handles**;
+  the engine resolves them through the context retain table. Strings remain
+  borrowed/handled as before.
+- C example now prints `host: 42`, `call: 42`, `prop: 42`, `set: 43`.
+- Tests cover property write, callback identity return, and object handles.
+
+Integration suite: **792 passed, 0 failed, 3 ignored**; `rune_capi` **6 tests**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

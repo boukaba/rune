@@ -78,7 +78,7 @@ rune_context_destroy(ctx);
 ABI 2 adds retained value handles: `rune_context_eval_value` returns heap
 values as handles, `rune_context_call_value` invokes retained JS functions, and
 `rune_context_value_to_string`/`release_value` manage them, and
-`rune_context_get_property` reads data properties. See
+`rune_context_get_property`/`set_property` read and write data properties. See
 [`docs/c-api.md`](docs/c-api.md) for the full contract and limitations.
 
 | Crate | Purpose |

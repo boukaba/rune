@@ -8231,9 +8231,14 @@ impl PropDesc {
 /// Read one descriptor field: presence via proto-chain walk + value via the
 /// shared recursive load. Accessor-valued fields are out of scope (sync
 /// builtins can't run getters) — treated as absent, documented gap.
-fn desc_field(desc_obj: Value, name: &str) -> (bool, Value) {
+fn desc_field(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    desc_obj: Value,
+    name: &str,
+) -> Result<(bool, Value), Value> {
     let Some(dptr) = desc_obj.heap_ptr() else {
-        return (false, Value::undefined());
+        return Ok((false, Value::undefined()));
     };
     let dtag = unsafe { (*(dptr as *const GcHeader)).tag() };
     // Function descriptors store fields on their extra_props object.
@@ -8242,7 +8247,7 @@ fn desc_field(desc_obj: Value, name: &str) -> (bool, Value) {
             rune_core::function::Func::extra_props(dptr as *mut rune_core::function::Func)
         };
         if ep.is_null() {
-            return (false, Value::undefined());
+            return Ok((false, Value::undefined()));
         }
         ep
     } else if dtag == TAG_OBJECT {
@@ -8250,23 +8255,23 @@ fn desc_field(desc_obj: Value, name: &str) -> (bool, Value) {
     } else if dtag == TAG_DATE {
         let ep = unsafe { rune_core::date::RuneDate::extra_props(dptr) };
         if ep.is_null() {
-            return (false, Value::undefined());
+            return Ok((false, Value::undefined()));
         }
         ep
     } else if dtag == TAG_REGEXP {
         let ep = unsafe { rune_core::regexp::RegExp::extra_props(dptr) };
         if ep.is_null() {
-            return (false, Value::undefined());
+            return Ok((false, Value::undefined()));
         }
         ep
     } else if dtag == TAG_ARRAY {
         let ep = unsafe { RuneArray::extra_props(dptr as *mut RuneArray) };
         if ep.is_null() {
-            return (false, Value::undefined());
+            return Ok((false, Value::undefined()));
         }
         ep
     } else {
-        return (false, Value::undefined());
+        return Ok((false, Value::undefined()));
     };
     let key = PropertyKey::from_string(name);
     let mut current = start;
@@ -8274,27 +8279,36 @@ fn desc_field(desc_obj: Value, name: &str) -> (bool, Value) {
         let shape = unsafe { JSObject::shape_ptr(current as *mut JSObject) };
         if let Some(slot) = shape.lookup(&key) {
             let v = unsafe { JSObject::get_slot(current as *mut JSObject, slot) };
-            // Accessor-held descriptor fields: treated as absent (sync gap).
             if v.heap_ptr()
                 .is_some_and(|vp| unsafe { (*(vp as *const GcHeader)).tag() == TAG_ACCESSOR })
             {
-                return (false, Value::undefined());
+                let vp = v.heap_ptr().unwrap();
+                let getter = unsafe { rune_core::accessor::AccessorPair::getter(vp) };
+                if getter.is_undefined() {
+                    return Ok((false, Value::undefined()));
+                }
+                let value = vm.call_value_sync(gc, getter, desc_obj, &[])?;
+                return Ok((true, value));
             }
-            return (true, v);
+            return Ok((true, v));
         }
         let proto = unsafe { JSObject::prototype(current as *mut JSObject) };
         if proto.is_null() {
-            return (false, Value::undefined());
+            return Ok((false, Value::undefined()));
         }
         current = proto;
     }
-    (false, Value::undefined())
+    Ok((false, Value::undefined()))
 }
 
 /// ToPropertyDescriptor (§6.1.7.1 + §20.1.2.3 validation): parse a
 /// descriptor object, rejecting data/accessor mixing and non-callable
 /// getters/setters with TypeError values.
-fn to_property_descriptor(gc: &mut SemiSpace, vm: &Vm, desc_obj: Value) -> Result<PropDesc, Value> {
+fn to_property_descriptor(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    desc_obj: Value,
+) -> Result<PropDesc, Value> {
     // ToPropertyDescriptor requires Type(Obj) = Object — primitives
     // (including strings) throw; functions count as objects.
     if !is_object_value(desc_obj) {
@@ -8306,18 +8320,18 @@ fn to_property_descriptor(gc: &mut SemiSpace, vm: &Vm, desc_obj: Value) -> Resul
         ));
     }
     let mut d = PropDesc::empty();
-    let (p, v) = desc_field(desc_obj, "enumerable");
+    let (p, v) = desc_field(gc, vm, desc_obj, "enumerable")?;
     d.has_enumerable = p;
     d.enumerable = v.to_bool();
-    let (p, v) = desc_field(desc_obj, "configurable");
+    let (p, v) = desc_field(gc, vm, desc_obj, "configurable")?;
     d.has_configurable = p;
     d.configurable = v.to_bool();
-    (d.has_value, d.value) = desc_field(desc_obj, "value");
-    let (p, v) = desc_field(desc_obj, "writable");
+    (d.has_value, d.value) = desc_field(gc, vm, desc_obj, "value")?;
+    let (p, v) = desc_field(gc, vm, desc_obj, "writable")?;
     d.has_writable = p;
     d.writable = v.to_bool();
-    let (has_get, get) = desc_field(desc_obj, "get");
-    let (has_set, set) = desc_field(desc_obj, "set");
+    let (has_get, get) = desc_field(gc, vm, desc_obj, "get")?;
+    let (has_set, set) = desc_field(gc, vm, desc_obj, "set")?;
     // Present-but-undefined means absent; present null is NOT callable and
     // must throw (only undefined is exempt).
     if has_get && !get.is_undefined() {

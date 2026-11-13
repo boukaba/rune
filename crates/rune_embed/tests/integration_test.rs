@@ -15676,3 +15676,40 @@ fn test_regexp_symbol_split() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_descriptor_accessor_fields() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var calls = 0;
+            var desc = {};
+            Object.defineProperty(desc, "enumerable", {
+                get: function () { calls += 1; return true; }
+            });
+            Object.defineProperty(desc, "value", {
+                get: function () { return 42; }
+            });
+            var obj = Object.create({}, { prop: desc });
+            var seen = false;
+            for (var k in obj) { if (k === "prop") seen = true; }
+            var threw = false;
+            try {
+                Object.create({}, {
+                    bad: { get configurable() { throw new TypeError("boom"); } }
+                });
+            } catch (e) { threw = e instanceof TypeError; }
+            var plain = Object.create({}, { x: { value: 7 } });
+            [
+                calls === 1,
+                seen,
+                obj.prop === 42,
+                threw,
+                plain.x === 7
+            ].join("|") === "true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

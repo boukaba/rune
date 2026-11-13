@@ -1023,6 +1023,9 @@ pub struct Vm {
     /// Run-loop exit floor: a `Return` exits the loop when the frame count
     /// drops to this value (used for nested module evaluation).
     pub return_frame_floor: usize,
+    /// Operand-stack length to preserve when the nested run_loop floor is hit
+    /// (builtins holding temporary roots above the caller's frame base).
+    pub return_stack_floor: Option<usize>,
     /// While a generator's nested run_loop is active: the frame index the
     /// generator frame occupies. Return inside it must NOT run the module-
     /// style caller-stack truncation (the real caller lives outside this
@@ -1353,6 +1356,7 @@ impl Vm {
             module_stack: Vec::new(),
             globals_override: None,
             return_frame_floor: 0,
+            return_stack_floor: None,
             nested_gen_floor: None,
             generator_return_sentinel: None,
             generator_return_value: None,
@@ -4085,6 +4089,13 @@ impl Vm {
         // caller with garbage + exited, so any throw nested 2+ frames deep
         // escaped try/catch and assert.throws.)
         'unwind: loop {
+            // A synchronous builtin call must not let a throw escape into the
+            // caller's try/catch: the builtin (Rust stack) has to observe the
+            // error and decide how to continue. Once unwinding reaches the
+            // sync-call floor, hand the exception back to call_value_sync.
+            if self.return_stack_floor.is_some() && self.frames.len() <= self.return_frame_floor {
+                return Some(Exit::Throw(val));
+            }
             // Find in-frame handler. Loops: an entry may decline (generator
             // return-sentinel skipping its catch with no finally of its own) —
             // discard it and keep scanning outer entries in this frame.
@@ -4316,6 +4327,12 @@ impl Vm {
             self.drop_dead_copy_op(popped_frame);
             if self.frames.is_empty() {
                 self.stack.clear();
+                return Some(Exit::Throw(val));
+            }
+            // Same sync-call isolation at the post-pop caller edge: do not
+            // route the exception into the caller's handlers (the builtin must
+            // observe it before the JS caller can).
+            if self.return_stack_floor.is_some() && self.frames.len() <= self.return_frame_floor {
                 return Some(Exit::Throw(val));
             }
             // Check for try-catch-finally in the caller frame
@@ -5022,6 +5039,72 @@ impl Vm {
         // place — historically new machines forgot this and fired on the
         // wrong Return, cf. v0.8.1 skip-gate batch).
         self.rebase_pending_depths();
+    }
+
+    /// Call a JS function (or builtin handle) to completion synchronously.
+    ///
+    /// Re-enters the interpreter loop with `return_frame_floor` set to the
+    /// current frame depth, so the nested loop returns as soon as the callee
+    /// returns and cannot pop the caller's frames. Used by builtins that need
+    /// observable user code in the middle of a synchronous algorithm
+    /// (ToPropertyDescriptor accessor fields first).
+    pub(crate) fn call_value_sync(
+        &mut self,
+        gc: &mut SemiSpace,
+        callee: Value,
+        this: Value,
+        args: &[Value],
+    ) -> Result<Value, Value> {
+        if let Some(sid) = callee.as_smi() {
+            if sid < 0 {
+                let id = (-sid as usize) - 1;
+                if id < self.builtins.len() {
+                    let result = (self.builtins[id].func)(gc, this, args, self);
+                    if let Some(exc) = self.pending_exception.take() {
+                        return Err(exc);
+                    }
+                    return Ok(result);
+                }
+            }
+        }
+        let Some(ptr) = callee.heap_ptr() else {
+            return Err(crate::errors::error_object(
+                gc,
+                &self.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "value is not callable",
+            ));
+        };
+        if unsafe { (*(ptr as *const GcHeader)).tag() } != TAG_FUNC {
+            return Err(crate::errors::error_object(
+                gc,
+                &self.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "value is not callable",
+            ));
+        }
+        let floor = self.frames.len();
+        let base = self.stack.len();
+        self.push_callback_call(gc, callee, this, args.to_vec());
+        let saved_floor = self.return_frame_floor;
+        let saved_stack_floor = self.return_stack_floor;
+        self.return_frame_floor = floor;
+        self.return_stack_floor = Some(base);
+        let exit = self.run_loop(gc);
+        self.return_frame_floor = saved_floor;
+        self.return_stack_floor = saved_stack_floor;
+        self.frames.truncate(floor);
+        self.stack.truncate(base);
+        match exit {
+            Exit::Return(v) => Ok(v),
+            Exit::Throw(e) => Err(e),
+            Exit::Yield(_) => Err(crate::errors::error_object(
+                gc,
+                &self.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "unexpected yield during synchronous call",
+            )),
+        }
     }
 
     /// Construct(ctor, args) for builtins (B1f-6d species/of/from): mirrors
@@ -13190,7 +13273,8 @@ impl Vm {
                         // The stack above the caller's base is the module's
                         // temporaries — discard them.
                         let caller_base = self.frames.last().unwrap().stack_base;
-                        self.stack.truncate(caller_base);
+                        let trunc = self.return_stack_floor.take().unwrap_or(caller_base);
+                        self.stack.truncate(trunc);
                         return Exit::Return(result);
                     }
                     let new_fi = self.frames.len() - 1;

@@ -1955,6 +1955,27 @@ Integration suite: **837 passed, 0 failed, 3 ignored**.
 
 Integration suite: **837 passed, 0 failed, 3 ignored**.
 
+### Phase 1 — Synchronous re-entrant calls + descriptor accessors (2026-11-13)
+
+- Added `Vm::call_value_sync`: a nested `run_loop` scoped by
+  `return_frame_floor`, preserving the builtin's operand-stack roots via a new
+  `return_stack_floor`. JS functions and builtin handles both run to completion
+  and return `Ok(value)` / `Err(exception)`.
+- Throws from a sync callee are isolated from the JS caller's try/catch until
+  the builtin observes them: strict floor checks in `handle_throw` at both the
+  in-frame and post-pop caller edges.
+- `ToPropertyDescriptor` now invokes accessor getters for descriptor fields
+  (`enumerable`, `configurable`, `value`, `writable`, `get`, `set`) through
+  this helper, with thrown getters becoming the builtin's pending exception.
+- Test262: Object **2546 → 2609/3411**, `Object.create` **266 → 287/320**,
+  `defineProperty` **907 → 932/1131**, `defineProperties` **451/632**.
+- Regression: `test_descriptor_accessor_fields`.
+- Known gaps: a throwing getter unwinds the nested call but leaves some
+  partially-applied descriptor work to the caller path; nested sync calls
+  disable nothing JIT-related (JIT is off by default).
+
+Integration suite: **838 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

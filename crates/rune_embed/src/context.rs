@@ -50,6 +50,25 @@ impl Context {
         Self::new_with_semispace(64 * 1024 * 1024) // 64 MiB for conformance
     }
 
+    /// Retain a JS Value across host callbacks; the returned id is stable for
+    /// the lifetime of the context (release it with `release_value`).
+    pub fn retain_value(&mut self, value: Value) -> usize {
+        self.vm.retain_value(value)
+    }
+
+    pub fn retained_value(&self, id: usize) -> Value {
+        self.vm.retained_value(id)
+    }
+
+    pub fn release_value(&mut self, id: usize) {
+        self.vm.release_value(id);
+    }
+
+    /// Drain queued promise microtasks (used by runtimes between host jobs).
+    pub fn drain_microtasks(&mut self) {
+        self.vm.drain_microtask_queue(&mut self.gc);
+    }
+
     /// Register a Rust host function and install it as a JS global. The
     /// closure receives `(gc, this, args, vm)` and may use the normal VM
     /// services; it is callable from JS like any other function.

@@ -24,8 +24,8 @@ use std::path::Path;
 /// Magic bytes identifying an AFPC cache file.
 const AFPC_MAGIC: &[u8; 4] = b"AFPC";
 /// Cache format version. Bump when the serialized schema changes.
-/// v7: BytecodeProgram carries param_count/display_name.
-const AFPC_VERSION: u32 = 7;
+/// v8: builtin table gained _host_invoke (host function bridge).
+const AFPC_VERSION: u32 = 8;
 
 /// Stable source fingerprint (FNV-1a). A cache is valid only for the exact
 /// source text it was compiled from; the CLI checks this before executing.

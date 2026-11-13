@@ -60,7 +60,8 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 | `rune_parser` | JavaScript lexer, recursive-descent parser, bytecode emitter |
 | `rune_interpreter` | Stack-based VM with SIDT inline caches, call frames, generators, builtins |
 | `rune_jit_baseline` | Baseline JIT (AArch64; runtime opt-in, off by default) — 62 opcodes whitelisted, function tier-up at 50 calls, N=16 vector IC table, **inlining** (Phase F: hot callees spliced inline, ~5% gain), **float self-tagging** (NaN-boxed Values, 0 heap allocation for floats) |
-| `rune_embed` | Embedding API (`Context::eval`), AFPC cache save/load |
+| `rune_embed` | Embedding API (`Context::eval`), AFPC cache save/load, host functions |
+| `rune_runtime` | Runtime facade: timer event loop (`setTimeout`/`clearTimeout`), retained callbacks, host jobs |
 | `rune_cli` | CLI binary with `--cache`, `--snapshot`, `--ic-stats`, `--trace-stats` |
 | `rune_bench` | Criterion benchmarks with V8 comparison scripts |
 
@@ -94,6 +95,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 - **TypedArray family:** `ArrayBuffer` (+ `slice`, `isView`), Uint8Array/Int8Array/Uint8ClampedArray/Int16Array/Uint16Array/Int32Array/Uint32Array/Float32Array/Float64Array — ctor from length/typed array/ArrayBuffer view/array/string, typed indexing with spec conversions (wraparound, truncation, round-half-to-even clamping), `length`/`byteLength`/`byteOffset`/`buffer`/`BYTES_PER_ELEMENT`, `set` (overlapping-safe snapshot), `subarray` (shared buffer), `fill`/`at`/`indexOf`/`includes`/`slice`, iteration + spread via `@@iterator`
 - **String methods:** `replace`/`replaceAll` (string + regex), `indexOf`, `charAt`, `slice`, `split` (string + regex separator, limit), `trim`/`trimStart`/`trimEnd`, `toUpperCase`/`toLowerCase`, `charCodeAt`/`codePointAt` (UTF-16 code-unit semantics incl. surrogate pairs), `fromCharCode`, `startsWith`/`endsWith`/`includes`, `padStart`/`padEnd`, `repeat`, `substring`/`substr`/`concat` — all position/index math in UTF-16 code units
 - **Global functions:** `parseInt` (radix, hex), `parseFloat` (Infinity, NaN, scientific notation), `isNaN`, `isFinite` (ToNumber coercion, symbols throw)
+- **Runtime / embedding:** Rust host functions via `Context::register_host_fn` (closures, callbacks, `.call`/`apply`, length/name metadata), GC-retained runtime values (`retain_value`/`release_value`), `rune_runtime` timer event loop (`setTimeout`/`clearTimeout`, nested timers, microtask draining), `console.*`, `btoa`/`atob`, `encodeURIComponent`/`decodeURIComponent`, `URL`/`URLSearchParams`, UTF-8 `TextEncoder`/`TextDecoder`
 
 ## What Doesn't Work (Yet)
 
@@ -185,7 +187,7 @@ Immutable, content-addressed shapes guarantee O(1) property access at any polymo
 
 ### AOT-First Persistent Compilation (AFPC)
 
-Rune caches compiled code across restarts with **source/ABI-scoped validity**: shapes are immutable and content-addressed, so shape identity is stable, but native code is valid only for the exact source hash and engine/OS/arch tag recorded in the cache header (unlike V8/JSC, whose shape transitions invalidate cached dispatch). Cache format is versioned (`AFPC_VERSION = 7`); stale or foreign caches fall back to compilation.
+Rune caches compiled code across restarts with **source/ABI-scoped validity**: shapes are immutable and content-addressed, so shape identity is stable, but native code is valid only for the exact source hash and engine/OS/arch tag recorded in the cache header (unlike V8/JSC, whose shape transitions invalidate cached dispatch). Cache format is versioned (`AFPC_VERSION = 8`); stale or foreign caches fall back to compilation.
 
 1. **First run:** Parse → emit → JIT-compile → persist (bytecode + shapes + ICs + native code)
 2. **Subsequent runs:** mmap cache → restore shapes/ICs, install native entries, execute immediately (cache load 26µs vs 355µs compile — 13.5×)

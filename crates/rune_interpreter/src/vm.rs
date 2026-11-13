@@ -1222,6 +1222,9 @@ pub struct Vm {
     /// Registered embedding host functions, indexed by the id captured in
     /// each synthetic wrapper's environment.
     pub host_functions: Vec<Option<HostFn>>,
+    /// Values retained by the embedder/runtime (timer callbacks, queued host
+    /// work). Slots are rooted and released lazily.
+    pub retained_values: Vec<Value>,
     /// Pending promise reactions: (callback, chained_promise) pairs keyed by promise ptr.
     pub(crate) promise_reactions: HashMap<*mut u8, Vec<(Value, Value)>>,
     /// Async generator tasks: maps gen_id → outer Promise so the Return handler can resolve it.
@@ -1412,6 +1415,7 @@ impl Vm {
             pending_promise_ctor: None,
             microtask_queue: Vec::new(),
             host_functions: Vec::new(),
+            retained_values: Vec::new(),
             promise_reactions: HashMap::new(),
             async_tasks: Vec::new(),
             pending_async_gen: None,
@@ -2795,6 +2799,28 @@ impl Vm {
         Value::smi(-(id as i32) - 1)
     }
 
+    /// Retain a Value across host/runtime callbacks. Returns a stable slot id.
+    pub fn retain_value(&mut self, value: Value) -> usize {
+        let id = self.retained_values.len();
+        self.retained_values.push(value);
+        id
+    }
+
+    /// Read a retained slot (undefined after release).
+    pub fn retained_value(&self, id: usize) -> Value {
+        self.retained_values
+            .get(id)
+            .copied()
+            .unwrap_or(Value::undefined())
+    }
+
+    /// Release a retained slot.
+    pub fn release_value(&mut self, id: usize) {
+        if let Some(slot) = self.retained_values.get_mut(id) {
+            *slot = Value::undefined();
+        }
+    }
+
     /// Register an embedding host function and install it as a global.
     ///
     /// The function becomes a real TAG_FUNC wrapper whose program forwards
@@ -2956,7 +2982,7 @@ impl Vm {
     /// Drain all enqueued microtasks. Each microtask is executed synchronously
     /// via push_callback_call. New microtasks enqueued during draining are
     /// processed in the current batch.
-    pub(crate) fn drain_microtask_queue(&mut self, gc: &mut SemiSpace) {
+    pub fn drain_microtask_queue(&mut self, gc: &mut SemiSpace) {
         while !self.microtask_queue.is_empty() {
             let tasks: Vec<Microtask> = std::mem::take(&mut self.microtask_queue);
             for task in tasks {
@@ -3659,6 +3685,9 @@ impl Vm {
         gc.push_root(&self.text_encoder_prototype as *const Value as *mut u64);
         gc.push_root(&self.text_decoder_constructor as *const Value as *mut u64);
         gc.push_root(&self.text_decoder_prototype as *const Value as *mut u64);
+        for v in &self.retained_values {
+            gc.push_root(v as *const Value as *mut u64);
+        }
         gc.push_root(&self.regexp_prototype as *const Value as *mut u64);
         gc.push_root(&self.symbol_ctor as *const Value as *mut u64);
         gc.push_root(&self.symbol_prototype as *const Value as *mut u64);

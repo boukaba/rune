@@ -835,6 +835,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rune_runtime"
+version = "0.1.0"
+dependencies = [
+ "rune_core",
+ "rune_embed",
+ "rune_interpreter",
+]
+
+[[package]]
 name = "rustversion"
 version = "1.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"

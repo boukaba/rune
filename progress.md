@@ -511,7 +511,32 @@ the engine (the embedder owns them); recursive re-entry into the *same* host
 function while its closure is running is rejected; host functions do not yet
 integrate real async I/O or `fetch`.
 
-Next: runtime crate/fetch design and stable headers.
+### Phase 3 start — `rune_runtime` event loop + timers (2026-11-13)
+
+A new `rune_runtime` crate sits above `rune_embed`:
+
+- `Runtime::new()` installs `setTimeout`/`clearTimeout` host globals and owns a
+  timer queue; `Runtime::eval` runs the script, then drains timers and
+  microtasks in due-time order (nested timers included).
+- Timer callbacks and their extra arguments are retained as GC roots through
+  new `Context::retain_value`/`retained_value`/`release_value`, released after
+  the callback runs. `Context::drain_microtasks` lets runtimes drain promise
+  jobs between host tasks.
+- `Runtime::context_mut()` exposes host registration, values, and snapshots.
+- Four runtime tests cover timer order, callback arguments, `clearTimeout`,
+  nested timers, promise microtasks inside timers, and host-function
+  composition.
+
+Integration suite: **766 passed, 0 failed, 3 ignored**; the new crate adds 4
+tests in its own package. AFPC format is now v8 because the builtin table gained
+`_host_invoke`; v7 caches are rejected by the version check.
+
+Known limits: timers sleep the thread for positive delays and no real I/O
+happens while sleeping; no `setInterval`/`queueMicrotask`/AbortSignal; passing
+a non-callable to `setTimeout` returns `undefined` instead of throwing
+`TypeError`; no `fetch`/HTTP/snapshot integration yet.
+
+Next: `fetch`/HTTP transport design, then stable headers.
 
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,

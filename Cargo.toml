@@ -11,6 +11,7 @@ members = [
     "crates/rune_module",
     "crates/rune_debugger",
     "crates/rune_embed",
+    "crates/rune_runtime",
     "crates/rune_capi",
     "crates/rune_cli",
     "crates/rune_bench",

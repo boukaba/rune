@@ -89,6 +89,16 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 
 ## Anchored Summary
 
+### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Embedding host functions**: `Context::register_host_fn(name, length, FnMut(gc,this,args,vm))` installs a real TAG_FUNC wrapper; synthetic program forwards `(id, call-site this, arguments array)` to `_host_invoke`; works as callbacks/`.call`/`apply`/`bind`; closures may capture Rust state. Metadata `length`/`name`; host table on Vm.
+- **Retained runtime values**: `Context::retain_value`/`retained_value`/`release_value` root host callbacks/arguments across jobs; `Vm::retained_values` traced in `register_roots`.
+- **`rune_runtime` crate**: `Runtime` owns a timer queue with `setTimeout`/`clearTimeout`; `Runtime::eval` drains timers + promise microtasks in due order; nested timers; timer args; 4 package tests. Known: thread-sleep delays, no intervals/fetch/queueMicrotask, non-callable setTimeout returns undefined.
+- **Web API additions**: `URL` (absolute/relative, fields, toString/toJSON, TypeError paths), `URLSearchParams` core + `URL.searchParams`, UTF-8 `TextEncoder`/`TextDecoder`, `console.*`, base64/URI globals.
+- **Function metadata**: JS functions now have own non-enumerable `length`/`name`; bind computes bound metadata. AFPC v7.
+- **GC**: forced-collection stress harness + CI job; aggressive Promise.all stress on 16 MiB at interval 48.
+- Verification: integration **766 passed, 0 failed, 3 ignored**; `rune_runtime` 4 passed; full workspace green; fmt/clippy clean.
+- Known gaps: stable array/object headers pending; host closure captures not GC-rooted by engine; same-host-function re-entry rejected; no real HTTP/fetch/snapshots; test262 90% gate not met.
+
 ### Goal
 Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8× vs Node) with enough stdlib to run real workloads. v0.4 = stdlib breadth (14 builtins). v0.5 = Promise + async patterns.
 

@@ -16258,3 +16258,36 @@ fn test_object_literal_getter_setter_pair() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_string_raw_and_code_point_coercions() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var raw = String.raw({ raw: { length: 2, 0: "a", 1: "b" } }, "-");
+            var getterThrew = false;
+            try {
+                String.raw({ raw: { get length() { throw new TypeError("len"); } } });
+            } catch (e) { getterThrew = e instanceof TypeError; }
+            var symbolRawThrew = false;
+            try {
+                String.raw({ raw: { length: 1, get 0() { throw new TypeError("seg"); } } });
+            } catch (e) { symbolRawThrew = e instanceof TypeError; }
+            var charCode = String.fromCharCode({ valueOf: function () { return 65; } });
+            var codePoint = String.fromCodePoint({ valueOf: function () { return 0x1F600; } });
+            var symbolThrew = false;
+            try { String.fromCodePoint(Symbol("x")); } catch (e) { symbolThrew = e instanceof TypeError; }
+            [
+                raw === "a-b",
+                getterThrew,
+                symbolRawThrew,
+                charCode === "A",
+                codePoint === "\u{1F600}",
+                symbolThrew
+            ].join("|") === "true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

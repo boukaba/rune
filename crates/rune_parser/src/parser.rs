@@ -2117,9 +2117,21 @@ impl Parser {
                         };
                         if is_getter || is_setter {
                             let name = match &key {
-                                PropKey::Identifier(n) => Some(n.clone()),
-                                PropKey::String(n) => Some(n.clone()),
-                                PropKey::Number(n) => Some(Box::from(n.to_string())),
+                                PropKey::Identifier(n) => Some(Box::from(format!(
+                                    "{} {}",
+                                    if is_getter { "get" } else { "set" },
+                                    n
+                                ))),
+                                PropKey::String(n) => Some(Box::from(format!(
+                                    "{} {}",
+                                    if is_getter { "get" } else { "set" },
+                                    n
+                                ))),
+                                PropKey::Number(n) => Some(Box::from(format!(
+                                    "{} {}",
+                                    if is_getter { "get" } else { "set" },
+                                    n
+                                ))),
                                 _ => None,
                             };
                             let fn_body = self.parse_function_body(name, false, false, pstart);

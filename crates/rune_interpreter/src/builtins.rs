@@ -14787,14 +14787,20 @@ pub fn string_from_char_code(
     gc: &mut SemiSpace,
     _this: Value,
     args: &[Value],
-    _vm: &mut Vm,
+    vm: &mut Vm,
 ) -> Value {
     // §22.1.2.2 String.fromCharCode(...codeUnits): each arg → ToNumber →
     // ToUint16 → UTF-16 code unit. (Lone surrogates are unrepresentable in
     // the engine's UTF-16 storage — they decode to U+FFFD like elsewhere.)
     let mut s = String::new();
     for arg in args {
-        let n = to_number(*arg);
+        let n = match to_number_sync(gc, vm, *arg) {
+            Ok(n) => n,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        };
         let unit = if n.is_nan() || n.is_infinite() {
             0
         } else {
@@ -14819,7 +14825,13 @@ pub fn string_from_code_point(
 ) -> Value {
     let mut s = String::new();
     for arg in args {
-        let n = to_number(*arg);
+        let n = match to_number_sync(gc, vm, *arg) {
+            Ok(n) => n,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        };
         if n.is_nan() || n.fract() != 0.0 || n < 0.0 || n > 0x10_FFFF as f64 {
             vm.set_pending_exception(crate::errors::error_object(
                 gc,
@@ -14851,31 +14863,84 @@ pub fn string_raw(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm)
         return Value::undefined();
     }
     let template = crate::vm::to_object_value(gc, template, vm);
-    let raw_key = Value::from_heap_ptr(HeapString::allocate(gc, "raw") as *mut u8);
-    let raw = load_property_recursive(template, raw_key, Some(vm.function_prototype), gc);
-    if let Some(exc) = vm.pending_exception.take() {
-        vm.pending_exception = Some(exc);
+    let raw = match get_value_sync(gc, vm, template, "raw") {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    if !is_object_value(raw) {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "String.raw template.raw is not an object",
+        ));
         return Value::undefined();
     }
-    let raw = crate::vm::to_object_value(gc, raw, vm);
-    let len = crate::vm::array_like_length(raw).unwrap_or(0) as usize;
+    let len_val = match get_value_sync(gc, vm, raw, "length") {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let len_num = match to_number_sync(gc, vm, len_val) {
+        Ok(n) => n,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let len = if len_num.is_nan() || len_num <= 0.0 {
+        0usize
+    } else {
+        len_num as usize
+    };
     if len == 0 {
         return Value::from_heap_ptr(HeapString::allocate(gc, "") as *mut u8);
     }
     let mut result = String::new();
+    let to_string = |gc: &mut SemiSpace, vm: &mut Vm, value: Value| -> Result<String, Value> {
+        let prim = to_primitive_sync(gc, vm, value, "string")?;
+        if prim.as_symbol_id().is_some() {
+            return Err(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Cannot convert a Symbol value to a string",
+            ));
+        }
+        Ok(value_to_js_string(prim))
+    };
     for i in 0..len {
-        let segment = crate::vm::array_like_index(raw, i as u32).unwrap_or(Value::undefined());
-        let Some(segment) = to_primitive_string(gc, segment, vm) else {
-            return Value::undefined();
-        };
-        result.push_str(&segment);
-        if i + 1 < len {
-            if let Some(sub) = args.get(i + 1).copied() {
-                let Some(sub) = to_primitive_string(gc, sub, vm) else {
-                    return Value::undefined();
-                };
-                result.push_str(&sub);
+        let idx = i.to_string();
+        let segment = match get_value_sync(gc, vm, raw, &idx) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
             }
+        };
+        let text = match to_string(gc, vm, segment) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        };
+        result.push_str(&text);
+        if i + 1 < len {
+            let sub = args.get(i + 1).copied().unwrap_or(Value::undefined());
+            let text = match to_string(gc, vm, sub) {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            };
+            result.push_str(&text);
         }
     }
     Value::from_heap_ptr(HeapString::allocate(gc, &result) as *mut u8)

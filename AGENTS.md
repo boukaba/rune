@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **String statics/accessor names (2026-11-13)**: raw getters, sync code-point coercion, get/set names. String **846/1223**. Integration **857**.
 - **Literal accessor pairs (2026-11-13)**: DefineAccessor merges get/set halves. Object **2659/3411**. Integration **856**.
 - **Reflect receiver/define (2026-11-13)**: receiver-aware get/set, boolean defineProperty, key/args throw paths. Reflect **137/153**. Integration **855**.
 - **Reflect validation/setProto (2026-11-13)**: descriptor order, target checks, cycle/extensible semantics. Reflect **115/153**, Object **2655/3411**. Integration **854**.

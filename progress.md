@@ -2294,6 +2294,24 @@ Integration suite: **855 passed, 0 failed, 3 ignored**.
 
 Integration suite: **856 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — String statics + accessor names (2026-11-13)
+
+- Object-literal accessor functions now get spec names (`get x` / `set x`)
+  instead of the bare key.
+- `String.raw` now:
+  - requires `template.raw` to be an object;
+  - Gets `raw`, `length`, and each segment through the accessor-aware sync Get
+    (getters can throw);
+  - ToLengths `length` and ToStrings substitutions (Symbol → TypeError).
+- `String.fromCharCode` / `fromCodePoint` now coerce arguments through
+  synchronous ToNumber (`valueOf` runs and can throw), with Symbol rejection.
+- Test262: String **834 → 846/1223**, `String/raw` **24/30**,
+  `fromCharCode` **14/17**, `fromCodePoint` **10/11**.
+- Regression: `test_string_raw_and_code_point_coercions`.
+- Known remaining failures: tagged-template literal forms, lone surrogates.
+
+Integration suite: **857 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

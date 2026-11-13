@@ -2728,10 +2728,39 @@ impl Vm {
                     );
                 }
             }
-            if let Some(h) = find_handle(&self.builtins, "Object_prototype_propertyIsEnumerable") {
+            if let Some(h) = find_handle(&self.builtins, "Object_prototype_toLocaleString") {
                 unsafe {
                     JSObject::add_property(
                         obj_proto_ptr,
+                        PropertyKey::from_string("toLocaleString"),
+                        "toLocaleString".to_string(),
+                        h,
+                    );
+                }
+            }
+            for (name, key) in [
+                ("__lookupGetter__", "Object_prototype_lookupGetter"),
+                ("__lookupSetter__", "Object_prototype_lookupSetter"),
+                ("__defineGetter__", "Object_prototype_defineGetter"),
+                ("__defineSetter__", "Object_prototype_defineSetter"),
+            ] {
+                if let Some(h) = find_handle(&self.builtins, key) {
+                    let live = self.ensure_object_capacity(gc, obj_proto_ptr);
+                    unsafe {
+                        JSObject::add_property(
+                            live,
+                            PropertyKey::from_string(name),
+                            name.to_string(),
+                            h,
+                        );
+                    }
+                }
+            }
+            if let Some(h) = find_handle(&self.builtins, "Object_prototype_propertyIsEnumerable") {
+                let live = self.ensure_object_capacity(gc, obj_proto_ptr);
+                unsafe {
+                    JSObject::add_property(
+                        live,
                         PropertyKey::from_string("propertyIsEnumerable"),
                         "propertyIsEnumerable".to_string(),
                         h,
@@ -2739,9 +2768,10 @@ impl Vm {
                 }
             }
             if let Some(h) = find_handle(&self.builtins, "Object_prototype_valueOf") {
+                let live = self.ensure_object_capacity(gc, obj_proto_ptr);
                 unsafe {
                     JSObject::add_property(
-                        obj_proto_ptr,
+                        live,
                         PropertyKey::from_string("valueOf"),
                         "valueOf".to_string(),
                         h,

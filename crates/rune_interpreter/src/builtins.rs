@@ -5927,8 +5927,20 @@ pub fn object_prototype_to_string(
             TAG_ARRAY_BUFFER => "ArrayBuffer".to_string(),
             TAG_TYPED_ARRAY => "Object".to_string(),
             TAG_OBJECT => {
+                // Primitive wrapper objects carry hidden data slots.
+                let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                if shape
+                    .lookup(&PropertyKey::from_string(BOOLEAN_WRAPPER_KEY))
+                    .is_some()
+                {
+                    "Boolean".to_string()
+                } else if shape
+                    .lookup(&PropertyKey::from_string(NUMBER_WRAPPER_KEY))
+                    .is_some()
+                {
+                    "Number".to_string()
                 // Callable wrappers (builtin constructors) are functions.
-                if vm
+                } else if vm
                     .callable_wrappers
                     .iter()
                     .any(|w| w.heap_ptr() == Some(ptr))
@@ -5970,6 +5982,190 @@ fn is_on_proto_chain(obj: *mut u8, proto: *mut u8) -> bool {
         cur = unsafe { JSObject::prototype(cur as *mut JSObject) };
     }
     false
+}
+
+/// Object.prototype.toLocaleString() — delegates to Object.prototype.toString
+/// for the default object model.
+pub fn object_prototype_to_locale_string(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    object_prototype_to_string(gc, this, args, vm)
+}
+
+/// Walk the prototype chain looking for an accessor property; return its
+/// getter or setter (undefined when absent or data-only).
+fn legacy_lookup_accessor(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    this: Value,
+    key: Value,
+    want_getter: bool,
+) -> Value {
+    if this.is_null() || this.is_undefined() {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Object.prototype.__lookupGetter__ called on null or undefined",
+        ));
+        return Value::undefined();
+    }
+    let obj = crate::vm::to_object_value(gc, this, vm);
+    let name = arg_to_string(gc, Some(key), vm);
+    let pkey = PropertyKey::from_string(&name);
+    let mut current = obj;
+    for _ in 0..MAX_PROTOTYPE_DEPTH {
+        let Some(ptr) = current.heap_ptr() else {
+            break;
+        };
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_OBJECT || tag == TAG_FUNC {
+            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+            if let Some(slot) = shape.lookup(&pkey) {
+                let value = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+                if let Some(vp) = value.heap_ptr() {
+                    if unsafe { (*(vp as *const GcHeader)).tag() } == TAG_ACCESSOR {
+                        return if want_getter {
+                            unsafe { rune_core::accessor::AccessorPair::getter(vp) }
+                        } else {
+                            unsafe { rune_core::accessor::AccessorPair::setter(vp) }
+                        };
+                    }
+                }
+                return Value::undefined();
+            }
+        }
+        let Some(proto) = crate::vm::value_prototype(current) else {
+            break;
+        };
+        current = Value::from_heap_ptr(proto);
+    }
+    Value::undefined()
+}
+
+pub fn object_prototype_lookup_getter(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let key = args.first().copied().unwrap_or(Value::undefined());
+    legacy_lookup_accessor(gc, vm, this, key, true)
+}
+
+pub fn object_prototype_lookup_setter(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let key = args.first().copied().unwrap_or(Value::undefined());
+    legacy_lookup_accessor(gc, vm, this, key, false)
+}
+
+fn legacy_define_accessor(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    this: Value,
+    args: &[Value],
+    is_getter: bool,
+) -> Value {
+    if this.is_null() || this.is_undefined() {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Object.prototype.__defineGetter__ called on null or undefined",
+        ));
+        return Value::undefined();
+    }
+    let key = args.first().copied().unwrap_or(Value::undefined());
+    let func = args.get(1).copied().unwrap_or(Value::undefined());
+    let callable = func.as_smi().is_some_and(|s| s < 0)
+        || func
+            .heap_ptr()
+            .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC);
+    if !callable {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Object.prototype.__defineGetter__: getter must be callable",
+        ));
+        return Value::undefined();
+    }
+    let obj = crate::vm::to_object_value(gc, this, vm);
+    let Some(ptr) = obj.heap_ptr() else {
+        return Value::undefined();
+    };
+    if unsafe { (*(ptr as *const GcHeader)).tag() } != TAG_OBJECT {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Object.prototype.__defineGetter__: receiver is not an object",
+        ));
+        return Value::undefined();
+    }
+    let name = arg_to_string(gc, Some(key), vm);
+    let pkey = PropertyKey::from_string(&name);
+    let obj_ptr = unsafe { rune_core::gc::resolve_forwarded(ptr) } as *mut JSObject;
+    let shape = unsafe { JSObject::shape_ptr(obj_ptr) };
+    if let Some(slot) = shape.lookup(&pkey) {
+        let existing = unsafe { JSObject::get_slot(obj_ptr, slot) };
+        let (old_get, old_set) = if existing
+            .heap_ptr()
+            .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_ACCESSOR)
+        {
+            let ap = existing.heap_ptr().unwrap();
+            unsafe {
+                (
+                    rune_core::accessor::AccessorPair::getter(ap),
+                    rune_core::accessor::AccessorPair::setter(ap),
+                )
+            }
+        } else {
+            (Value::undefined(), Value::undefined())
+        };
+        let pair = if is_getter {
+            rune_core::accessor::AccessorPair::allocate(gc, func, old_set)
+        } else {
+            rune_core::accessor::AccessorPair::allocate(gc, old_get, func)
+        };
+        unsafe { JSObject::set_slot(obj_ptr, slot, Value::from_heap_ptr(pair)) };
+        return Value::undefined();
+    }
+    let live = vm.ensure_object_capacity(gc, obj_ptr);
+    let pair = if is_getter {
+        rune_core::accessor::AccessorPair::allocate(gc, func, Value::undefined())
+    } else {
+        rune_core::accessor::AccessorPair::allocate(gc, Value::undefined(), func)
+    };
+    unsafe {
+        JSObject::add_property(live, pkey, name, Value::from_heap_ptr(pair));
+    }
+    Value::undefined()
+}
+
+pub fn object_prototype_define_getter(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    legacy_define_accessor(gc, vm, this, args, true)
+}
+
+pub fn object_prototype_define_setter(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    legacy_define_accessor(gc, vm, this, args, false)
 }
 
 /// §20.3.4.4 Object.prototype.hasOwnProperty(key) — own-property check only.
@@ -20819,6 +21015,31 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 0,
             name: "Object_prototype_toString",
             func: object_prototype_to_string,
+        },
+        Builtin {
+            length: 0,
+            name: "Object_prototype_toLocaleString",
+            func: object_prototype_to_locale_string,
+        },
+        Builtin {
+            length: 1,
+            name: "Object_prototype_lookupGetter",
+            func: object_prototype_lookup_getter,
+        },
+        Builtin {
+            length: 1,
+            name: "Object_prototype_lookupSetter",
+            func: object_prototype_lookup_setter,
+        },
+        Builtin {
+            length: 2,
+            name: "Object_prototype_defineGetter",
+            func: object_prototype_define_getter,
+        },
+        Builtin {
+            length: 2,
+            name: "Object_prototype_defineSetter",
+            func: object_prototype_define_setter,
         },
         Builtin {
             length: 1,

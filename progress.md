@@ -1206,6 +1206,28 @@ Integration suite: **796 passed, 0 failed, 3 ignored**.
 
 Integration suite: **796 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Object wrapper tags + legacy accessor helpers (2026-11-13)
+
+- `Object.prototype.toString` now recognizes hidden Number/Boolean data slots:
+  `new Number(5)` and `new Boolean(true)` report `[object Number]` /
+  `[object Boolean]` instead of `[object Object]`.
+- Added `Object.prototype.toLocaleString` (default delegation to the ordinary
+  object tag).
+- Added legacy accessor helpers:
+  - `__lookupGetter__` / `__lookupSetter__` walk the prototype chain and return
+    the accessor pair's getter/setter, or undefined for data/absent properties;
+  - `__defineGetter__` / `__defineSetter__` validate a callable and install or
+    update an accessor pair on an object receiver.
+- Object prototype capacity is grown when installing these properties.
+- Test262: Object **1531 → 1558/3411**; each lookup helper **8/16**.
+- Regression: `test_object_wrapper_tags_and_legacy_accessors`.
+- Known gaps: legacy define helpers only target plain `TAG_OBJECT` receivers
+  (arrays/proxies unsupported); added accessors use default enumerable/
+  configurable attributes; `Object.prototype.__proto__` remains the engine's
+  special-cased internal-prototype path rather than a descriptor property.
+
+Integration suite: **797 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

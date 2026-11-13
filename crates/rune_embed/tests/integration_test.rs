@@ -14639,3 +14639,29 @@ fn test_string_locale_statics_and_primitive_methods() {
         .unwrap();
     assert_eq!(r3.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_object_wrapper_tags_and_legacy_accessors() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var o = {};
+            o.__defineGetter__("x", function () { return 7; });
+            o.__defineSetter__("y", function (v) { this.z = v; });
+            o.y = 9;
+            [
+                Object.prototype.toString.call(new Boolean(true)) === "[object Boolean]",
+                Object.prototype.toString.call(new Number(5)) === "[object Number]",
+                ({}).toLocaleString() === "[object Object]",
+                o.x === 7,
+                o.z === 9,
+                typeof o.__lookupGetter__("x") === "function",
+                typeof o.__lookupSetter__("y") === "function",
+                o.__lookupGetter__("missing") === undefined
+            ].join("|") === "true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

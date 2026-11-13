@@ -2166,6 +2166,27 @@ Integration suite: **848 passed, 0 failed, 3 ignored**.
 
 Integration suite: **849 passed, 0 failed, 3 ignored**.
 
+### Phase 1 — Synchronous collection constructors + live `forEach` (2026-11-13)
+
+- `Map`/`Set` constructors now fill through the re-entrant sync iterator helper:
+  - `Get(map,"set")` / `Get(set,"add")` with callable validation, then a real
+    `Call(adder, collection, …)` per entry;
+  - entry `"0"`/`"1"` Gets with accessor support;
+  - IteratorClose on abrupt entry/adder failures;
+  - works for arrays, iterables, Maps/Sets and generators.
+- `forEach` now iterates the **live** entries list via `call_value_sync`
+  instead of the single-flight snapshot machine:
+  - elements added after iteration starts are visited;
+  - deleted-before-visited entries are skipped;
+  - re-added entries are visited again;
+  - callback throws propagate immediately.
+- Test262: Map **183 → 195/204**, Set **182 → 191/383**.
+- Regression: `test_collection_constructor_adder_and_live_foreach`.
+- Known remaining Map failures: `is-a-constructor` (Reflect missing), global
+  descriptor attributes, BigInt literals and `new Function()`.
+
+Integration suite: **850 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

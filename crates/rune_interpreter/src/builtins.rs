@@ -6,7 +6,7 @@ use crate::vm::load_property_recursive;
 use crate::vm::to_number;
 use crate::vm::value_to_array_index;
 use crate::vm::value_to_prop_key;
-use crate::vm::{CollectionCtorState, PendingCollectionCtor, PendingCollectionForEach};
+use crate::vm::{CollectionCtorState, PendingCollectionCtor};
 use crate::vm::{Exit, GeneratorResume, call_builtin_sync};
 use rune_bytecode::opcode::{BytecodeProgram, Instruction, Opcode};
 use rune_core::array::RuneArray;
@@ -6264,7 +6264,7 @@ pub fn typed_array_entries_builtin(
 
 /// §27.1.3.6 Map.prototype.forEach(callback, thisArg)
 pub fn map_foreach_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some(map_ptr) = map_strong_receiver(gc, this, vm) else {
+    let Some(_) = map_strong_receiver(gc, this, vm) else {
         return Value::undefined();
     };
     let callback = args.first().copied().unwrap_or(Value::undefined());
@@ -6278,67 +6278,45 @@ pub fn map_foreach_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: 
         return Value::undefined();
     }
     let this_arg = args.get(1).copied().unwrap_or(Value::undefined());
-    let entries_ptr = unsafe { RuneMap::entries(map_ptr) };
-    let len = if entries_ptr.is_null() {
-        0
-    } else {
-        (unsafe { RuneArray::length(entries_ptr as *mut RuneArray) }) as usize
-    };
-    let size = unsafe { RuneMap::size(map_ptr) } as usize;
-    // §23.1.3.25: entries deleted before being visited are not visited, so
-    // snapshot the KEYS only and re-check liveness (and re-read the value)
-    // at dispatch time. Mutations during callbacks don't reorder.
-    let mut elems: Vec<Value> = Vec::with_capacity(len / 2);
-    if !entries_ptr.is_null() {
-        let entries = entries_ptr as *mut RuneArray;
-        for i in (0..len).step_by(2) {
-            let k = unsafe { RuneArray::get_element(entries, i) };
-            if k.raw() != Value::empty_sentinel().raw() {
-                elems.push(k);
-            }
-        }
-    }
-    let snapshot = RuneArray::allocate(gc, &elems) as *mut u8;
+    let base = vm.temp_roots.len();
+    vm.temp_roots.push(this);
+    vm.temp_roots.push(callback);
+    vm.temp_roots.push(this_arg);
     let mut idx = 0usize;
-    let mut found = 0usize;
-    while idx < elems.len() && found < size {
-        let k = unsafe { RuneArray::get_element(snapshot as *mut RuneArray, idx) };
-        let live_entries = unsafe { RuneMap::entries(map_ptr) };
-        if let Some(live) = key_index(live_entries, k, true) {
-            found += 1;
-            let v = unsafe { RuneArray::get_element(live_entries as *mut RuneArray, live + 1) };
-            if callback.as_smi().is_some_and(|s| s < 0) {
-                let id = (-callback.as_smi().unwrap() as usize) - 1;
-                if id < vm.builtins.len() {
-                    (vm.builtins[id].func)(gc, this_arg, &[v, k, this], vm);
-                    if vm.pending_exception.is_some() {
-                        return Value::undefined();
-                    }
-                }
-            } else {
-                vm.pending_collection_foreach = Some(PendingCollectionForEach {
-                    source_frame_depth: vm.frame_depth() - 1,
-                    snapshot,
-                    idx: idx + 1,
-                    found,
-                    size,
-                    is_map: true,
-                    callback,
-                    this_arg,
-                    collection: this,
-                });
-                vm.push_callback_call(gc, callback, this_arg, vec![v, k, this]);
-                return Value::undefined();
-            }
+    loop {
+        let coll = vm.temp_roots[base];
+        let Some(ptr) = coll.heap_ptr() else { break };
+        let entries_ptr = unsafe { RuneMap::entries(ptr) };
+        if entries_ptr.is_null() {
+            break;
         }
-        idx += 1;
+        let len = unsafe { RuneArray::length(entries_ptr as *mut RuneArray) } as usize;
+        if idx + 1 >= len {
+            break;
+        }
+        let entries = entries_ptr as *mut RuneArray;
+        let k = unsafe { RuneArray::get_element(entries, idx) };
+        let v = unsafe { RuneArray::get_element(entries, idx + 1) };
+        idx += 2;
+        if k.raw() == Value::empty_sentinel().raw() {
+            continue;
+        }
+        let callback = vm.temp_roots[base + 1];
+        let this_arg = vm.temp_roots[base + 2];
+        let coll = vm.temp_roots[base];
+        if let Err(e) = vm.call_value_sync(gc, callback, this_arg, &[v, k, coll]) {
+            vm.temp_roots.truncate(base);
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
     }
+    vm.temp_roots.truncate(base);
     Value::undefined()
 }
 
 /// §27.2.3.8 Set.prototype.forEach(callback, thisArg)
 pub fn set_foreach_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some(set_ptr) = set_strong_receiver(gc, this, vm) else {
+    let Some(_) = set_strong_receiver(gc, this, vm) else {
         return Value::undefined();
     };
     let callback = args.first().copied().unwrap_or(Value::undefined());
@@ -6352,62 +6330,41 @@ pub fn set_foreach_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: 
         return Value::undefined();
     }
     let this_arg = args.get(1).copied().unwrap_or(Value::undefined());
-    let entries_ptr = unsafe { RuneSet::entries(set_ptr) };
-    let len = if entries_ptr.is_null() {
-        0
-    } else {
-        (unsafe { RuneArray::length(entries_ptr as *mut RuneArray) }) as usize
-    };
-    let size = unsafe { RuneSet::size(set_ptr) } as usize;
-    // §23.2.3.11: elements deleted before being visited are not visited.
-    let mut elems: Vec<Value> = Vec::with_capacity(len);
-    if !entries_ptr.is_null() {
-        let entries = entries_ptr as *mut RuneArray;
-        for i in 0..len {
-            let v = unsafe { RuneArray::get_element(entries, i) };
-            if v.raw() != Value::empty_sentinel().raw() {
-                elems.push(v);
-            }
-        }
-    }
-    let snapshot = RuneArray::allocate(gc, &elems) as *mut u8;
+    let base = vm.temp_roots.len();
+    vm.temp_roots.push(this);
+    vm.temp_roots.push(callback);
+    vm.temp_roots.push(this_arg);
     let mut idx = 0usize;
-    let mut found = 0usize;
-    while idx < elems.len() && found < size {
-        let v = unsafe { RuneArray::get_element(snapshot as *mut RuneArray, idx) };
-        let live_entries = unsafe { RuneSet::entries(set_ptr) };
-        if key_index(live_entries, v, false).is_some() {
-            found += 1;
-            if callback.as_smi().is_some_and(|s| s < 0) {
-                let id = (-callback.as_smi().unwrap() as usize) - 1;
-                if id < vm.builtins.len() {
-                    (vm.builtins[id].func)(gc, this_arg, &[v, v, this], vm);
-                    if vm.pending_exception.is_some() {
-                        return Value::undefined();
-                    }
-                }
-            } else {
-                vm.pending_collection_foreach = Some(PendingCollectionForEach {
-                    source_frame_depth: vm.frame_depth() - 1,
-                    snapshot,
-                    idx: idx + 1,
-                    found,
-                    size,
-                    is_map: false,
-                    callback,
-                    this_arg,
-                    collection: this,
-                });
-                vm.push_callback_call(gc, callback, this_arg, vec![v, v, this]);
-                return Value::undefined();
-            }
+    loop {
+        let coll = vm.temp_roots[base];
+        let Some(ptr) = coll.heap_ptr() else { break };
+        let entries_ptr = unsafe { RuneSet::entries(ptr) };
+        if entries_ptr.is_null() {
+            break;
         }
+        let len = unsafe { RuneArray::length(entries_ptr as *mut RuneArray) } as usize;
+        if idx >= len {
+            break;
+        }
+        let v = unsafe { RuneArray::get_element(entries_ptr as *mut RuneArray, idx) };
         idx += 1;
+        if v.raw() == Value::empty_sentinel().raw() {
+            continue;
+        }
+        let callback = vm.temp_roots[base + 1];
+        let this_arg = vm.temp_roots[base + 2];
+        let coll = vm.temp_roots[base];
+        if let Err(e) = vm.call_value_sync(gc, callback, this_arg, &[v, v, coll]) {
+            vm.temp_roots.truncate(base);
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
     }
+    vm.temp_roots.truncate(base);
     Value::undefined()
 }
 
-/// Outcome of filling a collection from an iterable.
+/// Outcome of filling a collection from an iterable./// Outcome of filling a collection from an iterable.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FillOutcome {
     Done,
@@ -6537,25 +6494,148 @@ pub(crate) fn fill_collection_from_iterator(
 
 /// §27.1.1.1 Map constructor — AddEntriesFromIterable.
 /// The map must be rooted on the VM stack at `collection_idx`.
-pub fn map_constructor(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let root_base = vm.stack.len();
-    vm.push(this);
-    let iterable = args.first().copied().unwrap_or(Value::undefined());
-    let outcome = if iterable.is_undefined() || iterable.is_null() {
-        FillOutcome::Done
-    } else {
-        fill_collection_from_iterable(vm, gc, root_base, iterable, true)
-    };
-    match outcome {
-        FillOutcome::Done => {
-            vm.stack.truncate(root_base);
-            this
+fn fill_collection_sync(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    collection: Value,
+    iterable: Value,
+    is_map: bool,
+) -> Result<Value, Value> {
+    let base = vm.temp_roots.len();
+    vm.temp_roots.push(collection);
+    let adder_name = if is_map { "set" } else { "add" };
+    let adder = match get_value_sync(gc, vm, collection, adder_name) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.temp_roots.truncate(base);
+            return Err(e);
         }
-        // Pending: a callback frame sits on the stack (rooted at root_base);
-        // truncating would steal the root below its base.
-        FillOutcome::Pending => Value::undefined(),
-        FillOutcome::Threw => {
-            vm.stack.truncate(root_base);
+    };
+    let adder_ok = adder
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC })
+        || adder.as_smi().is_some_and(|s| s < 0);
+    if !adder_ok {
+        vm.temp_roots.truncate(base);
+        return Err(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            if is_map {
+                "Map.prototype.set is not callable"
+            } else {
+                "Set.prototype.add is not callable"
+            },
+        ));
+    }
+    let method = match get_iter_method(vm, gc, iterable) {
+        SymbolMethodResult::Found(m) => m,
+        _ => {
+            vm.temp_roots.truncate(base);
+            return Err(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "value is not iterable",
+            ));
+        }
+    };
+    let iterator = match vm.call_value_sync(gc, method, iterable, &[]) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.temp_roots.truncate(base);
+            return Err(e);
+        }
+    };
+    let islot = vm.temp_roots.len();
+    vm.temp_roots.push(iterator);
+    loop {
+        let iter = vm.temp_roots[islot];
+        let next = match get_value_sync(gc, vm, iter, "next") {
+            Ok(v) => v,
+            Err(e) => {
+                vm.temp_roots.truncate(base);
+                return Err(e);
+            }
+        };
+        let result = match vm.call_value_sync(gc, next, iter, &[]) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.temp_roots.truncate(base);
+                return Err(e);
+            }
+        };
+        let done = match get_value_sync(gc, vm, result, "done") {
+            Ok(v) => v.to_boolean().unwrap_or(false),
+            Err(e) => {
+                close_iterator(gc, vm, vm.temp_roots[islot]);
+                vm.temp_roots.truncate(base);
+                return Err(e);
+            }
+        };
+        if done {
+            break;
+        }
+        let item = match get_value_sync(gc, vm, result, "value") {
+            Ok(v) => v,
+            Err(e) => {
+                close_iterator(gc, vm, vm.temp_roots[islot]);
+                vm.temp_roots.truncate(base);
+                return Err(e);
+            }
+        };
+        let call = if is_map {
+            if !is_object_value(item) {
+                close_iterator(gc, vm, vm.temp_roots[islot]);
+                vm.temp_roots.truncate(base);
+                return Err(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "Iterator value is not an entry object",
+                ));
+            }
+            let k = match get_value_sync(gc, vm, item, "0") {
+                Ok(v) => v,
+                Err(e) => {
+                    close_iterator(gc, vm, vm.temp_roots[islot]);
+                    vm.temp_roots.truncate(base);
+                    return Err(e);
+                }
+            };
+            let v = match get_value_sync(gc, vm, item, "1") {
+                Ok(v) => v,
+                Err(e) => {
+                    close_iterator(gc, vm, vm.temp_roots[islot]);
+                    vm.temp_roots.truncate(base);
+                    return Err(e);
+                }
+            };
+            vm.call_value_sync(gc, adder, vm.temp_roots[base], &[k, v])
+        } else {
+            vm.call_value_sync(gc, adder, vm.temp_roots[base], &[item])
+        };
+        if let Err(e) = call {
+            close_iterator(gc, vm, vm.temp_roots[islot]);
+            vm.temp_roots.truncate(base);
+            return Err(e);
+        }
+    }
+    let result = vm.temp_roots[base];
+    vm.temp_roots.truncate(base);
+    Ok(result)
+}
+
+/// §27.1.1.1 Map constructor.
+pub fn map_constructor(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let iterable = args.first().copied().unwrap_or(Value::undefined());
+    if iterable.is_null() || iterable.is_undefined() {
+        return this;
+    }
+    match fill_collection_sync(gc, vm, this, iterable, true) {
+        Ok(collection) => collection,
+        Err(e) => {
+            vm.set_pending_exception(e);
             Value::undefined()
         }
     }
@@ -6563,29 +6643,22 @@ pub fn map_constructor(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
 
 /// §27.2.1.1 Set constructor.
 pub fn set_constructor(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let root_base = vm.stack.len();
-    vm.push(this);
     let iterable = args.first().copied().unwrap_or(Value::undefined());
-    let outcome = if iterable.is_undefined() || iterable.is_null() {
-        FillOutcome::Done
-    } else {
-        fill_collection_from_iterable(vm, gc, root_base, iterable, false)
-    };
-    match outcome {
-        FillOutcome::Done => {
-            vm.stack.truncate(root_base);
-            this
-        }
-        FillOutcome::Pending => Value::undefined(),
-        FillOutcome::Threw => {
-            vm.stack.truncate(root_base);
+    if iterable.is_null() || iterable.is_undefined() {
+        return this;
+    }
+    match fill_collection_sync(gc, vm, this, iterable, false) {
+        Ok(collection) => collection,
+        Err(e) => {
+            vm.set_pending_exception(e);
             Value::undefined()
         }
     }
 }
 
-/// Resolve the @@iterator method for `iterable` and fill `collection`
+/// Resolve the @@iterator method for `iterable`/// Resolve the @@iterator method for `iterable` and fill `collection`
 /// (rooted at `collection_idx` on the VM stack) from it.
+#[allow(dead_code)]
 fn fill_collection_from_iterable(
     vm: &mut Vm,
     gc: &mut SemiSpace,

@@ -16059,3 +16059,35 @@ fn test_collection_species_and_for_each_abrupt() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_collection_constructor_adder_and_live_foreach() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var originalSet = Map.prototype.set;
+            var calls = 0;
+            Map.prototype.set = function (k, v) { calls += 1; return originalSet.call(this, k, v); };
+            var m = new Map([["a", 1], ["b", 2]]);
+            Map.prototype.set = originalSet;
+            var nonCallable = false;
+            var savedSet = Map.prototype.set;
+            Map.prototype.set = null;
+            try { new Map([[1, 1]]); } catch (e) { nonCallable = e instanceof TypeError; }
+            Map.prototype.set = savedSet;
+            var s = new Set([1]);
+            var seen = [];
+            s.forEach(function (v) { seen.push(v); if (v < 4) s.add(v + 1); });
+            [
+                calls === 2,
+                m.get("a") === 1 && m.get("b") === 2,
+                nonCallable,
+                seen.join(",") === "1,2,3,4",
+                s.size === 4
+            ].join("|") === "true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

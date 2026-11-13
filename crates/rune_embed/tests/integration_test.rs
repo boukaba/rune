@@ -14665,3 +14665,42 @@ fn test_object_wrapper_tags_and_legacy_accessors() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_namespace_prototypes_and_proto_accessor() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            Object.prototype.get = function () { return "jsonGetProperty"; };
+            var target = {};
+            Object.defineProperty(target, "property", JSON);
+            var desc = Object.getOwnPropertyDescriptor(Object.prototype, "__proto__");
+            var a = {};
+            var b = {};
+            a.__proto__ = b;
+            var cyclic = false;
+            try {
+                desc.set.call(b, a);
+            } catch (e) {
+                cyclic = e instanceof TypeError;
+            }
+            var plain = {};
+            plain.__proto__ = null;
+            [
+                Object.getPrototypeOf(JSON) === Object.prototype,
+                Object.getPrototypeOf(Math) === Object.prototype,
+                Object.getPrototypeOf(console) === Object.prototype,
+                target.property === "jsonGetProperty",
+                typeof desc.get === "function",
+                typeof desc.set === "function",
+                Object.getPrototypeOf(a) === b,
+                cyclic,
+                Object.getPrototypeOf(plain) === null,
+                plain.__proto__ === null
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

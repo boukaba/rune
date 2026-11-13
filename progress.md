@@ -1228,6 +1228,29 @@ Integration suite: **796 passed, 0 failed, 3 ignored**.
 
 Integration suite: **797 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — namespace prototypes + `__proto__` descriptor (2026-11-13)
+
+- Math/JSON/console namespace objects are now chained to `Object.prototype`
+  (they are created before the intrinsic object prototype exists), so inherited
+  lookups and descriptor tests work.
+- `Object.prototype.__proto__` is now a real accessor property:
+  - getter boxes primitives and returns the internal prototype;
+  - setter validates object/null values, rejects non-extensible receivers, and
+    throws TypeError on cycles;
+  - descriptor-shaped get/set are observable through
+    `getOwnPropertyDescriptor` and can be called directly.
+- Ordinary `obj.__proto__ = value` assignment keeps the historical internal
+  SetPrototypeOf fast path (including class prototype linking), while reads are
+  handled before IC/accessor paths so the magic property is not shadowed.
+- Test262: Object **1558 → 1580/3411**; defineProperty **509 → 521/1131**;
+  `__proto__` **6/15**.
+- Regression: `test_namespace_prototypes_and_proto_accessor`.
+- Known gap: the assignment fast path intentionally does not implement the
+  accessor setter's cycle/primitive rejection semantics; direct descriptor
+  calls do.
+
+Integration suite: **798 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

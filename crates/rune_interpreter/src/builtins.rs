@@ -5995,6 +5995,90 @@ pub fn object_prototype_to_locale_string(
     object_prototype_to_string(gc, this, args, vm)
 }
 
+/// Object.prototype.__proto__ getter — §B.2.2.1.1.
+pub fn object_prototype_proto_get(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    if this.is_null() || this.is_undefined() {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Object.prototype.__proto__ getter called on null or undefined",
+        ));
+        return Value::undefined();
+    }
+    let obj = crate::vm::to_object_value(gc, this, vm);
+    match crate::vm::value_prototype(obj) {
+        Some(ptr) => Value::from_heap_ptr(ptr),
+        None => Value::null(),
+    }
+}
+
+/// Object.prototype.__proto__ setter — §B.2.2.1.2.
+pub fn object_prototype_proto_set(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    if this.is_null() || this.is_undefined() {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Object.prototype.__proto__ setter called on null or undefined",
+        ));
+        return Value::undefined();
+    }
+    if !this.is_heap_object() {
+        return Value::undefined();
+    }
+    let value = args.first().copied().unwrap_or(Value::undefined());
+    if !value.is_null() && !value.is_heap_object() {
+        return Value::undefined();
+    }
+    let Some(receiver) = this.heap_ptr() else {
+        return Value::undefined();
+    };
+    let rtag = unsafe { (*(receiver as *const GcHeader)).tag() };
+    // Function objects store their prototype in a tag-specific layout; the
+    // JSObject::set_prototype field is not applicable to them here.
+    if rtag != TAG_OBJECT && rtag != TAG_ARRAY {
+        return Value::undefined();
+    }
+    let receiver_ptr = unsafe { rune_core::gc::resolve_forwarded(receiver) } as *mut JSObject;
+    if !unsafe { JSObject::is_extensible(receiver_ptr) } {
+        return Value::undefined();
+    }
+    let proto = if value.is_null() {
+        std::ptr::null_mut()
+    } else if let Some(ptr) = value.heap_ptr() {
+        let ptag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if ptag != TAG_OBJECT && ptag != TAG_ARRAY {
+            return Value::undefined();
+        }
+        let target = unsafe { rune_core::gc::resolve_forwarded(ptr) };
+        if target == receiver_ptr as *mut u8 || is_on_proto_chain(target, receiver_ptr as *mut u8) {
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Cyclic __proto__ value",
+            ));
+            return Value::undefined();
+        }
+        target
+    } else {
+        std::ptr::null_mut()
+    };
+    unsafe { JSObject::set_prototype(receiver_ptr, proto) };
+    Value::undefined()
+}
+
 /// Walk the prototype chain looking for an accessor property; return its
 /// getter or setter (undefined when absent or data-only).
 fn legacy_lookup_accessor(
@@ -21040,6 +21124,16 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 2,
             name: "Object_prototype_defineSetter",
             func: object_prototype_define_setter,
+        },
+        Builtin {
+            length: 0,
+            name: "Object_prototype_proto_get",
+            func: object_prototype_proto_get,
+        },
+        Builtin {
+            length: 1,
+            name: "Object_prototype_proto_set",
+            func: object_prototype_proto_set,
         },
         Builtin {
             length: 1,

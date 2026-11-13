@@ -2692,6 +2692,20 @@ impl Vm {
         if let Some(ptr) = self.date_prototype.heap_ptr() {
             unsafe { date::RuneDate::set_prototype(ptr, obj_proto_u8) };
         }
+        // Namespace objects (Math/JSON/console) are created before
+        // Object.prototype exists; chain them once it does.
+        for name in ["Math", "JSON", "console"] {
+            if let Some(ns) = self.builtin_wrappers.get(name).copied() {
+                if let Some(ptr) = ns.heap_ptr() {
+                    if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_OBJECT {
+                        unsafe {
+                            JSObject::set_prototype(ptr as *mut JSObject, obj_proto_u8);
+                        }
+                    }
+                }
+            }
+        }
+
         // Object.prototype methods: toString / hasOwnProperty / isPrototypeOf
         {
             let to_string_handle = find_handle(&self.builtins, "Object_prototype_toString");
@@ -2754,6 +2768,20 @@ impl Vm {
                             h,
                         );
                     }
+                }
+            }
+            let proto_getter = find_handle(&self.builtins, "Object_prototype_proto_get");
+            let proto_setter = find_handle(&self.builtins, "Object_prototype_proto_set");
+            if let (Some(getter), Some(setter)) = (proto_getter, proto_setter) {
+                let pair = rune_core::accessor::AccessorPair::allocate(gc, getter, setter);
+                let live = self.ensure_object_capacity(gc, obj_proto_ptr);
+                unsafe {
+                    JSObject::add_property(
+                        live,
+                        PropertyKey::from_string("__proto__"),
+                        "__proto__".to_string(),
+                        Value::from_heap_ptr(pair),
+                    );
                 }
             }
             if let Some(h) = find_handle(&self.builtins, "Object_prototype_propertyIsEnumerable") {
@@ -5690,6 +5718,25 @@ impl Vm {
                 None => PropGetOut::Bail(None),
             };
         }
+        // `__proto__` reads are the internal prototype (legacy behavior),
+        // bypassing IC/accessor paths so a descriptor-shaped accessor cannot
+        // shadow the magic property.
+        if is_proto_key(raw_key) {
+            let proto = if crate::vm::value_is_string(obj) {
+                self.string_prototype.heap_ptr()
+            } else if let Some(_ptr) = obj.heap_ptr() {
+                crate::vm::value_prototype(obj)
+            } else if obj.is_boolean() {
+                self.boolean_prototype.heap_ptr()
+            } else if obj.as_smi().is_some() || obj.as_float64().is_some() {
+                self.number_prototype.heap_ptr()
+            } else if obj.is_symbol() {
+                self.symbol_prototype.heap_ptr()
+            } else {
+                None
+            };
+            return PropGetOut::Ready(proto.map(Value::from_heap_ptr).unwrap_or_else(Value::null));
+        }
         // A3: strict-function poison pills + sloppy .caller (§15.3.5.4).
         // Own data props shadow (a sloppy assignment created them) — only
         // consulted when absent. Strict functions always throw; sloppy
@@ -6025,6 +6072,26 @@ impl Vm {
                 };
             }
         }
+        // Legacy internal-prototype fast path for `obj.__proto__ = value`.
+        // Direct accessor calls (descriptor set.call) still go through the
+        // accessor pair; ordinary assignment preserves the historical
+        // SetPrototypeOf behavior used by class prototype linking.
+        if is_proto_key(raw_key) {
+            if let Some(ptr) = obj.heap_ptr() {
+                let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+                if tag == TAG_OBJECT || tag == TAG_ARRAY {
+                    if !unsafe { JSObject::is_extensible(ptr as *mut JSObject) } {
+                        return PropSetOut::Ready(Value::undefined());
+                    }
+                    let proto = value
+                        .heap_ptr()
+                        .map(|p| unsafe { rune_core::gc::resolve_forwarded(p) })
+                        .unwrap_or(std::ptr::null_mut());
+                    unsafe { JSObject::set_prototype(ptr as *mut JSObject, proto) };
+                    return PropSetOut::Ready(Value::undefined());
+                }
+            }
+        }
         // Check for accessor setter on own or prototype chain.
         // B1e: dense arrays participate — the own slot is the accessor
         // overlay for numeric indices (named extra_props otherwise), then
@@ -6072,6 +6139,26 @@ impl Vm {
                                 if unsafe { (*(vptr as *const GcHeader)).tag() } == TAG_ACCESSOR {
                                     let setter = unsafe { AccessorPair::setter(vptr) };
                                     if !setter.is_undefined() {
+                                        if let Some(sid) = setter.as_smi() {
+                                            if sid < 0 {
+                                                let id = (-sid as usize) - 1;
+                                                if id < self.builtins.len() {
+                                                    let _ = (self.builtins[id].func)(
+                                                        gc,
+                                                        obj,
+                                                        &[value],
+                                                        self,
+                                                    );
+                                                }
+                                                if let Some(exc) = self.pending_exception.take() {
+                                                    return match self.handle_throw(gc, exc) {
+                                                        Some(exit) => PropSetOut::Bail(Some(exit)),
+                                                        None => PropSetOut::Bail(None),
+                                                    };
+                                                }
+                                                return PropSetOut::Ready(Value::undefined());
+                                            }
+                                        }
                                         if let Some(sptr) = setter.heap_ptr() {
                                             if unsafe { (*(sptr as *const GcHeader)).tag() }
                                                 == TAG_FUNC

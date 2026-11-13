@@ -15114,3 +15114,27 @@ fn test_number_statics_and_radix() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_number_formatting_methods() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            [
+                (1.2345).toFixed(2) === "1.23",
+                (1.5).toFixed(0) === "2",
+                (0).toFixed(2) === "0.00",
+                (123.456).toPrecision(4) === "123.5",
+                (1).toPrecision(3) === "1.00",
+                (1.2345).toExponential(2) === "1.23e+0",
+                (100).toExponential() === "1e+2",
+                (NaN).toFixed(2) === "NaN",
+                (Infinity).toFixed(2) === "Infinity",
+                (1.5).toLocaleString() === "1.5"
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

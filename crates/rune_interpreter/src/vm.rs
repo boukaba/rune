@@ -1936,7 +1936,19 @@ impl Vm {
                 .unwrap_or(Value::undefined());
             let value_of = find_handle(&self.builtins, "Number_prototype_valueOf")
                 .unwrap_or(Value::undefined());
-            let num_proto = make_object(gc, &[("toString", to_string), ("valueOf", value_of)]);
+            let mut num_proto_entries: Vec<(&str, Value)> =
+                vec![("toString", to_string), ("valueOf", value_of)];
+            for (name, handle) in [
+                ("toExponential", "Number_prototype_toExponential"),
+                ("toFixed", "Number_prototype_toFixed"),
+                ("toPrecision", "Number_prototype_toPrecision"),
+                ("toLocaleString", "Number_prototype_toLocaleString"),
+            ] {
+                if let Some(h) = find_handle(&self.builtins, handle) {
+                    num_proto_entries.push((name, h));
+                }
+            }
+            let num_proto = make_object(gc, &num_proto_entries);
             self.number_prototype = num_proto;
             let num_name = Value::from_heap_ptr(HeapString::allocate(gc, "Number") as *mut u8);
             let mut num_entries: Vec<(&str, Value)> = vec![("prototype", num_proto)];

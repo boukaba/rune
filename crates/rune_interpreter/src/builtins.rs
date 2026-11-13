@@ -1593,6 +1593,203 @@ pub fn number_prototype_to_string(
     Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8)
 }
 
+fn number_receiver(gc: &mut SemiSpace, vm: &mut Vm, this: Value, what: &str) -> Option<f64> {
+    if let Some(n) = this.as_smi() {
+        return Some(n as f64);
+    }
+    if let Some(n) = this.as_float64() {
+        return Some(n);
+    }
+    let v = wrapper_value_or_throw(gc, vm, this, NUMBER_WRAPPER_KEY, what)?;
+    v.as_smi().map(|n| n as f64).or_else(|| v.as_float64())
+}
+
+fn number_fraction_digits(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    args: &[Value],
+    default: Option<usize>,
+    what: &str,
+) -> Option<usize> {
+    match args.first() {
+        None => default,
+        Some(v) if v.is_undefined() => default,
+        Some(v) => {
+            let n = match to_integer_sync(gc, vm, *v) {
+                Ok(n) => n,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return None;
+                }
+            };
+            if !(0.0..=100.0).contains(&n) {
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::RangeError,
+                    &format!("{what} digits out of range"),
+                ));
+                return None;
+            }
+            Some(n as usize)
+        }
+    }
+}
+
+fn format_exponential(x: f64, fraction_digits: Option<usize>) -> String {
+    let s = match fraction_digits {
+        Some(f) => format!("{:.*e}", f, x),
+        None => format!("{:e}", x),
+    };
+    let Some((mantissa, exp)) = s.split_once('e') else {
+        return s;
+    };
+    let exp_num: i32 = exp.parse().unwrap_or(0);
+    format!(
+        "{mantissa}e{}{}",
+        if exp_num < 0 { '-' } else { '+' },
+        exp_num.abs()
+    )
+}
+
+/// §21.1.3.3 Number.prototype.toExponential(fractionDigits).
+pub fn number_prototype_to_exponential(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(x) = number_receiver(gc, vm, this, "Number.prototype.toExponential") else {
+        return Value::undefined();
+    };
+    let f = match args.first() {
+        None => None,
+        Some(v) if v.is_undefined() => None,
+        Some(_) => match number_fraction_digits(gc, vm, args, Some(0), "toExponential") {
+            Some(n) => Some(n),
+            None => return Value::undefined(),
+        },
+    };
+    let text = if x.is_nan() {
+        "NaN".to_string()
+    } else if x.is_infinite() {
+        if x < 0.0 { "-Infinity" } else { "Infinity" }.to_string()
+    } else {
+        format_exponential(x, f)
+    };
+    Value::from_heap_ptr(HeapString::allocate(gc, &text) as *mut u8)
+}
+
+/// §21.1.3.5 Number.prototype.toFixed(fractionDigits).
+pub fn number_prototype_to_fixed(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(x) = number_receiver(gc, vm, this, "Number.prototype.toFixed") else {
+        return Value::undefined();
+    };
+    let Some(f) = number_fraction_digits(gc, vm, args, Some(0), "toFixed") else {
+        return Value::undefined();
+    };
+    let text = if x.is_nan() {
+        "NaN".to_string()
+    } else if x.is_infinite() {
+        if x < 0.0 { "-Infinity" } else { "Infinity" }.to_string()
+    } else if x.abs() >= 1e21 {
+        value_to_js_string(Value::from_float64(x))
+    } else if x == 0.0 {
+        if f == 0 {
+            "0".to_string()
+        } else {
+            format!("0.{}", "0".repeat(f))
+        }
+    } else {
+        format!("{:.*}", f, x)
+    };
+    Value::from_heap_ptr(HeapString::allocate(gc, &text) as *mut u8)
+}
+
+/// §21.1.3.7 Number.prototype.toPrecision(precision).
+pub fn number_prototype_to_precision(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(x) = number_receiver(gc, vm, this, "Number.prototype.toPrecision") else {
+        return Value::undefined();
+    };
+    let p = match args.first() {
+        None => {
+            return Value::from_heap_ptr(HeapString::allocate(
+                gc,
+                &value_to_js_string(Value::from_float64(x)),
+            ) as *mut u8);
+        }
+        Some(v) if v.is_undefined() => {
+            return Value::from_heap_ptr(HeapString::allocate(
+                gc,
+                &value_to_js_string(Value::from_float64(x)),
+            ) as *mut u8);
+        }
+        Some(v) => {
+            let n = match to_integer_sync(gc, vm, *v) {
+                Ok(n) => n,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            };
+            if !(1.0..=100.0).contains(&n) {
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::RangeError,
+                    "toPrecision precision out of range",
+                ));
+                return Value::undefined();
+            }
+            n as usize
+        }
+    };
+    let text = if x.is_nan() {
+        "NaN".to_string()
+    } else if x.is_infinite() {
+        if x < 0.0 { "-Infinity" } else { "Infinity" }.to_string()
+    } else if x == 0.0 {
+        if p == 1 {
+            "0".to_string()
+        } else {
+            format!("0.{}", "0".repeat(p - 1))
+        }
+    } else {
+        let e = x.abs().log10().floor() as i32;
+        if e < -6 || e >= p as i32 {
+            format_exponential(x, Some(p - 1))
+        } else {
+            let frac = (p as i32 - 1 - e).max(0) as usize;
+            format!("{:.*}", frac, x)
+        }
+    };
+    Value::from_heap_ptr(HeapString::allocate(gc, &text) as *mut u8)
+}
+
+/// §21.1.3.4 Number.prototype.toLocaleString.
+pub fn number_prototype_to_locale_string(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(x) = number_receiver(gc, vm, this, "Number.prototype.toLocaleString") else {
+        return Value::undefined();
+    };
+    let text = value_to_js_string(Value::from_float64(x));
+    Value::from_heap_ptr(HeapString::allocate(gc, &text) as *mut u8)
+}
+
 /// String(value) — converts a value to its string representation.
 /// Per §21.1.2.1: calls ToString via ToPrimitive with string hint.
 pub fn string_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
@@ -21239,6 +21436,26 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 1,
             name: "Number_prototype_toString",
             func: number_prototype_to_string,
+        },
+        Builtin {
+            length: 1,
+            name: "Number_prototype_toExponential",
+            func: number_prototype_to_exponential,
+        },
+        Builtin {
+            length: 1,
+            name: "Number_prototype_toFixed",
+            func: number_prototype_to_fixed,
+        },
+        Builtin {
+            length: 1,
+            name: "Number_prototype_toPrecision",
+            func: number_prototype_to_precision,
+        },
+        Builtin {
+            length: 0,
+            name: "Number_prototype_toLocaleString",
+            func: number_prototype_to_locale_string,
         },
         Builtin {
             length: 1,

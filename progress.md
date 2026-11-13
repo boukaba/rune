@@ -1553,6 +1553,22 @@ Integration suite: **814 passed, 0 failed, 3 ignored**.
 
 Integration suite: **815 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Number formatting methods (2026-11-13)
+
+- Added `Number.prototype.toFixed`, `toPrecision`, `toExponential` and
+  `toLocaleString`:
+  - fraction/precision digit coercion and 0–100/1–100 RangeErrors;
+  - NaN/Infinity/-0 handling, short exponential form, ranged exponential
+    output (`1.23e+0`).
+- Test262: Number **201 → 223/340**; `toFixed` **11/16**,
+  `toPrecision` **8/17**, `toExponential` **5/15**.
+- Regression: `test_number_formatting_methods`.
+- Known gaps: decimal rounding uses Rust's formatter (ties/edge decimals can
+  differ from the exact-decimal spec); `toPrecision` significant-digit padding
+  is approximate for extreme magnitudes.
+
+Integration suite: **816 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

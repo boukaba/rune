@@ -14966,3 +14966,30 @@ fn test_promise_try_and_with_resolvers() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_function_to_string_callable_rules() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var source = (function named() { return 1; }).toString();
+            var threw = false;
+            try { Function.prototype.toString.call(null); } catch (e) { threw = e instanceof TypeError; }
+            var d = Object.getOwnPropertyDescriptor(Function.prototype.toString, "length");
+            var rejected = false;
+            Promise.try(function () { throw new TypeError("boom"); }).catch(function (e) {
+                rejected = e.message === "boom";
+            });
+            [
+                /native code/.test(source),
+                threw,
+                d.configurable === true,
+                Function.prototype.toString.hasOwnProperty("length"),
+                !Function.prototype.toString.propertyIsEnumerable("length")
+            ].join("|") === "true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

@@ -6464,6 +6464,17 @@ pub fn object_prototype_has_own_property(
         return Value::undefined();
     }
     let key = args.first().copied().unwrap_or(Value::undefined());
+    if let Some(sid) = this.as_smi() {
+        if sid < 0 {
+            if let Some(kptr) = key.heap_ptr() {
+                if unsafe { (*(kptr as *const GcHeader)).tag() } == TAG_STRING {
+                    let name = unsafe { HeapString::to_string(kptr as *mut HeapString) };
+                    return Value::boolean(name == "length" || name == "name");
+                }
+            }
+        }
+        return Value::boolean(false);
+    }
     let Some(ptr) = this.heap_ptr() else {
         // Primitives have no own properties (string exotic props unsupported).
         return Value::boolean(false);
@@ -6593,6 +6604,9 @@ pub fn object_prototype_property_is_enumerable(
         return Value::undefined();
     }
     let key = args.first().copied().unwrap_or(Value::undefined());
+    if this.as_smi().is_some_and(|s| s < 0) {
+        return Value::boolean(false);
+    }
     let Some(ptr) = this.heap_ptr() else {
         return Value::boolean(false);
     };
@@ -8658,6 +8672,36 @@ pub fn object_get_own_property_descriptor(
             crate::errors::ErrorKind::TypeError,
             "Cannot convert undefined or null to object",
         ));
+        return Value::undefined();
+    }
+    if let Some(sid) = target.as_smi() {
+        if sid < 0 {
+            let raw_key = args.get(1).copied().unwrap_or(Value::undefined());
+            let Some(kptr) = raw_key.heap_ptr() else {
+                return Value::undefined();
+            };
+            if unsafe { (*(kptr as *const GcHeader)).tag() } != TAG_STRING {
+                return Value::undefined();
+            }
+            let name = unsafe { HeapString::to_string(kptr as *mut HeapString) };
+            let id = (-sid as usize) - 1;
+            if id >= vm.builtins.len() {
+                return Value::undefined();
+            }
+            let value = if name == "length" {
+                Value::smi(vm.builtins[id].length as i32)
+            } else if name == "name" {
+                Value::from_heap_ptr(HeapString::allocate(gc, vm.builtins[id].name) as *mut u8)
+            } else {
+                return Value::undefined();
+            };
+            return make_descriptor_object(
+                gc,
+                value,
+                rune_core::shape::ATTR_CONFIGURABLE,
+                vm.object_prototype.heap_ptr(),
+            );
+        }
         return Value::undefined();
     }
     let Some(ptr) = target.heap_ptr() else {
@@ -20085,6 +20129,55 @@ fn function_metadata(target: Value) -> (u32, String) {
 /// wrapper needs no per-arity program generation: `MakeArgumentsArray`
 /// collects the call's incoming arguments and the builtin merges both arrays
 /// before invoking the target through Function.prototype.apply.
+/// Function.prototype.toString — native-form source for engine functions.
+pub fn function_prototype_to_string(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let mut name: Option<String> = None;
+    if let Some(sid) = this.as_smi() {
+        if sid < 0 {
+            let id = (-sid as usize) - 1;
+            if id < vm.builtins.len() {
+                name = Some(vm.builtins[id].name.trim_start_matches('_').to_string());
+            }
+        } else {
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Function.prototype.toString requires a callable receiver",
+            ));
+            return Value::undefined();
+        }
+    } else if let Some(ptr) = this.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } != TAG_FUNC {
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Function.prototype.toString requires a callable receiver",
+            ));
+            return Value::undefined();
+        }
+    } else {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Function.prototype.toString requires a callable receiver",
+        ));
+        return Value::undefined();
+    }
+    let out = match name {
+        Some(n) if !n.is_empty() => format!("function {n}() {{ [native code] }}"),
+        _ => "function () { [native code] }".to_string(),
+    };
+    Value::from_heap_ptr(HeapString::allocate(gc, &out) as *mut u8)
+}
+
 pub fn function_bind(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let callable = this.as_smi().is_some_and(|s| s < 0)
         || this
@@ -22379,6 +22472,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 1,
             name: "Function_prototype_bind",
             func: function_bind,
+        },
+        Builtin {
+            length: 0,
+            name: "Function_prototype_toString",
+            func: function_prototype_to_string,
         },
         Builtin {
             length: 4,

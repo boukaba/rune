@@ -2749,6 +2749,9 @@ impl Vm {
             if let Some(bind_handle) = find_handle(&self.builtins, "Function_prototype_bind") {
                 proto_entries_f.push(("bind", bind_handle));
             }
+            if let Some(ts) = find_handle(&self.builtins, "Function_prototype_toString") {
+                proto_entries_f.push(("toString", ts));
+            }
             let func_proto = make_object(gc, &proto_entries_f);
             self.function_prototype = func_proto;
             // %Function% wrapper
@@ -3920,6 +3923,37 @@ impl Vm {
                     let caller_idx = self.frames.len() - 1;
                     self.frames[caller_idx].pc += 1;
                     return None;
+                }
+            }
+            // A throw escaping a Promise.try callback rejects the promise
+            // created by the builtin and resumes its caller with that promise.
+            if let Some(pc) = self.pending_call.take() {
+                if let PendingCallCont::PromiseTry { promise } = pc.cont {
+                    if self.frames.len() == pc.source_frame_depth + 1 {
+                        crate::builtins::promise_reject_impl(gc, promise, &[val], self);
+                        let stack_base = self.frames.last().unwrap().stack_base;
+                        let popped_frame = self.frames.len() - 1;
+                        self.frames.pop();
+                        self.try_stack
+                            .retain(|tf| tf.frame_depth != popped_frame + 1);
+                        self.drop_dead_array_op(popped_frame);
+                        self.drop_dead_sort_op(popped_frame);
+                        self.drop_dead_from_op(popped_frame);
+                        self.drop_dead_length_op(popped_frame);
+                        self.drop_dead_species_op(popped_frame);
+                        self.drop_dead_copy_op(popped_frame);
+                        self.stack.truncate(stack_base);
+                        if self.frames.is_empty() {
+                            return Some(Exit::Return(promise));
+                        }
+                        self.push(promise);
+                        let caller_idx = self.frames.len() - 1;
+                        self.frames[caller_idx].pc += 1;
+                        return None;
+                    }
+                    self.pending_call = Some(pc);
+                } else {
+                    self.pending_call = Some(pc);
                 }
             }
             // No handler — pop frame and check caller

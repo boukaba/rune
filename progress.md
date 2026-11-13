@@ -1450,6 +1450,26 @@ Integration suite: **808 passed, 0 failed, 3 ignored**.
 
 Integration suite: **809 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Function.prototype.toString + Promise.try rejection (2026-11-13)
+
+- Added a real `Function.prototype.toString`:
+  - callable receivers return native-form source (`function name() { [native code] }`);
+  - non-callable receivers throw TypeError;
+  - engine functions are not stored with source text, so exact-source tests cannot pass.
+- Builtin handles now report own `length`/`name` descriptors through
+  `hasOwnProperty`, `propertyIsEnumerable` (false) and
+  `getOwnPropertyDescriptor` (configurable, non-writable, non-enumerable).
+- `Promise.try` callback throws now reject the created promise on the unwind
+  path (previously they propagated); `Promise.try/throws` still fails on the
+  test262 `asyncTest` harness include.
+- Test262: Function toString **4 → 8/80**; Promise 374/703.
+- Regression: `test_function_to_string_callable_rules`.
+- Known gaps: no function source preservation; harness `includes` such as
+  `asyncHelpers.js`/`nativeFunctionMatcher.js` are not reaching test code in
+  some direct-file runs.
+
+Integration suite: **810 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

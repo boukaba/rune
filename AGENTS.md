@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Function.toString + try rejection (2026-11-13)**: native-form toString/TypeError; builtin length/name descriptors; Promise.try throws reject. Function toString 4→8/80. Integration **810**.
 - **Promise.try/withResolvers (2026-11-13)**: PromiseTry pending continuation; withResolvers bridges. Promise 369→**374/703**, try 6/12. Integration **809**.
 - **Exotic descriptor receivers (2026-11-13)**: ToPropertyDescriptor reads Function/Date/RegExp/Array extra_props. Object 1808→**1860/3411**, create 211→231, defineProperty 524→566. Integration **808**.
 - **Weak chains + symbols (2026-11-13)**: weak constructors chain to Function.prototype/callable, prototypes to Object.prototype, symbol keys supported. WeakMap 75→**86/141**, WeakSet 50→**60/85**. Integration **807**.

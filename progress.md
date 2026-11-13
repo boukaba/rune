@@ -2963,6 +2963,28 @@ Integration suite: **879 passed, 0 failed, 3 ignored**.
 
 Integration suite: **880 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — RegExp symbol protocol methods (2026-11-14)
+
+- `RegExp.prototype[@@match]`, `[@@search]` and `[@@split]` now follow the
+  spec protocols instead of matching the internal engine directly:
+  - observable `flags`, `lastIndex` and `exec` Gets (custom exec objects work);
+  - `@@search` saves/restores `lastIndex` and returns `Get(result, "index")`;
+  - `@@match` loops `exec` for global regexps, appends each match, and advances
+    `lastIndex` by code point on empty matches (u/v aware);
+  - `@@split` uses `SpeciesConstructor`, constructs a sticky splitter from the
+    `flags` string, steps `lastIndex`, appends captures (undefined for
+    non-participating), applies UTF-16 slicing/limit semantics.
+- RegExp `[@@match]`/`[@@search]`/`[@@replace]`/`[@@split]` prototype
+  properties are now non-enumerable (W|C).
+- Test262: RegExp/prototype **246 → 299/487**; Symbol.match **27 → 48/53**,
+  Symbol.search **9 → 18/23**, Symbol.split **15 → 34/44**; String
+  **1068 → 1070/1223**, JSON **127/165**.
+- Remaining: flags-getter ordering tests, `@@match` unicode inference, custom
+  splitter species edge cases, `@@replace` generic algorithm.
+- Regression: `test_regexp_symbol_method_protocols`.
+
+Integration suite: **881 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

@@ -2855,41 +2855,45 @@ impl Vm {
             }
             if let Some(h) = find_handle(&self.builtins, "RegExp_prototype_[Symbol.match]") {
                 unsafe {
-                    JSObject::add_property(
+                    JSObject::add_property_with_attrs(
                         re_proto.heap_ptr().unwrap() as *mut JSObject,
                         PropertyKey::from_symbol(rune_core::symbol::SYM_MATCH),
                         "\u{0}".to_string(),
                         h,
+                        rune_core::shape::ATTR_WRITABLE | rune_core::shape::ATTR_CONFIGURABLE,
                     );
                 }
             }
             if let Some(h) = find_handle(&self.builtins, "RegExp_prototype_[Symbol.search]") {
                 unsafe {
-                    JSObject::add_property(
+                    JSObject::add_property_with_attrs(
                         re_proto.heap_ptr().unwrap() as *mut JSObject,
                         PropertyKey::from_symbol(rune_core::symbol::SYM_SEARCH),
                         "\u{0}".to_string(),
                         h,
+                        rune_core::shape::ATTR_WRITABLE | rune_core::shape::ATTR_CONFIGURABLE,
                     );
                 }
             }
             if let Some(h) = find_handle(&self.builtins, "RegExp_prototype_[Symbol.replace]") {
                 unsafe {
-                    JSObject::add_property(
+                    JSObject::add_property_with_attrs(
                         re_proto.heap_ptr().unwrap() as *mut JSObject,
                         PropertyKey::from_symbol(rune_core::symbol::SYM_REPLACE),
                         "\u{0}".to_string(),
                         h,
+                        rune_core::shape::ATTR_WRITABLE | rune_core::shape::ATTR_CONFIGURABLE,
                     );
                 }
             }
             if let Some(h) = find_handle(&self.builtins, "RegExp_prototype_[Symbol.split]") {
                 unsafe {
-                    JSObject::add_property(
+                    JSObject::add_property_with_attrs(
                         re_proto.heap_ptr().unwrap() as *mut JSObject,
                         PropertyKey::from_symbol(rune_core::symbol::SYM_SPLIT),
                         "\u{0}".to_string(),
                         h,
+                        rune_core::shape::ATTR_WRITABLE | rune_core::shape::ATTR_CONFIGURABLE,
                     );
                 }
             }

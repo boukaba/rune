@@ -16907,6 +16907,52 @@ fn byte_for_utf16_index(s: &str, index: usize) -> usize {
     s.len()
 }
 
+fn utf16_slice(s: &str, start: usize, end: usize) -> String {
+    if start >= end {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut units = 0usize;
+    for ch in s.chars() {
+        let len = ch.len_utf16();
+        if units >= start && units + len <= end {
+            out.push(ch);
+        }
+        units += len;
+        if units >= end {
+            break;
+        }
+    }
+    out
+}
+
+fn advance_utf16_index(s: &str, index: usize, unicode: bool) -> usize {
+    let units: Vec<u16> = s.encode_utf16().collect();
+    if index >= units.len() {
+        return units.len() + 1;
+    }
+    if unicode
+        && (0xD800..=0xDBFF).contains(&units[index])
+        && index + 1 < units.len()
+        && (0xDC00..=0xDFFF).contains(&units[index + 1])
+    {
+        index + 2
+    } else {
+        index + 1
+    }
+}
+
+fn to_length_sync(gc: &mut SemiSpace, vm: &mut Vm, v: Value) -> Result<usize, Value> {
+    let n = to_number_sync(gc, vm, v)?;
+    if n.is_nan() || n <= 0.0 {
+        Ok(0)
+    } else if n.is_infinite() {
+        Ok(usize::MAX)
+    } else {
+        Ok(n.min(9_007_199_254_740_991.0) as usize)
+    }
+}
+
 fn make_match_result_array(
     gc: &mut SemiSpace,
     groups: &[(usize, usize)],
@@ -28540,174 +28586,410 @@ pub(crate) fn regexp_set_last_index_value(gc: &mut SemiSpace, ptr: *mut u8, valu
 
 /// §22.2.6.8 RegExp.prototype[@@match](string)
 pub fn regexp_symbol_match(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some(rx) = get_regexp_this(this) else {
+    // §22.2.6.8 RegExp.prototype[@@match](string)
+    let rx = this;
+    let input_val = args.first().copied().unwrap_or(Value::undefined());
+    let Some(input) = to_primitive_string(gc, input_val, vm) else {
+        return Value::undefined();
+    };
+    let flags_val = match get_value_sync(gc, vm, rx, "flags") {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let Some(flags) = to_primitive_string(gc, flags_val, vm) else {
+        return Value::undefined();
+    };
+    if !flags.contains('g') {
+        return match regexp_exec_abstract(gc, vm, rx, &input) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                Value::undefined()
+            }
+        };
+    }
+    let full_unicode = flags.contains('u') || flags.contains('v');
+    if vm
+        .set_property_sync(gc, rx, "lastIndex", Value::smi(0))
+        .is_err()
+    {
         vm.set_pending_exception(crate::errors::error_object(
             gc,
             &vm.error_protos,
             crate::errors::ErrorKind::TypeError,
-            "RegExp.prototype[Symbol.match] called on incompatible receiver",
+            "Cannot set lastIndex",
         ));
         return Value::undefined();
-    };
-    let input = args
-        .first()
-        .map(|v| string_from_value(*v))
-        .unwrap_or_default();
-    let global = unsafe { RegExp::has_flag(rx, 0) };
-    if !global {
-        regexp_set_last_index_value(gc, rx, Value::smi(0));
-        return regexp_exec(gc, this, args, vm);
     }
-    regexp_set_last_index_value(gc, rx, Value::smi(0));
-    let asym = input.as_bytes();
-    let mut matched: Vec<String> = Vec::new();
+    let mut out = fresh_dense_array(gc, vm);
+    let base = vm.temp_roots.len();
+    vm.temp_roots.push(out);
+    let mut count = 0usize;
     loop {
-        let last = match to_number_sync(gc, vm, regexp_last_index_value(rx)) {
-            Ok(n) if !n.is_nan() && n > 0.0 => n as usize,
-            Ok(_) => 0,
+        let result = match regexp_exec_abstract(gc, vm, rx, &input) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                vm.temp_roots.truncate(base);
+                return Value::undefined();
+            }
+        };
+        if result.is_null() {
+            vm.temp_roots.truncate(base);
+            if count == 0 {
+                return Value::null();
+            }
+            return out;
+        }
+        let match_str = match get_value_sync(gc, vm, result, "0") {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                vm.temp_roots.truncate(base);
+                return Value::undefined();
+            }
+        };
+        let match_text = to_primitive_string(gc, match_str, vm);
+        let Some(match_text) = match_text else {
+            vm.temp_roots.truncate(base);
+            return Value::undefined();
+        };
+        let value = Value::from_heap_ptr(HeapString::allocate(gc, &match_text) as *mut u8);
+        if result_push(gc, vm, &mut out, value).is_err() {
+            vm.temp_roots.truncate(base);
+            return Value::undefined();
+        }
+        out = vm.temp_roots[base];
+        count += 1;
+        if match_text.is_empty() {
+            let last_val = match get_value_sync(gc, vm, rx, "lastIndex") {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    vm.temp_roots.truncate(base);
+                    return Value::undefined();
+                }
+            };
+            let last = match to_length_sync(gc, vm, last_val) {
+                Ok(n) => n,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    vm.temp_roots.truncate(base);
+                    return Value::undefined();
+                }
+            };
+            let next = advance_utf16_index(&input, last, full_unicode);
+            if vm
+                .set_property_sync(gc, rx, "lastIndex", Value::smi(next as i32))
+                .is_err()
+            {
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "Cannot set lastIndex",
+                ));
+                vm.temp_roots.truncate(base);
+                return Value::undefined();
+            }
+        }
+    }
+}
+
+/// §22.2.6.14 RegExp.prototype[@@split](string, limit)
+fn regexp_exec_abstract(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    rx: Value,
+    input: &str,
+) -> Result<Value, Value> {
+    let input_val = Value::from_heap_ptr(HeapString::allocate(gc, input) as *mut u8);
+    let exec_method = get_value_sync(gc, vm, rx, "exec")?;
+    if is_callable_value(exec_method) {
+        vm.call_value_sync(gc, exec_method, rx, &[input_val])
+    } else {
+        Ok(regexp_exec(gc, rx, &[input_val], vm))
+    }
+}
+
+fn dense_array_length(v: Value) -> usize {
+    v.heap_ptr()
+        .filter(|p| unsafe { (*(*p as *const GcHeader)).tag() == TAG_ARRAY })
+        .map(|p| unsafe { RuneArray::length(p as *mut RuneArray) } as usize)
+        .unwrap_or(0)
+}
+
+pub fn regexp_symbol_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    // §22.2.6.14 RegExp.prototype[@@split](string, limit)
+    let rx = this;
+    let input_val = args.first().copied().unwrap_or(Value::undefined());
+    let Some(input) = to_primitive_string(gc, input_val, vm) else {
+        return Value::undefined();
+    };
+    let limit = match args.get(1).copied() {
+        Some(v) if !v.is_undefined() => {
+            let n = match to_number_sync(gc, vm, v) {
+                Ok(n) => n,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            };
+            if n.is_nan() || n <= 0.0 {
+                0u32
+            } else if n.is_infinite() {
+                u32::MAX
+            } else {
+                (n.trunc() as u64 % 4_294_967_296) as u32
+            }
+        }
+        _ => u32::MAX,
+    };
+    let mut out = fresh_dense_array(gc, vm);
+    if limit == 0 {
+        return out;
+    }
+
+    // SpeciesConstructor(rx, %RegExp%)
+    let ctor = match get_value_sync(gc, vm, rx, "constructor") {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let species = if ctor.is_undefined() || ctor.is_null() {
+        Value::undefined()
+    } else {
+        match get_property_value_sync(gc, vm, ctor, Value::symbol(rune_core::symbol::SYM_SPECIES)) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
+    };
+    let custom_species =
+        !species.is_undefined() && !species.is_null() && species != vm.regexp_constructor;
+    if custom_species && !is_callable_value(species) && !is_object_value(species) {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "RegExp @@species is not a constructor",
+        ));
+        return Value::undefined();
+    }
+
+    let flags_val = match get_value_sync(gc, vm, rx, "flags") {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let Some(flags) = to_primitive_string(gc, flags_val, vm) else {
+        return Value::undefined();
+    };
+    let unicode = flags.contains('u') || flags.contains('v');
+    let new_flags = if flags.contains('y') {
+        flags
+    } else {
+        format!("{flags}y")
+    };
+
+    let splitter = if custom_species {
+        let new_flags_val = Value::from_heap_ptr(HeapString::allocate(gc, &new_flags) as *mut u8);
+        let base = vm.temp_roots.len();
+        vm.temp_roots.push(rx);
+        let result = vm.construct_value_sync(gc, species, vec![rx, new_flags_val]);
+        vm.temp_roots.truncate(base);
+        match result {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
+    } else {
+        let source_val = match get_value_sync(gc, vm, rx, "source") {
+            Ok(v) => v,
             Err(e) => {
                 vm.set_pending_exception(e);
                 return Value::undefined();
             }
         };
-        if last > asym.len() {
-            regexp_set_last_index_value(gc, rx, Value::smi(0));
-            break;
-        }
-        match regexp_exec_internal(gc, rx, &input, last) {
-            Some(groups) => {
-                let (start, end) = groups[0];
-                matched.push(input.get(start..end).unwrap_or("").to_string());
-                let next = if start == end {
-                    if end < asym.len() {
-                        let step = input[end..]
-                            .chars()
-                            .next()
-                            .map(|c| c.len_utf8())
-                            .unwrap_or(1);
-                        end + step
-                    } else {
-                        end
-                    }
-                } else {
-                    end
-                };
-                regexp_set_last_index_value(gc, rx, Value::smi(next as i32));
-                if start == end && next >= asym.len() {
-                    regexp_set_last_index_value(gc, rx, Value::smi(0));
-                    break;
-                }
-            }
-            None => {
-                regexp_set_last_index_value(gc, rx, Value::smi(0));
-                break;
-            }
-        }
-    }
-    if matched.is_empty() {
-        return Value::null();
-    }
-    let vals: Vec<Value> = matched
-        .iter()
-        .map(|s| Value::from_heap_ptr(HeapString::allocate(gc, s) as *mut u8))
-        .collect();
-    build_array(gc, &vals, vm)
-}
-
-/// §22.2.6.14 RegExp.prototype[@@split](string, limit)
-pub fn regexp_symbol_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some(rx) = get_regexp_this(this) else {
-        vm.set_pending_exception(crate::errors::error_object(
-            gc,
-            &vm.error_protos,
-            crate::errors::ErrorKind::TypeError,
-            "RegExp.prototype[Symbol.split] called on incompatible receiver",
-        ));
-        return Value::undefined();
-    };
-    let input = args
-        .first()
-        .map(|v| string_from_value(*v))
-        .unwrap_or_default();
-    let limit = args
-        .get(1)
-        .map(|v| match v.as_smi() {
-            Some(n) if n > 0 => n as usize,
-            Some(_) => 0,
-            None => match v.as_float64() {
-                Some(f) if f > 0.0 => f as usize,
-                Some(_) => 0,
-                None => u32::MAX as usize,
-            },
-        })
-        .unwrap_or(u32::MAX as usize);
-    if limit == 0 {
-        return build_array(gc, &[], vm);
-    }
-    unsafe { RegExp::set_last_index(rx, 0) };
-    if input.is_empty() {
-        let matched = regexp_exec_internal(gc, rx, &input, 0).is_some();
-        let vals: Vec<Value> = if matched {
-            Vec::new()
-        } else {
-            vec![Value::from_heap_ptr(HeapString::allocate(gc, "") as *mut u8)]
+        let Some(source) = to_primitive_string(gc, source_val, vm) else {
+            return Value::undefined();
         };
-        return build_array(gc, &vals, vm);
-    }
-    let advance = |i: usize| -> usize {
-        if i >= input.len() {
-            return input.len() + 1;
+        let mut bits = 0u32;
+        for ch in new_flags.chars() {
+            bits |= match ch {
+                'g' => 1,
+                'i' => 2,
+                'm' => 4,
+                's' => 8,
+                'u' => 16,
+                'y' => 32,
+                'd' => 64,
+                'v' => 128,
+                _ => 0,
+            };
         }
-        let step = input[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
-        i + step
+        alloc_regexp_from_string(gc, &source, bits, vm.regexp_prototype)
     };
-    let mut out: Vec<Value> = Vec::new();
+    let base = vm.temp_roots.len();
+    vm.temp_roots.push(out);
+    vm.temp_roots.push(splitter);
+
+    let size = utf16_len(&input);
+    let push =
+        |gc: &mut SemiSpace, vm: &mut Vm, out: &mut Value, value: Value| -> Result<bool, ()> {
+            result_push(gc, vm, out, value).map_err(|_| ())?;
+            Ok(true)
+        };
+
+    if input.is_empty() {
+        let z = match regexp_exec_abstract(gc, vm, splitter, &input) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                vm.temp_roots.truncate(base);
+                return Value::undefined();
+            }
+        };
+        if !z.is_null() {
+            let result = vm.temp_roots[base];
+            vm.temp_roots.truncate(base);
+            return result;
+        }
+        let sval = Value::from_heap_ptr(HeapString::allocate(gc, "") as *mut u8);
+        if push(gc, vm, &mut out, sval).is_err() {
+            vm.temp_roots.truncate(base);
+            return Value::undefined();
+        }
+        let result = vm.temp_roots[base];
+        vm.temp_roots.truncate(base);
+        return result;
+    }
+
     let mut p = 0usize;
     let mut q = 0usize;
-    let mut accepted_nonempty = false;
-    while q <= input.len() {
-        let Some(groups) = regexp_exec_internal(gc, rx, &input, q) else {
-            q = advance(q);
-            continue;
-        };
-        let (start, end) = groups[0];
-        if end == p || (start == end && start >= input.len()) {
-            q = advance(q);
-            continue;
-        }
-        if out.len() >= limit {
+    loop {
+        if q >= size {
             break;
         }
-        out.push(Value::from_heap_ptr(
-            HeapString::allocate(gc, &input[p..start]) as *mut u8,
-        ));
-        if end > start {
-            accepted_nonempty = true;
+        if vm
+            .set_property_sync(gc, splitter, "lastIndex", Value::smi(q as i32))
+            .is_err()
+        {
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Cannot set splitter lastIndex",
+            ));
+            vm.temp_roots.truncate(base);
+            return Value::undefined();
         }
-        p = end;
-        for &(gs, ge) in groups.iter().skip(1) {
-            if gs == usize::MAX {
-                out.push(Value::undefined());
-            } else {
-                out.push(Value::from_heap_ptr(
-                    HeapString::allocate(gc, &input[gs..ge]) as *mut u8,
-                ));
+        let z = match regexp_exec_abstract(gc, vm, splitter, &input) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                vm.temp_roots.truncate(base);
+                return Value::undefined();
             }
-            if out.len() >= limit {
-                break;
+        };
+        if z.is_null() {
+            q = advance_utf16_index(&input, q, unicode);
+            continue;
+        }
+        let end_val = match get_value_sync(gc, vm, splitter, "lastIndex") {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                vm.temp_roots.truncate(base);
+                return Value::undefined();
+            }
+        };
+        let end_units = match to_length_sync(gc, vm, end_val) {
+            Ok(n) => n.min(size),
+            Err(e) => {
+                vm.set_pending_exception(e);
+                vm.temp_roots.truncate(base);
+                return Value::undefined();
+            }
+        };
+        if end_units == p {
+            q = advance_utf16_index(&input, q, unicode);
+            continue;
+        }
+        let substring =
+            Value::from_heap_ptr(HeapString::allocate(gc, &utf16_slice(&input, p, q)) as *mut u8);
+        if push(gc, vm, &mut out, substring).is_err() {
+            vm.temp_roots.truncate(base);
+            return Value::undefined();
+        }
+        out = vm.temp_roots[base];
+        if dense_array_length(out) as u32 >= limit {
+            let result = out;
+            vm.temp_roots.truncate(base);
+            return result;
+        }
+        p = end_units;
+
+        let captures_val = match get_value_sync(gc, vm, z, "length") {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                vm.temp_roots.truncate(base);
+                return Value::undefined();
+            }
+        };
+        let captures = match to_length_sync(gc, vm, captures_val) {
+            Ok(n) => n,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                vm.temp_roots.truncate(base);
+                return Value::undefined();
+            }
+        };
+        for i in 1..captures {
+            let cap = match get_value_sync(gc, vm, z, &i.to_string()) {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    vm.temp_roots.truncate(base);
+                    return Value::undefined();
+                }
+            };
+            if push(gc, vm, &mut out, cap).is_err() {
+                vm.temp_roots.truncate(base);
+                return Value::undefined();
+            }
+            out = vm.temp_roots[base];
+            if dense_array_length(out) as u32 >= limit {
+                let result = out;
+                vm.temp_roots.truncate(base);
+                return result;
             }
         }
         q = p;
-        if out.len() >= limit {
-            break;
-        }
     }
-    if (p < input.len() || accepted_nonempty) && out.len() < limit {
-        out.push(Value::from_heap_ptr(
-            HeapString::allocate(gc, &input[p..]) as *mut u8
-        ));
+
+    let tail =
+        Value::from_heap_ptr(HeapString::allocate(gc, &utf16_slice(&input, p, size)) as *mut u8);
+    if push(gc, vm, &mut out, tail).is_err() {
+        vm.temp_roots.truncate(base);
+        return Value::undefined();
     }
-    build_array(gc, &out, vm)
+    out = vm.temp_roots[base];
+    let result = out;
+    vm.temp_roots.truncate(base);
+    result
 }
 
 /// §22.2.6.11 RegExp.prototype[@@replace](string, replaceValue)
@@ -28833,27 +29115,85 @@ pub fn regexp_symbol_replace(
 
 /// §22.2.6.9 RegExp.prototype[@@search](string)
 pub fn regexp_symbol_search(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some(rx) = get_regexp_this(this) else {
+    // §22.2.6.13 RegExp.prototype[@@search](string)
+    let rx = this;
+    let input_val = args.first().copied().unwrap_or(Value::undefined());
+    let Some(input) = to_primitive_string(gc, input_val, vm) else {
+        return Value::undefined();
+    };
+    let previous = match get_value_sync(gc, vm, rx, "lastIndex") {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    if !same_value(previous, Value::smi(0)) {
+        if vm
+            .set_property_sync(gc, rx, "lastIndex", Value::smi(0))
+            .is_err()
+        {
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Cannot set lastIndex",
+            ));
+            return Value::undefined();
+        }
+    }
+    let exec = match get_value_sync(gc, vm, rx, "exec") {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    if !is_callable_value(exec) {
         vm.set_pending_exception(crate::errors::error_object(
             gc,
             &vm.error_protos,
             crate::errors::ErrorKind::TypeError,
-            "RegExp.prototype[Symbol.search] called on incompatible receiver",
+            "exec is not callable",
         ));
         return Value::undefined();
+    }
+    let input_value = Value::from_heap_ptr(HeapString::allocate(gc, &input) as *mut u8);
+    let result = match vm.call_value_sync(gc, exec, rx, &[input_value]) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
     };
-    let input = args
-        .first()
-        .map(|v| string_from_value(*v))
-        .unwrap_or_default();
-    let prev = regexp_last_index_value(rx);
-    regexp_set_last_index_value(gc, rx, Value::smi(0));
-    let result = match regexp_exec_internal(gc, rx, &input, 0) {
-        Some(groups) => Value::smi(groups[0].0 as i32),
-        None => Value::smi(-1),
+    let current = match get_value_sync(gc, vm, rx, "lastIndex") {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
     };
-    regexp_set_last_index_value(gc, rx, prev);
-    result
+    if !same_value(current, previous) {
+        if vm.set_property_sync(gc, rx, "lastIndex", previous).is_err() {
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Cannot restore lastIndex",
+            ));
+            return Value::undefined();
+        }
+    }
+    if result.is_null() {
+        return Value::smi(-1);
+    }
+    match get_value_sync(gc, vm, result, "index") {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            Value::undefined()
+        }
+    }
 }
 
 /// RegExp.prototype.test(string) — return true if pattern matches.

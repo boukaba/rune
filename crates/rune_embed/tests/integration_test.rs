@@ -16981,3 +16981,35 @@ fn test_regexp_exec_lastindex_utf16_and_lazy() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_regexp_symbol_method_protocols() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var custom = {
+                lastIndex: 0,
+                flags: "",
+                exec: function () {
+                    this.lastIndex = 2;
+                    return { 0: "z", index: 0, length: 1, lastIndex: 2 };
+                }
+            };
+            var searchIndex = RegExp.prototype[Symbol.search].call(custom, "abc");
+            var restored = custom.lastIndex === 0;
+            var matched = RegExp.prototype[Symbol.match].call(custom, "abc");
+            [
+                "a1b2c".split(/\d/).join("|") === "a|b|c",
+                "abc".split(/b/).join("|") === "a|c",
+                "a1b".match(/\d/g).join("|") === "1",
+                "abc".search(/b/) === 1,
+                searchIndex === 0,
+                restored,
+                matched !== null && matched[0] === "z"
+            ].join("|") === "true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

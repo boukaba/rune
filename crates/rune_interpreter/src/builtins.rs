@@ -17486,68 +17486,140 @@ pub fn async_reject(_gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
 
 /// Promise.all(iterable) — returns a promise that fulfills when all items fulfill,
 /// or rejects on the first rejection.
+/// Internal per-index continuation for Promise.all: store one fulfilled value
+/// and settle the aggregate when the last input completes.
+pub fn promise_all_element(
+    _gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let state_val = args.first().copied().unwrap_or(Value::undefined());
+    let index = args.get(1).copied().and_then(|v| v.as_smi()).unwrap_or(0) as usize;
+    let value = args.get(2).copied().unwrap_or(Value::undefined());
+    let Some(state_ptr) = state_val.heap_ptr() else {
+        return Value::undefined();
+    };
+    let state = state_ptr as *mut RuneArray;
+    let values = unsafe { RuneArray::get_element(state, 0) };
+    if let Some(values_ptr) = values.heap_ptr() {
+        unsafe {
+            RuneArray::set_element(values_ptr as *mut RuneArray, index, value);
+        }
+    }
+    let remaining = unsafe { RuneArray::get_element(state, 1) }
+        .as_smi()
+        .unwrap_or(0);
+    let next = remaining.saturating_sub(1);
+    unsafe {
+        RuneArray::set_element(state, 1, Value::smi(next));
+    }
+    if next == 0 {
+        let result = unsafe { RuneArray::get_element(state, 2) };
+        if let Some(ptr) = result.heap_ptr() {
+            if unsafe { Promise::state(ptr) == PROMISE_PENDING } {
+                unsafe {
+                    Promise::set_state(ptr, PROMISE_FULFILLED);
+                    Promise::set_result(ptr, values);
+                }
+                settle_promise_reactions(vm, ptr, values, true);
+            }
+        }
+    }
+    Value::undefined()
+}
+
 pub fn promise_static_all(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let iterable = args.first().copied().unwrap_or(Value::undefined());
     let proto = vm.promise_prototype.heap_ptr();
     let result_ptr = Promise::allocate(gc, proto);
     let result_val = Value::from_heap_ptr(result_ptr);
-    let len = if let Some(l) = crate::vm::array_like_length(iterable) {
-        l
-    } else {
-        unsafe {
-            Promise::set_state(result_ptr, PROMISE_FULFILLED);
-        }
+    let Some(len) = crate::vm::array_like_length(iterable) else {
+        unsafe { Promise::set_state(result_ptr, PROMISE_FULFILLED) };
         return result_val;
     };
     if len == 0 {
         let arr = RuneArray::allocate(gc, &[]);
-        if let Some(proto) = vm.array_prototype.heap_ptr() {
-            unsafe { RuneArray::set_prototype(arr, proto) };
-        }
         unsafe {
+            RuneArray::set_shape_ptr(arr, *DENSE_ARRAY_SHAPE as *const Shape);
+            if let Some(proto) = vm.array_prototype.heap_ptr() {
+                RuneArray::set_prototype(arr, proto);
+            }
             Promise::set_state(result_ptr, PROMISE_FULFILLED);
             Promise::set_result(result_ptr, Value::from_heap_ptr(arr as *mut u8));
         }
         return result_val;
     }
-    let mut arr_ptr = RuneArray::allocate(gc, &[]);
-    if let Some(proto) = vm.array_prototype.heap_ptr() {
-        unsafe { RuneArray::set_prototype(arr_ptr, proto) };
+
+    let root_base = vm.temp_roots.len();
+    vm.temp_roots.push(result_val);
+    let reject_h = vm.find_builtin_handle("_promise_reject");
+    let reject_bridge = vm.create_promise_bridge(gc, result_val, reject_h);
+    vm.temp_roots.push(reject_bridge);
+
+    let values_arr = RuneArray::allocate(gc, &vec![Value::undefined(); len as usize]);
+    unsafe {
+        RuneArray::set_shape_ptr(values_arr, *DENSE_ARRAY_SHAPE as *const Shape);
+        if let Some(proto) = vm.array_prototype.heap_ptr() {
+            RuneArray::set_prototype(values_arr, proto);
+        }
     }
-    let mut remaining: u32 = len;
+    let values_val = Value::from_heap_ptr(values_arr as *mut u8);
+    vm.temp_roots.push(values_val);
+
+    let state_arr = RuneArray::allocate(
+        gc,
+        &[
+            values_val,
+            Value::smi(len as i32),
+            result_val,
+            reject_bridge,
+        ],
+    );
+    unsafe {
+        RuneArray::set_shape_ptr(state_arr, *DENSE_ARRAY_SHAPE as *const Shape);
+        if let Some(proto) = vm.array_prototype.heap_ptr() {
+            RuneArray::set_prototype(state_arr, proto);
+        }
+    }
+    let state_val = Value::from_heap_ptr(state_arr as *mut u8);
+    vm.temp_roots.push(state_val);
+
+    // One shared wrapper program: each index gets a Func with its own env.
+    let instrs = vec![
+        Instruction::new(Opcode::LoadUndefined, vec![]),
+        Instruction::new(Opcode::LoadCaptured, vec![0, 2]),
+        Instruction::new(Opcode::LoadCaptured, vec![0, 0]),
+        Instruction::new(Opcode::LoadCaptured, vec![0, 1]),
+        Instruction::new(Opcode::LoadLocal, vec![0]),
+        Instruction::new(Opcode::Call, vec![3]),
+        Instruction::new(Opcode::Return, vec![]),
+    ];
+    let inner = BytecodeProgram::new(instrs, vec![], vec![]);
+    let outer = Box::new(BytecodeProgram::new(vec![], vec![], vec![inner]));
+    let prog_ptr = Box::leak(outer) as *const BytecodeProgram as *const u8;
+    let element_handle = vm.find_builtin_handle("_promise_all_element");
+
     for i in 0..len {
-        let item = crate::vm::array_like_index(iterable, i).unwrap_or(Value::undefined());
-        let is_promise = if let Some(ptr) = item.heap_ptr() {
-            unsafe { (*(ptr as *const GcHeader)).tag() == TAG_PROMISE }
-        } else {
-            false
-        };
-        if is_promise {
-            let ptr = item.heap_ptr().unwrap();
-            let state = unsafe { Promise::state(ptr) };
-            if state == PROMISE_FULFILLED {
-                let r = unsafe { Promise::result(ptr) };
-                arr_ptr = unsafe { RuneArray::push(gc, arr_ptr, r) };
-                remaining -= 1;
-            } else if state == PROMISE_REJECTED {
-                let r = unsafe { Promise::result(ptr) };
-                unsafe {
-                    Promise::set_state(result_ptr, PROMISE_REJECTED);
-                    Promise::set_result(result_ptr, r);
-                }
-                return result_val;
-            }
-        } else {
-            arr_ptr = unsafe { RuneArray::push(gc, arr_ptr, item) };
-            remaining -= 1;
-        }
-    }
-    if remaining == 0 {
+        let env = EnvObject::allocate(gc, 3, std::ptr::null_mut());
+        let func = Func::allocate(gc, 0, prog_ptr, false, env as *mut u8);
+        let env = resolve_forwarded(env as *mut u8) as *mut EnvObject;
+        let func = resolve_forwarded(func as *mut u8) as *mut Func;
+        let state_now = resolve_forwarded(state_val.heap_ptr().unwrap()) as *mut RuneArray;
         unsafe {
-            Promise::set_state(result_ptr, PROMISE_FULFILLED);
-            Promise::set_result(result_ptr, Value::from_heap_ptr(arr_ptr as *mut u8));
+            EnvObject::set_slot(env, 0, Value::from_heap_ptr(state_now as *mut u8));
+            EnvObject::set_slot(env, 1, Value::smi(i as i32));
+            EnvObject::set_slot(env, 2, element_handle);
+            Func::set_env_ptr(func, env as *mut u8);
         }
+        let cb = Value::from_heap_ptr(func as *mut u8);
+        vm.temp_roots.push(cb);
+        let item = crate::vm::array_like_index(iterable, i).unwrap_or(Value::undefined());
+        let input = promise_static_resolve(gc, Value::undefined(), &[item], vm);
+        promise_prototype_then(gc, input, &[cb, reject_bridge], vm);
+        vm.temp_roots.pop();
     }
+    vm.temp_roots.truncate(root_base);
     result_val
 }
 
@@ -19041,6 +19113,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 4,
             name: "Bound_invoke",
             func: bound_invoke,
+        },
+        Builtin {
+            length: 3,
+            name: "_promise_all_element",
+            func: promise_all_element,
         },
         // Test262 assert builtins
         Builtin {

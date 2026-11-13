@@ -13617,3 +13617,39 @@ fn test_promise_race_pending_rejection() {
     .unwrap();
     assert_eq!(eval_str(&mut ctx, "out"), "race-reject");
 }
+
+#[test]
+fn test_promise_all_pending_order_and_rejection() {
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+        var r1, r2;
+        var p1 = new Promise(function (r) { r1 = r; });
+        var p2 = new Promise(function (r) { r2 = r; });
+        var out = "";
+        Promise.all([p1, p2]).then(function (v) { out = v.join(","); });
+        r2(2);
+        r1(1);
+        0;
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        eval_str(&mut ctx, "out"),
+        "1,2",
+        "all must preserve index order"
+    );
+    let mut ctx2 = Context::new_small();
+    ctx2.eval(
+        r#"
+        var reject;
+        var p = new Promise(function (_, r) { reject = r; });
+        var err = "";
+        Promise.all([p]).catch(function (e) { err = e.message; });
+        reject(new Error("nope"));
+        0;
+        "#,
+    )
+    .unwrap();
+    assert_eq!(eval_str(&mut ctx2, "err"), "nope");
+}

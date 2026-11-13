@@ -299,11 +299,27 @@ layout is now `[onFulfilled, onRejected, chained]`.
   and race rejection.
 - Integration suite: **756 passed, 0 failed, 3 ignored**.
 
-Known gaps: `Promise.all` still only observes already-settled inputs (pending
-inputs never settle it); `allSettled`/`any` are absent. These need per-index
-reaction state (the race shared-bridge trick does not apply).
+### Phase 0 — pending Promise.all (2026-11-13)
 
-Next: pending `Promise.all`/`allSettled` and the Phase 1 runtime/layout work.
+`Promise.all` now waits for pending inputs. Each index receives a synthesized
+callback (a TAG_FUNC with a captured environment holding the shared state
+array and its index) that writes its value, decrements the remaining count, and
+fulfills the aggregate on the last completion. The state array
+`[values, remaining, result, rejectBridge]` is rooted via `temp_roots` during
+setup and via the callback environments afterward; the shared reject bridge
+rejects the aggregate on the first failure. Index order is preserved.
+
+Verified: two pending promises resolving out of order produce `1,2`; mixed
+value/pending inputs; pending rejection through `.catch`; `Promise.all([])`
+still fulfills with an empty array. Integration suite: **757 passed, 0 failed,
+3 ignored**.
+
+Known gaps: thenables inside `all`/`race` (`promise_static_resolve` currently
+returns `undefined` while parking a thenable callback, so combinators attaching
+to its return see no promise); `allSettled`/`any` are absent.
+
+Next: Phase 1 foundations — stable object/array layout, GC stress, then the
+runtime/Web API layer.
 
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,

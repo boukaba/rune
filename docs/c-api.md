@@ -33,6 +33,7 @@ cc app.c -Icrates/rune_capi/include -Ltarget/release -lrune_capi \
 | `rune_context_call_value(ctx, func, args, argc, &result, &error)` | Call a retained JS function. |
 | `rune_context_install_runtime(ctx)` | Install timers/promise jobs (idempotent). |
 | `rune_context_run_jobs(ctx, &error)` | Run due timers and queued promise jobs. |
+| `rune_context_set_fetcher(ctx, user, callback)` | Install a C HTTP transport for `fetch`. |
 | `rune_context_get_property(ctx, object, key, &result, &error)` | Read a data property from a retained object/array. |
 | `rune_context_set_property(ctx, object, key, value, &error)` | Write a data property. |
 | `rune_free_string(text)` | Frees result/error strings. |
@@ -83,8 +84,29 @@ rune_context_eval(ctx, "setTimeout(function(){ done = 1; }, 0);", NULL, &error);
 rune_context_run_jobs(ctx, &error);
 ```
 
-Fetch is installed but has no transport in the C API by default; requests
-reject. The C API is single-threaded and not re-entrant.
+### Fetch transport
+
+`rune_context_set_fetcher` installs a C callback for `fetch`:
+
+```c
+typedef struct {
+    uint32_t status;
+    const char *body;
+    const char *status_text;
+    const char *headers;   /* "name<TAB>value<LF>" per line */
+} RuneFetchResponse;
+
+int fetch_cb(void *user, const char *method, const char *url,
+             const char *headers, const char *body, RuneFetchResponse *out) {
+    out->status = 200;
+    out->body = "hello";
+    return 0;
+}
+```
+
+Return non-zero to reject. Strings are borrowed for the callback and copied
+immediately. Without a transport, fetch requests reject. The C API is
+single-threaded and not re-entrant; the transport blocks the job loop.
 
 ## Host functions
 
@@ -122,8 +144,8 @@ pointer must remain valid for the context's lifetime.
   borrowed for the callback duration.
 - `get_property`/`set_property` support data properties; JS accessors are
   rejected.
-- Timers/promise jobs are available via `install_runtime`/`run_jobs`; fetch has
-  no transport configured in the C API and rejects.
+- Timers/promise jobs and fetch transport callbacks are available; the fetch
+  callback is synchronous/blocking and runs on the calling thread.
 - Contexts are single-threaded; do not share one context across threads.
 - Raw invalid pointers are undefined behavior (standard C ABI rules); the API
   null-checks but cannot validate arbitrary addresses.

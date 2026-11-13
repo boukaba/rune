@@ -1132,6 +1132,21 @@ Integration suite: **794 passed, 0 failed, 3 ignored**.
 
 Integration suite: **794 passed, 0 failed, 3 ignored**; `rune_capi` **7 tests**.
 
+### Phase 3 — C fetch transport (2026-11-13)
+
+- Added `RuneFetchCallback`/`RuneFetchResponse` and
+  `rune_context_set_fetcher(ctx, user, callback)`: a synchronous C HTTP
+  transport for `fetch` jobs. Method/url/header/body strings are borrowed for
+  the callback; response strings are copied immediately. Non-zero return
+  rejects the fetch.
+- Response headers use a `name<TAB>value<LF>` blob. Empty/unknown fields are
+  tolerated.
+- C example now prints `fetch: hello` after resolving a fetch promise through
+  `run_jobs`.
+- Tests: **8** C API tests (timers + fetch + handles/property/host callbacks).
+
+Integration suite: **794 passed, 0 failed, 3 ignored**; `rune_capi` **8 tests**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

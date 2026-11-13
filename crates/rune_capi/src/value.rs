@@ -149,3 +149,25 @@ pub fn value_from_c(gc: &mut SemiSpace, value: RuneValue) -> Value {
         _ => Value::undefined(),
     }
 }
+
+/// Serialize headers as `name<TAB>value<LF>` for the C boundary.
+pub fn headers_blob(headers: &[(String, String)]) -> String {
+    let mut out = String::new();
+    for (name, value) in headers {
+        out.push_str(&name.replace(['\t', '\n', '\r'], " "));
+        out.push('\t');
+        out.push_str(&value.replace(['\t', '\n', '\r'], " "));
+        out.push('\n');
+    }
+    out
+}
+
+/// Parse a `name<TAB>value<LF>` header blob; malformed lines are ignored.
+pub fn parse_headers_blob(blob: &str) -> Vec<(String, String)> {
+    blob.lines()
+        .filter_map(|line| {
+            let (name, value) = line.split_once('\t')?;
+            Some((name.to_string(), value.to_string()))
+        })
+        .collect()
+}

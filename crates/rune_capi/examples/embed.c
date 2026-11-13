@@ -6,6 +6,17 @@
 #include "rune.h"
 #include <stdio.h>
 
+static int fetch_cb(void *user, const char *method, const char *url,
+                    const char *headers, const char *body,
+                    RuneFetchResponse *response) {
+    (void)user; (void)method; (void)url; (void)headers; (void)body;
+    response->status = 200;
+    response->body = "hello";
+    response->status_text = "OK";
+    response->headers = "X-Test\t1\n";
+    return 0;
+}
+
 static RuneValue add(void *user, size_t argc, const RuneValue *argv) {
     RuneValue out = { RUNE_NUMBER, 0, 0.0, NULL, 0 };
     (void)user;
@@ -84,6 +95,19 @@ int main(void) {
         printf("timer: %s\n", text);
     } else {
         printf("timer error: %s\n", error ? error : "unknown");
+    }
+    rune_free_string(text);
+    rune_free_string(error);
+
+    rune_context_set_fetcher(ctx, NULL, fetch_cb);
+    text = NULL;
+    error = NULL;
+    if (rune_context_eval(ctx, "var body = ''; fetch('https://example.com/x').then(function(r){ return r.text().then(function(t){ body = t; }); });", NULL, &error) == 0 &&
+        rune_context_run_jobs(ctx, &error) == 0 &&
+        rune_context_eval(ctx, "body", &text, &error) == 0) {
+        printf("fetch: %s\n", text);
+    } else {
+        printf("fetch error: %s\n", error ? error : "unknown");
     }
     rune_free_string(text);
     rune_free_string(error);

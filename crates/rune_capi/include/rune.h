@@ -82,6 +82,22 @@ int rune_context_release_value(void *ctx, RuneValue value);
 /* Install timers/promise jobs (idempotent). */
 int rune_context_install_runtime(void *ctx);
 
+/* C fetch transport response/header strings are borrowed for the call and
+ * copied by the engine. headers is one "name<TAB>value<LF>" per line. */
+typedef struct {
+    uint32_t status;
+    const char *body;
+    const char *status_text;
+    const char *headers;
+} RuneFetchResponse;
+
+typedef int (*RuneFetchCallback)(void *user, const char *method, const char *url,
+                                 const char *headers, const char *body,
+                                 RuneFetchResponse *response);
+
+/* Install a C HTTP transport for fetch jobs (requires install_runtime). */
+int rune_context_set_fetcher(void *ctx, void *user, RuneFetchCallback callback);
+
 /* Run due timers and queued promise jobs. */
 int rune_context_run_jobs(void *ctx, char **error);
 

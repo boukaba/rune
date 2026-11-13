@@ -22,7 +22,30 @@ thread_local! {
     /// by the context address is sufficient.
     static RUNTIME_JOBS: RefCell<HashMap<usize, rune_runtime::RuntimeJobs>> =
         RefCell::new(HashMap::new());
+    static FETCHERS: RefCell<HashMap<usize, (usize, RuneFetchCallback)>> =
+        RefCell::new(HashMap::new());
 }
+
+/// Response filled by a C fetch transport. Strings are borrowed for the call
+/// and copied by the engine.
+#[repr(C)]
+pub struct RuneFetchResponse {
+    pub status: u32,
+    pub body: *const c_char,
+    pub status_text: *const c_char,
+    /// Header blob: one `name<TAB>value<LF>` per header.
+    pub headers: *const c_char,
+}
+
+/// C fetch transport. Return 0 on success, non-zero to reject the fetch.
+pub type RuneFetchCallback = unsafe extern "C" fn(
+    user: *mut c_void,
+    method: *const c_char,
+    url: *const c_char,
+    headers: *const c_char,
+    body: *const c_char,
+    response: *mut RuneFetchResponse,
+) -> i32;
 
 fn into_c_string(text: String) -> *mut c_char {
     CString::new(text.replace('\0', "\\0"))
@@ -68,6 +91,9 @@ pub extern "C" fn rune_context_destroy(ctx: *mut c_void) {
     if !ctx.is_null() {
         RUNTIME_JOBS.with(|jobs| {
             jobs.borrow_mut().remove(&(ctx as usize));
+        });
+        FETCHERS.with(|fetchers| {
+            fetchers.borrow_mut().remove(&(ctx as usize));
         });
         unsafe {
             let _ = Box::from_raw(ctx as *mut Context);
@@ -435,6 +461,80 @@ pub unsafe extern "C" fn rune_context_install_runtime(ctx: *mut c_void) -> i32 {
             entry.insert(rune_runtime::install(ctx_ref));
         }
     });
+    STATUS_OK
+}
+
+/// Install a C HTTP transport used by `fetch` jobs. Requires
+/// `rune_context_install_runtime` to have been called.
+///
+/// # Safety
+/// `ctx` must be live; `callback` and `user` must remain valid until the
+/// context is destroyed or another transport is installed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rune_context_set_fetcher(
+    ctx: *mut c_void,
+    user: *mut c_void,
+    callback: Option<RuneFetchCallback>,
+) -> i32 {
+    if ctx.is_null() {
+        return STATUS_INVALID;
+    }
+    let Some(callback) = callback else {
+        return STATUS_INVALID;
+    };
+    let key = ctx as usize;
+    let jobs = RUNTIME_JOBS.with(|slot| slot.borrow_mut().remove(&key));
+    let Some(mut jobs) = jobs else {
+        return STATUS_INVALID;
+    };
+    FETCHERS.with(|slot| {
+        slot.borrow_mut().insert(key, (user as usize, callback));
+    });
+    jobs.set_fetcher(move |request| {
+        let (user, callback) = FETCHERS
+            .with(|slot| slot.borrow().get(&key).copied())
+            .ok_or_else(|| "C fetch transport is not installed".to_string())?;
+        let method = CString::new(request.method.as_str()).unwrap_or_default();
+        let url = CString::new(request.url.as_str()).unwrap_or_default();
+        let headers =
+            CString::new(crate::value::headers_blob(&request.headers)).unwrap_or_default();
+        let body = CString::new(request.body.clone().unwrap_or_default()).unwrap_or_default();
+        let mut out = RuneFetchResponse {
+            status: 0,
+            body: std::ptr::null(),
+            status_text: std::ptr::null(),
+            headers: std::ptr::null(),
+        };
+        let rc = unsafe {
+            callback(
+                user as *mut c_void,
+                method.as_ptr(),
+                url.as_ptr(),
+                headers.as_ptr(),
+                body.as_ptr(),
+                &mut out,
+            )
+        };
+        if rc != 0 {
+            return Err("C fetch transport failed".to_string());
+        }
+        let text = |ptr: *const c_char| -> String {
+            if ptr.is_null() {
+                String::new()
+            } else {
+                unsafe { CStr::from_ptr(ptr) }
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        };
+        Ok(rune_runtime::FetchResponse {
+            status: out.status.min(u16::MAX as u32) as u16,
+            status_text: text(out.status_text),
+            headers: crate::value::parse_headers_blob(&text(out.headers)),
+            body: text(out.body),
+        })
+    });
+    RUNTIME_JOBS.with(|slot| slot.borrow_mut().insert(key, jobs));
     STATUS_OK
 }
 
@@ -1051,6 +1151,63 @@ mod runtime_tests {
             .into_owned();
         unsafe { rune_free_string(result) };
         assert_eq!(text, "1");
+        rune_context_destroy(ctx);
+    }
+}
+
+#[cfg(test)]
+mod fetch_tests {
+    use super::*;
+
+    unsafe extern "C" fn fetch_cb(
+        _user: *mut c_void,
+        _method: *const c_char,
+        _url: *const c_char,
+        _headers: *const c_char,
+        _body: *const c_char,
+        response: *mut RuneFetchResponse,
+    ) -> i32 {
+        unsafe {
+            (*response).status = 200;
+            (*response).body = c"hello".as_ptr();
+            (*response).status_text = c"OK".as_ptr();
+            (*response).headers = c"X-Test\t1\n".as_ptr();
+        }
+        0
+    }
+
+    #[test]
+    fn c_fetch_transport_resolves_promises() {
+        let ctx = rune_context_create();
+        assert_eq!(unsafe { rune_context_install_runtime(ctx) }, 0);
+        assert_eq!(
+            unsafe { rune_context_set_fetcher(ctx, std::ptr::null_mut(), Some(fetch_cb)) },
+            0
+        );
+        let source = CString::new(
+            "var out = ''; fetch('https://example.com/x').then(function (r) { return r.text().then(function (t) { out = r.status + ':' + t; }); });",
+        )
+        .unwrap();
+        let mut error: *mut c_char = std::ptr::null_mut();
+        let status =
+            unsafe { rune_context_eval(ctx, source.as_ptr(), std::ptr::null_mut(), &mut error) };
+        assert_eq!(status, 0);
+        if !error.is_null() {
+            unsafe { rune_free_string(error) };
+        }
+        assert_eq!(unsafe { rune_context_run_jobs(ctx, &mut error) }, 0);
+        if !error.is_null() {
+            unsafe { rune_free_string(error) };
+        }
+        let check = CString::new("out").unwrap();
+        let mut result: *mut c_char = std::ptr::null_mut();
+        let status = unsafe { rune_context_eval(ctx, check.as_ptr(), &mut result, &mut error) };
+        assert_eq!(status, 0);
+        let text = unsafe { CStr::from_ptr(result) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { rune_free_string(result) };
+        assert_eq!(text, "200:hello");
         rune_context_destroy(ctx);
     }
 }

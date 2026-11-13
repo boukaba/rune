@@ -2811,6 +2811,31 @@ Integration suite: **873 passed, 0 failed, 3 ignored**.
 
 Integration suite: **874 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Spec-shaped JSON.stringify (2026-11-13)
+
+- Replaced the raw-slot serializer with an algorithm that:
+  - applies `toJSON` (callable Get) and function replacers via synchronous
+    calls, propagating abrupt completions;
+  - supports array replacers as ordered, de-duplicated PropertyLists
+    (Number/String wrappers stringified through ToString);
+  - finalizes boxed Number (`ToNumber`), String (`ToString`), Boolean values
+    after toJSON/replacer;
+  - omits undefined/function/symbol values in objects and emits `null` in
+    arrays;
+  - throws TypeError for circular structures (tracked by pointer stack);
+  - pretty-prints with a `space` argument (string, number, or Number/String
+    wrapper; clamped to 10) and correct `\n`/indent layout;
+  - serializes object properties via Get (accessors run) and skips synthetic
+    rawJSON slots;
+  - preserves rawJSON wrappers.
+- Test262: JSON **94 → 119/165**, JSON.stringify **15 → 40/66**.
+- Remaining stringify failures: Proxy traps, exact property ordering,
+  lone-surrogate escaping, `toJSON` wrong-type edge cases, String-wrapper
+  overridden-toString for `space`.
+- Regression: `test_json_stringify_replacer_tojson_wrappers`.
+
+Integration suite: **875 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

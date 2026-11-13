@@ -18686,78 +18686,227 @@ pub fn json_stringify(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
                 '\n' => out.push_str("\\n"),
                 '\r' => out.push_str("\\r"),
                 '\t' => out.push_str("\\t"),
-                c if c.is_control() => {
-                    out.push_str(&format!("\\u{:04x}", c as u32));
-                }
+                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
                 c => out.push(c),
             }
         }
         out
     }
-    fn stringify_val(
+
+    fn finalize_json_wrapper(gc: &mut SemiSpace, vm: &mut Vm, v: Value) -> Result<Value, Value> {
+        if v.heap_ptr()
+            .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_STRING_OBJ })
+        {
+            let prim = to_primitive_sync(gc, vm, v, "string")?;
+            if prim.as_symbol_id().is_some() {
+                return Err(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "Cannot convert a Symbol value to a string",
+                ));
+            }
+            return Ok(prim);
+        }
+        if wrapper_value(v, NUMBER_WRAPPER_KEY).is_some() {
+            return to_number_sync(gc, vm, v).map(Value::from_float64);
+        }
+        if let Some(b) = wrapper_value(v, BOOLEAN_WRAPPER_KEY) {
+            return Ok(b);
+        }
+        Ok(v)
+    }
+
+    fn json_wrapper_string(
         gc: &mut SemiSpace,
-        val: Value,
-        stack: &mut Vec<*mut u8>,
         vm: &mut Vm,
-    ) -> Result<String, ()> {
-        if val.is_undefined() {
-            return Err(());
+        v: Value,
+    ) -> Result<Option<String>, Value> {
+        let is_num = wrapper_value(v, NUMBER_WRAPPER_KEY).is_some();
+        let is_str = v
+            .heap_ptr()
+            .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_STRING_OBJ });
+        if !is_num && !is_str {
+            return Ok(None);
         }
-        if val.is_null() {
-            return Ok("null".to_string());
+        let prim = to_primitive_sync(gc, vm, v, "string")?;
+        if prim.as_symbol_id().is_some() {
+            return Err(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Cannot convert a Symbol value to a string",
+            ));
         }
-        if val.is_boolean() {
-            return Ok(if val.to_boolean().unwrap() {
-                "true"
-            } else {
-                "false"
+        Ok(Some(value_to_js_string(prim)))
+    }
+
+    let val = args.first().copied().unwrap_or(Value::undefined());
+    let replacer = args.get(1).copied().unwrap_or(Value::undefined());
+    let space_arg = args.get(2).copied().unwrap_or(Value::undefined());
+
+    // Build the PropertyList for array replacers (order preserved, unique).
+    let mut prop_list: Option<Vec<String>> = None;
+    let mut replacer_fn: Option<Value> = None;
+    if is_callable_value(replacer) {
+        replacer_fn = Some(replacer);
+    } else if let Some(ptr) = replacer.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_ARRAY {
+            let len = unsafe { RuneArray::length(ptr as *mut RuneArray) } as usize;
+            let mut names: Vec<String> = Vec::new();
+            for i in 0..len {
+                let item = unsafe { RuneArray::get_element(ptr as *mut RuneArray, i) };
+                if item == Value::empty_sentinel() {
+                    continue;
+                }
+                let wrapper_name = match json_wrapper_string(gc, vm, item) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        vm.set_pending_exception(e);
+                        return Value::undefined();
+                    }
+                };
+                let item = wrapper_primitive(item).unwrap_or(item);
+                let name = if let Some(n) = wrapper_name {
+                    Some(n)
+                } else if let Some(sp) = item.heap_ptr() {
+                    if unsafe { (*(sp as *const GcHeader)).tag() } == TAG_STRING {
+                        Some(unsafe { HeapString::to_string(sp as *mut HeapString) })
+                    } else {
+                        None
+                    }
+                } else if let Some(n) = item.as_smi() {
+                    Some(n.to_string())
+                } else {
+                    item.as_float64().map(f64_to_json_string)
+                };
+                if let Some(n) = name {
+                    if !names.contains(&n) {
+                        names.push(n);
+                    }
+                }
             }
-            .to_string());
+            prop_list = Some(names);
         }
-        if let Some(n) = val.as_smi() {
-            return Ok(n.to_string());
+    }
+
+    // Gap string from the space argument.
+    let mut gap = String::new();
+    if let Some(n) = space_arg.as_smi() {
+        gap = " ".repeat(n.clamp(0, 10) as usize);
+    } else if let Some(f) = space_arg.as_float64() {
+        if f.is_finite() {
+            gap = " ".repeat((f.trunc().clamp(0.0, 10.0)) as usize);
         }
-        if val.is_float64() {
-            let f = val.as_float64().unwrap_or(f64::NAN);
-            if f.is_nan() || f.is_infinite() {
-                return Ok("null".to_string());
+    } else if let Some(sp) = space_arg.heap_ptr() {
+        if wrapper_value(space_arg, NUMBER_WRAPPER_KEY).is_some() {
+            match to_number_sync(gc, vm, space_arg) {
+                Ok(n) => {
+                    if n.is_finite() {
+                        gap = " ".repeat(n.trunc().clamp(0.0, 10.0) as usize);
+                    }
+                }
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
             }
-            return Ok(f64_to_json_string(f));
-        }
-        if let Some(ptr) = val.heap_ptr() {
-            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-            if tag == TAG_STRING {
-                let s = unsafe { HeapString::to_string(ptr as *mut HeapString) };
-                return Ok(format!("\"{}\"", escape_json(&s)));
-            }
-            if tag == TAG_ARRAY {
-                if stack.contains(&ptr) {
-                    let err = crate::errors::error_object(
+        } else if unsafe { (*(sp as *const GcHeader)).tag() } == TAG_STRING_OBJ {
+            match to_primitive_sync(gc, vm, space_arg, "string") {
+                Ok(v) if v.as_symbol_id().is_none() => {
+                    gap = value_to_js_string(v).chars().take(10).collect();
+                }
+                Ok(_) => {
+                    vm.set_pending_exception(crate::errors::error_object(
                         gc,
                         &vm.error_protos,
                         crate::errors::ErrorKind::TypeError,
-                        "Converting circular structure to JSON",
-                    );
-                    vm.set_pending_exception(err);
-                    return Err(());
+                        "Cannot convert a Symbol value to a string",
+                    ));
+                    return Value::undefined();
                 }
-                stack.push(ptr);
-                let len = unsafe { RuneArray::length(ptr as *mut RuneArray) } as usize;
-                let mut parts: Vec<String> = Vec::with_capacity(len);
-                for i in 0..len {
-                    let elem = unsafe { RuneArray::get_element(ptr as *mut RuneArray, i) };
-                    // B1e: holes (and unallocated tail slots) stringify
-                    // as null.
-                    if elem == Value::empty_sentinel() {
-                        parts.push("null".to_string());
-                        continue;
-                    }
-                    parts.push(
-                        stringify_val(gc, elem, stack, vm).unwrap_or_else(|_| "null".to_string()),
-                    );
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
                 }
-                stack.pop();
-                return Ok(format!("[{}]", parts.join(",")));
+            }
+        } else if unsafe { (*(sp as *const GcHeader)).tag() } == TAG_STRING {
+            let text = unsafe { HeapString::to_string(sp as *mut HeapString) };
+            gap = text.chars().take(10).collect();
+        }
+    }
+
+    fn is_object_like(v: Value) -> bool {
+        v.heap_ptr().is_some()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn stringify_inner(
+        gc: &mut SemiSpace,
+        vm: &mut Vm,
+        holder: Value,
+        key: &str,
+        mut val: Value,
+        replacer_fn: Option<Value>,
+        prop_list: Option<&Vec<String>>,
+        gap: &str,
+        indent: &str,
+        stack: &mut Vec<*mut u8>,
+    ) -> Result<String, Value> {
+        let root = vm.temp_roots.len();
+        vm.temp_roots.push(val);
+        let result = (|| -> Result<String, Value> {
+            let key_val = Value::from_heap_ptr(HeapString::allocate(gc, key) as *mut u8);
+            // toJSON (only for objects).
+            if is_object_like(val) {
+                let to_json = get_value_sync(gc, vm, val, "toJSON")?;
+                if is_callable_value(to_json) {
+                    val = vm.call_value_sync(gc, to_json, val, &[key_val])?;
+                    vm.temp_roots[root] = val;
+                }
+            }
+            if let Some(rep) = replacer_fn {
+                val = vm.call_value_sync(gc, rep, holder, &[key_val, val])?;
+                vm.temp_roots[root] = val;
+            }
+            val = finalize_json_wrapper(gc, vm, vm.temp_roots[root])?;
+            vm.temp_roots[root] = val;
+
+            if val.is_undefined() || val.is_symbol() {
+                return Err(Value::undefined());
+            }
+            if val.is_null() {
+                return Ok("null".to_string());
+            }
+            if val.is_boolean() {
+                return Ok(if val.to_boolean().unwrap() {
+                    "true".to_string()
+                } else {
+                    "false".to_string()
+                });
+            }
+            if let Some(n) = val.as_smi() {
+                return Ok(n.to_string());
+            }
+            if let Some(f) = val.as_float64() {
+                if !f.is_finite() {
+                    return Ok("null".to_string());
+                }
+                if f == 0.0 {
+                    return Ok("0".to_string());
+                }
+                return Ok(value_to_js_string(Value::from_float64(f)));
+            }
+            let Some(ptr) = val.heap_ptr() else {
+                return Err(Value::undefined());
+            };
+            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+            if tag == TAG_STRING {
+                let text = unsafe { HeapString::to_string(ptr as *mut HeapString) };
+                return Ok(format!("\"{}\"", escape_json(&text)));
+            }
+            if tag == TAG_FUNC {
+                return Err(Value::undefined());
             }
             if tag == TAG_OBJECT {
                 let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
@@ -18769,53 +18918,184 @@ pub fn json_stringify(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
                         }
                     }
                 }
-                if let Some(primitive) = wrapper_primitive(val) {
-                    return stringify_val(gc, primitive, stack, vm);
-                }
+            }
+
+            if tag == TAG_ARRAY {
                 if stack.contains(&ptr) {
-                    vm.set_pending_exception(crate::errors::error_object(
+                    let err = crate::errors::error_object(
                         gc,
                         &vm.error_protos,
                         crate::errors::ErrorKind::TypeError,
                         "Converting circular structure to JSON",
-                    ));
-                    return Err(());
+                    );
+                    vm.set_pending_exception(err);
+                    return Err(err);
                 }
                 stack.push(ptr);
-                let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
-                let count = unsafe { JSObject::slot_count(ptr as *mut JSObject) };
-                let mut pairs: Vec<String> = Vec::new();
-                for i in 0..count {
-                    // §25.5: symbol-keyed properties are not serialized.
-                    if shape.entries[i].0.is_symbol() {
-                        continue;
+                let res = (|| -> Result<String, Value> {
+                    let len_val = get_value_sync(gc, vm, val, "length")?;
+                    let len_num = to_number_sync(gc, vm, len_val)?;
+                    let len = if len_num.is_nan() || len_num <= 0.0 {
+                        0usize
+                    } else {
+                        len_num as usize
+                    };
+                    let child_indent = format!("{indent}{gap}");
+                    let mut parts: Vec<String> = Vec::with_capacity(len);
+                    for i in 0..len {
+                        let idx_key = i.to_string();
+                        let element = get_value_sync(gc, vm, val, &idx_key)?;
+                        match stringify_inner(
+                            gc,
+                            vm,
+                            val,
+                            &idx_key,
+                            element,
+                            replacer_fn,
+                            prop_list,
+                            gap,
+                            &child_indent,
+                            stack,
+                        ) {
+                            Ok(s) => parts.push(s),
+                            Err(e) => {
+                                if !e.is_undefined() {
+                                    vm.set_pending_exception(e);
+                                    return Err(e);
+                                }
+                                parts.push("null".to_string());
+                            }
+                        }
                     }
-                    let key_name = shape.key_name_at(i).unwrap_or("");
-                    if key_name.starts_with('\0') {
-                        continue;
+                    if parts.is_empty() {
+                        Ok("[]".to_string())
+                    } else if gap.is_empty() {
+                        Ok(format!("[{}]", parts.join(",")))
+                    } else {
+                        Ok(format!(
+                            "[\n{}{}\n{}]",
+                            child_indent,
+                            parts.join(&format!(",\n{child_indent}")),
+                            indent
+                        ))
                     }
-                    let val = unsafe { JSObject::get_slot(ptr as *mut JSObject, i) };
-                    if val.is_undefined() {
-                        continue;
-                    }
-                    if let Ok(s) = stringify_val(gc, val, stack, vm) {
-                        pairs.push(format!("\"{}\":{}", escape_json(key_name), s));
-                    }
-                }
+                })();
                 stack.pop();
-                return Ok(format!("{{{}}}", pairs.join(",")));
+                return res;
             }
-        }
-        Ok("null".to_string())
+
+            if tag == TAG_OBJECT {
+                if stack.contains(&ptr) {
+                    let err = crate::errors::error_object(
+                        gc,
+                        &vm.error_protos,
+                        crate::errors::ErrorKind::TypeError,
+                        "Converting circular structure to JSON",
+                    );
+                    vm.set_pending_exception(err);
+                    return Err(err);
+                }
+                stack.push(ptr);
+                let res = (|| -> Result<String, Value> {
+                    let mut names: Vec<String> = if let Some(list) = prop_list {
+                        list.clone()
+                    } else {
+                        let keys_arr = object_keys(gc, Value::undefined(), &[val], vm);
+                        let mut out = Vec::new();
+                        if let Some(kp) = keys_arr.heap_ptr() {
+                            if unsafe { (*(kp as *const GcHeader)).tag() } == TAG_ARRAY {
+                                let arr = kp as *mut RuneArray;
+                                let n = unsafe { RuneArray::length(arr) } as usize;
+                                for i in 0..n {
+                                    let kv = unsafe { RuneArray::get_element(arr, i) };
+                                    if let Some(sp) = kv.heap_ptr() {
+                                        if unsafe { (*(sp as *const GcHeader)).tag() } == TAG_STRING
+                                        {
+                                            out.push(unsafe {
+                                                HeapString::to_string(sp as *mut HeapString)
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        out
+                    };
+                    names.retain(|n| !n.starts_with('\0'));
+                    let child_indent = format!("{indent}{gap}");
+                    let mut pairs: Vec<String> = Vec::new();
+                    for name in names {
+                        let prop = get_value_sync(gc, vm, val, &name)?;
+                        match stringify_inner(
+                            gc,
+                            vm,
+                            val,
+                            &name,
+                            prop,
+                            replacer_fn,
+                            prop_list,
+                            gap,
+                            &child_indent,
+                            stack,
+                        ) {
+                            Ok(s) => pairs.push(format!(
+                                "\"{}\":{}{}",
+                                escape_json(&name),
+                                if gap.is_empty() { "" } else { " " },
+                                s
+                            )),
+                            Err(e) => {
+                                if !e.is_undefined() {
+                                    vm.set_pending_exception(e);
+                                    return Err(e);
+                                }
+                            }
+                        }
+                    }
+                    if pairs.is_empty() {
+                        Ok("{}".to_string())
+                    } else if gap.is_empty() {
+                        Ok(format!("{{{}}}", pairs.join(",")))
+                    } else {
+                        Ok(format!(
+                            "{{\n{}{}\n{}}}",
+                            child_indent,
+                            pairs.join(&format!(",\n{child_indent}")),
+                            indent
+                        ))
+                    }
+                })();
+                stack.pop();
+                return res;
+            }
+            Ok("null".to_string())
+        })();
+        vm.temp_roots.truncate(root);
+        result
     }
-    let val = args.first().copied().unwrap_or(Value::undefined());
+
+    let holder = make_simple_object(gc, "", val);
     let mut stack: Vec<*mut u8> = Vec::new();
-    match stringify_val(gc, val, &mut stack, vm) {
-        Ok(s) => {
-            let heap_s = HeapString::allocate(gc, &s);
-            Value::from_heap_ptr(heap_s as *mut u8)
+    let replacer_fn = replacer_fn;
+    match stringify_inner(
+        gc,
+        vm,
+        holder,
+        "",
+        val,
+        replacer_fn,
+        prop_list.as_ref(),
+        &gap,
+        "",
+        &mut stack,
+    ) {
+        Ok(s) => Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8),
+        Err(e) => {
+            if !e.is_undefined() && vm.pending_exception.is_none() {
+                vm.set_pending_exception(e);
+            }
+            Value::undefined()
         }
-        Err(()) => Value::undefined(),
     }
 }
 

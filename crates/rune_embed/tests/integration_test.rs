@@ -16812,3 +16812,28 @@ fn test_json_parse_strictness_and_proto() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_json_stringify_replacer_tojson_wrappers() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var circular = { a: 1 }; circular.self = circular;
+            var circThrew = false;
+            try { JSON.stringify(circular); } catch (e) { circThrew = e instanceof TypeError; }
+            [
+                JSON.stringify({ a: 1, b: 2 }, ["b"]) === '{"b":2}',
+                JSON.stringify([1, { a: 2 }], []) === '[1,{}]',
+                JSON.stringify({ a: 1 }, function (k, v) { return typeof v === "number" ? v * 2 : v; }) === '{"a":2}',
+                JSON.stringify({ x: { toJSON: function () { return 5; } } }) === '{"x":5}',
+                JSON.stringify([new Number(2)]) === '[2]',
+                JSON.stringify({ s: new String("x") }) === '{"s":"x"}',
+                JSON.stringify({ a: 1 }, null, new Number(2)) === '{\n  "a": 1\n}',
+                circThrew
+            ].join("|") === "true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

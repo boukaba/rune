@@ -138,3 +138,63 @@ fn fetch_accepts_url_objects_and_headers() {
     .unwrap();
     assert_eq!(rt.context_mut().eval("out").unwrap().as_smi(), Some(201));
 }
+
+#[test]
+fn fetch_policy_blocks_private_and_unsupported_schemes() {
+    use rune_runtime::FetchPolicy;
+    let policy = FetchPolicy::default();
+    assert!(policy.check("https://example.com/a").is_ok());
+    assert!(policy.check("http://example.com/a").is_ok());
+    for url in [
+        "http://localhost/a",
+        "http://127.0.0.1/a",
+        "http://10.0.0.1/a",
+        "http://192.168.1.1/a",
+        "http://169.254.1.1/a",
+        "http://[::1]/a",
+        "file:///etc/passwd",
+        "ftp://example.com/a",
+    ] {
+        assert!(policy.check(url).is_err(), "{url} should be blocked");
+    }
+}
+
+#[test]
+fn fetch_policy_allowlist_and_private_flag() {
+    use rune_runtime::FetchPolicy;
+    let policy = FetchPolicy {
+        allowed_hosts: Some(vec![
+            "example.com".to_string(),
+            "*.internal.test".to_string(),
+        ]),
+        ..Default::default()
+    };
+    assert!(policy.check("https://example.com/").is_ok());
+    assert!(policy.check("https://api.internal.test/").is_ok());
+    assert!(policy.check("https://evil.example.com/").is_err());
+    assert!(policy.check("https://127.0.0.1/").is_err());
+
+    let private_ok = FetchPolicy {
+        allow_private_networks: true,
+        ..Default::default()
+    };
+    assert!(private_ok.check("http://127.0.0.1:8765/").is_ok());
+}
+
+#[test]
+fn runtime_fetch_policy_rejects_before_transport() {
+    let mut rt = Runtime::new();
+    rt.set_fetcher(|_req| panic!("transport must not run for a blocked host"));
+    rt.eval(
+        r#"
+        var out = "";
+        fetch("http://127.0.0.1:1/").catch(function (e) { out = e; });
+        "#,
+    )
+    .unwrap();
+    let out = eval_str(&mut rt, "out");
+    assert!(
+        out.contains("private/loopback"),
+        "unexpected rejection: {out}"
+    );
+}

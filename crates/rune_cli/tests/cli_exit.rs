@@ -27,3 +27,20 @@ fn timers_run_after_eval_in_cli() {
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("timer ran"));
 }
+
+#[test]
+fn fetch_blocks_private_hosts_by_default() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rune"))
+        .args([
+            "-e",
+            "fetch('http://127.0.0.1:1/').catch(function (e) { print(e); });",
+        ])
+        .output()
+        .expect("spawn rune");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("private/loopback"),
+        "unexpected output: {stdout}"
+    );
+}

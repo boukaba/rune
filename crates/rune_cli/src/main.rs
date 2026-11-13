@@ -11,6 +11,7 @@ fn main() {
     let mut enable_inlining = false;
     let mut stencil_jit = false;
     let mut enable_jit = false;
+    let mut allow_private_fetch = false;
 
     let mut source_args: Vec<String> = Vec::new();
     let mut i = 0;
@@ -43,6 +44,8 @@ fn main() {
             enable_jit = true;
         } else if arg == "--no-jit" {
             enable_jit = false;
+        } else if arg == "--allow-private-fetch" {
+            allow_private_fetch = true;
         } else if arg == "--stencil-jit" {
             stencil_jit = true;
         } else if arg == "--no-stencil-jit" {
@@ -63,6 +66,10 @@ fn main() {
         None
     } else {
         let mut jobs = rune_runtime::install(&mut ctx);
+        jobs.set_fetch_policy(rune_runtime::FetchPolicy {
+            allow_private_networks: allow_private_fetch,
+            ..Default::default()
+        });
         jobs.set_fetcher(http_fetch);
         Some(jobs)
     };

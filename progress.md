@@ -727,6 +727,24 @@ Verification: workspace green; JIT differential 13/13 on AArch64; integration
 773; full 512-stress 773.
 
 
+### Phase 3 — fetch network policy (2026-11-13)
+
+- `rune_runtime::FetchPolicy` is applied before the transport: schemes limited
+  to http/https, literal loopback/private/link-local/CGNAT/ULA hosts blocked by
+  default, optional exact/`*.suffix` allowlist, and `allow_private_networks`
+  for trusted local development.
+- `RuntimeJobs::set_fetch_policy` and `Runtime::set_fetch_policy` expose it.
+  Rejections still arrive as Promise rejections, not synchronous throws.
+- CLI installs the safe default; `--allow-private-fetch` opts into local
+  networks. Unit tests cover IPv4/IPv6 private ranges, schemes, allowlist
+  matching, the private override, and a runtime test proving the transport is
+  never invoked for a blocked host. CLI test verifies the default block.
+- DNS names are not resolved by the policy; a transport must still defend
+  against DNS rebinding. No proxy/redirect policy yet.
+
+`rune_runtime`: 10 tests; CLI: 5 tests (1 HTTP unit + 4 integration).
+Integration suite: **773 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

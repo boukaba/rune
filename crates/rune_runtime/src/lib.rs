@@ -49,6 +49,110 @@ pub struct FetchResponse {
     pub body: String,
 }
 
+/// Network access policy applied before a fetch reaches the host transport.
+/// Literal private/loopback hosts are blocked by default; DNS names are not
+/// resolved here, so a transport must still defend against rebinding.
+#[derive(Clone, Debug)]
+pub struct FetchPolicy {
+    pub allow_http: bool,
+    pub allow_private_networks: bool,
+    /// Exact hosts, or `*.example.com` suffix entries. `None` allows all.
+    pub allowed_hosts: Option<Vec<String>>,
+}
+
+impl Default for FetchPolicy {
+    fn default() -> Self {
+        Self {
+            allow_http: true,
+            allow_private_networks: false,
+            allowed_hosts: None,
+        }
+    }
+}
+
+impl FetchPolicy {
+    pub fn check(&self, url: &str) -> Result<(), String> {
+        let scheme_end = url
+            .find("://")
+            .ok_or_else(|| format!("fetch: invalid URL {url:?}"))?;
+        let scheme = url[..scheme_end].to_ascii_lowercase();
+        match scheme.as_str() {
+            "https" => {}
+            "http" if self.allow_http => {}
+            "http" => return Err("fetch: http is disabled by policy".to_string()),
+            _ => return Err(format!("fetch: unsupported scheme {scheme:?}")),
+        }
+        let rest = &url[scheme_end + 3..];
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        let authority = authority.rsplit('@').next().unwrap_or(authority);
+        let host = if let Some(inner) = authority.strip_prefix('[') {
+            inner
+                .split(']')
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+        } else {
+            authority
+                .split(':')
+                .next()
+                .unwrap_or_default()
+                .trim_end_matches('.')
+                .to_ascii_lowercase()
+        };
+        if host.is_empty() {
+            return Err("fetch: URL has no host".to_string());
+        }
+        if let Some(allowed) = &self.allowed_hosts {
+            let ok = allowed.iter().any(|entry| {
+                let entry = entry.to_ascii_lowercase();
+                if let Some(suffix) = entry.strip_prefix("*.") {
+                    host == suffix || host.ends_with(&format!(".{suffix}"))
+                } else {
+                    host == entry
+                }
+            });
+            if !ok {
+                return Err(format!("fetch: host {host:?} is not allowed"));
+            }
+            return Ok(());
+        }
+        if self.allow_private_networks {
+            return Ok(());
+        }
+        if host == "localhost" || host.ends_with(".localhost") || is_private_host(&host) {
+            return Err(format!("fetch: host {host:?} is private/loopback"));
+        }
+        Ok(())
+    }
+}
+
+fn is_private_host(host: &str) -> bool {
+    use std::net::IpAddr;
+    let Ok(ip) = host.parse::<IpAddr>() else {
+        return false;
+    };
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_unspecified()
+                || v4.is_multicast()
+                || (v4.octets()[0] == 100 && (64..=127).contains(&v4.octets()[1]))
+                || (v4.octets()[0] == 198 && (18..=19).contains(&v4.octets()[1]))
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local()
+        }
+    }
+}
+
 type Fetcher = Box<dyn FnMut(&FetchRequest) -> Result<FetchResponse, String>>;
 
 struct FetchJob {
@@ -62,6 +166,7 @@ pub struct RuntimeJobs {
     timers: Rc<RefCell<TimerQueue>>,
     fetches: Rc<RefCell<VecDeque<FetchJob>>>,
     fetcher: Fetcher,
+    fetch_policy: FetchPolicy,
     response_factory: usize,
 }
 
@@ -202,6 +307,7 @@ pub fn install(ctx: &mut Context) -> RuntimeJobs {
         timers,
         fetches,
         fetcher: Box::new(|_| Err("fetch transport not configured".to_string())),
+        fetch_policy: FetchPolicy::default(),
         response_factory,
     }
 }
@@ -220,6 +326,11 @@ impl Runtime {
         F: FnMut(&FetchRequest) -> Result<FetchResponse, String> + 'static,
     {
         self.jobs.set_fetcher(fetcher);
+    }
+
+    /// Replace the network access policy used before the transport runs.
+    pub fn set_fetch_policy(&mut self, policy: FetchPolicy) {
+        self.jobs.set_fetch_policy(policy);
     }
 
     /// Evaluate a script, then run the timer/microtask jobs it queued.
@@ -254,13 +365,20 @@ impl RuntimeJobs {
         self.fetcher = Box::new(fetcher);
     }
 
+    pub fn set_fetch_policy(&mut self, policy: FetchPolicy) {
+        self.fetch_policy = policy;
+    }
+
     pub fn run_jobs(&mut self, ctx: &mut Context) -> Result<(), String> {
         loop {
             // Host I/O jobs run before timers; their resolution may queue
             // microtasks/timers that the next iterations process.
             let fetch = self.fetches.borrow_mut().pop_front();
             if let Some(job) = fetch {
-                let result = (self.fetcher)(&job.request);
+                let result = match self.fetch_policy.check(&job.request.url) {
+                    Ok(()) => (self.fetcher)(&job.request),
+                    Err(err) => Err(err),
+                };
                 let resolve = ctx.retained_value(job.resolve);
                 let reject = ctx.retained_value(job.reject);
                 ctx.release_value(job.resolve);

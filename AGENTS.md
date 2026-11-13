@@ -99,8 +99,8 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 - **Function metadata**: JS functions now have own non-enumerable `length`/`name`; bind computes bound metadata. AFPC v9.
 - **GC**: forced-collection stress harness + CI job; aggressive Promise.all stress on 16 MiB at interval 48.
 - **Stable object/array headers**: initial values are inline; growth converts to a separate slot buffer and never moves the header. GC distinguishes inline/grown/buffer layouts; object self-pointers are repaired in to-space. JIT x86-64/AArch64 property IC and trace-IC slot offsets updated; AFPC v10. Regression + 100K-object stress + full 512-stress green.
-- Verification: integration **773 passed, 0 failed, 3 ignored**; `rune_runtime` **7 passed**; full workspace green; fmt/clippy/no-default clean.
-- Known gaps: host closure captures not GC-rooted by engine; same-host-function re-entry rejected; CLI fetch uses a real HTTP/HTTPS transport with no SSRF/allowlist policy yet; `rune_runtime` embedders choose their own; no snapshots/AOT product path; test262 90% gate not met; targeted `built-ins/Promise` baseline is 364/703 (51.8%).
+- Verification: integration **773 passed, 0 failed, 3 ignored**; `rune_runtime` **10 passed**; full workspace green; fmt/clippy/no-default clean.
+- Known gaps: host closure captures not GC-rooted by engine; same-host-function re-entry rejected; CLI fetch uses a real HTTP/HTTPS transport with literal private-network blocking and an opt-in allowlist policy; DNS rebinding/proxy/redirect policy still open; `rune_runtime` embedders choose their own; no snapshots/AOT product path; test262 90% gate not met; targeted `built-ins/Promise` baseline is 364/703 (51.8%).
 
 ### Goal
 Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8× vs Node) with enough stdlib to run real workloads. v0.4 = stdlib breadth (14 builtins). v0.5 = Promise + async patterns.

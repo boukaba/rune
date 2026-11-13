@@ -270,6 +270,8 @@ pub(crate) enum PendingCallCont {
     /// non-primitive first result run valueOf (tried_valueof=false) or
     /// throw TypeError (true). `value` is the coerced object.
     ToPrimString { value: Value, tried_valueof: bool },
+    /// Promise.try: resolve the rooted promise with the callback result.
+    PromiseTry { promise: Value },
 }
 
 /// State for a pending Function.prototype.call invocation.
@@ -2530,6 +2532,12 @@ impl Vm {
             if let Some(r) = find_handle(&self.builtins, "Promise_race") {
                 ctor_entries.push(("race", r));
             }
+            if let Some(r) = find_handle(&self.builtins, "Promise_withResolvers") {
+                ctor_entries.push(("withResolvers", r));
+            }
+            if let Some(r) = find_handle(&self.builtins, "Promise_try") {
+                ctor_entries.push(("try", r));
+            }
             let prom_ctor = make_object(gc, &ctor_entries);
             self.promise_constructor = prom_ctor;
             self.builtin_wrappers
@@ -4431,8 +4439,14 @@ impl Vm {
             gc.push_root(&pra.fn_val as *const Value as *mut u64);
         }
         if let Some(ref ppc) = self.pending_call {
-            if let PendingCallCont::ToPrimString { value, .. } = ppc.cont {
-                gc.push_root(&value as *const Value as *mut u64);
+            match ppc.cont {
+                PendingCallCont::ToPrimString { value, .. } => {
+                    gc.push_root(&value as *const Value as *mut u64);
+                }
+                PendingCallCont::PromiseTry { promise } => {
+                    gc.push_root(&promise as *const Value as *mut u64);
+                }
+                PendingCallCont::Raw => {}
             }
         }
     }
@@ -12507,6 +12521,19 @@ impl Vm {
                                     // and advance caller PC.
                                     self.stack.truncate(callee_base);
                                     self.push(result);
+                                    let caller_idx = self.frames.len() - 1;
+                                    self.frames[caller_idx].pc += 1;
+                                    continue;
+                                }
+                                PendingCallCont::PromiseTry { promise } => {
+                                    let _ = crate::builtins::promise_resolve_impl(
+                                        gc,
+                                        promise,
+                                        &[result],
+                                        self,
+                                    );
+                                    self.stack.truncate(callee_base);
+                                    self.push(promise);
                                     let caller_idx = self.frames.len() - 1;
                                     self.frames[caller_idx].pc += 1;
                                     continue;

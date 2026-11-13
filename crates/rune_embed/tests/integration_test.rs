@@ -14946,3 +14946,23 @@ fn test_exotic_descriptor_objects() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_promise_try_and_with_resolvers() {
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+        var tryOut = 0;
+        var wrOut = 0;
+        Promise.try(function () { return 5; }).then(function (v) { tryOut = v; });
+        var r = Promise.withResolvers();
+        r.resolve(7);
+        r.promise.then(function (v) { wrOut = v; });
+        "#,
+    )
+    .unwrap();
+    let r = ctx
+        .eval("tryOut === 5 && wrOut === 7 && typeof Promise.withResolvers === 'function' && typeof Promise.try === 'function';")
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

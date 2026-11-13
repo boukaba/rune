@@ -1435,6 +1435,21 @@ Integration suite: **807 passed, 0 failed, 3 ignored**.
 
 Integration suite: **808 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Promise.try + withResolvers (2026-11-13)
+
+- Added `Promise.try(callback, ...args)` with a new `PromiseTry` pending-call
+  continuation: JS callbacks run with frames, the result resolves the created
+  promise, and the promise is returned at the call site.
+- Added `Promise.withResolvers()` returning `{promise, resolve, reject}` backed
+  by the existing promise bridges. Non-Promise `this` throws TypeError.
+- Test262: Promise **369 → 374/703**; `Promise.try` **2 → 6/12**;
+  withResolvers **3/6**.
+- Regression: `test_promise_try_and_with_resolvers`.
+- Known gaps: `Promise.try` callback throws are not yet converted to promise
+  rejection (unwind path); withResolvers ignores subclass constructors.
+
+Integration suite: **809 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

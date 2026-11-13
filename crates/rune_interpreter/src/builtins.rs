@@ -20176,6 +20176,94 @@ pub fn bound_invoke(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut V
     )
 }
 
+/// Promise.try(callback, ...args) — invoke synchronously, adopt the result.
+pub fn promise_try(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if this.heap_ptr() != vm.promise_constructor.heap_ptr() {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Promise.try called on non-Promise constructor",
+        ));
+        return Value::undefined();
+    }
+    let callback = args.first().copied().unwrap_or(Value::undefined());
+    let callable = callback.as_smi().is_some_and(|s| s < 0)
+        || callback
+            .heap_ptr()
+            .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC);
+    if !callable {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Promise.try callback is not callable",
+        ));
+        return Value::undefined();
+    }
+    let promise_ptr = Promise::allocate(gc, vm.promise_prototype.heap_ptr());
+    let promise = Value::from_heap_ptr(promise_ptr);
+    let call_args: Vec<Value> = args.iter().skip(1).copied().collect();
+    if let Some(sid) = callback.as_smi() {
+        if sid < 0 {
+            let id = (-sid as usize) - 1;
+            if id < vm.builtins.len() {
+                let result = (vm.builtins[id].func)(gc, Value::undefined(), &call_args, vm);
+                let _ = promise_resolve_impl(gc, promise, &[result], vm);
+                return promise;
+            }
+        }
+    }
+    vm.pending_call = Some(crate::vm::PendingCall {
+        source_frame_depth: vm.frame_depth(),
+        cont: crate::vm::PendingCallCont::PromiseTry { promise },
+    });
+    vm.push_callback_call(gc, callback, Value::undefined(), call_args);
+    Value::undefined()
+}
+
+/// Promise.withResolvers() — returns {promise, resolve, reject}.
+pub fn promise_with_resolvers(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let is_promise_ctor = this.heap_ptr() == vm.promise_constructor.heap_ptr();
+    if !is_promise_ctor {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Promise.withResolvers called on non-Promise constructor",
+        ));
+        return Value::undefined();
+    }
+    let promise_ptr = Promise::allocate(gc, vm.promise_prototype.heap_ptr());
+    let promise = Value::from_heap_ptr(promise_ptr);
+    let root_base = vm.temp_roots.len();
+    vm.temp_roots.push(promise);
+    let resolve_handle = vm.find_builtin_handle("_promise_resolve");
+    let reject_handle = vm.find_builtin_handle("_promise_reject");
+    let resolve = vm.create_promise_bridge(gc, promise, resolve_handle);
+    vm.temp_roots.push(resolve);
+    let reject = vm.create_promise_bridge(gc, promise, reject_handle);
+    vm.temp_roots.push(reject);
+    let names = ["promise", "resolve", "reject"];
+    let entries: Vec<(PropertyKey, usize)> = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (PropertyKey::from_string(n), i))
+        .collect();
+    let shape = Shape::intern(entries, names.iter().map(|s| s.to_string()).collect());
+    let obj = JSObject::allocate(gc, shape, &[promise, resolve, reject]);
+    if let Some(proto) = vm.object_prototype.heap_ptr() {
+        unsafe { JSObject::set_prototype(obj, proto) };
+    }
+    vm.temp_roots.truncate(root_base);
+    Value::from_heap_ptr(obj as *mut u8)
+}
+
 /// Promise.race(iterable) — settles with the first settled promise or value.
 /// Internal per-index continuation for Promise.allSettled: record
 /// `{status, value|reason}` and settle the aggregate when all inputs settle.
@@ -21447,6 +21535,16 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 1,
             name: "Promise_race",
             func: promise_static_race,
+        },
+        Builtin {
+            length: 0,
+            name: "Promise_withResolvers",
+            func: promise_with_resolvers,
+        },
+        Builtin {
+            length: 1,
+            name: "Promise_try",
+            func: promise_try,
         },
         Builtin {
             length: 1,

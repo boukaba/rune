@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Top-level lexical capture (2026-11-13)**: top-level `let`/`const` now live in the script capture env when closures exist; TDZ through env sentinels; captured top-level const writes throw TypeError (function-local const still uncovered). Integration **793**.
 - **Deferred thenable jobs (2026-11-13)**: `Promise.resolve(thenable)` queues the then call as a microtask (spec PromiseResolveThenableJob); throwing then rejects. Promise **359/703 (51.1%)**; integration **792**. Corrected the old sync expectation.
 - **Promise generic methods/self-resolution (2026-11-13)**: spec `catch` via `Invoke(then)` with primitive boxing, `then` non-Promise TypeError, generic non-callable `finally`, self-resolution TypeErrors. Promise **357/703 (50.8%)**; integration **791**.
 - **Promise constructor semantics (2026-11-13)**: `new` required, callable-executor TypeError, `Promise.call/apply` path, executor throw rejects promise (scoped `from_constructor` interception). Promise **345/703 (49.1%)**; map **203/216**; integration **790**.

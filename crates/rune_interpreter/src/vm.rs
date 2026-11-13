@@ -9529,6 +9529,9 @@ impl Vm {
                             new_env
                         };
                         EnvObject::set_parent(resolved, self.frames[fi].env as *mut EnvObject);
+                        for slot in 0..count {
+                            EnvObject::set_slot(resolved, slot, Value::empty_sentinel());
+                        }
                         self.frames[fi].env = resolved as *mut u8;
                     }
                     self.frames[fi].pc = pc + 1;
@@ -9563,6 +9566,18 @@ impl Vm {
                     let env = self.frames[fi].env as *mut EnvObject;
                     let target = unsafe { EnvObject::ancestor(env, depth) };
                     let val = unsafe { EnvObject::get_slot(target, slot) };
+                    if val == Value::empty_sentinel() {
+                        let err = crate::errors::error_object(
+                            gc,
+                            &self.error_protos,
+                            crate::errors::ErrorKind::ReferenceError,
+                            "Cannot access binding before initialization",
+                        );
+                        if let Some(exit) = self.handle_throw(gc, err) {
+                            return exit;
+                        }
+                        continue;
+                    }
                     self.push(val);
                     self.frames[fi].pc = pc + 1;
                 }

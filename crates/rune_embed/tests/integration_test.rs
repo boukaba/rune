@@ -14510,3 +14510,35 @@ fn test_promise_resolve_defers_thenable_job() {
     let r = ctx.eval(r#"order.join(",") === "sync,then,done""#).unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_top_level_lexical_bindings_captured_by_closures() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            function readX() { return x; }
+            var tdz = false;
+            try { readX(); } catch (e) { tdz = e instanceof ReferenceError; }
+            let x = 5;
+            let counter = 1;
+            function bump() { counter += 1; }
+            bump();
+            bump();
+            const fixed = 9;
+            var constThrew = false;
+            function overwrite() { try { fixed = 10; } catch (e) { constThrew = e instanceof TypeError; } }
+            overwrite();
+            [
+                tdz,
+                readX() === 5,
+                counter === 3,
+                fixed === 9,
+                constThrew,
+                (() => x)() === 5
+            ].join("|") === "true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

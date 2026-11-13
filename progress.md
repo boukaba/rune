@@ -1077,6 +1077,26 @@ Integration suite: **792 passed, 0 failed, 3 ignored**; `rune_capi` **6 tests**.
 
 Integration suite: **792 passed, 0 failed, 3 ignored**; `rune_capi` **6 tests**.
 
+### Phase 2 — top-level lexical bindings captured by closures (2026-11-13)
+
+- Root-caused a core scoping bug: top-level `let`/`const` lived in script-frame
+  lexical slots, so any nested function/arrow referencing them resolved a
+  global and threw `ReferenceError` (`let p=42; (()=>p)()` failed).
+- `emit_program` now adds **direct top-level let/const declarations** to the
+  script capture env (only when the program contains an inner function), so
+  closures resolve them via `LoadCaptured`/`StoreCaptured`.
+- `MakeEnv` initializes captured slots to `empty_sentinel`; `LoadCaptured`
+  raises a catchable ReferenceError for them, preserving TDZ for top-level
+  lexicals read through closures.
+- Writes to captured top-level `const` bindings from closures now evaluate the
+  RHS and throw TypeError ("Assignment to constant variable.") instead of
+  mutating the binding; direct top-level const writes keep their existing path.
+- Regression: `test_top_level_lexical_bindings_captured_by_closures`.
+- Known gap: writes to a **function-local** const from a deeper closure still
+  use the env slot (the env has no const metadata); top-level const is covered.
+
+Integration suite: **793 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

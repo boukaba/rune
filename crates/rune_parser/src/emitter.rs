@@ -66,6 +66,10 @@ pub struct Emitter {
     /// bindings must keep flowing to globals (cross-`eval` persistence), so
     /// only function/class DECLARATIONS are captured at this level.
     script_scope_depth: Option<usize>,
+    /// Top-level `const` names captured into the script env. Assignments to
+    /// these from nested closures must throw TypeError; the lexical slot's
+    /// const flag is not visible through the env.
+    script_const_names: HashSet<String>,
     loop_exit_stack: Vec<usize>,
     loop_cont_stack: Vec<usize>,
     /// Pending `break`/`continue` jump positions of the innermost do-while loop,
@@ -125,6 +129,7 @@ impl Emitter {
             env_scope_is_per_iter: Vec::new(),
             lexical_scope_shadowing: Vec::new(),
             script_scope_depth: None,
+            script_const_names: HashSet::new(),
             loop_exit_stack: Vec::new(),
             loop_cont_stack: Vec::new(),
             pending_loop_jumps: Vec::new(),
@@ -203,6 +208,33 @@ impl Emitter {
             let mut decl_names: Vec<String> = Vec::new();
             for stmt in &prog.body {
                 collect_script_decl_names_stmt(stmt, &mut decl_names);
+            }
+            // Top-level lexical bindings are visible to nested functions too;
+            // capture them in the script env. Only direct program-body
+            // declarations — block/loop lexicals keep their own scope.
+            for stmt in &prog.body {
+                if let Stmt::Var(VarKind::Let | VarKind::Const, decls, _) = stmt {
+                    for decl in decls {
+                        let mut bindings = Vec::new();
+                        self.collect_lexical_bindings(&decl.pattern, &decl.name, &mut bindings);
+                        for binding in bindings {
+                            if !decl_names.contains(&binding.name) {
+                                decl_names.push(binding.name);
+                            }
+                        }
+                    }
+                }
+            }
+            for stmt in &prog.body {
+                if let Stmt::Var(VarKind::Const, decls, _) = stmt {
+                    for decl in decls {
+                        let mut bindings = Vec::new();
+                        self.collect_lexical_bindings(&decl.pattern, &decl.name, &mut bindings);
+                        for binding in bindings {
+                            self.script_const_names.insert(binding.name);
+                        }
+                    }
+                }
             }
             for name in &decl_names {
                 if !self.locals.contains(name) {
@@ -597,6 +629,7 @@ impl Emitter {
         let mut sub = Emitter::new();
         sub.env_scope_stack = self.env_scope_stack.clone();
         sub.env_scope_is_per_iter = self.env_scope_is_per_iter.clone();
+        sub.script_const_names = self.script_const_names.clone();
         sub.lexical_scope_shadowing = self.lexical_scope_shadowing.clone();
         sub.script_scope_depth = self.script_scope_depth;
         sub.private_field_names = self.private_field_names.clone();
@@ -678,6 +711,20 @@ impl Emitter {
             if !sub.locals.contains(name) {
                 sub.locals.push(name.clone());
             }
+        }
+        for name in &all_var_names {
+            sub.script_const_names.remove(name);
+        }
+        for param in &func.params {
+            if let Pattern::Identifier(name, _, _) = param {
+                sub.script_const_names.remove(name.as_ref());
+            }
+        }
+        if let Some(rest) = &func.rest_param {
+            sub.script_const_names.remove(rest.as_ref());
+        }
+        if let Some(name) = &func.name {
+            sub.script_const_names.remove(name.as_ref());
         }
         let has_inner = contains_inner_function_stmt(&func.body);
         if has_inner && !sub.locals.is_empty() {
@@ -1593,6 +1640,28 @@ impl Emitter {
         self.emit_store_binding(name, kind);
     }
 
+    /// StoreCaptured, but rejects writes to a captured top-level const.
+    fn emit_store_captured_checked(&mut self, depth: usize, slot: usize, name: &str) {
+        if std::env::var_os("CDEBUG").is_some() && name == "c" {
+            eprintln!(
+                "[const-check] {name} in={} depth={depth} slot={slot}",
+                self.script_const_names.contains(name)
+            );
+        }
+        if self.script_const_names.contains(name) {
+            // Value is on the stack; spec evaluates the RHS before PutValue.
+            self.emit(Opcode::Pop, vec![]);
+            let ctor = self.intern_string("TypeError") as i64;
+            self.emit(Opcode::LoadGlobal, vec![ctor]);
+            let msg = self.intern_string("Assignment to constant variable.") as i64;
+            self.emit(Opcode::LoadStringConst, vec![msg]);
+            self.emit(Opcode::New, vec![1]);
+            self.emit(Opcode::Throw, vec![]);
+        } else {
+            self.emit(Opcode::StoreCaptured, vec![depth as i64, slot as i64]);
+        }
+    }
+
     /// Store a value to a binding (var → StoreLocal/StoreCaptured+Pop, let/const → DeclareLet/DeclareConst).
     fn emit_store_binding(&mut self, name: &str, kind: &DestructureStore) {
         match kind {
@@ -1609,7 +1678,7 @@ impl Emitter {
                 }
                 if let Some((depth, env_slot)) = self.env_captured_slot(name) {
                     // StoreCaptured pops the value — no Pop needed
-                    self.emit(Opcode::StoreCaptured, vec![depth as i64, env_slot as i64]);
+                    self.emit_store_captured_checked(depth, env_slot, name);
                 } else if let Some(idx) = self.local_index(name) {
                     self.emit(Opcode::StoreLocal, vec![idx as i64]);
                     self.emit(Opcode::Pop, vec![]);
@@ -2635,7 +2704,7 @@ impl Emitter {
                             UpdateOp::MinusMinus => Opcode::Sub,
                         };
                         self.emit(opcode, vec![]);
-                        self.emit(Opcode::StoreCaptured, vec![depth as i64, slot as i64]);
+                        self.emit_store_captured_checked(depth, slot, name);
                         if is_pre {
                             // StoreCaptured consumes the new value; prefix must
                             // leave it as the expression result.
@@ -2778,9 +2847,9 @@ impl Emitter {
                         Expr::Identifier(name, _) => {
                             self.emit_expression(rhs);
                             if let Some(env_slot) = self.captured_slot(name) {
-                                self.emit(Opcode::StoreCaptured, vec![0, env_slot as i64]);
+                                self.emit_store_captured_checked(0, env_slot, name);
                             } else if let Some((depth, slot)) = self.env_captured_slot(name) {
-                                self.emit(Opcode::StoreCaptured, vec![depth as i64, slot as i64]);
+                                self.emit_store_captured_checked(depth, slot, name);
                             } else if let Some(idx) = self.local_index(name) {
                                 self.emit(Opcode::StoreLocal, vec![idx as i64]);
                             } else {
@@ -3204,7 +3273,7 @@ impl Emitter {
                         // StoreCaptured pops the value; Dup keeps it for the
                         // statement's cleanup Pop (net 0).
                         self.emit(Opcode::Dup, vec![]);
-                        self.emit(Opcode::StoreCaptured, vec![depth as i64, slot as i64]);
+                        self.emit_store_captured_checked(depth, slot, name);
                     } else if let Some(slot) = self.lexical_slot(name) {
                         self.emit(Opcode::StoreLexical, vec![slot as i64]);
                     } else if let Some(idx) = self.local_index(name) {
@@ -3276,7 +3345,7 @@ impl Emitter {
                             // StoreCaptured pops the result; Dup keeps it for the
                             // statement's cleanup Pop (net 0).
                             self.emit(Opcode::Dup, vec![]);
-                            self.emit(Opcode::StoreCaptured, vec![depth as i64, slot as i64]);
+                            self.emit_store_captured_checked(depth, slot, name);
                         } else if let Some(slot) = self.lexical_slot(name) {
                             self.emit(Opcode::LoadLexical, vec![slot as i64]);
                             self.emit_expression(rhs);
@@ -3669,9 +3738,9 @@ impl Emitter {
     /// pop it, so only the net-0 stores need a trailing Pop.)
     fn emit_assign_store(&mut self, name: &str) {
         if let Some(env_slot) = self.captured_slot(name) {
-            self.emit(Opcode::StoreCaptured, vec![0, env_slot as i64]);
+            self.emit_store_captured_checked(0, env_slot, name);
         } else if let Some((depth, slot)) = self.env_captured_slot(name) {
-            self.emit(Opcode::StoreCaptured, vec![depth as i64, slot as i64]);
+            self.emit_store_captured_checked(depth, slot, name);
         } else if let Some(slot) = self.lexical_slot(name) {
             self.emit(Opcode::StoreLexical, vec![slot as i64]);
         } else if let Some(idx) = self.local_index(name) {
@@ -3697,9 +3766,9 @@ impl Emitter {
 
     fn emit_target_store(&mut self, name: &str) {
         if let Some(env_slot) = self.captured_slot(name) {
-            self.emit(Opcode::StoreCaptured, vec![0, env_slot as i64]);
+            self.emit_store_captured_checked(0, env_slot, name);
         } else if let Some((depth, slot)) = self.env_captured_slot(name) {
-            self.emit(Opcode::StoreCaptured, vec![depth as i64, slot as i64]);
+            self.emit_store_captured_checked(depth, slot, name);
         } else if let Some(slot) = self.lexical_slot(name) {
             self.emit(Opcode::StoreLexical, vec![slot as i64]);
         } else if let Some(idx) = self.local_index(name) {

@@ -16175,6 +16175,7 @@ pub fn string_replace(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
             // Parse and execute regex (flags-aware for i/m/s)
             match rune_regex::parse_regex(&pattern) {
                 Ok(expr) => {
+                    let named = rune_regex::ast::named_captures(&expr);
                     let nfa = rune_regex::nfa::compile(&expr);
                     let pike_vm = rune_regex::pikevm::PikeVm::new();
                     let flags = unsafe { RegExp::flags(ptr) };
@@ -16206,7 +16207,7 @@ pub fn string_replace(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
                         }
                         // String replacement (original logic)
                         let replacement = arg_to_string(gc, replacement_fn, vm);
-                        let expanded = expand_replacement(&s, &m.groups, &replacement);
+                        let expanded = expand_replacement(&s, &m.groups, &replacement, &named);
                         let result = s[..start].to_string() + &expanded + &s[end..];
                         return Value::from_heap_ptr(HeapString::allocate(gc, &result) as *mut u8);
                     } else {
@@ -16237,13 +16238,54 @@ pub fn string_replace(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
 }
 
 /// Expand $&, $`, $', $1..$n in a replacement string for regex match.
-fn expand_replacement(s: &str, groups: &[(usize, usize)], replacement: &str) -> String {
+fn expand_replacement(
+    s: &str,
+    groups: &[(usize, usize)],
+    replacement: &str,
+    named: &[(String, usize)],
+) -> String {
     let mut result = String::new();
     let mut chars = replacement.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '$' {
             match chars.next() {
                 Some('$') => result.push('$'),
+                Some('<') => {
+                    let mut name = String::new();
+                    let mut closed = false;
+                    for ch in chars.by_ref() {
+                        if ch == '>' {
+                            closed = true;
+                            break;
+                        }
+                        name.push(ch);
+                    }
+                    let known =
+                        closed && !named.is_empty() && named.iter().any(|(n, _)| n == &name);
+                    if known {
+                        let mut matched = None;
+                        for (n, idx) in named {
+                            if n != &name {
+                                continue;
+                            }
+                            if let Some(&(gs, ge)) = groups.get(idx + 1) {
+                                if gs != usize::MAX {
+                                    matched = Some((gs, ge));
+                                    break;
+                                }
+                            }
+                        }
+                        if let Some((gs, ge)) = matched {
+                            result.push_str(&s[gs..ge]);
+                        }
+                    } else {
+                        result.push_str("$<");
+                        result.push_str(&name);
+                        if closed {
+                            result.push('>');
+                        }
+                    }
+                }
                 Some('&') => result.push_str(&s[groups[0].0..groups[0].1]),
                 Some('`') => result.push_str(&s[..groups[0].0]),
                 Some('\'') => result.push_str(&s[groups[0].1..]),
@@ -16262,7 +16304,9 @@ fn expand_replacement(s: &str, groups: &[(usize, usize)], replacement: &str) -> 
                     }
                     if n < groups.len() {
                         let (gs, ge) = groups[n];
-                        result.push_str(&s[gs..ge]);
+                        if gs != usize::MAX {
+                            result.push_str(&s[gs..ge]);
+                        }
                     } else {
                         result.push('$');
                         result.push(char::from_digit(n as u32, 10).unwrap());
@@ -16354,6 +16398,7 @@ pub fn string_replace_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
             let pattern = unsafe { HeapString::to_string(pattern_ptr as *mut HeapString) };
             match rune_regex::parse_regex(&pattern) {
                 Ok(expr) => {
+                    let named = rune_regex::ast::named_captures(&expr);
                     let nfa = rune_regex::nfa::compile(&expr);
                     let pike_vm = rune_regex::pikevm::PikeVm::new();
                     let flags = unsafe { RegExp::flags(ptr) };
@@ -16414,7 +16459,7 @@ pub fn string_replace_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
                     while let Some(m) = pike_vm.exec_with_flags(&nfa, &s, last_end, flags) {
                         let (start, end) = m.groups[0];
                         result.push_str(&s[last_end..start]);
-                        result.push_str(&expand_replacement(&s, &m.groups, &replacement));
+                        result.push_str(&expand_replacement(&s, &m.groups, &replacement, &named));
                         last_end = end;
                         if start == end {
                             // Avoid infinite loop for zero-length matches
@@ -16484,11 +16529,11 @@ pub fn string_replace_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
     if search_str.is_empty() {
         let mut result = String::new();
         for (pos, ch) in s.char_indices() {
-            result.push_str(&expand_replacement(&s, &[(pos, pos)], &replacement));
+            result.push_str(&expand_replacement(&s, &[(pos, pos)], &replacement, &[]));
             result.push(ch);
         }
         let end = s.len();
-        result.push_str(&expand_replacement(&s, &[(end, end)], &replacement));
+        result.push_str(&expand_replacement(&s, &[(end, end)], &replacement, &[]));
         return Value::from_heap_ptr(HeapString::allocate(gc, &result) as *mut u8);
     }
     let mut result = String::new();
@@ -16499,6 +16544,7 @@ pub fn string_replace_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
             &s,
             &[(pos, pos + m.len())],
             &replacement,
+            &[],
         ));
         last_end = pos + m.len();
     }
@@ -16552,11 +16598,16 @@ fn make_match_result_array(
     input: &str,
     match_index: usize,
     array_proto: Value,
+    named: &[(String, usize)],
 ) -> Value {
     let mut elements = Vec::with_capacity(groups.len());
     for (gs, ge) in groups.iter() {
-        let s = HeapString::allocate(gc, &input[*gs..*ge]);
-        elements.push(Value::from_heap_ptr(s as *mut u8));
+        if *gs == usize::MAX {
+            elements.push(Value::undefined());
+        } else {
+            let s = HeapString::allocate(gc, &input[*gs..*ge]);
+            elements.push(Value::from_heap_ptr(s as *mut u8));
+        }
     }
     let arr = RuneArray::allocate(gc, &elements);
     unsafe {
@@ -16582,6 +16633,46 @@ fn make_match_result_array(
             PropertyKey::from_string("input"),
             "input".to_string(),
             Value::from_heap_ptr(input_str as *mut u8),
+        );
+        // §22.2.7.2: named capture groups object (or undefined).
+        let groups_val = if named.is_empty() {
+            Value::undefined()
+        } else {
+            let gobj = JSObject::allocate(gc, Shape::empty(), &[]);
+            let mut order: Vec<&str> = Vec::new();
+            for (name, _) in named {
+                if !order.contains(&name.as_str()) {
+                    order.push(name);
+                }
+            }
+            for name in order {
+                let mut value: Option<(usize, usize)> = None;
+                for (n, idx) in named.iter().rev() {
+                    if n != name {
+                        continue;
+                    }
+                    if let Some(&(gs, ge)) = groups.get(idx + 1) {
+                        if gs != usize::MAX {
+                            value = Some((gs, ge));
+                            break;
+                        }
+                    }
+                }
+                let val = match value {
+                    Some((gs, ge)) => {
+                        Value::from_heap_ptr(HeapString::allocate(gc, &input[gs..ge]) as *mut u8)
+                    }
+                    None => Value::undefined(),
+                };
+                JSObject::add_property(gobj, PropertyKey::from_string(name), name.to_string(), val);
+            }
+            Value::from_heap_ptr(gobj as *mut u8)
+        };
+        JSObject::add_property(
+            props,
+            PropertyKey::from_string("groups"),
+            "groups".to_string(),
+            groups_val,
         );
         RuneArray::set_extra_props(ptr as *mut RuneArray, props as *mut u8);
     }
@@ -16680,7 +16771,7 @@ pub fn string_match(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
         match regexp_exec_internal(gc, rx_ptr, &s, 0) {
             Some(groups) => {
                 let match_index = groups[0].0;
-                make_match_result_array(gc, &groups, &s, match_index, vm.array_prototype)
+                make_match_result_array(gc, &groups, &s, match_index, vm.array_prototype, &[])
             }
             None => Value::null(),
         }
@@ -16745,7 +16836,7 @@ fn collect_match_all(gc: &mut SemiSpace, rp: *mut u8, s: &str, vm: &mut Vm) -> V
         positions.push(s.len());
         for (index, pos) in positions.into_iter().enumerate() {
             let groups = [(pos, pos)];
-            let m = make_match_result_array(gc, &groups, s, index, vm.array_prototype);
+            let m = make_match_result_array(gc, &groups, s, index, vm.array_prototype, &[]);
             let mut results_now = vm.temp_roots[base];
             if result_push(gc, vm, &mut results_now, m).is_err() {
                 vm.temp_roots.truncate(base);
@@ -27505,6 +27596,11 @@ pub fn regexp_exec(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
 
     let global = unsafe { RegExp::has_flag(regexp_ptr, 0) };
     let sticky = unsafe { RegExp::has_flag(regexp_ptr, 5) };
+    let pattern_ptr = unsafe { RegExp::pattern(regexp_ptr) };
+    let pattern = unsafe { HeapString::to_string(pattern_ptr as *mut HeapString) };
+    let named: Vec<(String, usize)> = rune_regex::parse_regex(&pattern)
+        .map(|e| rune_regex::ast::named_captures(&e))
+        .unwrap_or_default();
 
     // RegExpBuiltinExec reads/ToLengths lastIndex even for non-global regexps
     // (the value is then ignored unless global/sticky).
@@ -27548,7 +27644,7 @@ pub fn regexp_exec(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
                 if global || sticky {
                     regexp_set_last_index_value(gc, regexp_ptr, Value::smi(end as i32));
                 }
-                return make_match_result_array(gc, &groups, &s, start, vm.array_prototype);
+                return make_match_result_array(gc, &groups, &s, start, vm.array_prototype, &named);
             }
             None => {
                 // Failure: sticky returns null immediately (lastIndex = 0);
@@ -27751,7 +27847,7 @@ pub fn regexp_symbol_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: 
         }
         p = end;
         for &(gs, ge) in groups.iter().skip(1) {
-            if gs == 0 && ge == 0 {
+            if gs == usize::MAX {
                 out.push(Value::undefined());
             } else {
                 out.push(Value::from_heap_ptr(
@@ -27796,6 +27892,11 @@ pub fn regexp_symbol_replace(
         .map(|v| string_from_value(*v))
         .unwrap_or_default();
     let replacement = args.get(1).copied().unwrap_or(Value::undefined());
+    let pattern_ptr = unsafe { RegExp::pattern(rx) };
+    let pattern = unsafe { HeapString::to_string(pattern_ptr as *mut HeapString) };
+    let named: Vec<(String, usize)> = rune_regex::parse_regex(&pattern)
+        .map(|e| rune_regex::ast::named_captures(&e))
+        .unwrap_or_default();
     let is_fn = replacement
         .heap_ptr()
         .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC);
@@ -27812,9 +27913,13 @@ pub fn regexp_symbol_replace(
                 HeapString::allocate(gc, &input[start..end]) as *mut u8,
             ));
             for &(gs, ge) in groups.iter().skip(1) {
-                fn_args.push(Value::from_heap_ptr(
-                    HeapString::allocate(gc, &input[gs..ge]) as *mut u8,
-                ));
+                if gs == usize::MAX {
+                    fn_args.push(Value::undefined());
+                } else {
+                    fn_args.push(Value::from_heap_ptr(
+                        HeapString::allocate(gc, &input[gs..ge]) as *mut u8,
+                    ));
+                }
             }
             fn_args.push(Value::smi(start as i32));
             fn_args.push(Value::from_heap_ptr(
@@ -27829,7 +27934,7 @@ pub fn regexp_symbol_replace(
             return Value::undefined();
         }
         let repl = arg_to_string(gc, Some(replacement), vm);
-        let expanded = expand_replacement(&input, &groups, &repl);
+        let expanded = expand_replacement(&input, &groups, &repl, &named);
         let result = input[..start].to_string() + &expanded + &input[end..];
         return Value::from_heap_ptr(HeapString::allocate(gc, &result) as *mut u8);
     }
@@ -27861,7 +27966,7 @@ pub fn regexp_symbol_replace(
             return Value::undefined();
         }
         let repl = arg_to_string(gc, Some(replacement), vm);
-        out.push_str(&expand_replacement(&input, &groups, &repl));
+        out.push_str(&expand_replacement(&input, &groups, &repl, &named));
         pos = end;
         if start == end {
             if pos < input.len() {

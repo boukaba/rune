@@ -3,23 +3,68 @@ use crate::ast::RegexExpr;
 pub fn parse_regex(pattern: &str) -> Result<RegexExpr, String> {
     let chars: Vec<char> = pattern.chars().collect();
     let mut i = 0;
-    parse_alt(&chars, &mut i)
+    let mut captures = 0usize;
+    let expr = parse_alt(&chars, &mut i, &mut captures)?;
+    if i != chars.len() {
+        return Err(format!("Unexpected '{}'", chars[i]));
+    }
+    let names = crate::ast::named_captures(&expr);
+    let mut map: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+    for (name, idx) in names {
+        map.entry(name).or_default().push(idx);
+    }
+    resolve_named(expr, &map)
 }
 
-fn parse_alt(chars: &[char], i: &mut usize) -> Result<RegexExpr, String> {
-    let mut left = parse_seq(chars, i)?;
+fn resolve_named(
+    expr: RegexExpr,
+    map: &std::collections::HashMap<String, Vec<usize>>,
+) -> Result<RegexExpr, String> {
+    Ok(match expr {
+        RegexExpr::NamedBackref(name) => match map.get(&name) {
+            Some(indices) if indices.len() == 1 => RegexExpr::Backref(indices[0] + 1),
+            Some(indices) => RegexExpr::BackrefMulti(indices.iter().map(|i| *i + 1).collect()),
+            None => return Err(format!("Invalid named capture referenced: {name}")),
+        },
+        RegexExpr::BackrefMulti(_) => expr,
+        RegexExpr::Group(inner, cap, name) => {
+            RegexExpr::Group(Box::new(resolve_named(*inner, map)?), cap, name)
+        }
+        RegexExpr::Concat(parts) => RegexExpr::Concat(
+            parts
+                .into_iter()
+                .map(|p| resolve_named(p, map))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        RegexExpr::Alt(a, b) => RegexExpr::Alt(
+            Box::new(resolve_named(*a, map)?),
+            Box::new(resolve_named(*b, map)?),
+        ),
+        RegexExpr::Star(e) => RegexExpr::Star(Box::new(resolve_named(*e, map)?)),
+        RegexExpr::Plus(e) => RegexExpr::Plus(Box::new(resolve_named(*e, map)?)),
+        RegexExpr::Optional(e) => RegexExpr::Optional(Box::new(resolve_named(*e, map)?)),
+        RegexExpr::Lookahead { expr, negated } => RegexExpr::Lookahead {
+            expr: Box::new(resolve_named(*expr, map)?),
+            negated,
+        },
+        other => other,
+    })
+}
+
+fn parse_alt(chars: &[char], i: &mut usize, captures: &mut usize) -> Result<RegexExpr, String> {
+    let mut left = parse_seq(chars, i, captures)?;
     while *i < chars.len() && chars[*i] == '|' {
         *i += 1;
-        let right = parse_seq(chars, i)?;
+        let right = parse_seq(chars, i, captures)?;
         left = RegexExpr::Alt(Box::new(left), Box::new(right));
     }
     Ok(left)
 }
 
-fn parse_seq(chars: &[char], i: &mut usize) -> Result<RegexExpr, String> {
+fn parse_seq(chars: &[char], i: &mut usize, captures: &mut usize) -> Result<RegexExpr, String> {
     let mut nodes = Vec::new();
     while *i < chars.len() && chars[*i] != '|' && chars[*i] != ')' {
-        nodes.push(parse_repetition(chars, i)?);
+        nodes.push(parse_repetition(chars, i, captures)?);
     }
     Ok(if nodes.is_empty() {
         RegexExpr::Empty
@@ -30,8 +75,12 @@ fn parse_seq(chars: &[char], i: &mut usize) -> Result<RegexExpr, String> {
     })
 }
 
-fn parse_repetition(chars: &[char], i: &mut usize) -> Result<RegexExpr, String> {
-    let node = parse_atom(chars, i)?;
+fn parse_repetition(
+    chars: &[char],
+    i: &mut usize,
+    captures: &mut usize,
+) -> Result<RegexExpr, String> {
+    let node = parse_atom(chars, i, captures)?;
     if *i < chars.len() {
         match chars[*i] {
             '*' => {
@@ -126,7 +175,7 @@ fn parse_repetition(chars: &[char], i: &mut usize) -> Result<RegexExpr, String> 
     Ok(node)
 }
 
-fn parse_atom(chars: &[char], i: &mut usize) -> Result<RegexExpr, String> {
+fn parse_atom(chars: &[char], i: &mut usize, captures: &mut usize) -> Result<RegexExpr, String> {
     if *i >= chars.len() {
         return Err("Unexpected end of pattern".into());
     }
@@ -176,6 +225,26 @@ fn parse_atom(chars: &[char], i: &mut usize) -> Result<RegexExpr, String> {
                     }
                 }
                 'b' | 'B' => Ok(RegexExpr::WordBoundary { negated: c == 'B' }),
+                'k' => {
+                    if *i < chars.len() && chars[*i] == '<' {
+                        *i += 1;
+                        let start = *i;
+                        while *i < chars.len() && chars[*i] != '>' {
+                            *i += 1;
+                        }
+                        if *i >= chars.len() {
+                            return Err("Unterminated named backreference".into());
+                        }
+                        let name: String = chars[start..*i].iter().collect();
+                        *i += 1;
+                        if name.is_empty() {
+                            return Err("Empty named backreference".into());
+                        }
+                        Ok(RegexExpr::NamedBackref(name))
+                    } else {
+                        Ok(RegexExpr::Literal('k'))
+                    }
+                }
                 'n' => Ok(RegexExpr::Literal('\n')),
                 'r' => Ok(RegexExpr::Literal('\r')),
                 't' => Ok(RegexExpr::Literal('\t')),
@@ -197,7 +266,7 @@ fn parse_atom(chars: &[char], i: &mut usize) -> Result<RegexExpr, String> {
             {
                 let negated = chars[*i + 1] == '!';
                 *i += 2;
-                let expr = parse_alt(chars, i)?;
+                let expr = parse_alt(chars, i, captures)?;
                 if *i >= chars.len() || chars[*i] != ')' {
                     return Err("Unclosed group".into());
                 }
@@ -207,22 +276,50 @@ fn parse_atom(chars: &[char], i: &mut usize) -> Result<RegexExpr, String> {
                     negated,
                 });
             }
-            // Check for (?:...) non-capturing group
+            // Check for (?:...) non-capturing group and (?<name>...) named.
+            let mut name: Option<String> = None;
             let capturing = if *i + 1 < chars.len() && chars[*i] == '?' && chars[*i + 1] == ':' {
                 *i += 2;
                 false
+            } else if *i + 1 < chars.len() && chars[*i] == '?' && chars[*i + 1] == '<' {
+                if *i + 2 < chars.len() && (chars[*i + 2] == '=' || chars[*i + 2] == '!') {
+                    return Err("Lookbehind is not supported".into());
+                }
+                *i += 2;
+                let start = *i;
+                while *i < chars.len() && chars[*i] != '>' {
+                    *i += 1;
+                }
+                if *i >= chars.len() {
+                    return Err("Unterminated group name".into());
+                }
+                let n: String = chars[start..*i].iter().collect();
+                *i += 1;
+                if n.is_empty()
+                    || !n
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+                {
+                    return Err("Invalid capture group name".into());
+                }
+                name = Some(n);
+                true
             } else {
                 true
             };
-            let expr = parse_alt(chars, i)?;
+            let cap_idx = if capturing {
+                let idx = *captures;
+                *captures += 1;
+                Some(idx)
+            } else {
+                None
+            };
+            let expr = parse_alt(chars, i, captures)?;
             if *i >= chars.len() || chars[*i] != ')' {
                 return Err("Unclosed group".into());
             }
             *i += 1;
-            Ok(RegexExpr::Group(
-                Box::new(expr),
-                if capturing { Some(0) } else { None },
-            ))
+            Ok(RegexExpr::Group(Box::new(expr), cap_idx, name))
         }
         ')' | '|' | '*' | '+' | '?' => Err(format!("Unexpected '{}'", chars[*i])),
         c => {

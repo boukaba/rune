@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Named capture groups (2026-11-13)**: `(?<name>)`, `\k<name>`, `groups` object, `$<name>`, stable capture indices, unmatched=undefined. RegExp **568/1879**. Integration **872**.
 - **Builtin-handle tag + Number formatting (2026-11-13)**: BUILTIN_TAG, negative number methods/typeof/calls, half-up toExponential. Number **337/340**, String **959/1223**. Integration **871**.
 - **Script var hoisting (2026-11-13)**: DeclareGlobal pre-pass, Boolean 48/51. Negative-Smi/builtin-handle ambiguity documented. Integration **870**.
 - **Date RFC1123/toTemporalInstant (2026-11-13)**: RFC1123 parse, ToPrimitive getters, Temporal method stub. Date **588/594**. Integration **869**.

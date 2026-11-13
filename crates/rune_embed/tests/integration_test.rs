@@ -16729,3 +16729,32 @@ fn test_builtin_tag_and_negative_number_methods() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_regexp_named_groups_and_unmatched_captures() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var m = /(?<y>\d+)-(?<mo>\d+)/.exec("12-34");
+            var opt = /(a)?b/.exec("b");
+            var nested = /(a(b)c)/.exec("abc");
+            var dup = /(?<x>a)|(?<x>b)/.exec("ba");
+            var rep = /(?:(?<x>a)|(?<x>b))\k<x>/.exec("bb");
+            [
+                m.groups.y === "12",
+                m.groups.mo === "34",
+                opt[1] === undefined,
+                nested[1] === "abc" && nested[2] === "b",
+                dup[0] === "b" && dup[2] === "b" && dup.groups.x === "b",
+                rep[0] === "bb" && rep[1] === undefined && rep.groups.x === "b",
+                "abc".replace(/(?<x>b)/, "[$<x>]") === "a[b]c",
+                "b".replace(/(?<x>a)|(?<x>b)/, "[$<x>]") === "[b]",
+                "ab".replace(/(a)?(b)/, "[$1][$2]") === "[a][b]",
+                "b".replace(/(a)?(b)/, "[$1][$2]") === "[][b]"
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

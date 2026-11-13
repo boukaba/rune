@@ -165,6 +165,48 @@ impl PikeVm {
                                     }
                                 }
                             }
+                            Edge::BackrefMulti { indices, target } => {
+                                for index in indices {
+                                    let s_idx = (*index - 1) * 2 + 2;
+                                    let e_idx = (*index - 1) * 2 + 3;
+                                    if s_idx >= t.saves.len() || e_idx >= t.saves.len() {
+                                        continue;
+                                    }
+                                    let (Some(s), Some(e)) = (t.saves[s_idx], t.saves[e_idx])
+                                    else {
+                                        continue;
+                                    };
+                                    let cap_len = e - s;
+                                    if cap_len == 0 || cur_pos + cap_len > chars.len() {
+                                        continue;
+                                    }
+                                    let mut ok = true;
+                                    for k in 0..cap_len {
+                                        let a = chars[s + k];
+                                        let b = chars[cur_pos + k];
+                                        let eq = if flags & 2 != 0 {
+                                            a.eq_ignore_ascii_case(&b)
+                                        } else {
+                                            a == b
+                                        };
+                                        if !eq {
+                                            ok = false;
+                                            break;
+                                        }
+                                    }
+                                    if ok {
+                                        if offset + cap_len < queues.len() {
+                                            add_thread(
+                                                &mut queues[offset + cap_len],
+                                                nfa,
+                                                *target,
+                                                &t.saves,
+                                            );
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -322,6 +364,32 @@ fn follow_nonconsuming(
                         }
                     }
                 }
+                Edge::BackrefMulti { indices, target } => {
+                    let mut nonempty = false;
+                    for index in indices {
+                        let s_idx = (*index - 1) * 2 + 2;
+                        let e_idx = (*index - 1) * 2 + 3;
+                        if s_idx >= t.saves.len() || e_idx >= t.saves.len() {
+                            continue;
+                        }
+                        if let (Some(s), Some(e)) = (t.saves[s_idx], t.saves[e_idx]) {
+                            if e != s {
+                                nonempty = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !nonempty {
+                        has_nonconsuming = true;
+                        let new_t = Thread {
+                            pc: *target,
+                            saves: t.saves.clone(),
+                        };
+                        if !in_sets(&new_t, &worklist, &result) {
+                            worklist.push(new_t);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -413,7 +481,8 @@ fn lookahead_matches(
                     | Edge::AnchorStart(_)
                     | Edge::AnchorEnd(_)
                     | Edge::WordBoundary { .. }
-                    | Edge::Backref { .. } => {}
+                    | Edge::Backref { .. }
+                    | Edge::BackrefMulti { .. } => {}
                 }
             }
         }
@@ -438,7 +507,10 @@ fn build_groups(
     for i in 0..num_captures {
         let s = i * 2 + 2;
         let e = i * 2 + 3;
-        groups[i + 1] = (saves[s].unwrap_or(match_end), saves[e].unwrap_or(match_end));
+        groups[i + 1] = match (saves[s], saves[e]) {
+            (Some(gs), Some(ge)) => (gs, ge),
+            _ => (usize::MAX, usize::MAX),
+        };
     }
     Match { groups }
 }

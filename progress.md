@@ -2743,6 +2743,32 @@ Integration suite: **870 passed, 0 failed, 3 ignored**.
 
 Integration suite: **871 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Named capture groups (2026-11-13)
+
+- Parser/AST: `(?<name>...)` named capture groups and `\k<name>` named
+  backreferences; names collected in source order, unknown names rejected.
+- NFA/VM: stable capture indices are assigned at parse time (outer group before
+  its contents), so quantified copies of a subpattern no longer allocate extra
+  capture slots and nested captures keep spec order.
+  - `/(?:(a)|(b)){2}/.exec("ab").length === 3`;
+  - `/(a(b)c)/` yields `["abc","abc","b"]`.
+- Unmatched captures now carry a `usize::MAX` sentinel and surface as
+  `undefined` in exec arrays, function-replacer arguments, `String.split`
+  captures, and `$n` substitutions (previously empty strings or panics).
+- `exec`/`match`/`matchAll` results gain the spec `groups` object (or undefined)
+  with matched capture text; duplicate named groups share one property and pick
+  the participating alternative.
+- `$<name>` replacement substitution works in `String.replace`/`replaceAll`
+  (first participating duplicate).
+- Test262: RegExp **562 → 568/1879**; named-groups **7/10 runnable**
+  (26 feature-skipped); remaining duplicates need per-iteration capture
+  clearing and `d`/indices support.
+- String: 959 → 958/1223 (one expectation changed; integration regressions
+  fixed and covered).
+- Regression: `test_regexp_named_groups_and_unmatched_captures`.
+
+Integration suite: **872 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

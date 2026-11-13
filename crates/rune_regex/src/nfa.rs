@@ -40,6 +40,11 @@ pub enum Edge {
         index: usize,
         target: usize,
     },
+    /// Backreference matching any of several duplicate-named captures.
+    BackrefMulti {
+        indices: Vec<usize>,
+        target: usize,
+    },
 }
 
 pub struct Nfa {
@@ -144,10 +149,9 @@ fn compile_expr(
             states[s_out].is_match = false;
             (s_start, s_end)
         }
-        RegexExpr::Group(inner, cap_idx) => {
-            if cap_idx.is_some() {
-                let idx = *group_count;
-                *group_count += 1;
+        RegexExpr::Group(inner, cap_idx, _name) => {
+            if let Some(idx) = *cap_idx {
+                *group_count = (*group_count).max(idx + 1);
                 let slot_start = idx * 2 + 2;
                 let slot_end = idx * 2 + 3;
                 let s_save_start = alloc_state(states);
@@ -212,12 +216,26 @@ fn compile_expr(
             });
             (s1, s2)
         }
+        RegexExpr::NamedBackref(_) => {
+            // Unresolved named backrefs are rejected by parse_regex.
+            unreachable!("named backreference survived parsing")
+        }
         RegexExpr::Backref(idx) => {
             let s1 = alloc_state(states);
             let s2 = alloc_state(states);
             states[s2].is_match = true;
             states[s1].edges.push(Edge::Backref {
                 index: *idx,
+                target: s2,
+            });
+            (s1, s2)
+        }
+        RegexExpr::BackrefMulti(indices) => {
+            let s1 = alloc_state(states);
+            let s2 = alloc_state(states);
+            states[s2].is_match = true;
+            states[s1].edges.push(Edge::BackrefMulti {
+                indices: indices.clone(),
                 target: s2,
             });
             (s1, s2)

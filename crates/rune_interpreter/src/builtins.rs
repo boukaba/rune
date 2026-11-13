@@ -9544,6 +9544,114 @@ pub fn object_define_property(
     }
 }
 
+/// Object.getOwnPropertyDescriptors(obj) — §20.1.2.9.
+pub fn object_get_own_property_descriptors(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let target = args.first().copied().unwrap_or(Value::undefined());
+    if target.is_null() || target.is_undefined() {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Cannot convert undefined or null to object",
+        ));
+        return Value::undefined();
+    }
+    let mut keys: Vec<Value> = Vec::new();
+    if let Some(sid) = target.as_smi() {
+        if sid < 0 {
+            let id = (-sid as usize) - 1;
+            if id < vm.builtins.len() {
+                for (name, bit) in [("length", 1u8), ("name", 2u8)] {
+                    if !vm.deleted_builtin_metadata.contains(&(id, bit)) {
+                        keys.push(Value::from_heap_ptr(
+                            HeapString::allocate(gc, name) as *mut u8
+                        ));
+                    }
+                }
+            }
+        }
+    } else if let Some(ptr) = target.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        match tag {
+            TAG_OBJECT => {
+                let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                let count = unsafe { JSObject::slot_count(ptr as *mut JSObject) };
+                for i in 0..count {
+                    if shape.entries[i].0.is_symbol() {
+                        continue;
+                    }
+                    let key = shape.key_name_at(i).unwrap_or("").to_string();
+                    if key.starts_with('\0') {
+                        continue;
+                    }
+                    keys.push(Value::from_heap_ptr(
+                        HeapString::allocate(gc, &key) as *mut u8
+                    ));
+                }
+            }
+            TAG_ARRAY => {
+                let len = unsafe { RuneArray::length(ptr as *mut RuneArray) } as usize;
+                for i in 0..len {
+                    keys.push(Value::from_heap_ptr(
+                        HeapString::allocate(gc, &i.to_string()) as *mut u8,
+                    ));
+                }
+                let extra = unsafe { RuneArray::extra_props(ptr as *mut RuneArray) };
+                if !extra.is_null() {
+                    let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                    let count = unsafe { JSObject::slot_count(extra as *mut JSObject) };
+                    for i in 0..count {
+                        if shape.entries[i].0.is_symbol() {
+                            continue;
+                        }
+                        let key = shape.key_name_at(i).unwrap_or("").to_string();
+                        if key.starts_with('\0') {
+                            continue;
+                        }
+                        keys.push(Value::from_heap_ptr(
+                            HeapString::allocate(gc, &key) as *mut u8
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut names: Vec<String> = Vec::with_capacity(keys.len());
+    let mut vals: Vec<Value> = Vec::with_capacity(keys.len());
+    for key in keys {
+        let name = match key.heap_ptr() {
+            Some(kp) => unsafe { HeapString::to_string(kp as *mut HeapString) },
+            None => continue,
+        };
+        let desc = object_get_own_property_descriptor(gc, Value::undefined(), &[target, key], vm);
+        if vm.pending_exception.is_some() {
+            return Value::undefined();
+        }
+        if desc.is_undefined() {
+            continue;
+        }
+        names.push(name);
+        vals.push(desc);
+    }
+    let entries: Vec<(PropertyKey, usize)> = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (PropertyKey::from_string(n), i))
+        .collect();
+    let shape = Shape::intern(entries, names);
+    let obj = JSObject::allocate(gc, shape, &vals);
+    if let Some(proto) = vm.object_prototype.heap_ptr() {
+        unsafe { JSObject::set_prototype(obj, proto) };
+    }
+    Value::from_heap_ptr(obj as *mut u8)
+}
+
 /// Object.defineProperties(obj, {k: descriptor}) — batch form (§20.1.2.4).
 pub fn object_define_properties(
     gc: &mut SemiSpace,
@@ -23351,6 +23459,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 2,
             name: "Object_getOwnPropertyDescriptor",
             func: object_get_own_property_descriptor,
+        },
+        Builtin {
+            length: 1,
+            name: "Object_getOwnPropertyDescriptors",
+            func: object_get_own_property_descriptors,
         },
         Builtin {
             length: 1,

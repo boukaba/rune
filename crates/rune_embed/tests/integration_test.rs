@@ -15772,3 +15772,27 @@ fn test_regexp_last_index_data_property() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_object_get_own_property_descriptors() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var o = {};
+            o.a = 1;
+            Object.defineProperty(o, "b", { value: 2, enumerable: false });
+            var d = Object.getOwnPropertyDescriptors(o);
+            var arr = Object.getOwnPropertyDescriptors([7]);
+            [
+                Object.getOwnPropertyDescriptors.length === 1,
+                d.a.value === 1 && d.a.enumerable === true,
+                d.b.value === 2 && d.b.enumerable === false,
+                arr[0].value === 7,
+                Object.getOwnPropertyDescriptors({}).a === undefined
+            ].join("|") === "true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

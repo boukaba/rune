@@ -2013,6 +2013,23 @@ Integration suite: **839 passed, 0 failed, 3 ignored**.
 
 Integration suite: **840 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Object.getOwnPropertyDescriptors (2026-11-13)
+
+- Implemented `Object.getOwnPropertyDescriptors(obj)`:
+  - enumerates all own string keys (plain objects, arrays with dense indices and
+    named extras, builtin `length`/`name` metadata respecting delete bits);
+  - builds each descriptor through the existing `getOwnPropertyDescriptor`
+    core;
+  - returns a fresh ordinary object inheriting `Object.prototype`.
+- Test262: `Object/getOwnPropertyDescriptors` **1 → 11/18**, Object
+  **2609 → 2619/3411**.
+- Regression: `test_object_get_own_property_descriptors`.
+- Negative result: rewrote `RegExp.prototype[@@replace]` to use sync callbacks
+  for global function replacers; Symbol.replace stayed at 16/70 but String
+  dropped 834 → 831, so the rewrite was reverted before commit.
+
+Integration suite: **841 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

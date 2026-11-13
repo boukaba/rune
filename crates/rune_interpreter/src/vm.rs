@@ -1605,6 +1605,9 @@ impl Vm {
             if let Some(h) = find_handle(&self.builtins, "Object_getOwnPropertyDescriptor") {
                 obj_entries.push(("getOwnPropertyDescriptor", h));
             }
+            if let Some(h) = find_handle(&self.builtins, "Object_getOwnPropertyDescriptors") {
+                obj_entries.push(("getOwnPropertyDescriptors", h));
+            }
             if let Some(h) = find_handle(&self.builtins, "Object_preventExtensions") {
                 obj_entries.push(("preventExtensions", h));
             }

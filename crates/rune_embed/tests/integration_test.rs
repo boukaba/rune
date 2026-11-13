@@ -14788,3 +14788,28 @@ fn test_property_descriptor_objects_inherit_object_prototype() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_global_object_mirror_and_callable_constructors() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var d = Object.getOwnPropertyDescriptor(this, "undefined");
+            [
+                this.Math === Math,
+                globalThis.Object === Object,
+                typeof Object === "function",
+                typeof Array === "function",
+                typeof Math === "object",
+                Object instanceof Function,
+                Symbol instanceof Function,
+                !(Math instanceof Function),
+                this.hasOwnProperty("Object"),
+                d.writable === false && d.enumerable === false && d.configurable === false
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

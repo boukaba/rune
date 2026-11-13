@@ -6350,6 +6350,16 @@ pub fn object_prototype_has_own_property(
         // Primitives have no own properties (string exotic props unsupported).
         return Value::boolean(false);
     };
+    if vm.global_this.heap_ptr() == Some(ptr) {
+        if let Some(kptr) = key.heap_ptr() {
+            if unsafe { (*(kptr as *const GcHeader)).tag() } == TAG_STRING {
+                let name = unsafe { HeapString::to_string(kptr as *mut HeapString) };
+                if vm.lookup_global_binding(&name).is_some() {
+                    return Value::boolean(true);
+                }
+            }
+        }
+    }
     let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
     let key_str: Option<String> = match key.heap_ptr() {
         Some(kp) if unsafe { (*(kp as *const GcHeader)).tag() } == TAG_STRING => Some(unsafe {
@@ -8461,6 +8471,21 @@ pub fn object_get_own_property_descriptor(
         return Value::undefined();
     };
     let raw_key = args.get(1).copied().unwrap_or(Value::undefined());
+    if vm.global_this.heap_ptr() == Some(ptr) {
+        if let Some(kptr) = raw_key.heap_ptr() {
+            if unsafe { (*(kptr as *const GcHeader)).tag() } == TAG_STRING {
+                let name = unsafe { HeapString::to_string(kptr as *mut HeapString) };
+                if let Some((v, from_globals)) = vm.lookup_global_binding(&name) {
+                    let attr = if from_globals {
+                        0
+                    } else {
+                        rune_core::shape::ATTR_WRITABLE | rune_core::shape::ATTR_CONFIGURABLE
+                    };
+                    return make_descriptor_object(gc, v, attr, vm.object_prototype.heap_ptr());
+                }
+            }
+        }
+    }
     // B1f-5: descriptors on dense arrays (§10.1.5.1 via the exotic — holes
     // read as absent → undefined).
     if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_ARRAY {

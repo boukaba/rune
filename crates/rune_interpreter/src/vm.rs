@@ -2991,6 +2991,11 @@ impl Vm {
             }
             let mut wrappers: Vec<Value> = Vec::new();
             wrappers.extend(self.error_ctors.iter().copied());
+            for name in ["Object", "Array", "Boolean", "Function"] {
+                if let Some(v) = self.builtin_wrappers.get(name).copied() {
+                    wrappers.push(v);
+                }
+            }
             if let Some(v) = self.string_constructor.heap_ptr() {
                 wrappers.push(Value::from_heap_ptr(v));
             }
@@ -5703,6 +5708,22 @@ impl Vm {
             };
             return PropGetOut::Ready(proto.map(Value::from_heap_ptr).unwrap_or_else(Value::null));
         }
+        // The per-context global object exposes the globals map as own
+        // properties (globalThis.Math, this.undefined, ...). Own object
+        // slots remain authoritative; this fallback keeps `var` bindings and
+        // intrinsic globals visible without duplicating storage.
+        if let Some(gptr) = self.global_this.heap_ptr() {
+            if obj.heap_ptr() == Some(gptr) {
+                if let Some(kptr) = raw_key.heap_ptr() {
+                    if unsafe { (*(kptr as *const GcHeader)).tag() } == TAG_STRING {
+                        let name = unsafe { HeapString::to_string(kptr as *mut HeapString) };
+                        if let Some((v, _)) = self.lookup_global_binding(&name) {
+                            return PropGetOut::Ready(v);
+                        }
+                    }
+                }
+            }
+        }
         // A3: strict-function poison pills + sloppy .caller (§15.3.5.4).
         // Own data props shadow (a sloppy assignment created them) — only
         // consulted when absent. Strict functions always throw; sloppy
@@ -6270,6 +6291,16 @@ impl Vm {
     /// updates + forwarding) when full. Returns the live pointer; callers
     /// must refresh any locals holding the old address (same discipline as
     /// array grow). Resolves GC-forwarded pointers on entry.
+    /// Resolve a global binding for the global object mirror. Returns the
+    /// value and whether it came from the mutable globals map (vs an intrinsic
+    /// wrapper).
+    pub(crate) fn lookup_global_binding(&self, name: &str) -> Option<(Value, bool)> {
+        if let Some(v) = self.globals.get(name) {
+            return Some((*v, true));
+        }
+        self.builtin_wrappers.get(name).map(|v| (*v, false))
+    }
+
     pub(crate) fn ensure_object_capacity(
         &mut self,
         gc: &mut SemiSpace,
@@ -7295,14 +7326,23 @@ impl Vm {
                         }
                         continue;
                     }
-                    // Walk lhs prototype chain
-                    let result = ordinary_has_instance(
-                        lhs,
-                        rhs_proto_ptr,
-                        self.function_prototype
-                            .heap_ptr()
-                            .unwrap_or(std::ptr::null_mut()),
-                    );
+                    // Walk lhs prototype chain. Builtin constructor wrappers are
+                    // callable TAG_OBJECTs whose [[Prototype]] is
+                    // %Function.prototype% for `instanceof Function`.
+                    let function_proto = self
+                        .function_prototype
+                        .heap_ptr()
+                        .unwrap_or(std::ptr::null_mut());
+                    let lhs_is_callable_wrapper = lhs.heap_ptr().is_some_and(|p| {
+                        self.callable_wrappers
+                            .iter()
+                            .any(|w| w.heap_ptr() == Some(p))
+                    });
+                    let result = if lhs_is_callable_wrapper {
+                        !function_proto.is_null() && rhs_proto_ptr == function_proto
+                    } else {
+                        ordinary_has_instance(lhs, rhs_proto_ptr, function_proto)
+                    };
                     self.push(Value::boolean(result));
                     self.frames[fi].pc = pc + 1;
                 }

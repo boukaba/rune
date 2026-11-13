@@ -1325,6 +1325,27 @@ Integration suite: **801 passed, 0 failed, 3 ignored**.
 
 Integration suite: **802 passed, 0 failed, 3 ignored**.
 
+### Phase 2/3 — global object mirror + callable constructors (2026-11-13)
+
+- The per-context global object now exposes `globals` and intrinsic wrappers
+  as own property reads (`globalThis.Object === Object`, `this.Math === Math`,
+  `this.undefined`), plus matching `hasOwnProperty` and
+  `getOwnPropertyDescriptor` results. Builtin wrappers report writable,
+  non-enumerable, configurable descriptors; mutable globals (NaN/Infinity/
+  undefined) report all-false.
+- Intrinsic constructor wrappers (Object/Array/Boolean/Function) are now in the
+  callable set: `typeof Object === "function"`, `Object instanceof Function`,
+  `Symbol instanceof Function`; non-callable namespaces like Math stay
+  `"object"`.
+- Test262: Object **1791 → 1801/3411**; `getOwnPropertyDescriptor`
+  **232 → 235/310**; Function 165/509.
+- Regression: `test_global_object_mirror_and_callable_constructors`.
+- Known gaps: the mirror is read-only (writes through `globalThis.foo` do not
+  enter the globals map); global enumeration/delete are not mirrored; some
+  builtin accessor descriptors are still missing.
+
+Integration suite: **803 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

@@ -2168,20 +2168,35 @@ impl Vm {
             unsafe {
                 let proto_ptr = map_proto.heap_ptr().unwrap() as *mut JSObject;
                 if let Some(h) = find_handle(&self.builtins, "Map_prototype_entries") {
-                    JSObject::add_property(
+                    JSObject::add_property_with_attrs(
                         proto_ptr,
                         PropertyKey::from_symbol(rune_core::symbol::SYM_ITERATOR),
                         "\u{0}".to_string(),
                         h,
+                        rune_core::shape::ATTR_WRITABLE | rune_core::shape::ATTR_CONFIGURABLE,
                     );
                 }
                 let tag_str = HeapString::allocate(gc, "Map") as *mut u8;
-                JSObject::add_property(
+                JSObject::add_property_with_attrs(
                     proto_ptr,
                     PropertyKey::from_symbol(rune_core::symbol::SYM_TO_STRING_TAG),
                     "\u{0}".to_string(),
                     Value::from_heap_ptr(tag_str),
+                    rune_core::shape::ATTR_CONFIGURABLE,
                 );
+            }
+            if let Some(getter) = find_handle(&self.builtins, "get size") {
+                let pair =
+                    rune_core::accessor::AccessorPair::allocate(gc, getter, Value::undefined());
+                unsafe {
+                    JSObject::add_property_with_attrs(
+                        map_proto.heap_ptr().unwrap() as *mut JSObject,
+                        PropertyKey::from_string("size"),
+                        "size".to_string(),
+                        Value::from_heap_ptr(pair),
+                        rune_core::shape::ATTR_CONFIGURABLE,
+                    );
+                }
             }
             let map_ctor = make_object(gc, &[("prototype", map_proto)]);
             if let Some(h) = find_handle(&self.builtins, "Map_groupBy") {

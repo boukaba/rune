@@ -2117,6 +2117,24 @@ Integration suite: **845 passed, 0 failed, 3 ignored**.
 
 Integration suite: **846 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Map brand checks + size accessor (2026-11-13)
+
+- `Map.prototype` methods now use a strong receiver check and reject WeakMap
+  receivers; WeakMap methods were moved to internal map operations so they keep
+  working without going through Map branding.
+- `Map.prototype.size` is now a real accessor property:
+  - getter name/length `get size` / 0, no setter;
+  - `{ writable: false, enumerable: false, configurable: true }`;
+  - rejects WeakMap/Set/primitive receivers.
+- `Map.prototype.set.length` corrected to 2; `@@iterator` and
+  `@@toStringTag` now carry their spec attributes.
+- Test262: `Map/prototype/size` **0 → 11/11**, Map **161 → 179/204**.
+- Regression: `test_map_size_and_brand_checks`.
+- Known remaining Map failures: Map constructor iterator-abrupt/close cluster,
+  `new Function()`, BigInt literals, and `forEach` mutation snapshots.
+
+Integration suite: **847 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

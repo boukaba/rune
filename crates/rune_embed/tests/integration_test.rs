@@ -15962,3 +15962,37 @@ fn test_map_get_or_insert() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_map_size_and_brand_checks() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var m = new Map([[1, 2], [3, 4]]);
+            var desc = Object.getOwnPropertyDescriptor(Map.prototype, "size");
+            var weakMapRejected = false;
+            var setRejected = false;
+            try { desc.get.call(new WeakMap()); } catch (e) { weakMapRejected = e instanceof TypeError; }
+            try { desc.get.call(new Set()); } catch (e) { setRejected = e instanceof TypeError; }
+            var methodsRejected = true;
+            ["get", "has", "delete", "clear", "forEach", "keys", "values", "entries"].forEach(function (name) {
+                try { Map.prototype[name].call(new WeakMap(), 1); methodsRejected = false; } catch (e) {}
+            });
+            [
+                m.size === 2,
+                desc.get.length === 0,
+                desc.get.name === "get size",
+                desc.set === undefined,
+                desc.configurable === true && desc.enumerable === false,
+                weakMapRejected && setRejected,
+                methodsRejected,
+                Map.prototype.set.length === 2,
+                Map.prototype[Symbol.toStringTag] === "Map",
+                Map.prototype[Symbol.iterator] === Map.prototype.entries
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

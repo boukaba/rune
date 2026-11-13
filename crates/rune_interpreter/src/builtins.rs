@@ -3360,6 +3360,22 @@ fn map_receiver(gc: &mut SemiSpace, this: Value, vm: &mut Vm) -> Option<*mut u8>
     None
 }
 
+/// Map prototype methods must reject WeakMap receivers (unlike the WeakMap
+/// methods, which use `map_receiver` after their own brand check).
+fn map_strong_receiver(gc: &mut SemiSpace, this: Value, vm: &mut Vm) -> Option<*mut u8> {
+    let ptr = map_receiver(gc, this, vm)?;
+    if unsafe { RuneMap::is_weak(ptr) } {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Map.prototype method called on incompatible receiver",
+        ));
+        return None;
+    }
+    Some(ptr)
+}
+
 fn set_receiver(gc: &mut SemiSpace, this: Value, vm: &mut Vm) -> Option<*mut u8> {
     if let Some(ptr) = this.heap_ptr() {
         if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_SET {
@@ -3383,7 +3399,7 @@ fn is_callable_value(v: Value) -> bool {
 
 /// §27.1.3.15 Map.prototype.set
 pub fn map_set_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some(_map_ptr) = map_receiver(gc, this, vm) else {
+    let Some(_map_ptr) = map_strong_receiver(gc, this, vm) else {
         return Value::undefined();
     };
     let key = args.first().copied().unwrap_or(Value::undefined());
@@ -3391,6 +3407,14 @@ pub fn map_set_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
     let mut slot = this;
     map_set_internal(gc, &mut slot, key, value);
     this
+}
+
+/// Map.prototype.size getter (§27.1.3.11).
+pub fn map_size_getter(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    let Some(map_ptr) = map_strong_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    Value::smi(unsafe { RuneMap::size(map_ptr) } as i32)
 }
 
 /// Map.prototype.getOrInsert(key, value) — upsert proposal.
@@ -3484,7 +3508,7 @@ pub fn map_get_or_insert_computed_builtin(
 
 /// §27.1.3.8 Map.prototype.get
 pub fn map_get_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some(map_ptr) = map_receiver(gc, this, vm) else {
+    let Some(map_ptr) = map_strong_receiver(gc, this, vm) else {
         return Value::undefined();
     };
     let key = args.first().copied().unwrap_or(Value::undefined());
@@ -3497,7 +3521,7 @@ pub fn map_get_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
 
 /// §27.1.3.10 Map.prototype.has
 pub fn map_has_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some(map_ptr) = map_receiver(gc, this, vm) else {
+    let Some(map_ptr) = map_strong_receiver(gc, this, vm) else {
         return Value::undefined();
     };
     let key = args.first().copied().unwrap_or(Value::undefined());
@@ -3506,7 +3530,7 @@ pub fn map_has_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
 
 /// §27.1.3.4 Map.prototype.delete — removes the entry, returns true if present.
 pub fn map_delete_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some(map_ptr) = map_receiver(gc, this, vm) else {
+    let Some(map_ptr) = map_strong_receiver(gc, this, vm) else {
         return Value::undefined();
     };
     let key = args.first().copied().unwrap_or(Value::undefined());
@@ -3526,7 +3550,7 @@ pub fn map_delete_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
 /// §27.1.3.2 Map.prototype.clear — empties the map (the entry list itself is
 /// retained so suspended iterators keep their snapshot semantics).
 pub fn map_clear_builtin(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
-    let Some(map_ptr) = map_receiver(gc, this, vm) else {
+    let Some(map_ptr) = map_strong_receiver(gc, this, vm) else {
         return Value::undefined();
     };
     let entries_ptr = unsafe { RuneMap::entries(map_ptr) };
@@ -3608,7 +3632,12 @@ pub fn weakmap_get(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
     if !key.is_heap_object() && !key.is_symbol() {
         return Value::undefined();
     }
-    map_get_builtin(gc, this, args, vm)
+    let map_ptr = this.heap_ptr().unwrap();
+    if let Some(i) = key_index(unsafe { RuneMap::entries(map_ptr) }, key, true) {
+        let entries = unsafe { RuneMap::entries(map_ptr) } as *mut RuneArray;
+        return unsafe { RuneArray::get_element(entries, i + 1) };
+    }
+    Value::undefined()
 }
 
 pub fn weakmap_set(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
@@ -3626,7 +3655,10 @@ pub fn weakmap_set(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
         ));
         return Value::undefined();
     }
-    map_set_builtin(gc, this, args, vm)
+    let value = args.get(1).copied().unwrap_or(Value::undefined());
+    let mut slot = this;
+    map_set_internal(gc, &mut slot, key, value);
+    this
 }
 
 pub fn weakmap_has(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
@@ -3638,7 +3670,8 @@ pub fn weakmap_has(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
     if !key.is_heap_object() && !key.is_symbol() {
         return Value::boolean(false);
     }
-    map_has_builtin(gc, this, args, vm)
+    let map_ptr = this.heap_ptr().unwrap();
+    Value::boolean(key_index(unsafe { RuneMap::entries(map_ptr) }, key, true).is_some())
 }
 
 pub fn weakmap_delete(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
@@ -3650,7 +3683,18 @@ pub fn weakmap_delete(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
     if !key.is_heap_object() && !key.is_symbol() {
         return Value::boolean(false);
     }
-    map_delete_builtin(gc, this, args, vm)
+    let map_ptr = this.heap_ptr().unwrap();
+    let entries_ptr = unsafe { RuneMap::entries(map_ptr) };
+    if let Some(i) = key_index(entries_ptr, key, true) {
+        let entries = entries_ptr as *mut RuneArray;
+        unsafe {
+            RuneArray::set_element(entries, i, Value::empty_sentinel());
+            RuneArray::set_element(entries, i + 1, Value::undefined());
+        }
+        unsafe { RuneMap::set_size(map_ptr, RuneMap::size(map_ptr) - 1) };
+        return Value::boolean(true);
+    }
+    Value::boolean(false)
 }
 
 pub fn weakset_add(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
@@ -3732,21 +3776,21 @@ fn make_collection_iterator(
 
 /// §27.1.3.5 Map.prototype.entries / keys / values
 pub fn map_entries_builtin(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
-    let Some(_map_ptr) = map_receiver(gc, this, vm) else {
+    let Some(_map_ptr) = map_strong_receiver(gc, this, vm) else {
         return Value::undefined();
     };
     make_collection_iterator(gc, vm, this, 0, "Map_iterator_next", "Map Iterator")
 }
 
 pub fn map_keys_builtin(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
-    let Some(_map_ptr) = map_receiver(gc, this, vm) else {
+    let Some(_map_ptr) = map_strong_receiver(gc, this, vm) else {
         return Value::undefined();
     };
     make_collection_iterator(gc, vm, this, 1, "Map_iterator_next", "Map Iterator")
 }
 
 pub fn map_values_builtin(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
-    let Some(_map_ptr) = map_receiver(gc, this, vm) else {
+    let Some(_map_ptr) = map_strong_receiver(gc, this, vm) else {
         return Value::undefined();
     };
     make_collection_iterator(gc, vm, this, 2, "Map_iterator_next", "Map Iterator")
@@ -6176,7 +6220,7 @@ pub fn typed_array_entries_builtin(
 
 /// §27.1.3.6 Map.prototype.forEach(callback, thisArg)
 pub fn map_foreach_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some(map_ptr) = map_receiver(gc, this, vm) else {
+    let Some(map_ptr) = map_strong_receiver(gc, this, vm) else {
         return Value::undefined();
     };
     let callback = args.first().copied().unwrap_or(Value::undefined());
@@ -23351,9 +23395,14 @@ pub fn default_builtins() -> Vec<Builtin> {
             func: map_constructor,
         },
         Builtin {
-            length: 1,
+            length: 2,
             name: "Map_prototype_set",
             func: map_set_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "get size",
+            func: map_size_getter,
         },
         Builtin {
             length: 2,

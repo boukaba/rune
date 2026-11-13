@@ -1287,6 +1287,27 @@ Integration suite: **799 passed, 0 failed, 3 ignored**.
 
 Integration suite: **800 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — prototype-chain completeness (2026-11-13)
+
+- Default `.prototype` objects created by `MakeFunction` now chain to
+  `Object.prototype`. Previously `new F()` instances had no inherited
+  `toString`/`hasOwnProperty` (only class constructors were chained).
+- String primitive property reads now walk `String.prototype →
+  Object.prototype` instead of only looking in String.prototype's own shape,
+  enabling inherited methods and symbol lookups on strings.
+- `Object.prototype.hasOwnProperty` now:
+  - sees string exotic own properties (`0`, `1`, … and `length`);
+  - looks in Function/Date/RegExp `extra_props` for named properties;
+  - accepts direct symbol keys for shape lookups.
+- Test262: Object **1719 → 1729/3411**; String **668 → 673/1223**;
+  Function **157 → 165/509**; Date 310/594; Promise **365 → 369/703**.
+- Regression: `test_function_prototype_chain_and_string_own_methods`.
+- Known gaps: ToPropertyKey callbacks (object whose `toString` returns a
+  symbol) are not dispatched; propertyIsEnumerable still lacks the same
+  string/exotic coverage.
+
+Integration suite: **801 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

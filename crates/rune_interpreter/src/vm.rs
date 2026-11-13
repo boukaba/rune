@@ -5851,40 +5851,29 @@ impl Vm {
                             let len = s.encode_utf16().count();
                             Value::smi(len as i32)
                         } else if self.string_prototype.is_heap_object() {
-                            // Look up from String.prototype
-                            if let Some(proto_ptr) = self.string_prototype.heap_ptr() {
-                                let proto_key = PropertyKey::from_string(&key_str);
-                                let shape =
-                                    unsafe { JSObject::shape_ptr(proto_ptr as *mut JSObject) };
-                                if let Some(slot) = shape.lookup(&proto_key) {
-                                    unsafe { JSObject::get_slot(proto_ptr as *mut JSObject, slot) }
-                                } else {
-                                    Value::undefined()
-                                }
-                            } else {
-                                Value::undefined()
-                            }
+                            // Walk String.prototype → Object.prototype.
+                            load_property_recursive(
+                                self.string_prototype,
+                                raw_key,
+                                Some(self.function_prototype),
+                                gc,
+                            )
                         } else {
                             Value::undefined()
                         }
                     } else {
                         Value::undefined()
                     }
-                } else if let Some(sym_id) = raw_key.as_symbol_id() {
+                } else if raw_key.as_symbol_id().is_some() {
                     // Symbol key on a string receiver → String.prototype
                     // (e.g. `'abc'[Symbol.iterator]`).
                     if self.string_prototype.is_heap_object() {
-                        if let Some(proto_ptr) = self.string_prototype.heap_ptr() {
-                            let proto_key = PropertyKey::from_symbol(sym_id);
-                            let shape = unsafe { JSObject::shape_ptr(proto_ptr as *mut JSObject) };
-                            if let Some(slot) = shape.lookup(&proto_key) {
-                                unsafe { JSObject::get_slot(proto_ptr as *mut JSObject, slot) }
-                            } else {
-                                Value::undefined()
-                            }
-                        } else {
-                            Value::undefined()
-                        }
+                        load_property_recursive(
+                            self.string_prototype,
+                            raw_key,
+                            Some(self.function_prototype),
+                            gc,
+                        )
                     } else {
                         Value::undefined()
                     }
@@ -9389,7 +9378,11 @@ impl Vm {
                     // Allocate the default `.prototype` FIRST so that if GC triggers
                     // during Func::allocate, we can resolve the forwarding address.
                     let default_proto = if !is_arrow {
-                        JSObject::allocate(gc, Shape::empty(), &[])
+                        let p = JSObject::allocate(gc, Shape::empty(), &[]);
+                        if let Some(obj_proto) = self.object_prototype.heap_ptr() {
+                            unsafe { JSObject::set_prototype(p, obj_proto) };
+                        }
+                        p
                     } else {
                         std::ptr::null_mut()
                     };

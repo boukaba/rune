@@ -5857,6 +5857,43 @@ pub fn error_prototype_to_string(
 /// §20.3.4.2 Object.prototype.toString() — returns "[object Tag]" where Tag
 /// comes from the receiver's type (and, for Error instances, the prototype
 /// chain reaching one of the seven error prototypes).
+/// Walk the prototype chain for a string-valued @@toStringTag.
+fn to_string_tag_on_chain(start: Value) -> Option<String> {
+    let mut current = start;
+    for _ in 0..MAX_PROTOTYPE_DEPTH {
+        let Some(cptr) = current.heap_ptr() else {
+            break;
+        };
+        let ctag = unsafe { (*(cptr as *const GcHeader)).tag() };
+        let holder = if ctag == TAG_OBJECT {
+            Some(cptr as *mut JSObject)
+        } else if ctag == TAG_ARRAY {
+            let extra = unsafe { RuneArray::extra_props(cptr as *mut RuneArray) };
+            (!extra.is_null()).then_some(extra as *mut JSObject)
+        } else {
+            None
+        };
+        if let Some(holder) = holder {
+            let shape = unsafe { JSObject::shape_ptr(holder) };
+            if let Some(slot) = shape.lookup(&PropertyKey::from_symbol(
+                rune_core::symbol::SYM_TO_STRING_TAG,
+            )) {
+                let v = unsafe { JSObject::get_slot(holder, slot) };
+                if let Some(sptr) = v.heap_ptr() {
+                    if unsafe { (*(sptr as *const GcHeader)).tag() } == TAG_STRING {
+                        return Some(unsafe { HeapString::to_string(sptr as *mut HeapString) });
+                    }
+                }
+            }
+        }
+        let Some(proto) = crate::vm::value_prototype(current) else {
+            break;
+        };
+        current = Value::from_heap_ptr(proto);
+    }
+    None
+}
+
 pub fn object_prototype_to_string(
     gc: &mut SemiSpace,
     this: Value,
@@ -5868,10 +5905,23 @@ pub fn object_prototype_to_string(
     } else if this.is_null() {
         "Null".to_string()
     } else if this.to_boolean().is_some() {
+        // Primitives consult @@toStringTag on their wrapper prototype first.
+        if let Some(tag) = to_string_tag_on_chain(vm.boolean_prototype) {
+            let out = format!("[object {tag}]");
+            return Value::from_heap_ptr(crate::vm::heap_string(gc, &out));
+        }
         "Boolean".to_string()
     } else if this.is_symbol() {
-        "Symbol".to_string()
+        if let Some(tag) = to_string_tag_on_chain(vm.symbol_prototype) {
+            let out = format!("[object {tag}]");
+            return Value::from_heap_ptr(crate::vm::heap_string(gc, &out));
+        }
+        "Object".to_string()
     } else if this.is_smi() || this.as_float64().is_some() {
+        if let Some(tag) = to_string_tag_on_chain(vm.number_prototype) {
+            let out = format!("[object {tag}]");
+            return Value::from_heap_ptr(crate::vm::heap_string(gc, &out));
+        }
         "Number".to_string()
     } else if let Some(ptr) = this.heap_ptr() {
         // §20.1.3.6 step 3: an own/inherited @@toStringTag string wins.
@@ -5914,6 +5964,12 @@ pub fn object_prototype_to_string(
             current = Value::from_heap_ptr(proto);
         }
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_STRING {
+            if let Some(custom) = to_string_tag_on_chain(vm.string_prototype) {
+                let out = format!("[object {custom}]");
+                return Value::from_heap_ptr(crate::vm::heap_string(gc, &out));
+            }
+        }
         match tag {
             TAG_STRING => "String".to_string(),
             TAG_STRING_OBJ => "String".to_string(),
@@ -6253,6 +6309,27 @@ pub fn object_prototype_define_setter(
 }
 
 /// §20.3.4.4 Object.prototype.hasOwnProperty(key) — own-property check only.
+fn exotic_extra_props_has(ptr: *mut u8, key: Value) -> bool {
+    let Some(pk) = value_to_prop_key(key) else {
+        return false;
+    };
+    let props = unsafe {
+        match (*(ptr as *const GcHeader)).tag() {
+            TAG_FUNC => {
+                rune_core::function::Func::extra_props(ptr as *mut rune_core::function::Func)
+                    as *mut JSObject
+            }
+            TAG_DATE => rune_core::date::RuneDate::extra_props(ptr) as *mut JSObject,
+            TAG_REGEXP => rune_core::regexp::RegExp::extra_props(ptr) as *mut JSObject,
+            _ => std::ptr::null_mut(),
+        }
+    };
+    if props.is_null() {
+        return false;
+    }
+    unsafe { JSObject::shape_ptr(props) }.lookup(&pk).is_some()
+}
+
 pub fn object_prototype_has_own_property(
     gc: &mut SemiSpace,
     this: Value,
@@ -6336,6 +6413,32 @@ pub fn object_prototype_has_own_property(
             };
             let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
             shape.lookup(&pk).is_some()
+        }
+        TAG_FUNC | TAG_DATE | TAG_REGEXP => exotic_extra_props_has(ptr, key),
+        TAG_STRING | TAG_STRING_OBJ => {
+            let text = if tag == TAG_STRING {
+                unsafe {
+                    rune_core::string::HeapString::to_string(
+                        ptr as *mut rune_core::string::HeapString,
+                    )
+                }
+            } else {
+                let sp = unsafe {
+                    rune_core::string_object::StringObject::string_ptr(
+                        ptr as *mut rune_core::string_object::StringObject,
+                    )
+                };
+                unsafe {
+                    rune_core::string::HeapString::to_string(
+                        sp as *mut rune_core::string::HeapString,
+                    )
+                }
+            };
+            if let Some(index) = value_to_array_index(key) {
+                index < text.encode_utf16().count()
+            } else {
+                key_is_str("length")
+            }
         }
         _ => false,
     };

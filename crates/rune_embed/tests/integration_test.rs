@@ -14745,3 +14745,25 @@ fn test_builtin_property_descriptor_attributes() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_function_prototype_chain_and_string_own_methods() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            function F() { this.a = 1; }
+            var instance = new F();
+            [
+                Object.getPrototypeOf(F.prototype) === Object.prototype,
+                instance.hasOwnProperty("a"),
+                instance.toString() === "[object Object]",
+                "abc".hasOwnProperty(0),
+                "abc".hasOwnProperty("length"),
+                typeof "abc".hasOwnProperty === "function"
+            ].join("|") === "true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

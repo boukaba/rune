@@ -1713,6 +1713,7 @@ impl Vm {
         let slice_handle = find_handle(&self.builtins, "String_prototype_slice");
         let split_handle = find_handle(&self.builtins, "String_prototype_split");
         let index_of_handle = find_handle(&self.builtins, "String_prototype_indexOf");
+        let last_index_of_handle = find_handle(&self.builtins, "String_prototype_lastIndexOf");
         let includes_handle = find_handle(&self.builtins, "String_prototype_includes");
         let starts_with_handle = find_handle(&self.builtins, "String_prototype_startsWith");
         let ends_with_handle = find_handle(&self.builtins, "String_prototype_endsWith");
@@ -1750,6 +1751,9 @@ impl Vm {
             }
             if let Some(idx) = index_of_handle {
                 str_proto_entries.push(("indexOf", idx));
+            }
+            if let Some(idx) = last_index_of_handle {
+                str_proto_entries.push(("lastIndexOf", idx));
             }
             if let Some(incl) = includes_handle {
                 str_proto_entries.push(("includes", incl));

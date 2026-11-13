@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **String ToPrimitive + lastIndexOf (2026-11-13)**: ToPrimitive exhaustion throws TypeError; all String prototype methods coerce `this` via ToPrimitive; added lastIndexOf (UTF-16, clamped position, empty search). String 592→**666/1223**; lastIndexOf 12/25. Integration **796**.
 - **String locale/statics + primitive dispatch (2026-11-13)**: toLocaleLowerCase/Upper, localeCompare, normalize/toWellFormed, fromCodePoint, String.raw; trim ToPrimitive; number/boolean primitives resolve through their prototypes and wrapper methods accept primitive this. String 523→**592/1223**, Number 128/340. Integration **796**.
 - **Prototype constructor backrefs (2026-11-13)**: all built-in prototypes get `.constructor` (Object/Array/String/Number/Boolean/Symbol/Map/Set/Date/RegExp/Promise/Function/Error family); RegExp uses wrapper. String 454→**523/1223**, split 11→**78/120**, Object 1520→1529. Integration **795**.
 - **Top-level lexical capture (2026-11-13)**: top-level `let`/`const` now live in the script capture env when closures exist; TDZ through env sentinels; captured top-level const writes throw TypeError. **Function-local const writes are now enforced too**, and local/param shadowing no longer resolves through an ancestor env (per-iteration env depth preserved). Integration **794**. Block-shadow const analysis remains function-wide.

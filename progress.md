@@ -1186,6 +1186,26 @@ Integration suite: **795 passed, 0 failed, 3 ignored**.
 
 Integration suite: **796 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — String ToString coercion + lastIndexOf (2026-11-13)
+
+- `to_primitive_string` now throws a catchable TypeError when an object has
+  neither a usable `toString` nor `valueOf` (ES ToPrimitive exhaustion) instead
+  of silently falling back to `"[object Object]"`.
+- All String prototype methods now coerce `this` through ToPrimitive rather
+  than the old string-only helper, so inherited/custom `toString` paths and
+  abrupt conversions are observed.
+- Added `String.prototype.lastIndexOf(searchString, position)` with UTF-16
+  unit search, position clamping (NaN/+Infinity → length, negatives → 0), and
+  empty-search semantics.
+- Test262: String **592 → 666/1223**; `lastIndexOf` **2 → 12/25**.
+- Regression extended: `test_string_locale_statics_and_primitive_methods`.
+- Known gap: JavaScript `valueOf`/`toString` callbacks used for String
+  coercion still cannot resume the method after the callback (the pending-call
+  result replaces the method result); custom `valueOf` throwing in position
+  conversion is not dispatched.
+
+Integration suite: **796 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

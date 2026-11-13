@@ -1114,8 +1114,14 @@ pub(crate) fn to_primitive_string(gc: &mut SemiSpace, val: Value, vm: &mut Vm) -
                 }
             }
         }
-        // Neither toString nor valueOf returned a primitive
-        return Some(value_to_js_string(val));
+        // Neither toString nor valueOf returned a primitive.
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Cannot convert object to primitive value",
+        ));
+        return None;
     }
     Some(value_to_js_string(val))
 }
@@ -11499,7 +11505,9 @@ pub fn string_char_at(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
         .first()
         .map(|&v| to_integer_or_infinity(v).max(0.0) as usize)
         .unwrap_or(0);
-    let s = string_from_value(this);
+    let Some(s) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
     if index >= s.chars().count() {
         let empty = HeapString::allocate(gc, "");
         return Value::from_heap_ptr(empty as *mut u8);
@@ -11516,7 +11524,9 @@ pub fn string_slice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let s = string_from_value(this);
+    let Some(s) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
     let units = s.encode_utf16().collect::<Vec<u16>>();
     let len = units.len() as f64;
     let raw_start = to_number(args.first().copied().unwrap_or(Value::undefined()));
@@ -11561,7 +11571,9 @@ pub fn string_index_of(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let s = string_from_value(this);
+    let Some(s) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
     let units = s.encode_utf16().collect::<Vec<u16>>();
     let search_str = arg_to_string(gc, args.first().copied(), vm);
     let search_units = search_str.encode_utf16().collect::<Vec<u16>>();
@@ -11592,12 +11604,54 @@ pub fn string_index_of(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
     }
 }
 
+/// String.prototype.lastIndexOf(searchString, position) — §22.1.3.20.
+pub fn string_last_index_of(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let Some(s) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let units = s.encode_utf16().collect::<Vec<u16>>();
+    let search_str = arg_to_string(gc, args.first().copied(), vm);
+    let search_units = search_str.encode_utf16().collect::<Vec<u16>>();
+    let len = units.len();
+    let pos = args.get(1).copied().unwrap_or(Value::undefined());
+    let pos = if pos.is_undefined() {
+        len
+    } else {
+        let f = to_integer_or_infinity(pos);
+        if f.is_nan() || f > len as f64 {
+            len
+        } else if f < 0.0 {
+            0
+        } else {
+            f as usize
+        }
+    };
+    if search_units.is_empty() {
+        return Value::smi(pos.min(len) as i32);
+    }
+    if search_units.len() > len {
+        return Value::smi(-1);
+    }
+    let max_start = pos.min(len - search_units.len());
+    for start in (0..=max_start).rev() {
+        if units[start..start + search_units.len()] == search_units[..] {
+            return Value::smi(start as i32);
+        }
+    }
+    Value::smi(-1)
+}
+
 /// String.prototype.includes(searchString, position) — returns true if searchString is found.
 pub fn string_includes(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let s = string_from_value(this);
+    let Some(s) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
     let units = s.encode_utf16().collect::<Vec<u16>>();
     let search_str = arg_to_string(gc, args.first().copied(), vm);
     let search_units = search_str.encode_utf16().collect::<Vec<u16>>();
@@ -11630,7 +11684,9 @@ pub fn string_starts_with(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let s = string_from_value(this);
+    let Some(s) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
     let units = s.encode_utf16().collect::<Vec<u16>>();
     let search_str = arg_to_string(gc, args.first().copied(), vm);
     let search_units = search_str.encode_utf16().collect::<Vec<u16>>();
@@ -11653,7 +11709,9 @@ pub fn string_ends_with(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let s = string_from_value(this);
+    let Some(s) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
     let units = s.encode_utf16().collect::<Vec<u16>>();
     let search_str = arg_to_string(gc, args.first().copied(), vm);
     let search_units = search_str.encode_utf16().collect::<Vec<u16>>();
@@ -11724,7 +11782,9 @@ pub fn string_char_code_at(gc: &mut SemiSpace, this: Value, args: &[Value], vm: 
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let s = string_from_value(this);
+    let Some(s) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
     let pos = args.first().copied().unwrap_or(Value::undefined());
     // §22.1.3.4: pos = ToIntegerOrInfinity(index); NaN → 0 (to_integer_or_infinity).
     let idx = to_integer_or_infinity(pos) as isize;
@@ -11744,7 +11804,9 @@ pub fn string_code_point_at(gc: &mut SemiSpace, this: Value, args: &[Value], vm:
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let s = string_from_value(this);
+    let Some(s) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
     let pos = args.first().copied().unwrap_or(Value::undefined());
     let idx = to_integer_or_infinity(pos) as isize;
     if idx < 0 {
@@ -11771,7 +11833,9 @@ pub fn string_substring(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let s = string_from_value(this);
+    let Some(s) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
     let units = s.encode_utf16().collect::<Vec<u16>>();
     let len = units.len() as f64;
     let raw_start = to_integer_or_infinity(args.first().copied().unwrap_or(Value::undefined()));
@@ -11796,7 +11860,9 @@ pub fn string_substr(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let s = string_from_value(this);
+    let Some(s) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
     let units = s.encode_utf16().collect::<Vec<u16>>();
     let len = units.len();
     let raw_start = to_integer_or_infinity(args.first().copied().unwrap_or(Value::undefined()));
@@ -11864,7 +11930,9 @@ pub fn string_to_lower_case(
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let s = string_from_value(this);
+    let Some(s) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
     let result = HeapString::allocate(gc, &s.to_lowercase());
     Value::from_heap_ptr(result as *mut u8)
 }
@@ -11879,7 +11947,9 @@ pub fn string_to_upper_case(
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let s = string_from_value(this);
+    let Some(s) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
     let result = HeapString::allocate(gc, &s.to_uppercase());
     Value::from_heap_ptr(result as *mut u8)
 }
@@ -11934,7 +12004,9 @@ pub fn string_repeat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let s = string_from_value(this);
+    let Some(s) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
     let count = args.first().copied().unwrap_or(Value::undefined());
     let n = to_integer_or_infinity(count);
     if n.is_infinite() || n < 0.0 || n.is_nan() {
@@ -11970,7 +12042,9 @@ fn string_pad(gc: &mut SemiSpace, vm: &mut Vm, this: Value, args: &[Value], at_e
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let s = string_from_value(this);
+    let Some(s) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
     let units = s.encode_utf16().collect::<Vec<u16>>();
     let max_len = args.first().copied().unwrap_or(Value::undefined());
     let target_f = to_integer_or_infinity(max_len);
@@ -12023,7 +12097,9 @@ pub fn string_to_string(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &m
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let s = string_from_value(this);
+    let Some(s) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
     let result = HeapString::allocate(gc, &s);
     Value::from_heap_ptr(result as *mut u8)
 }
@@ -12034,7 +12110,9 @@ pub fn string_value_of(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mu
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let s = string_from_value(this);
+    let Some(s) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
     let result = HeapString::allocate(gc, &s);
     Value::from_heap_ptr(result as *mut u8)
 }
@@ -12044,7 +12122,9 @@ pub fn string_concat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let s = string_from_value(this);
+    let Some(s) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
     let mut result = s;
     for &arg in args {
         result.push_str(&arg_to_string(gc, Some(arg), vm));
@@ -12068,7 +12148,9 @@ pub fn string_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let s = string_from_value(this);
+    let Some(s) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
     let separator = args.first().copied().unwrap_or(Value::undefined());
     let limit = args.get(1).copied().unwrap_or(Value::undefined());
 
@@ -12206,7 +12288,9 @@ pub fn string_replace(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let s = string_from_value(this);
+    let Some(s) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
     let search = args.first().copied().unwrap_or(Value::undefined());
     let replacement_fn = args.get(1).copied();
     let is_fn_replacement = replacement_fn.is_some_and(|v| {
@@ -12341,7 +12425,9 @@ pub fn string_replace_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let s = string_from_value(this);
+    let Some(s) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
     let search = args.first().copied().unwrap_or(Value::undefined());
     let replacement_fn = args.get(1).copied();
     let is_fn_replacement = replacement_fn.is_some_and(|v| {
@@ -12614,7 +12700,9 @@ pub fn string_match(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let s = string_from_value(this);
+    let Some(s) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
     let regexp_val = args.first().copied();
 
     // §21.1.3.39 step 2: if regexp is an object with a callable @@match,
@@ -12704,7 +12792,9 @@ pub fn string_search(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let s = string_from_value(this);
+    let Some(s) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
     let regexp_val = args.first().copied();
 
     // §21.1.3.22 step 2: @@search dispatch.
@@ -20974,6 +21064,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 1,
             name: "String_prototype_indexOf",
             func: string_index_of,
+        },
+        Builtin {
+            length: 1,
+            name: "String_prototype_lastIndexOf",
+            func: string_last_index_of,
         },
         Builtin {
             length: 1,

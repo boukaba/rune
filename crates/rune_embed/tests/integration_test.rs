@@ -14624,4 +14624,18 @@ fn test_string_locale_statics_and_primitive_methods() {
         )
         .unwrap();
     assert_eq!(r2.to_boolean(), Some(true));
+    let r3 = ctx
+        .eval(
+            r#"
+            var threw = false;
+            try {
+                String.prototype.toLowerCase.call({toString: undefined, valueOf: undefined});
+            } catch (e) {
+                threw = e instanceof TypeError;
+            }
+            threw && "abcabc".lastIndexOf("b") === 4 && "abc".lastIndexOf("b", 1) === 1;
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r3.to_boolean(), Some(true));
 }

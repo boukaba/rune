@@ -2355,6 +2355,17 @@ impl Vm {
                 }
             }
             let date_ctor = make_object(gc, &date_ctor_entries);
+            if let Some(h) = find_handle(&self.builtins, "Date_prototype_[Symbol.toPrimitive]") {
+                unsafe {
+                    JSObject::add_property_with_attrs(
+                        date_proto.heap_ptr().unwrap() as *mut JSObject,
+                        PropertyKey::from_symbol(rune_core::symbol::SYM_TO_PRIMITIVE),
+                        "\u{0}".to_string(),
+                        h,
+                        rune_core::shape::ATTR_CONFIGURABLE,
+                    );
+                }
+            }
             self.builtin_wrappers.insert("Date".to_string(), date_ctor);
             self.date_constructor = date_ctor;
             self.date_prototype = date_proto;

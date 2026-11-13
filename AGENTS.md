@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Date @@toPrimitive (2026-11-13)**: hint validation + Date fast paths + builtin method fallback. Date 453→**458/594**. Integration **833**.
 - **Function.prototype metadata (2026-11-13)**: length 0/name ""; deleted builtin length falls back to 0. Function 185→**187/509**. Integration **832**.
 - **Deletable builtin metadata (2026-11-13)**: delete length/name honored by get/has/gOPD. Date 363→**453/594**, String 761→**828/1223**. Integration **831**.
 - **Builtin names + ctor metadata (2026-11-13)**: spec `.name` and constructor `name`/`length` own properties. Object 2500→**2502/3411**. Integration **830**.

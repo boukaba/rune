@@ -15549,3 +15549,30 @@ fn test_function_prototype_metadata_fallback() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_date_to_primitive_symbol() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var method = Date.prototype[Symbol.toPrimitive];
+            var d = new Date(0);
+            var invalidHint = false;
+            try { method.call(d, "bad"); } catch (e) { invalidHint = e instanceof TypeError; }
+            var nonObject = false;
+            try { method.call(1, "number"); } catch (e) { nonObject = e instanceof TypeError; }
+            [
+                typeof method === "function",
+                method.name === "[Symbol.toPrimitive]",
+                method.length === 1,
+                method.call(d, "number") === 0,
+                typeof method.call(d, "string") === "string",
+                invalidHint,
+                nonObject
+            ].join("|") === "true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

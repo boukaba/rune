@@ -1852,6 +1852,22 @@ Integration suite: **831 passed, 0 failed, 3 ignored**.
 
 Integration suite: **832 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Date.prototype[@@toPrimitive] (2026-11-13)
+
+- Added `Date.prototype[Symbol.toPrimitive]` (length 1, name
+  `[Symbol.toPrimitive]`, non-writable/non-enumerable/configurable) wired under
+  the well-known symbol.
+- Implements hint validation (`default`/`string`/`number`), object-receiver
+  checks, Date fast paths (number hint → time value, string/default → date
+  string), and OrdinaryToPrimitive over **builtin** `valueOf`/`toString`;
+  user JS methods still need the frame machinery and raise TypeError for now.
+- Test262: Date **453 → 458/594**; the `Symbol.toPrimitive` directory is
+  **9/18** (metadata, invalid hint, non-object, and Date fast paths pass).
+- Regression: `test_date_to_primitive_symbol`.
+- Known gap: generic objects with JS `valueOf`/`toString` are unsupported.
+
+Integration suite: **833 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

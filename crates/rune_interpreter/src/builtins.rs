@@ -4094,6 +4094,102 @@ pub fn date_value_of_builtin(
     date_number(unsafe { date::RuneDate::tv(ptr) })
 }
 
+/// §21.4.4.44 Date.prototype[@@toPrimitive](hint)
+pub fn date_to_primitive_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let type_err = |gc: &mut SemiSpace, vm: &mut Vm| {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Date.prototype[Symbol.toPrimitive] called on a non-object",
+        ));
+    };
+    if this.heap_ptr().is_none() && this.as_smi().is_none_or(|s| s >= 0) {
+        type_err(gc, vm);
+        return Value::undefined();
+    }
+    let hint_val = args.first().copied().unwrap_or(Value::undefined());
+    let Some(hptr) = hint_val.heap_ptr() else {
+        type_err(gc, vm);
+        return Value::undefined();
+    };
+    if unsafe { (*(hptr as *const GcHeader)).tag() } != TAG_STRING {
+        type_err(gc, vm);
+        return Value::undefined();
+    }
+    let hint = unsafe { HeapString::to_string(hptr as *mut HeapString) };
+    if hint != "default" && hint != "string" && hint != "number" {
+        type_err(gc, vm);
+        return Value::undefined();
+    }
+    // Fast path: Date receivers use the spec Date value/string conversions.
+    if let Some(ptr) = this.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_DATE {
+            let tv = unsafe { date::RuneDate::tv(ptr) };
+            if hint == "number" {
+                return date_number(tv);
+            }
+            let text = date::to_date_string(tv);
+            return Value::from_heap_ptr(HeapString::allocate(gc, &text) as *mut u8);
+        }
+    }
+    // OrdinaryToPrimitive over builtin methods. JS user methods require the
+    // frame machinery and are not supported from this sync builtin yet.
+    let order: [&str; 2] = if hint == "number" {
+        ["valueOf", "toString"]
+    } else {
+        ["toString", "valueOf"]
+    };
+    for name in order {
+        let key = Value::from_heap_ptr(HeapString::allocate(gc, name) as *mut u8);
+        let method = load_property_recursive(this, key, Some(vm.function_prototype), gc);
+        if method.is_undefined() {
+            continue;
+        }
+        let callable = match classify_method(method) {
+            Ok(Some(c)) => c,
+            _ => {
+                type_err(gc, vm);
+                return Value::undefined();
+            }
+        };
+        let Some(ptr) = method.heap_ptr() else {
+            // Builtin handles are negative Smis; non-callable values already
+            // rejected above.
+            if let Some(sid) = method.as_smi() {
+                if sid < 0 {
+                    let id = (-sid as usize) - 1;
+                    if id < vm.builtins.len() {
+                        let result = (vm.builtins[id].func)(gc, this, &[], vm);
+                        if vm.pending_exception.is_some() {
+                            return Value::undefined();
+                        }
+                        if !is_object_value(result) {
+                            return result;
+                        }
+                        continue;
+                    }
+                }
+            }
+            type_err(gc, vm);
+            return Value::undefined();
+        };
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_FUNC {
+            let _ = callable;
+            type_err(gc, vm);
+            return Value::undefined();
+        }
+    }
+    type_err(gc, vm);
+    Value::undefined()
+}
+
 /// §21.4.4.41 Date.prototype.toString
 pub fn date_to_string_builtin(
     gc: &mut SemiSpace,
@@ -22567,6 +22663,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 0,
             name: "Date_prototype_toString",
             func: date_to_string_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "Date_prototype_[Symbol.toPrimitive]",
+            func: date_to_primitive_builtin,
         },
         Builtin {
             length: 0,

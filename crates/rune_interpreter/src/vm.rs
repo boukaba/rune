@@ -5096,7 +5096,12 @@ impl Vm {
         let saved_stack_floor = self.return_stack_floor;
         self.return_frame_floor = floor;
         self.return_stack_floor = Some(base);
+        // A pending assert.throws belongs to the JS caller above the builtin,
+        // not to the callee we are invoking synchronously. Hide it so nested
+        // returns cannot be mistaken for the assert thunk returning.
+        let saved_assert = self.pending_assert.take();
         let exit = self.run_loop(gc);
+        self.pending_assert = saved_assert;
         self.return_frame_floor = saved_floor;
         self.return_stack_floor = saved_stack_floor;
         self.frames.truncate(floor);

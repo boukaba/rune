@@ -4404,61 +4404,70 @@ fn to_primitive_sync(
     if !is_object_value(input) {
         return Ok(input);
     }
-    let hint_key = Value::from_heap_ptr(HeapString::allocate(gc, hint) as *mut u8);
-    match get_symbol_method(
-        gc,
-        input,
-        rune_core::symbol::SYM_TO_PRIMITIVE,
-        Some(vm.function_prototype),
-    ) {
-        SymbolMethodResult::Found(method) => {
-            let result = vm.call_value_sync(gc, method, input, &[hint_key])?;
-            if is_object_value(result) {
+    let slot = vm.temp_roots.len();
+    vm.temp_roots.push(input);
+    let result = (|| {
+        let hint_key = Value::from_heap_ptr(HeapString::allocate(gc, hint) as *mut u8);
+        let input = vm.temp_roots[slot];
+        match get_symbol_method(
+            gc,
+            input,
+            rune_core::symbol::SYM_TO_PRIMITIVE,
+            Some(vm.function_prototype),
+        ) {
+            SymbolMethodResult::Found(method) => {
+                let result = vm.call_value_sync(gc, method, input, &[hint_key])?;
+                if is_object_value(result) {
+                    return Err(crate::errors::error_object(
+                        gc,
+                        &vm.error_protos,
+                        crate::errors::ErrorKind::TypeError,
+                        "Cannot convert object to primitive value",
+                    ));
+                }
+                return Ok(result);
+            }
+            SymbolMethodResult::NotCallable => {
                 return Err(crate::errors::error_object(
                     gc,
                     &vm.error_protos,
                     crate::errors::ErrorKind::TypeError,
-                    "Cannot convert object to primitive value",
+                    "@@toPrimitive is not callable",
                 ));
             }
-            return Ok(result);
+            SymbolMethodResult::NotFound => {}
         }
-        SymbolMethodResult::NotCallable => {
-            return Err(crate::errors::error_object(
-                gc,
-                &vm.error_protos,
-                crate::errors::ErrorKind::TypeError,
-                "@@toPrimitive is not callable",
-            ));
+        let order: [&str; 2] = if hint == "string" {
+            ["toString", "valueOf"]
+        } else {
+            ["valueOf", "toString"]
+        };
+        for name in order {
+            let key = Value::from_heap_ptr(HeapString::allocate(gc, name) as *mut u8);
+            let input = vm.temp_roots[slot];
+            let method = load_property_recursive(input, key, Some(vm.function_prototype), gc);
+            let is_callable = method
+                .heap_ptr()
+                .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC })
+                || method.as_smi().is_some_and(|s| s < 0);
+            if !is_callable {
+                continue;
+            }
+            let input = vm.temp_roots[slot];
+            let result = vm.call_value_sync(gc, method, input, &[])?;
+            if !is_object_value(result) {
+                return Ok(result);
+            }
         }
-        SymbolMethodResult::NotFound => {}
-    }
-    let order: [&str; 2] = if hint == "string" {
-        ["toString", "valueOf"]
-    } else {
-        ["valueOf", "toString"]
-    };
-    for name in order {
-        let key = Value::from_heap_ptr(HeapString::allocate(gc, name) as *mut u8);
-        let method = load_property_recursive(input, key, Some(vm.function_prototype), gc);
-        let is_callable = method
-            .heap_ptr()
-            .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC })
-            || method.as_smi().is_some_and(|s| s < 0);
-        if !is_callable {
-            continue;
-        }
-        let result = vm.call_value_sync(gc, method, input, &[])?;
-        if !is_object_value(result) {
-            return Ok(result);
-        }
-    }
-    Err(crate::errors::error_object(
-        gc,
-        &vm.error_protos,
-        crate::errors::ErrorKind::TypeError,
-        "Cannot convert object to primitive value",
-    ))
+        Err(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Cannot convert object to primitive value",
+        ))
+    })();
+    vm.temp_roots.truncate(slot);
+    result
 }
 
 fn to_number_sync(gc: &mut SemiSpace, vm: &mut Vm, input: Value) -> Result<f64, Value> {
@@ -8403,6 +8412,55 @@ pub fn object_group_by(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mu
 /// Object.fromEntries(iterable)/// Object.fromEntries(iterable)/// Object.fromEntries(iterable) — §20.1.2.7. Sync-only: accepts an array of
 /// [key, value] pairs (general iterables drain via JS callbacks and are not
 /// supported inside sync builtins — documented gap).
+/// Synchronous Get that invokes accessor getters through the re-entrant call
+/// path. `load_property_recursive` returns an AccessorPair for accessor slots.
+fn get_value_sync(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    object: Value,
+    key: &str,
+) -> Result<Value, Value> {
+    let slot = vm.temp_roots.len();
+    vm.temp_roots.push(object);
+    let result = (|| {
+        let key_val = Value::from_heap_ptr(HeapString::allocate(gc, key) as *mut u8);
+        let object = vm.temp_roots[slot];
+        let value = load_property_recursive(object, key_val, Some(vm.function_prototype), gc);
+        if let Some(exc) = vm.pending_exception.take() {
+            return Err(exc);
+        }
+        if let Some(ptr) = value.heap_ptr() {
+            if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_ACCESSOR {
+                let getter = unsafe { rune_core::accessor::AccessorPair::getter(ptr) };
+                if getter.is_undefined() {
+                    return Ok(Value::undefined());
+                }
+                let object = vm.temp_roots[slot];
+                return vm.call_value_sync(gc, getter, object, &[]);
+            }
+        }
+        Ok(value)
+    })();
+    vm.temp_roots.truncate(slot);
+    result
+}
+
+fn close_iterator(gc: &mut SemiSpace, vm: &mut Vm, iterator: Value) {
+    let Ok(ret) = get_value_sync(gc, vm, iterator, "return") else {
+        vm.pending_exception = None;
+        return;
+    };
+    let callable = ret
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC })
+        || ret.as_smi().is_some_and(|s| s < 0);
+    if !callable {
+        return;
+    }
+    let _ = vm.call_value_sync(gc, ret, iterator, &[]);
+    vm.pending_exception = None;
+}
+
 pub fn object_from_entries(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let iterable = args.first().copied().unwrap_or(Value::undefined());
     if iterable.is_null() || iterable.is_undefined() {
@@ -8426,7 +8484,7 @@ pub fn object_from_entries(gc: &mut SemiSpace, _this: Value, args: &[Value], vm:
     vm.temp_roots.push(obj);
     let add_entry =
         |gc: &mut SemiSpace, vm: &mut Vm, obj_slot: usize, entry: Value| -> Result<(), Value> {
-            if entry.heap_ptr().is_none() {
+            if !is_object_value(entry) {
                 return Err(crate::errors::error_object(
                     gc,
                     &vm.error_protos,
@@ -8434,15 +8492,30 @@ pub fn object_from_entries(gc: &mut SemiSpace, _this: Value, args: &[Value], vm:
                     "Iterator value is not an entry object",
                 ));
             }
-            let zero = Value::from_heap_ptr(HeapString::allocate(gc, "0") as *mut u8);
-            let one = Value::from_heap_ptr(HeapString::allocate(gc, "1") as *mut u8);
-            let key_v = load_property_recursive(entry, zero, Some(vm.function_prototype), gc);
-            let val_v = load_property_recursive(entry, one, Some(vm.function_prototype), gc);
+            let base = vm.temp_roots.len();
+            let key_v = get_value_sync(gc, vm, entry, "0")?;
+            vm.temp_roots.push(key_v);
+            let val_v = match get_value_sync(gc, vm, entry, "1") {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.temp_roots.truncate(base);
+                    return Err(e);
+                }
+            };
+            vm.temp_roots.push(val_v);
+            let key_v = vm.temp_roots[base];
             let prim = if key_v.as_symbol_id().is_some() {
                 key_v
             } else {
-                to_primitive_sync(gc, vm, key_v, "string")?
+                match to_primitive_sync(gc, vm, key_v, "string") {
+                    Ok(v) => v,
+                    Err(e) => {
+                        vm.temp_roots.truncate(base);
+                        return Err(e);
+                    }
+                }
             };
+            let val_v = vm.temp_roots[base + 1];
             let obj_live = unsafe {
                 rune_core::gc::resolve_forwarded(vm.temp_roots[obj_slot].heap_ptr().unwrap())
                     as *mut JSObject
@@ -8467,6 +8540,7 @@ pub fn object_from_entries(gc: &mut SemiSpace, _this: Value, args: &[Value], vm:
                     );
                 }
             }
+            vm.temp_roots.truncate(base);
             Ok(())
         };
     let method = match get_iter_method(vm, gc, iterable) {
@@ -8542,6 +8616,7 @@ pub fn object_from_entries(gc: &mut SemiSpace, _this: Value, args: &[Value], vm:
         let value_key = Value::from_heap_ptr(HeapString::allocate(gc, "value") as *mut u8);
         let entry = load_property_recursive(result, value_key, Some(vm.function_prototype), gc);
         if let Err(e) = add_entry(gc, vm, root_base, entry) {
+            close_iterator(gc, vm, vm.temp_roots[islot]);
             vm.temp_roots.truncate(root_base);
             vm.set_pending_exception(e);
             return Value::undefined();

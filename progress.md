@@ -2064,6 +2064,26 @@ Integration suite: **842 passed, 0 failed, 3 ignored**.
 
 Integration suite: **843 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Complete fromEntries/groupBy iterator semantics (2026-11-13)
+
+- Root-caused the spurious `assert.throws` "Expected X to throw" failures:
+  `call_value_sync` now hides `pending_assert` while a nested sync callee runs,
+  so an inner return cannot be mistaken for the assert thunk returning. This
+  also fixed the remaining `groupBy` iterator cases.
+- `Object.fromEntries` is now **25/25**:
+  - synchronous Get that invokes accessor getters (with the receiver rooted);
+  - ToPropertyKey rooted across the `"0"`/`"1"` Gets and conversion;
+  - rejects primitive entries (including strings) with TypeError;
+  - implements IteratorClose on entry-processing errors (but not next-errors);
+  - duplicate keys overwrite; symbols and generators supported.
+- `Object.groupBy` is now **14/14** via the same assert isolation.
+- GC-safety fixes: `to_primitive_sync` and `get_value_sync` root their input
+  values across allocations and re-entrant calls.
+- Test262: Object **2635 → 2648/3411**.
+- Regression: `test_object_from_entries_accessor_order_and_close`.
+
+Integration suite: **844 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

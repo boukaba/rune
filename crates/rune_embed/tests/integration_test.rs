@@ -15851,3 +15851,57 @@ fn test_object_from_entries_iterables() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_object_from_entries_accessor_order_and_close() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var effects = [];
+            function entry(label) {
+                return {
+                    get "0"() {
+                        effects.push("get0 " + label);
+                        return { toString: function () { effects.push("toString " + label); return label + " key"; } };
+                    },
+                    get "1"() {
+                        effects.push("get1 " + label);
+                        return label + " value";
+                    }
+                };
+            }
+            var iterable = {
+                [Symbol.iterator]: function () {
+                    var n = 0;
+                    return {
+                        next: function () {
+                            if (n++ === 0) return { done: false, value: entry("first") };
+                            return { done: true };
+                        }
+                    };
+                }
+            };
+            var result = Object.fromEntries(iterable);
+            var returned = false;
+            var closing = {
+                [Symbol.iterator]: function () {
+                    return {
+                        next: function () { return { done: false, value: null }; },
+                        "return": function () { returned = true; }
+                    };
+                }
+            };
+            var threw = false;
+            try { Object.fromEntries(closing); } catch (e) { threw = e instanceof TypeError; }
+            [
+                result["first key"] === "first value",
+                effects.join(",") === "get0 first,get1 first,toString first",
+                threw,
+                returned
+            ].join("|") === "true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

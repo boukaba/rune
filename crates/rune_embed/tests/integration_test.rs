@@ -16758,3 +16758,29 @@ fn test_regexp_named_groups_and_unmatched_captures() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_regexp_capture_clearing_and_indices() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var rep = /(?:(a)|(b)){2}/.exec("ab");
+            var m = /(?<x>a)(b)?/d.exec("a");
+            var plain = /(?<x>a)/.exec("a");
+            [
+                rep.length === 3,
+                rep[1] === undefined,
+                rep[2] === "b",
+                m.indices.length === 3,
+                m.indices[0][0] === 0 && m.indices[0][1] === 1,
+                m.indices[1][0] === 0 && m.indices[1][1] === 1,
+                m.indices[2] === undefined,
+                m.indices.groups.x[0] === 0 && m.indices.groups.x[1] === 1,
+                plain.indices === undefined
+            ].join("|") === "true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

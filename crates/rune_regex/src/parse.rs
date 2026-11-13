@@ -75,6 +75,15 @@ fn parse_seq(chars: &[char], i: &mut usize, captures: &mut usize) -> Result<Rege
     })
 }
 
+fn clear_before(node: RegexExpr) -> RegexExpr {
+    let idx = crate::ast::capture_indices(&node);
+    if idx.is_empty() {
+        node
+    } else {
+        RegexExpr::Concat(vec![RegexExpr::ClearCaptures(idx), node])
+    }
+}
+
 fn parse_repetition(
     chars: &[char],
     i: &mut usize,
@@ -127,7 +136,8 @@ fn parse_repetition(
                         // {n,} — unbounded upper
                         if *i < chars.len() && chars[*i] == '}' {
                             *i += 1;
-                            let mut nodes = vec![node.clone(); n];
+                            let mut nodes: Vec<RegexExpr> =
+                                (0..n).map(|_| clear_before(node.clone())).collect();
                             if n > 0 {
                                 nodes.push(RegexExpr::Star(Box::new(node)));
                             }
@@ -152,7 +162,8 @@ fn parse_repetition(
                     return Err("Invalid quantifier range".into());
                 }
                 if m == n {
-                    let mut nodes = vec![node.clone(); n];
+                    let mut nodes: Vec<RegexExpr> =
+                        (0..n).map(|_| clear_before(node.clone())).collect();
                     return Ok(if nodes.len() == 1 {
                         nodes.remove(0)
                     } else {

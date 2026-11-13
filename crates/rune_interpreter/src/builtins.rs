@@ -16599,6 +16599,7 @@ fn make_match_result_array(
     match_index: usize,
     array_proto: Value,
     named: &[(String, usize)],
+    has_indices: bool,
 ) -> Value {
     let mut elements = Vec::with_capacity(groups.len());
     for (gs, ge) in groups.iter() {
@@ -16674,9 +16675,92 @@ fn make_match_result_array(
             "groups".to_string(),
             groups_val,
         );
+        if has_indices {
+            let mut idx_elems = Vec::with_capacity(groups.len());
+            for (gs, ge) in groups.iter() {
+                if *gs == usize::MAX {
+                    idx_elems.push(Value::undefined());
+                } else {
+                    let pair =
+                        RuneArray::allocate(gc, &[Value::smi(*gs as i32), Value::smi(*ge as i32)]);
+                    set_array_proto_value(pair, array_proto);
+                    idx_elems.push(Value::from_heap_ptr(pair as *mut u8));
+                }
+            }
+            let idx_arr = RuneArray::allocate(gc, &idx_elems);
+            set_array_proto_value(idx_arr, array_proto);
+            let idx_groups = if named.is_empty() {
+                Value::undefined()
+            } else {
+                let gobj = JSObject::allocate(gc, Shape::empty(), &[]);
+                let mut order: Vec<&str> = Vec::new();
+                for (name, _) in named {
+                    if !order.contains(&name.as_str()) {
+                        order.push(name);
+                    }
+                }
+                for name in order {
+                    let mut value: Option<(usize, usize)> = None;
+                    for (n, idx) in named.iter().rev() {
+                        if n != name {
+                            continue;
+                        }
+                        if let Some(&(gs, ge)) = groups.get(idx + 1) {
+                            if gs != usize::MAX {
+                                value = Some((gs, ge));
+                                break;
+                            }
+                        }
+                    }
+                    let val = match value {
+                        Some((gs, ge)) => {
+                            let pair = RuneArray::allocate(
+                                gc,
+                                &[Value::smi(gs as i32), Value::smi(ge as i32)],
+                            );
+                            set_array_proto_value(pair, array_proto);
+                            Value::from_heap_ptr(pair as *mut u8)
+                        }
+                        None => Value::undefined(),
+                    };
+                    JSObject::add_property(
+                        gobj,
+                        PropertyKey::from_string(name),
+                        name.to_string(),
+                        val,
+                    );
+                }
+                Value::from_heap_ptr(gobj as *mut u8)
+            };
+            let idx_props = JSObject::allocate(gc, Shape::empty(), &[]);
+            JSObject::add_property(
+                idx_props,
+                PropertyKey::from_string("groups"),
+                "groups".to_string(),
+                idx_groups,
+            );
+            RuneArray::set_extra_props(idx_arr, idx_props as *mut u8);
+            JSObject::add_property(
+                props,
+                PropertyKey::from_string("indices"),
+                "indices".to_string(),
+                Value::from_heap_ptr(idx_arr as *mut u8),
+            );
+        }
         RuneArray::set_extra_props(ptr as *mut RuneArray, props as *mut u8);
     }
     Value::from_heap_ptr(arr as *mut u8)
+}
+
+fn set_array_proto_value(arr: *mut RuneArray, array_proto: Value) {
+    unsafe {
+        let ptr = arr as *mut u8;
+        *(ptr.add(8) as *mut *const rune_core::shape::Shape) =
+            *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
+        if let Some(proto) = array_proto.heap_ptr() {
+            *(ptr.add(24) as *mut *mut u8) = proto;
+        }
+    }
 }
 
 fn set_array_proto(arr: *mut RuneArray, vm: &Vm) {
@@ -16771,7 +16855,15 @@ pub fn string_match(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
         match regexp_exec_internal(gc, rx_ptr, &s, 0) {
             Some(groups) => {
                 let match_index = groups[0].0;
-                make_match_result_array(gc, &groups, &s, match_index, vm.array_prototype, &[])
+                make_match_result_array(
+                    gc,
+                    &groups,
+                    &s,
+                    match_index,
+                    vm.array_prototype,
+                    &[],
+                    false,
+                )
             }
             None => Value::null(),
         }
@@ -16836,7 +16928,7 @@ fn collect_match_all(gc: &mut SemiSpace, rp: *mut u8, s: &str, vm: &mut Vm) -> V
         positions.push(s.len());
         for (index, pos) in positions.into_iter().enumerate() {
             let groups = [(pos, pos)];
-            let m = make_match_result_array(gc, &groups, s, index, vm.array_prototype, &[]);
+            let m = make_match_result_array(gc, &groups, s, index, vm.array_prototype, &[], false);
             let mut results_now = vm.temp_roots[base];
             if result_push(gc, vm, &mut results_now, m).is_err() {
                 vm.temp_roots.truncate(base);
@@ -27644,7 +27736,15 @@ pub fn regexp_exec(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
                 if global || sticky {
                     regexp_set_last_index_value(gc, regexp_ptr, Value::smi(end as i32));
                 }
-                return make_match_result_array(gc, &groups, &s, start, vm.array_prototype, &named);
+                return make_match_result_array(
+                    gc,
+                    &groups,
+                    &s,
+                    start,
+                    vm.array_prototype,
+                    &named,
+                    unsafe { RegExp::has_flag(regexp_ptr, 6) },
+                );
             }
             None => {
                 // Failure: sticky returns null immediately (lastIndex = 0);

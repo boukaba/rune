@@ -254,6 +254,19 @@ fn follow_nonconsuming(
                         worklist.push(new_t);
                     }
                 }
+                Edge::Clear { slots, target } => {
+                    has_nonconsuming = true;
+                    let mut saves = t.saves.clone();
+                    for slot in slots {
+                        if *slot < saves.len() {
+                            saves[*slot] = None;
+                        }
+                    }
+                    let new_t = Thread { pc: *target, saves };
+                    if !in_sets(&new_t, &worklist, &result) {
+                        worklist.push(new_t);
+                    }
+                }
                 Edge::Lookahead {
                     sub_start,
                     sub_match,
@@ -482,7 +495,8 @@ fn lookahead_matches(
                     | Edge::AnchorEnd(_)
                     | Edge::WordBoundary { .. }
                     | Edge::Backref { .. }
-                    | Edge::BackrefMulti { .. } => {}
+                    | Edge::BackrefMulti { .. }
+                    | Edge::Clear { .. } => {}
                 }
             }
         }
@@ -527,8 +541,18 @@ fn add_thread(nlist: &mut Vec<Thread>, nfa: &Nfa, pc: usize, saves: &[Option<usi
         saves: saves.to_vec(),
     });
     for edge in &nfa.states[pc].edges {
-        if let Edge::Epsilon(target) = edge {
-            add_thread(nlist, nfa, *target, saves);
+        match edge {
+            Edge::Epsilon(target) => add_thread(nlist, nfa, *target, saves),
+            Edge::Clear { slots, target } => {
+                let mut saves = saves.to_vec();
+                for slot in slots {
+                    if *slot < saves.len() {
+                        saves[*slot] = None;
+                    }
+                }
+                add_thread(nlist, nfa, *target, &saves);
+            }
+            _ => {}
         }
     }
 }

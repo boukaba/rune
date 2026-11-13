@@ -2769,6 +2769,25 @@ Integration suite: **871 passed, 0 failed, 3 ignored**.
 
 Integration suite: **872 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Regex capture clearing + `d`/indices (2026-11-13)
+
+- Parser-timed capture indices plus a new zero-width `ClearCaptures` AST node:
+  each copy produced by `{n,m}` expansion clears its contained capture slots
+  before matching. NFA gains `Edge::Clear`, and PikeVM follows it in both the
+  epsilon closure and the per-character thread expansion.
+- Consequence: captures inside quantified groups reflect only the **last**
+  iteration (`/(?:(a)|(b)){2}/.exec("ab")` → `[undefined, "b"]` captures), and
+  duplicate named groups/backrefs now match and expose the right alternative.
+- `hasIndices` / `d` flag results now include the spec `indices` array:
+  - one `[start,end]` pair per capture (undefined for non-participating);
+  - `indices.groups` object mirroring named groups;
+  - property absent for non-`d` regexps.
+- Test262: named-groups **10/10 runnable (26 feature-skipped)**;
+  RegExp **568 → 578/1879**, String **960 → 961/1223**.
+- Regression: `test_regexp_capture_clearing_and_indices`.
+
+Integration suite: **873 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

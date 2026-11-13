@@ -45,6 +45,11 @@ pub enum Edge {
         indices: Vec<usize>,
         target: usize,
     },
+    /// Reset capture slots to None, then continue (zero-width).
+    Clear {
+        slots: Vec<usize>,
+        target: usize,
+    },
 }
 
 pub struct Nfa {
@@ -228,6 +233,18 @@ fn compile_expr(
                 index: *idx,
                 target: s2,
             });
+            (s1, s2)
+        }
+        RegexExpr::ClearCaptures(indices) => {
+            let s1 = alloc_state(states);
+            let s2 = alloc_state(states);
+            states[s2].is_match = true;
+            let mut slots: Vec<usize> = Vec::new();
+            for i in indices {
+                slots.push(i * 2 + 2);
+                slots.push(i * 2 + 3);
+            }
+            states[s1].edges.push(Edge::Clear { slots, target: s2 });
             (s1, s2)
         }
         RegexExpr::BackrefMulti(indices) => {

@@ -23,6 +23,8 @@ pub enum RegexExpr {
     NamedBackref(String),
     /// Backreference that may refer to any of several duplicate-named captures.
     BackrefMulti(Vec<usize>),
+    /// Zero-width reset of capture slots (start of a repeated copy).
+    ClearCaptures(Vec<usize>),
     /// Zero-width lookahead assertion: the inner expression must match
     /// starting at the current position (negated = negative lookahead).
     /// Captures inside a positive lookahead participate in the match.
@@ -60,6 +62,40 @@ fn walk_named(expr: &RegexExpr, out: &mut Vec<(String, usize)>) {
         | RegexExpr::Plus(e)
         | RegexExpr::Optional(e)
         | RegexExpr::Lookahead { expr: e, .. } => walk_named(e, out),
+        _ => {}
+    }
+}
+
+/// All capture indices contained in `expr`.
+pub fn capture_indices(expr: &RegexExpr) -> Vec<usize> {
+    let mut out = Vec::new();
+    collect_caps(expr, &mut out);
+    out
+}
+
+fn collect_caps(expr: &RegexExpr, out: &mut Vec<usize>) {
+    match expr {
+        RegexExpr::Group(inner, cap, _) => {
+            if let Some(idx) = cap {
+                if !out.contains(idx) {
+                    out.push(*idx);
+                }
+            }
+            collect_caps(inner, out);
+        }
+        RegexExpr::Concat(parts) => {
+            for p in parts {
+                collect_caps(p, out);
+            }
+        }
+        RegexExpr::Alt(a, b) => {
+            collect_caps(a, out);
+            collect_caps(b, out);
+        }
+        RegexExpr::Star(e)
+        | RegexExpr::Plus(e)
+        | RegexExpr::Optional(e)
+        | RegexExpr::Lookahead { expr: e, .. } => collect_caps(e, out),
         _ => {}
     }
 }

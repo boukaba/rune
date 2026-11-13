@@ -15161,3 +15161,32 @@ fn test_regexp_string_and_number_exponent_forms() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_math_hyperbolic_and_signed_zero() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            [
+                Math.fround(1.5) === 1.5,
+                Math.acosh(1) === 0,
+                Math.asinh(0) === 0,
+                Math.atanh(0) === 0,
+                Math.sinh(0) === 0,
+                Math.cosh(0) === 1,
+                Math.tanh(0) === 0,
+                Math.expm1(0) === 0,
+                Math.log1p(0) === 0,
+                Object.is(Math.min(-0, 0), -0),
+                !Object.is(Math.max(-0, 0), -0),
+                Object.is(Math.ceil(-0.1), -0),
+                Object.is(Math.pow(-0, 1), -0),
+                Number.isNaN(Math.pow(1, Infinity)),
+                Number.isNaN(Math.max(1, NaN))
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

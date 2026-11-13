@@ -1585,6 +1585,21 @@ Integration suite: **816 passed, 0 failed, 3 ignored**.
 
 Integration suite: **817 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Math hyperbolic methods + signed-zero/NaN semantics (2026-11-13)
+
+- Added `Math.fround`, `acosh`, `asinh`, `atanh`, `sinh`, `cosh`, `tanh`,
+  `expm1`, `log1p`.
+- Fixed sign/NaN edge semantics:
+  - `min`/`max` preserve `-0`/`+0` and propagate NaN;
+  - unary/binary helpers no longer smi-collapse `-0`;
+  - `pow` handles `1^±Infinity`/`(-1)^±Infinity` NaN, `NaN^0` = 1 and
+    `-0` results.
+- Test262: Math **138 → 178/327**.
+- Regression: `test_math_hyperbolic_and_signed_zero`.
+- Known gaps: `Math.sumPrecise` proposal and a few `pow`/`atan2` corners.
+
+Integration suite: **818 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

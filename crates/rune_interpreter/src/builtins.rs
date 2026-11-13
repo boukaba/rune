@@ -14003,6 +14003,9 @@ fn math_op_unary(args: &[Value], op: fn(f64) -> f64) -> Value {
         .or_else(|| x.as_float64())
         .unwrap_or(f64::NAN);
     let result = op(n);
+    if result == 0.0 && result.is_sign_negative() {
+        return Value::from_float64(-0.0);
+    }
     if result.fract() == 0.0 && result.is_finite() {
         let i = result as i32;
         if i as f64 == result {
@@ -14011,6 +14014,33 @@ fn math_op_unary(args: &[Value], op: fn(f64) -> f64) -> Value {
     }
     Value::from_float64(result)
 }
+
+pub fn math_fround(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let x = args.first().copied().unwrap_or(Value::smi(0));
+    let n = x
+        .as_smi()
+        .map(|v| v as f64)
+        .or_else(|| x.as_float64())
+        .unwrap_or(f64::NAN);
+    Value::from_float64((n as f32) as f64)
+}
+
+macro_rules! math_unary_extra {
+    ($name:ident, $method:ident) => {
+        pub fn $name(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+            math_op_unary(args, f64::$method)
+        }
+    };
+}
+
+math_unary_extra!(math_acosh, acosh);
+math_unary_extra!(math_asinh, asinh);
+math_unary_extra!(math_atanh, atanh);
+math_unary_extra!(math_cosh, cosh);
+math_unary_extra!(math_sinh, sinh);
+math_unary_extra!(math_tanh, tanh);
+math_unary_extra!(math_expm1, exp_m1);
+math_unary_extra!(math_log1p, ln_1p);
 
 fn math_op_binary(args: &[Value], op: fn(f64, f64) -> f64) -> Value {
     let a = args.first().copied().unwrap_or(Value::smi(0));
@@ -14026,6 +14056,9 @@ fn math_op_binary(args: &[Value], op: fn(f64, f64) -> f64) -> Value {
         .or_else(|| b.as_float64())
         .unwrap_or(f64::NAN);
     let result = op(na, nb);
+    if result == 0.0 && result.is_sign_negative() {
+        return Value::from_float64(-0.0);
+    }
     if result.fract() == 0.0 && result.is_finite() {
         let i = result as i32;
         if i as f64 == result {
@@ -14049,15 +14082,26 @@ pub fn math_abs(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm)
 
 pub fn math_min(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     let mut min = f64::INFINITY;
+    let mut neg_zero = false;
     for arg in args {
         let n = arg
             .as_smi()
             .map(|v| v as f64)
             .or_else(|| arg.as_float64())
             .unwrap_or(f64::NAN);
+        if n.is_nan() {
+            min = f64::NAN;
+            break;
+        }
+        if n == 0.0 && n.is_sign_negative() {
+            neg_zero = true;
+        }
         if n < min {
             min = n;
         }
+    }
+    if min == 0.0 && neg_zero {
+        return Value::from_float64(-0.0);
     }
     if min.fract() == 0.0 && min.is_finite() {
         let i = min as i32;
@@ -14076,6 +14120,10 @@ pub fn math_max(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm)
             .map(|v| v as f64)
             .or_else(|| arg.as_float64())
             .unwrap_or(f64::NAN);
+        if n.is_nan() {
+            max = f64::NAN;
+            break;
+        }
         if n > max {
             max = n;
         }
@@ -14090,7 +14138,18 @@ pub fn math_max(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm)
 }
 
 pub fn math_pow(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
-    math_op_binary(args, |a, b| a.powf(b))
+    math_op_binary(args, |a, b| {
+        if b.is_nan() {
+            return f64::NAN;
+        }
+        if a.is_nan() {
+            return if b == 0.0 { 1.0 } else { f64::NAN };
+        }
+        if b.is_infinite() && a.abs() == 1.0 {
+            return f64::NAN;
+        }
+        a.powf(b)
+    })
 }
 
 pub fn math_sqrt(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
@@ -22783,6 +22842,51 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 1,
             name: "Math_cbrt",
             func: math_cbrt,
+        },
+        Builtin {
+            length: 1,
+            name: "Math_fround",
+            func: math_fround,
+        },
+        Builtin {
+            length: 1,
+            name: "Math_acosh",
+            func: math_acosh,
+        },
+        Builtin {
+            length: 1,
+            name: "Math_asinh",
+            func: math_asinh,
+        },
+        Builtin {
+            length: 1,
+            name: "Math_atanh",
+            func: math_atanh,
+        },
+        Builtin {
+            length: 1,
+            name: "Math_cosh",
+            func: math_cosh,
+        },
+        Builtin {
+            length: 1,
+            name: "Math_sinh",
+            func: math_sinh,
+        },
+        Builtin {
+            length: 1,
+            name: "Math_tanh",
+            func: math_tanh,
+        },
+        Builtin {
+            length: 1,
+            name: "Math_expm1",
+            func: math_expm1,
+        },
+        Builtin {
+            length: 1,
+            name: "Math_log1p",
+            func: math_log1p,
         },
         Builtin {
             length: 1,

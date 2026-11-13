@@ -34,6 +34,11 @@ impl Context {
         Self::new_with_semispace(16 * 1024 * 1024) // 16 MiB default
     }
 
+    /// Create a context with an explicit semispace size (bytes).
+    pub fn new_with_heap_size(bytes: usize) -> Self {
+        Self::new_with_semispace(bytes)
+    }
+
     /// Like `new()` but with a small semispace (1 MiB) for tests that
     /// run many contexts in parallel. Large live sets (>60K objects)
     /// may OOM with this — use the 16 MiB `new()` for those.

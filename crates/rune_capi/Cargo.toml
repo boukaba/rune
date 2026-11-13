@@ -3,7 +3,11 @@ name = "rune_capi"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
 [dependencies]
 rune_core = { path = "../rune_core" }
 rune_embed = { path = "../rune_embed" }
+rune_interpreter = { path = "../rune_interpreter" }
 libc = { workspace = true }

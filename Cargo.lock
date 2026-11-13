@@ -803,6 +803,7 @@ dependencies = [
  "libc",
  "rune_core",
  "rune_embed",
+ "rune_interpreter",
 ]
 
 [[package]]

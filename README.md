@@ -58,7 +58,23 @@ let val = ctx.eval("var x = 1; function inc() { return x = x + 1; } inc() + inc(
 assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 ```
 
-## Architecture
+### C Embedding
+
+Build the C ABI (`cargo build -p rune_capi --release`) and include
+[`crates/rune_capi/include/rune.h`](crates/rune_capi/include/rune.h):
+
+```c
+void *ctx = rune_context_create();
+char *result = NULL, *error = NULL;
+if (rune_context_eval(ctx, "1 + 2", &result, &error) == 0) {
+    printf("%s\n", result);   /* 3 */
+}
+rune_free_string(result);
+rune_free_string(error);
+rune_context_destroy(ctx);
+```
+
+See [`docs/c-api.md`](docs/c-api.md) for the full contract and limitations.
 
 | Crate | Purpose |
 |---|---|
@@ -69,6 +85,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 | `rune_jit_baseline` | Baseline JIT (AArch64; runtime opt-in, off by default) — 62 opcodes whitelisted, function tier-up at 50 calls, N=16 vector IC table, **inlining** (Phase F: hot callees spliced inline, ~5% gain), **float self-tagging** (NaN-boxed Values, 0 heap allocation for floats); branching loop bodies are conservatively excluded from trace recording pending a sound branch model |
 | `rune_embed` | Embedding API (`Context::eval`), AFPC cache save/load, host functions |
 | `rune_runtime` | Runtime facade: timer event loop (`setTimeout`/`clearTimeout`), host `fetch` jobs with pluggable transport, retained callbacks |
+| `rune_capi` | Panic-safe C ABI (`include/rune.h`): status-based eval, JS-string results, heap/budget/JIT controls |
 | `rune_cli` | CLI binary with `rune build`/`rune run` application bundles, `--cache`, `--snapshot`, `--max-instructions`, `--timeout-ms`, `--ic-stats`, `--trace-stats`; installs runtime timers/fetch for scripts, with a real ureq HTTP/HTTPS transport and private-network blocking (`--allow-private-fetch` to opt in) |
 | `rune_bench` | Criterion benchmarks with V8 comparison scripts |
 

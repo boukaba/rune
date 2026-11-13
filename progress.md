@@ -973,6 +973,23 @@ Integration suite: **789 passed, 0 failed, 3 ignored**; CLI **9 tests**.
 Integration suite: **789 passed, 0 failed, 3 ignored**; CLI **10 tests**
 (1 HTTP unit + 9 integration).
 
+### Phase 3 — C ABI hardening (2026-11-13)
+
+- `rune_capi` now exports a documented C ABI (`include/rune.h`,
+  `RUNE_ABI_VERSION 1`): opaque contexts, `rune_version`, explicit-heap
+  create, status-based `rune_context_eval` with result/error out-strings,
+  instruction/time budgets, and JIT opt-in.
+- Panics are caught at the FFI boundary; NUL checks and invalid-argument
+  statuses are handled; output strings are caller-owned (`rune_free_string`).
+- Crates build `cdylib`/`staticlib`/`rlib`; a C example compiles and prints
+  `result: 42` against the built library.
+- Docs: `docs/c-api.md` documents the contract and limitations (no host
+  callbacks/Value handles, no timers/fetch, single-threaded).
+- Unit tests cover success, errors, instruction budget, NULL arguments, heap
+  creation, and version.
+
+Integration suite: **789 passed, 0 failed, 3 ignored**; `rune_capi` **3 tests**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

@@ -252,6 +252,32 @@ impl RuneTypedArray {
         }
     }
 
+    pub unsafe fn set_length_tracking(ptr: *mut u8, tracking: bool) {
+        unsafe {
+            (*(ptr as *mut RuneTypedArray))._pad[0] = tracking as u8;
+        }
+    }
+
+    pub unsafe fn is_length_tracking(ptr: *mut u8) -> bool {
+        unsafe { (*(ptr as *mut RuneTypedArray))._pad[0] != 0 }
+    }
+
+    /// Current length; length-tracking views derive it from the live buffer.
+    pub unsafe fn effective_length(ptr: *mut u8) -> usize {
+        unsafe {
+            if !Self::is_length_tracking(ptr) {
+                return Self::length(ptr);
+            }
+            let buf = Self::buffer(ptr);
+            if buf.is_null() || RuneArrayBuffer::is_detached(buf) {
+                return 0;
+            }
+            let available =
+                RuneArrayBuffer::byte_length(buf).saturating_sub(Self::byte_offset(ptr));
+            available / Self::kind(ptr).element_size()
+        }
+    }
+
     pub unsafe fn kind(ptr: *mut u8) -> TypedArrayKind {
         unsafe { TypedArrayKind::from_index((*(ptr as *mut RuneTypedArray)).kind as usize) }
     }

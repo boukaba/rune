@@ -14802,7 +14802,7 @@ pub(crate) fn load_property_recursive(
                 // keys read elements directly (out of bounds → undefined, no
                 // prototype consult); own computed keys; else walk proto.
                 if let Some(index) = value_to_array_index(raw_key) {
-                    let len = unsafe { typedarray::RuneTypedArray::length(ptr) };
+                    let len = unsafe { typedarray::RuneTypedArray::effective_length(ptr) };
                     if index < len {
                         return unsafe { typedarray::read_element(ptr, index) };
                     }
@@ -14813,7 +14813,8 @@ pub(crate) fn load_property_recursive(
                         let key_str = unsafe { HeapString::to_string(key_ptr as *mut HeapString) };
                         match key_str.as_str() {
                             "length" => {
-                                let len = unsafe { typedarray::RuneTypedArray::length(ptr) };
+                                let len =
+                                    unsafe { typedarray::RuneTypedArray::effective_length(ptr) };
                                 return Value::smi(len as i32);
                             }
                             "byteLength" => {
@@ -15347,7 +15348,7 @@ pub(crate) fn do_store_property(
             // Integer-indexed exotic object (§10.4.5.2): numeric canonical
             // keys write elements (out of range / non-canonical → no-op).
             if let Some(index) = value_to_array_index(raw_key) {
-                let len = unsafe { typedarray::RuneTypedArray::length(ptr) };
+                let len = unsafe { typedarray::RuneTypedArray::effective_length(ptr) };
                 if index < len {
                     let kind = unsafe { typedarray::RuneTypedArray::kind(ptr) };
                     let n = to_number(value);
@@ -15810,7 +15811,7 @@ pub(crate) fn has_property(obj: Value, raw_key: Value, function_prototype: Optio
             // Integer-indexed exotic object: in-bounds numeric index exists;
             // other keys walk the prototype chain.
             if let Some(index) = value_to_array_index(raw_key) {
-                let len = unsafe { typedarray::RuneTypedArray::length(ptr) };
+                let len = unsafe { typedarray::RuneTypedArray::effective_length(ptr) };
                 return index < len;
             }
             let proto_ptr = unsafe { typedarray::RuneTypedArray::prototype(ptr) };

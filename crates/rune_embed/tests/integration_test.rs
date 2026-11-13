@@ -15292,3 +15292,32 @@ fn test_resizable_array_buffer() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_typed_array_length_tracking() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var b = new ArrayBuffer(4, { maxByteLength: 16 });
+            var tracking = new Uint8Array(b);
+            var initial = tracking.length === 4;
+            b.resize(8);
+            var grew = tracking.length === 8;
+            tracking[7] = 9;
+            b.resize(2);
+            var shrank = tracking.length === 2;
+            var fixed = new Uint8Array(b, 0, 2);
+            b.resize(8);
+            [
+                initial,
+                grew,
+                shrank,
+                tracking.length === 8,
+                fixed.length === 2
+            ].join("|") === "true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

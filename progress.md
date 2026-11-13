@@ -1664,6 +1664,22 @@ Integration suite: **821 passed, 0 failed, 3 ignored**.
 
 Integration suite: **822 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — TypedArray length tracking (2026-11-13)
+
+- TypedArrays created from an ArrayBuffer without an explicit length are marked
+  as length-tracking views (padding flag) and derive their length from the live
+  buffer (`effective_length`).
+- All TypedArray element/length/iteration/method paths now use
+  `effective_length`, so `b.resize(8)` updates tracking views immediately and
+  shrinking below their byte offset yields length 0.
+- Fixed-length views (`new Uint8Array(b, 0, n)`) keep their explicit length.
+- Regression: `test_typed_array_length_tracking`.
+- Known gaps: fixed-length views over a shrunk buffer do not yet throw
+  out-of-bounds on element access; the test262 resizable-arraybuffer feature is
+  still skipped by the harness.
+
+Integration suite: **823 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

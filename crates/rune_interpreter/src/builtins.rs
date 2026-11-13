@@ -896,7 +896,7 @@ pub fn text_decoder_decode(
     let mut bytes: Vec<u8> = Vec::new();
     if let Some(ptr) = input.heap_ptr() {
         if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_TYPED_ARRAY {
-            let len = unsafe { typedarray::RuneTypedArray::length(ptr) };
+            let len = unsafe { typedarray::RuneTypedArray::effective_length(ptr) };
             for i in 0..len {
                 let v = unsafe { typedarray::read_element(ptr, i) };
                 bytes.push(v.as_smi().unwrap_or(0).clamp(0, 255) as u8);
@@ -3063,7 +3063,7 @@ pub fn array_iterator_next(gc: &mut SemiSpace, this: Value, _args: &[Value], vm:
                             let len = if arr_tag == TAG_ARRAY {
                                 (unsafe { RuneArray::length(arr_ptr as *mut RuneArray) }) as usize
                             } else {
-                                unsafe { typedarray::RuneTypedArray::length(arr_ptr) }
+                                unsafe { typedarray::RuneTypedArray::effective_length(arr_ptr) }
                             };
                             if index >= len {
                                 unsafe {
@@ -4926,6 +4926,7 @@ fn typed_array_ctor_impl(
                 typedarray::RuneTypedArray::set_kind(ptr, kind);
                 typedarray::RuneTypedArray::set_byte_offset(ptr, offset);
                 typedarray::RuneTypedArray::set_length(ptr, new_len);
+                typedarray::RuneTypedArray::set_length_tracking(ptr, length_arg.is_undefined());
             }
             let _ = new_byte_len;
             return this;
@@ -4933,7 +4934,7 @@ fn typed_array_ctor_impl(
         if ftag == TAG_TYPED_ARRAY {
             // §23.2.5.1.2 InitializeTypedArrayFromTypedArray — elementwise
             // (snapshots the source so overlapping conversion is safe).
-            let src_len = unsafe { typedarray::RuneTypedArray::length(fp) };
+            let src_len = unsafe { typedarray::RuneTypedArray::effective_length(fp) };
             let mut vals = Vec::with_capacity(src_len);
             for i in 0..src_len {
                 vals.push(to_number(unsafe { typedarray::read_element(fp, i) }));
@@ -5371,7 +5372,7 @@ pub fn typed_array_subarray_builtin(
         return Value::undefined();
     };
     let kind = unsafe { typedarray::RuneTypedArray::kind(ptr) };
-    let length = unsafe { typedarray::RuneTypedArray::length(ptr) };
+    let length = unsafe { typedarray::RuneTypedArray::effective_length(ptr) };
     let start = to_clamped_index(args.first().copied().unwrap_or(Value::smi(0)), length);
     let end = if args.get(1).is_none_or(|v| v.is_undefined()) {
         length
@@ -5407,7 +5408,7 @@ pub fn typed_array_fill_builtin(
         return Value::undefined();
     };
     let kind = unsafe { typedarray::RuneTypedArray::kind(ptr) };
-    let length = unsafe { typedarray::RuneTypedArray::length(ptr) };
+    let length = unsafe { typedarray::RuneTypedArray::effective_length(ptr) };
     let value = typedarray::convert_number(
         kind,
         to_number(args.first().copied().unwrap_or(Value::undefined())),
@@ -5436,7 +5437,7 @@ pub fn typed_array_at_builtin(
     let Some(ptr) = typed_array_receiver(gc, this, vm) else {
         return Value::undefined();
     };
-    let length = unsafe { typedarray::RuneTypedArray::length(ptr) };
+    let length = unsafe { typedarray::RuneTypedArray::effective_length(ptr) };
     let k = to_absolute_index(args.first().copied().unwrap_or(Value::smi(0)), length);
     if k < 0 || k as usize >= length {
         return Value::undefined();
@@ -5454,7 +5455,7 @@ pub fn typed_array_index_of_builtin(
     let Some(ptr) = typed_array_receiver(gc, this, vm) else {
         return Value::undefined();
     };
-    let length = unsafe { typedarray::RuneTypedArray::length(ptr) };
+    let length = unsafe { typedarray::RuneTypedArray::effective_length(ptr) };
     let search = args.first().copied().unwrap_or(Value::undefined());
     let k = if length == 0 {
         0
@@ -5482,7 +5483,7 @@ pub fn typed_array_includes_builtin(
     let Some(ptr) = typed_array_receiver(gc, this, vm) else {
         return Value::undefined();
     };
-    let length = unsafe { typedarray::RuneTypedArray::length(ptr) };
+    let length = unsafe { typedarray::RuneTypedArray::effective_length(ptr) };
     if length == 0 {
         return Value::boolean(false);
     }
@@ -5530,7 +5531,7 @@ pub fn typed_array_set_builtin(
         return Value::undefined();
     }
     let target_offset = target_offset as usize;
-    let target_len = unsafe { typedarray::RuneTypedArray::length(target) };
+    let target_len = unsafe { typedarray::RuneTypedArray::effective_length(target) };
     let target_kind = unsafe { typedarray::RuneTypedArray::kind(target) };
 
     enum ReadSource {
@@ -5542,7 +5543,7 @@ pub fn typed_array_set_builtin(
         let stag = unsafe { (*(sp as *const GcHeader)).tag() };
         if stag == TAG_TYPED_ARRAY {
             (
-                unsafe { typedarray::RuneTypedArray::length(sp) },
+                unsafe { typedarray::RuneTypedArray::effective_length(sp) },
                 ReadSource::Typed(sp),
             )
         } else if stag == TAG_ARRAY {
@@ -5627,7 +5628,7 @@ pub fn typed_array_slice_builtin(
         return Value::undefined();
     };
     let kind = unsafe { typedarray::RuneTypedArray::kind(ptr) };
-    let length = unsafe { typedarray::RuneTypedArray::length(ptr) };
+    let length = unsafe { typedarray::RuneTypedArray::effective_length(ptr) };
     let start = to_clamped_index(args.first().copied().unwrap_or(Value::smi(0)), length);
     let end = if args.get(1).is_none_or(|v| v.is_undefined()) {
         length
@@ -7134,7 +7135,7 @@ pub fn object_prototype_has_own_property(
                 {
                     return Value::boolean(true);
                 }
-                let len = unsafe { rune_core::typedarray::RuneTypedArray::length(ptr) };
+                let len = unsafe { rune_core::typedarray::RuneTypedArray::effective_length(ptr) };
                 index < len
             } else {
                 key_is_str("length")
@@ -7263,7 +7264,7 @@ pub fn object_prototype_property_is_enumerable(
         }
         TAG_TYPED_ARRAY => {
             if let Some(index) = value_to_array_index(key) {
-                let len = unsafe { rune_core::typedarray::RuneTypedArray::length(ptr) };
+                let len = unsafe { rune_core::typedarray::RuneTypedArray::effective_length(ptr) };
                 index < len
             } else {
                 key_is_str("length")
@@ -11302,7 +11303,7 @@ pub(crate) fn length_drive(
     if let Some(ptr) = op.stash_this.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_TYPED_ARRAY {
-            let len = unsafe { typedarray::RuneTypedArray::length(ptr) } as u64;
+            let len = unsafe { typedarray::RuneTypedArray::effective_length(ptr) } as u64;
             return LengthOut::Done((len, len as f64));
         }
         if tag == TAG_STRING_OBJ {
@@ -15900,7 +15901,7 @@ fn seq_length(gc: &mut SemiSpace, vm: &mut Vm, this: Value) -> Result<(u64, f64)
     if let Some(ptr) = this.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_TYPED_ARRAY {
-            let len = unsafe { typedarray::RuneTypedArray::length(ptr) } as u64;
+            let len = unsafe { typedarray::RuneTypedArray::effective_length(ptr) } as u64;
             return Ok((len, len as f64));
         }
         if tag == TAG_STRING_OBJ {

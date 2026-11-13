@@ -5090,6 +5090,52 @@ pub fn array_buffer_constructor(
     this
 }
 
+/// get ArrayBuffer.prototype.byteLength.
+pub fn array_buffer_byte_length(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = array_buffer_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    Value::smi(unsafe { typedarray::RuneArrayBuffer::byte_length(ptr) } as i32)
+}
+
+/// get ArrayBuffer.prototype.detached.
+pub fn array_buffer_detached(
+    _gc: &mut SemiSpace,
+    _this: Value,
+    _args: &[Value],
+    _vm: &mut Vm,
+) -> Value {
+    Value::boolean(false)
+}
+
+/// get ArrayBuffer.prototype.resizable.
+pub fn array_buffer_resizable(
+    _gc: &mut SemiSpace,
+    _this: Value,
+    _args: &[Value],
+    _vm: &mut Vm,
+) -> Value {
+    Value::boolean(false)
+}
+
+/// get ArrayBuffer.prototype.maxByteLength.
+pub fn array_buffer_max_byte_length(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(ptr) = array_buffer_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    Value::smi(unsafe { typedarray::RuneArrayBuffer::byte_length(ptr) } as i32)
+}
+
 /// §25.1.5.1 ArrayBuffer.isView ( arg )
 pub fn array_buffer_is_view_builtin(
     _gc: &mut SemiSpace,
@@ -21771,6 +21817,26 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 2,
             name: "ArrayBuffer_prototype_slice",
             func: array_buffer_slice_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "ArrayBuffer_prototype_byteLength",
+            func: array_buffer_byte_length,
+        },
+        Builtin {
+            length: 0,
+            name: "ArrayBuffer_prototype_detached",
+            func: array_buffer_detached,
+        },
+        Builtin {
+            length: 0,
+            name: "ArrayBuffer_prototype_resizable",
+            func: array_buffer_resizable,
+        },
+        Builtin {
+            length: 0,
+            name: "ArrayBuffer_prototype_maxByteLength",
+            func: array_buffer_max_byte_length,
         },
         Builtin {
             length: 1,

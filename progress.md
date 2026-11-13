@@ -1614,6 +1614,20 @@ Integration suite: **818 passed, 0 failed, 3 ignored**.
 
 Integration suite: **819 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — ArrayBuffer length accessors (2026-11-13)
+
+- Added `ArrayBuffer.prototype` accessors:
+  - `byteLength` (TypeError on non-buffer receivers);
+  - `detached` (false for now);
+  - `resizable` (false);
+  - `maxByteLength` (current byte length for non-resizable buffers).
+- Test262: ArrayBuffer **26 → 34/221**.
+- Regression: `test_array_buffer_length_accessors`.
+- Known gaps: no detach/resize/transfer state; transfer/transferToFixedLength
+  and immutable proposals remain unimplemented.
+
+Integration suite: **820 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

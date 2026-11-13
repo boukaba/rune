@@ -15213,3 +15213,28 @@ fn test_math_sum_precise_and_minmax_edges() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_array_buffer_length_accessors() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var b = new ArrayBuffer(8);
+            var d = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength");
+            var threw = false;
+            try { d.get.call(1); } catch (e) { threw = e instanceof TypeError; }
+            [
+                b.byteLength === 8,
+                b.detached === false,
+                b.resizable === false,
+                b.maxByteLength === 8,
+                typeof d.get === "function",
+                d.set === undefined,
+                threw
+            ].join("|") === "true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

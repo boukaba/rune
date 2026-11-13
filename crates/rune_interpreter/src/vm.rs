@@ -2362,6 +2362,18 @@ impl Vm {
             if let Some(h) = find_handle(&self.builtins, "ArrayBuffer_prototype_slice") {
                 ab_proto_entries.push(("slice", h));
             }
+            for (name, key) in [
+                ("byteLength", "ArrayBuffer_prototype_byteLength"),
+                ("detached", "ArrayBuffer_prototype_detached"),
+                ("resizable", "ArrayBuffer_prototype_resizable"),
+                ("maxByteLength", "ArrayBuffer_prototype_maxByteLength"),
+            ] {
+                if let Some(getter) = find_handle(&self.builtins, key) {
+                    let pair =
+                        rune_core::accessor::AccessorPair::allocate(gc, getter, Value::undefined());
+                    ab_proto_entries.push((name, Value::from_heap_ptr(pair)));
+                }
+            }
             let tag_str = HeapString::allocate(gc, "ArrayBuffer") as *mut u8;
             let ab_proto = make_object(gc, &ab_proto_entries);
             unsafe {

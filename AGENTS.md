@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **ArrayBuffer accessors (2026-11-13)**: byteLength/detached/resizable/maxByteLength getters. ArrayBuffer 26→**34/221**. Integration **820**.
 - **Math.sumPrecise + min/max (2026-11-13)**: compensated Array/Set summation, ToNumber min/max, signed-zero rules. Math 178→**182/327**. Integration **819**.
 - **Math hyperbolic + signed zero (2026-11-13)**: fround/acosh/asinh/atanh/sinh/cosh/tanh/expm1/log1p; min/max/pow sign/NaN rules. Math 138→**178/327**. Integration **818**.
 - **Regexp/number coercion (2026-11-13)**: RegExp toString + ToPrimitive; JS exponent thresholds; FEFF whitespace. String 697→**722/1223**, trim 123/129. Integration **817**.

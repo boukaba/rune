@@ -2150,6 +2150,8 @@ impl Vm {
             for (name, handle) in [
                 ("set", "Map_prototype_set"),
                 ("get", "Map_prototype_get"),
+                ("getOrInsert", "Map_prototype_getOrInsert"),
+                ("getOrInsertComputed", "Map_prototype_getOrInsertComputed"),
                 ("has", "Map_prototype_has"),
                 ("delete", "Map_prototype_delete"),
                 ("clear", "Map_prototype_clear"),

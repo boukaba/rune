@@ -15930,3 +15930,35 @@ fn test_map_group_by() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_map_get_or_insert() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var m = new Map();
+            var a = m.getOrInsert("a", 1);
+            var b = m.getOrInsert("a", 2);
+            var calls = 0;
+            var c = m.getOrInsertComputed("a", function () { calls += 1; return 3; });
+            var d = m.getOrInsertComputed("b", function (k) { calls += 1; return k + "!"; });
+            m.getOrInsert(-0, "zero");
+            var weakRejected = false;
+            try { Map.prototype.getOrInsert.call(new WeakMap(), 1, 1); } catch (e) { weakRejected = e instanceof TypeError; }
+            [
+                Map.prototype.getOrInsert.length === 2,
+                Map.prototype.getOrInsertComputed.length === 2,
+                a === 1 && b === 1,
+                c === 1,
+                d === "b!",
+                calls === 1,
+                m.get("b") === "b!",
+                m.has(0),
+                weakRejected
+            ].join("|") === "true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

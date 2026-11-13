@@ -3393,6 +3393,95 @@ pub fn map_set_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
     this
 }
 
+/// Map.prototype.getOrInsert(key, value) — upsert proposal.
+pub fn map_get_or_insert_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(map_ptr) = map_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    if unsafe { RuneMap::is_weak(map_ptr) } {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Map.prototype method called on incompatible receiver",
+        ));
+        return Value::undefined();
+    }
+    let mut key = args.first().copied().unwrap_or(Value::undefined());
+    if key.as_float64() == Some(-0.0) {
+        key = Value::smi(0);
+    }
+    let value = args.get(1).copied().unwrap_or(Value::undefined());
+    if let Some(i) = key_index(unsafe { RuneMap::entries(map_ptr) }, key, true) {
+        let entries = unsafe { RuneMap::entries(map_ptr) } as *mut RuneArray;
+        return unsafe { RuneArray::get_element(entries, i + 1) };
+    }
+    let mut slot = this;
+    map_set_internal(gc, &mut slot, key, value);
+    value
+}
+
+/// Map.prototype.getOrInsertComputed(key, callbackfn) — upsert proposal.
+pub fn map_get_or_insert_computed_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(map_ptr) = map_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    if unsafe { RuneMap::is_weak(map_ptr) } {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Map.prototype method called on incompatible receiver",
+        ));
+        return Value::undefined();
+    }
+    let callback = args.get(1).copied().unwrap_or(Value::undefined());
+    let callable = callback
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC)
+        || callback.as_smi().is_some_and(|s| s < 0);
+    if !callable {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Map.prototype.getOrInsertComputed callback must be callable",
+        ));
+        return Value::undefined();
+    }
+    let mut key = args.first().copied().unwrap_or(Value::undefined());
+    if key.as_float64() == Some(-0.0) {
+        key = Value::smi(0);
+    }
+    if let Some(i) = key_index(unsafe { RuneMap::entries(map_ptr) }, key, true) {
+        let entries = unsafe { RuneMap::entries(map_ptr) } as *mut RuneArray;
+        return unsafe { RuneArray::get_element(entries, i + 1) };
+    }
+    let value = match vm.call_value_sync(gc, callback, Value::undefined(), &[key]) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let slot = vm.temp_roots.len();
+    vm.temp_roots.push(this);
+    let mut rooted = vm.temp_roots[slot];
+    map_set_internal(gc, &mut rooted, key, value);
+    vm.temp_roots.truncate(slot);
+    value
+}
+
 /// §27.1.3.8 Map.prototype.get
 pub fn map_get_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let Some(map_ptr) = map_receiver(gc, this, vm) else {
@@ -23265,6 +23354,16 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 1,
             name: "Map_prototype_set",
             func: map_set_builtin,
+        },
+        Builtin {
+            length: 2,
+            name: "Map_prototype_getOrInsert",
+            func: map_get_or_insert_builtin,
+        },
+        Builtin {
+            length: 2,
+            name: "Map_prototype_getOrInsertComputed",
+            func: map_get_or_insert_computed_builtin,
         },
         Builtin {
             length: 1,

@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Map upsert (2026-11-13)**: getOrInsert/getOrInsertComputed with brand checks. getOrInsert **14/14**, Map **161/204**. Integration **846**.
 - **Map.groupBy (2026-11-13)**: SameValueZero, insertion order, iterable drain. Map/groupBy **14/14**, Map **140/204**. Integration **845**.
 - **fromEntries/groupBy complete (2026-11-13)**: IteratorClose, accessor Get, assert isolation. fromEntries **25/25**, groupBy **14/14**, Object **2648/3411**. Integration **844**.
 - **Iterable fromEntries/groupBy (2026-11-13)**: sync iterator drain, ToPropertyKey, duplicate overwrite. fromEntries 8→**14/25**, Object **2635/3411**. Integration **843**.

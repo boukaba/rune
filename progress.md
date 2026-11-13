@@ -2099,6 +2099,24 @@ Integration suite: **844 passed, 0 failed, 3 ignored**.
 
 Integration suite: **845 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Map getOrInsert / getOrInsertComputed (2026-11-13)
+
+- Implemented the upsert methods:
+  - `getOrInsert(key, value)`: brand check rejects WeakMap/primitive receivers,
+    normalizes `-0` to `+0`, returns the existing value or inserts and returns
+    the supplied value;
+  - `getOrInsertComputed(key, callbackfn)`: callable validation, existing key
+    short-circuits without calling the callback, otherwise sync-calls
+    `callbackfn(key)`, inserts and returns the result; throwing callbacks leave
+    the map unchanged.
+- Test262: `getOrInsert` **0 → 14/14**, `getOrInsertComputed` **0 → 16/19**,
+  Map **140 → 161/204**.
+- Regression: `test_map_get_or_insert`.
+- Known remaining computed failures are unrelated: one test needs BigInt
+  literals, the other `new Function()`.
+
+Integration suite: **846 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

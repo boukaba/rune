@@ -2918,6 +2918,19 @@ impl Vm {
             for (name, handle) in [
                 ("construct", "Reflect_construct"),
                 ("apply", "Reflect_apply"),
+                ("get", "Reflect_get"),
+                ("set", "Reflect_set"),
+                ("has", "Reflect_has"),
+                (
+                    "getOwnPropertyDescriptor",
+                    "Reflect_getOwnPropertyDescriptor",
+                ),
+                ("defineProperty", "Reflect_defineProperty"),
+                ("getPrototypeOf", "Reflect_getPrototypeOf"),
+                ("setPrototypeOf", "Reflect_setPrototypeOf"),
+                ("isExtensible", "Reflect_isExtensible"),
+                ("preventExtensions", "Reflect_preventExtensions"),
+                ("ownKeys", "Reflect_ownKeys"),
             ] {
                 if let Some(h) = find_handle(&self.builtins, handle) {
                     reflect_entries.push((name, h));

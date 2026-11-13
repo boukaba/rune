@@ -2208,6 +2208,21 @@ Integration suite: **850 passed, 0 failed, 3 ignored**.
 
 Integration suite: **851 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Reflect property methods (2026-11-13)
+
+- Added `Reflect.get`, `set`, `has`, `getOwnPropertyDescriptor`,
+  `defineProperty`, `getPrototypeOf`, `setPrototypeOf`, `isExtensible`,
+  `preventExtensions`, and `ownKeys`.
+- `get` uses the synchronous accessor-aware Get helper; `set` funnels through
+  `vm_set_property` with a synthetic strict site; the descriptor/prototype/
+  integrity methods reuse the Object builtins.
+- Test262: Reflect **39 → 92/153**.
+- Regression: `test_reflect_property_methods`.
+- Known: `Reflect.deleteProperty` still absent; `ownKeys` excludes symbols and
+  does not yet enforce integer-key ordering; `receiver` arguments are ignored.
+
+Integration suite: **852 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

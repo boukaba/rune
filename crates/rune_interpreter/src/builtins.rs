@@ -3528,6 +3528,185 @@ pub fn reflect_construct(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &
     result
 }
 
+fn reflect_key_value(gc: &mut SemiSpace, raw: Value) -> Value {
+    if raw.as_symbol_id().is_some() {
+        return raw;
+    }
+    if let Some(ptr) = raw.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_STRING {
+            return raw;
+        }
+    }
+    Value::from_heap_ptr(HeapString::allocate(gc, &value_to_js_string(raw)) as *mut u8)
+}
+
+fn reflect_target(gc: &mut SemiSpace, args: &[Value], vm: &mut Vm) -> Option<Value> {
+    let target = args.first().copied().unwrap_or(Value::undefined());
+    if !is_object_value(target) {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Reflect method called on non-object",
+        ));
+        return None;
+    }
+    Some(target)
+}
+
+pub fn reflect_get(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some(target) = reflect_target(gc, args, vm) else {
+        return Value::undefined();
+    };
+    let key = reflect_key_value(gc, args.get(1).copied().unwrap_or(Value::undefined()));
+    match get_property_value_sync(gc, vm, target, key) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            Value::undefined()
+        }
+    }
+}
+
+pub fn reflect_set(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some(target) = reflect_target(gc, args, vm) else {
+        return Value::undefined();
+    };
+    let key = reflect_key_value(gc, args.get(1).copied().unwrap_or(Value::undefined()));
+    let value = args.get(2).copied().unwrap_or(Value::undefined());
+    let site = crate::vm::PropSetSite {
+        ic_index: -1,
+        prog_ptr: std::ptr::null(),
+        pc: 0,
+        is_strict: true,
+    };
+    let outcome = vm.vm_set_property(gc, target, key, value, site);
+    match outcome {
+        crate::vm::PropSetOut::Ready(_) => {
+            if vm.pending_exception.is_some() {
+                Value::undefined()
+            } else {
+                Value::boolean(true)
+            }
+        }
+        crate::vm::PropSetOut::Wait => Value::boolean(true),
+        crate::vm::PropSetOut::Bail(Some(crate::vm::Exit::Throw(e))) => {
+            vm.set_pending_exception(e);
+            Value::undefined()
+        }
+        crate::vm::PropSetOut::Bail(_) => Value::boolean(true),
+    }
+}
+
+pub fn reflect_has(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some(target) = reflect_target(gc, args, vm) else {
+        return Value::undefined();
+    };
+    let key = reflect_key_value(gc, args.get(1).copied().unwrap_or(Value::undefined()));
+    Value::boolean(crate::vm::has_property(
+        target,
+        key,
+        Some(vm.function_prototype),
+    ))
+}
+
+pub fn reflect_get_own_property_descriptor(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(target) = reflect_target(gc, args, vm) else {
+        return Value::undefined();
+    };
+    let key = reflect_key_value(gc, args.get(1).copied().unwrap_or(Value::undefined()));
+    object_get_own_property_descriptor(gc, Value::undefined(), &[target, key], vm)
+}
+
+pub fn reflect_define_property(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(target) = reflect_target(gc, args, vm) else {
+        return Value::undefined();
+    };
+    let key = reflect_key_value(gc, args.get(1).copied().unwrap_or(Value::undefined()));
+    let descriptor = args.get(2).copied().unwrap_or(Value::undefined());
+    let result = object_define_property(gc, Value::undefined(), &[target, key, descriptor], vm);
+    if vm.pending_exception.is_some() {
+        return Value::undefined();
+    }
+    Value::boolean(is_object_value(result))
+}
+
+pub fn reflect_get_prototype_of(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    object_get_prototype_of(gc, Value::undefined(), args, vm)
+}
+
+pub fn reflect_set_prototype_of(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let result = object_set_prototype_of(gc, Value::undefined(), args, vm);
+    if vm.pending_exception.is_some() {
+        return Value::undefined();
+    }
+    Value::boolean(is_object_value(result))
+}
+
+pub fn reflect_is_extensible(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    object_is_extensible(gc, Value::undefined(), args, vm)
+}
+
+pub fn reflect_prevent_extensions(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let target = reflect_target(gc, args, vm);
+    match target {
+        Some(t) => {
+            let result = object_prevent_extensions(gc, Value::undefined(), &[t], vm);
+            if vm.pending_exception.is_some() {
+                Value::undefined()
+            } else {
+                Value::boolean(is_object_value(result))
+            }
+        }
+        None => Value::undefined(),
+    }
+}
+
+pub fn reflect_own_keys(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some(target) = reflect_target(gc, args, vm) else {
+        return Value::undefined();
+    };
+    let entries = match object_own_entries_mode(gc, target, vm, false) {
+        Ok(e) => e,
+        Err(()) => return Value::undefined(),
+    };
+    let vals: Vec<Value> = entries
+        .iter()
+        .map(|(k, _)| Value::from_heap_ptr(HeapString::allocate(gc, k) as *mut u8))
+        .collect();
+    build_array(gc, &vals, vm)
+}
+
 /// Reflect.apply(target, thisArgument, argumentsList).
 pub fn reflect_apply(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let target = args.first().copied().unwrap_or(Value::undefined());
@@ -8985,18 +9164,19 @@ fn build_grouped_map(
 /// supported inside sync builtins — documented gap).
 /// Synchronous Get that invokes accessor getters through the re-entrant call
 /// path. `load_property_recursive` returns an AccessorPair for accessor slots.
-fn get_value_sync(
+fn get_property_value_sync(
     gc: &mut SemiSpace,
     vm: &mut Vm,
     object: Value,
-    key: &str,
+    key: Value,
 ) -> Result<Value, Value> {
     let slot = vm.temp_roots.len();
     vm.temp_roots.push(object);
+    vm.temp_roots.push(key);
     let result = (|| {
-        let key_val = Value::from_heap_ptr(HeapString::allocate(gc, key) as *mut u8);
         let object = vm.temp_roots[slot];
-        let value = load_property_recursive(object, key_val, Some(vm.function_prototype), gc);
+        let key = vm.temp_roots[slot + 1];
+        let value = load_property_recursive(object, key, Some(vm.function_prototype), gc);
         if let Some(exc) = vm.pending_exception.take() {
             return Err(exc);
         }
@@ -9014,6 +9194,16 @@ fn get_value_sync(
     })();
     vm.temp_roots.truncate(slot);
     result
+}
+
+fn get_value_sync(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    object: Value,
+    key: &str,
+) -> Result<Value, Value> {
+    let key_val = Value::from_heap_ptr(HeapString::allocate(gc, key) as *mut u8);
+    get_property_value_sync(gc, vm, object, key_val)
 }
 
 fn close_iterator(gc: &mut SemiSpace, vm: &mut Vm, iterator: Value) {
@@ -23643,6 +23833,56 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 2,
             name: "Map_prototype_set",
             func: map_set_builtin,
+        },
+        Builtin {
+            length: 2,
+            name: "Reflect_get",
+            func: reflect_get,
+        },
+        Builtin {
+            length: 3,
+            name: "Reflect_set",
+            func: reflect_set,
+        },
+        Builtin {
+            length: 2,
+            name: "Reflect_has",
+            func: reflect_has,
+        },
+        Builtin {
+            length: 2,
+            name: "Reflect_getOwnPropertyDescriptor",
+            func: reflect_get_own_property_descriptor,
+        },
+        Builtin {
+            length: 3,
+            name: "Reflect_defineProperty",
+            func: reflect_define_property,
+        },
+        Builtin {
+            length: 1,
+            name: "Reflect_getPrototypeOf",
+            func: reflect_get_prototype_of,
+        },
+        Builtin {
+            length: 2,
+            name: "Reflect_setPrototypeOf",
+            func: reflect_set_prototype_of,
+        },
+        Builtin {
+            length: 1,
+            name: "Reflect_isExtensible",
+            func: reflect_is_extensible,
+        },
+        Builtin {
+            length: 1,
+            name: "Reflect_preventExtensions",
+            func: reflect_prevent_extensions,
+        },
+        Builtin {
+            length: 1,
+            name: "Reflect_ownKeys",
+            func: reflect_own_keys,
         },
         Builtin {
             length: 2,

@@ -16120,3 +16120,31 @@ fn test_reflect_construct_and_apply() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_reflect_property_methods() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var o = { a: 1 };
+            var set = Reflect.set(o, "b", 2);
+            var desc = Reflect.getOwnPropertyDescriptor(o, "a");
+            var own = Reflect.ownKeys(o).sort().join(",");
+            var ext = Reflect.isExtensible(o);
+            Reflect.preventExtensions(o);
+            [
+                Reflect.get(o, "a") === 1,
+                set === true && o.b === 2,
+                Reflect.has(o, "b"),
+                desc.value === 1 && desc.enumerable === true,
+                own === "a,b",
+                ext === true,
+                Reflect.isExtensible(o) === false,
+                Reflect.getPrototypeOf(o) === Object.prototype
+            ].join("|") === "true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

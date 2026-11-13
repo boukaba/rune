@@ -155,7 +155,7 @@ impl SemiSpace {
         self.scratch_roots.len()
     }
 
-    pub(crate) fn scratch_value(&self, index: usize) -> Value {
+    pub fn scratch_value(&self, index: usize) -> Value {
         self.scratch_roots[index]
     }
 

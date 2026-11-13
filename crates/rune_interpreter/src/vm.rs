@@ -1103,6 +1103,9 @@ pub struct Vm {
     pub string_prototype: Value,
     pub string_constructor: Value,
     pub number_constructor: Value,
+    pub number_prototype: Value,
+    pub boolean_constructor: Value,
+    pub boolean_prototype: Value,
     pub object_constructor: Value,
     pub promise_constructor: Value,
     pub promise_prototype: Value,
@@ -1353,6 +1356,9 @@ impl Vm {
             string_constructor: Value::undefined(),
             object_constructor: Value::undefined(),
             number_constructor: Value::undefined(),
+            number_prototype: Value::undefined(),
+            boolean_constructor: Value::undefined(),
+            boolean_prototype: Value::undefined(),
             promise_constructor: Value::undefined(),
             promise_prototype: Value::undefined(),
             promise_bridge_prog: std::ptr::null(),
@@ -1803,14 +1809,19 @@ impl Vm {
             self.builtin_wrappers.insert("String".to_string(), str_ctor);
         }
 
-        // Number constructor with .prototype + numeric constants (§21.1.2).
-        // B1f-1: POSITIVE_INFINITY (and friends) unblock the S15 length
-        // families, which assign them to .length and compare against them.
+        // Number constructor + %Number.prototype% (§21.1.2/§21.1.3).
         if find_handle(&self.builtins, "Number").is_some() {
+            let to_string = find_handle(&self.builtins, "Number_prototype_toString")
+                .unwrap_or(Value::undefined());
+            let value_of = find_handle(&self.builtins, "Number_prototype_valueOf")
+                .unwrap_or(Value::undefined());
+            let num_proto = make_object(gc, &[("toString", to_string), ("valueOf", value_of)]);
+            self.number_prototype = num_proto;
+            let num_name = Value::from_heap_ptr(HeapString::allocate(gc, "Number") as *mut u8);
             let num_ctor = make_object(
                 gc,
                 &[
-                    ("prototype", Value::undefined()),
+                    ("prototype", num_proto),
                     ("EPSILON", Value::from_float64(f64::EPSILON)),
                     (
                         "MAX_SAFE_INTEGER",
@@ -1825,10 +1836,54 @@ impl Vm {
                     ("NaN", Value::from_float64(f64::NAN)),
                     ("NEGATIVE_INFINITY", Value::from_float64(f64::NEG_INFINITY)),
                     ("POSITIVE_INFINITY", Value::from_float64(f64::INFINITY)),
+                    ("length", Value::smi(1)),
+                    ("name", num_name),
                 ],
             );
+            if let Some(proto_ptr) = num_proto.heap_ptr() {
+                unsafe {
+                    JSObject::add_property(
+                        proto_ptr as *mut JSObject,
+                        PropertyKey::from_string("constructor"),
+                        "constructor".to_string(),
+                        num_ctor,
+                    );
+                }
+            }
             self.number_constructor = num_ctor;
             self.builtin_wrappers.insert("Number".to_string(), num_ctor);
+        }
+
+        // Boolean constructor + %Boolean.prototype% (§20.3).
+        if find_handle(&self.builtins, "Boolean").is_some() {
+            let to_string = find_handle(&self.builtins, "Boolean_prototype_toString")
+                .unwrap_or(Value::undefined());
+            let value_of = find_handle(&self.builtins, "Boolean_prototype_valueOf")
+                .unwrap_or(Value::undefined());
+            let bool_proto = make_object(gc, &[("toString", to_string), ("valueOf", value_of)]);
+            self.boolean_prototype = bool_proto;
+            let bool_name = Value::from_heap_ptr(HeapString::allocate(gc, "Boolean") as *mut u8);
+            let bool_ctor = make_object(
+                gc,
+                &[
+                    ("prototype", bool_proto),
+                    ("length", Value::smi(1)),
+                    ("name", bool_name),
+                ],
+            );
+            if let Some(proto_ptr) = bool_proto.heap_ptr() {
+                unsafe {
+                    JSObject::add_property(
+                        proto_ptr as *mut JSObject,
+                        PropertyKey::from_string("constructor"),
+                        "constructor".to_string(),
+                        bool_ctor,
+                    );
+                }
+            }
+            self.boolean_constructor = bool_ctor;
+            self.builtin_wrappers
+                .insert("Boolean".to_string(), bool_ctor);
         }
 
         // Symbol constructor — well-known symbol statics + Symbol.prototype.
@@ -2506,6 +2561,8 @@ impl Vm {
         let obj_proto_u8 = obj_proto_ptr as *mut u8;
         for proto in [
             self.function_prototype,
+            self.number_prototype,
+            self.boolean_prototype,
             self.regexp_prototype,
             self.error_protos
                 .first()
@@ -3166,7 +3223,13 @@ impl Vm {
                 {
                     let proto = self.error_protos.get(ti).and_then(|v| v.heap_ptr());
                     if let Some(pp) = proto {
-                        if ordinary_has_instance(thrown, pp) {
+                        if ordinary_has_instance(
+                            thrown,
+                            pp,
+                            self.function_prototype
+                                .heap_ptr()
+                                .unwrap_or(std::ptr::null_mut()),
+                        ) {
                             return true;
                         }
                     }
@@ -3747,6 +3810,9 @@ impl Vm {
         gc.push_root(&self.string_constructor as *const Value as *mut u64);
         gc.push_root(&self.object_constructor as *const Value as *mut u64);
         gc.push_root(&self.number_constructor as *const Value as *mut u64);
+        gc.push_root(&self.number_prototype as *const Value as *mut u64);
+        gc.push_root(&self.boolean_constructor as *const Value as *mut u64);
+        gc.push_root(&self.boolean_prototype as *const Value as *mut u64);
         gc.push_root(&self.promise_constructor as *const Value as *mut u64);
         gc.push_root(&self.map_constructor as *const Value as *mut u64);
         gc.push_root(&self.array_constructor as *const Value as *mut u64);
@@ -6798,7 +6864,13 @@ impl Vm {
                         continue;
                     }
                     // Walk lhs prototype chain
-                    let result = ordinary_has_instance(lhs, rhs_proto_ptr);
+                    let result = ordinary_has_instance(
+                        lhs,
+                        rhs_proto_ptr,
+                        self.function_prototype
+                            .heap_ptr()
+                            .unwrap_or(std::ptr::null_mut()),
+                    );
                     self.push(Value::boolean(result));
                     self.frames[fi].pc = pc + 1;
                 }
@@ -9249,6 +9321,22 @@ impl Vm {
                         }
                         continue;
                     }
+                    // §20.3.2.1: `new Boolean(x)` creates a wrapper.
+                    if constructor == self.boolean_constructor {
+                        let b = args
+                            .first()
+                            .map(|v| v.to_boolean().unwrap_or(true))
+                            .unwrap_or(false);
+                        let wrapper = make_wrapper_value(
+                            gc,
+                            crate::builtins::BOOLEAN_WRAPPER_KEY,
+                            Value::boolean(b),
+                            self.boolean_prototype,
+                        );
+                        self.push(wrapper);
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    }
                     // B1f-1: `new Number(x)` returns the number primitive.
                     // (Real Number wrapper objects are B2 work; the S15
                     // length families only extract the primitive. Returning
@@ -9263,22 +9351,25 @@ impl Vm {
                             }
                             continue;
                         }
-                        self.push(result);
+                        let wrapper = make_wrapper_value(
+                            gc,
+                            crate::builtins::NUMBER_WRAPPER_KEY,
+                            result,
+                            self.number_prototype,
+                        );
+                        self.push(wrapper);
                         self.frames[fi].pc = pc + 1;
                         continue;
                     }
                     // §20.1.1.1: `new Object(...)` — fresh empty object with
                     // %Object.prototype% as [[Prototype]].
                     if constructor == self.object_constructor {
-                        let shape = Shape::empty();
-                        let proto_ptr = self.object_prototype.heap_ptr();
-                        let obj = JSObject::allocate(gc, shape, &[]);
-                        if let Some(pp) = proto_ptr {
-                            unsafe {
-                                JSObject::set_prototype(obj, pp);
-                            }
-                        }
-                        self.push(Value::from_heap_ptr(obj as *mut u8));
+                        let value = to_object_value(
+                            gc,
+                            args.first().copied().unwrap_or(Value::undefined()),
+                            self,
+                        );
+                        self.push(value);
                         self.frames[fi].pc = pc + 1;
                         continue;
                     }
@@ -9760,6 +9851,15 @@ impl Vm {
 
                     // §20.1.1.1: Object(value) called as a function.
                     if callee == self.object_constructor {
+                        let value = to_object_value(
+                            gc,
+                            args.first().copied().unwrap_or(Value::undefined()),
+                            self,
+                        );
+                        self.push(value);
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                        #[allow(unreachable_code)]
                         let result = crate::builtins::object_builtin(gc, this, &args, self);
                         if let Some(exc) = self.pending_exception.take() {
                             if let Some(exit) = self.handle_throw(gc, exc) {
@@ -9767,6 +9867,14 @@ impl Vm {
                             }
                             continue;
                         }
+                        self.push(result);
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    }
+
+                    // Boolean(value) called as a function.
+                    if callee == self.boolean_constructor {
+                        let result = crate::builtins::boolean_builtin(gc, this, &args, self);
                         self.push(result);
                         self.frames[fi].pc = pc + 1;
                         continue;
@@ -13038,6 +13146,15 @@ fn try_convert_object_to_string(val: Value, gc: &mut SemiSpace, vm: &mut Vm) -> 
         let heap_ptr = HeapString::allocate(gc, &s);
         return Ok(Value::from_heap_ptr(heap_ptr as *mut u8));
     }
+    if tag == TAG_STRING_OBJ {
+        let sptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
+        return Ok(Value::from_heap_ptr(sptr));
+    }
+    if tag == TAG_OBJECT {
+        if let Some(primitive) = crate::builtins::wrapper_primitive(val) {
+            return Ok(primitive);
+        }
+    }
     if tag != TAG_OBJECT {
         return Ok(val);
     }
@@ -14707,6 +14824,70 @@ pub(crate) fn has_property(obj: Value, raw_key: Value, function_prototype: Optio
     }
 }
 
+fn make_wrapper_value(gc: &mut SemiSpace, key: &str, value: Value, prototype: Value) -> Value {
+    let shape = Shape::intern(
+        vec![(PropertyKey::from_string(key), 0)],
+        vec![key.to_string()],
+    );
+    let ptr = JSObject::allocate(gc, shape, &[value]);
+    if let Some(proto) = prototype.heap_ptr() {
+        unsafe { JSObject::set_prototype(ptr, proto) };
+    }
+    Value::from_heap_ptr(ptr as *mut u8)
+}
+
+/// ToObject (§7.1.14): box primitives into String/Boolean/Number wrapper
+/// objects; objects pass through; null/undefined become a fresh object.
+pub(crate) fn to_object_value(gc: &mut SemiSpace, value: Value, vm: &mut Vm) -> Value {
+    if let Some(ptr) = value.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_STRING {
+            let base = gc.scratch_len();
+            gc.push_scratch_root(value);
+            let s = unsafe { HeapString::to_string(ptr as *mut HeapString) };
+            let sp = HeapString::allocate(gc, &s);
+            gc.push_scratch_root(Value::from_heap_ptr(sp as *mut u8));
+            let sp_now = gc
+                .scratch_value(base + 1)
+                .heap_ptr()
+                .unwrap_or(std::ptr::null_mut());
+            let proto = vm
+                .string_prototype
+                .heap_ptr()
+                .map(Value::from_heap_ptr)
+                .unwrap_or(Value::undefined());
+            let obj = StringObject::allocate(gc, sp_now, proto);
+            gc.truncate_scratch(base);
+            return Value::from_heap_ptr(obj as *mut u8);
+        }
+        return value;
+    }
+    if value.is_undefined() || value.is_null() {
+        let ptr = JSObject::allocate(gc, Shape::empty(), &[]);
+        if let Some(proto) = vm.object_prototype.heap_ptr() {
+            unsafe { JSObject::set_prototype(ptr, proto) };
+        }
+        return Value::from_heap_ptr(ptr as *mut u8);
+    }
+    if let Some(b) = value.to_boolean() {
+        return make_wrapper_value(
+            gc,
+            crate::builtins::BOOLEAN_WRAPPER_KEY,
+            Value::boolean(b),
+            vm.boolean_prototype,
+        );
+    }
+    if value.as_smi().is_some() || value.as_float64().is_some() {
+        return make_wrapper_value(
+            gc,
+            crate::builtins::NUMBER_WRAPPER_KEY,
+            value,
+            vm.number_prototype,
+        );
+    }
+    value
+}
+
 /// Prototype pointer for any heap object tag, used by `instanceof` and
 /// `Object.getPrototypeOf`. Returns None for primitives/internal objects with
 /// no prototype.
@@ -14729,7 +14910,7 @@ pub(crate) fn value_prototype(value: Value) -> Option<*mut u8> {
 }
 
 /// OrdinaryHasInstance per §13.10.2: walk lhs prototype chain looking for rhs_proto.
-fn ordinary_has_instance(lhs: Value, rhs_proto_ptr: *mut u8) -> bool {
+fn ordinary_has_instance(lhs: Value, rhs_proto_ptr: *mut u8, function_proto: *mut u8) -> bool {
     let mut current = lhs;
     let mut depth = 0;
     loop {
@@ -14737,9 +14918,18 @@ fn ordinary_has_instance(lhs: Value, rhs_proto_ptr: *mut u8) -> bool {
             return false;
         }
         depth += 1;
-        let Some(proto) = value_prototype(current) else {
+        let Some(cp) = current.heap_ptr() else {
             return false;
         };
+        let tag = unsafe { (*(cp as *const GcHeader)).tag() };
+        let proto = if tag == TAG_FUNC {
+            function_proto
+        } else {
+            value_prototype(current).unwrap_or(std::ptr::null_mut())
+        };
+        if proto.is_null() {
+            return false;
+        }
         if proto == rhs_proto_ptr {
             return true;
         }

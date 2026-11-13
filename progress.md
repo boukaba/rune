@@ -767,6 +767,31 @@ Integration suite: **773 passed, 0 failed, 3 ignored**.
 
 Integration suite: **776 passed, 0 failed, 3 ignored**; full 512-stress 776.
 
+### Phase 2 — Boolean/Number wrappers + primitive array receivers (2026-11-13)
+
+- Added `Boolean` global and `%Boolean.prototype%`; `Number.prototype` now
+  exists with `valueOf`/`toString`. `new Boolean(x)`/`new Number(x)` create real
+  wrapper objects (hidden internal slots, visible `length`/index properties),
+  while plain calls still return primitives.
+- `%String.prototype%`, `%Boolean.prototype%`, `%Number.prototype%` and
+  `%Function.prototype%` are wired into the Object.prototype chain; generic
+  `Object.getPrototypeOf`/`instanceof` now handle function objects via
+  `Function.prototype` rather than the function's own `.prototype` object.
+- `ToObject` boxes String/Boolean/Number receivers for `Array.prototype.*`
+  methods, so `map.call(false, ...)`, `map.call("abc", ...)` and primitive
+  wrapper array-likes observe boxed callback receivers and correct elements.
+  Boxed receivers are retained for the operation (known bounded-lifetime leak).
+- Hidden wrapper slots are filtered from `Object.keys`/JSON; wrappers serialize
+  as their primitive (`JSON.stringify(new Number(3)) === "3"`).
+- Add works through wrapper `valueOf`; non-Add arithmetic still needs a
+  number-hint ToPrimitive pass (`new Number(3) * 2` currently NaN).
+
+Measured: `built-ins/Array/prototype/map` **191/216 (88.4%; was 184)**;
+Promise unchanged at 373/703. New regressions: wrapper semantics, primitive
+array receivers, function prototype/instanceof.
+
+Integration suite: **779 passed, 0 failed, 3 ignored**; full 512-stress 779.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

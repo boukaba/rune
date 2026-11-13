@@ -55,7 +55,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 
 | Crate | Purpose |
 |---|---|
-| `rune_core` | Tagged Smi/heap values, semi-space GC, immutable shapes, strings, **stable object/array headers + slot buffers** |
+| `rune_core` | Tagged Smi/heap values, semi-space GC, immutable shapes, strings, **stable object/array headers + slot buffers**, String/Boolean/Number wrapper objects |
 | `rune_bytecode` | Bytecode opcodes, instructions, program representation, CFG/liveness analysis |
 | `rune_parser` | JavaScript lexer, recursive-descent parser, bytecode emitter |
 | `rune_interpreter` | Stack-based VM with SIDT inline caches, call frames, generators, builtins |

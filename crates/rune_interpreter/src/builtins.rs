@@ -1324,6 +1324,117 @@ pub fn number_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
     Value::from_float64(f64::NAN)
 }
 
+pub const BOOLEAN_WRAPPER_KEY: &str = "\u{0}boolean";
+pub const NUMBER_WRAPPER_KEY: &str = "\u{0}number";
+
+/// Boolean(value) — ToBoolean (§20.3.1.1).
+pub fn boolean_builtin(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let b = args
+        .first()
+        .map(|v| v.to_boolean().unwrap_or(true))
+        .unwrap_or(false);
+    Value::boolean(b)
+}
+
+pub(crate) fn wrapper_primitive(this: Value) -> Option<Value> {
+    wrapper_value(this, NUMBER_WRAPPER_KEY).or_else(|| wrapper_value(this, BOOLEAN_WRAPPER_KEY))
+}
+
+fn wrapper_value(this: Value, key: &str) -> Option<Value> {
+    let ptr = this.heap_ptr()?;
+    let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+    if tag != TAG_OBJECT {
+        return None;
+    }
+    let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+    shape
+        .lookup(&PropertyKey::from_string(key))
+        .map(|slot| unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) })
+}
+
+fn wrapper_value_or_throw(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    this: Value,
+    key: &str,
+    method: &str,
+) -> Option<Value> {
+    if let Some(value) = wrapper_value(this, key) {
+        return Some(value);
+    }
+    vm.set_pending_exception(crate::errors::error_object(
+        gc,
+        &vm.error_protos,
+        crate::errors::ErrorKind::TypeError,
+        &format!("{method} called on incompatible receiver"),
+    ));
+    None
+}
+
+pub fn boolean_prototype_value_of(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    wrapper_value_or_throw(
+        gc,
+        vm,
+        this,
+        BOOLEAN_WRAPPER_KEY,
+        "Boolean.prototype.valueOf",
+    )
+    .unwrap_or(Value::undefined())
+}
+
+pub fn boolean_prototype_to_string(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(v) = wrapper_value_or_throw(
+        gc,
+        vm,
+        this,
+        BOOLEAN_WRAPPER_KEY,
+        "Boolean.prototype.toString",
+    ) else {
+        return Value::undefined();
+    };
+    let b = v.to_boolean().unwrap_or(false);
+    Value::from_heap_ptr(HeapString::allocate(gc, if b { "true" } else { "false" }) as *mut u8)
+}
+
+pub fn number_prototype_value_of(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    wrapper_value_or_throw(gc, vm, this, NUMBER_WRAPPER_KEY, "Number.prototype.valueOf")
+        .unwrap_or(Value::undefined())
+}
+
+pub fn number_prototype_to_string(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(v) = wrapper_value_or_throw(
+        gc,
+        vm,
+        this,
+        NUMBER_WRAPPER_KEY,
+        "Number.prototype.toString",
+    ) else {
+        return Value::undefined();
+    };
+    let s = value_to_js_string(v);
+    Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8)
+}
+
 /// String(value) — converts a value to its string representation.
 /// Per §21.1.2.1: calls ToString via ToPrimitive with string hint.
 pub fn string_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
@@ -6026,6 +6137,11 @@ pub fn object_get_prototype_of(
         ));
         return Value::undefined();
     };
+    if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_FUNC {
+        if let Some(proto) = vm.function_prototype.heap_ptr() {
+            return Value::from_heap_ptr(proto);
+        }
+    }
     if let Some(proto) = crate::vm::value_prototype(obj) {
         return Value::from_heap_ptr(proto);
     }
@@ -6186,6 +6302,9 @@ fn object_own_entries(
                         continue;
                     }
                     let key = shape.key_name_at(i).unwrap_or("").to_string();
+                    if key.starts_with('\0') {
+                        continue;
+                    }
                     let value = unsafe { JSObject::get_slot(ptr as *mut JSObject, i) };
                     entries.push((key, value));
                 }
@@ -6214,6 +6333,9 @@ fn object_own_entries(
                             continue;
                         }
                         let key = shape.key_name_at(i).unwrap_or("").to_string();
+                        if key.starts_with('\0') {
+                            continue;
+                        }
                         let value = unsafe { JSObject::get_slot(extra_ptr as *mut JSObject, i) };
                         entries.push((key, value));
                     }
@@ -13240,6 +13362,9 @@ pub fn json_stringify(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
                 return Ok(format!("[{}]", parts.join(",")));
             }
             if tag == TAG_OBJECT {
+                if let Some(primitive) = wrapper_primitive(val) {
+                    return stringify_val(gc, primitive, stack, vm);
+                }
                 if stack.contains(&ptr) {
                     vm.set_pending_exception(crate::errors::error_object(
                         gc,
@@ -13259,6 +13384,9 @@ pub fn json_stringify(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
                         continue;
                     }
                     let key_name = shape.key_name_at(i).unwrap_or("");
+                    if key_name.starts_with('\0') {
+                        continue;
+                    }
                     let val = unsafe { JSObject::get_slot(ptr as *mut JSObject, i) };
                     if val.is_undefined() {
                         continue;
@@ -15724,9 +15852,20 @@ fn array_iter_prologue(
     args: &[Value],
     method: &str,
     caller: BuiltinFn,
-) -> Option<(u32, Value, Value, *mut u8)> {
+) -> Option<(u32, Value, Value, *mut u8, Value)> {
     if !require_object_coercible(this, vm, gc) {
         return None;
+    }
+    // ToObject for primitive receivers: String/Boolean/Number array-like
+    // methods must observe a boxed wrapper. Retain it for the operation so a
+    // GC during a callback cannot move the source pointer.
+    let mut this = this;
+    let primitive_string = this
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_STRING);
+    if this.heap_ptr().is_none() || primitive_string {
+        this = crate::vm::to_object_value(gc, this, vm);
+        vm.retained_values.push(this);
     }
     // B1f-3: LengthOfArrayLike via the B1f-1 chain reader (own + inherited data
     // lengths, ToLength-clamped u64; symbol lengths throw anywhere on the chain
@@ -15776,7 +15915,7 @@ fn array_iter_prologue(
     }
     let this_arg = args.get(1).copied().unwrap_or(Value::undefined());
     let source_ptr = this.heap_ptr().unwrap_or(std::ptr::null_mut());
-    Some((length, callback, this_arg, source_ptr))
+    Some((length, callback, this_arg, source_ptr, this))
 }
 
 /// First present index in [0, len) per HasProperty semantics
@@ -15804,8 +15943,8 @@ fn prev_existing_index(this: Value, before: usize) -> Option<usize> {
         .find(|&i| crate::vm::has_property(this, Value::smi(i as i32), None))
 }
 
-pub fn array_for_each(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some((length, callback, this_arg, source_ptr)) = array_iter_prologue(
+pub fn array_for_each(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some((length, callback, this_arg, source_ptr, boxed_this)) = array_iter_prologue(
         gc,
         vm,
         this,
@@ -15815,6 +15954,7 @@ pub fn array_for_each(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
     ) else {
         return Value::undefined();
     };
+    this = boxed_this;
     let Some(first) = first_existing_index(this, length) else {
         return Value::undefined();
     };
@@ -15860,11 +16000,12 @@ pub fn array_for_each(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut 
 
 /// Array.prototype.filter(callback, thisArg) — set up state machine iteration.
 pub fn array_filter(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some((length, callback, this_arg, _)) =
+    let Some((length, callback, this_arg, _, boxed_this)) =
         array_iter_prologue(gc, vm, this, args, "Array.prototype.filter", array_filter)
     else {
         return Value::undefined();
     };
+    this = boxed_this;
     // B1f-6d: species Construct installs (len 0; dense swaps in as the
     // buffer, plain returns at completion via species_fallback).
     let made = match species_stage(gc, vm, array_filter, this, args, 0) {
@@ -15952,11 +16093,12 @@ pub fn array_filter(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mu
 
 /// Array.prototype.map(callback, thisArg) — set up state machine iteration.
 pub fn array_map(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some((length, callback, this_arg, _)) =
+    let Some((length, callback, this_arg, _, boxed_this)) =
         array_iter_prologue(gc, vm, this, args, "Array.prototype.map", array_map)
     else {
         return Value::undefined();
     };
+    this = boxed_this;
     // B1f-6d: species Construct installs (len; dense swaps in as the
     // buffer, plain returns at completion via species_fallback).
     let made = match species_stage(gc, vm, array_map, this, args, length as u64) {
@@ -16056,12 +16198,13 @@ pub fn array_map(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut V
 /// Array.prototype.reduce(callback, initialValue) — set up state machine.
 /// Without initialValue the accumulator starts at the first PRESENT element
 /// (holes skipped); no present elements at all → TypeError.
-pub fn array_reduce(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some((length, callback, _, source_ptr)) =
+pub fn array_reduce(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some((length, callback, _, source_ptr, boxed_this)) =
         array_iter_prologue(gc, vm, this, args, "Array.prototype.reduce", array_reduce)
     else {
         return Value::undefined();
     };
+    this = boxed_this;
     let has_initial = args.len() > 1;
     let initial = args.get(1).copied().unwrap_or(Value::undefined());
     if has_initial {
@@ -16187,8 +16330,13 @@ pub fn array_reduce(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
 
 /// Array.prototype.reduceRight(callback, initialValue) — backward mirror
 /// of reduce (B1c): seeds from the last present element, iterates down.
-pub fn array_reduce_right(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some((length, callback, _, source_ptr)) = array_iter_prologue(
+pub fn array_reduce_right(
+    gc: &mut SemiSpace,
+    mut this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some((length, callback, _, source_ptr, boxed_this)) = array_iter_prologue(
         gc,
         vm,
         this,
@@ -16198,6 +16346,7 @@ pub fn array_reduce_right(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
     ) else {
         return Value::undefined();
     };
+    this = boxed_this;
     let has_initial = args.len() > 1;
     let initial = args.get(1).copied().unwrap_or(Value::undefined());
     if has_initial {
@@ -16315,8 +16464,8 @@ pub fn array_reduce_right(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
 }
 
 /// Array.prototype.findLast(callback, thisArg) — backward find (B1c).
-pub fn array_find_last(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some((length, callback, this_arg, source_ptr)) = array_iter_prologue(
+pub fn array_find_last(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some((length, callback, this_arg, source_ptr, boxed_this)) = array_iter_prologue(
         gc,
         vm,
         this,
@@ -16326,6 +16475,7 @@ pub fn array_find_last(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
     ) else {
         return Value::undefined();
     };
+    this = boxed_this;
     let Some(last) = last_existing_index(this, length) else {
         return Value::undefined();
     };
@@ -16370,11 +16520,11 @@ pub fn array_find_last(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
 /// Array.prototype.findLastIndex(callback, thisArg) — backward findIndex (B1c).
 pub fn array_find_last_index(
     gc: &mut SemiSpace,
-    this: Value,
+    mut this: Value,
     args: &[Value],
     vm: &mut Vm,
 ) -> Value {
-    let Some((length, callback, this_arg, source_ptr)) = array_iter_prologue(
+    let Some((length, callback, this_arg, source_ptr, boxed_this)) = array_iter_prologue(
         gc,
         vm,
         this,
@@ -16384,6 +16534,7 @@ pub fn array_find_last_index(
     ) else {
         return Value::smi(-1);
     };
+    this = boxed_this;
     let Some(last) = last_existing_index(this, length) else {
         return Value::smi(-1);
     };
@@ -16426,12 +16577,13 @@ pub fn array_find_last_index(
 }
 
 /// Array.prototype.find(callback, thisArg) — set up state machine iteration.
-pub fn array_find(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some((length, callback, this_arg, source_ptr)) =
+pub fn array_find(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some((length, callback, this_arg, source_ptr, boxed_this)) =
         array_iter_prologue(gc, vm, this, args, "Array.prototype.find", array_find)
     else {
         return Value::undefined();
     };
+    this = boxed_this;
     let Some(first) = first_existing_index(this, length) else {
         return Value::undefined();
     };
@@ -16476,8 +16628,8 @@ pub fn array_find(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
 }
 
 /// Array.prototype.findIndex(callback, thisArg) — set up state machine iteration.
-pub fn array_find_index(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some((length, callback, this_arg, source_ptr)) = array_iter_prologue(
+pub fn array_find_index(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some((length, callback, this_arg, source_ptr, boxed_this)) = array_iter_prologue(
         gc,
         vm,
         this,
@@ -16487,6 +16639,7 @@ pub fn array_find_index(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
     ) else {
         return Value::smi(-1);
     };
+    this = boxed_this;
     let Some(first) = first_existing_index(this, length) else {
         return Value::smi(-1);
     };
@@ -17782,7 +17935,7 @@ pub fn array_to_sorted(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
 
 /// Array.prototype.flatMap(callback, thisArg) — set up state machine iteration, spreading array results.
 pub fn array_flat_map(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some((length, callback, this_arg, _)) = array_iter_prologue(
+    let Some((length, callback, this_arg, _, boxed_this)) = array_iter_prologue(
         gc,
         vm,
         this,
@@ -17792,6 +17945,7 @@ pub fn array_flat_map(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &
     ) else {
         return Value::undefined();
     };
+    this = boxed_this;
     // B1f-6d: species Construct installs (len 0; dense swaps in as the
     // buffer, plain returns at completion via species_fallback).
     let made = match species_stage(gc, vm, array_flat_map, this, args, 0) {
@@ -17876,12 +18030,13 @@ pub fn array_flat_map(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &
 }
 
 /// Array.prototype.some(callback, thisArg) — set up state machine iteration.
-pub fn array_some(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some((length, callback, this_arg, source_ptr)) =
+pub fn array_some(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some((length, callback, this_arg, source_ptr, boxed_this)) =
         array_iter_prologue(gc, vm, this, args, "Array.prototype.some", array_some)
     else {
         return Value::boolean(false);
     };
+    this = boxed_this;
     let Some(first) = first_existing_index(this, length) else {
         return Value::boolean(false);
     };
@@ -17926,12 +18081,13 @@ pub fn array_some(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
 }
 
 /// Array.prototype.every(callback, thisArg) — set up state machine iteration.
-pub fn array_every(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some((length, callback, this_arg, source_ptr)) =
+pub fn array_every(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some((length, callback, this_arg, source_ptr, boxed_this)) =
         array_iter_prologue(gc, vm, this, args, "Array.prototype.every", array_every)
     else {
         return Value::boolean(true);
     };
+    this = boxed_this;
     let Some(first) = first_existing_index(this, length) else {
         return Value::boolean(true);
     };
@@ -19286,6 +19442,31 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 1,
             name: "Number",
             func: number_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Number_prototype_valueOf",
+            func: number_prototype_value_of,
+        },
+        Builtin {
+            length: 1,
+            name: "Number_prototype_toString",
+            func: number_prototype_to_string,
+        },
+        Builtin {
+            length: 1,
+            name: "Boolean",
+            func: boolean_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "Boolean_prototype_valueOf",
+            func: boolean_prototype_value_of,
+        },
+        Builtin {
+            length: 0,
+            name: "Boolean_prototype_toString",
+            func: boolean_prototype_to_string,
         },
         Builtin {
             length: 1,

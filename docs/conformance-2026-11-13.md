@@ -26,7 +26,7 @@ Observed failure categories in the tail of this run:
 Follow-up fixes (prototype-chain dispatch for `instanceof`/`Object.getPrototypeOf`,
 String-wrapper prototypes, `Array.prototype.toString`, array-like String/function
 receivers) moved the same suite from 364 to 373. The targeted
-`built-ins/Array/prototype/map` suite is 184/216 (85.2%).
+`built-ins/Array/prototype/map` suite is 191/216 (88.4%).
 
 The suite includes `Promise.any` and combinator-thenable tests; the numbers
 above were measured after those implementations landed (commit series ending

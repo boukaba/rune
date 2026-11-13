@@ -14081,3 +14081,77 @@ fn test_array_methods_on_string_and_function_array_likes() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_boolean_and_number_wrappers() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var b = new Boolean(true);
+            var n = new Number(3.5);
+            [
+                b instanceof Boolean,
+                b instanceof Object,
+                b.valueOf() === true,
+                b.toString() === "true",
+                n instanceof Number,
+                n.valueOf() === 3.5,
+                n.toString() === "3.5",
+                Object(false) instanceof Boolean,
+                Object(5) instanceof Number,
+                Object.keys(b).length === 0,
+                JSON.stringify(b) === "true",
+                JSON.stringify(n) === "3.5",
+                (new Number(3) + 2) === 5
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}
+
+#[test]
+fn test_primitive_and_wrapper_array_like_methods() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            Boolean.prototype[0] = true;
+            Boolean.prototype.length = 1;
+            var mappedBoolean = Array.prototype.map.call(false, function (v, i, o) {
+                return o instanceof Boolean;
+            })[0];
+            var mappedString = Array.prototype.map.call("abc", function (v, i, o) {
+                return [v, o instanceof String];
+            });
+            [
+                mappedBoolean,
+                mappedString[0][0] === "a",
+                mappedString[0][1],
+                mappedString[2][0] === "c"
+            ].join("|") === "true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}
+
+#[test]
+fn test_function_instanceof_and_prototype() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var f = function (a, b) { return a + b; };
+            [
+                f instanceof Function,
+                f instanceof Object,
+                Object.getPrototypeOf(f) === Function.prototype,
+                Object.getPrototypeOf(Function.prototype) === Object.prototype
+            ].join("|") === "true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

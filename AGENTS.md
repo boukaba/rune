@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Reflect validation/setProto (2026-11-13)**: descriptor order, target checks, cycle/extensible semantics. Reflect **115/153**, Object **2655/3411**. Integration **854**.
 - **Reflect delete/ownKeys (2026-11-13)**: configurable delete, integer/symbol key order, holes. Reflect **101/153**. Integration **853**.
 - **Reflect property methods (2026-11-13)**: get/set/has/descriptors/ownKeys/integrity. Reflect **92/153**. Integration **852**.
 - **Reflect.construct/apply (2026-11-13)**: nested construction loop + newTarget prototypes. Map **196/204**, Set **192/383**. Integration **851**.

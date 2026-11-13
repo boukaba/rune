@@ -3455,6 +3455,15 @@ pub fn reflect_construct(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &
         return Value::undefined();
     }
     let list = args.get(1).copied().unwrap_or(Value::undefined());
+    if !is_object_value(list) {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Reflect.construct argumentsList is not an object",
+        ));
+        return Value::undefined();
+    }
     let len = crate::vm::array_like_length(list).unwrap_or(0) as usize;
     let mut call_args = Vec::with_capacity(len);
     for i in 0..len {
@@ -3647,7 +3656,10 @@ pub fn reflect_get_prototype_of(
     args: &[Value],
     vm: &mut Vm,
 ) -> Value {
-    object_get_prototype_of(gc, Value::undefined(), args, vm)
+    let Some(target) = reflect_target(gc, args, vm) else {
+        return Value::undefined();
+    };
+    object_get_prototype_of(gc, Value::undefined(), &[target], vm)
 }
 
 pub fn reflect_set_prototype_of(
@@ -3656,11 +3668,51 @@ pub fn reflect_set_prototype_of(
     args: &[Value],
     vm: &mut Vm,
 ) -> Value {
-    let result = object_set_prototype_of(gc, Value::undefined(), args, vm);
-    if vm.pending_exception.is_some() {
+    let Some(target) = reflect_target(gc, args, vm) else {
+        return Value::undefined();
+    };
+    let proto = args.get(1).copied().unwrap_or(Value::undefined());
+    if !proto.is_null() && !is_object_value(proto) {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Reflect.setPrototypeOf prototype is not an object",
+        ));
         return Value::undefined();
     }
-    Value::boolean(is_object_value(result))
+    let tptr = target.heap_ptr().unwrap();
+    let pptr = if proto.is_null() {
+        std::ptr::null_mut()
+    } else {
+        proto.heap_ptr().unwrap()
+    };
+    let tag = unsafe { (*(tptr as *const GcHeader)).tag() };
+    if tag != TAG_OBJECT && tag != TAG_ARRAY {
+        return Value::boolean(false);
+    }
+    let tdesc = tptr as *mut JSObject;
+    let current = unsafe { JSObject::prototype(tdesc) };
+    if current == pptr {
+        return Value::boolean(true);
+    }
+    if !unsafe { JSObject::is_extensible(tdesc) } {
+        return Value::boolean(false);
+    }
+    // Cycle check: target may not appear in proto's chain.
+    let mut p = pptr;
+    while !p.is_null() {
+        if p == tptr {
+            return Value::boolean(false);
+        }
+        let ptag = unsafe { (*(p as *const GcHeader)).tag() };
+        if ptag != TAG_OBJECT && ptag != TAG_ARRAY {
+            break;
+        }
+        p = unsafe { JSObject::prototype(p as *mut JSObject) };
+    }
+    unsafe { JSObject::set_prototype(tdesc, pptr) };
+    Value::boolean(true)
 }
 
 pub fn reflect_is_extensible(
@@ -3669,7 +3721,10 @@ pub fn reflect_is_extensible(
     args: &[Value],
     vm: &mut Vm,
 ) -> Value {
-    object_is_extensible(gc, Value::undefined(), args, vm)
+    let Some(target) = reflect_target(gc, args, vm) else {
+        return Value::undefined();
+    };
+    object_is_extensible(gc, Value::undefined(), &[target], vm)
 }
 
 pub fn reflect_prevent_extensions(
@@ -3821,6 +3876,15 @@ pub fn reflect_apply(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut 
     }
     let this_arg = args.get(1).copied().unwrap_or(Value::undefined());
     let list = args.get(2).copied().unwrap_or(Value::undefined());
+    if !is_object_value(list) {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Reflect.apply argumentsList is not an object",
+        ));
+        return Value::undefined();
+    }
     let len = crate::vm::array_like_length(list).unwrap_or(0) as usize;
     let mut call_args = Vec::with_capacity(len);
     for i in 0..len {
@@ -9606,8 +9670,55 @@ pub fn object_set_prototype_of(
         proto.heap_ptr().unwrap()
     };
     match tag {
-        TAG_OBJECT => unsafe { JSObject::set_prototype(ptr as *mut JSObject, new_proto) },
-        TAG_ARRAY => unsafe { RuneArray::set_prototype(ptr as *mut RuneArray, new_proto) },
+        TAG_OBJECT | TAG_ARRAY => {
+            let (current, extensible) = if tag == TAG_ARRAY {
+                let arr = ptr as *mut RuneArray;
+                (unsafe { RuneArray::prototype(arr) }, unsafe {
+                    RuneArray::is_extensible(arr)
+                })
+            } else {
+                let o = ptr as *mut JSObject;
+                (unsafe { JSObject::prototype(o) }, unsafe {
+                    JSObject::is_extensible(o)
+                })
+            };
+            if current == new_proto {
+                return obj;
+            }
+            if !extensible {
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "Cannot set prototype of non-extensible object",
+                ));
+                return Value::undefined();
+            }
+            // Cycle check.
+            let mut p = new_proto;
+            while !p.is_null() {
+                if p == ptr {
+                    vm.set_pending_exception(crate::errors::error_object(
+                        gc,
+                        &vm.error_protos,
+                        crate::errors::ErrorKind::TypeError,
+                        "Cyclic __proto__ value",
+                    ));
+                    return Value::undefined();
+                }
+                let ptag = unsafe { (*(p as *const GcHeader)).tag() };
+                p = match ptag {
+                    TAG_OBJECT => unsafe { JSObject::prototype(p as *mut JSObject) },
+                    TAG_ARRAY => unsafe { RuneArray::prototype(p as *mut RuneArray) },
+                    _ => std::ptr::null_mut(),
+                };
+            }
+            if tag == TAG_ARRAY {
+                unsafe { RuneArray::set_prototype(ptr as *mut RuneArray, new_proto) };
+            } else {
+                unsafe { JSObject::set_prototype(ptr as *mut JSObject, new_proto) };
+            }
+        }
         _ => {}
     }
     obj
@@ -11164,21 +11275,7 @@ fn make_descriptor_object(
     attr: u8,
     proto: Option<*mut u8>,
 ) -> Value {
-    let pairs: Vec<(&str, Value)> = vec![
-        (
-            "enumerable",
-            Value::boolean(attr & rune_core::shape::ATTR_ENUMERABLE != 0),
-        ),
-        (
-            "configurable",
-            Value::boolean(attr & rune_core::shape::ATTR_CONFIGURABLE != 0),
-        ),
-    ];
     let (mut names, mut vals): (Vec<String>, Vec<Value>) = (vec![], vec![]);
-    for (k, v) in pairs {
-        names.push(k.to_string());
-        vals.push(v);
-    }
     if val
         .heap_ptr()
         .is_some_and(|vp| unsafe { (*(vp as *const GcHeader)).tag() == TAG_ACCESSOR })
@@ -11200,6 +11297,14 @@ fn make_descriptor_object(
         names.push("writable".to_string());
         vals.push(Value::boolean(attr & rune_core::shape::ATTR_WRITABLE != 0));
     }
+    names.push("enumerable".to_string());
+    vals.push(Value::boolean(
+        attr & rune_core::shape::ATTR_ENUMERABLE != 0,
+    ));
+    names.push("configurable".to_string());
+    vals.push(Value::boolean(
+        attr & rune_core::shape::ATTR_CONFIGURABLE != 0,
+    ));
     let entries: Vec<(PropertyKey, usize)> = names
         .iter()
         .enumerate()
@@ -11213,7 +11318,7 @@ fn make_descriptor_object(
     Value::from_heap_ptr(obj as *mut u8)
 }
 
-/// Shared integrity-level helper: preventExtensions (level 0), seal (1),
+/// Shared integrity-level helper/// Shared integrity-level helper: preventExtensions (level 0), seal (1),
 /// freeze (2). Mass-updates attributes via shape transitions and clears the
 /// extensible bit. Returns obj (seal/freeze/preventExtensions) — the
 /// is-checks are separate builtins below.

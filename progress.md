@@ -2240,6 +2240,23 @@ Integration suite: **852 passed, 0 failed, 3 ignored**.
 
 Integration suite: **853 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Reflect descriptor order/validation + setPrototypeOf (2026-11-13)
+
+- Property-descriptor objects now use the spec field order
+  (`value,writable,enumerable,configurable` / `get,set,…`), fixing
+  `Reflect.getOwnPropertyDescriptor` and improving Object gOPD.
+- Reflect methods validate the target as an object (Symbol/primitive
+  TypeErrors) and `construct`/`apply` require an object `argumentsList`.
+- `Reflect.setPrototypeOf` implements same-proto fast-path, non-extensible
+  false, cycle false, and null/object prototype validation; shared
+  `Object.setPrototypeOf` now throws on non-extensible/cyclic changes.
+- Test262: Reflect **101 → 115/153**, Object **2648 → 2655/3411**.
+- Regression: `test_reflect_set_prototype_of_and_descriptor_order`.
+- Known remaining Reflect failures are mostly Proxy traps, `receiver`
+  plumbing, and accessor/data setter semantics.
+
+Integration suite: **854 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

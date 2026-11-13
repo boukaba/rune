@@ -16179,3 +16179,32 @@ fn test_reflect_delete_property_and_own_keys() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_reflect_set_prototype_of_and_descriptor_order() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var o = {};
+            var cycle = Reflect.setPrototypeOf(o, o);
+            var same = Reflect.setPrototypeOf(o, Object.prototype);
+            var child = Object.create(o);
+            var protoCycle = Reflect.setPrototypeOf(o, child);
+            var frozen = {};
+            Object.preventExtensions(frozen);
+            var nonExtensible = Reflect.setPrototypeOf(frozen, {});
+            var desc = Object.getOwnPropertyDescriptor({ p: 1 }, "p");
+            [
+                cycle === false,
+                same === true,
+                protoCycle === false,
+                nonExtensible === false,
+                Object.getPrototypeOf(frozen) === Object.prototype,
+                Object.getOwnPropertyNames(desc).join(",") === "value,writable,enumerable,configurable"
+            ].join("|") === "true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

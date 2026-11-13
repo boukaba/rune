@@ -16557,3 +16557,31 @@ fn test_replace_all_substitutions_and_dispatch() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_math_f16_imul_zero_and_coercion() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var coerced = 0;
+            var max = Math.max(NaN, { valueOf: function () { coerced++; return 1; } });
+            var rnd = Math.random();
+            [
+                Math.f16round(1.337) === 1.3369140625,
+                Math.f16round(-1.337) === -1.3369140625,
+                Math.f16round(5.960464477539063e-8) === 5.960464477539063e-8,
+                Math.imul(-1073741824, 7) === 1073741824,
+                Math.imul(65535, 65536) === -65536,
+                1 / Math.max(-0, 0) === Infinity,
+                1 / Math.hypot() === Infinity,
+                1 / Math.sin(-0) === -Infinity,
+                rnd >= 0 && rnd < 1,
+                Math[Symbol.toStringTag] === "Math",
+                coerced === 1 && max !== max
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

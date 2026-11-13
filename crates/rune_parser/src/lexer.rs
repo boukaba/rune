@@ -668,6 +668,8 @@ impl Lexer {
                     self.advance();
                     self.advance();
                     Token::new(TokenKind::Ellipsis, self.start, self.pos, "...".into())
+                } else if self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                    self.scan_number('.')
                 } else {
                     Token::new(TokenKind::Dot, self.start, self.pos, ".".into())
                 }

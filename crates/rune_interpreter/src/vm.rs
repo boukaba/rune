@@ -2913,6 +2913,8 @@ impl Vm {
             ("hypot", find_handle(&self.builtins, "Math_hypot")),
             ("clz32", find_handle(&self.builtins, "Math_clz32")),
             ("imul", find_handle(&self.builtins, "Math_imul")),
+            ("random", find_handle(&self.builtins, "Math_random")),
+            ("f16round", find_handle(&self.builtins, "Math_f16round")),
             ("cbrt", find_handle(&self.builtins, "Math_cbrt")),
             ("fround", find_handle(&self.builtins, "Math_fround")),
             ("sumPrecise", find_handle(&self.builtins, "Math_sumPrecise")),
@@ -2959,11 +2961,12 @@ impl Vm {
             if let Some(ptr) = math_obj.heap_ptr() {
                 let tag = Value::from_heap_ptr(HeapString::allocate(gc, "Math") as *mut u8);
                 unsafe {
-                    JSObject::add_property(
+                    JSObject::add_property_with_attrs(
                         ptr as *mut JSObject,
                         PropertyKey::from_symbol(rune_core::symbol::SYM_TO_STRING_TAG),
                         "\0".to_string(),
                         tag,
+                        rune_core::shape::ATTR_CONFIGURABLE,
                     );
                 }
             }

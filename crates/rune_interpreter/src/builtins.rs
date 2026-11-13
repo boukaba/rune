@@ -16897,6 +16897,95 @@ fn math_op_unary(args: &[Value], op: fn(f64) -> f64) -> Value {
     Value::from_float64(result)
 }
 
+/// Math.random() — splitmix64-derived uniform [0, 1).
+pub fn math_random(_gc: &mut SemiSpace, _this: Value, _args: &[Value], _vm: &mut Vm) -> Value {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static STATE: AtomicU64 = AtomicU64::new(0x9E37_79B9_7F4A_7C15);
+    let mut z = STATE.fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    Value::from_float64((z >> 11) as f64 / (1u64 << 53) as f64)
+}
+
+fn f64_to_f16_bits(value: f64) -> u16 {
+    let bits = value.to_bits();
+    let sign = ((bits >> 48) & 0x8000) as u16;
+    let exp = ((bits >> 52) & 0x7ff) as i32;
+    let mant = bits & 0x000f_ffff_ffff_ffff;
+    if exp == 0x7ff {
+        return sign | 0x7c00 | if mant != 0 { 0x0200 } else { 0 };
+    }
+    let mut e = exp - 1023 + 15;
+    if e >= 31 {
+        return sign | 0x7c00;
+    }
+    if e <= 0 {
+        if e < -10 {
+            return sign;
+        }
+        let shift = (43 - e) as u32;
+        let full = mant | (1u64 << 52);
+        let mut m = full >> shift;
+        let rem = full & ((1u64 << shift) - 1);
+        let half = 1u64 << (shift - 1);
+        if rem > half || (rem == half && (m & 1) != 0) {
+            m += 1;
+        }
+        if m >= 0x400 {
+            return sign | 0x0400;
+        }
+        return sign | m as u16;
+    }
+    let mut m = mant >> 42;
+    let rem = mant & ((1u64 << 42) - 1);
+    let half = 1u64 << 41;
+    if rem > half || (rem == half && (m & 1) != 0) {
+        m += 1;
+    }
+    if m >= 0x400 {
+        m = 0;
+        e += 1;
+        if e >= 31 {
+            return sign | 0x7c00;
+        }
+    }
+    sign | ((e as u16) << 10) | (m as u16 & 0x03ff)
+}
+
+fn f16_bits_to_f64(bits: u16) -> f64 {
+    let sign = if bits & 0x8000 != 0 { -1.0 } else { 1.0 };
+    let exp = ((bits >> 10) & 0x1f) as i32;
+    let mant = (bits & 0x03ff) as f64;
+    if exp == 0 {
+        if mant == 0.0 {
+            return sign * 0.0;
+        }
+        return sign * mant * 2f64.powi(-24);
+    }
+    if exp == 31 {
+        return if mant == 0.0 {
+            sign * f64::INFINITY
+        } else {
+            f64::NAN
+        };
+    }
+    sign * (1.0 + mant / 1024.0) * 2f64.powi(exp - 15)
+}
+
+/// Math.f16round(x) — round to nearest IEEE-754 binary16 value.
+pub fn math_f16round(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let x = match to_number_sync(gc, vm, args.first().copied().unwrap_or(Value::undefined())) {
+        Ok(n) => n,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let bits = f64_to_f16_bits(x);
+    Value::from_float64(f16_bits_to_f64(bits))
+}
+
 /// Math.sumPrecise(iterable) — compensated summation over arrays/Sets of Numbers.
 pub fn math_sum_precise(_gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let Some(arg) = args.first().copied() else {
@@ -17073,14 +17162,22 @@ pub fn math_abs(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm)
     math_op_unary(args, f64::abs)
 }
 
-pub fn math_min(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+pub fn math_min(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let mut nums = Vec::with_capacity(args.len());
+    for arg in args {
+        match to_number_sync(gc, vm, *arg) {
+            Ok(n) => nums.push(n),
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
+    }
     let mut min = f64::INFINITY;
     let mut neg_zero = false;
-    for arg in args {
-        let n = math_to_f64(*arg);
+    for n in nums {
         if n.is_nan() {
-            min = f64::NAN;
-            break;
+            return Value::from_float64(f64::NAN);
         }
         if n == 0.0 && n.is_sign_negative() {
             neg_zero = true;
@@ -17092,23 +17189,25 @@ pub fn math_min(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm)
     if min == 0.0 && neg_zero {
         return Value::from_float64(-0.0);
     }
-    if min.fract() == 0.0 && min.is_finite() {
-        let i = min as i32;
-        if i as f64 == min {
-            return Value::smi(i);
-        }
-    }
-    Value::from_float64(min)
+    math_result(min)
 }
 
-pub fn math_max(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+pub fn math_max(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let mut nums = Vec::with_capacity(args.len());
+    for arg in args {
+        match to_number_sync(gc, vm, *arg) {
+            Ok(n) => nums.push(n),
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
+    }
     let mut max = f64::NEG_INFINITY;
     let mut pos_zero = false;
-    for arg in args {
-        let n = math_to_f64(*arg);
+    for n in nums {
         if n.is_nan() {
-            max = f64::NAN;
-            break;
+            return Value::from_float64(f64::NAN);
         }
         if n == 0.0 && !n.is_sign_negative() {
             pos_zero = true;
@@ -17117,16 +17216,10 @@ pub fn math_max(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm)
             max = n;
         }
     }
-    if max == 0.0 && !pos_zero {
-        return Value::from_float64(-0.0);
+    if max == 0.0 {
+        return math_result(if pos_zero { 0.0 } else { -0.0 });
     }
-    if max.fract() == 0.0 && max.is_finite() {
-        let i = max as i32;
-        if i as f64 == max {
-            return Value::smi(i);
-        }
-    }
-    Value::from_float64(max)
+    math_result(max)
 }
 
 pub fn math_pow(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
@@ -17183,10 +17276,18 @@ fn math_to_f64(v: Value) -> f64 {
 /// Wrap an f64 builtin result: integral finite values within i32 become
 /// Smis (same convention as math_op_unary), everything else stays float64.
 fn math_result(r: f64) -> Value {
+    if r == 0.0 {
+        // Preserve -0 produced by odd functions / truncation; +0 stays Smi.
+        return if r.is_sign_negative() {
+            Value::from_float64(-0.0)
+        } else {
+            Value::smi(0)
+        };
+    }
     if r.fract() == 0.0 && r.is_finite() {
-        let i = r as i32;
-        if i as f64 == r {
-            return Value::smi(i);
+        let i = r as i64;
+        if i as f64 == r && (-(1i64 << 30)..(1i64 << 30)).contains(&i) {
+            return Value::smi(i as i32);
         }
     }
     Value::from_float64(r)
@@ -17251,8 +17352,17 @@ pub fn math_sign(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm
 }
 
 /// Math.hypot — §21.3.2.19: coerce all first, ±Inf wins over NaN, all-zero → +0.
-pub fn math_hypot(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
-    let coerced: Vec<f64> = args.iter().map(|&v| math_to_f64(v)).collect();
+pub fn math_hypot(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let mut coerced: Vec<f64> = Vec::with_capacity(args.len());
+    for arg in args {
+        match to_number_sync(gc, vm, *arg) {
+            Ok(n) => coerced.push(n),
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
+    }
     // Step 3: any ±Infinity → +Infinity (checked before NaN)
     if coerced.iter().any(|n| n.is_infinite()) {
         return Value::from_float64(f64::INFINITY);
@@ -17263,6 +17373,9 @@ pub fn math_hypot(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut V
     }
     // Step 6: all zeros → +0
     let sum_sq: f64 = coerced.iter().map(|n| n * n).sum();
+    if sum_sq == 0.0 {
+        return Value::smi(0);
+    }
     math_result(sum_sq.sqrt())
 }
 
@@ -17292,7 +17405,7 @@ pub fn math_imul(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm
         0u32
     };
     let product = ua.wrapping_mul(ub);
-    Value::smi(product as i32)
+    math_result((product as i32) as f64)
 }
 
 /// Math.cbrt / log family / exp / trig — direct f64 ops via the shared helper.
@@ -26261,6 +26374,16 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 2,
             name: "Math_imul",
             func: math_imul,
+        },
+        Builtin {
+            length: 0,
+            name: "Math_random",
+            func: math_random,
+        },
+        Builtin {
+            length: 1,
+            name: "Math_f16round",
+            func: math_f16round,
         },
         Builtin {
             length: 1,

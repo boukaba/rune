@@ -2587,6 +2587,29 @@ Integration suite: **864 passed, 0 failed, 3 ignored**.
 
 Integration suite: **865 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Math.random/f16round + conversions (2026-11-13)
+
+- Added `Math.random` (splitmix64 uniform [0,1)) and `Math.f16round`
+  (binary64→binary16→binary64, round-ties-to-even including subnormals and
+  overflow/NaN/Infinity).
+- `Math.imul` no longer panics on i31-overflow results; returns Number via the
+  shared Smi-range check, with 32-bit wrapping.
+- `Math.min`/`Math.max` coerce **all** arguments via synchronous ToNumber
+  (throwing propagation, no NaN short-circuit) and apply signed-zero rules
+  exactly (±0 ordering).
+- `Math.hypot` coerces all arguments first (abrupt completion aborts before
+  later coercions) and returns +0 for no/all-zero args.
+- `math_result` preserves -0 from odd functions (`sin`, `tan`, …), returns +0
+  as Smi 0, and only Smi-encodes values inside the i31 range.
+- `Math[Symbol.toStringTag]` is configurable/non-enumerable/non-writable.
+- Lexer accepts leading-dot numeric literals (`.9`).
+- Test262: Math **298 → 323/327**.
+- Remaining Math failures: Math.sumPrecise exact/precise and iterator cases.
+- Regression: `test_math_f16_imul_zero_and_coercion`; existing
+  `test_math_hypot_clz32_imul` re-verified.
+
+Integration suite: **866 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

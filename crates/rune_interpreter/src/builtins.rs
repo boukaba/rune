@@ -4094,6 +4094,57 @@ pub fn date_value_of_builtin(
     date_number(unsafe { date::RuneDate::tv(ptr) })
 }
 
+/// §20.2.3.6 Function.prototype[@@hasInstance](value)
+pub fn function_has_instance_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let value = args.first().copied().unwrap_or(Value::undefined());
+    let Some(tptr) = this.heap_ptr() else {
+        return Value::boolean(false);
+    };
+    let tag = unsafe { (*(tptr as *const GcHeader)).tag() };
+    let proto = if tag == TAG_FUNC {
+        unsafe { rune_core::function::Func::prototype(tptr as *mut rune_core::function::Func) }
+    } else if tag == TAG_OBJECT {
+        let shape = unsafe { JSObject::shape_ptr(tptr as *mut JSObject) };
+        match shape.lookup(&PropertyKey::from_string("prototype")) {
+            Some(slot) => {
+                let p = unsafe { JSObject::get_slot(tptr as *mut JSObject, slot) };
+                match p.heap_ptr() {
+                    Some(pp) => pp,
+                    None => {
+                        vm.set_pending_exception(crate::errors::error_object(
+                            gc,
+                            &vm.error_protos,
+                            crate::errors::ErrorKind::TypeError,
+                            "Function has non-object prototype in instanceof check",
+                        ));
+                        return Value::undefined();
+                    }
+                }
+            }
+            None => return Value::boolean(false),
+        }
+    } else {
+        return Value::boolean(false);
+    };
+    if proto.is_null() {
+        return Value::boolean(false);
+    }
+    let function_proto = vm
+        .function_prototype
+        .heap_ptr()
+        .unwrap_or(std::ptr::null_mut());
+    Value::boolean(crate::vm::ordinary_has_instance(
+        value,
+        proto,
+        function_proto,
+    ))
+}
+
 /// §21.4.4.44 Date.prototype[@@toPrimitive](hint)
 pub fn date_to_primitive_builtin(
     gc: &mut SemiSpace,
@@ -22668,6 +22719,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 1,
             name: "Date_prototype_[Symbol.toPrimitive]",
             func: date_to_primitive_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "Function_prototype_[Symbol.hasInstance]",
+            func: function_has_instance_builtin,
         },
         Builtin {
             length: 0,

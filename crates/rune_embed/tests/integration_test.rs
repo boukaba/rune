@@ -15576,3 +15576,27 @@ fn test_date_to_primitive_symbol() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_function_symbol_has_instance() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var method = Function.prototype[Symbol.hasInstance];
+            function F() {}
+            var d = Object.getOwnPropertyDescriptor(Function.prototype, Symbol.hasInstance);
+            [
+                typeof method === "function",
+                method.name === "[Symbol.hasInstance]",
+                method.length === 1,
+                d.writable === false && d.enumerable === false && d.configurable === false,
+                method.call(F, new F()),
+                !method.call(F, {}),
+                !method.call({}, new F())
+            ].join("|") === "true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

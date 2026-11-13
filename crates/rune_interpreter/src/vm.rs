@@ -2874,6 +2874,18 @@ impl Vm {
                 Value::from_heap_ptr(HeapString::allocate(gc, "") as *mut u8),
             ));
             let func_proto = make_object(gc, &proto_entries_f);
+            if let Some(h) = find_handle(&self.builtins, "Function_prototype_[Symbol.hasInstance]")
+            {
+                unsafe {
+                    JSObject::add_property_with_attrs(
+                        func_proto.heap_ptr().unwrap() as *mut JSObject,
+                        PropertyKey::from_symbol(rune_core::symbol::SYM_HAS_INSTANCE),
+                        "\u{0}".to_string(),
+                        h,
+                        0,
+                    );
+                }
+            }
             self.function_prototype = func_proto;
             // %Function% wrapper
             let fn_name = HeapString::allocate(gc, "Function") as *mut u8;
@@ -16176,7 +16188,11 @@ pub(crate) fn value_prototype(value: Value) -> Option<*mut u8> {
 }
 
 /// OrdinaryHasInstance per §13.10.2: walk lhs prototype chain looking for rhs_proto.
-fn ordinary_has_instance(lhs: Value, rhs_proto_ptr: *mut u8, function_proto: *mut u8) -> bool {
+pub(crate) fn ordinary_has_instance(
+    lhs: Value,
+    rhs_proto_ptr: *mut u8,
+    function_proto: *mut u8,
+) -> bool {
     // Builtin function handles are negative Smis; their [[Prototype]] is
     // %Function.prototype%, so `builtinMethod instanceof Function` is true.
     if lhs.as_smi().is_some_and(|s| s < 0) {

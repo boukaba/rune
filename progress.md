@@ -1868,6 +1868,23 @@ Integration suite: **832 passed, 0 failed, 3 ignored**.
 
 Integration suite: **833 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Function.prototype[@@hasInstance] (2026-11-13)
+
+- Added `Function.prototype[Symbol.hasInstance]` (length 1, name
+  `[Symbol.hasInstance]`, non-writable/non-enumerable/non-configurable) wired
+  under the well-known symbol.
+- Delegates to the engine's `OrdinaryHasInstance` walker; non-callable `this`
+  returns false, JS-function `prototype` and builtin wrapper prototypes are
+  handled, and non-object prototypes throw.
+- Test262: Function **187 → 193/509**; the `Symbol.hasInstance` directory is
+  **7/11**.
+- Regression: `test_function_symbol_has_instance`.
+- Known gaps: bound-function targets, poisoned `prototype` getters, and
+  `instanceof` dispatch through a custom `@@hasInstance` method are still
+  unsupported.
+
+Integration suite: **834 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

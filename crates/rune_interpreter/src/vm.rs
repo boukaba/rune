@@ -1223,6 +1223,10 @@ pub struct Vm {
     /// When exhausted, a catchable RangeError is raised once and the budget is
     /// reset to unlimited so error handling can run.
     pub instruction_budget: u64,
+    /// Optional wall-clock deadline for interpreted execution. JIT is disabled
+    /// while a deadline is active so native loops cannot bypass it.
+    pub execution_deadline: Option<std::time::Instant>,
+    deadline_counter: u32,
     /// Values temporarily held by a builtin across allocations (e.g. the
     /// result promise and resolve/reject bridges of Promise.race). Registered
     /// as GC roots like any other VM state; builtins truncate to their entry
@@ -1432,6 +1436,8 @@ impl Vm {
             pending_array_ops: Vec::new(),
             array_receiver_roots: Vec::new(),
             instruction_budget: u64::MAX,
+            execution_deadline: None,
+            deadline_counter: 4096,
             temp_roots: Vec::new(),
             pending_call: None,
             pending_promise_ctor: None,
@@ -6002,6 +6008,11 @@ impl Vm {
             && unsafe { (*(fp as *const GcHeader)).tag() } == TAG_FUNC
             && unsafe { Func::is_strict(fp as *mut Func) }
     }
+    /// JIT is suppressed while any interpreter budget/time limit is active.
+    fn jit_allowed(&self) -> bool {
+        self.jit_enabled && self.instruction_budget == u64::MAX && self.execution_deadline.is_none()
+    }
+
     pub fn run_loop(&mut self, gc: &mut SemiSpace) -> Exit {
         'run: loop {
             if self.instruction_budget != u64::MAX {
@@ -6019,6 +6030,25 @@ impl Vm {
                     continue;
                 }
                 self.instruction_budget -= 1;
+            }
+            if let Some(deadline) = self.execution_deadline {
+                self.deadline_counter = self.deadline_counter.saturating_sub(1);
+                if self.deadline_counter == 0 {
+                    self.deadline_counter = 4096;
+                    if std::time::Instant::now() >= deadline {
+                        self.execution_deadline = None;
+                        let err = crate::errors::error_object(
+                            gc,
+                            &self.error_protos,
+                            crate::errors::ErrorKind::RangeError,
+                            "execution time budget exceeded",
+                        );
+                        if let Some(exit) = self.handle_throw(gc, err) {
+                            return exit;
+                        }
+                        continue;
+                    }
+                }
             }
             let fi = self.frames.len() - 1;
             let pc = self.frames[fi].pc;
@@ -8495,7 +8525,7 @@ impl Vm {
                         // Runtime JIT is opt-in: the interpreter is the
                         // reference implementation until differential tests
                         // prove the trace compiler sound.
-                        if !self.jit_enabled {
+                        if !self.jit_allowed() {
                             self.frames[fi].pc = target;
                             continue;
                         }
@@ -10383,7 +10413,7 @@ impl Vm {
                                             #[cfg(feature = "jit")]
                                             let jit_entry = ic.jit_entry;
                                             #[cfg(feature = "jit")]
-                                            if self.jit_enabled && !jit_entry.is_null() {
+                                            if self.jit_allowed() && !jit_entry.is_null() {
                                                 // IC hit: call JIT entry directly, skip all overhead.
                                                 self.jit_locals_buffer.clear();
                                                 if func_prog.named_function {
@@ -10482,7 +10512,7 @@ impl Vm {
 
                                 // --- JIT tier-up (if enabled) ---
                                 #[cfg(all(feature = "jit", target_arch = "aarch64"))]
-                                if self.jit_enabled && !caller_module && !caller_is_module_fn {
+                                if self.jit_allowed() && !caller_module && !caller_is_module_fn {
                                     unsafe { Func::increment_call_count(ptr as *mut Func) };
                                     let count = unsafe { Func::call_count(ptr as *mut Func) };
                                     const JIT_THRESHOLD: u32 = 50;

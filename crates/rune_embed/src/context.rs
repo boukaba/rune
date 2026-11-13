@@ -75,6 +75,18 @@ impl Context {
         self.vm.instruction_budget = instructions.max(1);
     }
 
+    /// Bound wall-clock interpreter execution. JIT is disabled while the
+    /// deadline is active. Expiry raises a catchable RangeError once and
+    /// clears the deadline so the handler can run.
+    pub fn set_time_budget(&mut self, budget: std::time::Duration) {
+        self.vm.execution_deadline = Some(std::time::Instant::now() + budget);
+    }
+
+    /// Clear any wall-clock deadline.
+    pub fn clear_time_budget(&mut self) {
+        self.vm.execution_deadline = None;
+    }
+
     /// Register a Rust host function and install it as a JS global. The
     /// closure receives `(gc, this, args, vm)` and may use the normal VM
     /// services; it is callable from JS like any other function.

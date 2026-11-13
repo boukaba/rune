@@ -21,8 +21,12 @@ not a security boundary.
 - **Deterministic instruction budget.** `Context::set_instruction_budget(n)` and
   `rune --max-instructions=N` bound interpreted work. Exhaustion raises a
   catchable `RangeError` once, then resets to unlimited so the handler can run.
-  JIT-compiled code is opt-in and does not decrement the counter; do not enable
-  JIT for untrusted code when relying on this limit.
+  While a budget is active the JIT is suppressed, so native code cannot bypass
+  the counter.
+- **Wall-clock budget.** `Context::set_time_budget(duration)` and
+  `rune --timeout-ms=N` check a deadline every 4096 interpreted instructions.
+  Expiry raises a catchable RangeError once and clears the deadline. The JIT is
+  equally suppressed while a deadline is active.
 - **Network policy.** `FetchPolicy` defaults to http/https with literal
   loopback/private/link-local/CGNAT/ULA hosts blocked. Exact/`*.suffix`
   allowlists and `allow_private_networks` are opt-in. Host blocking happens
@@ -36,9 +40,11 @@ not a security boundary.
 
 ## Not enforced / known gaps
 
-- **No per-script heap cap or wall-clock timeout.** The semispace is fixed per
-  `Context`; allocation exhaustion is an engine-level failure. The instruction
-  budget is not a time limit and does not cover JIT code.
+- **No per-script heap cap.** The semispace is fixed per `Context`;
+  allocation exhaustion is an engine-level failure.
+- **Budgets are execution-only.** Parsing/compilation, host functions, event-loop
+  jobs, and blocking I/O are not covered by the instruction/time budgets. The
+  time budget observes the clock only between interpreter instructions.
 - **DNS rebinding / redirects / proxy / TLS pinning.** Fetch policy checks the
   literal host only. A transport may resolve a public name to a private address,
   follow redirects to blocked hosts, or use system proxy settings. No
@@ -49,8 +55,9 @@ not a security boundary.
 - **No bundle signing/encryption.** Integrity is hash/ABI-scoped, not
   authenticity-scoped.
 - **JIT proof.** Branch-containing traces are gated off; the remaining native
-  tier is differential-tested but not formally verified. JS-visible bugs in
-  native code remain a risk.
+  tier is differential-tested but not formally verified. JIT is automatically
+  disabled while a budget is active, but otherwise JS-visible native bugs remain
+  a risk.
 - **Resource exhaustion through recursion, strings, regexes, or TypedArrays**
   is not uniformly bounded; individual operations may allocate large objects.
 

@@ -14340,3 +14340,29 @@ fn test_parser_fuzz_corpus_does_not_panic() {
         let _ = ctx.eval(&src);
     }
 }
+
+#[test]
+fn test_time_budget_and_jit_budget_suppression() {
+    let mut ctx = Context::new_small();
+    ctx.set_time_budget(std::time::Duration::from_millis(20));
+    let err = ctx
+        .eval("while (true) {}")
+        .expect_err("time budget must trip");
+    assert!(
+        err.contains("time budget exceeded"),
+        "unexpected error: {err}"
+    );
+    assert_eq!(ctx.eval("2 + 2").unwrap().as_smi(), Some(4));
+
+    // Instruction budget must also cover the opt-in JIT (JIT is suppressed).
+    let mut jit = Context::new_small();
+    jit.enable_jit = true;
+    jit.set_instruction_budget(20_000);
+    let err = jit
+        .eval("while (true) {}")
+        .expect_err("JIT must not bypass instruction budget");
+    assert!(
+        err.contains("instruction budget exceeded"),
+        "unexpected error: {err}"
+    );
+}

@@ -55,6 +55,7 @@ fn main() {
     let mut allow_private_fetch = false;
     let mut build_out: Option<String> = None;
     let mut max_instructions: Option<u64> = None;
+    let mut timeout_ms: Option<u64> = None;
 
     let mut source_args: Vec<String> = Vec::new();
     let mut i = 0;
@@ -103,6 +104,13 @@ fn main() {
             }
         } else if let Some(rest) = arg.strip_prefix("--max-instructions=") {
             max_instructions = rest.parse().ok();
+        } else if arg == "--timeout-ms" {
+            i += 1;
+            if i < args.len() {
+                timeout_ms = args[i].parse().ok();
+            }
+        } else if let Some(rest) = arg.strip_prefix("--timeout-ms=") {
+            timeout_ms = rest.parse().ok();
         } else if arg == "--stencil-jit" {
             stencil_jit = true;
         } else if arg == "--no-stencil-jit" {
@@ -119,6 +127,9 @@ fn main() {
     ctx.enable_jit = enable_jit;
     if let Some(limit) = max_instructions {
         ctx.set_instruction_budget(limit);
+    }
+    if let Some(ms) = timeout_ms {
+        ctx.set_time_budget(std::time::Duration::from_millis(ms));
     }
     // Install timer/fetch host globals and the event-loop job queues. The
     // test262 harness keeps a bare context; scripts get the runtime globals.

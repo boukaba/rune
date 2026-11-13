@@ -880,8 +880,11 @@ CLI tests: **7 tests** (1 HTTP unit + 6 integration); integration suite 783.
 
 - `Context::set_instruction_budget` + `rune --max-instructions=N` add a
   deterministic interpreter work limit. Exhaustion raises a catchable
-  `RangeError` once and resets to unlimited so error handling can run. JIT
-  code is not budgeted (documented).
+  `RangeError` once and resets to unlimited so error handling can run.
+- `Context::set_time_budget` + `rune --timeout-ms=N` add a wall-clock deadline,
+  checked every 4096 instructions, with the same catchable-once behavior.
+- Both limits **suppress the JIT** while active, so native loops cannot bypass
+  them; this is regression-tested with `enable_jit = true`.
 - New deterministic token-soup parser corpus (300 random programs) asserts
   malformed input produces parse/runtime errors without panics or hangs.
 - New `docs/security-model.md` records enforced controls (budget, fetch policy,
@@ -890,8 +893,8 @@ CLI tests: **7 tests** (1 HTTP unit + 6 integration); integration suite 783.
   bundle signing, formal JIT proof).
 - CLI budget test; integration budget + parser-fuzz regressions.
 
-Integration suite: **785 passed, 0 failed, 3 ignored**; CLI **8 tests**
-(1 HTTP unit + 7 integration).
+Integration suite: **786 passed, 0 failed, 3 ignored**; CLI **9 tests**
+(1 HTTP unit + 8 integration).
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:

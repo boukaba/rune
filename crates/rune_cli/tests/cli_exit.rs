@@ -142,3 +142,17 @@ fn instruction_budget_stops_infinite_loop() {
         "unexpected stderr: {stderr}"
     );
 }
+
+#[test]
+fn time_budget_stops_infinite_loop() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rune"))
+        .args(["--timeout-ms=20", "-e", "while (true) {}"])
+        .output()
+        .expect("spawn rune");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("time budget exceeded"),
+        "unexpected stderr: {stderr}"
+    );
+}

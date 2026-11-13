@@ -1010,6 +1010,22 @@ Integration suite: **789 passed, 0 failed, 3 ignored**; `rune_capi` **4 tests**.
   integration **790**.
 - Regression: `test_promise_constructor_errors_and_executor_rejection`.
 
+### Phase 2 — Promise generic methods + self-resolution (2026-11-13)
+
+- `Promise.prototype.catch` now performs the spec `Invoke(this, "then",
+  [undefined, onRejected])`: primitive receivers are boxed (`Boolean/Number/
+  String/Symbol` prototypes), null/undefined throw TypeError, and thenable
+  `then` results are returned unchanged.
+- `Promise.prototype.then` now throws TypeError for non-Promise receivers
+  (previously silently returned undefined).
+- `Promise.prototype.finally` handles a non-callable `onFinally` on generic
+  thenables by invoking `then` with `(onFinally, onFinally)` and returning its
+  result; native-Promise callable behavior is unchanged.
+- Self-resolution (`resolve(promise)` from its own executor) rejects with a
+  TypeError instead of fulfilling the promise with itself.
+- Measured: Promise **357/703 (50.8%; was 345)**, integration **791**.
+- Regression: `test_promise_generic_catch_finally_and_self_resolution`.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

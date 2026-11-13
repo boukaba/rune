@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Promise generic methods/self-resolution (2026-11-13)**: spec `catch` via `Invoke(then)` with primitive boxing, `then` non-Promise TypeError, generic non-callable `finally`, self-resolution TypeErrors. Promise **357/703 (50.8%)**; integration **791**.
 - **Promise constructor semantics (2026-11-13)**: `new` required, callable-executor TypeError, `Promise.call/apply` path, executor throw rejects promise (scoped `from_constructor` interception). Promise **345/703 (49.1%)**; map **203/216**; integration **790**.
 - **Sloppy global `this` (2026-11-13)**: per-context global object for script top-level `this`, sloppy undefined receivers, and `globalThis`; strict/module behavior preserved. Map **203/216 (94.0%)**; integration **789**. Globals map not mirrored as properties yet.
 - **Date/RegExp own properties (2026-11-13)**: Date padding reused as `extra_props`; RegExp 48-byte layout with extra-props; load/store/has/length/index cover both. Map **202/216 (93.5%)**; integration **788**; GC stress 4/4.
@@ -113,7 +114,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 - **GC**: forced-collection stress harness + CI job; aggressive Promise.all stress on 16 MiB at interval 48.
 - **Stable object/array headers**: initial values are inline; growth converts to a separate slot buffer and never moves the header. GC distinguishes inline/grown/buffer layouts; object self-pointers are repaired in to-space. JIT x86-64/AArch64 property IC and trace-IC slot offsets updated; AFPC v10. Regression + 100K-object stress + full 512-stress green.
 - Verification: integration **773 passed, 0 failed, 3 ignored**; `rune_runtime` **10 passed**; full workspace green; fmt/clippy/no-default clean.
-- Known gaps: host closure captures not GC-rooted by engine; same-host-function re-entry rejected; CLI fetch uses a real HTTP/HTTPS transport with literal private-network blocking and an opt-in allowlist policy; DNS rebinding/proxy/redirect policy still open; `rune_runtime` embedders choose their own; `rune build`/`rune run` bundles exist for scripts and precompiled ESM graphs (bytecode, no native module AOT); standalone executables are unsigned and module code is interpreter-only; test262 90% gate not met; targeted `built-ins/Promise` honest async baseline is 345/703 (49.1%).
+- Known gaps: host closure captures not GC-rooted by engine; same-host-function re-entry rejected; CLI fetch uses a real HTTP/HTTPS transport with literal private-network blocking and an opt-in allowlist policy; DNS rebinding/proxy/redirect policy still open; `rune_runtime` embedders choose their own; `rune build`/`rune run` bundles exist for scripts and precompiled ESM graphs (bytecode, no native module AOT); standalone executables are unsigned and module code is interpreter-only; test262 90% gate not met; targeted `built-ins/Promise` honest async baseline is 357/703 (50.8%).
 
 ### Goal
 Ship a minimally viable JS engine for edge/serverless — cold-start wedge (2.8× vs Node) with enough stdlib to run real workloads. v0.4 = stdlib breadth (14 builtins). v0.5 = Promise + async patterns.

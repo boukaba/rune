@@ -14455,3 +14455,36 @@ fn test_promise_constructor_errors_and_executor_rejection() {
     );
     assert_eq!(ctx.eval("reason").unwrap().as_smi(), Some(9));
 }
+
+#[test]
+fn test_promise_generic_catch_finally_and_self_resolution() {
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+        var thenResult = { tag: "then-result" };
+        var thenable = { then: function (a, b) { return thenResult; } };
+        var caught = Promise.prototype.catch.call(thenable, function () {});
+        var site = {};
+        var seenThis = null;
+        site.then = function (a, b) { seenThis = this; return "R"; };
+        var finalResult = Promise.prototype.finally.call(site, 1);
+        var resolve;
+        var p = new Promise(function (r) { resolve = r; });
+        var selfReason = null;
+        p.catch(function (e) { selfReason = e; });
+        resolve(p);
+        "#,
+    )
+    .unwrap();
+    let r = ctx
+        .eval(
+            r#"
+            caught === thenResult
+                && finalResult === "R"
+                && seenThis === site
+                && selfReason instanceof TypeError;
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

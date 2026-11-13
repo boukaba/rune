@@ -18294,6 +18294,20 @@ pub fn promise_resolve_impl(
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_PROMISE && unsafe { Promise::state(ptr) == PROMISE_PENDING } {
             let val = args.first().copied().unwrap_or(Value::undefined());
+            if val == this {
+                let error = crate::errors::error_object(
+                    _gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "Chaining cycle detected for promise",
+                );
+                unsafe {
+                    Promise::set_state(ptr, PROMISE_REJECTED);
+                    Promise::set_result(ptr, error);
+                }
+                settle_promise_reactions(vm, ptr, error, false);
+                return Value::undefined();
+            }
             unsafe {
                 Promise::set_state(ptr, PROMISE_FULFILLED);
                 Promise::set_result(ptr, val);
@@ -18382,12 +18396,23 @@ pub fn promise_prototype_then(
     args: &[Value],
     vm: &mut Vm,
 ) -> Value {
-    let ptr = match this.heap_ptr() {
-        Some(p) => p,
-        None => return Value::undefined(),
+    let Some(ptr) = this.heap_ptr() else {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Promise.prototype.then called on a non-Promise",
+        ));
+        return Value::undefined();
     };
     let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
     if tag != TAG_PROMISE {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Promise.prototype.then called on a non-Promise",
+        ));
         return Value::undefined();
     }
     let state = unsafe { Promise::state(ptr) };
@@ -18470,10 +18495,40 @@ pub fn promise_prototype_catch(
     args: &[Value],
     vm: &mut Vm,
 ) -> Value {
-    promise_prototype_then(
+    // §27.2.5.1: Return ? Invoke(promise, "then", « undefined, onRejected »).
+    // Generic receivers/thenables are supported; missing/non-callable `then`
+    // throws via call_builtin's IsCallable check.
+    if this.is_null() || this.is_undefined() {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Promise.prototype.catch called on null or undefined",
+        ));
+        return Value::undefined();
+    }
+    let key = Value::from_heap_ptr(HeapString::allocate(gc, "then") as *mut u8);
+    let holder = if this.as_symbol_id().is_some() {
+        vm.symbol_prototype
+    } else {
+        crate::vm::to_object_value(gc, this, vm)
+    };
+    let base = vm.temp_roots.len();
+    vm.temp_roots.push(holder);
+    let then = load_property_recursive(holder, key, Some(vm.function_prototype), gc);
+    if let Some(exc) = vm.pending_exception.take() {
+        vm.temp_roots.truncate(base);
+        vm.pending_exception = Some(exc);
+        return Value::undefined();
+    }
+    vm.temp_roots.push(then);
+    let then_now = vm.temp_roots[base + 1];
+    vm.temp_roots.truncate(base);
+    call_builtin(
         gc,
-        this,
+        then_now,
         &[
+            this,
             Value::undefined(),
             args.first().copied().unwrap_or(Value::undefined()),
         ],
@@ -18489,6 +18544,37 @@ pub fn promise_prototype_finally(
     vm: &mut Vm,
 ) -> Value {
     let on_finally = args.first().copied().unwrap_or(Value::undefined());
+    // §27.2.5.3: for a non-callable onFinally the two callbacks are simply
+    // `onFinally` itself; generic thenables receive them through `then`.
+    if !is_callable_value(on_finally) {
+        if this.is_null() || this.is_undefined() {
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Promise.prototype.finally called on null or undefined",
+            ));
+            return Value::undefined();
+        }
+        let key = Value::from_heap_ptr(HeapString::allocate(gc, "then") as *mut u8);
+        let holder = if this.as_symbol_id().is_some() {
+            vm.symbol_prototype
+        } else {
+            crate::vm::to_object_value(gc, this, vm)
+        };
+        let base = vm.temp_roots.len();
+        vm.temp_roots.push(holder);
+        let then = load_property_recursive(holder, key, Some(vm.function_prototype), gc);
+        if let Some(exc) = vm.pending_exception.take() {
+            vm.temp_roots.truncate(base);
+            vm.pending_exception = Some(exc);
+            return Value::undefined();
+        }
+        vm.temp_roots.push(then);
+        let then_now = vm.temp_roots[base + 1];
+        vm.temp_roots.truncate(base);
+        return call_builtin(gc, then_now, &[this, on_finally, on_finally], vm);
+    }
     let ptr = match this.heap_ptr() {
         Some(p) => p,
         None => return Value::undefined(),

@@ -9,10 +9,10 @@ Command:
 Result:
 
 ```text
-Results: 345 passed, 293 failed, 65 skipped, 703 total
+Results: 357 passed, 281 failed, 65 skipped, 703 total
 ```
 
-This is **49.1% of the suite** and **54.1% of executed tests** (638). It is a
+This is **50.8% of the suite** and **56.0% of executed tests** (638). It is a
 targeted baseline, not the core-suite 90% gate from the production roadmap.
 
 Observed failure categories in the tail of this run:
@@ -26,9 +26,9 @@ Observed failure categories in the tail of this run:
 Follow-up fixes (prototype-chain dispatch, wrappers, AggregateError, undeclared
 identifiers) moved the suite upward; then the runner began actually draining
 microtasks and honoring `$DONE(error)`. The honest async-completion baseline is
-**345**, because assertions that were previously never reached now run. The
-latest five come from Promise-constructor semantics: `new` required, callable
-executor, `Promise.call`, and an executor throw rejecting the promise. The targeted
+**357**, because assertions that were previously never reached now run. The
+latest gains come from Promise-constructor semantics plus generic `catch`/
+`finally` dispatch and self-resolution rejection. The targeted
 `built-ins/Array/prototype/map` suite is 203/216 (94.0%).
 
 The suite includes `Promise.any` and combinator-thenable tests; the numbers

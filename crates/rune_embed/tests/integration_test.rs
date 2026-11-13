@@ -15321,3 +15321,25 @@ fn test_typed_array_length_tracking() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_typed_array_array_like_coercions() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var a = new Uint8Array([1, 2]);
+            a.set([42], [1]);
+            var b = new Uint8Array([3, 4]);
+            [
+                a[0] === 1,
+                a[1] === 42,
+                compareArray(a, [1, 42]),
+                compareArray(b, [3, 4]),
+                !compareArray(a, b)
+            ].join("|") === "true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

@@ -1257,7 +1257,7 @@ pub(crate) fn to_primitive_string_sync(val: Value, gc: &mut SemiSpace, vm: &mut 
 }
 
 /// Convert a string to f64 per ToNumber(string) spec.
-fn string_to_number(s: &str) -> f64 {
+pub(crate) fn string_to_number(s: &str) -> f64 {
     let trimmed = s.trim();
     if trimmed.is_empty() {
         return 0.0;
@@ -1281,7 +1281,7 @@ fn string_to_number(s: &str) -> f64 {
 }
 
 /// Build a comma-separated string representation of a dense array.
-fn array_to_string(arr: *mut RuneArray) -> String {
+pub(crate) fn array_to_string(arr: *mut RuneArray) -> String {
     unsafe {
         let len = RuneArray::length(arr);
         if len == 0 {

@@ -15525,6 +15525,10 @@ pub(crate) fn to_number(v: Value) -> f64 {
             // §7.1.4 + §7.1.1.1 ToPrimitive(Date, number): Date's default hint is
             // string, but Number(x) uses the number hint → [[DateValue]]
             unsafe { date::RuneDate::tv(ptr) }
+        } else if tag == TAG_ARRAY {
+            // ToPrimitive(array, number) → valueOf (object) → toString → join.
+            let text = crate::builtins::array_to_string(ptr as *mut RuneArray);
+            crate::builtins::string_to_number(&text)
         } else {
             f64::NAN
         }
@@ -16077,6 +16081,9 @@ pub(crate) fn array_like_length(this: Value) -> Option<u32> {
                     .encode_utf16()
                     .count() as u32,
             )
+        }
+        TAG_TYPED_ARRAY => {
+            Some(unsafe { rune_core::typedarray::RuneTypedArray::effective_length(ptr) as u32 })
         }
         TAG_REGEXP => {
             let extra = unsafe { rune_core::regexp::RegExp::extra_props(ptr) };

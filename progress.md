@@ -1695,6 +1695,18 @@ Integration suite: **823 passed, 0 failed, 3 ignored**.
 
 Integration suite: **823 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — TypedArray array-like length/coercion (2026-11-13)
+
+- `array_like_length` now understands TypedArrays (effective length), so
+  harness comparisons and array-like algorithms see typed-array elements.
+- `ToNumber(array)` now follows ToPrimitive: array → `join` string →
+  numeric string. This fixes `typedArray.set(source, [1])`-style offsets.
+- Test262: TypedArray **14 → 15/829** (most remaining failures need object
+  `valueOf` frames in offset/limit coercion).
+- Regression: `test_typed_array_array_like_coercions`.
+
+Integration suite: **824 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

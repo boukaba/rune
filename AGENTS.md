@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **TypedArray array-like coercions (2026-11-13)**: effective length in array_like_length; ToNumber(array) via join. TypedArray 15/829. Integration **824**.
 - **TypedArray harness baseline (2026-11-13)**: testTypedArray no longer skipped; boolean compareArray helper. Honest TypedArray **14/829**. Integration **823**.
 - **TypedArray length tracking (2026-11-13)**: views derive effective length from live resizable buffers; fixed views keep length. Integration **823**.
 - **Resizable ArrayBuffer (2026-11-13)**: maxByteLength options, resizable/max accessors, resize with RangeError. ArrayBuffer 56→**66/221**. Integration **822**.

@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **TypedArray harness baseline (2026-11-13)**: testTypedArray no longer skipped; boolean compareArray helper. Honest TypedArray **14/829**. Integration **823**.
 - **TypedArray length tracking (2026-11-13)**: views derive effective length from live resizable buffers; fixed views keep length. Integration **823**.
 - **Resizable ArrayBuffer (2026-11-13)**: maxByteLength options, resizable/max accessors, resize with RangeError. ArrayBuffer 56→**66/221**. Integration **822**.
 - **ArrayBuffer transfer/detach (2026-11-13)**: transfer/transferToFixedLength/immutable copies, real detach state, resize TypeError. ArrayBuffer 34→**56/221**. Integration **821**.

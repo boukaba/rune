@@ -1680,6 +1680,21 @@ Integration suite: **822 passed, 0 failed, 3 ignored**.
 
 Integration suite: **823 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — TypedArray harness measurement (2026-11-13)
+
+- Stopped skipping `testTypedArray.js`; the harness now loads and runs, so the
+  TypedArray suite is measured honestly instead of being skipped.
+- Added the global boolean `compareArray(a, b)` helper used by that harness
+  (distinct from `assert.compareArray`, which throws).
+- Honest baseline: TypedArray **14 passed / 815 failed / 617 skipped** (829
+  executed) versus 0 passed / 115 failed / 1330 skipped before. Most failures
+  are in `%TypedArray%.prototype` methods: offset ToNumber ordering, species,
+  detached buffers, and method-level edge cases.
+- Known gaps: TypedArray is far from the 80% band; enabling the harness made a
+  large previously-hidden failure surface visible.
+
+Integration suite: **823 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

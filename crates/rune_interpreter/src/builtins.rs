@@ -23513,6 +23513,11 @@ pub fn default_builtins() -> Vec<Builtin> {
         },
         Builtin {
             length: 2,
+            name: "test262_compareArray",
+            func: test262_compare_array,
+        },
+        Builtin {
+            length: 2,
             name: "assert_throws",
             func: assert_throws,
         },
@@ -23859,6 +23864,40 @@ pub fn assert_compare_array(
         }
     }
     Value::undefined()
+}
+
+/// Test262 `compareArray(a, b)` helper returning a boolean.
+pub fn test262_compare_array(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    _vm: &mut Vm,
+) -> Value {
+    let actual = args.first().copied().unwrap_or(Value::undefined());
+    let expected = args.get(1).copied().unwrap_or(Value::undefined());
+    let is_prim = |v: Value| {
+        if !v.is_heap_object() {
+            return true;
+        }
+        v.heap_ptr()
+            .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_STRING })
+    };
+    if is_prim(actual) || is_prim(expected) {
+        return Value::boolean(false);
+    }
+    let alen = crate::vm::array_like_length(actual).unwrap_or(0) as usize;
+    let blen = crate::vm::array_like_length(expected).unwrap_or(0) as usize;
+    if alen != blen {
+        return Value::boolean(false);
+    }
+    for i in 0..alen {
+        let a = crate::vm::load_property_recursive(actual, Value::smi(i as i32), None, gc);
+        let b = crate::vm::load_property_recursive(expected, Value::smi(i as i32), None, gc);
+        if !same_value(a, b) {
+            return Value::boolean(false);
+        }
+    }
+    Value::boolean(true)
 }
 
 /// assert() — plain assert function that throws Test262Error if condition is falsy.

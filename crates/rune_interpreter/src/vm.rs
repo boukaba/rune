@@ -3299,6 +3299,9 @@ impl Vm {
                 self.globals.insert(name.to_string(), v);
             }
         }
+        if let Some(ca) = find_handle(&self.builtins, "test262_compareArray") {
+            self.globals.insert("compareArray".to_string(), ca);
+        }
         self.globals.insert("NaN".to_string(), nan_val);
         let inf_val = Value::from_float64(f64::INFINITY);
         self.globals.insert("Infinity".to_string(), inf_val);

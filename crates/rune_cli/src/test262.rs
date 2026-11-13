@@ -171,7 +171,6 @@ fn build_test_source(test: &TestCase) -> Result<String, String> {
         "assert",
         "fnGlobalObject.js",
         "doneprintHandle.js",
-        "testTypedArray.js",
         "testBigIntTypedArray.js",
         "byteConversionValues.js",
         "nans.js",
@@ -201,6 +200,9 @@ fn build_test_source(test: &TestCase) -> Result<String, String> {
     }
 
     full_source.push_str(&source);
+    if std::env::var("RUNE_T262_DUMP").is_ok() {
+        let _ = std::fs::write("/tmp/rune_ta_source.js", &full_source);
+    }
     Ok(full_source)
 }
 

@@ -14159,3 +14159,62 @@ fn test_function_instanceof_and_prototype() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_aggregate_error_constructor_identity() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var e = new AggregateError([1, 2], "boom");
+            [
+                e.name === "AggregateError",
+                e.message === "boom",
+                e.errors.length === 2,
+                e.errors[0] === 1,
+                e instanceof AggregateError,
+                e instanceof Error,
+                Object.getPrototypeOf(e) === AggregateError.prototype,
+                AggregateError.prototype instanceof Error,
+                typeof AggregateError === "function"
+            ].join("|") === "true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}
+
+#[test]
+fn test_array_this_arg_boxing_and_hex_length() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var boxed = [1].map(function () { return this.valueOf() === false; }, false)[0];
+            var hex = { 0: 11, 1: 9, 2: 12, length: "0x0002" };
+            var mapped = Array.prototype.map.call(hex, function (v) { return v < 10; });
+            [boxed, mapped.length === 2, mapped[1]].join("|") === "true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}
+
+#[test]
+fn test_object_to_string_tags() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var custom = {};
+            custom[Symbol.toStringTag] = "Custom";
+            [
+                Object.prototype.toString.call(Math),
+                Object.prototype.toString.call(JSON),
+                Object.prototype.toString.call(custom)
+            ].join("|") === "[object Math]|[object JSON]|[object Custom]";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

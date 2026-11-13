@@ -5852,6 +5852,33 @@ pub fn object_prototype_to_string(
     } else if this.is_smi() || this.as_float64().is_some() {
         "Number".to_string()
     } else if let Some(ptr) = this.heap_ptr() {
+        // §20.1.3.6 step 3: an own/inherited @@toStringTag string wins.
+        let mut current = this;
+        for _ in 0..MAX_PROTOTYPE_DEPTH {
+            let Some(cptr) = current.heap_ptr() else {
+                break;
+            };
+            let ctag = unsafe { (*(cptr as *const GcHeader)).tag() };
+            if ctag == TAG_OBJECT {
+                let shape = unsafe { JSObject::shape_ptr(cptr as *mut JSObject) };
+                if let Some(slot) = shape.lookup(&PropertyKey::from_symbol(
+                    rune_core::symbol::SYM_TO_STRING_TAG,
+                )) {
+                    let v = unsafe { JSObject::get_slot(cptr as *mut JSObject, slot) };
+                    if let Some(sptr) = v.heap_ptr() {
+                        if unsafe { (*(sptr as *const GcHeader)).tag() } == TAG_STRING {
+                            let s = unsafe { HeapString::to_string(sptr as *mut HeapString) };
+                            let out = format!("[object {s}]");
+                            return Value::from_heap_ptr(crate::vm::heap_string(gc, &out));
+                        }
+                    }
+                }
+            }
+            let Some(proto) = crate::vm::value_prototype(current) else {
+                break;
+            };
+            current = Value::from_heap_ptr(proto);
+        }
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         match tag {
             TAG_STRING => "String".to_string(),
@@ -9688,7 +9715,7 @@ fn length_prim_number(gc: &mut SemiSpace, vm: &mut Vm, v: Value) -> Result<Optio
             if t.is_empty() {
                 return Ok(Some(0.0));
             }
-            return Ok(Some(t.parse::<f64>().unwrap_or(f64::NAN)));
+            return Ok(Some(crate::vm::to_number(v)));
         }
         // B1f-2 parity (length_to_number): String objects coerce by inner
         // string (own valueOf overrides are a documented gap there too).
@@ -9699,7 +9726,7 @@ fn length_prim_number(gc: &mut SemiSpace, vm: &mut Vm, v: Value) -> Result<Optio
             if t.is_empty() {
                 return Ok(Some(0.0));
             }
-            return Ok(Some(t.parse::<f64>().unwrap_or(f64::NAN)));
+            return Ok(Some(crate::vm::to_number(v)));
         }
     }
     Ok(None)
@@ -10086,7 +10113,7 @@ fn length_to_number(gc: &mut SemiSpace, vm: &mut Vm, v: Value) -> Result<f64, Va
             if t.is_empty() {
                 return Ok(0.0);
             }
-            return Ok(t.parse::<f64>().unwrap_or(f64::NAN));
+            return Ok(crate::vm::to_number(v));
         }
         // String objects coerce by their inner string (own valueOf
         // overrides are a documented gap — B1f-6 dispatches methods).
@@ -10097,7 +10124,7 @@ fn length_to_number(gc: &mut SemiSpace, vm: &mut Vm, v: Value) -> Result<f64, Va
             if t.is_empty() {
                 return Ok(0.0);
             }
-            return Ok(t.parse::<f64>().unwrap_or(f64::NAN));
+            return Ok(crate::vm::to_number(v));
         }
         if tag == TAG_OBJECT {
             // OrdinaryToPrimitive needs a callable valueOf or toString: a
@@ -15916,7 +15943,26 @@ fn array_iter_prologue(
         ));
         return None;
     }
-    let this_arg = args.get(1).copied().unwrap_or(Value::undefined());
+    let mut this_arg = args.get(1).copied().unwrap_or(Value::undefined());
+    // Non-strict JS callbacks receive a boxed `this` for primitive thisArg.
+    let primitive_this_arg = this_arg.to_boolean().is_some()
+        || this_arg.as_float64().is_some()
+        || this_arg.as_smi().is_some_and(|n| n >= 0)
+        || this_arg
+            .heap_ptr()
+            .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_STRING);
+    if primitive_this_arg {
+        if let Some(cb_ptr) = callback.heap_ptr() {
+            let cb_tag = unsafe { (*(cb_ptr as *const GcHeader)).tag() };
+            if cb_tag == TAG_FUNC && !unsafe { Func::is_strict(cb_ptr as *mut Func) } {
+                this_arg = crate::vm::to_object_value(gc, this_arg, vm);
+                if vm.pending_array_op.is_none() && vm.pending_array_ops.is_empty() {
+                    vm.array_receiver_roots.clear();
+                }
+                vm.array_receiver_roots.push(this_arg);
+            }
+        }
+    }
     let source_ptr = this.heap_ptr().unwrap_or(std::ptr::null_mut());
     Some((length, callback, this_arg, source_ptr, this))
 }
@@ -19075,6 +19121,73 @@ pub fn promise_static_all_settled(
     result_val
 }
 
+/// AggregateError(errors, message) — ES2021 Error subclass.
+pub fn aggregate_error_builtin(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let errors_arg = args.first().copied().unwrap_or(Value::undefined());
+    let message = args
+        .get(1)
+        .map(|v| value_to_js_string(*v))
+        .unwrap_or_default();
+    let base = gc.scratch_len();
+    gc.push_scratch_root(errors_arg);
+    let mut values: Vec<Value> = Vec::new();
+    if let Some(ptr) = errors_arg.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_ARRAY {
+            let len = unsafe { RuneArray::length(ptr as *mut RuneArray) };
+            for i in 0..len {
+                let v = unsafe { RuneArray::get_element(ptr as *mut RuneArray, i as usize) };
+                values.push(if v == Value::empty_sentinel() {
+                    Value::undefined()
+                } else {
+                    v
+                });
+            }
+        } else if let Some(len) = crate::vm::array_like_length(errors_arg) {
+            for i in 0..len {
+                values
+                    .push(crate::vm::array_like_index(errors_arg, i).unwrap_or(Value::undefined()));
+            }
+        }
+    }
+    let errors = build_array(gc, &values, vm);
+    let err = crate::errors::error_object(
+        gc,
+        &vm.error_protos,
+        crate::errors::ErrorKind::Error,
+        &message,
+    );
+    let Some(ptr) = err.heap_ptr() else {
+        gc.truncate_scratch(base);
+        return err;
+    };
+    let obj = unsafe { rune_core::gc::resolve_forwarded(ptr) } as *mut JSObject;
+    if let Some(proto) = vm.aggregate_error_prototype.heap_ptr() {
+        unsafe { JSObject::set_prototype(obj, proto) };
+    }
+    let name_str = HeapString::allocate(gc, "AggregateError") as *mut u8;
+    let obj = unsafe { rune_core::gc::resolve_forwarded(obj as *mut u8) } as *mut JSObject;
+    let shape = unsafe { JSObject::shape_ptr(obj) };
+    if let Some(slot) = shape.lookup(&PropertyKey::from_string("name")) {
+        unsafe { JSObject::set_slot(obj, slot, Value::from_heap_ptr(name_str)) };
+    }
+    unsafe {
+        JSObject::add_property(
+            obj,
+            PropertyKey::from_string("errors"),
+            "errors".to_string(),
+            errors,
+        );
+    }
+    gc.truncate_scratch(base);
+    Value::from_heap_ptr(obj as *mut u8)
+}
+
 /// Build an AggregateError-shaped object carrying the rejection reasons.
 fn aggregate_error(gc: &mut SemiSpace, errors: Value, vm: &mut Vm) -> Value {
     let err = crate::errors::error_object(
@@ -19092,6 +19205,9 @@ fn aggregate_error(gc: &mut SemiSpace, errors: Value, vm: &mut Vm) -> Value {
     let shape = unsafe { JSObject::shape_ptr(obj) };
     if let Some(slot) = shape.lookup(&PropertyKey::from_string("name")) {
         unsafe { JSObject::set_slot(obj, slot, Value::from_heap_ptr(name_str)) };
+    }
+    if let Some(proto) = vm.aggregate_error_prototype.heap_ptr() {
+        unsafe { JSObject::set_prototype(obj, proto) };
     }
     unsafe {
         JSObject::add_property(

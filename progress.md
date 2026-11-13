@@ -795,6 +795,22 @@ array receivers, function prototype/instanceof.
 
 Integration suite: **779 passed, 0 failed, 3 ignored**; full 512-stress 779.
 
+### Phase 2 — AggregateError + array conformance tail (2026-11-13)
+
+- Added a real `AggregateError` constructor/prototype inheriting
+  `Error.prototype`, with `errors`/`message`/`name`, callable without `new`,
+  and `typeof`/`instanceof`/`Object.getPrototypeOf` wiring. `Promise.any`
+  rejections now use this prototype.
+- `Object.prototype.toString` honors own/inherited `@@toStringTag`; `Math`
+  and `JSON` carry their tags (`[object Math]`/`[object JSON]`).
+- Non-strict JS array callbacks box primitive `thisArg` (Boolean/Number/String),
+  while builtin handles/undefined keep their identity.
+- Length coercion uses full ToNumber, so `{length: "0x0002"}` works.
+- Measured: `built-ins/Array/prototype/map` **198/216 (91.7%; was 191)**;
+  `built-ins/Promise` **375/703 (53.3%; was 373)**.
+
+Integration suite: **782 passed, 0 failed, 3 ignored**; full 512-stress 782.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

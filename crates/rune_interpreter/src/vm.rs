@@ -1145,6 +1145,8 @@ pub struct Vm {
     /// ReferenceError, SyntaxError, TypeError, URIError).
     pub error_ctors: Vec<Value>,
     pub error_protos: Vec<Value>,
+    pub aggregate_error_constructor: Value,
+    pub aggregate_error_prototype: Value,
     /// Wrapper objects that behave as functions (builtin constructors with
     /// Call/New dispatch). Their [[Prototype]] is %Function.prototype% and
     /// `typeof` reports "function".
@@ -1393,6 +1395,8 @@ impl Vm {
             error_ctors: Vec::new(),
             callable_wrappers: Vec::new(),
             error_protos: Vec::new(),
+            aggregate_error_constructor: Value::undefined(),
+            aggregate_error_prototype: Value::undefined(),
             symbol_prototype: Value::undefined(),
             pending_symbol_dispatch: None,
             pending_symbol_coercion: None,
@@ -2442,6 +2446,17 @@ impl Vm {
         .collect();
         if !math_entries.is_empty() {
             let math_obj = make_object(gc, &math_entries);
+            if let Some(ptr) = math_obj.heap_ptr() {
+                let tag = Value::from_heap_ptr(HeapString::allocate(gc, "Math") as *mut u8);
+                unsafe {
+                    JSObject::add_property(
+                        ptr as *mut JSObject,
+                        PropertyKey::from_symbol(rune_core::symbol::SYM_TO_STRING_TAG),
+                        "\0".to_string(),
+                        tag,
+                    );
+                }
+            }
             self.builtin_wrappers.insert("Math".to_string(), math_obj);
         }
 
@@ -2452,6 +2467,17 @@ impl Vm {
                 json_entries.push(("stringify", stringify_handle));
             }
             let json_obj = make_object(gc, &json_entries);
+            if let Some(ptr) = json_obj.heap_ptr() {
+                let tag = Value::from_heap_ptr(HeapString::allocate(gc, "JSON") as *mut u8);
+                unsafe {
+                    JSObject::add_property(
+                        ptr as *mut JSObject,
+                        PropertyKey::from_symbol(rune_core::symbol::SYM_TO_STRING_TAG),
+                        "\0".to_string(),
+                        tag,
+                    );
+                }
+            }
             self.builtin_wrappers.insert("JSON".to_string(), json_obj);
         }
 
@@ -2766,6 +2792,47 @@ impl Vm {
                 }
                 let _ = i;
             }
+
+            // AggregateError (ES2021): an Error subclass carrying `errors`.
+            let agg_proto_name =
+                Value::from_heap_ptr(HeapString::allocate(gc, "AggregateError") as *mut u8);
+            let agg_proto_message = Value::from_heap_ptr(HeapString::allocate(gc, "") as *mut u8);
+            let agg_proto = make_object(
+                gc,
+                &[("name", agg_proto_name), ("message", agg_proto_message)],
+            );
+            unsafe {
+                JSObject::set_prototype(
+                    agg_proto.heap_ptr().unwrap() as *mut JSObject,
+                    err_proto.heap_ptr().unwrap(),
+                );
+            }
+            let agg_name =
+                Value::from_heap_ptr(HeapString::allocate(gc, "AggregateError") as *mut u8);
+            let agg_ctor = make_object(
+                gc,
+                &[
+                    ("prototype", agg_proto),
+                    ("length", Value::smi(2)),
+                    ("name", agg_name),
+                ],
+            );
+            unsafe {
+                JSObject::set_prototype(
+                    agg_ctor.heap_ptr().unwrap() as *mut JSObject,
+                    err_ctor.heap_ptr().unwrap(),
+                );
+                JSObject::add_property(
+                    agg_proto.heap_ptr().unwrap() as *mut JSObject,
+                    PropertyKey::from_string("constructor"),
+                    "constructor".to_string(),
+                    agg_ctor,
+                );
+            }
+            self.aggregate_error_prototype = agg_proto;
+            self.aggregate_error_constructor = agg_ctor;
+            self.builtin_wrappers
+                .insert("AggregateError".to_string(), agg_ctor);
         }
 
         // Wire the callable wrapper set: every builtin constructor wrapper
@@ -2850,6 +2917,9 @@ impl Vm {
             if let Some(v) = self.regexp_constructor.heap_ptr() {
                 wrappers.push(Value::from_heap_ptr(v));
             }
+            if let Some(v) = self.aggregate_error_constructor.heap_ptr() {
+                wrappers.push(Value::from_heap_ptr(v));
+            }
             wrappers.extend(self.typed_array_ctors.iter().copied());
             for w in &wrappers {
                 if let Some(ptr) = w.heap_ptr() {
@@ -2861,6 +2931,7 @@ impl Vm {
                         .iter()
                         .skip(1)
                         .any(|e| e.heap_ptr() == Some(ptr))
+                        || self.aggregate_error_constructor.heap_ptr() == Some(ptr)
                     {
                         continue;
                     }
@@ -3837,6 +3908,8 @@ impl Vm {
         for v in self.typed_array_ctor_handles.iter_mut() {
             gc.push_root(v as *mut Value as *mut u64);
         }
+        gc.push_root(&self.aggregate_error_constructor as *const Value as *mut u64);
+        gc.push_root(&self.aggregate_error_prototype as *const Value as *mut u64);
         for v in self.error_ctors.iter_mut() {
             gc.push_root(v as *mut Value as *mut u64);
         }
@@ -9554,6 +9627,18 @@ impl Vm {
                             continue;
                         }
                     }
+                    // AggregateError(errors, message) — ES2021 Error subclass.
+                    if constructor == self.aggregate_error_constructor {
+                        let result = crate::builtins::aggregate_error_builtin(
+                            gc,
+                            Value::undefined(),
+                            &args,
+                            self,
+                        );
+                        self.push(result);
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    }
                     // Error-family constructors: new TypeError(message[, options])
                     if let Some(ptr) = constructor.heap_ptr() {
                         if let Some(ti) = self
@@ -10042,6 +10127,14 @@ impl Vm {
                                 continue;
                             }
                         }
+                    }
+
+                    if callee == self.aggregate_error_constructor {
+                        let result =
+                            crate::builtins::aggregate_error_builtin(gc, this, &args, self);
+                        self.push(result);
+                        self.frames[fi].pc = pc + 1;
+                        continue;
                     }
 
                     // §20.5.1.1 / §20.5.6.1.1: Error and the native errors are

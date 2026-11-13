@@ -1806,6 +1806,7 @@ impl Vm {
         let replace_handle = find_handle(&self.builtins, "String_prototype_replace");
         let replace_all_handle = find_handle(&self.builtins, "String_prototype_replaceAll");
         let match_handle = find_handle(&self.builtins, "String_prototype_match");
+        let match_all_handle = find_handle(&self.builtins, "String_prototype_matchAll");
         let search_handle = find_handle(&self.builtins, "String_prototype_search");
         if let (Some(char_at), Some(slice)) = (char_at_handle, slice_handle) {
             let mut str_proto_entries: Vec<(&str, Value)> =
@@ -1902,6 +1903,9 @@ impl Vm {
             }
             if let Some(mh) = match_handle {
                 str_proto_entries.push(("match", mh));
+            }
+            if let Some(ma) = match_all_handle {
+                str_proto_entries.push(("matchAll", ma));
             }
             if let Some(sh) = search_handle {
                 str_proto_entries.push(("search", sh));
@@ -2835,6 +2839,17 @@ impl Vm {
                 find_handle(&self.builtins, "RegExp").unwrap_or(Value::undefined());
             proto_entries.push(("constructor", re_ctor_handle));
             let re_proto = make_object(gc, &proto_entries);
+            if let Some(h) = find_handle(&self.builtins, "RegExp_prototype_matchAll") {
+                unsafe {
+                    JSObject::add_property_with_attrs(
+                        re_proto.heap_ptr().unwrap() as *mut JSObject,
+                        PropertyKey::from_symbol(rune_core::symbol::SYM_MATCH_ALL),
+                        "\u{0}".to_string(),
+                        h,
+                        rune_core::shape::ATTR_WRITABLE | rune_core::shape::ATTR_CONFIGURABLE,
+                    );
+                }
+            }
             if let Some(h) = find_handle(&self.builtins, "RegExp_prototype_[Symbol.match]") {
                 unsafe {
                     JSObject::add_property(

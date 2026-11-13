@@ -16472,6 +16472,164 @@ pub fn string_match(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
     }
 }
 
+/// Collect all global-regexp matches into an array iterator.
+fn collect_match_all(gc: &mut SemiSpace, rp: *mut u8, s: &str, vm: &mut Vm) -> Value {
+    let pattern = unsafe { HeapString::to_string(RegExp::pattern(rp) as *mut HeapString) };
+    let flags = unsafe { RegExp::flags(rp) };
+    let clone = alloc_regexp_from_string(gc, &pattern, flags, vm.regexp_prototype);
+    let input = Value::from_heap_ptr(HeapString::allocate(gc, s) as *mut u8);
+    let base = vm.temp_roots.len();
+    vm.temp_roots.push(clone);
+    vm.temp_roots.push(input);
+    let results = fresh_dense_array(gc, vm);
+    vm.temp_roots.push(results);
+    let results_slot = vm.temp_roots.len() - 1;
+    let mut guard = 0usize;
+    loop {
+        guard += 1;
+        if guard > 1_000_000 {
+            break;
+        }
+        let clone = vm.temp_roots[base];
+        let input = vm.temp_roots[base + 1];
+        let m = regexp_exec(gc, clone, &[input], vm);
+        if vm.pending_exception.is_some() {
+            vm.temp_roots.truncate(base);
+            return Value::undefined();
+        }
+        if m.is_null() {
+            break;
+        }
+        let empty = m
+            .heap_ptr()
+            .filter(|p| unsafe { (*(*p as *const GcHeader)).tag() } == TAG_ARRAY)
+            .map(|p| {
+                let arr = p as *mut RuneArray;
+                let first = unsafe { RuneArray::get_element(arr, 0) };
+                first
+                    .heap_ptr()
+                    .map(|sp| unsafe { HeapString::to_string(sp as *mut HeapString) }.is_empty())
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        let mut results_now = vm.temp_roots[results_slot];
+        if result_push(gc, vm, &mut results_now, m).is_err() {
+            vm.temp_roots.truncate(base);
+            return Value::undefined();
+        }
+        vm.temp_roots[results_slot] = results_now;
+        if empty {
+            let clone = vm.temp_roots[base];
+            if let Some(cp) = clone.heap_ptr() {
+                if unsafe { (*(cp as *const GcHeader)).tag() } == TAG_REGEXP {
+                    let next = unsafe { RegExp::last_index(cp) }.saturating_add(1);
+                    unsafe { RegExp::set_last_index(cp, next) };
+                    if next as usize > s.encode_utf16().count() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    vm.temp_roots.truncate(base);
+    array_values_builtin(gc, results, &[], vm)
+}
+
+/// RegExp.prototype[@@matchAll](string) — §22.2.6.9.
+pub fn regexp_match_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some(rp) = this.heap_ptr() else {
+        return Value::undefined();
+    };
+    if unsafe { (*(rp as *const GcHeader)).tag() } != TAG_REGEXP {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "RegExp.prototype[Symbol.matchAll] requires a RegExp",
+        ));
+        return Value::undefined();
+    }
+    if !unsafe { RegExp::has_flag(rp, 0) } {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "RegExp.prototype[Symbol.matchAll] requires a global RegExp",
+        ));
+        return Value::undefined();
+    }
+    let s = args
+        .first()
+        .copied()
+        .map(value_to_js_string)
+        .unwrap_or_default();
+    collect_match_all(gc, rp, &s, vm)
+}
+
+/// String.prototype.matchAll(regexp) — §22.1.3.13.
+pub fn string_match_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let Some(s) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let this_value = this;
+    let regexp = args.first().copied().unwrap_or(Value::undefined());
+    if regexp.is_undefined() || regexp.is_null() {
+        let re = alloc_regexp_from_string(gc, "", 1, vm.regexp_prototype);
+        if let Some(rp) = re.heap_ptr() {
+            return collect_match_all(gc, rp, &s, vm);
+        }
+        return Value::undefined();
+    }
+    // Primitive regexp arguments throw (only null/undefined are accepted).
+    let primitive_string = regexp
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_STRING });
+    if regexp.heap_ptr().is_none() || regexp.as_symbol_id().is_some() || primitive_string {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "String.prototype.matchAll requires an object",
+        ));
+        return Value::undefined();
+    }
+    let key = Value::symbol(rune_core::symbol::SYM_MATCH_ALL);
+    let method = match get_property_value_sync(gc, vm, regexp, key) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    if !method.is_undefined() && !method.is_null() {
+        let s_val = Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8);
+        return match vm.call_value_sync(gc, method, regexp, &[s_val]) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                Value::undefined()
+            }
+        };
+    }
+    if let Some(rp) = regexp.heap_ptr() {
+        if unsafe { (*(rp as *const GcHeader)).tag() } == TAG_REGEXP {
+            return collect_match_all(gc, rp, &s, vm);
+        }
+    }
+    // Non-RegExp objects are converted to a global RegExp.
+    let text = value_to_js_string(regexp);
+    let re = alloc_regexp_from_string(gc, &text, 1, vm.regexp_prototype);
+    let _ = this_value;
+    if let Some(rp) = re.heap_ptr() {
+        collect_match_all(gc, rp, &s, vm)
+    } else {
+        Value::undefined()
+    }
+}
+
 pub fn string_search(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
@@ -25267,6 +25425,11 @@ pub fn default_builtins() -> Vec<Builtin> {
         },
         Builtin {
             length: 1,
+            name: "RegExp_prototype_matchAll",
+            func: regexp_match_all,
+        },
+        Builtin {
+            length: 1,
             name: "RegExp_prototype_exec",
             func: regexp_exec,
         },
@@ -25344,6 +25507,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 1,
             name: "String_prototype_match",
             func: string_match,
+        },
+        Builtin {
+            length: 1,
+            name: "String_prototype_matchAll",
+            func: string_match_all,
         },
         Builtin {
             length: 1,

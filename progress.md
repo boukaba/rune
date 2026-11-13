@@ -2520,6 +2520,31 @@ Integration suite: **863 passed, 0 failed, 3 ignored**.
 
 Integration suite: **863 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — String.matchAll + RegExp @@matchAll (2026-11-13)
+
+- Added `String.prototype.matchAll` with spec dispatch:
+  - null/undefined → empty global RegExp;
+  - primitive arguments throw TypeError;
+  - object @@matchAll method (including custom protocol) invoked with the
+    original string;
+  - non-RegExp objects fall back to a global RegExp.
+- Added `RegExp.prototype[@@matchAll]`, installed as a writable/configurable
+  symbol property; it clones the source RegExp, requires the global flag, and
+  collects exec results into an Array iterator.
+- Fixed a GC-safety bug found by the regression: the results array was not
+  rooted across `RegExp.exec` allocations and could be reused/moved, producing
+  a stale TAG_STRING_OBJ and a SIGSEGV under GC. The array now lives in
+  `temp_roots` across the loop, refreshed before each push.
+- Empty-global matches advance lastIndex and include the match at the end of
+  the subject (without looping forever).
+- Test262: String **907 → 918/1223**, String/matchAll **0 → 13/25**.
+- Regression: `test_string_match_all_and_regexp_protocol` (passes under
+  `RUNE_GC_STRESS=512`).
+- Known: custom/prototype matchAll error edge cases; some regex-driven
+  String methods still fail.
+
+Integration suite: **864 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

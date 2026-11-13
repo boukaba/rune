@@ -16506,3 +16506,32 @@ fn test_string_wrapper_properties_and_position_coercion() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_string_match_all_and_regexp_protocol() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var all = Array.from("a1b22".matchAll(/([a-z])(\d+)/g));
+            var custom = "x".matchAll({ [Symbol.matchAll]: function (str) { return ["custom", str]; } });
+            var empty = Array.from("abc".matchAll(undefined));
+            var primThrew = false;
+            try { "x".matchAll("a"); } catch (e) { primThrew = e instanceof TypeError; }
+            var protoThrew = false;
+            try { "x".matchAll(/a/); } catch (e) { protoThrew = e instanceof TypeError; }
+            [
+                all.length === 2,
+                all[0][0] === "a1" && all[0][1] === "a" && all[0][2] === "1",
+                all[1][0] === "b22" && all[1][2] === "22",
+                custom[0] === "custom" && custom[1] === "x",
+                empty.length === 4 && empty[0][0] === "" && empty[3][0] === "",
+                primThrew,
+                protoThrew,
+                typeof RegExp.prototype[Symbol.matchAll] === "function"
+            ].join("|") === "true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

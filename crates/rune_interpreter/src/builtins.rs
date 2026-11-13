@@ -5087,6 +5087,51 @@ pub fn array_buffer_constructor(
             );
         }
     }
+    let ptr = unsafe { rune_core::gc::resolve_forwarded(ptr) };
+    unsafe { typedarray::RuneArrayBuffer::set_max_byte_length(ptr, byte_length) };
+    if let Some(options) = args.get(1).copied() {
+        if !options.is_undefined() {
+            let Some(opt_ptr) = options.heap_ptr() else {
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "ArrayBuffer options must be an object",
+                ));
+                return Value::undefined();
+            };
+            let tag = unsafe { (*(opt_ptr as *const GcHeader)).tag() };
+            if tag != TAG_OBJECT {
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "ArrayBuffer options must be an object",
+                ));
+                return Value::undefined();
+            }
+            let key = Value::from_heap_ptr(HeapString::allocate(gc, "maxByteLength") as *mut u8);
+            let max_val =
+                crate::vm::load_property_recursive(options, key, Some(vm.function_prototype), gc);
+            if !max_val.is_undefined() {
+                let max = match to_index_typed(gc, vm, max_val) {
+                    Ok(n) => n,
+                    Err(()) => return Value::undefined(),
+                };
+                if max < byte_length {
+                    vm.set_pending_exception(crate::errors::error_object(
+                        gc,
+                        &vm.error_protos,
+                        crate::errors::ErrorKind::RangeError,
+                        "maxByteLength must be greater than or equal to byteLength",
+                    ));
+                    return Value::undefined();
+                }
+                let ptr = unsafe { rune_core::gc::resolve_forwarded(ptr) };
+                unsafe { typedarray::RuneArrayBuffer::set_resizable_max(ptr, max) };
+            }
+        }
+    }
     this
 }
 
@@ -5118,12 +5163,15 @@ pub fn array_buffer_detached(
 
 /// get ArrayBuffer.prototype.resizable.
 pub fn array_buffer_resizable(
-    _gc: &mut SemiSpace,
-    _this: Value,
+    gc: &mut SemiSpace,
+    this: Value,
     _args: &[Value],
-    _vm: &mut Vm,
+    vm: &mut Vm,
 ) -> Value {
-    Value::boolean(false)
+    let Some(ptr) = array_buffer_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    Value::boolean(unsafe { typedarray::RuneArrayBuffer::is_resizable(ptr) })
 }
 
 /// get ArrayBuffer.prototype.maxByteLength.
@@ -5136,7 +5184,7 @@ pub fn array_buffer_max_byte_length(
     let Some(ptr) = array_buffer_receiver(gc, this, vm) else {
         return Value::undefined();
     };
-    Value::smi(unsafe { typedarray::RuneArrayBuffer::byte_length(ptr) } as i32)
+    Value::smi(unsafe { typedarray::RuneArrayBuffer::max_byte_length(ptr) } as i32)
 }
 
 fn array_buffer_transfer_impl(
@@ -5228,16 +5276,35 @@ pub fn array_buffer_slice_to_immutable(
 }
 
 /// ArrayBuffer.prototype.resize(newLength) — non-resizable buffers throw.
-pub fn array_buffer_resize(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
-    let Some(_ptr) = array_buffer_receiver(gc, this, vm) else {
+pub fn array_buffer_resize(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some(ptr) = array_buffer_receiver(gc, this, vm) else {
         return Value::undefined();
     };
-    vm.set_pending_exception(crate::errors::error_object(
-        gc,
-        &vm.error_protos,
-        crate::errors::ErrorKind::TypeError,
-        "ArrayBuffer is not resizable",
-    ));
+    if !unsafe { typedarray::RuneArrayBuffer::is_resizable(ptr) } {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "ArrayBuffer is not resizable",
+        ));
+        return Value::undefined();
+    }
+    let new_len = match to_index_typed(gc, vm, args.first().copied().unwrap_or(Value::undefined()))
+    {
+        Ok(n) => n,
+        Err(()) => return Value::undefined(),
+    };
+    let max = unsafe { typedarray::RuneArrayBuffer::max_byte_length(ptr) };
+    if new_len > max {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::RangeError,
+            "new length exceeds maxByteLength",
+        ));
+        return Value::undefined();
+    }
+    unsafe { typedarray::RuneArrayBuffer::resize(ptr, new_len) };
     Value::undefined()
 }
 

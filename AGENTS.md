@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Resizable ArrayBuffer (2026-11-13)**: maxByteLength options, resizable/max accessors, resize with RangeError. ArrayBuffer 56→**66/221**. Integration **822**.
 - **ArrayBuffer transfer/detach (2026-11-13)**: transfer/transferToFixedLength/immutable copies, real detach state, resize TypeError. ArrayBuffer 34→**56/221**. Integration **821**.
 - **ArrayBuffer accessors (2026-11-13)**: byteLength/detached/resizable/maxByteLength getters. ArrayBuffer 26→**34/221**. Integration **820**.
 - **Math.sumPrecise + min/max (2026-11-13)**: compensated Array/Set summation, ToNumber min/max, signed-zero rules. Math 178→**182/327**. Integration **819**.

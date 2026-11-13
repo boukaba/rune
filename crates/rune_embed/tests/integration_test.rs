@@ -15265,3 +15265,30 @@ fn test_array_buffer_transfer_and_detach() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_resizable_array_buffer() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var b = new ArrayBuffer(4, { maxByteLength: 16 });
+            var grew = false;
+            var exceeded = false;
+            var plainRejected = false;
+            b.resize(8);
+            grew = b.byteLength === 8 && b.maxByteLength === 16;
+            try { b.resize(32); } catch (e) { exceeded = e instanceof RangeError; }
+            try { new ArrayBuffer(4).resize(8); } catch (e) { plainRejected = e instanceof TypeError; }
+            [
+                b.resizable === true,
+                grew,
+                exceeded,
+                plainRejected,
+                new ArrayBuffer(4).resizable === false
+            ].join("|") === "true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

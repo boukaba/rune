@@ -1647,6 +1647,23 @@ Integration suite: **820 passed, 0 failed, 3 ignored**.
 
 Integration suite: **821 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Resizable ArrayBuffers (2026-11-13)
+
+- ArrayBuffer layout extended to 40 bytes with a max-byte-length word (high bit
+  marks resizable); GC size accounting updated.
+- `new ArrayBuffer(len, { maxByteLength })` now creates a resizable buffer;
+  options must be an object and max >= length (RangeError).
+- `resizable`/`maxByteLength` report the real state; `resize(newLength)`
+  reallocates the backing store (prefix preserved, growth zero-filled) and
+  enforces maxByteLength with RangeError.
+- Test262: ArrayBuffer **56 → 66/221**.
+- Regression: `test_resizable_array_buffer`.
+- Known gaps: TypedArray length-tracking views over resizable buffers are not
+  implemented; immutable-buffer enforcement and resizable transfer semantics
+  remain.
+
+Integration suite: **822 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

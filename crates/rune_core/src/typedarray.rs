@@ -2,7 +2,7 @@ use crate::gc::{GcHeader, SemiSpace, TAG_ARRAY_BUFFER, TAG_TYPED_ARRAY};
 use crate::value::Value;
 use std::sync::atomic::Ordering;
 
-pub const ARRAY_BUFFER_SIZE: usize = 32;
+pub const ARRAY_BUFFER_SIZE: usize = 40;
 pub const TYPED_ARRAY_SIZE: usize = 40;
 
 /// The supported TypedArray element types (Table 71 minus BigInt/Float16 —
@@ -74,6 +74,8 @@ pub struct RuneArrayBuffer {
     data: *mut u8,
     byte_length: u64,
     prototype: *mut u8,
+    /// Max byte length; high bit marks a resizable buffer.
+    max_byte_length: u64,
 }
 
 /// Heap-allocated TypedArray object (integer-indexed exotic object).
@@ -103,6 +105,7 @@ impl RuneArrayBuffer {
             (*b).data = data;
             (*b).byte_length = byte_length as u64;
             (*b).prototype = prototype;
+            (*b).max_byte_length = byte_length as u64;
         }
         ptr
     }
@@ -133,6 +136,49 @@ impl RuneArrayBuffer {
             let b = ptr as *mut RuneArrayBuffer;
             (*b).data = data;
             (*b).byte_length = byte_length as u64;
+        }
+    }
+
+    const RESIZABLE_BIT: u64 = 1 << 63;
+
+    pub unsafe fn max_byte_length(ptr: *mut u8) -> usize {
+        unsafe {
+            (*(ptr.add(std::mem::size_of::<GcHeader>() + 24) as *const u64) & !Self::RESIZABLE_BIT)
+                as usize
+        }
+    }
+
+    pub unsafe fn is_resizable(ptr: *mut u8) -> bool {
+        unsafe {
+            *(ptr.add(std::mem::size_of::<GcHeader>() + 24) as *const u64) & Self::RESIZABLE_BIT
+                != 0
+        }
+    }
+
+    pub unsafe fn set_max_byte_length(ptr: *mut u8, max: usize) {
+        unsafe {
+            let slot = ptr.add(std::mem::size_of::<GcHeader>() + 24) as *mut u64;
+            *slot = (*slot & Self::RESIZABLE_BIT) | (max as u64);
+        }
+    }
+
+    pub unsafe fn set_resizable_max(ptr: *mut u8, max: usize) {
+        unsafe {
+            *(ptr.add(std::mem::size_of::<GcHeader>() + 24) as *mut u64) =
+                (max as u64) | Self::RESIZABLE_BIT;
+        }
+    }
+
+    /// Grow/shrink the backing store, preserving the overlapping prefix.
+    pub unsafe fn resize(ptr: *mut u8, new_len: usize) {
+        unsafe {
+            let old_len = Self::byte_length(ptr);
+            let mut data = vec![0u8; new_len].into_boxed_slice();
+            let copy_len = old_len.min(new_len);
+            if copy_len > 0 {
+                std::ptr::copy_nonoverlapping(Self::data(ptr), data.as_mut_ptr(), copy_len);
+            }
+            Self::set_data_and_length(ptr, Box::into_raw(data) as *mut u8, new_len);
         }
     }
 

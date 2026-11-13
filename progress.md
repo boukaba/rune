@@ -1163,6 +1163,29 @@ Integration suite: **794 passed, 0 failed, 3 ignored**; `rune_capi` **8 tests**.
 
 Integration suite: **795 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — String locale/statics + primitive prototype dispatch (2026-11-13)
+
+- Added `String.prototype.toLocaleLowerCase`/`toLocaleUpperCase`
+  (locale-insensitive aliases), `localeCompare` (UTF-16 code-unit ordering),
+  `normalize` (validates NFC/NFD/NFKC/NFKD; identity transform — no Unicode
+  normalization database), and `toWellFormed` (identity).
+- Added `String.fromCodePoint` (RangeError validation) and
+  `String.raw(template, ...substitutions)`.
+- `trim`/`trimStart`/`trimEnd` now coerce objects via ToPrimitive, so custom
+  `toString` on `this` is honored.
+- Fixed primitive property dispatch: non-negative Smis and number values now
+  resolve through `Number.prototype` (was Object.prototype); booleans through
+  `Boolean.prototype`. `Number.prototype.valueOf/toString` and
+  `Boolean.prototype.valueOf/toString` accept primitive receivers.
+- Test262: String **523 → 591/1223**; Number **128/340**; Boolean **20/51**;
+  `String.raw` 16/30, `normalize` 6/14, `toWellFormed` 4/8,
+  `fromCodePoint` 4/11.
+- Regression: `test_string_locale_statics_and_primitive_methods`.
+- Known gaps: no real Unicode normalization/case mapping, localeCompare ignores
+  collation, lone surrogate inputs are replaced/rejected.
+
+Integration suite: **796 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

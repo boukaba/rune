@@ -1725,6 +1725,13 @@ impl Vm {
         let trim_end_handle = find_handle(&self.builtins, "String_prototype_trimEnd");
         let to_lower_handle = find_handle(&self.builtins, "String_prototype_toLowerCase");
         let to_upper_handle = find_handle(&self.builtins, "String_prototype_toUpperCase");
+        let to_locale_lower_handle =
+            find_handle(&self.builtins, "String_prototype_toLocaleLowerCase");
+        let to_locale_upper_handle =
+            find_handle(&self.builtins, "String_prototype_toLocaleUpperCase");
+        let locale_compare_handle = find_handle(&self.builtins, "String_prototype_localeCompare");
+        let normalize_handle = find_handle(&self.builtins, "String_prototype_normalize");
+        let well_formed_handle = find_handle(&self.builtins, "String_prototype_toWellFormed");
         let repeat_handle = find_handle(&self.builtins, "String_prototype_repeat");
         let pad_start_handle = find_handle(&self.builtins, "String_prototype_padStart");
         let pad_end_handle = find_handle(&self.builtins, "String_prototype_padEnd");
@@ -1779,6 +1786,21 @@ impl Vm {
             }
             if let Some(tu) = to_upper_handle {
                 str_proto_entries.push(("toUpperCase", tu));
+            }
+            if let Some(tl) = to_locale_lower_handle {
+                str_proto_entries.push(("toLocaleLowerCase", tl));
+            }
+            if let Some(tu) = to_locale_upper_handle {
+                str_proto_entries.push(("toLocaleUpperCase", tu));
+            }
+            if let Some(lc) = locale_compare_handle {
+                str_proto_entries.push(("localeCompare", lc));
+            }
+            if let Some(n) = normalize_handle {
+                str_proto_entries.push(("normalize", n));
+            }
+            if let Some(w) = well_formed_handle {
+                str_proto_entries.push(("toWellFormed", w));
             }
             if let Some(rp) = repeat_handle {
                 str_proto_entries.push(("repeat", rp));
@@ -1855,10 +1877,15 @@ impl Vm {
                 .get("String.prototype")
                 .copied()
                 .unwrap_or(Value::undefined());
-            let str_ctor = make_object(
-                gc,
-                &[("fromCharCode", handle), ("prototype", str_proto_val)],
-            );
+            let mut str_ctor_entries: Vec<(&str, Value)> =
+                vec![("fromCharCode", handle), ("prototype", str_proto_val)];
+            if let Some(h) = find_handle(&self.builtins, "String_fromCodePoint") {
+                str_ctor_entries.push(("fromCodePoint", h));
+            }
+            if let Some(h) = find_handle(&self.builtins, "String_raw") {
+                str_ctor_entries.push(("raw", h));
+            }
+            let str_ctor = make_object(gc, &str_ctor_entries);
             self.string_constructor = str_ctor;
             self.builtin_wrappers.insert("String".to_string(), str_ctor);
         }
@@ -5830,6 +5857,13 @@ impl Vm {
                 } else {
                     Value::undefined()
                 }
+            } else if self.number_prototype.is_heap_object() {
+                load_property_recursive(
+                    self.number_prototype,
+                    raw_key,
+                    Some(self.function_prototype),
+                    gc,
+                )
             } else {
                 Value::undefined()
             }
@@ -5870,22 +5904,19 @@ impl Vm {
                 Value::undefined()
             }
         } else if obj.is_boolean() {
-            // Boolean primitive property access — boxed semantics:
-            // the value is an object with [[Prototype]] =
-            // %Object.prototype% (no %Boolean.prototype% in the
-            // engine), so Object.prototype methods resolve.
+            // Boolean primitive — boxed semantics resolve through
+            // Boolean.prototype (which chains to Object.prototype).
             load_property_recursive(
-                self.object_prototype,
+                self.boolean_prototype,
                 raw_key,
                 Some(self.function_prototype),
                 gc,
             )
         } else if obj.as_float64().is_some() {
-            // Number primitive — same boxed-object semantics
-            // (Number.prototype is not implemented, so only
-            // Object.prototype methods resolve).
+            // Number primitive — boxed semantics resolve through
+            // Number.prototype (which chains to Object.prototype).
             load_property_recursive(
-                self.object_prototype,
+                self.number_prototype,
                 raw_key,
                 Some(self.function_prototype),
                 gc,

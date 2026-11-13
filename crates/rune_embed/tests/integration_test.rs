@@ -14592,3 +14592,36 @@ fn test_builtin_prototype_constructor_backrefs() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_string_locale_statics_and_primitive_methods() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            [
+                String.fromCodePoint(65, 66) === "AB",
+                String.raw({ raw: ["a", "b"] }, 1) === "a1b",
+                "é".normalize("NFC") === "é",
+                "x".toWellFormed() === "x",
+                "A".toLocaleLowerCase() === "a",
+                "a".toLocaleUpperCase() === "A",
+                "a".localeCompare("b") === -1,
+                (5).toString() === "5",
+                true.toString() === "true",
+                Number.prototype.toLocaleLowerCase === String.prototype.toLocaleLowerCase
+            ].join("|") === "true|true|true|true|true|true|true|true|true|false";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+    let r2 = ctx
+        .eval(
+            r#"
+            Number.prototype.toLocaleLowerCase = String.prototype.toLocaleLowerCase;
+            Infinity.toLocaleLowerCase() === "infinity";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r2.to_boolean(), Some(true));
+}

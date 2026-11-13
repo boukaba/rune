@@ -1377,6 +1377,9 @@ pub fn boolean_prototype_value_of(
     _args: &[Value],
     vm: &mut Vm,
 ) -> Value {
+    if this.is_boolean() {
+        return this;
+    }
     wrapper_value_or_throw(
         gc,
         vm,
@@ -1393,14 +1396,19 @@ pub fn boolean_prototype_to_string(
     _args: &[Value],
     vm: &mut Vm,
 ) -> Value {
-    let Some(v) = wrapper_value_or_throw(
-        gc,
-        vm,
-        this,
-        BOOLEAN_WRAPPER_KEY,
-        "Boolean.prototype.toString",
-    ) else {
-        return Value::undefined();
+    let v = if this.is_boolean() {
+        this
+    } else {
+        let Some(v) = wrapper_value_or_throw(
+            gc,
+            vm,
+            this,
+            BOOLEAN_WRAPPER_KEY,
+            "Boolean.prototype.toString",
+        ) else {
+            return Value::undefined();
+        };
+        v
     };
     let b = v.to_boolean().unwrap_or(false);
     Value::from_heap_ptr(HeapString::allocate(gc, if b { "true" } else { "false" }) as *mut u8)
@@ -1412,6 +1420,9 @@ pub fn number_prototype_value_of(
     _args: &[Value],
     vm: &mut Vm,
 ) -> Value {
+    if this.as_smi().is_some() || this.as_float64().is_some() {
+        return this;
+    }
     wrapper_value_or_throw(gc, vm, this, NUMBER_WRAPPER_KEY, "Number.prototype.valueOf")
         .unwrap_or(Value::undefined())
 }
@@ -1422,14 +1433,19 @@ pub fn number_prototype_to_string(
     _args: &[Value],
     vm: &mut Vm,
 ) -> Value {
-    let Some(v) = wrapper_value_or_throw(
-        gc,
-        vm,
-        this,
-        NUMBER_WRAPPER_KEY,
-        "Number.prototype.toString",
-    ) else {
-        return Value::undefined();
+    let v = if this.as_smi().is_some() || this.as_float64().is_some() {
+        this
+    } else {
+        let Some(v) = wrapper_value_or_throw(
+            gc,
+            vm,
+            this,
+            NUMBER_WRAPPER_KEY,
+            "Number.prototype.toString",
+        ) else {
+            return Value::undefined();
+        };
+        v
     };
     let s = value_to_js_string(v);
     Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8)
@@ -11326,6 +11342,124 @@ pub fn string_from_char_code(
     Value::from_heap_ptr(ptr as *mut u8)
 }
 
+/// String.fromCodePoint(...codePoints) — §22.1.2.3.
+pub fn string_from_code_point(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let mut s = String::new();
+    for arg in args {
+        let n = to_number(*arg);
+        if n.is_nan() || n.fract() != 0.0 || n < 0.0 || n > 0x10_FFFF as f64 {
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::RangeError,
+                "Invalid code point",
+            ));
+            return Value::undefined();
+        }
+        if let Some(c) = char::from_u32(n as u32) {
+            s.push(c);
+        } else {
+            s.push('\u{FFFD}');
+        }
+    }
+    Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8)
+}
+
+/// String.raw(template, ...substitutions) — §22.1.2.4.
+pub fn string_raw(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let template = args.first().copied().unwrap_or(Value::undefined());
+    if template.is_null() || template.is_undefined() {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "String.raw template is not coercible",
+        ));
+        return Value::undefined();
+    }
+    let template = crate::vm::to_object_value(gc, template, vm);
+    let raw_key = Value::from_heap_ptr(HeapString::allocate(gc, "raw") as *mut u8);
+    let raw = load_property_recursive(template, raw_key, Some(vm.function_prototype), gc);
+    if let Some(exc) = vm.pending_exception.take() {
+        vm.pending_exception = Some(exc);
+        return Value::undefined();
+    }
+    let raw = crate::vm::to_object_value(gc, raw, vm);
+    let len = crate::vm::array_like_length(raw).unwrap_or(0) as usize;
+    if len == 0 {
+        return Value::from_heap_ptr(HeapString::allocate(gc, "") as *mut u8);
+    }
+    let mut result = String::new();
+    for i in 0..len {
+        let segment = crate::vm::array_like_index(raw, i as u32).unwrap_or(Value::undefined());
+        let Some(segment) = to_primitive_string(gc, segment, vm) else {
+            return Value::undefined();
+        };
+        result.push_str(&segment);
+        if i + 1 < len {
+            if let Some(sub) = args.get(i + 1).copied() {
+                let Some(sub) = to_primitive_string(gc, sub, vm) else {
+                    return Value::undefined();
+                };
+                result.push_str(&sub);
+            }
+        }
+    }
+    Value::from_heap_ptr(HeapString::allocate(gc, &result) as *mut u8)
+}
+
+/// String.prototype.normalize([form]) — normalization is identity here; the
+/// form is validated and the string returned unchanged.
+pub fn string_normalize(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let Some(text) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let form = args.first().copied().unwrap_or(Value::undefined());
+    let form = if form.is_undefined() {
+        "NFC".to_string()
+    } else {
+        let Some(form) = to_primitive_string(gc, form, vm) else {
+            return Value::undefined();
+        };
+        form
+    };
+    if !matches!(form.as_str(), "NFC" | "NFD" | "NFKC" | "NFKD") {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::RangeError,
+            "The normalization form should be one of NFC, NFD, NFKC, NFKD",
+        ));
+        return Value::undefined();
+    }
+    Value::from_heap_ptr(HeapString::allocate(gc, &text) as *mut u8)
+}
+
+/// String.prototype.toWellFormed() — engine strings cannot hold lone
+/// surrogates, so this is an identity conversion.
+pub fn string_to_well_formed(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let Some(text) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
+    Value::from_heap_ptr(HeapString::allocate(gc, &text) as *mut u8)
+}
+
 /// Extract the underlying string content from a TAG_STRING or TAG_STRING_OBJ value.
 fn string_from_value(this: Value) -> String {
     if let Some(ptr) = this.heap_ptr() {
@@ -11689,7 +11823,9 @@ pub fn string_trim(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let s = string_from_value(this);
+    let Some(s) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
     let result = HeapString::allocate(gc, s.trim_matches(char::is_whitespace));
     Value::from_heap_ptr(result as *mut u8)
 }
@@ -11699,7 +11835,9 @@ pub fn string_trim_start(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let s = string_from_value(this);
+    let Some(s) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
     let result = HeapString::allocate(gc, s.trim_start_matches(char::is_whitespace));
     Value::from_heap_ptr(result as *mut u8)
 }
@@ -11709,7 +11847,9 @@ pub fn string_trim_end(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mu
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let s = string_from_value(this);
+    let Some(s) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
     let result = HeapString::allocate(gc, s.trim_end_matches(char::is_whitespace));
     Value::from_heap_ptr(result as *mut u8)
 }
@@ -11742,6 +11882,51 @@ pub fn string_to_upper_case(
     let s = string_from_value(this);
     let result = HeapString::allocate(gc, &s.to_uppercase());
     Value::from_heap_ptr(result as *mut u8)
+}
+
+/// String.prototype.toLocaleLowerCase([locale]) — locale-insensitive alias.
+pub fn string_to_locale_lower_case(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    string_to_lower_case(gc, this, args, vm)
+}
+
+/// String.prototype.toLocaleUpperCase([locale]) — locale-insensitive alias.
+pub fn string_to_locale_upper_case(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    string_to_upper_case(gc, this, args, vm)
+}
+
+/// String.prototype.localeCompare(that) — code-unit lexicographic comparison.
+pub fn string_locale_compare(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let Some(left) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let that = args.first().copied().unwrap_or(Value::undefined());
+    let Some(right) = to_primitive_string(gc, that, vm) else {
+        return Value::undefined();
+    };
+    let ordering = left.encode_utf16().cmp(right.encode_utf16());
+    Value::smi(match ordering {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    })
 }
 
 /// String.prototype.repeat(count) — returns string repeated count times.
@@ -20762,6 +20947,16 @@ pub fn default_builtins() -> Vec<Builtin> {
         },
         Builtin {
             length: 1,
+            name: "String_fromCodePoint",
+            func: string_from_code_point,
+        },
+        Builtin {
+            length: 1,
+            name: "String_raw",
+            func: string_raw,
+        },
+        Builtin {
+            length: 1,
             name: "String_prototype_charAt",
             func: string_char_at,
         },
@@ -20839,6 +21034,31 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 0,
             name: "String_prototype_toUpperCase",
             func: string_to_upper_case,
+        },
+        Builtin {
+            length: 0,
+            name: "String_prototype_toLocaleLowerCase",
+            func: string_to_locale_lower_case,
+        },
+        Builtin {
+            length: 0,
+            name: "String_prototype_normalize",
+            func: string_normalize,
+        },
+        Builtin {
+            length: 0,
+            name: "String_prototype_toWellFormed",
+            func: string_to_well_formed,
+        },
+        Builtin {
+            length: 0,
+            name: "String_prototype_toLocaleUpperCase",
+            func: string_to_locale_upper_case,
+        },
+        Builtin {
+            length: 1,
+            name: "String_prototype_localeCompare",
+            func: string_locale_compare,
         },
         Builtin {
             length: 1,

@@ -232,11 +232,17 @@ impl Context {
         entry: &str,
         resolve: &mut dyn FnMut(&str, &str) -> Result<String, String>,
     ) -> Result<Value, String> {
-        self.vm.enable_inlining = self.enable_inlining;
-        self.vm.stencil_jit = self.stencil_jit;
-        self.vm.jit_enabled = self.enable_jit;
+        let (programs, specifiers) = Self::compile_module_graph(entry, resolve)?;
+        self.execute_module_graph(programs, specifiers)
+    }
 
-        // Compile the full import graph: (specifier, source) → pinned program.
+    /// Compile an ESM import graph without executing it. The returned program
+    /// order matches `specifiers`; both can be cached and later passed to
+    /// [`Context::execute_module_graph`].
+    pub fn compile_module_graph(
+        entry: &str,
+        resolve: &mut dyn FnMut(&str, &str) -> Result<String, String>,
+    ) -> Result<(Vec<BytecodeProgram>, Vec<String>), String> {
         struct Pending {
             specifier: String,
             source: String,
@@ -246,18 +252,16 @@ impl Context {
             source: entry.to_string(),
         }];
         let mut seen: Vec<String> = Vec::new();
-        let mut programs: Vec<Pin<Box<BytecodeProgram>>> = Vec::new();
-        let mut records: Vec<(String, usize)> = Vec::new(); // (specifier, program idx)
+        let mut programs: Vec<BytecodeProgram> = Vec::new();
+        let mut specifiers: Vec<String> = Vec::new();
         while let Some(p) = pending.pop() {
             if seen.contains(&p.specifier) {
                 continue;
             }
             seen.push(p.specifier.clone());
             let program = rune_module::compile_module(&p.source)?;
-            let prog_idx = programs.len();
-            let pinned = Box::pin(program);
-            programs.push(pinned);
-            let prog_ref: &BytecodeProgram = &programs.last().unwrap().as_ref();
+            programs.push(program);
+            let prog_ref: &BytecodeProgram = programs.last().unwrap();
             let mut ordered_deps: Vec<String> = Vec::new();
             if let Some(info) = &prog_ref.module {
                 for imp in &info.imports {
@@ -281,7 +285,6 @@ impl Context {
                     }
                 }
             }
-            // Resolve dependencies (unresolved → empty module).
             for dep in ordered_deps {
                 if !seen.contains(&dep) {
                     let src = resolve(&dep, &p.specifier).unwrap_or_else(|_| String::new());
@@ -291,17 +294,32 @@ impl Context {
                     });
                 }
             }
-            records.push((p.specifier.clone(), prog_idx));
+            specifiers.push(p.specifier.clone());
         }
-        // Pin all programs (stable addresses) and register module records.
+        Ok((programs, specifiers))
+    }
+
+    /// Execute a precompiled module graph (e.g. from an AOT bundle). Program
+    /// order must match `specifiers` as produced by `compile_module_graph`.
+    pub fn execute_module_graph(
+        &mut self,
+        programs: Vec<BytecodeProgram>,
+        specifiers: Vec<String>,
+    ) -> Result<Value, String> {
+        self.vm.enable_inlining = self.enable_inlining;
+        self.vm.stencil_jit = self.stencil_jit;
+        self.vm.jit_enabled = self.enable_jit;
+        if programs.len() != specifiers.len() {
+            return Err("module graph program/specifier count mismatch".to_string());
+        }
         let base = self.programs.len();
-        for (_specifier, _prog_idx) in &records {
-            self.programs.push(programs.remove(0));
+        for program in programs {
+            self.programs.push(Box::pin(program));
         }
         self.vm.modules.clear();
         self.vm.module_records.clear();
-        for (specifier, prog_idx) in &records {
-            let prog_ref: &BytecodeProgram = &self.programs[base + *prog_idx].as_ref();
+        for (offset, specifier) in specifiers.iter().enumerate() {
+            let prog_ref: &BytecodeProgram = &self.programs[base + offset].as_ref();
             let rec = rune_interpreter::vm::ModuleRecord {
                 specifier: specifier.clone(),
                 program: prog_ref as *const BytecodeProgram,

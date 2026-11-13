@@ -195,7 +195,26 @@ fn main() {
                             std::process::exit(1);
                         }
                     };
-                    rune_embed::bundle::save_module_bundle(&out, &source, &modules)
+                    let mut resolver = |spec: &str, _referrer: &str| -> Result<String, String> {
+                        modules
+                            .iter()
+                            .find(|(name, _)| name == spec)
+                            .map(|(_, source)| source.clone())
+                            .ok_or_else(|| format!("module {spec} is not bundled"))
+                    };
+                    match rune_embed::Context::compile_module_graph(&source, &mut resolver) {
+                        Ok((programs, specifiers)) => {
+                            let cache = rune_embed::bundle::ModuleProgramCache {
+                                programs,
+                                specifiers,
+                            };
+                            rune_embed::bundle::save_module_bytecode_bundle(&out, &source, &cache)
+                        }
+                        Err(error) => {
+                            eprintln!("Error: {error}");
+                            std::process::exit(1);
+                        }
+                    }
                 } else {
                     let bytecode = match ctx.compile(&source) {
                         Ok(bytecode) => bytecode,
@@ -225,7 +244,9 @@ fn main() {
                     eprintln!("Error: invalid or incompatible bundle {path}");
                     std::process::exit(1);
                 };
-                let result = if let Some(cache) = bundle.cache {
+                let result = if let Some(module_cache) = bundle.module_cache {
+                    ctx.execute_module_graph(module_cache.programs, module_cache.specifiers)
+                } else if let Some(cache) = bundle.cache {
                     cache.restore_shapes();
                     if !cache.compiled_funcs.is_empty() {
                         let native = rune_embed::afpc::InstalledNativeCode::from_cache(&cache);

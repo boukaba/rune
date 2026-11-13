@@ -44,7 +44,7 @@ rune --cache=/tmp/foo.cache 'function f(n){var s=0;for(var i=0;i<n;i++)s+=i;retu
 rune build app.js --out app.runeapp
 rune run app.runeapp
 
-# ESM bundle: self-contained source graph (no filesystem resolution at run)
+# ESM bundle: precompiled import graph (no parse/resolution at run)
 rune build main.mjs --out app.runeapp
 ```
 
@@ -102,7 +102,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 - **TypedArray family:** `ArrayBuffer` (+ `slice`, `isView`), Uint8Array/Int8Array/Uint8ClampedArray/Int16Array/Uint16Array/Int32Array/Uint32Array/Float32Array/Float64Array — ctor from length/typed array/ArrayBuffer view/array/string, typed indexing with spec conversions (wraparound, truncation, round-half-to-even clamping), `length`/`byteLength`/`byteOffset`/`buffer`/`BYTES_PER_ELEMENT`, `set` (overlapping-safe snapshot), `subarray` (shared buffer), `fill`/`at`/`indexOf`/`includes`/`slice`, iteration + spread via `@@iterator`
 - **String methods:** `replace`/`replaceAll` (string + regex), `indexOf`, `charAt`, `slice`, `split` (string + regex separator, limit), `trim`/`trimStart`/`trimEnd`, `toUpperCase`/`toLowerCase`, `charCodeAt`/`codePointAt` (UTF-16 code-unit semantics incl. surrogate pairs), `fromCharCode`, `startsWith`/`endsWith`/`includes`, `padStart`/`padEnd`, `repeat`, `substring`/`substr`/`concat` — all position/index math in UTF-16 code units
 - **Global functions:** `parseInt` (radix, hex), `parseFloat` (Infinity, NaN, scientific notation), `isNaN`, `isFinite` (ToNumber coercion, symbols throw)
-- **Application bundles:** `rune build` packages scripts with AFPC bytecode/native/ICs (executed without parsing) or ESM entry+import graph as a self-contained source bundle; `rune run app.runeapp` restores/executes it (no standalone binary, module bytecode still compiled at run)
+- **Application bundles:** `rune build` packages scripts with AFPC bytecode/native/ICs (executed without parsing) or an ESM entry+import graph with **precompiled module bytecode**; `rune run app.runeapp` executes without parsing or filesystem resolution (no standalone binary yet; module code is interpreter-only)
 - **Security model:** [`docs/security-model.md`](docs/security-model.md) documents enforced limits (instruction/time budgets with JIT suppression, fetch private-network policy, bundle hash/ABI checks) and explicit non-goals (no sandbox, no DNS-rebinding protection, no per-script heap cap, JIT not budgeted)
 - **Runtime / embedding:** Rust host functions via `Context::register_host_fn` (closures, callbacks, `.call`/`apply`, length/name metadata), GC-retained runtime values (`retain_value`/`release_value`), `rune_runtime` timer event loop (`setTimeout`/`clearTimeout`, nested timers, microtask draining) installed in the CLI for scripts, host `fetch` with pluggable transport, private-network policy, and Promise/text/json/headers responses, `console.*`, `btoa`/`atob`, `encodeURIComponent`/`decodeURIComponent`, `URL`/`URLSearchParams`, UTF-8 `TextEncoder`/`TextDecoder`
 

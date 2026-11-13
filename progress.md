@@ -939,6 +939,23 @@ Integration suite: **788 passed, 0 failed, 3 ignored**.
 
 Integration suite: **789 passed, 0 failed, 3 ignored**.
 
+### Phase 3 — AOT module bundles (2026-11-13)
+
+- `Context::eval_module` was split into `compile_module_graph` and
+  `execute_module_graph`; the compiled graph is a parallel program/specifier
+  list that can be cached and restored.
+- `rune_embed::bundle` gained a rkyv `ModuleProgramCache`; RUNEAPP2 flag bit 2
+  marks module-bytecode bundles. `rune build main.mjs` now compiles the entire
+  import graph and embeds the **precompiled BytecodePrograms**, so `rune run`
+  executes modules without parsing source or resolving dependencies.
+- Live bindings still work (`dep.mjs` mutation observed as `x 42`); the module
+  test asserts the precompiled-cache flag.
+- Module native code remains interpreter-only (module functions skip JIT), and
+  there is no standalone binary yet. Module bundles are self-contained but do
+  not carry a source hash (bytecode is the payload).
+
+Integration suite: **789 passed, 0 failed, 3 ignored**; CLI **9 tests**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

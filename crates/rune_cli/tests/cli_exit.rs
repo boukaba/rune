@@ -115,6 +115,14 @@ fn build_and_run_module_bundle() {
         "build failed: {}",
         String::from_utf8_lossy(&build.stderr)
     );
+    let bytes = std::fs::read(&bundle).expect("read bundle");
+    assert_eq!(&bytes[..8], b"RUNEAPP2");
+    let flags = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+    assert_ne!(
+        flags & 4,
+        0,
+        "module bundle must carry precompiled bytecode"
+    );
     let run = Command::new(env!("CARGO_BIN_EXE_rune"))
         .args(["run", bundle.to_str().unwrap()])
         .output()

@@ -11,17 +11,27 @@
 //! source map for the import graph and recompile at run time.
 
 use crate::afpc::{self, AfpcCache};
+use rune_bytecode::opcode::BytecodeProgram;
 use std::io;
 use std::path::Path;
 
 const MAGIC: &[u8; 8] = b"RUNEAPP2";
 const FLAG_CACHE: u32 = 1;
 const FLAG_MODULES: u32 = 2;
+const FLAG_MODULE_CACHE: u32 = 4;
+
+/// Precompiled ESM graph: program order matches `specifiers`.
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct ModuleProgramCache {
+    pub programs: Vec<BytecodeProgram>,
+    pub specifiers: Vec<String>,
+}
 
 pub struct Bundle {
     pub source: String,
     pub cache: Option<AfpcCache>,
     pub modules: Vec<(String, String)>,
+    pub module_cache: Option<ModuleProgramCache>,
 }
 
 fn write_section(out: &mut Vec<u8>, bytes: &[u8]) {
@@ -49,6 +59,7 @@ fn write_bundle(
     source: &str,
     cache: Option<&AfpcCache>,
     modules: &[(String, String)],
+    module_cache: Option<&ModuleProgramCache>,
 ) -> io::Result<usize> {
     let cache_bytes = match cache {
         Some(cache) => Some(
@@ -64,6 +75,17 @@ fn write_bundle(
     if !modules.is_empty() {
         flags |= FLAG_MODULES;
     }
+    let module_cache_bytes = match module_cache {
+        Some(cache) => Some(
+            rkyv::to_bytes::<rkyv::rancor::Error>(cache)
+                .map_err(|e| io::Error::other(format!("module cache serialize: {e:?}")))?
+                .to_vec(),
+        ),
+        None => None,
+    };
+    if module_cache_bytes.is_some() {
+        flags |= FLAG_MODULE_CACHE;
+    }
     let mut out = Vec::new();
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&flags.to_le_bytes());
@@ -78,13 +100,16 @@ fn write_bundle(
     if let Some(bytes) = cache_bytes {
         out.extend_from_slice(&bytes);
     }
+    if let Some(bytes) = module_cache_bytes {
+        out.extend_from_slice(&bytes);
+    }
     std::fs::write(path, &out)?;
     Ok(out.len())
 }
 
 /// Write a compiled script bundle (source + AFPC cache).
 pub fn save_bundle<P: AsRef<Path>>(path: P, source: &str, cache: &AfpcCache) -> io::Result<usize> {
-    write_bundle(path.as_ref(), source, Some(cache), &[])
+    write_bundle(path.as_ref(), source, Some(cache), &[], None)
 }
 
 /// Write a source module bundle (entry + specifier→source map).
@@ -93,7 +118,16 @@ pub fn save_module_bundle<P: AsRef<Path>>(
     source: &str,
     modules: &[(String, String)],
 ) -> io::Result<usize> {
-    write_bundle(path.as_ref(), source, None, modules)
+    write_bundle(path.as_ref(), source, None, modules, None)
+}
+
+/// Write an AOT module bundle: entry source plus precompiled graph.
+pub fn save_module_bytecode_bundle<P: AsRef<Path>>(
+    path: P,
+    source: &str,
+    cache: &ModuleProgramCache,
+) -> io::Result<usize> {
+    write_bundle(path.as_ref(), source, None, &[], Some(cache))
 }
 
 pub fn load_bundle<P: AsRef<Path>>(path: P) -> Option<Bundle> {
@@ -126,9 +160,24 @@ pub fn load_bundle<P: AsRef<Path>>(path: P) -> Option<Bundle> {
     } else {
         None
     };
+    let module_cache = if flags & FLAG_MODULE_CACHE != 0 {
+        let body = &data[cursor..];
+        let mut aligned = vec![0u8; body.len() + 16];
+        let offset = (16 - (aligned.as_ptr() as usize & 15)) & 15;
+        aligned[offset..offset + body.len()].copy_from_slice(body);
+        Some(
+            rkyv::from_bytes::<ModuleProgramCache, rkyv::rancor::Error>(
+                &aligned[offset..offset + body.len()],
+            )
+            .ok()?,
+        )
+    } else {
+        None
+    };
     Some(Bundle {
         source,
         cache,
         modules,
+        module_cache,
     })
 }

@@ -279,8 +279,31 @@ Current differential corpus status (55 everyday programs vs Node 22):
 formatting — Rune's `print` uses `String(-0) === "0"` per §7.1.12.1, while
 Node's console prints `-0`; neither is an engine semantics difference.
 
-Next: `Promise.race`/`allSettled`, then begin Phase 1 (runtime and stable
-layout work).
+### Phase 0 — promise reactions and pending race (2026-11-13)
+
+Pending promises now retain **both** handlers. The reaction array layout was a
+`[onFulfilled, chained]` pair, so a `.then(onFulfilled, onRejected)` attached
+before settlement silently dropped `onRejected`; a later rejection resolved the
+derived promise as fulfilled with the reason, or swallowed it entirely. The
+layout is now `[onFulfilled, onRejected, chained]`.
+
+- New `settle_promise_reactions` centralizes delivery for resolve/reject
+  bridges, the async-return path, promise-constructor reactions, and
+  `finally`. Missing handlers propagate the settlement into the chained
+  promise recursively.
+- `Promise.race` handles already-settled inputs directly, subscribes shared
+  resolve/reject bridges for pending inputs, and roots the result promise and
+  bridges in the new `Vm::temp_roots` across allocations.
+- Verified: pending reject reaches `.catch` via `.then()` with no handlers,
+  pending reject reaches a `Promise.race(...).catch`, pending race fulfillment,
+  and race rejection.
+- Integration suite: **756 passed, 0 failed, 3 ignored**.
+
+Known gaps: `Promise.all` still only observes already-settled inputs (pending
+inputs never settle it); `allSettled`/`any` are absent. These need per-index
+reaction state (the race shared-bridge trick does not apply).
+
+Next: pending `Promise.all`/`allSettled` and the Phase 1 runtime/layout work.
 
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,

@@ -17153,27 +17153,7 @@ pub fn promise_resolve_impl(
                 Promise::set_state(ptr, PROMISE_FULFILLED);
                 Promise::set_result(ptr, val);
             }
-            let reactions_ptr = unsafe { Promise::reactions(ptr) };
-            if !reactions_ptr.is_null() {
-                let arr = reactions_ptr as *mut RuneArray;
-                let len = unsafe { RuneArray::length(arr) };
-                let mut idx = 0;
-                while idx + 1 < len as usize {
-                    let cb = unsafe { RuneArray::get_element(arr, idx) };
-                    let chained = unsafe { RuneArray::get_element(arr, idx + 1) };
-                    if cb.is_heap_object() {
-                        let ppc = crate::vm::PendingPromiseCtor {
-                            source_frame_depth: 0,
-                            promise: chained,
-                            resolve_handle: Value::undefined(),
-                            reject_handle: Value::undefined(),
-                            resolve_with_result: true,
-                        };
-                        vm.enqueue_microtask(cb, vec![val], Some(ppc));
-                    }
-                    idx += 2;
-                }
-            }
+            settle_promise_reactions(vm, ptr, val, true);
         }
     }
     Value::undefined()
@@ -17189,30 +17169,64 @@ pub fn promise_reject_impl(_gc: &mut SemiSpace, this: Value, args: &[Value], vm:
                 Promise::set_state(ptr, PROMISE_REJECTED);
                 Promise::set_result(ptr, reason);
             }
-            let reactions_ptr = unsafe { Promise::reactions(ptr) };
-            if !reactions_ptr.is_null() {
-                let arr = reactions_ptr as *mut RuneArray;
-                let len = unsafe { RuneArray::length(arr) };
-                let mut idx = 0;
-                while idx + 1 < len as usize {
-                    let cb = unsafe { RuneArray::get_element(arr, idx) };
-                    let chained = unsafe { RuneArray::get_element(arr, idx + 1) };
-                    if cb.is_heap_object() {
-                        let ppc = crate::vm::PendingPromiseCtor {
-                            source_frame_depth: 0,
-                            promise: chained,
-                            resolve_handle: Value::undefined(),
-                            reject_handle: Value::undefined(),
-                            resolve_with_result: true,
-                        };
-                        vm.enqueue_microtask(cb, vec![reason], Some(ppc));
-                    }
-                    idx += 2;
-                }
-            }
+            settle_promise_reactions(vm, ptr, reason, false);
         }
     }
     Value::undefined()
+}
+
+/// Deliver a settled promise's reactions.
+///
+/// Reaction arrays store triples `[onFulfilled, onRejected, chained]` (the
+/// old layout was a pair, which silently dropped `onRejected` for promises
+/// that were still pending when `.then` was called). A missing handler
+/// propagates the settlement into `chained`; a callable handler is queued as a
+/// microtask whose PendingPromiseCtor resolves `chained` with its result.
+pub(crate) fn settle_promise_reactions(vm: &mut Vm, ptr: *mut u8, value: Value, fulfilled: bool) {
+    let reactions_ptr = unsafe { Promise::reactions(ptr) };
+    if reactions_ptr.is_null() {
+        return;
+    }
+    let arr = reactions_ptr as *mut RuneArray;
+    let len = unsafe { RuneArray::length(arr) };
+    let mut idx = 0;
+    while idx + 2 < len as usize {
+        let on_fulfilled = unsafe { RuneArray::get_element(arr, idx) };
+        let on_rejected = unsafe { RuneArray::get_element(arr, idx + 1) };
+        let chained = unsafe { RuneArray::get_element(arr, idx + 2) };
+        let cb = if fulfilled { on_fulfilled } else { on_rejected };
+        let callable = cb
+            .heap_ptr()
+            .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC });
+        if callable {
+            let ppc = crate::vm::PendingPromiseCtor {
+                source_frame_depth: 0,
+                promise: chained,
+                resolve_handle: Value::undefined(),
+                reject_handle: Value::undefined(),
+                resolve_with_result: true,
+            };
+            vm.enqueue_microtask(cb, vec![value], Some(ppc));
+        } else if let Some(cptr) = chained.heap_ptr() {
+            if unsafe { (*(cptr as *const GcHeader)).tag() == TAG_PROMISE }
+                && unsafe { Promise::state(cptr) == PROMISE_PENDING }
+            {
+                unsafe {
+                    Promise::set_state(
+                        cptr,
+                        if fulfilled {
+                            PROMISE_FULFILLED
+                        } else {
+                            PROMISE_REJECTED
+                        },
+                    );
+                    Promise::set_result(cptr, value);
+                }
+                settle_promise_reactions(vm, cptr, value, fulfilled);
+            }
+        }
+        idx += 3;
+    }
 }
 
 /// Promise.prototype.then(onFulfilled, onRejected)
@@ -17282,6 +17296,9 @@ pub fn promise_prototype_then(
     if !reactions_ptr.is_null() {
         unsafe {
             RuneArray::push(gc, reactions_ptr as *mut RuneArray, on_fulfilled);
+        }
+        unsafe {
+            RuneArray::push(gc, reactions_ptr as *mut RuneArray, on_rejected);
         }
         unsafe {
             RuneArray::push(gc, reactions_ptr as *mut RuneArray, new_promise);
@@ -17635,48 +17652,67 @@ pub fn promise_static_race(gc: &mut SemiSpace, _this: Value, args: &[Value], vm:
     let proto = vm.promise_prototype.heap_ptr();
     let result_ptr = Promise::allocate(gc, proto);
     let result_val = Value::from_heap_ptr(result_ptr);
-    let len = if let Some(l) = crate::vm::array_like_length(iterable) {
-        l
-    } else {
+    let Some(len) = crate::vm::array_like_length(iterable) else {
         return result_val;
     };
     if len == 0 {
         return result_val;
     }
+    // The result promise and the resolve/reject bridges must survive any
+    // allocation while reactions are attached to the input promises.
+    let root_base = vm.temp_roots.len();
+    vm.temp_roots.push(result_val);
+    let resolve_h = vm.find_builtin_handle("_promise_resolve");
+    let reject_h = vm.find_builtin_handle("_promise_reject");
+    let resolve_bridge = vm.create_promise_bridge(gc, result_val, resolve_h);
+    vm.temp_roots.push(resolve_bridge);
+    let reject_bridge = vm.create_promise_bridge(gc, result_val, reject_h);
+    vm.temp_roots.push(reject_bridge);
+
     for i in 0..len {
         let item = crate::vm::array_like_index(iterable, i).unwrap_or(Value::undefined());
-        let is_promise = if let Some(ptr) = item.heap_ptr() {
-            unsafe { (*(ptr as *const GcHeader)).tag() == TAG_PROMISE }
-        } else {
-            false
-        };
-        if is_promise {
-            let ptr = item.heap_ptr().unwrap();
-            let state = unsafe { Promise::state(ptr) };
-            if state == PROMISE_FULFILLED {
-                let r = unsafe { Promise::result(ptr) };
-                unsafe {
-                    Promise::set_state(result_ptr, PROMISE_FULFILLED);
-                    Promise::set_result(result_ptr, r);
+        // Already-settled native promises can settle the race directly; the
+        // result promise queues its own receivers. Pending inputs subscribe
+        // the shared bridges and settle through the reaction queue.
+        if let Some(ptr) = item.heap_ptr() {
+            if unsafe { (*(ptr as *const GcHeader)).tag() == TAG_PROMISE } {
+                match unsafe { Promise::state(ptr) } {
+                    PROMISE_FULFILLED => {
+                        let v = unsafe { Promise::result(ptr) };
+                        unsafe {
+                            Promise::set_state(result_ptr, PROMISE_FULFILLED);
+                            Promise::set_result(result_ptr, v);
+                        }
+                        vm.temp_roots.truncate(root_base);
+                        return result_val;
+                    }
+                    PROMISE_REJECTED => {
+                        let v = unsafe { Promise::result(ptr) };
+                        unsafe {
+                            Promise::set_state(result_ptr, PROMISE_REJECTED);
+                            Promise::set_result(result_ptr, v);
+                        }
+                        vm.temp_roots.truncate(root_base);
+                        return result_val;
+                    }
+                    _ => {
+                        let input = promise_static_resolve(gc, Value::undefined(), &[item], vm);
+                        promise_prototype_then(gc, input, &[resolve_bridge, reject_bridge], vm);
+                        continue;
+                    }
                 }
-                return result_val;
             }
-            if state == PROMISE_REJECTED {
-                let r = unsafe { Promise::result(ptr) };
-                unsafe {
-                    Promise::set_state(result_ptr, PROMISE_REJECTED);
-                    Promise::set_result(result_ptr, r);
-                }
-                return result_val;
-            }
-        } else {
-            unsafe {
-                Promise::set_state(result_ptr, PROMISE_FULFILLED);
-                Promise::set_result(result_ptr, item);
-            }
-            return result_val;
         }
+        // Non-promise entries win immediately (PromiseResolve wraps them in a
+        // fulfilled promise, but the observable ordering is identical).
+        unsafe {
+            Promise::set_state(result_ptr, PROMISE_FULFILLED);
+            Promise::set_result(result_ptr, item);
+        }
+        vm.temp_roots.truncate(root_base);
+        return result_val;
     }
+    vm.temp_roots.truncate(root_base);
     result_val
 }
 

@@ -1194,6 +1194,11 @@ pub struct Vm {
     /// its original frame depth. This replaces the old single-flight behavior
     /// that silently truncated nested iteration.
     pub(crate) pending_array_ops: Vec<ArrayOpState>,
+    /// Values temporarily held by a builtin across allocations (e.g. the
+    /// result promise and resolve/reject bridges of Promise.race). Registered
+    /// as GC roots like any other VM state; builtins truncate to their entry
+    /// length before returning.
+    pub(crate) temp_roots: Vec<Value>,
     /// Pending Function.prototype.call invocation.
     pub(crate) pending_call: Option<PendingCall>,
     /// Pending Promise constructor call (executor → resolve/reject → return promise).
@@ -1377,6 +1382,7 @@ impl Vm {
             pending_exception: None,
             pending_array_op: None,
             pending_array_ops: Vec::new(),
+            temp_roots: Vec::new(),
             pending_call: None,
             pending_promise_ctor: None,
             microtask_queue: Vec::new(),
@@ -3403,6 +3409,9 @@ impl Vm {
             }
         }
         for val in &self.last_locals {
+            gc.push_root(val as *const Value as *mut u64);
+        }
+        for val in &self.temp_roots {
             gc.push_root(val as *const Value as *mut u64);
         }
         for g in &self.generators {
@@ -11164,34 +11173,9 @@ impl Vm {
                                                 Promise::set_state(ptr, PROMISE_FULFILLED);
                                                 Promise::set_result(ptr, result);
                                             }
-                                            let reactions_ptr = unsafe { Promise::reactions(ptr) };
-                                            if !reactions_ptr.is_null() {
-                                                let arr = reactions_ptr as *mut RuneArray;
-                                                let len = unsafe { RuneArray::length(arr) };
-                                                let mut idx = 0;
-                                                while idx + 1 < len as usize {
-                                                    let cb =
-                                                        unsafe { RuneArray::get_element(arr, idx) };
-                                                    let chained = unsafe {
-                                                        RuneArray::get_element(arr, idx + 1)
-                                                    };
-                                                    if cb.is_heap_object() {
-                                                        let ppc2 = PendingPromiseCtor {
-                                                            source_frame_depth: 0,
-                                                            promise: chained,
-                                                            resolve_handle: Value::undefined(),
-                                                            reject_handle: Value::undefined(),
-                                                            resolve_with_result: true,
-                                                        };
-                                                        self.enqueue_microtask(
-                                                            cb,
-                                                            vec![result],
-                                                            Some(ppc2),
-                                                        );
-                                                    }
-                                                    idx += 2;
-                                                }
-                                            }
+                                            crate::builtins::settle_promise_reactions(
+                                                self, ptr, result, true,
+                                            );
                                         }
                                     }
                                 }
@@ -11326,27 +11310,12 @@ impl Vm {
                                 Promise::set_result(ptr, fop.orig_value);
                             }
                             // Drain reactions on the chained promise
-                            let reactions_ptr = unsafe { Promise::reactions(ptr) };
-                            if !reactions_ptr.is_null() {
-                                let arr = reactions_ptr as *mut RuneArray;
-                                let len = unsafe { RuneArray::length(arr) };
-                                let mut idx = 0;
-                                while idx + 1 < len as usize {
-                                    let cb = unsafe { RuneArray::get_element(arr, idx) };
-                                    let chained = unsafe { RuneArray::get_element(arr, idx + 1) };
-                                    if cb.is_heap_object() {
-                                        let ppc = PendingPromiseCtor {
-                                            source_frame_depth: 0,
-                                            promise: chained,
-                                            resolve_handle: Value::undefined(),
-                                            reject_handle: Value::undefined(),
-                                            resolve_with_result: true,
-                                        };
-                                        self.enqueue_microtask(cb, vec![fop.orig_value], Some(ppc));
-                                    }
-                                    idx += 2;
-                                }
-                            }
+                            crate::builtins::settle_promise_reactions(
+                                self,
+                                ptr,
+                                fop.orig_value,
+                                !fop.is_reject,
+                            );
                             self.stack.truncate(callee_base);
                             self.push(fop.promise);
                             if self.frames.is_empty() {
@@ -11522,27 +11491,7 @@ impl Vm {
                             Promise::set_state(ptr, PROMISE_FULFILLED);
                             Promise::set_result(ptr, result);
                         }
-                        let reactions_ptr = unsafe { Promise::reactions(ptr) };
-                        if !reactions_ptr.is_null() {
-                            let arr = reactions_ptr as *mut RuneArray;
-                            let len = unsafe { RuneArray::length(arr) };
-                            let mut idx = 0;
-                            while idx + 1 < len as usize {
-                                let cb = unsafe { RuneArray::get_element(arr, idx) };
-                                let chained = unsafe { RuneArray::get_element(arr, idx + 1) };
-                                if cb.is_heap_object() {
-                                    let ppc = PendingPromiseCtor {
-                                        source_frame_depth: 0,
-                                        promise: chained,
-                                        resolve_handle: Value::undefined(),
-                                        reject_handle: Value::undefined(),
-                                        resolve_with_result: true,
-                                    };
-                                    self.enqueue_microtask(cb, vec![result], Some(ppc));
-                                }
-                                idx += 2;
-                            }
-                        }
+                        crate::builtins::settle_promise_reactions(self, ptr, result, true);
                         self.stack.truncate(callee_base);
                         let promise_val = Value::from_heap_ptr(ptr);
                         self.push(promise_val);

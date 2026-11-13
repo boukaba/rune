@@ -13578,3 +13578,42 @@ fn test_function_bind_this_and_bound_args() {
         .unwrap();
     assert_eq!(m.as_smi(), Some(5));
 }
+
+#[test]
+fn test_promise_pending_rejection_handlers() {
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+        var reject;
+        var p = new Promise(function (_, r) { reject = r; });
+        var out = "";
+        var d = p.then();
+        d.catch(function (e) { out = e.message; });
+        reject(new Error("later"));
+        0;
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        eval_str(&mut ctx, "out"),
+        "later",
+        "pending rejection must reach the derived promise's catch"
+    );
+}
+
+#[test]
+fn test_promise_race_pending_rejection() {
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+        var reject;
+        var p = new Promise(function (_, r) { reject = r; });
+        var out = "";
+        Promise.race([p]).catch(function (e) { out = e.message; });
+        reject(new Error("race-reject"));
+        0;
+        "#,
+    )
+    .unwrap();
+    assert_eq!(eval_str(&mut ctx, "out"), "race-reject");
+}

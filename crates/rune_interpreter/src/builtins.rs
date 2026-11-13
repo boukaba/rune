@@ -18824,16 +18824,13 @@ pub fn promise_static_resolve(
                     .unwrap_or(Value::undefined());
                 let resolve_bridge = vm.create_promise_bridge(gc, promise_val, resolve_h);
                 let reject_bridge = vm.create_promise_bridge(gc, promise_val, reject_h);
-                vm.pending_promise_ctor = Some(crate::vm::PendingPromiseCtor {
-                    source_frame_depth: vm.frame_depth(),
-                    promise: promise_val,
-                    resolve_handle: resolve_h,
-                    reject_handle: reject_h,
-                    resolve_with_result: false,
-                    from_constructor: false,
-                });
-                vm.push_callback_call(gc, then_val, val, vec![resolve_bridge, reject_bridge]);
-                return Value::undefined();
+                vm.enqueue_thenable_microtask(
+                    then_val,
+                    val,
+                    vec![resolve_bridge, reject_bridge],
+                    promise_val,
+                );
+                return promise_val;
             }
         }
     }

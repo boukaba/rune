@@ -8452,7 +8452,7 @@ fn test_regex_replace_function_captures() {
 // ---- Thenable Unwrapping Tests ----
 
 #[test]
-fn test_thenable_unwrapping_sync() {
+fn test_thenable_unwrapping_is_deferred() {
     let mut ctx = Context::new_small();
     let val = ctx
         .eval(
@@ -8466,9 +8466,10 @@ fn test_thenable_unwrapping_sync() {
         .unwrap();
     assert_eq!(
         val.as_smi(),
-        Some(1),
-        ".then should have been called synchronously"
+        Some(0),
+        "thenable job must not run synchronously (PromiseResolveThenableJob)"
     );
+    assert_eq!(ctx.eval("side_effect").unwrap().as_smi(), Some(1));
 }
 
 #[test]
@@ -14486,5 +14487,26 @@ fn test_promise_generic_catch_finally_and_self_resolution() {
             "#,
         )
         .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}
+
+#[test]
+fn test_promise_resolve_defers_thenable_job() {
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+            var order = [];
+            var thenable = {
+                then: function (resolve) {
+                    order.push("then");
+                    resolve(1);
+                }
+            };
+            Promise.resolve(thenable).then(function () { order.push("done"); });
+            order.push("sync");
+            "#,
+    )
+    .unwrap();
+    let r = ctx.eval(r#"order.join(",") === "sync,then,done""#).unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }

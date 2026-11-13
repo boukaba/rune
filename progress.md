@@ -1025,6 +1025,12 @@ Integration suite: **789 passed, 0 failed, 3 ignored**; `rune_capi` **4 tests**.
   TypeError instead of fulfilling the promise with itself.
 - Measured: Promise **357/703 (50.8%; was 345)**, integration **791**.
 - Regression: `test_promise_generic_catch_finally_and_self_resolution`.
+- `Promise.resolve(thenable)` now queues the `then` call as a
+  PromiseResolveThenableJob microtask instead of invoking it synchronously;
+  throwing `then` rejects the new promise through the microtask path.
+  Corrected the old `test_thenable_unwrapping_sync` expectation (it pinned the
+  non-spec synchronous behavior) and added `test_promise_resolve_defers_thenable_job`.
+- Measured: Promise **359/703 (51.1%; was 357)**, integration **792**.
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:

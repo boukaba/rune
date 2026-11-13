@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Arguments `@@toStringTag` (2026-11-13)**: `Object.prototype.toString.call(arguments)` now reports `[object Arguments]` via internal array extra-props; array `@@toStringTag` lookup added. Map **200/216 (92.6%)**; integration **787**.
 - **Hardening: instruction/time budgets + fuzz/security docs (2026-11-13)**: `Context::set_instruction_budget`/`--max-instructions` and `set_time_budget`/`--timeout-ms`, catchable RangeError; both suppress JIT while active. 300-case token-soup parser fuzz corpus; `docs/security-model.md` (enforced controls + gaps). Integration **786**; CLI **9** tests. No sandbox/heap cap/bundle signing; parse/host/I/O unbudgeted.
 - **Application bundles (2026-11-13)**: in-memory AFPC serialize/deserialize (unaligned-body fix), `rune_embed::bundle` **RUNEAPP2** format. Script bundles: source+bytecode+native+ICs, executed without parsing. Module bundles: entry + specifier→source import graph, resolved in memory at run (live bindings work). CLI build/run tests for scripts and ESM; CLI 7 tests; integration 783. No standalone binary; module bundles recompile at run.
 - **Real async test262 execution (2026-11-13)**: child installs `$DONE` host fn, drains microtasks, honors async failures. Honest Promise **340/703 (48.4%)**, map **199/216 (92.1%)**, integration **783**. Timer jobs are installed in the child; fetch remains unconfigured.

@@ -8951,7 +8951,35 @@ impl Vm {
                             }
                         }
                     }
-                    self.push(Value::from_heap_ptr(arr as *mut u8));
+                    // `Object.prototype.toString` must report Arguments, not
+                    // Array. The internal @@toStringTag is invisible to keys /
+                    // JSON because symbol keys are filtered there.
+                    let root_base = self.temp_roots.len();
+                    self.temp_roots.push(Value::from_heap_ptr(arr as *mut u8));
+                    let extra = JSObject::allocate(gc, Shape::empty(), &[]);
+                    self.temp_roots.push(Value::from_heap_ptr(extra as *mut u8));
+                    let tag = HeapString::allocate(gc, "Arguments");
+                    self.temp_roots.push(Value::from_heap_ptr(tag as *mut u8));
+                    let arr_now = self.temp_roots[root_base]
+                        .heap_ptr()
+                        .unwrap_or(std::ptr::null_mut());
+                    let extra_now = self.temp_roots[root_base + 1]
+                        .heap_ptr()
+                        .unwrap_or(std::ptr::null_mut());
+                    let tag_now = self.temp_roots[root_base + 2]
+                        .heap_ptr()
+                        .unwrap_or(std::ptr::null_mut());
+                    unsafe {
+                        JSObject::add_property(
+                            extra_now as *mut JSObject,
+                            PropertyKey::from_symbol(rune_core::symbol::SYM_TO_STRING_TAG),
+                            "\0".to_string(),
+                            Value::from_heap_ptr(tag_now),
+                        );
+                        RuneArray::set_extra_props(arr_now as *mut RuneArray, extra_now);
+                    }
+                    self.temp_roots.truncate(root_base);
+                    self.push(Value::from_heap_ptr(arr_now));
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::CopyLexical => {

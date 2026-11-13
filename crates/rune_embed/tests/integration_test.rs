@@ -14366,3 +14366,25 @@ fn test_time_budget_and_jit_budget_suppression() {
         "unexpected error: {err}"
     );
 }
+
+#[test]
+fn test_arguments_object_to_string_tag() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            function f() { return arguments; }
+            var args = f(1, 2);
+            var plain = [1, 2];
+            [
+                Object.prototype.toString.call(args),
+                Object.prototype.toString.call(plain),
+                Array.isArray(args),
+                args.length,
+                args[Symbol.toStringTag]
+            ].join("|") === "[object Arguments]|[object Array]|true|2|Arguments";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

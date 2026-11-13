@@ -5859,12 +5859,24 @@ pub fn object_prototype_to_string(
                 break;
             };
             let ctag = unsafe { (*(cptr as *const GcHeader)).tag() };
-            if ctag == TAG_OBJECT {
-                let shape = unsafe { JSObject::shape_ptr(cptr as *mut JSObject) };
+            let tag_holder = if ctag == TAG_OBJECT {
+                Some(cptr as *mut JSObject)
+            } else if ctag == TAG_ARRAY {
+                let extra = unsafe { RuneArray::extra_props(cptr as *mut RuneArray) };
+                if extra.is_null() {
+                    None
+                } else {
+                    Some(extra as *mut JSObject)
+                }
+            } else {
+                None
+            };
+            if let Some(holder) = tag_holder {
+                let shape = unsafe { JSObject::shape_ptr(holder) };
                 if let Some(slot) = shape.lookup(&PropertyKey::from_symbol(
                     rune_core::symbol::SYM_TO_STRING_TAG,
                 )) {
-                    let v = unsafe { JSObject::get_slot(cptr as *mut JSObject, slot) };
+                    let v = unsafe { JSObject::get_slot(holder, slot) };
                     if let Some(sptr) = v.heap_ptr() {
                         if unsafe { (*(sptr as *const GcHeader)).tag() } == TAG_STRING {
                             let s = unsafe { HeapString::to_string(sptr as *mut HeapString) };

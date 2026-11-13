@@ -896,6 +896,19 @@ CLI tests: **7 tests** (1 HTTP unit + 6 integration); integration suite 783.
 Integration suite: **786 passed, 0 failed, 3 ignored**; CLI **9 tests**
 (1 HTTP unit + 8 integration).
 
+### Phase 2 — Arguments tag (2026-11-13)
+
+- `arguments` objects now carry an internal `@@toStringTag` on their array
+  extra-props, so `Object.prototype.toString.call(arguments)` reports
+  `[object Arguments]` while `Array.isArray`/indexing/length stay unchanged.
+- `Object.prototype.toString` now consults `@@toStringTag` on array
+  extra-props as well as ordinary objects; normal arrays remain `[object Array]`.
+- The tag is a symbol property, so keys/JSON filtering already hides it.
+- Measured: `built-ins/Array/prototype/map` **200/216 (92.6%; was 199)**.
+- Regression: `test_arguments_object_to_string_tag`.
+
+Integration suite: **787 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

@@ -16534,3 +16534,26 @@ fn test_string_match_all_and_regexp_protocol() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_replace_all_substitutions_and_dispatch() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var custom = /a/g;
+            custom[Symbol.replace] = function (O, v) { return "custom:" + v; };
+            var poison = { toString: function () { throw "bad"; } };
+            [
+                "abc".replaceAll("b", "$$") === "a$c",
+                "abc".replaceAll("b", "<$&>") === "a<b>c",
+                "abc".replaceAll("b", "[$`|$']") === "a[a|c]c",
+                "ab".replaceAll(/(a)(b)/g, "$2$1") === "ba",
+                "abc".replaceAll("", "-") === "-a-b-c-",
+                "x".replaceAll.call(poison, custom, 7) === "custom:7"
+            ].join("|") === "true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

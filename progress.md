@@ -2566,6 +2566,27 @@ Integration suite: **864 passed, 0 failed, 3 ignored**.
 
 Integration suite: **864 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — `replaceAll` substitutions + dispatch order (2026-11-13)
+
+- Fixed `$$` in GetSubstitution expansions (was emitting two dollars).
+- `String.prototype.replaceAll` with a RegExp searchValue now:
+  - looks up and invokes `@@replace` **before** ToString(this);
+  - passes the original this value and replacement through unchanged;
+  - uses the internal machine for the built-in RegExp @@replace with function
+    replacers (which the generic RegExp path cannot yet drive).
+- String-search replacement now performs full GetSubstitution per match:
+  `$$`, `$&`, ``$` ``, `$'`, numeric captures, and empty-search expansion at
+  every position (instead of literal `str.replace`).
+- Replacement values and string search values convert through synchronous
+  ToPrimitive(string), propagating throwing `toString`/`valueOf`.
+- Test262: String **927 → 942/1223**, replaceAll **17 → 25/45**.
+- Regression: `test_replace_all_substitutions_and_dispatch` (existing
+  `test_regex_replace_all_function` re-verified).
+- Remaining replaceAll failures: flags/getter ordering edge cases, named
+  groups `$<name>`, BigInt primitives, and poison-object ToString ordering.
+
+Integration suite: **865 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

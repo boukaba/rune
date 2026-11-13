@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **replaceAll substitutions/dispatch (2026-11-13)**: $$ fix, @@replace before ToString, string-search GetSubstitution, sync replacement ToPrimitive. String **942/1223**, replaceAll **25/45**. Integration **865**.
 - **matchAll protocol completion (2026-11-13)**: ToPrimitive this, primitive/null/undefined sources, flags checks, empty-pattern positions, matcher fallback. String **927/1223**, matchAll **22/25**. Integration **864**.
 - **matchAll + RegExp protocol (2026-11-13)**: String.matchAll dispatch, RegExp @@matchAll iterator, rooted result array (GC SIGSEGV fix). String **918/1223**, matchAll **13/25**. Integration **864**.
 - **String at/isWellFormed/coercion (2026-11-13)**: at/isWellFormed, sync ToInteger positions, ToPrimitive length coercion, exponential +/-0. String **907/1223**, Number **329/340**, Object **2695/3411**, Array **2628/3081**. Integration **863**.

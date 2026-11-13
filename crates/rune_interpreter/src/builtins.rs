@@ -15217,7 +15217,14 @@ pub fn string_index_of(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
         return Value::undefined();
     };
     let units = s.encode_utf16().collect::<Vec<u16>>();
-    let search_str = arg_to_string(gc, args.first().copied(), vm);
+    let search_str =
+        match replacement_to_string(gc, vm, args.first().copied().unwrap_or(Value::undefined())) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        };
     let search_units = search_str.encode_utf16().collect::<Vec<u16>>();
     let pos = args.get(1).copied().unwrap_or(Value::undefined());
     let start = if pos.is_undefined() {
@@ -16063,6 +16070,7 @@ fn expand_replacement(s: &str, groups: &[(usize, usize)], replacement: &str) -> 
     while let Some(c) = chars.next() {
         if c == '$' {
             match chars.next() {
+                Some('$') => result.push('$'),
                 Some('&') => result.push_str(&s[groups[0].0..groups[0].1]),
                 Some('`') => result.push_str(&s[..groups[0].0]),
                 Some('\'') => result.push_str(&s[groups[0].1..]),
@@ -16100,16 +16108,65 @@ fn expand_replacement(s: &str, groups: &[(usize, usize)], replacement: &str) -> 
     result
 }
 
+fn replacement_to_string(gc: &mut SemiSpace, vm: &mut Vm, v: Value) -> Result<String, Value> {
+    let prim = to_primitive_sync(gc, vm, v, "string")?;
+    if prim.as_symbol_id().is_some() {
+        return Err(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Cannot convert a Symbol value to a string",
+        ));
+    }
+    Ok(value_to_js_string(prim))
+}
+
 /// String.prototype.replaceAll(searchValue, replaceValue) — replace all non-overlapping matches.
 /// Supports string and RegExp patterns.
 pub fn string_replace_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
+    let search = args.first().copied().unwrap_or(Value::undefined());
+    let replacement = args.get(1).copied().unwrap_or(Value::undefined());
+    // §22.1.3.19 step 2: RegExp searchValue dispatches @@replace before
+    // ToString(this).
+    if search
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_REGEXP })
+    {
+        let key = Value::symbol(rune_core::symbol::SYM_REPLACE);
+        let replacer = match get_property_value_sync(gc, vm, search, key) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        };
+        if !replacer.is_undefined() && !replacer.is_null() {
+            // The internal replaceAll machine handles function replacers for
+            // the built-in RegExp @@replace; only custom methods need the
+            // generic dispatch path here.
+            let builtin_replace = find_handle(&vm.builtins, "RegExp_prototype_[Symbol.replace]");
+            if is_callable_value(replacement)
+                && builtin_replace.is_some()
+                && Some(replacer) == builtin_replace
+            {
+                // fall through to the internal implementation below
+            } else {
+                return match vm.call_value_sync(gc, replacer, search, &[this, replacement]) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        vm.set_pending_exception(e);
+                        Value::undefined()
+                    }
+                };
+            }
+        }
+    }
     let Some(s) = to_primitive_string(gc, this, vm) else {
         return Value::undefined();
     };
-    let search = args.first().copied().unwrap_or(Value::undefined());
     let replacement_fn = args.get(1).copied();
     let is_fn_replacement = replacement_fn.is_some_and(|v| {
         v.heap_ptr()
@@ -16168,7 +16225,17 @@ pub fn string_replace_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
                             }
                         }
                     }
-                    let replacement = arg_to_string(gc, replacement_fn, vm);
+                    let replacement = match replacement_to_string(
+                        gc,
+                        vm,
+                        replacement_fn.unwrap_or(Value::undefined()),
+                    ) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            vm.set_pending_exception(e);
+                            return Value::undefined();
+                        }
+                    };
                     let mut result = String::new();
                     let mut last_end = 0;
                     while let Some(m) = pike_vm.exec_with_flags(&nfa, &s, last_end, flags) {
@@ -16233,16 +16300,36 @@ pub fn string_replace_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
         }
         return Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8);
     }
-    let replacement = arg_to_string(gc, replacement_fn, vm);
+    let replacement =
+        match replacement_to_string(gc, vm, replacement_fn.unwrap_or(Value::undefined())) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        };
     if search_str.is_empty() {
-        let result = s
-            .chars()
-            .map(|c| replacement.clone() + &c.to_string())
-            .collect::<String>()
-            + &replacement;
+        let mut result = String::new();
+        for (pos, ch) in s.char_indices() {
+            result.push_str(&expand_replacement(&s, &[(pos, pos)], &replacement));
+            result.push(ch);
+        }
+        let end = s.len();
+        result.push_str(&expand_replacement(&s, &[(end, end)], &replacement));
         return Value::from_heap_ptr(HeapString::allocate(gc, &result) as *mut u8);
     }
-    let result = s.replace(&search_str, &replacement);
+    let mut result = String::new();
+    let mut last_end = 0usize;
+    for (pos, m) in s.match_indices(&search_str) {
+        result.push_str(&s[last_end..pos]);
+        result.push_str(&expand_replacement(
+            &s,
+            &[(pos, pos + m.len())],
+            &replacement,
+        ));
+        last_end = pos + m.len();
+    }
+    result.push_str(&s[last_end..]);
     Value::from_heap_ptr(HeapString::allocate(gc, &result) as *mut u8)
 }
 

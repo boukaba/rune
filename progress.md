@@ -623,6 +623,34 @@ Integration suite: **769 passed, 0 failed, 3 ignored**; `rune_runtime`: 7;
 Known limits: no CLI flag/config for a real fetch transport yet; timer waits
 still block the thread; test262 deliberately does not get runtime globals.
 
+### Phase 1 — stable array headers (2026-11-13)
+
+Arrays no longer move when they grow. This removes the last self-moving-growth
+alias class for array storage:
+
+- Initial arrays keep values inline in a 48-byte header with an
+  `ARRAY_INLINE_BIT`. Growth allocates a separate slot buffer (a tagged
+  `TAG_ARRAY` object with inline values), copies the window, clears the inline
+  bit, and updates the header's buffer pointer. The header address is unchanged.
+- GC scans inline arrays (prototype, extra_props, values), grown headers
+  (prototype, extra_props, buffer pointer), and slot buffers (values) through
+  distinct `ARRAY_BUFFER_BIT`/`ARRAY_INLINE_BIT` branches.
+- `SemiSpace` gained scratch roots that survive `clear_roots`, used while a
+  core allocator roots input Values/header across a collection. Array
+  allocation roots its incoming element Values before allocating; growth roots
+  the header while allocating the new buffer.
+- `RuneArray::grow` returns the resolved header as both old and new; callers'
+  pointer-update paths become no-ops. Array aliases in variables, objects, and
+  nested containers observe the grown array immediately.
+- Regression: `test_array_header_stable_across_growth` (300 pushes, alias,
+  object-held array, values). Full integration suite passes under
+  `RUNE_GC_STRESS=512`; dedicated GC-stress tests pass.
+
+Integration suite: **770 passed, 0 failed, 3 ignored**.
+
+Known gap: object/JSObject growth still uses the interim forwarding path;
+stable object headers are the remaining structural piece.
+
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:

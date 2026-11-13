@@ -13941,3 +13941,25 @@ fn test_thenables_in_promise_combinators() {
         "all:1,2|any:9|race:3|settled:rejected:e|throw:bad"
     );
 }
+
+#[test]
+fn test_array_header_stable_across_growth() {
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+        var a = [1, 2];
+        var alias = a;
+        var holder = { arr: a };
+        for (var i = 0; i < 300; i++) { a.push(i * 2); }
+        [alias === a, alias.length, holder.arr[100], holder.arr[301]].join("|");
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "[alias === a, alias.length, holder.arr[100], holder.arr[301]].join('|')"
+        ),
+        "true|302|196|598"
+    );
+}

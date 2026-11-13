@@ -55,7 +55,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 
 | Crate | Purpose |
 |---|---|
-| `rune_core` | Tagged Smi/heap values, semi-space GC, immutable shapes, objects, strings |
+| `rune_core` | Tagged Smi/heap values, semi-space GC, immutable shapes, objects, strings, stable array headers + slot buffers |
 | `rune_bytecode` | Bytecode opcodes, instructions, program representation, CFG/liveness analysis |
 | `rune_parser` | JavaScript lexer, recursive-descent parser, bytecode emitter |
 | `rune_interpreter` | Stack-based VM with SIDT inline caches, call frames, generators, builtins |
@@ -74,7 +74,7 @@ assert_eq!(val.as_smi(), Some(5)); // 2 + 3 = 5
 - **Functions:** declarations, expressions, arrows, closures, rest/default params, destructuring
 - **Objects:** literals, shorthand, methods, computed keys, spread, destructuring, member `obj.prop++` update
 - **Optional chaining:** `a?.b`, `a?.[b]`, `a?.b()`, `a?.()`, `?.#priv`, mixed chains (`a?.b.c?.[d]`) — whole chain short-circuits to undefined; syntax errors for `a?.b = c`, `new a?.b`
-- **Arrays:** dense arrays with real holes (elisions `[1, , 3]` parse; `delete` punches holes; holes fall through to the prototype, join as `""`, spread as `undefined`), `defineProperty` on indices (data + getter/setter overlay), spread, destructuring (declarations + assignment), rest, push/pop/length
+- **Arrays:** **stable headers across growth** (inline values convert to a GC-traced slot buffer; aliases never observe a moved array), dense arrays with real holes (elisions `[1, , 3]` parse; `delete` punches holes; holes fall through to the prototype, join as `""`, spread as `undefined`), `defineProperty` on indices (data + getter/setter overlay), spread, destructuring (declarations + assignment), rest, push/pop/length
 - **Control flow:** if/else, while, do/while (break/continue), for (continue runs the update), for-in, for..of (break/continue, member LHS), switch, try/catch/finally
 - **Generators:** function*, yield, next() (basic)
 - **Async/await:** `async function`, `async () =>`, `await expr` — generator-based, synchronous until first await, Promise-based continuation

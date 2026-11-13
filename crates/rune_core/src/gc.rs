@@ -1,3 +1,4 @@
+use crate::value::Value;
 use std::alloc::Layout;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -89,6 +90,8 @@ pub struct SemiSpace {
     limit: *mut u8,
     scan: *mut u8,
     roots: Vec<*mut u64>,
+    /// Roots not cleared by `clear_roots` (multi-object core allocations).
+    scratch_roots: Vec<Value>,
     semispace_size: usize,
     /// Optional root provider called before each collection to refresh
     /// the root set (handles Vec reallocation invalidating root pointers).
@@ -118,6 +121,7 @@ impl SemiSpace {
             limit: unsafe { r0.add(size) },
             scan: r0,
             roots: Vec::new(),
+            scratch_roots: Vec::new(),
             semispace_size: size,
             root_provider: None,
             gc_every: None,
@@ -140,6 +144,23 @@ impl SemiSpace {
     /// Clear all registered roots.
     pub fn clear_roots(&mut self) {
         self.roots.clear();
+    }
+
+    /// Push a root not cleared by `clear_roots`.
+    pub fn push_scratch_root(&mut self, value: Value) {
+        self.scratch_roots.push(value);
+    }
+
+    pub fn scratch_len(&self) -> usize {
+        self.scratch_roots.len()
+    }
+
+    pub(crate) fn scratch_value(&self, index: usize) -> Value {
+        self.scratch_roots[index]
+    }
+
+    pub fn truncate_scratch(&mut self, len: usize) {
+        self.scratch_roots.truncate(len);
     }
 
     /// Bytes remaining in the active semispace.
@@ -177,7 +198,7 @@ impl SemiSpace {
         let ptr = self.bump;
         let next = unsafe { ptr.add(aligned) };
         if next > self.limit {
-            if self.roots.is_empty() {
+            if self.roots.is_empty() && self.scratch_roots.is_empty() {
                 panic!(
                     "GC: out of memory (need {aligned} bytes, {} remaining) and no roots registered.",
                     self.remaining()
@@ -231,6 +252,12 @@ impl SemiSpace {
                 }
                 self.forward_value(slot);
             }
+            let scratch_len = self.scratch_roots.len();
+            for i in 0..scratch_len {
+                let mut value = self.scratch_roots[i];
+                self.forward_value(&mut value as *mut Value as *mut u64);
+                self.scratch_roots[i] = value;
+            }
 
             // Cheney scan: iterate over objects in to-space
             while self.scan < self.bump {
@@ -253,21 +280,34 @@ impl SemiSpace {
                         }
                     }
                     TAG_ARRAY => {
-                        // Forward prototype pointer (if non-null)
-                        let proto_ptr = scan_ptr.add(OBJECT_PROTOTYPE_OFFSET) as *mut u64;
-                        self.forward_value(proto_ptr);
-                        // Forward extra_props (named props JSObject, offset 32)
-                        let extra_ptr = scan_ptr.add(32) as *mut u64;
-                        self.forward_value(extra_ptr);
-                        // Forward array elements
-                        let slots_ptr = scan_ptr.add(crate::array::ARRAY_HEADER_END) as *mut u64;
-                        // Array layout: offset +16 = length, offset +20 = capacity
-                        // (mask integrity flag bits — B1f-5).
-                        let cap = (*(scan_ptr.add(20) as *const u32)
-                            & !crate::array::ARRAY_FLAG_MASK)
-                            as usize;
-                        for i in 0..cap {
-                            self.forward_value(slots_ptr.add(i));
+                        let raw_cap = *(scan_ptr.add(20) as *const u32);
+                        let cap = (raw_cap & !crate::array::ARRAY_FLAG_MASK) as usize;
+                        if raw_cap & crate::array::ARRAY_BUFFER_BIT != 0 {
+                            // Internal slot buffer: inline values at 40.
+                            let slots_ptr = scan_ptr.add(crate::array::BUFFER_HEAD_END) as *mut u64;
+                            for i in 0..cap {
+                                self.forward_value(slots_ptr.add(i));
+                            }
+                        } else if raw_cap & crate::array::ARRAY_INLINE_BIT != 0 {
+                            // Initial array: prototype/extra_props plus inline
+                            // values after the header.
+                            let proto_ptr = scan_ptr.add(OBJECT_PROTOTYPE_OFFSET) as *mut u64;
+                            self.forward_value(proto_ptr);
+                            let extra_ptr = scan_ptr.add(32) as *mut u64;
+                            self.forward_value(extra_ptr);
+                            let slots_ptr =
+                                scan_ptr.add(crate::array::ARRAY_HEADER_END) as *mut u64;
+                            for i in 0..cap {
+                                self.forward_value(slots_ptr.add(i));
+                            }
+                        } else {
+                            // Grown header: prototype, extra_props, buffer.
+                            let proto_ptr = scan_ptr.add(OBJECT_PROTOTYPE_OFFSET) as *mut u64;
+                            self.forward_value(proto_ptr);
+                            let extra_ptr = scan_ptr.add(32) as *mut u64;
+                            self.forward_value(extra_ptr);
+                            let elems_ptr = scan_ptr.add(40) as *mut u64;
+                            self.forward_value(elems_ptr);
                         }
                     }
                     TAG_FUNC => {
@@ -388,11 +428,15 @@ impl SemiSpace {
                     obj_start.add(align_up(total, 16))
                 }
                 TAG_ARRAY => {
-                    // Array layout: offset +20 = capacity (mask the B1f-5
-                    // integrity flag bits, like EXTENSIBLE_BIT for objects).
-                    let capacity_ptr = obj_start.add(20) as *const u32;
-                    let capacity = (*capacity_ptr & !crate::array::ARRAY_FLAG_MASK) as usize;
-                    let total = crate::array::ARRAY_HEADER_END + capacity * size_of::<u64>();
+                    let raw_cap = *(obj_start.add(20) as *const u32);
+                    let capacity = (raw_cap & !crate::array::ARRAY_FLAG_MASK) as usize;
+                    let total = if raw_cap & crate::array::ARRAY_BUFFER_BIT != 0 {
+                        crate::array::BUFFER_HEAD_END + capacity * size_of::<u64>()
+                    } else if raw_cap & crate::array::ARRAY_INLINE_BIT != 0 {
+                        crate::array::ARRAY_HEADER_END + capacity * size_of::<u64>()
+                    } else {
+                        crate::array::ARRAY_HEADER_END
+                    };
                     obj_start.add(align_up(total, 16))
                 }
                 TAG_ENV => {

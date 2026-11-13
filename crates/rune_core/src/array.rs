@@ -1,24 +1,33 @@
 use crate::gc::{GcHeader, SemiSpace, TAG_ARRAY, size_of};
 use crate::value::Value;
-use std::ptr;
 
-/// Memory layout:
+/// Memory layout of a stable array header:
 ///   [0..8)   GcHeader with TAG_ARRAY
 ///   [8..16)  shape: *const Shape (DENSE_ARRAY_SHAPE for all arrays)
 ///   [16..20) length: u32 (number of elements)
-///   [20..24) capacity: u32 (allocated element capacity)
+///   [20..24) capacity: u32 (allocated element capacity + flags)
 ///   [24..32) prototype: *mut u8 (Array.prototype, set by VM)
-///   [32..40) extra_props: *mut u8 (JSObject with named properties such as
-///            the non-enumerable "index"/"input" on match-result arrays)
-///   [40..)   elements: Value[]
+///   [32..40) extra_props: *mut u8 (JSObject with named properties)
+///   [40..48) elements: *mut SlotBuffer (never changes on growth)
 ///
-/// Reuses OBJECT_PROTOTYPE_OFFSET (24) from object.rs
+/// Element storage lives in a separate TAG_ARRAY slot buffer:
+///   [0..8) header, [8..16) unused, [16..20) capacity,
+///   [20..24) capacity|ARRAY_BUFFER_BIT, [24..32) unused, [32..40) unused,
+///   [40..) Value[]
+///
+/// The header address is stable across growth, so raw aliases held by roots,
+/// other arrays, objects, and pending machines never need a growth rewrite.
+/// The GC still moves headers; aliases in containers are updated as usual.
 pub struct RuneArray;
 
 /// Byte offset of the extra_props pointer (JSObject or null).
 pub const EXTRA_PROPS_OFFSET: usize = 32;
-/// Byte offset of the first element slot (header end).
-pub const ARRAY_HEADER_END: usize = 40;
+/// Byte offset of the slot-buffer pointer in a normal array header.
+pub const ELEMENTS_OFFSET: usize = 40;
+/// Total normal-array header size (the elements pointer ends at 48).
+pub const ARRAY_HEADER_END: usize = 48;
+/// Byte offset of inline values in an internal slot buffer.
+pub const BUFFER_HEAD_END: usize = 40;
 
 /// Array integrity flags in the capacity word (B1f-5; A4 object precedent —
 /// bit set = restricted). Capacities never approach 2^28 in practice (1M
@@ -33,11 +42,19 @@ pub const ARRAY_ELEMS_NONCONFIGURABLE_BIT: u32 = 1 << 29;
 /// Set when elements are non-writable (freeze whole-array lock; seal keeps
 /// writability).
 pub const ARRAY_ELEMS_NONWRITABLE_BIT: u32 = 1 << 28;
-/// Mask of all integrity flag bits in the capacity word (GC + capacity()).
+/// Marks an internal slot buffer (not a user-visible array). It has a 40-byte
+/// header and inline values.
+pub const ARRAY_BUFFER_BIT: u32 = 1 << 27;
+/// Initial arrays keep their values inline at offset 48. Growth converts them
+/// to a stable slot buffer and clears this bit; the header never moves.
+pub const ARRAY_INLINE_BIT: u32 = 1 << 26;
+/// Mask of all flag bits in the capacity word (GC + capacity()).
 pub const ARRAY_FLAG_MASK: u32 = ARRAY_NONEXTENSIBLE_BIT
     | ARRAY_LENGTH_NONWRITABLE_BIT
     | ARRAY_ELEMS_NONCONFIGURABLE_BIT
-    | ARRAY_ELEMS_NONWRITABLE_BIT;
+    | ARRAY_ELEMS_NONWRITABLE_BIT
+    | ARRAY_BUFFER_BIT
+    | ARRAY_INLINE_BIT;
 
 /// Number of extra element slots to reserve beyond initial length.
 const RESERVED_ELEMENTS: usize = 4;
@@ -48,44 +65,70 @@ impl RuneArray {
     unsafe fn live(arr: *mut RuneArray) -> *mut RuneArray {
         unsafe { crate::gc::resolve_forwarded(arr as *mut u8) as *mut RuneArray }
     }
-    /// Allocate a dense array with the given elements.
+    /// Allocate an internal slot buffer with `cap` inline Value slots.
+    unsafe fn slot_buffer_alloc(ss: &mut SemiSpace, cap: usize) -> *mut u8 {
+        unsafe {
+            let ptr = ss.alloc(BUFFER_HEAD_END + cap * size_of::<Value>());
+            let header = &mut *(ptr as *mut GcHeader);
+            header.word = std::sync::atomic::AtomicU64::new(TAG_ARRAY);
+            *(ptr.add(8) as *mut *const u8) = std::ptr::null_mut();
+            *(ptr.add(16) as *mut u32) = cap as u32;
+            *(ptr.add(20) as *mut u32) = (cap as u32) | ARRAY_BUFFER_BIT;
+            *(ptr.add(24) as *mut *mut u8) = std::ptr::null_mut();
+            *(ptr.add(32) as *mut *mut u8) = std::ptr::null_mut();
+            let values = ptr.add(BUFFER_HEAD_END) as *mut Value;
+            for i in 0..cap {
+                *values.add(i) = Value::empty_sentinel();
+            }
+            ptr
+        }
+    }
+
+    /// Current slot buffer (resolves GC forwarding).
+    unsafe fn elements_ptr(arr: *mut RuneArray) -> *mut Value {
+        let arr = unsafe { Self::live(arr) };
+        let word = unsafe { *((arr as *mut u8).add(20) as *const u32) };
+        if word & ARRAY_INLINE_BIT != 0 {
+            return unsafe { (arr as *mut u8).add(ARRAY_HEADER_END) as *mut Value };
+        }
+        let raw = unsafe { *((arr as *mut u8).add(ELEMENTS_OFFSET) as *const *mut u8) };
+        if raw.is_null() {
+            return std::ptr::null_mut();
+        }
+        unsafe { crate::gc::resolve_forwarded(raw).add(BUFFER_HEAD_END) as *mut Value }
+    }
+
+    /// Allocate a dense array with the given elements. Initial values are
+    /// inline; `grow` converts to a stable slot buffer without moving the
+    /// header.
     pub fn allocate(ss: &mut SemiSpace, elements: &[Value]) -> *mut RuneArray {
         let len = elements.len();
         let cap = len + RESERVED_ELEMENTS;
-        let total_size = ARRAY_HEADER_END + cap * size_of::<Value>();
-        let ptr = ss.alloc(total_size);
+        let scratch_base = ss.scratch_len();
+        // The allocation may collect and move heap Values in `elements`;
+        // root them and copy the refreshed values after the allocation.
+        for value in elements {
+            ss.push_scratch_root(*value);
+        }
+        let ptr = ss.alloc(ARRAY_HEADER_END + cap * size_of::<Value>());
         unsafe {
             let header = &mut *(ptr as *mut GcHeader);
             header.word = std::sync::atomic::AtomicU64::new(TAG_ARRAY);
-
-            // Shape pointer — DENSE_ARRAY_SHAPE, set externally via set_shape
-            let shape_ptr = ptr.add(8) as *mut *const u8;
-            *shape_ptr = std::ptr::null_mut();
-
-            let len_ptr = ptr.add(16) as *mut u32;
-            *len_ptr = len as u32;
-
-            let cap_ptr = ptr.add(20) as *mut u32;
-            *cap_ptr = cap as u32;
-
-            // Prototype starts as null (set externally)
-            let proto_ptr = ptr.add(24) as *mut *mut u8;
-            *proto_ptr = std::ptr::null_mut();
-
-            // extra_props starts as null
-            let extra_ptr = ptr.add(EXTRA_PROPS_OFFSET) as *mut *mut u8;
-            *extra_ptr = std::ptr::null_mut();
-
-            let elems_ptr = ptr.add(ARRAY_HEADER_END) as *mut Value;
-            ptr::copy_nonoverlapping(elements.as_ptr(), elems_ptr, len);
-            // Reserved slots are holes (empty sentinel), never undefined:
-            // length-extension exposes them and they must read as absent
-            // (B1f — an undefined fill here shadowed the prototype for
-            // length-grown tails).
+            *(ptr.add(8) as *mut *const u8) = std::ptr::null_mut();
+            *(ptr.add(16) as *mut u32) = len as u32;
+            *(ptr.add(20) as *mut u32) = (cap as u32) | ARRAY_INLINE_BIT;
+            *(ptr.add(24) as *mut *mut u8) = std::ptr::null_mut();
+            *(ptr.add(EXTRA_PROPS_OFFSET) as *mut *mut u8) = std::ptr::null_mut();
+            *(ptr.add(ELEMENTS_OFFSET) as *mut *mut u8) = std::ptr::null_mut();
+            let values = ptr.add(ARRAY_HEADER_END) as *mut Value;
+            for i in 0..len {
+                *values.add(i) = ss.scratch_value(scratch_base + i);
+            }
             for i in len..cap {
-                *elems_ptr.add(i) = Value::empty_sentinel();
+                *values.add(i) = Value::empty_sentinel();
             }
         }
+        ss.truncate_scratch(scratch_base);
         ptr as *mut RuneArray
     }
 
@@ -103,9 +146,11 @@ impl RuneArray {
             if n < old {
                 let cap = Self::capacity(arr);
                 let upto = (old as usize).min(cap as usize);
-                let elems_ptr = (arr as *mut u8).add(ARRAY_HEADER_END) as *mut Value;
-                for i in n as usize..upto {
-                    *elems_ptr.add(i) = Value::empty_sentinel();
+                let elems_ptr = Self::elements_ptr(arr);
+                if !elems_ptr.is_null() {
+                    for i in n as usize..upto {
+                        *elems_ptr.add(i) = Value::empty_sentinel();
+                    }
                 }
             }
             *((arr as *mut u8).add(16) as *mut u32) = n;
@@ -192,7 +237,10 @@ impl RuneArray {
             if index >= Self::capacity(arr) as usize {
                 return Value::empty_sentinel();
             }
-            let elems_ptr = (arr as *mut u8).add(ARRAY_HEADER_END) as *const Value;
+            let elems_ptr = Self::elements_ptr(arr);
+            if elems_ptr.is_null() {
+                return Value::empty_sentinel();
+            }
             *elems_ptr.add(index)
         }
     }
@@ -200,8 +248,10 @@ impl RuneArray {
     pub unsafe fn set_element(arr: *mut RuneArray, index: usize, val: Value) {
         let arr = unsafe { Self::live(arr) };
         unsafe {
-            let elems_ptr = (arr as *mut u8).add(ARRAY_HEADER_END) as *mut Value;
-            *elems_ptr.add(index) = val;
+            let elems_ptr = Self::elements_ptr(arr);
+            if !elems_ptr.is_null() {
+                *elems_ptr.add(index) = val;
+            }
         }
     }
 
@@ -243,48 +293,49 @@ impl RuneArray {
         }
     }
 
-    /// Grow the array to ~1.5x capacity, copying all elements and header.
-    /// Returns (resolved_old_ptr, new_array).
-    /// `resolved_old_ptr` is the pointer that roots should be updated from
-    /// (after any GC forwarding during the allocation).
+    /// Grow to ~1.5x capacity. Inline values are moved into a stable slot
+    /// buffer; the array header does NOT move on growth.
     pub unsafe fn grow(ss: &mut SemiSpace, arr: *mut RuneArray) -> (*mut u8, *mut RuneArray) {
         unsafe {
+            let arr = crate::gc::resolve_forwarded(arr as *mut u8) as *mut RuneArray;
             let old_len = Self::length(arr) as usize;
             let old_cap = Self::capacity(arr) as usize;
             let new_cap = (old_cap * 3 / 2).max(old_cap + 8);
-            let total_size = ARRAY_HEADER_END + new_cap * size_of::<Value>();
-            let new_ptr = ss.alloc(total_size);
-            // If GC ran during alloc, `arr` may be a stale from-space pointer
-            // with a forwarded header (and it may itself already be the target
-            // of an earlier growth). Resolve the full chain.
-            let src = crate::gc::resolve_forwarded(arr as *mut u8);
-            // Copy header (GcHeader + shape + length + capacity + prototype +
-            // extra_props) = 40 bytes
-            std::ptr::copy_nonoverlapping(src, new_ptr, ARRAY_HEADER_END);
-            // Update capacity in new header, preserving integrity flags
-            // (B1f-5; A4 object precedent — seal/freeze survive growth).
-            // Flags read from the resolved source (arr may be stale).
-            *(new_ptr.add(20) as *mut u32) =
-                (new_cap as u32) | (Self::capacity_word(src as *mut RuneArray) & ARRAY_FLAG_MASK);
-            // Copy elements (only the allocated window is readable;
-            // a length-extended array may have length > capacity).
-            // Everything past the copied window is a hole (empty sentinel),
-            // never undefined: reserved slots are unread and extended
-            // windows must read as holes.
+            let scratch_base = ss.scratch_len();
+            ss.push_scratch_root(Value::from_heap_ptr(arr as *mut u8));
+            let old_inline = (*((arr as *mut u8).add(20) as *const u32)) & ARRAY_INLINE_BIT != 0;
+            let old_buffer = if old_inline {
+                std::ptr::null_mut()
+            } else {
+                Self::elements_ptr(arr)
+            };
+            let new_buffer = Self::slot_buffer_alloc(ss, new_cap);
+            let arr_now = ss
+                .scratch_value(scratch_base)
+                .heap_ptr()
+                .unwrap_or(std::ptr::null_mut()) as *mut RuneArray;
             let copied = old_len.min(old_cap);
-            let old_elems = src.add(ARRAY_HEADER_END) as *const Value;
-            let new_elems = new_ptr.add(ARRAY_HEADER_END) as *mut Value;
-            std::ptr::copy_nonoverlapping(old_elems, new_elems, copied);
-            for i in copied..new_cap {
-                *new_elems.add(i) = Value::empty_sentinel();
+            if old_inline {
+                let old_values = (arr_now as *mut u8).add(ARRAY_HEADER_END) as *const Value;
+                std::ptr::copy_nonoverlapping(
+                    old_values,
+                    new_buffer.add(BUFFER_HEAD_END) as *mut Value,
+                    copied,
+                );
+            } else if !old_buffer.is_null() {
+                let old_buffer =
+                    crate::gc::resolve_forwarded(old_buffer as *mut u8) as *const Value;
+                std::ptr::copy_nonoverlapping(
+                    old_buffer,
+                    new_buffer.add(BUFFER_HEAD_END) as *mut Value,
+                    copied,
+                );
             }
-            // Mark the old array forwarded. Aliases stored in arrays,
-            // objects, generators, or pending machines may still hold this
-            // address; without the header every reader would keep observing
-            // the pre-growth length/elements until a collection happens to
-            // rewrite the holder.
-            (*(src as *const GcHeader)).set_forwarding(new_ptr);
-            (src, new_ptr as *mut RuneArray)
+            let flags = Self::capacity_word(arr_now) & ARRAY_FLAG_MASK & !ARRAY_INLINE_BIT;
+            *((arr_now as *mut u8).add(20) as *mut u32) = (new_cap as u32) | flags;
+            *((arr_now as *mut u8).add(ELEMENTS_OFFSET) as *mut *mut u8) = new_buffer;
+            ss.truncate_scratch(scratch_base);
+            (arr_now as *mut u8, arr_now)
         }
     }
 

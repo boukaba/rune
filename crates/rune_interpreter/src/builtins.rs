@@ -3464,11 +3464,13 @@ pub fn reflect_construct(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &
         ));
         return Value::undefined();
     }
-    let len = crate::vm::array_like_length(list).unwrap_or(0) as usize;
-    let mut call_args = Vec::with_capacity(len);
-    for i in 0..len {
-        call_args.push(crate::vm::array_like_index(list, i as u32).unwrap_or(Value::undefined()));
-    }
+    let call_args = match reflect_args_list(gc, vm, list) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
     let result = if let Some(ptr) = target.heap_ptr() {
         if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_FUNC {
             match vm.construct_value_sync(gc, target, call_args) {
@@ -3537,16 +3539,34 @@ pub fn reflect_construct(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &
     result
 }
 
-fn reflect_key_value(gc: &mut SemiSpace, raw: Value) -> Value {
+fn reflect_key_value(gc: &mut SemiSpace, vm: &mut Vm, raw: Value) -> Result<Value, Value> {
     if raw.as_symbol_id().is_some() {
-        return raw;
+        return Ok(raw);
     }
     if let Some(ptr) = raw.heap_ptr() {
         if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_STRING {
-            return raw;
+            return Ok(raw);
         }
     }
-    Value::from_heap_ptr(HeapString::allocate(gc, &value_to_js_string(raw)) as *mut u8)
+    let prim = to_primitive_sync(gc, vm, raw, "string")?;
+    Ok(Value::from_heap_ptr(
+        HeapString::allocate(gc, &value_to_js_string(prim)) as *mut u8,
+    ))
+}
+
+fn reflect_args_list(gc: &mut SemiSpace, vm: &mut Vm, list: Value) -> Result<Vec<Value>, Value> {
+    let len_val = get_value_sync(gc, vm, list, "length")?;
+    let len_num = to_number_sync(gc, vm, len_val)?;
+    let len = if len_num.is_nan() || len_num <= 0.0 {
+        0usize
+    } else {
+        len_num as usize
+    };
+    let mut out = Vec::with_capacity(len);
+    for i in 0..len {
+        out.push(get_value_sync(gc, vm, list, &i.to_string())?);
+    }
+    Ok(out)
 }
 
 fn reflect_target(gc: &mut SemiSpace, args: &[Value], vm: &mut Vm) -> Option<Value> {
@@ -3567,8 +3587,15 @@ pub fn reflect_get(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm
     let Some(target) = reflect_target(gc, args, vm) else {
         return Value::undefined();
     };
-    let key = reflect_key_value(gc, args.get(1).copied().unwrap_or(Value::undefined()));
-    match get_property_value_sync(gc, vm, target, key) {
+    let key = match reflect_key_value(gc, vm, args.get(1).copied().unwrap_or(Value::undefined())) {
+        Ok(k) => k,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let receiver = args.get(2).copied().unwrap_or(target);
+    match get_property_value_sync_receiver(gc, vm, target, key, receiver) {
         Ok(v) => v,
         Err(e) => {
             vm.set_pending_exception(e);
@@ -3581,29 +3608,119 @@ pub fn reflect_set(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm
     let Some(target) = reflect_target(gc, args, vm) else {
         return Value::undefined();
     };
-    let key = reflect_key_value(gc, args.get(1).copied().unwrap_or(Value::undefined()));
-    let value = args.get(2).copied().unwrap_or(Value::undefined());
-    let site = crate::vm::PropSetSite {
-        ic_index: -1,
-        prog_ptr: std::ptr::null(),
-        pc: 0,
-        is_strict: true,
+    let key = match reflect_key_value(gc, vm, args.get(1).copied().unwrap_or(Value::undefined())) {
+        Ok(k) => k,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
     };
-    let outcome = vm.vm_set_property(gc, target, key, value, site);
-    match outcome {
-        crate::vm::PropSetOut::Ready(_) => {
-            if vm.pending_exception.is_some() {
-                Value::undefined()
-            } else {
-                Value::boolean(true)
+    let value = args.get(2).copied().unwrap_or(Value::undefined());
+    let receiver = args.get(3).copied().unwrap_or(target);
+    let base = vm.temp_roots.len();
+    vm.temp_roots.push(target);
+    vm.temp_roots.push(key);
+    vm.temp_roots.push(value);
+    vm.temp_roots.push(receiver);
+    let result = (|| -> Result<bool, Value> {
+        let target = vm.temp_roots[base];
+        let key = vm.temp_roots[base + 1];
+        let value = vm.temp_roots[base + 2];
+        let receiver = vm.temp_roots[base + 3];
+        let found = load_property_recursive(target, key, Some(vm.function_prototype), gc);
+        if let Some(exc) = vm.pending_exception.take() {
+            return Err(exc);
+        }
+        if let Some(ptr) = found.heap_ptr() {
+            if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_ACCESSOR {
+                let setter = unsafe { rune_core::accessor::AccessorPair::setter(ptr) };
+                if setter.is_undefined() {
+                    return Ok(false);
+                }
+                vm.call_value_sync(gc, setter, receiver, &[value])?;
+                return Ok(true);
             }
         }
-        crate::vm::PropSetOut::Wait => Value::boolean(true),
-        crate::vm::PropSetOut::Bail(Some(crate::vm::Exit::Throw(e))) => {
+        if receiver.heap_ptr() == target.heap_ptr() {
+            let site = crate::vm::PropSetSite {
+                ic_index: -1,
+                prog_ptr: std::ptr::null(),
+                pc: 0,
+                is_strict: true,
+            };
+            match vm.vm_set_property(gc, target, key, value, site) {
+                crate::vm::PropSetOut::Ready(_) => {
+                    if vm.pending_exception.is_some() {
+                        return Ok(false);
+                    }
+                    Ok(true)
+                }
+                crate::vm::PropSetOut::Wait => Ok(true),
+                crate::vm::PropSetOut::Bail(Some(crate::vm::Exit::Throw(e))) => Err(e),
+                crate::vm::PropSetOut::Bail(_) => Ok(true),
+            }
+        } else {
+            let Some(rptr) = receiver.heap_ptr() else {
+                return Ok(false);
+            };
+            let rtag = unsafe { (*(rptr as *const GcHeader)).tag() };
+            if rtag != TAG_OBJECT && rtag != TAG_ARRAY {
+                return Ok(false);
+            }
+            let Some(pk) = crate::vm::value_to_prop_key(key) else {
+                return Ok(false);
+            };
+            let robj = rptr as *mut JSObject;
+            let shape = unsafe { JSObject::shape_ptr(robj) };
+            if let Some(slot) = shape.lookup(&pk) {
+                if shape.attr_at(slot) & rune_core::shape::ATTR_WRITABLE == 0 {
+                    return Ok(false);
+                }
+                {
+                    let existing = unsafe { JSObject::get_slot(robj, slot) };
+                    if let Some(ap) = existing
+                        .heap_ptr()
+                        .filter(|p| unsafe { (*(*p as *const GcHeader)).tag() } == TAG_ACCESSOR)
+                    {
+                        let setter = unsafe { rune_core::accessor::AccessorPair::setter(ap) };
+                        if setter.is_undefined() {
+                            return Ok(false);
+                        }
+                        vm.call_value_sync(gc, setter, receiver, &[value])?;
+                        return Ok(true);
+                    }
+                }
+                unsafe { JSObject::set_slot(robj, slot, value) };
+            } else {
+                let name = if let Some(s) = key.heap_ptr() {
+                    if unsafe { (*(s as *const GcHeader)).tag() } == TAG_STRING {
+                        unsafe { HeapString::to_string(s as *mut HeapString) }
+                    } else {
+                        value_to_js_string(key)
+                    }
+                } else {
+                    value_to_js_string(key)
+                };
+                unsafe {
+                    JSObject::add_property_with_attrs(
+                        robj,
+                        pk,
+                        name,
+                        value,
+                        rune_core::shape::ATTR_DEFAULT,
+                    );
+                }
+            }
+            Ok(true)
+        }
+    })();
+    vm.temp_roots.truncate(base);
+    match result {
+        Ok(b) => Value::boolean(b),
+        Err(e) => {
             vm.set_pending_exception(e);
             Value::undefined()
         }
-        crate::vm::PropSetOut::Bail(_) => Value::boolean(true),
     }
 }
 
@@ -3611,7 +3728,13 @@ pub fn reflect_has(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm
     let Some(target) = reflect_target(gc, args, vm) else {
         return Value::undefined();
     };
-    let key = reflect_key_value(gc, args.get(1).copied().unwrap_or(Value::undefined()));
+    let key = match reflect_key_value(gc, vm, args.get(1).copied().unwrap_or(Value::undefined())) {
+        Ok(k) => k,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
     Value::boolean(crate::vm::has_property(
         target,
         key,
@@ -3628,7 +3751,13 @@ pub fn reflect_get_own_property_descriptor(
     let Some(target) = reflect_target(gc, args, vm) else {
         return Value::undefined();
     };
-    let key = reflect_key_value(gc, args.get(1).copied().unwrap_or(Value::undefined()));
+    let key = match reflect_key_value(gc, vm, args.get(1).copied().unwrap_or(Value::undefined())) {
+        Ok(k) => k,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
     object_get_own_property_descriptor(gc, Value::undefined(), &[target, key], vm)
 }
 
@@ -3641,13 +3770,46 @@ pub fn reflect_define_property(
     let Some(target) = reflect_target(gc, args, vm) else {
         return Value::undefined();
     };
-    let key = reflect_key_value(gc, args.get(1).copied().unwrap_or(Value::undefined()));
+    let key = match reflect_key_value(gc, vm, args.get(1).copied().unwrap_or(Value::undefined())) {
+        Ok(k) => k,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
     let descriptor = args.get(2).copied().unwrap_or(Value::undefined());
-    let result = object_define_property(gc, Value::undefined(), &[target, key, descriptor], vm);
-    if vm.pending_exception.is_some() {
-        return Value::undefined();
+    let desc = match to_property_descriptor(gc, vm, descriptor) {
+        Ok(d) => d,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let Some(pk) = crate::vm::value_to_prop_key(key) else {
+        return Value::boolean(false);
+    };
+    let Some(ptr) = target.heap_ptr() else {
+        return Value::boolean(false);
+    };
+    if unsafe { (*(ptr as *const GcHeader)).tag() } != TAG_OBJECT {
+        return Value::boolean(false);
     }
-    Value::boolean(is_object_value(result))
+    let key_name = if let Some(kp) = key.heap_ptr() {
+        if unsafe { (*(kp as *const GcHeader)).tag() } == TAG_STRING {
+            unsafe { HeapString::to_string(kp as *mut HeapString) }
+        } else {
+            value_to_js_string(key)
+        }
+    } else {
+        value_to_js_string(key)
+    };
+    match define_own_property(gc, vm, ptr as *mut JSObject, pk, key_name, &desc) {
+        Ok(_) => Value::boolean(true),
+        Err(_) => {
+            vm.pending_exception = None;
+            Value::boolean(false)
+        }
+    }
 }
 
 pub fn reflect_get_prototype_of(
@@ -3756,7 +3918,14 @@ pub fn reflect_delete_property(
     let Some(target) = reflect_target(gc, args, vm) else {
         return Value::undefined();
     };
-    let key_val = reflect_key_value(gc, args.get(1).copied().unwrap_or(Value::undefined()));
+    let key_val =
+        match reflect_key_value(gc, vm, args.get(1).copied().unwrap_or(Value::undefined())) {
+            Ok(k) => k,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        };
     let Some(key) = crate::vm::value_to_prop_key(key_val) else {
         return Value::boolean(true);
     };
@@ -3885,11 +4054,13 @@ pub fn reflect_apply(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut 
         ));
         return Value::undefined();
     }
-    let len = crate::vm::array_like_length(list).unwrap_or(0) as usize;
-    let mut call_args = Vec::with_capacity(len);
-    for i in 0..len {
-        call_args.push(crate::vm::array_like_index(list, i as u32).unwrap_or(Value::undefined()));
-    }
+    let call_args = match reflect_args_list(gc, vm, list) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
     match vm.call_value_sync(gc, target, this_arg, &call_args) {
         Ok(v) => v,
         Err(e) => {
@@ -9348,6 +9519,40 @@ fn get_property_value_sync(
                 }
                 let object = vm.temp_roots[slot];
                 return vm.call_value_sync(gc, getter, object, &[]);
+            }
+        }
+        Ok(value)
+    })();
+    vm.temp_roots.truncate(slot);
+    result
+}
+
+fn get_property_value_sync_receiver(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    object: Value,
+    key: Value,
+    receiver: Value,
+) -> Result<Value, Value> {
+    let slot = vm.temp_roots.len();
+    vm.temp_roots.push(object);
+    vm.temp_roots.push(key);
+    vm.temp_roots.push(receiver);
+    let result = (|| {
+        let object = vm.temp_roots[slot];
+        let key = vm.temp_roots[slot + 1];
+        let value = load_property_recursive(object, key, Some(vm.function_prototype), gc);
+        if let Some(exc) = vm.pending_exception.take() {
+            return Err(exc);
+        }
+        if let Some(ptr) = value.heap_ptr() {
+            if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_ACCESSOR {
+                let getter = unsafe { rune_core::accessor::AccessorPair::getter(ptr) };
+                if getter.is_undefined() {
+                    return Ok(Value::undefined());
+                }
+                let receiver = vm.temp_roots[slot + 2];
+                return vm.call_value_sync(gc, getter, receiver, &[]);
             }
         }
         Ok(value)

@@ -3069,6 +3069,23 @@ impl Vm {
         let obj_proto_shape = Shape::empty();
         let obj_proto_ptr = JSObject::allocate(gc, obj_proto_shape, &[]);
         self.object_prototype = Value::from_heap_ptr(obj_proto_ptr as *mut u8);
+        // Namespace objects created before Object.prototype existed (Reflect)
+        // get their prototype and @@toStringTag here.
+        if let Some(reflect) = self.builtin_wrappers.get("Reflect").copied() {
+            if let Some(rp) = reflect.heap_ptr() {
+                unsafe {
+                    JSObject::set_prototype(rp as *mut JSObject, obj_proto_ptr as *mut u8);
+                    let tag = Value::from_heap_ptr(HeapString::allocate(gc, "Reflect") as *mut u8);
+                    JSObject::add_property_with_attrs(
+                        rp as *mut JSObject,
+                        PropertyKey::from_symbol(rune_core::symbol::SYM_TO_STRING_TAG),
+                        "\u{0}".to_string(),
+                        tag,
+                        rune_core::shape::ATTR_CONFIGURABLE,
+                    );
+                }
+            }
+        }
         if let Some(str_proto) = self.string_prototype.heap_ptr() {
             unsafe {
                 JSObject::set_prototype(str_proto as *mut JSObject, obj_proto_ptr as *mut u8);

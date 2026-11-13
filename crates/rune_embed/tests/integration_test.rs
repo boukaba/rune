@@ -16208,3 +16208,30 @@ fn test_reflect_set_prototype_of_and_descriptor_order() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_reflect_receiver_and_define_boolean() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var getterTarget = { get x() { return this.v; } };
+            var setterTarget = { set x(n) { this.v = n * 2; } };
+            var receiver = { v: 21 };
+            var got = Reflect.get(getterTarget, "x", receiver);
+            var setOk = Reflect.set(setterTarget, "x", 5, receiver);
+            var o = {};
+            Object.freeze(o);
+            var frozen = Reflect.defineProperty(o, "p", { value: 1 });
+            [
+                got === 21,
+                setOk === true && receiver.v === 10,
+                frozen === false,
+                Object.getPrototypeOf(Reflect) === Object.prototype,
+                Reflect[Symbol.toStringTag] === "Reflect"
+            ].join("|") === "true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

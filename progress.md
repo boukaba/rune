@@ -2257,6 +2257,30 @@ Integration suite: **853 passed, 0 failed, 3 ignored**.
 
 Integration suite: **854 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Reflect receiver semantics + defineProperty boolean (2026-11-13)
+
+- `Reflect.get(target, key, receiver)` now invokes accessor getters with the
+  receiver.
+- `Reflect.set(target, key, value, receiver)` now:
+  - calls accessor setters with the receiver (including inherited accessors);
+  - returns false for a setter-less accessor;
+  - defines/updates an own data property on an object receiver;
+  - returns false for primitive/non-writable receivers.
+- Property keys are converted through synchronous `ToPrimitive` and can throw.
+- `construct`/`apply` read `argumentsList.length` via an accessor-aware Get and
+  propagate its throw.
+- `Reflect.defineProperty` returns false for DefineOwnProperty failures
+  (frozen/non-extensible) instead of throwing.
+- Fixed the Reflect namespace prototype (`Object.prototype`) and
+  `@@toStringTag` (`"Reflect"`).
+- Test262: Reflect **115 → 137/153** (`set` 16/18, `get` 10/11,
+  `defineProperty` 11/12).
+- Regression: `test_reflect_receiver_and_define_boolean`.
+- Known: remaining Reflect failures are mostly Proxy traps; also observed an
+  object-literal bug where `{ get x(){...}, set x(v){...} }` drops the getter.
+
+Integration suite: **855 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

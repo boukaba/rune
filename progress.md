@@ -583,6 +583,26 @@ Integration suite: **768 passed, 0 failed, 3 ignored**. `rune_runtime`: 7.
 AFPC format is now v9 because the builtin table gained `Promise.any` and
 `_promise_any_element`; v8 caches are rejected.
 
+### Phase 2 — thenables in Promise combinators (2026-11-13)
+
+`Promise.all`, `race`, `allSettled`, and `any` now unwrap thenable inputs via
+deferred microtasks instead of recursively pushing JS frames during setup:
+
+- Native promises pass through; other values become fulfilled promises;
+  thenables get a pending promise and a `then(resolve, reject)` microtask with
+  an explicit `this`.
+- The microtask queue now carries `this` and an optional promise to reject if
+  the callback throws, so a throwing thenable rejects the aggregate instead of
+  hanging or leaking the exception.
+- `Promise.race` no longer fulfills immediately with a non-promise thenable;
+  values/thenables settle through the normal reaction queue.
+- Regression covers `all`, `race`, `allSettled`, `any`, and a throwing
+  thenable.
+
+Integration suite: **769 passed, 0 failed, 3 ignored**. Targeted Promise
+test262 improved from 353 to **364 passed / 703 total (51.8%)**; the report is
+updated in `docs/conformance-2026-11-13.md`.
+
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:

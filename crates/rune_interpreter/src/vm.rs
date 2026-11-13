@@ -296,8 +296,11 @@ pub(crate) struct PendingPromiseCtor {
 /// A microtask — a callback deferred to after the current synchronous task.
 pub(crate) struct Microtask {
     pub(crate) callback: Value,
+    pub(crate) this: Value,
     pub(crate) args: Vec<Value>,
     pub(crate) promise_ctor: Option<PendingPromiseCtor>,
+    /// Promise to reject if the callback throws (thenable unwrapping).
+    pub(crate) throw_promise: Option<Value>,
 }
 
 /// State for a pending primitive conversion (ToPrimitive via user-defined toString/valueOf).
@@ -3004,8 +3007,28 @@ impl Vm {
     ) {
         self.microtask_queue.push(Microtask {
             callback,
+            this: Value::undefined(),
             args,
             promise_ctor: ppc,
+            throw_promise: None,
+        });
+    }
+
+    /// Enqueue a microtask with an explicit `this` (thenable `.then` calls)
+    /// and a promise to reject if the call throws.
+    pub(crate) fn enqueue_thenable_microtask(
+        &mut self,
+        callback: Value,
+        this: Value,
+        args: Vec<Value>,
+        throw_promise: Value,
+    ) {
+        self.microtask_queue.push(Microtask {
+            callback,
+            this,
+            args,
+            promise_ctor: None,
+            throw_promise: Some(throw_promise),
         });
     }
 
@@ -3017,9 +3040,20 @@ impl Vm {
             let tasks: Vec<Microtask> = std::mem::take(&mut self.microtask_queue);
             for task in tasks {
                 self.pending_promise_ctor = task.promise_ctor;
-                self.push_callback_call(gc, task.callback, Value::undefined(), task.args);
+                self.push_callback_call(gc, task.callback, task.this, task.args);
                 self.register_roots(gc);
-                let _ = self.run_loop(gc);
+                let exit = self.run_loop(gc);
+                if let (Exit::Throw(err), Some(promise)) = (exit, task.throw_promise) {
+                    if let Some(ptr) = promise.heap_ptr() {
+                        if unsafe { Promise::state(ptr) == PROMISE_PENDING } {
+                            unsafe {
+                                Promise::set_state(ptr, PROMISE_REJECTED);
+                                Promise::set_result(ptr, err);
+                            }
+                            crate::builtins::settle_promise_reactions(self, ptr, err, false);
+                        }
+                    }
+                }
             }
         }
     }

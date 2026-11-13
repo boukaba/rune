@@ -9,10 +9,10 @@ Command:
 Result:
 
 ```text
-Results: 353 passed, 285 failed, 65 skipped, 703 total
+Results: 364 passed, 274 failed, 65 skipped, 703 total
 ```
 
-This is **50.2% of the suite** and **55.3% of executed tests** (638). It is a
+This is **51.8% of the suite** and **57.1% of executed tests** (638). It is a
 targeted baseline, not the core-suite 90% gate from the production roadmap.
 
 Observed failure categories in the tail of this run:
@@ -23,7 +23,8 @@ Observed failure categories in the tail of this run:
 - `Symbol.species` return-value/name cases;
 - async/iterator harness helpers not available in the standalone runner.
 
-The suite includes `Promise.any` tests; the implementation landed in this round,
-but the numbers above were measured after that build. Future runs should be
+The suite includes `Promise.any` and combinator-thenable tests; the numbers
+above were measured after those implementations landed (commit series ending
+with the thenable-combinator change). Future runs should be
 stored alongside the commit SHA and compared suite-by-suite rather than as one
 aggregate.

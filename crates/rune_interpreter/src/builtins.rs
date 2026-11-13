@@ -18219,6 +18219,59 @@ pub fn promise_prototype_finally(
 }
 
 /// Promise.resolve(value) — returns a fulfilled promise. If value is a promise, returns it.
+/// Resolve an input for combinators without recursively pushing JS frames
+/// during setup. Native promises pass through; thenables get a pending promise
+/// whose `then(resolve, reject)` runs as a microtask; other values are wrapped
+/// in a fulfilled promise.
+fn promise_resolve_for_combinator(gc: &mut SemiSpace, val: Value, vm: &mut Vm) -> Value {
+    if let Some(ptr) = val.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_PROMISE {
+            return val;
+        }
+    }
+    let root_base = vm.temp_roots.len();
+    vm.temp_roots.push(val);
+    if val.heap_ptr().is_some() {
+        let then_str = HeapString::allocate(gc, "then");
+        let then_key = Value::from_heap_ptr(then_str as *mut u8);
+        let then_val = load_property_recursive(val, then_key, Some(vm.function_prototype), gc);
+        if let Some(tp) = then_val.heap_ptr() {
+            if unsafe { (*(tp as *const GcHeader)).tag() } == TAG_FUNC {
+                vm.temp_roots.push(then_val);
+                let p = Promise::allocate(gc, vm.promise_prototype.heap_ptr());
+                let pv = Value::from_heap_ptr(p);
+                vm.temp_roots.push(pv);
+                let resolve_h = vm.find_builtin_handle("_promise_resolve");
+                let reject_h = vm.find_builtin_handle("_promise_reject");
+                let resolve = vm.create_promise_bridge(gc, pv, resolve_h);
+                vm.temp_roots.push(resolve);
+                let reject = vm.create_promise_bridge(gc, pv, reject_h);
+                vm.temp_roots.push(reject);
+                let p_now = vm.temp_roots[root_base + 2];
+                let then_now = vm.temp_roots[root_base + 1];
+                let this_now = vm.temp_roots[root_base];
+                let resolve_now = vm.temp_roots[root_base + 3];
+                let reject_now = vm.temp_roots[root_base + 4];
+                vm.enqueue_thenable_microtask(
+                    then_now,
+                    this_now,
+                    vec![resolve_now, reject_now],
+                    p_now,
+                );
+                vm.temp_roots.truncate(root_base);
+                return p_now;
+            }
+        }
+    }
+    vm.temp_roots.truncate(root_base);
+    let ptr = Promise::allocate(gc, vm.promise_prototype.heap_ptr());
+    unsafe {
+        Promise::set_state(ptr, PROMISE_FULFILLED);
+        Promise::set_result(ptr, val);
+    }
+    Value::from_heap_ptr(ptr)
+}
+
 pub fn promise_static_resolve(
     gc: &mut SemiSpace,
     _this: Value,
@@ -18446,7 +18499,7 @@ pub fn promise_static_all(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: 
         let cb = Value::from_heap_ptr(func as *mut u8);
         vm.temp_roots.push(cb);
         let item = crate::vm::array_like_index(iterable, i).unwrap_or(Value::undefined());
-        let input = promise_static_resolve(gc, Value::undefined(), &[item], vm);
+        let input = promise_resolve_for_combinator(gc, item, vm);
         promise_prototype_then(gc, input, &[cb, reject_bridge], vm);
         vm.temp_roots.pop();
     }
@@ -18731,7 +18784,7 @@ pub fn promise_static_all_settled(
             vm.temp_roots.push(callbacks[slot]);
         }
         let item = crate::vm::array_like_index(iterable, i).unwrap_or(Value::undefined());
-        let input = promise_static_resolve(gc, Value::undefined(), &[item], vm);
+        let input = promise_resolve_for_combinator(gc, item, vm);
         promise_prototype_then(gc, input, &[callbacks[0], callbacks[1]], vm);
         vm.temp_roots.truncate(root_base + 2);
     }
@@ -18914,7 +18967,7 @@ pub fn promise_static_any(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: 
             vm.temp_roots.push(callbacks[slot]);
         }
         let item = crate::vm::array_like_index(iterable, i).unwrap_or(Value::undefined());
-        let input = promise_static_resolve(gc, Value::undefined(), &[item], vm);
+        let input = promise_resolve_for_combinator(gc, item, vm);
         promise_prototype_then(gc, input, &[callbacks[0], callbacks[1]], vm);
         vm.temp_roots.truncate(root_base + 2);
     }
@@ -18971,21 +19024,18 @@ pub fn promise_static_race(gc: &mut SemiSpace, _this: Value, args: &[Value], vm:
                         return result_val;
                     }
                     _ => {
-                        let input = promise_static_resolve(gc, Value::undefined(), &[item], vm);
+                        let input = promise_resolve_for_combinator(gc, item, vm);
                         promise_prototype_then(gc, input, &[resolve_bridge, reject_bridge], vm);
                         continue;
                     }
                 }
             }
         }
-        // Non-promise entries win immediately (PromiseResolve wraps them in a
-        // fulfilled promise, but the observable ordering is identical).
-        unsafe {
-            Promise::set_state(result_ptr, PROMISE_FULFILLED);
-            Promise::set_result(result_ptr, item);
-        }
-        vm.temp_roots.truncate(root_base);
-        return result_val;
+        // Values and thenables go through PromiseResolve. Thenables are
+        // unwrapped in microtasks; plain values become already-fulfilled
+        // promises, so their reaction still settles the race asynchronously.
+        let input = promise_resolve_for_combinator(gc, item, vm);
+        promise_prototype_then(gc, input, &[resolve_bridge, reject_bridge], vm);
     }
     vm.temp_roots.truncate(root_base);
     result_val

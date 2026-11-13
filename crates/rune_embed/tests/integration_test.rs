@@ -13914,3 +13914,30 @@ fn test_promise_any_pending_input() {
     .unwrap();
     assert_eq!(eval_str(&mut ctx, "out"), "v7");
 }
+
+#[test]
+fn test_thenables_in_promise_combinators() {
+    let mut ctx = Context::new_small();
+    ctx.eval(
+        r#"
+        var out = [];
+        Promise.all([{ then: function (r) { r(1); } }, 2])
+            .then(function (v) { out.push("all:" + v.join(",")); });
+        Promise.race([{ then: function (r) { r(3); } }])
+            .then(function (v) { out.push("race:" + v); });
+        Promise.allSettled([{ then: function (_, j) { j("e"); } }])
+            .then(function (v) { out.push("settled:" + v[0].status + ":" + v[0].reason); });
+        Promise.any([{ then: function (_, j) { j("no"); } },
+                     { then: function (r) { r(9); } }])
+            .then(function (v) { out.push("any:" + v); });
+        Promise.all([{ then: function () { throw "bad"; } }])
+            .catch(function (e) { out.push("throw:" + e); });
+        "";
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        eval_str(&mut ctx, "out.sort().join('|')"),
+        "all:1,2|any:9|race:3|settled:rejected:e|throw:bad"
+    );
+}

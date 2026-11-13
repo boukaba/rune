@@ -2345,6 +2345,9 @@ impl Vm {
             if let Some(apply_handle) = find_handle(&self.builtins, "Function_prototype_apply") {
                 proto_entries_f.push(("apply", apply_handle));
             }
+            if let Some(bind_handle) = find_handle(&self.builtins, "Function_prototype_bind") {
+                proto_entries_f.push(("bind", bind_handle));
+            }
             let func_proto = make_object(gc, &proto_entries_f);
             self.function_prototype = func_proto;
             // %Function% wrapper

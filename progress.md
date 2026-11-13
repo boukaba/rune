@@ -259,8 +259,23 @@ Regression covers five forms (including `await` inside an async arrow) and
 checks the settled values `8,5,5,7,7`. Integration suite: **753 passed, 0
 failed, 3 ignored**.
 
-Next: `Function.prototype.bind`, `Promise.race`/`allSettled`, then begin Phase 1
-(runtime and stable layout work).
+### Phase 0 — Function.prototype.bind (2026-11-13)
+
+`Function.prototype.bind` now returns a real callable wrapper. The wrapper is a
+TAG_FUNC whose synthetic program forwards to an internal `Bound_invoke` builtin:
+the target, bound receiver, bound-argument array, and invoke handle live in its
+captured environment; `MakeArgumentsArray` collects incoming arguments and the
+builtin merges both lists before invoking through `Function.prototype.apply`.
+
+Covered: bound receiver, pre-bound arguments, no pre-bound arguments, chaining
+(`f.bind(...).bind(...)`), bound builtins (`print.bind`), and `typeof` reporting
+a function. Integration suite: **754 passed, 0 failed, 3 ignored**.
+
+Known gaps in this slice: `new Bound(...)` constructor semantics and
+`bound.length`/`bound.name` metadata are not yet implemented.
+
+Next: `Promise.race`/`allSettled`, then begin Phase 1 (runtime and stable
+layout work).
 
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,

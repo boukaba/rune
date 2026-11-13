@@ -13544,3 +13544,37 @@ fn test_async_arrow_forms() {
     .unwrap();
     assert_eq!(eval_str(&mut ctx, "out.join(',')"), "8,5,5,7,7");
 }
+
+#[test]
+fn test_function_bind_this_and_bound_args() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            function f(a, b) { return this.x + a + b; }
+            var g = f.bind({ x: 1 }, 2);
+            var h = f.bind({ x: 4 });
+            var chained = f.bind({ x: 1 }, 2).bind(null, 3);
+            [g(3), h(2, 3), chained(4), typeof g].join(",");
+        "#,
+        )
+        .unwrap();
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "g(3) + ',' + h(2,3) + ',' + chained(4) + ',' + typeof g"
+        ),
+        "6,9,6,function"
+    );
+    let _ = r;
+    let m = ctx
+        .eval(
+            r#"
+            var o = { v: 9, m: function () { return this.v; } };
+            var bound = o.m.bind({ v: 5 });
+            bound();
+        "#,
+        )
+        .unwrap();
+    assert_eq!(m.as_smi(), Some(5));
+}

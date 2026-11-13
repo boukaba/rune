@@ -8,8 +8,11 @@ use crate::vm::value_to_array_index;
 use crate::vm::value_to_prop_key;
 use crate::vm::{CollectionCtorState, PendingCollectionCtor, PendingCollectionForEach};
 use crate::vm::{Exit, GeneratorResume, call_builtin_sync};
+use rune_bytecode::opcode::{BytecodeProgram, Instruction, Opcode};
 use rune_core::array::RuneArray;
 use rune_core::date;
+use rune_core::env::EnvObject;
+use rune_core::function::Func;
 use rune_core::gc::{
     GcHeader, SemiSpace, TAG_ACCESSOR, TAG_ARRAY, TAG_ARRAY_BUFFER, TAG_DATE, TAG_FLOAT64,
     TAG_FORWARDED, TAG_FUNC, TAG_MAP, TAG_OBJECT, TAG_PROMISE, TAG_REGEXP, TAG_SET, TAG_STRING,
@@ -17531,6 +17534,101 @@ pub fn promise_static_all(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: 
     result_val
 }
 
+/// Function.prototype.bind(thisArg[, ...boundArgs]).
+///
+/// The bound function is a real TAG_FUNC whose synthetic program forwards to
+/// an internal `Bound_invoke` builtin. The target, bound receiver, bound
+/// argument array, and invoke handle live in its captured environment, so the
+/// wrapper needs no per-arity program generation: `MakeArgumentsArray`
+/// collects the call's incoming arguments and the builtin merges both arrays
+/// before invoking the target through Function.prototype.apply.
+pub fn function_bind(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let callable = this.as_smi().is_some_and(|s| s < 0)
+        || this
+            .heap_ptr()
+            .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC });
+    if !callable {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Function.prototype.bind called on non-function",
+        ));
+        return Value::undefined();
+    }
+    let target = this;
+    let bound_this = args.first().copied().unwrap_or(Value::undefined());
+    let bound_rest: &[Value] = if args.len() > 1 { &args[1..] } else { &[] };
+
+    let env = EnvObject::allocate(gc, 4, std::ptr::null_mut());
+    let bound_arr = RuneArray::allocate(gc, bound_rest);
+    unsafe {
+        RuneArray::set_shape_ptr(bound_arr, *DENSE_ARRAY_SHAPE as *const Shape);
+        if let Some(proto) = vm.array_prototype.heap_ptr() {
+            RuneArray::set_prototype(bound_arr, proto);
+        }
+    }
+
+    let instrs = vec![
+        Instruction::new(Opcode::LoadUndefined, vec![]),
+        Instruction::new(Opcode::LoadCaptured, vec![0, 3]),
+        Instruction::new(Opcode::LoadCaptured, vec![0, 0]),
+        Instruction::new(Opcode::LoadCaptured, vec![0, 1]),
+        Instruction::new(Opcode::LoadCaptured, vec![0, 2]),
+        Instruction::new(Opcode::MakeArgumentsArray, vec![]),
+        Instruction::new(Opcode::Call, vec![4]),
+        Instruction::new(Opcode::Return, vec![]),
+    ];
+    let inner = BytecodeProgram::new(instrs, vec![], vec![]);
+    let outer = Box::new(BytecodeProgram::new(vec![], vec![], vec![inner]));
+    let prog_ptr = Box::leak(outer) as *const BytecodeProgram as *const u8;
+    let invoke_handle = vm.find_builtin_handle("Bound_invoke");
+    let func = Func::allocate(gc, 0, prog_ptr, false, env as *mut u8);
+
+    // Allocations above may have moved env/array/func; resolve before storing.
+    let env = resolve_forwarded(env as *mut u8) as *mut EnvObject;
+    let bound_arr = resolve_forwarded(bound_arr as *mut u8) as *mut RuneArray;
+    let func = resolve_forwarded(func as *mut u8) as *mut Func;
+    unsafe {
+        EnvObject::set_slot(env, 0, target);
+        EnvObject::set_slot(env, 1, bound_this);
+        EnvObject::set_slot(env, 2, Value::from_heap_ptr(bound_arr as *mut u8));
+        EnvObject::set_slot(env, 3, invoke_handle);
+        Func::set_env_ptr(func, env as *mut u8);
+    }
+    Value::from_heap_ptr(func as *mut u8)
+}
+
+/// Internal continuation for bound functions: merge bound and incoming args,
+/// then invoke the target with the bound receiver through apply.
+pub fn bound_invoke(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let target = args.first().copied().unwrap_or(Value::undefined());
+    let bound_this = args.get(1).copied().unwrap_or(Value::undefined());
+    let bound_arr = args.get(2).copied().unwrap_or(Value::undefined());
+    let incoming = args.get(3).copied().unwrap_or(Value::undefined());
+    let mut merged: Vec<Value> = Vec::new();
+    for arr in [bound_arr, incoming] {
+        if let Some(len) = crate::vm::array_like_length(arr) {
+            for i in 0..len {
+                merged.push(crate::vm::array_like_index(arr, i).unwrap_or(Value::undefined()));
+            }
+        }
+    }
+    let merged_arr = RuneArray::allocate(gc, &merged);
+    unsafe {
+        RuneArray::set_shape_ptr(merged_arr, *DENSE_ARRAY_SHAPE as *const Shape);
+        if let Some(proto) = vm.array_prototype.heap_ptr() {
+            RuneArray::set_prototype(merged_arr, proto);
+        }
+    }
+    apply_builtin(
+        gc,
+        target,
+        &[bound_this, Value::from_heap_ptr(merged_arr as *mut u8)],
+        vm,
+    )
+}
+
 /// Promise.race(iterable) — settles with the first settled promise or value.
 pub fn promise_static_race(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let iterable = args.first().copied().unwrap_or(Value::undefined());
@@ -18897,6 +18995,16 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 2,
             name: "Function_prototype_apply",
             func: apply_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "Function_prototype_bind",
+            func: function_bind,
+        },
+        Builtin {
+            length: 4,
+            name: "Bound_invoke",
+            func: bound_invoke,
         },
         // Test262 assert builtins
         Builtin {

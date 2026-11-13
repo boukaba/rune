@@ -337,6 +337,27 @@ than normal allocation pressure:
 - CI has a new `gc-stress` job running the integration suite under the forced
   collector plus the dedicated stress tests.
 
+### Phase 1 hardening — AFPC cache identity (2026-11-13)
+
+A cached program is now executable only for the source and engine/ABI that
+produced it:
+
+- `AfpcCache` carries a source fingerprint; the CLI computes it and reuses a
+  cache only when it matches exactly. Editing the source now recompiles (the
+  old behavior silently ran the previous program).
+- The file header stores the source hash and an engine tag (version, OS, arch,
+  pointer width, optional `RUNE_BUILD_ID`). A foreign/ABI-mismatched cache is
+  rejected; header/body source-hash mismatches are rejected after
+  deserialization.
+- `AFPC_VERSION` bumped 5 → 6; README no longer claims "permanent" validity
+  and documents the source/ABI-scoped contract.
+- `save_bytecode_cache` remains source-agnostic (hash 0) for embedding uses;
+  the full CLI cache path uses the verified hash.
+
+Manual check: compile `print("first",111)` into a cache, edit to
+`print("second",222)`, rerun — now prints `second 222` instead of the stale
+program.
+
 Next: Phase 1 foundations — stable object/array headers (replace the interim
 forwarding layer), then the runtime/Web API layer.
 

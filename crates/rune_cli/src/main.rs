@@ -170,9 +170,14 @@ fn main() {
                     source
                 };
 
+                let source_fingerprint = rune_embed::afpc::source_hash(&source);
                 let result = if let Some(ref path) = cache_path {
-                    // AFPC cache: try full cache (bytecode + shapes + ICs + native code) first.
-                    if let Some(cache) = rune_embed::afpc::load_afpc_cache(path) {
+                    // AFPC cache: only reuse a cache compiled from this exact
+                    // source. The header also carries an engine/ABI tag, so a
+                    // stale or foreign native cache falls back to compilation.
+                    if let Some(cache) = rune_embed::afpc::load_afpc_cache(path)
+                        .filter(|c| c.source_hash == source_fingerprint)
+                    {
                         cache.restore_shapes();
                         if !cache.compiled_funcs.is_empty() {
                             let native = rune_embed::afpc::InstalledNativeCode::from_cache(&cache);
@@ -191,6 +196,7 @@ fn main() {
                                 let ics = ctx.ics();
                                 let mut cache =
                                     rune_embed::afpc::AfpcCache::from_runtime(bytecode, ics);
+                                cache.source_hash = source_fingerprint;
                                 cache.compiled_funcs = compiled_funcs;
                                 let _ = rune_embed::afpc::save_afpc_cache(path, &cache);
                                 exec_result

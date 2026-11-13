@@ -24,8 +24,39 @@ use std::path::Path;
 /// Magic bytes identifying an AFPC cache file.
 const AFPC_MAGIC: &[u8; 4] = b"AFPC";
 /// Cache format version. Bump when the serialized schema changes.
-/// v5: BytecodeProgram gains is_strict (A3 strict poison checks).
-const AFPC_VERSION: u32 = 5;
+/// v6: source hash + engine/ABI tag in the header; reaction/shape schema.
+const AFPC_VERSION: u32 = 6;
+
+/// Stable source fingerprint (FNV-1a). A cache is valid only for the exact
+/// source text it was compiled from; the CLI checks this before executing.
+pub fn source_hash(source: &str) -> u64 {
+    let mut h = 0xcbf29ce484222325u64;
+    for b in source.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// Fingerprint of the engine build/ABI that produced native blobs. Native
+/// code is not portable across engine versions, OS/arch, or pointer width.
+fn engine_tag() -> u64 {
+    let mut h = 0xcbf29ce484222325u64;
+    let mut mix = |bytes: &[u8]| {
+        for b in bytes {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    };
+    mix(env!("CARGO_PKG_VERSION").as_bytes());
+    mix(std::env::consts::ARCH.as_bytes());
+    mix(std::env::consts::OS.as_bytes());
+    mix(&(std::mem::size_of::<usize>() as u64).to_le_bytes());
+    if let Some(build) = option_env!("RUNE_BUILD_ID") {
+        mix(build.as_bytes());
+    }
+    h
+}
 
 /// Header written at the start of every cache file.
 #[derive(Copy, Clone, Debug)]
@@ -33,16 +64,19 @@ const AFPC_VERSION: u32 = 5;
 struct CacheHeader {
     magic: [u8; 4],
     version: u32,
-    /// Reserved for future use (e.g. flags, checksum offset).
-    _reserved: u64,
+    /// Fingerprint of the source text the cache was compiled from.
+    source_hash: u64,
+    /// Engine/ABI build tag; native code is rejected when this differs.
+    engine_tag: u64,
 }
 
 impl CacheHeader {
-    fn new() -> Self {
+    fn new(source_hash: u64) -> Self {
         Self {
             magic: *AFPC_MAGIC,
             version: AFPC_VERSION,
-            _reserved: 0,
+            source_hash,
+            engine_tag: engine_tag(),
         }
     }
 
@@ -133,6 +167,8 @@ pub struct CompiledTrace {
     bytecheck(bounds(__C: rkyv::validation::ArchiveContext + rkyv::rancor::Fallible<Error: rkyv::rancor::Source>))
 )]
 pub struct AfpcCache {
+    /// Source fingerprint; verified by the CLI before executing the bytecode.
+    pub source_hash: u64,
     pub bytecode: BytecodeProgram,
     pub shape_table: Vec<ShapeEntry>,
     pub ic_table: Vec<InlineCache>,
@@ -150,6 +186,7 @@ impl AfpcCache {
             .collect();
         let compiled_funcs = aot_compile_functions(&bytecode);
         Self {
+            source_hash: 0,
             bytecode,
             shape_table,
             ic_table: ics,
@@ -170,7 +207,7 @@ impl AfpcCache {
 /// Serialize a full AFPC cache and write it to `path`.
 pub fn save_afpc_cache<P: AsRef<Path>>(path: P, cache: &AfpcCache) -> std::io::Result<usize> {
     let mut file = fs::File::create(path)?;
-    let header = CacheHeader::new();
+    let header = CacheHeader::new(cache.source_hash);
     file.write_all(header.as_bytes())?;
 
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(cache)
@@ -193,13 +230,21 @@ pub fn load_afpc_cache<P: AsRef<Path>>(path: P) -> Option<AfpcCache> {
 
     let (header_bytes, body) = data.split_at(std::mem::size_of::<CacheHeader>());
     let header = CacheHeader::from_bytes(header_bytes.try_into().ok()?);
-    if &header.magic != AFPC_MAGIC || header.version != AFPC_VERSION {
+    if &header.magic != AFPC_MAGIC
+        || header.version != AFPC_VERSION
+        || header.engine_tag != engine_tag()
+    {
         return None;
     }
 
-    rkyv::from_bytes::<AfpcCache, rkyv::rancor::Error>(body)
+    let cache = rkyv::from_bytes::<AfpcCache, rkyv::rancor::Error>(body)
         .map_err(|e| eprintln!("AFPC cache load failed: {e:?}"))
-        .ok()
+        .ok()?;
+    if cache.source_hash != header.source_hash {
+        eprintln!("AFPC cache header/body source hash mismatch");
+        return None;
+    }
+    Some(cache)
 }
 
 /// Installs cached native code blobs into executable memory and returns a map
@@ -331,6 +376,7 @@ pub fn save_bytecode_cache<P: AsRef<Path>>(
     program: &BytecodeProgram,
 ) -> std::io::Result<usize> {
     let cache = AfpcCache {
+        source_hash: 0,
         bytecode: program.clone(),
         shape_table: Vec::new(),
         ic_table: Vec::new(),
@@ -364,7 +410,7 @@ mod tests {
 
     #[test]
     fn test_cache_header_roundtrip() {
-        let h = CacheHeader::new();
+        let h = CacheHeader::new(0);
         let bytes = h.as_bytes();
         let h2 = CacheHeader::from_bytes(bytes);
         assert_eq!(h2.magic, *AFPC_MAGIC);

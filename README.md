@@ -22,7 +22,7 @@ Indicative cold starts in **~4–7ms** — 5–8× faster than Node.js. Designed
 | **Cold start** (empty script) | **~4–7 ms** | ~26–33 ms |
 | **Compilation model** | AOT + persistent native cache | JIT-only, re-compiles on every restart |
 | **Shape system** | Immutable, content-addressed | Mutable hidden classes (transitions) |
-| **Cache validity** | Keyed by engine build, source, ABI, and ISA (not yet enforced) | None (no cross-run caching) |
+| **Cache validity** | Keyed by source hash plus engine/ABI/OS/arch; stale caches recompile | None (no cross-run caching) |
 | **Property IC** | SIMD (NEON/SSE), no megamorphic cliff | Linear probe, megamorphic cliff |
 | **GC** | Semi-space (Cheney) | Generational + concurrent |
 
@@ -185,7 +185,7 @@ Immutable, content-addressed shapes guarantee O(1) property access at any polymo
 
 ### AOT-First Persistent Compilation (AFPC)
 
-Rune caches compiled code across restarts with **permanent validity by construction**: shapes are immutable and content-addressed, so cached native code never needs an invalidation pass (unlike V8/JSC, whose shape transitions invalidate cached dispatch). Cache format is versioned (`AFPC_VERSION = 2`); any format change requires a bump that invalidates old caches.
+Rune caches compiled code across restarts with **source/ABI-scoped validity**: shapes are immutable and content-addressed, so shape identity is stable, but native code is valid only for the exact source hash and engine/OS/arch tag recorded in the cache header (unlike V8/JSC, whose shape transitions invalidate cached dispatch). Cache format is versioned (`AFPC_VERSION = 6`); stale or foreign caches fall back to compilation.
 
 1. **First run:** Parse → emit → JIT-compile → persist (bytecode + shapes + ICs + native code)
 2. **Subsequent runs:** mmap cache → restore shapes/ICs, install native entries, execute immediately (cache load 26µs vs 355µs compile — 13.5×)

@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Sloppy global `this` (2026-11-13)**: per-context global object for script top-level `this`, sloppy undefined receivers, and `globalThis`; strict/module behavior preserved. Map **203/216 (94.0%)**; integration **789**. Globals map not mirrored as properties yet.
 - **Date/RegExp own properties (2026-11-13)**: Date padding reused as `extra_props`; RegExp 48-byte layout with extra-props; load/store/has/length/index cover both. Map **202/216 (93.5%)**; integration **788**; GC stress 4/4.
 - **Arguments `@@toStringTag` (2026-11-13)**: `Object.prototype.toString.call(arguments)` now reports `[object Arguments]` via internal array extra-props; array `@@toStringTag` lookup added. Map **200/216 (92.6%)**; integration **787**.
 - **Hardening: instruction/time budgets + fuzz/security docs (2026-11-13)**: `Context::set_instruction_budget`/`--max-instructions` and `set_time_budget`/`--timeout-ms`, catchable RangeError; both suppress JIT while active. 300-case token-soup parser fuzz corpus; `docs/security-model.md` (enforced controls + gaps). Integration **786**; CLI **9** tests. No sandbox/heap cap/bundle signing; parse/host/I/O unbudgeted.

@@ -1223,6 +1223,9 @@ pub struct Vm {
     /// When exhausted, a catchable RangeError is raised once and the budget is
     /// reset to unlimited so error handling can run.
     pub instruction_budget: u64,
+    /// Sloppy global `this` object (script top level and sloppy calls with an
+    /// undefined receiver).
+    pub global_this: Value,
     /// Optional wall-clock deadline for interpreted execution. JIT is disabled
     /// while a deadline is active so native loops cannot bypass it.
     pub execution_deadline: Option<std::time::Instant>,
@@ -1436,6 +1439,7 @@ impl Vm {
             pending_array_ops: Vec::new(),
             array_receiver_roots: Vec::new(),
             instruction_budget: u64::MAX,
+            global_this: Value::undefined(),
             execution_deadline: None,
             deadline_counter: 4096,
             temp_roots: Vec::new(),
@@ -3919,6 +3923,7 @@ impl Vm {
         for v in self.typed_array_ctor_handles.iter_mut() {
             gc.push_root(v as *mut Value as *mut u64);
         }
+        gc.push_root(&self.global_this as *const Value as *mut u64);
         gc.push_root(&self.aggregate_error_constructor as *const Value as *mut u64);
         gc.push_root(&self.aggregate_error_prototype as *const Value as *mut u64);
         for v in self.error_ctors.iter_mut() {
@@ -4866,7 +4871,11 @@ impl Vm {
             stack_base: 0,
             prog: program as *const BytecodeProgram,
             generator_id: None,
-            this: Value::undefined(),
+            this: if program.is_module {
+                Value::undefined()
+            } else {
+                self.global_this
+            },
             is_constructor_call: false,
             constructed_object: Value::undefined(),
             env: std::ptr::null_mut(),
@@ -6265,14 +6274,19 @@ impl Vm {
 
                 // ---- `this` binding ----
                 Opcode::LoadThis => {
-                    let this = {
-                        let fp = self.frames[fi].func_ptr;
+                    let fp = self.frames[fi].func_ptr;
+                    let mut this = {
                         if !fp.is_null() && unsafe { Func::is_arrow(fp as *mut Func) } {
                             unsafe { Func::lexical_this(fp as *mut Func) }
                         } else {
                             self.frames[fi].this
                         }
                     };
+                    if this.is_undefined()
+                        && (fp.is_null() || !unsafe { Func::is_strict(fp as *mut Func) })
+                    {
+                        this = self.global_this;
+                    }
                     self.push(this);
                     self.frames[fi].pc = pc + 1;
                 }

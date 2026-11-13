@@ -14413,3 +14413,24 @@ fn test_date_regexp_array_like_extra_properties() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_sloppy_global_this_and_global_this_alias() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            this._flag = 7;
+            function readThis() { return this._flag; }
+            var mapped = [1].map(function () { return this._flag; });
+            [
+                readThis() === 7,
+                mapped[0] === 7,
+                this === globalThis,
+                typeof globalThis === "object"
+            ].join("|") === "true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

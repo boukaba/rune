@@ -120,6 +120,21 @@ impl Context {
         }
         // Build constructor wrappers (Object.create, etc.)
         ctx.vm.init_builtin_wrappers(&mut ctx.gc);
+        // Sloppy global `this` object + `globalThis` alias. It is intentionally
+        // separate from the globals map for now (var bindings are not mirrored).
+        {
+            let global = rune_core::object::JSObject::allocate(
+                &mut ctx.gc,
+                rune_core::shape::Shape::empty(),
+                &[],
+            );
+            if let Some(proto) = ctx.vm.object_prototype.heap_ptr() {
+                unsafe { rune_core::object::JSObject::set_prototype(global, proto) };
+            }
+            let global = Value::from_heap_ptr(global as *mut u8);
+            ctx.vm.global_this = global;
+            ctx.vm.globals.insert("globalThis".to_string(), global);
+        }
         // Pre-allocate typeof result strings for JIT typeof helper.
         ctx.vm.typeof_strings = [
             ctx.allocate_string("number"),

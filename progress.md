@@ -925,6 +925,20 @@ Integration suite: **787 passed, 0 failed, 3 ignored**.
 
 Integration suite: **788 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — sloppy global `this` (2026-11-13)
+
+- Added a per-`Context` global object: script top-level `this`, sloppy calls
+  with an undefined receiver, and `globalThis` all resolve to it. Strict
+  functions keep `this === undefined`; module top level remains undefined.
+- Arrow functions created at script top level now capture the global object.
+- The object is independent from the globals map for now (top-level `var`s are
+  not mirrored as properties); this is documented as a limitation.
+- Measured: `built-ins/Array/prototype/map` **203/216 (94.0%; was 202)**; the
+  remaining six are Proxy/resizable-buffer/species tests.
+- Regression: `test_sloppy_global_this_and_global_this_alias`.
+
+Integration suite: **789 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

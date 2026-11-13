@@ -2836,6 +2836,32 @@ Integration suite: **874 passed, 0 failed, 3 ignored**.
 
 Integration suite: **875 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — JSON.stringify edges + spec key ordering (2026-11-13)
+
+- `String` wrapper `ToPrimitive(string)` now honours an own `toString`
+  override before falling back to the wrapped primitive (String/String()
+  contexts), without recursing through String.prototype.toString.
+- `JSON.stringify`:
+  - reads `toJSON` from StringObject extra properties (so wrapper toJSON works);
+  - serialises non-plain exotic objects (RegExp/Map/etc.) as `{}`;
+  - converts replacer PropertyList numbers through JS ToString (`-0` → "0",
+    ±Infinity/NaN spellings);
+  - roots the reviver-style wrapper holder and gives it Object.prototype so
+    replacer `this` survives GC;
+  - key enumeration now uses integer-ascending, then insertion order.
+- `Object.keys`/`values`/`entries` and for-in-adjacent listings use the same
+  ordering, and hidden synthetic keys are detected by `\0` + alphabetic/underscore
+  marker instead of any NUL prefix, so user keys containing NUL enumerate and
+  escape correctly.
+- Test262: JSON **119 → 127/165**, JSON.stringify **40 → 48/66**;
+  Object **2708/3411** (+13 from ordering).
+- Remaining stringify: Proxy trap tests, lone-surrogate escaping, one wrapper
+  holder harness case.
+- Regressions: `test_json_stringify_key_order_and_control_escapes`,
+  `test_json_stringify_replacer_tojson_wrappers`.
+
+Integration suite: **876 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

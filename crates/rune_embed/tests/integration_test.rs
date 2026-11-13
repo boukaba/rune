@@ -16837,3 +16837,23 @@ fn test_json_stringify_replacer_tojson_wrappers() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_json_stringify_key_order_and_control_escapes() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var ordered = JSON.stringify({ p2: 1, add: 2, p4: 3, 2: 4, 0: 5, 1: 6, p1: 7 });
+            [
+                Object.keys({ p2: 1, add: 2, p4: 3, 2: 4, 0: 5, 1: 6, p1: 7 }).join(",") === "0,1,2,p2,add,p4,p1",
+                ordered === '{"0":5,"1":6,"2":4,"p2":1,"add":2,"p4":3,"p1":7}',
+                JSON.stringify("\u0000") === '"\\u0000"',
+                JSON.stringify({ "a\u0000b": 1 }) === '{"a\\u0000b":1}',
+                JSON.stringify({ "n\u0001m": "\u001f" }) === '{"n\\u0001m":"\\u001f"}'
+            ].join("|") === "true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

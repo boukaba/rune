@@ -1059,6 +1059,48 @@ pub(crate) fn to_primitive_string(gc: &mut SemiSpace, val: Value, vm: &mut Vm) -
         return Some(unsafe { HeapString::to_string(ptr as *mut HeapString) });
     }
     if tag == TAG_STRING_OBJ {
+        // OrdinaryToPrimitive(string): own toString override first, then own
+        // valueOf override, else the wrapped primitive.
+        let extra = unsafe { StringObject::extra_props(ptr as *mut StringObject) };
+        let own = |name: &str| -> Option<Value> {
+            if extra.is_null() {
+                return None;
+            }
+            let eo = extra as *mut JSObject;
+            let shape = unsafe { JSObject::shape_ptr(eo) };
+            shape
+                .lookup(&PropertyKey::from_string(name))
+                .map(|slot| unsafe { JSObject::get_slot(eo, slot) })
+        };
+        for name in ["toString", "valueOf"] {
+            let Some(method) = own(name) else { continue };
+            let callable = method
+                .heap_ptr()
+                .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC })
+                || method.is_builtin();
+            if !callable {
+                continue;
+            }
+            match vm.call_value_sync(gc, method, val, &[]) {
+                Ok(result) if !is_object_value(result) => {
+                    if result.as_symbol_id().is_some() {
+                        vm.set_pending_exception(crate::errors::error_object(
+                            gc,
+                            &vm.error_protos,
+                            crate::errors::ErrorKind::TypeError,
+                            "Cannot convert a Symbol value to a string",
+                        ));
+                        return None;
+                    }
+                    return Some(value_to_js_string(result));
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return None;
+                }
+            }
+        }
         let str_ptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
         return Some(unsafe { HeapString::to_string(str_ptr as *mut HeapString) });
     }
@@ -4065,7 +4107,7 @@ fn collect_shape_keys(
             continue;
         }
         let name = shape.key_name_at(i).unwrap_or("").to_string();
-        if name.starts_with('\0') {
+        if is_internal_key(&name) {
             continue;
         }
         if let Ok(n) = name.parse::<u64>() {
@@ -9007,6 +9049,30 @@ pub fn object_builtin(gc: &mut SemiSpace, _this: Value, _args: &[Value], _vm: &m
 
 /// Iterate own enumerable string-keyed properties of a value.
 /// Returns Ok(entries) or Err(()) if a TypeError was thrown (null/undefined).
+fn is_internal_key(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    bytes.len() > 1 && bytes[0] == 0 && (bytes[1].is_ascii_alphabetic() || bytes[1] == b'_')
+}
+
+fn own_key_index(name: &str) -> Option<u64> {
+    if name.is_empty() || (name.len() > 1 && name.starts_with('0')) {
+        return None;
+    }
+    if !name.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    name.parse::<u64>().ok().filter(|v| *v < u32::MAX as u64)
+}
+
+fn sort_own_entries(entries: &mut [(String, Value)]) {
+    entries.sort_by(|a, b| match (own_key_index(&a.0), own_key_index(&b.0)) {
+        (Some(x), Some(y)) => x.cmp(&y),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+}
+
 fn object_own_entries_mode(
     gc: &mut SemiSpace,
     val: Value,
@@ -9050,12 +9116,13 @@ fn object_own_entries_mode(
                         continue;
                     }
                     let key = shape.key_name_at(i).unwrap_or("").to_string();
-                    if key.starts_with('\0') {
+                    if is_internal_key(&key) {
                         continue;
                     }
                     let value = unsafe { JSObject::get_slot(ptr as *mut JSObject, i) };
                     entries.push((key, value));
                 }
+                sort_own_entries(&mut entries);
                 Ok(entries)
             }
             TAG_ARRAY => {
@@ -9084,7 +9151,7 @@ fn object_own_entries_mode(
                             continue;
                         }
                         let key = shape.key_name_at(i).unwrap_or("").to_string();
-                        if key.starts_with('\0') {
+                        if is_internal_key(&key) {
                             continue;
                         }
                         let value = unsafe { JSObject::get_slot(extra_ptr as *mut JSObject, i) };
@@ -9138,7 +9205,7 @@ fn object_own_entries_mode(
                         continue;
                     }
                     let key = shape.key_name_at(i).unwrap_or("").to_string();
-                    if key.starts_with('\0') {
+                    if is_internal_key(&key) {
                         continue;
                     }
                     let value = unsafe { JSObject::get_slot(props, i) };
@@ -11413,7 +11480,7 @@ pub fn object_get_own_property_descriptors(
                         continue;
                     }
                     let key = shape.key_name_at(i).unwrap_or("").to_string();
-                    if key.starts_with('\0') {
+                    if is_internal_key(&key) {
                         continue;
                     }
                     keys.push(Value::from_heap_ptr(
@@ -11437,7 +11504,7 @@ pub fn object_get_own_property_descriptors(
                             continue;
                         }
                         let key = shape.key_name_at(i).unwrap_or("").to_string();
-                        if key.starts_with('\0') {
+                        if is_internal_key(&key) {
                             continue;
                         }
                         keys.push(Value::from_heap_ptr(
@@ -18741,6 +18808,27 @@ pub fn json_stringify(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
         Ok(Some(value_to_js_string(prim)))
     }
 
+    fn get_value_any(
+        gc: &mut SemiSpace,
+        vm: &mut Vm,
+        v: Value,
+        name: &str,
+    ) -> Result<Value, Value> {
+        if let Some(ptr) = v.heap_ptr() {
+            if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_STRING_OBJ {
+                let extra = unsafe { StringObject::extra_props(ptr as *mut StringObject) };
+                if !extra.is_null() {
+                    let eo = extra as *mut JSObject;
+                    let shape = unsafe { JSObject::shape_ptr(eo) };
+                    if let Some(slot) = shape.lookup(&PropertyKey::from_string(name)) {
+                        return Ok(unsafe { JSObject::get_slot(eo, slot) });
+                    }
+                }
+            }
+        }
+        get_value_sync(gc, vm, v, name)
+    }
+
     let val = args.first().copied().unwrap_or(Value::undefined());
     let replacer = args.get(1).copied().unwrap_or(Value::undefined());
     let space_arg = args.get(2).copied().unwrap_or(Value::undefined());
@@ -18775,10 +18863,10 @@ pub fn json_stringify(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
                     } else {
                         None
                     }
-                } else if let Some(n) = item.as_smi() {
-                    Some(n.to_string())
+                } else if item.as_smi().is_some() || item.as_float64().is_some() {
+                    Some(value_to_js_string(item))
                 } else {
-                    item.as_float64().map(f64_to_json_string)
+                    None
                 };
                 if let Some(n) = name {
                     if !names.contains(&n) {
@@ -18859,7 +18947,7 @@ pub fn json_stringify(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
             let key_val = Value::from_heap_ptr(HeapString::allocate(gc, key) as *mut u8);
             // toJSON (only for objects).
             if is_object_like(val) {
-                let to_json = get_value_sync(gc, vm, val, "toJSON")?;
+                let to_json = get_value_any(gc, vm, val, "toJSON")?;
                 if is_callable_value(to_json) {
                     val = vm.call_value_sync(gc, to_json, val, &[key_val])?;
                     vm.temp_roots[root] = val;
@@ -19021,7 +19109,7 @@ pub fn json_stringify(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
                         }
                         out
                     };
-                    names.retain(|n| !n.starts_with('\0'));
+                    names.retain(|n| !is_internal_key(n));
                     let child_indent = format!("{indent}{gap}");
                     let mut pairs: Vec<String> = Vec::new();
                     for name in names {
@@ -19068,6 +19156,9 @@ pub fn json_stringify(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
                 stack.pop();
                 return res;
             }
+            if tag != TAG_FUNC && tag != TAG_ARRAY && tag != TAG_OBJECT {
+                return Ok("{}".to_string());
+            }
             Ok("null".to_string())
         })();
         vm.temp_roots.truncate(root);
@@ -19075,9 +19166,16 @@ pub fn json_stringify(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
     }
 
     let holder = make_simple_object(gc, "", val);
+    if let Some(hp) = holder.heap_ptr() {
+        if let Some(proto) = vm.object_prototype.heap_ptr() {
+            unsafe { JSObject::set_prototype(hp as *mut JSObject, proto) };
+        }
+    }
+    vm.temp_roots.push(holder);
     let mut stack: Vec<*mut u8> = Vec::new();
     let replacer_fn = replacer_fn;
-    match stringify_inner(
+    let holder = vm.temp_roots[vm.temp_roots.len() - 1];
+    let result = stringify_inner(
         gc,
         vm,
         holder,
@@ -19088,7 +19186,9 @@ pub fn json_stringify(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
         &gap,
         "",
         &mut stack,
-    ) {
+    );
+    vm.temp_roots.pop();
+    match result {
         Ok(s) => Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8),
         Err(e) => {
             if !e.is_undefined() && vm.pending_exception.is_none() {
@@ -19097,13 +19197,6 @@ pub fn json_stringify(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
             Value::undefined()
         }
     }
-}
-
-/// Convert f64 to shortest-reasonable JSON string representation.
-/// Known limitation: does not guarantee shortest round-trippable (Rust's `f64::to_string()`
-/// differs from JS's Number.prototype.toString() for some high-precision values).
-fn f64_to_json_string(f: f64) -> String {
-    f64::to_string(&f)
 }
 
 /// Function.prototype.call(thisArg, ...args) — calls `this` with the given thisArg and arguments.

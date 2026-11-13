@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **JSON.stringify edges/order (2026-11-13)**: wrapper toJSON, exotic {}, numeric PropertyList, key order, NUL keys. JSON **127/165**, stringify **48/66**. Integration **876**.
 - **Spec-shaped JSON.stringify (2026-11-13)**: replacer/toJSON/wrappers/space/circular. JSON **119/165**, stringify **40/66**. Integration **875**.
 - **Strict JSON.parse + reviver context (2026-11-13)**: grammar strictness, -0, __proto__ own props, ToPrimitive input, reviver context. JSON **94/165**. Integration **874**.
 - **Regex capture clearing + indices (2026-11-13)**: ClearCaptures, last-iteration captures, d/indices. RegExp **578/1879**, named-groups 10/10. Integration **873**.

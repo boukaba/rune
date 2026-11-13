@@ -15905,3 +15905,28 @@ fn test_object_from_entries_accessor_order_and_close() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_map_group_by() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var m = Map.groupBy([1, 2, 3, 4], function (n) { return n % 2; });
+            var key = {};
+            var byObject = Map.groupBy([1, 2], function () { return key; });
+            var keys = [];
+            m.forEach(function (v, k) { keys.push(String(k)); });
+            [
+                Map.groupBy.length === 2,
+                m.size === 2,
+                m.get(1).join(",") === "1,3",
+                m.get(0).join(",") === "2,4",
+                byObject.get(key).length === 2,
+                keys.join(",") === "1,0"
+            ].join("|") === "true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

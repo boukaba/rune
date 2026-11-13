@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Map.groupBy (2026-11-13)**: SameValueZero, insertion order, iterable drain. Map/groupBy **14/14**, Map **140/204**. Integration **845**.
 - **fromEntries/groupBy complete (2026-11-13)**: IteratorClose, accessor Get, assert isolation. fromEntries **25/25**, groupBy **14/14**, Object **2648/3411**. Integration **844**.
 - **Iterable fromEntries/groupBy (2026-11-13)**: sync iterator drain, ToPropertyKey, duplicate overwrite. fromEntries 8→**14/25**, Object **2635/3411**. Integration **843**.
 - **Object.groupBy (2026-11-13)**: sync callbacks, sorted integer keys, null proto. Object 2619→**2629/3411**. Integration **842**.

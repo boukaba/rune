@@ -8409,6 +8409,199 @@ pub fn object_group_by(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mu
     finish_grouped_object(gc, vm, &groups, &keys, root_base)
 }
 
+/// Map.groupBy(items, callbackfn) — §24.1.3.1.
+pub fn map_group_by(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let items = args.first().copied().unwrap_or(Value::undefined());
+    let callback = args.get(1).copied().unwrap_or(Value::undefined());
+    let callable = callback
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC)
+        || callback.as_smi().is_some_and(|s| s < 0);
+    if !callable {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Map.groupBy callback must be callable",
+        ));
+        return Value::undefined();
+    }
+    let root_base = vm.temp_roots.len();
+    // (key root index, value root indices), insertion ordered.
+    let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
+    let mut collect = |gc: &mut SemiSpace, vm: &mut Vm, value: Value, index: usize| -> bool {
+        let key = match vm.call_value_sync(
+            gc,
+            callback,
+            Value::undefined(),
+            &[value, Value::smi(index as i32)],
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.temp_roots.truncate(root_base);
+                vm.set_pending_exception(e);
+                return false;
+            }
+        };
+        let vslot = vm.temp_roots.len();
+        vm.temp_roots.push(value);
+        for (kidx, values) in groups.iter_mut() {
+            if same_value_zero(vm.temp_roots[*kidx], key) {
+                values.push(vslot);
+                return true;
+            }
+        }
+        let kslot = vm.temp_roots.len();
+        vm.temp_roots.push(key);
+        // Re-resolve the just-pushed key: the push may have moved it.
+        let _ = kslot;
+        groups.push((kslot, vec![vslot]));
+        true
+    };
+    if let Some(ptr) = items.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_STRING {
+            let text = unsafe { HeapString::to_string(ptr as *mut HeapString) };
+            for (i, ch) in text.chars().enumerate() {
+                let value =
+                    Value::from_heap_ptr(HeapString::allocate(gc, &ch.to_string()) as *mut u8);
+                if !collect(gc, vm, value, i) {
+                    return Value::undefined();
+                }
+            }
+            return build_grouped_map(gc, vm, groups, root_base);
+        }
+    }
+    match get_iter_method(vm, gc, items) {
+        SymbolMethodResult::Found(method) => {
+            let iterator = match vm.call_value_sync(gc, method, items, &[]) {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.temp_roots.truncate(root_base);
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            };
+            let islot = vm.temp_roots.len();
+            vm.temp_roots.push(iterator);
+            let mut index = 0usize;
+            loop {
+                let iter = vm.temp_roots[islot];
+                let next = get_value_sync(gc, vm, iter, "next");
+                let next = match next {
+                    Ok(v) => v,
+                    Err(e) => {
+                        vm.temp_roots.truncate(root_base);
+                        vm.set_pending_exception(e);
+                        return Value::undefined();
+                    }
+                };
+                let result = match vm.call_value_sync(gc, next, iter, &[]) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        vm.temp_roots.truncate(root_base);
+                        vm.set_pending_exception(e);
+                        return Value::undefined();
+                    }
+                };
+                let done = match get_value_sync(gc, vm, result, "done") {
+                    Ok(v) => v.to_boolean().unwrap_or(false),
+                    Err(e) => {
+                        vm.temp_roots.truncate(root_base);
+                        vm.set_pending_exception(e);
+                        return Value::undefined();
+                    }
+                };
+                if done {
+                    break;
+                }
+                let value = match get_value_sync(gc, vm, result, "value") {
+                    Ok(v) => v,
+                    Err(e) => {
+                        vm.temp_roots.truncate(root_base);
+                        vm.set_pending_exception(e);
+                        return Value::undefined();
+                    }
+                };
+                if !collect(gc, vm, value, index) {
+                    return Value::undefined();
+                }
+                index += 1;
+            }
+            return build_grouped_map(gc, vm, groups, root_base);
+        }
+        SymbolMethodResult::NotCallable => {
+            vm.temp_roots.truncate(root_base);
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Map.groupBy requires an iterable",
+            ));
+            return Value::undefined();
+        }
+        SymbolMethodResult::NotFound => {}
+    }
+    let Some(len) = crate::vm::array_like_length(items) else {
+        vm.temp_roots.truncate(root_base);
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Map.groupBy requires an iterable",
+        ));
+        return Value::undefined();
+    };
+    for i in 0..len {
+        let value =
+            load_property_recursive(items, Value::smi(i as i32), Some(vm.function_prototype), gc);
+        if !collect(gc, vm, value, i as usize) {
+            return Value::undefined();
+        }
+    }
+    build_grouped_map(gc, vm, groups, root_base)
+}
+
+fn build_grouped_map(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    groups: Vec<(usize, Vec<usize>)>,
+    root_base: usize,
+) -> Value {
+    let map_proto = vm.map_prototype.heap_ptr().unwrap_or(std::ptr::null_mut());
+    let map = RuneMap::allocate(gc, map_proto);
+    let map_val = Value::from_heap_ptr(map);
+    let mslot = vm.temp_roots.len();
+    vm.temp_roots.push(map_val);
+    for (kslot, values) in groups {
+        let arr = RuneArray::allocate(gc, &[]);
+        unsafe {
+            let ptr = arr as *mut u8;
+            *(ptr.add(8) as *mut *const Shape) = *DENSE_ARRAY_SHAPE as *const Shape;
+            if let Some(proto) = vm.array_prototype.heap_ptr() {
+                *(ptr.add(24) as *mut *mut u8) = proto;
+            }
+        }
+        let aslot = vm.temp_roots.len();
+        vm.temp_roots.push(Value::from_heap_ptr(arr as *mut u8));
+        for idx in values {
+            let value = vm.temp_roots[idx];
+            let arr_ptr = unsafe {
+                rune_core::gc::resolve_forwarded(vm.temp_roots[aslot].heap_ptr().unwrap())
+            } as *mut RuneArray;
+            let new_arr = unsafe { RuneArray::push(gc, arr_ptr, value) };
+            vm.temp_roots[aslot] = Value::from_heap_ptr(new_arr as *mut u8);
+        }
+        let key = vm.temp_roots[kslot];
+        let mut map_val = vm.temp_roots[mslot];
+        map_set_internal(gc, &mut map_val, key, vm.temp_roots[aslot]);
+        vm.temp_roots[mslot] = map_val;
+        vm.temp_roots.truncate(aslot);
+    }
+    let result = vm.temp_roots[mslot];
+    vm.temp_roots.truncate(root_base);
+    result
+}
+
 /// Object.fromEntries(iterable)/// Object.fromEntries(iterable)/// Object.fromEntries(iterable) — §20.1.2.7. Sync-only: accepts an array of
 /// [key, value] pairs (general iterables drain via JS callbacks and are not
 /// supported inside sync builtins — documented gap).
@@ -23122,6 +23315,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 1,
             name: "WeakSet_prototype_delete",
             func: weakset_delete,
+        },
+        Builtin {
+            length: 2,
+            name: "Map_groupBy",
+            func: map_group_by,
         },
         Builtin {
             length: 0,

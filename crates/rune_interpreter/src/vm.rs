@@ -2182,6 +2182,16 @@ impl Vm {
                 );
             }
             let map_ctor = make_object(gc, &[("prototype", map_proto)]);
+            if let Some(h) = find_handle(&self.builtins, "Map_groupBy") {
+                unsafe {
+                    JSObject::add_property(
+                        map_ctor.heap_ptr().unwrap() as *mut JSObject,
+                        PropertyKey::from_string("groupBy"),
+                        "groupBy".to_string(),
+                        h,
+                    );
+                }
+            }
             self.builtin_wrappers.insert("Map".to_string(), map_ctor);
             self.map_constructor = map_ctor;
             self.map_prototype = map_proto;

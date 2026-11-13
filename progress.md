@@ -2084,6 +2084,21 @@ Integration suite: **843 passed, 0 failed, 3 ignored**.
 
 Integration suite: **844 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Map.groupBy (2026-11-13)
+
+- Implemented `Map.groupBy(items, callbackfn)`:
+  - sync callbacks through `call_value_sync`;
+  - SameValueZero key identity (objects by reference, NaN grouped together);
+  - insertion-ordered groups, values rooted in `temp_roots`;
+  - generic iterator drain, code-point strings, array-like fallback;
+  - returns a real Map with `Map.prototype` and group arrays carrying
+    `Array.prototype`.
+- Test262: `Map/groupBy` **0 → 14/14**, Map **128 → 140/204**.
+- Regression: `test_map_group_by`.
+- Known: IteratorClose on abrupt is not wired into `Map.groupBy` yet.
+
+Integration suite: **845 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

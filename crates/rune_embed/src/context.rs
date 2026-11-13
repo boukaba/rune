@@ -50,6 +50,17 @@ impl Context {
         Self::new_with_semispace(64 * 1024 * 1024) // 64 MiB for conformance
     }
 
+    /// Register a Rust host function and install it as a JS global. The
+    /// closure receives `(gc, this, args, vm)` and may use the normal VM
+    /// services; it is callable from JS like any other function.
+    pub fn register_host_fn<F>(&mut self, name: &str, length: u32, f: F) -> Value
+    where
+        F: FnMut(&mut SemiSpace, Value, &[Value], &mut Vm) -> Value + 'static,
+    {
+        self.vm
+            .register_host_function(&mut self.gc, name, length, Box::new(f))
+    }
+
     /// Enable test-only GC stress: collect every `every` allocations even when
     /// the heap has room. Use a tiny/small semispace for maximum rotation.
     pub fn enable_gc_stress(&mut self, every: u32) {

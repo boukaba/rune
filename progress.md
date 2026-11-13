@@ -488,7 +488,30 @@ and plain-call rejection. Integration suite: **765 passed, 0 failed,
 Known gaps: `encodeInto`, decoder labels/`fatal`/`ignoreBOM`, ArrayBuffer
 inputs, and streaming decode are not implemented.
 
-Next: runtime crate/host API and stable headers.
+### Phase 2 — embedding host functions (2026-11-13)
+
+Embedders can now register Rust closures as JavaScript functions:
+
+- `Context::register_host_fn(name, length, FnMut(gc, this, args, vm) -> Value)`.
+- Each host function is a real TAG_FUNC wrapper whose synthetic program
+  forwards `(id, call-site this, arguments array)` to an internal
+  `_host_invoke` builtin; the VM stores the closure in a host-function table.
+- Because it is a normal function object, a host function works as a direct
+  call, an array callback (`[1,2].map(double)`), through `.call`/`.apply`, and
+  reports `length`/`name` metadata.
+- The closure may capture arbitrary Rust state (`Rc<Cell<_>>` tested) and may
+  use the VM/GC handles passed to it.
+
+Regression covers stateless arithmetic, host functions as callbacks, `.call`,
+metadata, and captured mutable state. Integration suite: **766 passed, 0
+failed, 3 ignored**.
+
+Known limits: GC-managed Values captured in a Rust closure are not rooted by
+the engine (the embedder owns them); recursive re-entry into the *same* host
+function while its closure is running is rejected; host functions do not yet
+integrate real async I/O or `fetch`.
+
+Next: runtime crate/fetch design and stable headers.
 
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,

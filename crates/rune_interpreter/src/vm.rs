@@ -95,6 +95,11 @@ fn property_key_string(val: Value) -> String {
 /// Callback for the `eval` builtin: parses and executes JS source, returns result.
 pub type EvalFn = Box<dyn FnMut(&mut SemiSpace, &str) -> Result<Value, String>>;
 
+/// Embedding host function. Stored in the VM and invoked through a synthetic
+/// TAG_FUNC wrapper, so host functions work everywhere JS functions do
+/// (callbacks, `call`/`apply`, `bind`, `typeof`).
+pub type HostFn = Box<dyn FnMut(&mut SemiSpace, Value, &[Value], &mut Vm) -> Value>;
+
 struct Frame {
     locals: Vec<Value>,
     /// Lexical (let/const) slots for block-scoped bindings.
@@ -1214,6 +1219,9 @@ pub struct Vm {
     pub(crate) pending_promise_ctor: Option<PendingPromiseCtor>,
     /// Microtask queue — Promise callbacks deferred to after sync execution.
     pub(crate) microtask_queue: Vec<Microtask>,
+    /// Registered embedding host functions, indexed by the id captured in
+    /// each synthetic wrapper's environment.
+    pub host_functions: Vec<Option<HostFn>>,
     /// Pending promise reactions: (callback, chained_promise) pairs keyed by promise ptr.
     pub(crate) promise_reactions: HashMap<*mut u8, Vec<(Value, Value)>>,
     /// Async generator tasks: maps gen_id → outer Promise so the Return handler can resolve it.
@@ -1403,6 +1411,7 @@ impl Vm {
             pending_call: None,
             pending_promise_ctor: None,
             microtask_queue: Vec::new(),
+            host_functions: Vec::new(),
             promise_reactions: HashMap::new(),
             async_tasks: Vec::new(),
             pending_async_gen: None,
@@ -2784,6 +2793,55 @@ impl Vm {
             func,
         });
         Value::smi(-(id as i32) - 1)
+    }
+
+    /// Register an embedding host function and install it as a global.
+    ///
+    /// The function becomes a real TAG_FUNC wrapper whose program forwards
+    /// `(id, call-site this, incoming args as an Array)` to the internal
+    /// `_host_invoke` builtin. This reuses the normal call machinery, so host
+    /// functions work as callbacks, through `call`/`apply`/`bind`, and report
+    /// `typeof "function"`.
+    pub fn register_host_function(
+        &mut self,
+        gc: &mut SemiSpace,
+        name: &str,
+        length: u32,
+        f: HostFn,
+    ) -> Value {
+        let id = self.host_functions.len();
+        self.host_functions.push(Some(f));
+        let invoke = self.find_builtin_handle("_host_invoke");
+        let instrs = vec![
+            Instruction::new(Opcode::LoadUndefined, vec![]),
+            Instruction::new(Opcode::LoadCaptured, vec![0, 1]),
+            Instruction::new(Opcode::LoadCaptured, vec![0, 0]),
+            Instruction::new(Opcode::LoadThis, vec![]),
+            Instruction::new(Opcode::MakeArgumentsArray, vec![]),
+            Instruction::new(Opcode::Call, vec![3]),
+            Instruction::new(Opcode::Return, vec![]),
+        ];
+        let inner = BytecodeProgram::new(instrs, vec![], vec![]);
+        let outer = Box::new(BytecodeProgram::new(vec![], vec![], vec![inner]));
+        let prog_ptr = Box::leak(outer) as *const BytecodeProgram as *const u8;
+        let env = EnvObject::allocate(gc, 2, std::ptr::null_mut());
+        let root_base = self.temp_roots.len();
+        self.temp_roots.push(Value::from_heap_ptr(env as *mut u8));
+        let func = Func::allocate(gc, 0, prog_ptr, false, env as *mut u8);
+        let env_now = self.temp_roots[root_base]
+            .heap_ptr()
+            .unwrap_or(std::ptr::null_mut()) as *mut EnvObject;
+        let func = unsafe { rune_core::gc::resolve_forwarded(func as *mut u8) as *mut Func };
+        unsafe {
+            EnvObject::set_slot(env_now, 0, Value::smi(id as i32));
+            EnvObject::set_slot(env_now, 1, invoke);
+            Func::set_env_ptr(func, env_now as *mut u8);
+        }
+        let func = self.set_function_metadata(gc, func, length, name);
+        self.temp_roots.truncate(root_base);
+        let value = Value::from_heap_ptr(func as *mut u8);
+        self.globals.insert(name.to_string(), value);
+        value
     }
 
     /// Look up a builtin handle by name.

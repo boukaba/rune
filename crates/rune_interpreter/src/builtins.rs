@@ -894,6 +894,37 @@ pub fn text_decoder_decode(
     Value::from_heap_ptr(HeapString::allocate(gc, &text) as *mut u8)
 }
 
+/// Internal bridge for embedding host functions. Args are `[id, this, args]`.
+pub fn host_invoke_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let id = args.first().copied().and_then(|v| v.as_smi()).unwrap_or(-1);
+    if id < 0 {
+        return Value::undefined();
+    }
+    let call_this = args.get(1).copied().unwrap_or(Value::undefined());
+    let args_arr = args.get(2).copied().unwrap_or(Value::undefined());
+    let mut call_args = Vec::new();
+    if let Some(len) = crate::vm::array_like_length(args_arr) {
+        for i in 0..len {
+            call_args.push(crate::vm::array_like_index(args_arr, i).unwrap_or(Value::undefined()));
+        }
+    }
+    let idx = id as usize;
+    let Some(Some(mut f)) = vm.host_functions.get_mut(idx).map(|slot| slot.take()) else {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Host function is not registered",
+        ));
+        return Value::undefined();
+    };
+    let result = f(gc, call_this, &call_args, vm);
+    if let Some(slot) = vm.host_functions.get_mut(idx) {
+        *slot = Some(f);
+    }
+    result
+}
+
 /// Try to convert a value to a string by calling ToPrimitive with string hint.
 /// For objects with a user-defined toString function, sets up the pending_call
 /// callback pattern and returns None (the caller must return immediately).
@@ -20217,6 +20248,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 4,
             name: "Bound_invoke",
             func: bound_invoke,
+        },
+        Builtin {
+            length: 3,
+            name: "_host_invoke",
+            func: host_invoke_builtin,
         },
         Builtin {
             length: 3,

@@ -13849,3 +13849,27 @@ fn test_text_encoder_decoder_utf8() {
     );
     let _ = r;
 }
+
+#[test]
+fn test_embedding_host_functions() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    let mut ctx = Context::new_small();
+    ctx.register_host_fn("double", 1, |_gc, _this, args, _vm| {
+        rune_core::value::Value::smi(args[0].as_smi().unwrap_or(0) * 2)
+    });
+    assert_eq!(ctx.eval("double(21)").unwrap().as_smi(), Some(42));
+    assert_eq!(ctx.eval("[1, 2].map(double)[1]").unwrap().as_smi(), Some(4));
+    assert_eq!(ctx.eval("double.call(null, 7)").unwrap().as_smi(), Some(14));
+    assert_eq!(ctx.eval("double.length").unwrap().as_smi(), Some(1));
+    assert_eq!(eval_str(&mut ctx, "double.name"), "double");
+
+    let counter = Rc::new(Cell::new(0));
+    let c = counter.clone();
+    ctx.register_host_fn("next", 0, move |_gc, _this, _args, _vm| {
+        let n = c.get() + 1;
+        c.set(n);
+        rune_core::value::Value::smi(n)
+    });
+    assert_eq!(ctx.eval("next() + next()").unwrap().as_smi(), Some(3));
+}

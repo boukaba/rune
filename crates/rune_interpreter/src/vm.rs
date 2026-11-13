@@ -1107,6 +1107,10 @@ pub struct Vm {
     pub url_prototype: Value,
     pub url_search_params_constructor: Value,
     pub url_search_params_prototype: Value,
+    pub text_encoder_constructor: Value,
+    pub text_encoder_prototype: Value,
+    pub text_decoder_constructor: Value,
+    pub text_decoder_prototype: Value,
     pub regexp_prototype: Value,
     /// Symbol constructor object (`Symbol` global) with well-known symbol statics.
     pub symbol_ctor: Value,
@@ -1344,6 +1348,10 @@ impl Vm {
             url_prototype: Value::undefined(),
             url_search_params_constructor: Value::undefined(),
             url_search_params_prototype: Value::undefined(),
+            text_encoder_constructor: Value::undefined(),
+            text_encoder_prototype: Value::undefined(),
+            text_decoder_constructor: Value::undefined(),
+            text_decoder_prototype: Value::undefined(),
             regexp_prototype: Value::undefined(),
             symbol_ctor: Value::undefined(),
             map_constructor: Value::undefined(),
@@ -2400,6 +2408,19 @@ impl Vm {
             if let Some(ctor) = find_handle(&self.builtins, "URLSearchParams") {
                 self.url_search_params_constructor = ctor;
             }
+        }
+        // TextEncoder/TextDecoder prototypes and constructor handles.
+        if let Some(enc) = find_handle(&self.builtins, "TextEncoder_prototype_encode") {
+            self.text_encoder_prototype = make_object(gc, &[("encode", enc)]);
+        }
+        if let Some(dec) = find_handle(&self.builtins, "TextDecoder_prototype_decode") {
+            self.text_decoder_prototype = make_object(gc, &[("decode", dec)]);
+        }
+        if let Some(ctor) = find_handle(&self.builtins, "TextEncoder") {
+            self.text_encoder_constructor = ctor;
+        }
+        if let Some(ctor) = find_handle(&self.builtins, "TextDecoder") {
+            self.text_decoder_constructor = ctor;
         }
 
         // Function.prototype with .call() method; its constructor is the
@@ -3576,6 +3597,10 @@ impl Vm {
         gc.push_root(&self.url_prototype as *const Value as *mut u64);
         gc.push_root(&self.url_search_params_constructor as *const Value as *mut u64);
         gc.push_root(&self.url_search_params_prototype as *const Value as *mut u64);
+        gc.push_root(&self.text_encoder_constructor as *const Value as *mut u64);
+        gc.push_root(&self.text_encoder_prototype as *const Value as *mut u64);
+        gc.push_root(&self.text_decoder_constructor as *const Value as *mut u64);
+        gc.push_root(&self.text_decoder_prototype as *const Value as *mut u64);
         gc.push_root(&self.regexp_prototype as *const Value as *mut u64);
         gc.push_root(&self.symbol_ctor as *const Value as *mut u64);
         gc.push_root(&self.symbol_prototype as *const Value as *mut u64);
@@ -8936,6 +8961,28 @@ impl Vm {
                     let mut args: Vec<Value> = (0..argc).map(|_| self.pop()).collect();
                     args.reverse();
                     let constructor = self.pop();
+                    if constructor == self.text_encoder_constructor {
+                        let obj = crate::builtins::text_instance(
+                            gc,
+                            self,
+                            self.text_encoder_prototype,
+                            "utf-8",
+                        );
+                        self.push(obj);
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    }
+                    if constructor == self.text_decoder_constructor {
+                        let obj = crate::builtins::text_instance(
+                            gc,
+                            self,
+                            self.text_decoder_prototype,
+                            "utf-8",
+                        );
+                        self.push(obj);
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    }
                     if constructor == self.url_search_params_constructor {
                         let obj = crate::builtins::url_search_params_construct(gc, &args, self);
                         if let Some(exc) = self.pending_exception.take() {

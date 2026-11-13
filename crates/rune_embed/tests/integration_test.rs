@@ -13824,3 +13824,28 @@ fn test_url_search_params_core() {
     );
     let _ = r;
 }
+
+#[test]
+fn test_text_encoder_decoder_utf8() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var e = new TextEncoder();
+            var b = e.encode("hé");
+            var d = new TextDecoder();
+            var called = "";
+            try { TextEncoder(); } catch (err) { called = err.name; }
+            [b.length, b[0], b[1], b[2], d.decode(b), e.encoding, d.encoding, called].join("|");
+        "#,
+        )
+        .unwrap();
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            "[b.length, b[0], b[1], b[2], d.decode(b), e.encoding, d.encoding, called].join('|')"
+        ),
+        "3|104|195|169|hé|utf-8|utf-8|TypeError"
+    );
+    let _ = r;
+}

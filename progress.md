@@ -470,7 +470,25 @@ Known gaps: `sort`, `forEach`, `keys`/`values`/`entries` iteration, `size`, and
 live URL binding (mutating `u.searchParams` does not update `u.search`/`href`)
 are not implemented. `TextEncoder`/`TextDecoder` remain.
 
-Next: TextEncoder/TextDecoder, then the runtime crate and stable headers.
+### Phase 2 — TextEncoder / TextDecoder (2026-11-13)
+
+UTF-8 `TextEncoder`/`TextDecoder` constructors:
+
+- `new TextEncoder().encode(string)` returns a `Uint8Array` of UTF-8 bytes;
+  `encoding` is `"utf-8"`.
+- `new TextDecoder().decode(typedArray)` decodes UTF-8 (lossy on invalid
+  sequences); `encoding` is `"utf-8"`.
+- Calling either constructor without `new` throws `TypeError`.
+- The typed-array result uses the existing Uint8Array prototype/buffer path.
+
+Regression checks byte length/content for `"hé"`, round-trip, encoding fields,
+and plain-call rejection. Integration suite: **765 passed, 0 failed,
+3 ignored**.
+
+Known gaps: `encodeInto`, decoder labels/`fatal`/`ignoreBOM`, ArrayBuffer
+inputs, and streaming decode are not implemented.
+
+Next: runtime crate/host API and stable headers.
 
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,

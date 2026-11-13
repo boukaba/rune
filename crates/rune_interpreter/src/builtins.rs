@@ -793,6 +793,107 @@ fn url_search_params_from_query(gc: &mut SemiSpace, vm: &mut Vm, query: Option<&
     params_instance(gc, vm, &pairs)
 }
 
+// ---------------------------------------------------------------------------
+// TextEncoder / TextDecoder (UTF-8 subset)
+// ---------------------------------------------------------------------------
+
+pub(crate) fn text_instance(
+    gc: &mut SemiSpace,
+    _vm: &mut Vm,
+    proto: Value,
+    encoding: &str,
+) -> Value {
+    let enc = HeapString::allocate(gc, encoding) as *mut u8;
+    let entries = vec![(PropertyKey::from_string("encoding"), 0usize)];
+    let shape = Shape::intern_with_attrs(
+        entries,
+        vec!["encoding".to_string()],
+        vec![rune_core::shape::ATTR_CONFIGURABLE],
+    );
+    let obj = JSObject::allocate(gc, shape, &[Value::from_heap_ptr(enc)]);
+    if let Some(p) = proto.heap_ptr() {
+        unsafe { JSObject::set_prototype(obj, p) };
+    }
+    Value::from_heap_ptr(obj as *mut u8)
+}
+
+pub fn text_encoder_constructor_builtin(
+    gc: &mut SemiSpace,
+    _this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    vm.set_pending_exception(crate::errors::error_object(
+        gc,
+        &vm.error_protos,
+        crate::errors::ErrorKind::TypeError,
+        "Constructor TextEncoder requires 'new'",
+    ));
+    Value::undefined()
+}
+
+pub fn text_decoder_constructor_builtin(
+    gc: &mut SemiSpace,
+    _this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    vm.set_pending_exception(crate::errors::error_object(
+        gc,
+        &vm.error_protos,
+        crate::errors::ErrorKind::TypeError,
+        "Constructor TextDecoder requires 'new'",
+    ));
+    Value::undefined()
+}
+
+pub fn text_encoder_encode(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let text = value_to_js_string(args.first().copied().unwrap_or(Value::undefined()));
+    let bytes = text.as_bytes();
+    let proto = vm
+        .typed_array_protos
+        .get(typedarray::TypedArrayKind::Uint8 as usize)
+        .and_then(|v| v.heap_ptr())
+        .unwrap_or(std::ptr::null_mut());
+    let ta = typedarray::RuneTypedArray::allocate(gc, proto);
+    let Some(buf) = typed_alloc_buffer(gc, vm, typedarray::TypedArrayKind::Uint8, bytes.len())
+    else {
+        return Value::undefined();
+    };
+    let ta = resolve_forwarded(ta);
+    unsafe {
+        typedarray::RuneTypedArray::set_buffer(ta, buf);
+        typedarray::RuneTypedArray::set_kind(ta, typedarray::TypedArrayKind::Uint8);
+        typedarray::RuneTypedArray::set_byte_offset(ta, 0);
+        typedarray::RuneTypedArray::set_length(ta, bytes.len());
+        for (i, b) in bytes.iter().enumerate() {
+            typedarray::write_element(ta, i, *b as f64);
+        }
+    }
+    Value::from_heap_ptr(ta)
+}
+
+pub fn text_decoder_decode(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    _vm: &mut Vm,
+) -> Value {
+    let input = args.first().copied().unwrap_or(Value::undefined());
+    let mut bytes: Vec<u8> = Vec::new();
+    if let Some(ptr) = input.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_TYPED_ARRAY {
+            let len = unsafe { typedarray::RuneTypedArray::length(ptr) };
+            for i in 0..len {
+                let v = unsafe { typedarray::read_element(ptr, i) };
+                bytes.push(v.as_smi().unwrap_or(0).clamp(0, 255) as u8);
+            }
+        }
+    }
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    Value::from_heap_ptr(HeapString::allocate(gc, &text) as *mut u8)
+}
+
 /// Try to convert a value to a string by calling ToPrimitive with string hint.
 /// For objects with a user-defined toString function, sets up the pending_call
 /// callback pattern and returns None (the caller must return immediately).
@@ -18742,6 +18843,26 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 0,
             name: "URLSearchParams_prototype_toString",
             func: url_search_params_to_string,
+        },
+        Builtin {
+            length: 0,
+            name: "TextEncoder",
+            func: text_encoder_constructor_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "TextEncoder_prototype_encode",
+            func: text_encoder_encode,
+        },
+        Builtin {
+            length: 0,
+            name: "TextDecoder",
+            func: text_decoder_constructor_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "TextDecoder_prototype_decode",
+            func: text_decoder_decode,
         },
         Builtin {
             length: 0,

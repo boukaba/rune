@@ -3,6 +3,7 @@
 //! The boundary uses only opaque pointers, C strings, integers, and status
 //! codes. Panics are caught so they never unwind across FFI.
 
+use crate::value::{HostCallback, RuneValue, value_from_c, value_to_c};
 use rune_embed::Context;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -84,6 +85,45 @@ pub extern "C" fn rune_context_set_jit(ctx: *mut c_void, enabled: i32) {
     }
     let ctx = unsafe { &mut *(ctx as *mut Context) };
     ctx.enable_jit = enabled != 0;
+}
+
+/// Register a host function backed by a C callback. Arguments are passed as
+/// borrowed `RuneValue`s; the return value is copied immediately. Returns 0 on
+/// success and -1 for invalid pointers/names.
+///
+/// # Safety
+/// `ctx` must be a live context. `name` must be a NUL-terminated UTF-8 string.
+/// `callback` (when non-NULL) must remain valid for the context's lifetime and
+/// `user` must be safe to pass to it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rune_context_register_host_fn(
+    ctx: *mut c_void,
+    name: *const c_char,
+    length: u32,
+    user: *mut c_void,
+    callback: Option<HostCallback>,
+) -> i32 {
+    if ctx.is_null() || name.is_null() {
+        return STATUS_INVALID;
+    }
+    let Some(callback) = callback else {
+        return STATUS_INVALID;
+    };
+    let name = unsafe { CStr::from_ptr(name) };
+    let Ok(name) = name.to_str() else {
+        return STATUS_INVALID;
+    };
+    let ctx = unsafe { &mut *(ctx as *mut Context) };
+    ctx.register_host_fn(name, length, move |gc, _this, args, _vm| {
+        let mut strings = Vec::new();
+        let c_args: Vec<RuneValue> = args
+            .iter()
+            .map(|value| value_to_c(*value, &mut strings))
+            .collect();
+        let result = unsafe { callback(user, c_args.len(), c_args.as_ptr()) };
+        value_from_c(gc, result)
+    });
+    STATUS_OK
 }
 
 /// Evaluate source. See `include/rune.h` for the status/out-param contract.
@@ -230,6 +270,157 @@ mod tests {
         let (status, result, _) = eval(ctx, "[1,2,3].length");
         assert_eq!(status, 0);
         assert_eq!(result.as_deref(), Some("3"));
+        rune_context_destroy(ctx);
+    }
+}
+
+#[cfg(test)]
+mod host_fn_tests {
+    use super::*;
+    use crate::value::{RUNE_BOOLEAN, RUNE_NUMBER, RUNE_STRING};
+    use std::ffi::CStr;
+
+    unsafe extern "C" fn add_cb(
+        _user: *mut c_void,
+        argc: usize,
+        argv: *const RuneValue,
+    ) -> RuneValue {
+        let mut total = 0.0;
+        for i in 0..argc {
+            let arg = unsafe { *argv.add(i) };
+            if arg.kind == RUNE_NUMBER {
+                total += arg.number;
+            }
+        }
+        RuneValue {
+            kind: RUNE_NUMBER,
+            boolean: 0,
+            number: total,
+            string: std::ptr::null(),
+        }
+    }
+
+    unsafe extern "C" fn greet_cb(
+        _user: *mut c_void,
+        _argc: usize,
+        _argv: *const RuneValue,
+    ) -> RuneValue {
+        RuneValue {
+            kind: RUNE_STRING,
+            boolean: 0,
+            number: 0.0,
+            string: c"from-c".as_ptr(),
+        }
+    }
+
+    unsafe extern "C" fn string_len_cb(
+        _user: *mut c_void,
+        argc: usize,
+        argv: *const RuneValue,
+    ) -> RuneValue {
+        let mut total = 0;
+        for i in 0..argc {
+            let arg = unsafe { *argv.add(i) };
+            if arg.kind == RUNE_STRING && !arg.string.is_null() {
+                total += unsafe { CStr::from_ptr(arg.string) }.to_bytes().len();
+            }
+        }
+        RuneValue {
+            kind: RUNE_NUMBER,
+            boolean: 0,
+            number: total as f64,
+            string: std::ptr::null(),
+        }
+    }
+
+    unsafe extern "C" fn truth_cb(
+        _user: *mut c_void,
+        _argc: usize,
+        _argv: *const RuneValue,
+    ) -> RuneValue {
+        RuneValue {
+            kind: RUNE_BOOLEAN,
+            boolean: 1,
+            number: 0.0,
+            string: std::ptr::null(),
+        }
+    }
+
+    fn eval(ctx: *mut c_void, source: &str) -> (i32, Option<String>) {
+        let source = CString::new(source).unwrap();
+        let mut result: *mut c_char = std::ptr::null_mut();
+        let mut error: *mut c_char = std::ptr::null_mut();
+        let status = unsafe {
+            rune_context_eval(
+                ctx,
+                source.as_ptr(),
+                &mut result as *mut *mut c_char,
+                &mut error as *mut *mut c_char,
+            )
+        };
+        let text = if result.is_null() {
+            if error.is_null() {
+                None
+            } else {
+                let text = unsafe { CStr::from_ptr(error) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe { rune_free_string(error) };
+                Some(text)
+            }
+        } else {
+            let text = unsafe { CStr::from_ptr(result) }
+                .to_string_lossy()
+                .into_owned();
+            unsafe { rune_free_string(result) };
+            Some(text)
+        };
+        (status, text)
+    }
+
+    #[test]
+    fn c_host_functions_receive_and_return_values() {
+        let ctx = rune_context_create();
+        assert_eq!(
+            unsafe {
+                rune_context_register_host_fn(
+                    ctx,
+                    c"cadd".as_ptr(),
+                    2,
+                    std::ptr::null_mut(),
+                    Some(add_cb),
+                )
+            },
+            0
+        );
+        assert_eq!(eval(ctx, "cadd(20, 22)"), (0, Some("42".to_string())));
+
+        unsafe {
+            rune_context_register_host_fn(
+                ctx,
+                c"greet".as_ptr(),
+                0,
+                std::ptr::null_mut(),
+                Some(greet_cb),
+            );
+            rune_context_register_host_fn(
+                ctx,
+                c"arglen".as_ptr(),
+                2,
+                std::ptr::null_mut(),
+                Some(string_len_cb),
+            );
+            rune_context_register_host_fn(
+                ctx,
+                c"truth".as_ptr(),
+                0,
+                std::ptr::null_mut(),
+                Some(truth_cb),
+            );
+        }
+        assert_eq!(eval(ctx, "greet()"), (0, Some("from-c".to_string())));
+        assert_eq!(eval(ctx, "arglen('ab', 'cde')"), (0, Some("5".to_string())));
+        assert_eq!(eval(ctx, "truth()"), (0, Some("true".to_string())));
         rune_context_destroy(ctx);
     }
 }

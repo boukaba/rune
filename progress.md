@@ -985,10 +985,14 @@ Integration suite: **789 passed, 0 failed, 3 ignored**; CLI **10 tests**
   `result: 42` against the built library.
 - Docs: `docs/c-api.md` documents the contract and limitations (no host
   callbacks/Value handles, no timers/fetch, single-threaded).
-- Unit tests cover success, errors, instruction budget, NULL arguments, heap
-  creation, and version.
+- Host-function callbacks: `rune_context_register_host_fn` with a
+  `RuneHostCallback` receiving borrowed `RuneValue` arguments (number, boolean,
+  null/undefined, string) and returning a copied value. Objects are currently
+  opaque/unsupported.
+- Unit tests cover success, errors, budgets, NULL arguments, heap creation,
+  version, and C host functions (number/string/boolean args and returns).
 
-Integration suite: **789 passed, 0 failed, 3 ignored**; `rune_capi` **3 tests**.
+Integration suite: **789 passed, 0 failed, 3 ignored**; `rune_capi` **4 tests**.
 
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:

@@ -6,14 +6,24 @@
 #include "rune.h"
 #include <stdio.h>
 
+static RuneValue add(void *user, size_t argc, const RuneValue *argv) {
+    RuneValue out = { RUNE_NUMBER, 0, 0.0, NULL };
+    (void)user;
+    for (size_t i = 0; i < argc; i++) {
+        if (argv[i].kind == RUNE_NUMBER) out.number += argv[i].number;
+    }
+    return out;
+}
+
 int main(void) {
     void *ctx = rune_context_create();
     if (!ctx) return 1;
     rune_context_set_instruction_budget(ctx, 1000000);
+    rune_context_register_host_fn(ctx, "add", 2, NULL, add);
 
     char *result = NULL;
     char *error = NULL;
-    if (rune_context_eval(ctx, "var n = 40; n + 2", &result, &error) == 0) {
+    if (rune_context_eval(ctx, "add(20, 22)", &result, &error) == 0) {
         printf("result: %s\n", result);
     } else {
         printf("error: %s\n", error);

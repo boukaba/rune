@@ -11,6 +11,29 @@ extern "C" {
 /* ABI version for the C surface. */
 #define RUNE_ABI_VERSION 1
 
+/* Value kinds passed to host callbacks. */
+#define RUNE_UNDEFINED 0
+#define RUNE_NULL 1
+#define RUNE_BOOLEAN 2
+#define RUNE_NUMBER 3
+#define RUNE_STRING 4
+#define RUNE_OBJECT 5
+
+/* Fixed-layout value. In callback arguments `string` is borrowed for the
+ * duration of the call. Returned strings are copied immediately. Objects are
+ * currently opaque and unsupported. */
+typedef struct {
+    uint32_t kind;
+    int32_t boolean;
+    double number;
+    const char *string;
+} RuneValue;
+
+/* Host callback: `user` is the pointer given to rune_context_register_host_fn.
+ * Arguments are borrowed; the return value is copied by the engine. */
+typedef RuneValue (*RuneHostCallback)(void *user, size_t argc,
+                                      const RuneValue *argv);
+
 /* Human-readable engine version (static storage). */
 const char *rune_version(void);
 
@@ -27,6 +50,11 @@ void rune_context_set_time_budget_ms(void *ctx, uint64_t milliseconds);
 
 /* Opt-in JIT (disabled by default). */
 void rune_context_set_jit(void *ctx, int enabled);
+
+/* Register a global host function. Returns 0 on success, -1 on invalid
+ * arguments. The callback and user pointer must outlive the context. */
+int rune_context_register_host_fn(void *ctx, const char *name, uint32_t length,
+                                  void *user, RuneHostCallback callback);
 
 /* Evaluate UTF-8 source. On success returns 0 and stores the JS string
  * representation of the result in *result (may be NULL on error). On a

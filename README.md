@@ -65,9 +65,10 @@ Build the C ABI (`cargo build -p rune_capi --release`) and include
 
 ```c
 void *ctx = rune_context_create();
+rune_context_register_host_fn(ctx, "add", 2, NULL, add_callback);
 char *result = NULL, *error = NULL;
-if (rune_context_eval(ctx, "1 + 2", &result, &error) == 0) {
-    printf("%s\n", result);   /* 3 */
+if (rune_context_eval(ctx, "add(20, 22)", &result, &error) == 0) {
+    printf("%s\n", result);   /* 42 */
 }
 rune_free_string(result);
 rune_free_string(error);

@@ -13992,6 +13992,15 @@ pub(crate) fn load_property_recursive(
                 }
                 return Value::undefined();
             } else if tag == TAG_REGEXP {
+                let extra = unsafe { rune_core::regexp::RegExp::extra_props(ptr) };
+                if !extra.is_null() {
+                    if let Some(key) = value_to_prop_key(raw_key) {
+                        let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                        if let Some(slot) = shape.lookup(&key) {
+                            return unsafe { JSObject::get_slot(extra as *mut JSObject, slot) };
+                        }
+                    }
+                }
                 // Check own properties (source, flags, lastIndex)
                 if let Some(key_ptr) = raw_key.heap_ptr() {
                     if unsafe { (*(key_ptr as *const GcHeader)).tag() == TAG_STRING } {
@@ -14143,7 +14152,18 @@ pub(crate) fn load_property_recursive(
                 }
                 return Value::undefined();
             } else if tag == TAG_DATE {
-                // RuneDate has no own properties; walk to Date.prototype
+                if let Some(extra) = {
+                    let extra = unsafe { date::RuneDate::extra_props(ptr) };
+                    if extra.is_null() { None } else { Some(extra) }
+                } {
+                    if let Some(key) = value_to_prop_key(raw_key) {
+                        let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                        if let Some(slot) = shape.lookup(&key) {
+                            return unsafe { JSObject::get_slot(extra as *mut JSObject, slot) };
+                        }
+                    }
+                }
+                // Walk to Date.prototype for inherited methods.
                 let proto_ptr = unsafe { date::RuneDate::prototype(ptr) };
                 if !proto_ptr.is_null() {
                     current = Value::from_heap_ptr(proto_ptr);
@@ -14619,8 +14639,7 @@ pub(crate) fn do_store_property(
                 }
             }
         } else if tag == TAG_REGEXP {
-            // RegExp instance properties: only "lastIndex" is writable.
-            // ToLength (§22.2.7.2 step 3) coerces the stored value on use.
+            let mut handled = false;
             if let Some(key_ptr) = raw_key.heap_ptr() {
                 let key_tag = unsafe { (*(key_ptr as *const GcHeader)).tag() };
                 if key_tag == TAG_STRING {
@@ -14629,8 +14648,54 @@ pub(crate) fn do_store_property(
                         let n = to_number(value);
                         let clamped = if n.is_nan() || n <= 0.0 { 0 } else { n as u32 };
                         unsafe { rune_core::regexp::RegExp::set_last_index(ptr, clamped) };
+                        handled = true;
                     }
                 }
+            }
+            if !handled {
+                if let Some(key) = value_to_prop_key(raw_key) {
+                    let mut re_ptr = unsafe { rune_core::gc::resolve_forwarded(ptr) };
+                    let mut extra = unsafe { rune_core::regexp::RegExp::extra_props(re_ptr) };
+                    if extra.is_null() {
+                        let new_extra = JSObject::allocate(gc, Shape::empty(), &[]);
+                        re_ptr = unsafe { rune_core::gc::resolve_forwarded(re_ptr) };
+                        unsafe {
+                            rune_core::regexp::RegExp::set_extra_props(re_ptr, new_extra as *mut u8)
+                        };
+                        extra = unsafe { rune_core::regexp::RegExp::extra_props(re_ptr) };
+                    }
+                    let extra_obj = extra as *mut JSObject;
+                    let shape = unsafe { JSObject::shape_ptr(extra_obj) };
+                    if let Some(slot) = shape.lookup(&key) {
+                        unsafe { JSObject::set_slot(extra_obj, slot, value) };
+                    } else {
+                        let key_name = value_to_debug_string(raw_key);
+                        let live = vm.ensure_object_capacity(gc, extra_obj);
+                        unsafe { JSObject::add_property(live, key, key_name, value) };
+                    }
+                    return true;
+                }
+            }
+        } else if tag == TAG_DATE {
+            if let Some(key) = value_to_prop_key(raw_key) {
+                let mut date_ptr = unsafe { rune_core::gc::resolve_forwarded(ptr) };
+                let mut extra = unsafe { date::RuneDate::extra_props(date_ptr) };
+                if extra.is_null() {
+                    let new_extra = JSObject::allocate(gc, Shape::empty(), &[]);
+                    date_ptr = unsafe { rune_core::gc::resolve_forwarded(date_ptr) };
+                    unsafe { date::RuneDate::set_extra_props(date_ptr, new_extra as *mut u8) };
+                    extra = unsafe { date::RuneDate::extra_props(date_ptr) };
+                }
+                let extra_obj = extra as *mut JSObject;
+                let shape = unsafe { JSObject::shape_ptr(extra_obj) };
+                if let Some(slot) = shape.lookup(&key) {
+                    unsafe { JSObject::set_slot(extra_obj, slot, value) };
+                } else {
+                    let key_name = value_to_debug_string(raw_key);
+                    let live = vm.ensure_object_capacity(gc, extra_obj);
+                    unsafe { JSObject::add_property(live, key, key_name, value) };
+                }
+                return true;
             }
         } else if tag == TAG_FUNC {
             if let Some(key) = value_to_prop_key(raw_key) {
@@ -15057,6 +15122,36 @@ pub(crate) fn has_property(obj: Value, raw_key: Value, function_prototype: Optio
                 return has_property(Value::from_heap_ptr(proto), raw_key, function_prototype);
             }
             false
+        } else if tag == TAG_REGEXP {
+            if let Some(key) = value_to_prop_key(raw_key) {
+                let extra = unsafe { rune_core::regexp::RegExp::extra_props(ptr) };
+                if !extra.is_null() {
+                    let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                    if shape.lookup(&key).is_some() {
+                        return true;
+                    }
+                }
+            }
+            let proto = unsafe { rune_core::regexp::RegExp::prototype(ptr) };
+            if !proto.is_null() {
+                return has_property(Value::from_heap_ptr(proto), raw_key, function_prototype);
+            }
+            false
+        } else if tag == TAG_DATE {
+            if let Some(key) = value_to_prop_key(raw_key) {
+                let extra = unsafe { date::RuneDate::extra_props(ptr) };
+                if !extra.is_null() {
+                    let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                    if shape.lookup(&key).is_some() {
+                        return true;
+                    }
+                }
+            }
+            let proto = unsafe { date::RuneDate::prototype(ptr) };
+            if !proto.is_null() {
+                return has_property(Value::from_heap_ptr(proto), raw_key, function_prototype);
+            }
+            false
         } else {
             false
         }
@@ -15256,6 +15351,36 @@ pub(crate) fn array_like_length(this: Value) -> Option<u32> {
                     .count() as u32,
             )
         }
+        TAG_REGEXP => {
+            let extra = unsafe { rune_core::regexp::RegExp::extra_props(ptr) };
+            if extra.is_null() {
+                return Some(0);
+            }
+            let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+            let key = PropertyKey::from_string("length");
+            shape.lookup(&key).map(|slot| {
+                let val = unsafe { JSObject::get_slot(extra as *mut JSObject, slot) };
+                val.as_smi()
+                    .map(|n| n.max(0) as u32)
+                    .or_else(|| val.as_float64().map(|f| f.max(0.0) as u32))
+                    .unwrap_or(0)
+            })
+        }
+        TAG_DATE => {
+            let extra = unsafe { date::RuneDate::extra_props(ptr) };
+            if extra.is_null() {
+                return Some(0);
+            }
+            let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+            let key = PropertyKey::from_string("length");
+            shape.lookup(&key).map(|slot| {
+                let val = unsafe { JSObject::get_slot(extra as *mut JSObject, slot) };
+                val.as_smi()
+                    .map(|n| n.max(0) as u32)
+                    .or_else(|| val.as_float64().map(|f| f.max(0.0) as u32))
+                    .unwrap_or(0)
+            })
+        }
         TAG_FUNC => {
             let extra = unsafe { Func::extra_props(ptr as *mut Func) };
             if extra.is_null() {
@@ -15322,6 +15447,28 @@ pub(crate) fn array_like_index(this: Value, i: u32) -> Option<Value> {
             shape
                 .lookup(&key)
                 .map(|slot| unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) })
+        }
+        TAG_REGEXP => {
+            let extra = unsafe { rune_core::regexp::RegExp::extra_props(ptr) };
+            if extra.is_null() {
+                return None;
+            }
+            let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+            let key = PropertyKey::from_string(&i.to_string());
+            shape
+                .lookup(&key)
+                .map(|slot| unsafe { JSObject::get_slot(extra as *mut JSObject, slot) })
+        }
+        TAG_DATE => {
+            let extra = unsafe { date::RuneDate::extra_props(ptr) };
+            if extra.is_null() {
+                return None;
+            }
+            let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+            let key = PropertyKey::from_string(&i.to_string());
+            shape
+                .lookup(&key)
+                .map(|slot| unsafe { JSObject::get_slot(extra as *mut JSObject, slot) })
         }
         TAG_FUNC => {
             let extra = unsafe { Func::extra_props(ptr as *mut Func) };

@@ -369,6 +369,8 @@ impl SemiSpace {
                         self.forward_value(pattern_ptr);
                         let proto_ptr = scan_ptr.add(24) as *mut u64;
                         self.forward_value(proto_ptr);
+                        let extra_ptr = scan_ptr.add(32) as *mut u64;
+                        self.forward_value(extra_ptr);
                     }
                     TAG_ACCESSOR => {
                         let getter_ptr = scan_ptr.add(size_of::<GcHeader>()) as *mut u64;
@@ -389,7 +391,9 @@ impl SemiSpace {
                         self.forward_value(proto_ptr);
                     }
                     TAG_DATE => {
-                        // RuneDate has no interior pointers except the prototype.
+                        // extra_props at 16, prototype at 24.
+                        let extra_ptr = scan_ptr.add(16) as *mut u64;
+                        self.forward_value(extra_ptr);
                         let proto_ptr = scan_ptr.add(24) as *mut u64;
                         self.forward_value(proto_ptr);
                     }
@@ -459,7 +463,7 @@ impl SemiSpace {
                 }
                 TAG_STRING_OBJ => obj_start.add(align_up(STRING_OBJ_TOTAL_SIZE, 16)),
                 TAG_PROMISE => obj_start.add(align_up(crate::promise::PROMISE_SIZE, 16)),
-                TAG_REGEXP => obj_start.add(align_up(32, 16)),
+                TAG_REGEXP => obj_start.add(align_up(crate::regexp::REGEXP_SIZE, 16)),
                 TAG_ACCESSOR => obj_start.add(align_up(crate::accessor::ACCESSOR_SIZE, 16)),
                 TAG_MAP => obj_start.add(align_up(crate::map::MAP_SIZE, 16)),
                 TAG_SET => obj_start.add(align_up(crate::map::SET_SIZE, 16)),

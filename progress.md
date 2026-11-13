@@ -909,6 +909,22 @@ Integration suite: **786 passed, 0 failed, 3 ignored**; CLI **9 tests**
 
 Integration suite: **787 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Date/RegExp own properties (2026-11-13)
+
+- `RuneDate` reuses its former padding word as an `extra_props` JSObject;
+  `RegExp` grew a 48-byte layout with `extra_props` at offset 32. GC forwards
+  both pointers and scans the new RegExp size.
+- Own property load/store/has and array-like `length`/index lookup now cover
+  Date and RegExp. `lastIndex`/internal `source`/`flags` behavior is preserved;
+  arbitrary keys live in the extra-props shape.
+- `Array.prototype.map.call(new Date(...))` and `...call(/x/)` now observe
+  their own `length`/index properties and callback receivers.
+- Measured: `built-ins/Array/prototype/map` **202/216 (93.5%; was 200)**.
+- Regression: `test_date_regexp_array_like_extra_properties`; full GC stress
+  remains green after the RegExp layout change.
+
+Integration suite: **788 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

@@ -4,14 +4,14 @@ use std::sync::atomic::Ordering;
 pub const DATE_SIZE: usize = 32;
 
 /// Heap-allocated Date object.
-/// Layout: [GcHeader(8) | tv:f64(8) | pad(8) | prototype(8)] = 32 bytes
+/// Layout: [GcHeader(8) | tv:f64(8) | extra_props(8) | prototype(8)] = 32 bytes
 /// `tv` is the time value: a finite integral Number of milliseconds since the
 /// epoch, or NaN for an invalid date.
 #[repr(C)]
 pub struct RuneDate {
     header: GcHeader,
     tv: f64,
-    _pad: u64,
+    extra_props: *mut u8,
     prototype: *mut u8,
 }
 
@@ -23,7 +23,7 @@ impl RuneDate {
             (*hdr).word.store(TAG_DATE, Ordering::Relaxed);
             let d = ptr as *mut RuneDate;
             (*d).tv = f64::NAN;
-            (*d)._pad = 0;
+            (*d).extra_props = std::ptr::null_mut();
             (*d).prototype = prototype;
         }
         ptr
@@ -46,6 +46,16 @@ impl RuneDate {
     pub unsafe fn set_prototype(ptr: *mut u8, proto: *mut u8) {
         unsafe {
             (*(ptr as *mut RuneDate)).prototype = proto;
+        }
+    }
+
+    pub unsafe fn extra_props(ptr: *mut u8) -> *mut u8 {
+        unsafe { crate::gc::resolve_forwarded((*(ptr as *mut RuneDate)).extra_props) }
+    }
+
+    pub unsafe fn set_extra_props(ptr: *mut u8, props: *mut u8) {
+        unsafe {
+            (*(ptr as *mut RuneDate)).extra_props = props;
         }
     }
 }

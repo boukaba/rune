@@ -10063,6 +10063,26 @@ fn length_walk_value(this: Value) -> Value {
             .count();
         return length_value(len as u64);
     }
+    if tag == TAG_REGEXP {
+        let extra = unsafe { rune_core::regexp::RegExp::extra_props(ptr) };
+        if !extra.is_null() {
+            let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+            if let Some(slot) = shape.lookup(&PropertyKey::from_string("length")) {
+                return unsafe { JSObject::get_slot(extra as *mut JSObject, slot) };
+            }
+        }
+        return Value::undefined();
+    }
+    if tag == TAG_DATE {
+        let extra = unsafe { date::RuneDate::extra_props(ptr) };
+        if !extra.is_null() {
+            let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+            if let Some(slot) = shape.lookup(&PropertyKey::from_string("length")) {
+                return unsafe { JSObject::get_slot(extra as *mut JSObject, slot) };
+            }
+        }
+        return Value::undefined();
+    }
     if tag == TAG_FUNC {
         let extra = unsafe { Func::extra_props(ptr as *mut Func) };
         if !extra.is_null() {

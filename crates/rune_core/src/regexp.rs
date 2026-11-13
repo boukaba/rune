@@ -1,7 +1,7 @@
 use crate::gc::{GcHeader, SemiSpace, TAG_REGEXP};
 use std::sync::atomic::Ordering;
 
-pub const REGEXP_SIZE: usize = 32;
+pub const REGEXP_SIZE: usize = 48;
 
 /// Heap-allocated RegExp object.
 /// Layout: [GcHeader(8) | pattern_ptr(8) | flags:u32(4) | last_index:u32(4) | prototype(8)] = 32 bytes
@@ -12,6 +12,7 @@ pub struct RegExp {
     flags: u32,
     last_index: u32,
     prototype: *mut u8,
+    extra_props: *mut u8,
 }
 
 impl RegExp {
@@ -25,6 +26,7 @@ impl RegExp {
             (*re).flags = flags;
             (*re).last_index = 0;
             (*re).prototype = std::ptr::null_mut();
+            (*re).extra_props = std::ptr::null_mut();
         }
         ptr
     }
@@ -60,6 +62,16 @@ impl RegExp {
     pub unsafe fn set_prototype(ptr: *mut u8, proto: *mut u8) {
         unsafe {
             (*(ptr as *mut RegExp)).prototype = proto;
+        }
+    }
+
+    pub unsafe fn extra_props(ptr: *mut u8) -> *mut u8 {
+        unsafe { crate::gc::resolve_forwarded((*(ptr as *mut RegExp)).extra_props) }
+    }
+
+    pub unsafe fn set_extra_props(ptr: *mut u8, props: *mut u8) {
+        unsafe {
+            (*(ptr as *mut RegExp)).extra_props = props;
         }
     }
 

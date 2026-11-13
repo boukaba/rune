@@ -14388,3 +14388,28 @@ fn test_arguments_object_to_string_tag() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_date_regexp_array_like_extra_properties() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var d = new Date(0);
+            d.length = 1;
+            d[0] = 42;
+            var re = /x/;
+            re.length = 1;
+            re[0] = 7;
+            var dm = Array.prototype.map.call(d, function (v, i, o) { return [v, o instanceof Date]; });
+            var rm = Array.prototype.map.call(re, function (v, i, o) { return [v, o instanceof RegExp]; });
+            [
+                d.length, d[0], re.length, re[0],
+                dm.length, dm[0][0], dm[0][1],
+                rm.length, rm[0][0], rm[0][1]
+            ].join("|") === "1|42|1|7|1|42|true|1|7|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

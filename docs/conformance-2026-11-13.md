@@ -27,7 +27,7 @@ Follow-up fixes (prototype-chain dispatch, wrappers, AggregateError, undeclared
 identifiers) moved the suite upward; then the runner began actually draining
 microtasks and honoring `$DONE(error)`. The honest async-completion baseline is
 **340**, because assertions that were previously never reached now run. The targeted
-`built-ins/Array/prototype/map` suite is 200/216 (92.6%).
+`built-ins/Array/prototype/map` suite is 202/216 (93.5%).
 
 The suite includes `Promise.any` and combinator-thenable tests; the numbers
 above were measured after those implementations landed (commit series ending

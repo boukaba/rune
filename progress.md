@@ -2631,6 +2631,25 @@ Integration suite: **866 passed, 0 failed, 3 ignored**.
 
 Integration suite: **866 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Date toJSON/@@toPrimitive + setFullYear (2026-11-13)
+
+- `Date.prototype[Symbol.toPrimitive]` now dispatches user `toString`/`valueOf`
+  through synchronous re-entrant calls (OrdinaryToPrimitive), skips
+  non-callable methods, and validates hint/TypeError paths. Suite **9 → 18/18**.
+- `Date.prototype.toJSON` is fully generic: ToObject, ToPrimitive(number),
+  non-finite Number → null, Get(`toISOString`) callable check, and
+  Call(toISOString, O). Suite **4 → 11/13**.
+- `setFullYear`/`setUTCFullYear` no longer apply the constructor/setYear
+  0-99 → 1900+ mapping (only the constructor and `setYear` do). Both suites
+  fully pass.
+- Updated the stale `test_date_setters` expectation (setUTCFullYear(26) → 26).
+- Test262: Date **523 → 544/594**.
+- Remaining Date failures: `toTemporalInstant` (Temporal absent), remaining
+  setter/getter generic-receiver edges, two toJSON/metadata cases.
+- Regression: `test_date_to_json_to_primitive_and_full_year`.
+
+Integration suite: **867 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

@@ -11009,7 +11009,7 @@ fn test_date_setters() {
         },
         "2026-02-01T03:05:07.009Z"
     );
-    // setFullYear with 0-99 mapping
+    // setUTCFullYear does not apply the constructor's 0-99 -> 1900+ mapping.
     let r = ctx
         .eval(
             "var d = new Date(Date.UTC(2000, 0, 1));
@@ -11017,7 +11017,7 @@ fn test_date_setters() {
              d.getUTCFullYear();",
         )
         .unwrap();
-    assert_eq!(r.as_smi(), Some(1926));
+    assert_eq!(r.as_smi(), Some(26));
     // setTime resets
     let r = ctx
         .eval(
@@ -16584,6 +16584,39 @@ fn test_math_f16_imul_zero_and_coercion() {
                 1 / Math.sumPrecise([]) === -Infinity,
                 Math.sumPrecise([1e308, 1e308, 0.1, 0.1, 1e30, 0.1, -1e30, -1e308, -1e308]) === 0.30000000000000004
             ].join("|") === "true|true|true|true|true|true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}
+
+#[test]
+fn test_date_to_json_to_primitive_and_full_year() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var calls = [];
+            var generic = {
+                valueOf: function () { return 1; },
+                toISOString: function () { calls.push("iso"); return "generic-iso"; }
+            };
+            var invalid = Date.prototype.toJSON.call({ valueOf: function () { return NaN; }, toISOString: function () { throw "no"; } });
+            var prim = Date.prototype[Symbol.toPrimitive];
+            var defaultObj = {
+                valueOf: function () { return "valueOf"; },
+                toString: function () { return {}; }
+            };
+            var d = new Date(0);
+            d.setFullYear(1);
+            [
+                Date.prototype.toJSON.call(generic) === "generic-iso",
+                calls.length === 1,
+                invalid === null,
+                prim.call(defaultObj, "default") === "valueOf",
+                prim.call({ toString: function () { return "s"; } }, "string") === "s",
+                d.getFullYear() === 1
+            ].join("|") === "true|true|true|true|true|true";
             "#,
         )
         .unwrap();

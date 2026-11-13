@@ -4992,33 +4992,44 @@ pub fn date_to_primitive_builtin(
     args: &[Value],
     vm: &mut Vm,
 ) -> Value {
-    let type_err = |gc: &mut SemiSpace, vm: &mut Vm| {
+    let type_err = |gc: &mut SemiSpace, vm: &mut Vm, msg: &str| {
         vm.set_pending_exception(crate::errors::error_object(
             gc,
             &vm.error_protos,
             crate::errors::ErrorKind::TypeError,
-            "Date.prototype[Symbol.toPrimitive] called on a non-object",
+            msg,
         ));
     };
     if this.heap_ptr().is_none() && this.as_smi().is_none_or(|s| s >= 0) {
-        type_err(gc, vm);
+        type_err(
+            gc,
+            vm,
+            "Date.prototype[Symbol.toPrimitive] called on a non-object",
+        );
         return Value::undefined();
     }
     let hint_val = args.first().copied().unwrap_or(Value::undefined());
     let Some(hptr) = hint_val.heap_ptr() else {
-        type_err(gc, vm);
+        type_err(
+            gc,
+            vm,
+            "Date.prototype[Symbol.toPrimitive] hint is not a string",
+        );
         return Value::undefined();
     };
     if unsafe { (*(hptr as *const GcHeader)).tag() } != TAG_STRING {
-        type_err(gc, vm);
+        type_err(
+            gc,
+            vm,
+            "Date.prototype[Symbol.toPrimitive] hint is not a string",
+        );
         return Value::undefined();
     }
     let hint = unsafe { HeapString::to_string(hptr as *mut HeapString) };
     if hint != "default" && hint != "string" && hint != "number" {
-        type_err(gc, vm);
+        type_err(gc, vm, "Date.prototype[Symbol.toPrimitive] invalid hint");
         return Value::undefined();
     }
-    // Fast path: Date receivers use the spec Date value/string conversions.
     if let Some(ptr) = this.heap_ptr() {
         if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_DATE {
             let tv = unsafe { date::RuneDate::tv(ptr) };
@@ -5029,55 +5040,43 @@ pub fn date_to_primitive_builtin(
             return Value::from_heap_ptr(HeapString::allocate(gc, &text) as *mut u8);
         }
     }
-    // OrdinaryToPrimitive over builtin methods. JS user methods require the
-    // frame machinery and are not supported from this sync builtin yet.
+    // OrdinaryToPrimitive(O, tryFirst) with user methods dispatched through
+    // the synchronous call machinery.
     let order: [&str; 2] = if hint == "number" {
         ["valueOf", "toString"]
     } else {
         ["toString", "valueOf"]
     };
     for name in order {
-        let key = Value::from_heap_ptr(HeapString::allocate(gc, name) as *mut u8);
-        let method = load_property_recursive(this, key, Some(vm.function_prototype), gc);
-        if method.is_undefined() {
-            continue;
-        }
-        let callable = match classify_method(method) {
-            Ok(Some(c)) => c,
-            _ => {
-                type_err(gc, vm);
+        let method = match get_value_sync(gc, vm, this, name) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
                 return Value::undefined();
             }
         };
-        let Some(ptr) = method.heap_ptr() else {
-            // Builtin handles are negative Smis; non-callable values already
-            // rejected above.
-            if let Some(sid) = method.as_smi() {
-                if sid < 0 {
-                    let id = (-sid as usize) - 1;
-                    if id < vm.builtins.len() {
-                        let result = (vm.builtins[id].func)(gc, this, &[], vm);
-                        if vm.pending_exception.is_some() {
-                            return Value::undefined();
-                        }
-                        if !is_object_value(result) {
-                            return result;
-                        }
-                        continue;
-                    }
-                }
+        if method.is_undefined() || method.is_null() {
+            continue;
+        }
+        let callable = method
+            .heap_ptr()
+            .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC)
+            || method.as_smi().is_some_and(|s| s < 0);
+        if !callable {
+            continue;
+        }
+        let result = match vm.call_value_sync(gc, method, this, &[]) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
             }
-            type_err(gc, vm);
-            return Value::undefined();
         };
-        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-        if tag == TAG_FUNC {
-            let _ = callable;
-            type_err(gc, vm);
-            return Value::undefined();
+        if !is_object_value(result) {
+            return result;
         }
     }
-    type_err(gc, vm);
+    type_err(gc, vm, "Cannot convert object to primitive value");
     Value::undefined()
 }
 
@@ -5192,18 +5191,60 @@ pub fn date_to_json_builtin(
     _args: &[Value],
     vm: &mut Vm,
 ) -> Value {
-    // Generic per spec; this implementation handles Date receivers and
-    // non-finite primitive coercions (objects without a toISOString are a gap).
-    if let Some(ptr) = this.heap_ptr() {
-        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_DATE {
-            let tv = unsafe { date::RuneDate::tv(ptr) };
-            if tv.is_nan() || tv.is_infinite() {
-                return Value::null();
-            }
-            return date_to_iso_string_builtin(gc, this, _args, vm);
+    if this.is_null() || this.is_undefined() {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Date.prototype.toJSON called on null or undefined",
+        ));
+        return Value::undefined();
+    }
+    let obj = crate::vm::to_object_value(gc, this, vm);
+    let tv = match to_primitive_sync(gc, vm, obj, "number") {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    if tv.as_smi().is_some() || tv.as_float64().is_some() {
+        let n = if let Some(i) = tv.as_smi() {
+            i as f64
+        } else {
+            tv.as_float64().unwrap_or(f64::NAN)
+        };
+        if !n.is_finite() {
+            return Value::null();
         }
     }
-    Value::null()
+    let method = match get_value_sync(gc, vm, obj, "toISOString") {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let callable = method
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC)
+        || method.as_smi().is_some_and(|s| s < 0);
+    if !callable {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "toISOString is not callable",
+        ));
+        return Value::undefined();
+    }
+    match vm.call_value_sync(gc, method, obj, &[]) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            Value::undefined()
+        }
+    }
 }
 
 /// §21.4.4.38-40 locale methods — implementation-defined without ECMA-402.
@@ -5405,7 +5446,7 @@ pub fn date_set_full_year_builtin(
     let dt = args.get(2).map_or(date::date_from_time(base) as f64, |x| {
         date_arg_number!(gc, vm, *x)
     });
-    let yr = date::make_full_year(y);
+    let yr = if y.is_finite() { y.trunc() } else { f64::NAN };
     let new_date = date::make_date(date::make_day(yr, m, dt), date::time_within_day(base));
     let u = date::time_clip(new_date);
     if vm.pending_exception.is_some() {
@@ -5699,7 +5740,7 @@ pub fn date_set_utc_full_year_builtin(
     let dt = args.get(2).map_or(date::date_from_time(base) as f64, |x| {
         date_arg_number!(gc, vm, *x)
     });
-    let yr = date::make_full_year(y);
+    let yr = if y.is_finite() { y.trunc() } else { f64::NAN };
     let v = date::time_clip(date::make_date(
         date::make_day(yr, m, dt),
         date::time_within_day(base),

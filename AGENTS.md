@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Date toJSON/@@toPrimitive (2026-11-13)**: generic toJSON and OrdinaryToPrimitive, setFullYear no 1900 mapping. Date **544/594**. Integration **867**.
 - **Exact Math.sumPrecise (2026-11-13)**: bigint exact summation + iterable drain; array symbol-key stores. Math **325/327**. Integration **866**.
 - **Math.random/f16round/conversions (2026-11-13)**: random, f16round, imul wrapping, min/max/hypot sync coercion, signed zeros, leading-dot literals. Math **323/327**. Integration **866**.
 - **replaceAll substitutions/dispatch (2026-11-13)**: $$ fix, @@replace before ToString, string-search GetSubstitution, sync replacement ToPrimitive. String **942/1223**, replaceAll **25/45**. Integration **865**.

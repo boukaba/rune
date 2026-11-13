@@ -1837,6 +1837,21 @@ Integration suite: **830 passed, 0 failed, 3 ignored**.
 
 Integration suite: **831 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Function.prototype metadata + gOPN builtin keys (2026-11-13)
+
+- `%Function.prototype%` now has spec `length: 0` and `name: ""`
+  (non-enumerable, configurable via `make_object` attrs), so deleting a
+  builtin's own `length` falls back to `0` instead of `undefined`.
+- `Object.getOwnPropertyNames` has an explicit path for raw builtin handles
+  (`length`/`name`, respecting deleted metadata), and the own-entries walker
+  gained an enumerable-filter switch (still enumerable-only for
+  keys/values/entries).
+- Test262: Function **185 → 187/509**.
+- Regression: `test_function_prototype_metadata_fallback`; updated
+  `test_delete_builtin_metadata` to expect the spec `0` fallback.
+
+Integration suite: **832 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

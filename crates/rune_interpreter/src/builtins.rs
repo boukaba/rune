@@ -7515,10 +7515,11 @@ pub fn object_builtin(gc: &mut SemiSpace, _this: Value, _args: &[Value], _vm: &m
 
 /// Iterate own enumerable string-keyed properties of a value.
 /// Returns Ok(entries) or Err(()) if a TypeError was thrown (null/undefined).
-fn object_own_entries(
+fn object_own_entries_mode(
     gc: &mut SemiSpace,
     val: Value,
     vm: &mut Vm,
+    only_enumerable: bool,
 ) -> Result<Vec<(String, Value)>, ()> {
     if val.is_null() || val.is_undefined() {
         let msg = crate::errors::error_object(
@@ -7538,7 +7539,7 @@ fn object_own_entries(
                 if extra.is_null() {
                     Ok(Vec::new())
                 } else {
-                    object_own_entries(gc, Value::from_heap_ptr(extra), vm)
+                    object_own_entries_mode(gc, Value::from_heap_ptr(extra), vm, only_enumerable)
                 }
             }
             TAG_OBJECT => {
@@ -7552,7 +7553,8 @@ fn object_own_entries(
                         continue;
                     }
                     // A4: non-enumerable own properties are excluded.
-                    if shape.attr_at(i) & rune_core::shape::ATTR_ENUMERABLE == 0 {
+                    if only_enumerable && shape.attr_at(i) & rune_core::shape::ATTR_ENUMERABLE == 0
+                    {
                         continue;
                     }
                     let key = shape.key_name_at(i).unwrap_or("").to_string();
@@ -7676,6 +7678,23 @@ fn build_array(gc: &mut SemiSpace, elements: &[Value], vm: &Vm) -> Value {
 /// Object.keys(obj) — returns array of own enumerable string-keyed property names.
 pub fn object_keys(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let target = args.first().copied().unwrap_or(Value::undefined());
+    if let Some(sid) = target.as_smi() {
+        if sid < 0 {
+            let id = (-sid as usize) - 1;
+            if id >= vm.builtins.len() {
+                return build_array(gc, &[], vm);
+            }
+            let mut keys: Vec<Value> = Vec::new();
+            for (name, bit) in [("length", 1u8), ("name", 2u8)] {
+                if !vm.deleted_builtin_metadata.contains(&(id, bit)) {
+                    keys.push(Value::from_heap_ptr(
+                        HeapString::allocate(gc, name) as *mut u8
+                    ));
+                }
+            }
+            return build_array(gc, &keys, vm);
+        }
+    }
     let entries = match object_own_entries(gc, target, vm) {
         Ok(e) => e,
         Err(()) => return Value::undefined(),
@@ -7809,6 +7828,14 @@ pub fn object_get_own_property_names(
         .map(|(k, _)| Value::from_heap_ptr(HeapString::allocate(gc, k) as *mut u8))
         .collect();
     build_array(gc, &keys, vm)
+}
+
+fn object_own_entries(
+    gc: &mut SemiSpace,
+    val: Value,
+    vm: &mut Vm,
+) -> Result<Vec<(String, Value)>, ()> {
+    object_own_entries_mode(gc, val, vm, true)
 }
 
 /// Object.fromEntries(iterable) — §20.1.2.7. Sync-only: accepts an array of

@@ -2857,6 +2857,11 @@ impl Vm {
             if let Some(ts) = find_handle(&self.builtins, "Function_prototype_toString") {
                 proto_entries_f.push(("toString", ts));
             }
+            proto_entries_f.push(("length", Value::smi(0)));
+            proto_entries_f.push((
+                "name",
+                Value::from_heap_ptr(HeapString::allocate(gc, "") as *mut u8),
+            ));
             let func_proto = make_object(gc, &proto_entries_f);
             self.function_prototype = func_proto;
             // %Function% wrapper

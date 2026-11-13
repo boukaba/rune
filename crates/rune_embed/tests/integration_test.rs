@@ -15521,10 +15521,29 @@ fn test_delete_builtin_metadata() {
                 deleted,
                 !f.hasOwnProperty("length"),
                 Object.getOwnPropertyDescriptor(f, "length") === undefined,
-                f.length === undefined,
+                f.length === 0,
                 delete f.name,
                 !f.hasOwnProperty("name")
             ].join("|") === "true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}
+
+#[test]
+fn test_function_prototype_metadata_fallback() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var f = Date.prototype.setHours;
+            delete f.length;
+            [
+                Function.prototype.length === 0,
+                Function.prototype.name === "",
+                f.length === 0
+            ].join("|") === "true|true|true";
             "#,
         )
         .unwrap();

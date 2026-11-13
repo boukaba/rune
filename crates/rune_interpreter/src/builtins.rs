@@ -6809,6 +6809,9 @@ fn object_own_entries(
                         if shape.entries[i].0.is_symbol() {
                             continue;
                         }
+                        if shape.attr_at(i) & rune_core::shape::ATTR_ENUMERABLE == 0 {
+                            continue;
+                        }
                         let key = shape.key_name_at(i).unwrap_or("").to_string();
                         if key.starts_with('\0') {
                             continue;
@@ -6832,11 +6835,43 @@ fn object_own_entries(
             TAG_STRING_OBJ => {
                 let str_ptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
                 let s = unsafe { HeapString::to_string(str_ptr as *mut HeapString) };
-                let mut entries = Vec::with_capacity(s.len());
-                for (i, c) in s.chars().enumerate() {
-                    let ch: String = c.to_string();
+                let units: Vec<u16> = s.encode_utf16().collect();
+                let mut entries = Vec::with_capacity(units.len());
+                for (i, u) in units.into_iter().enumerate() {
+                    let ch = String::from_utf16_lossy(&[u]);
                     let ch_val = Value::from_heap_ptr(HeapString::allocate(gc, &ch) as *mut u8);
                     entries.push((i.to_string(), ch_val));
+                }
+                Ok(entries)
+            }
+            TAG_FUNC | TAG_DATE | TAG_REGEXP => {
+                let props = unsafe {
+                    match tag {
+                        TAG_FUNC => rune_core::function::Func::extra_props(
+                            ptr as *mut rune_core::function::Func,
+                        ) as *mut JSObject,
+                        TAG_DATE => rune_core::date::RuneDate::extra_props(ptr) as *mut JSObject,
+                        _ => rune_core::regexp::RegExp::extra_props(ptr) as *mut JSObject,
+                    }
+                };
+                if props.is_null() {
+                    return Ok(Vec::new());
+                }
+                let shape = unsafe { JSObject::shape_ptr(props) };
+                let count = unsafe { JSObject::slot_count(props) };
+                let mut entries = Vec::with_capacity(count);
+                for i in 0..count {
+                    if shape.entries[i].0.is_symbol()
+                        || shape.attr_at(i) & rune_core::shape::ATTR_ENUMERABLE == 0
+                    {
+                        continue;
+                    }
+                    let key = shape.key_name_at(i).unwrap_or("").to_string();
+                    if key.starts_with('\0') {
+                        continue;
+                    }
+                    let value = unsafe { JSObject::get_slot(props, i) };
+                    entries.push((key, value));
                 }
                 Ok(entries)
             }
@@ -22798,7 +22833,16 @@ fn regexp_flag_bit(
     _vm: &mut Vm,
     bit: u32,
 ) -> Value {
+    if this.heap_ptr().is_some() && this.heap_ptr() == _vm.regexp_prototype.heap_ptr() {
+        return Value::undefined();
+    }
     let Some(regexp_ptr) = get_regexp_this(this) else {
+        _vm.set_pending_exception(crate::errors::error_object(
+            _gc,
+            &_vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "RegExp flag getter called on incompatible receiver",
+        ));
         return Value::undefined();
     };
     let flags = unsafe { RegExp::flags(regexp_ptr) };

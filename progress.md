@@ -1366,6 +1366,24 @@ Integration suite: **803 passed, 0 failed, 3 ignored**.
 
 Integration suite: **804 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — RegExp flag receivers + accessor exceptions (2026-11-13)
+
+- Builtin accessor getters can now raise: `vm_get_property` routes a pending
+  exception produced by synchronous accessor dispatch through `handle_throw`,
+  so `try/catch` and `assert.throws` observe it.
+- RegExp flag getters follow the receiver rules: `undefined` on
+  `%RegExp.prototype%`, TypeError for other non-RegExp receivers.
+- `Object.keys/values/entries` now include enumerable Function/Date/RegExp
+  `extra_props` and String-wrapper indices; non-enumerable array overlay
+  entries are excluded.
+- Test262: RegExp prototype **117 → 123/487**; Object **1805 → 1808/3411**;
+  Object.keys 44→46; entries 10→11.
+- Regression: `test_regexp_flag_getter_receiver_rules`.
+- Known gaps: the non-object receiver test also uses a BigInt literal (parser
+  unsupported); RegExp property escapes still need Unicode data.
+
+Integration suite: **805 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

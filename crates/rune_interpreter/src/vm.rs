@@ -6012,6 +6012,12 @@ impl Vm {
             // opcode with the getter's result.
             return PropGetOut::Wait;
         }
+        if let Some(exc) = self.pending_exception.take() {
+            return match self.handle_throw(gc, exc) {
+                Some(exit) => PropGetOut::Bail(Some(exit)),
+                None => PropGetOut::Bail(None),
+            };
+        }
         PropGetOut::Ready(result)
     }
 

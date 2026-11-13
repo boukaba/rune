@@ -14839,3 +14839,23 @@ fn test_regexp_flag_accessors() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_regexp_flag_getter_receiver_rules() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var d = Object.getOwnPropertyDescriptor(RegExp.prototype, "global");
+            var threw = false;
+            try { d.get.call(3); } catch (e) { threw = e instanceof TypeError; }
+            [
+                RegExp.prototype.global === undefined,
+                d.get.call(/a/g) === true,
+                threw
+            ].join("|") === "true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

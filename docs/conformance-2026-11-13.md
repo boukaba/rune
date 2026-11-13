@@ -32,7 +32,7 @@ dispatch, self-resolution rejection, and deferred thenable jobs. The targeted
 `built-ins/Array/prototype/map` suite is 203/216 (94.0%). Adding
 `.constructor` back-references to built-in prototypes lifted `String` from
 454 to 523/1223 and `String.prototype.split` from ~11 to 78/120. Locale/string statics and
-primitive prototype dispatch raised `String` to 591/1223 and made
+primitive prototype dispatch raised `String` to 592/1223 and made
 `(5).toString()`/`true.toString()` reachable through their prototypes.
 
 The suite includes `Promise.any` and combinator-thenable tests; the numbers

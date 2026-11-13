@@ -1177,7 +1177,7 @@ Integration suite: **795 passed, 0 failed, 3 ignored**.
   resolve through `Number.prototype` (was Object.prototype); booleans through
   `Boolean.prototype`. `Number.prototype.valueOf/toString` and
   `Boolean.prototype.valueOf/toString` accept primitive receivers.
-- Test262: String **523 → 591/1223**; Number **128/340**; Boolean **20/51**;
+- Test262: String **523 → 592/1223**; Number **128/340**; Boolean **20/51**;
   `String.raw` 16/30, `normalize` 6/14, `toWellFormed` 4/8,
   `fromCodePoint` 4/11.
 - Regression: `test_string_locale_statics_and_primitive_methods`.

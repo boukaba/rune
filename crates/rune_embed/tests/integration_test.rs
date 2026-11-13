@@ -15238,3 +15238,30 @@ fn test_array_buffer_length_accessors() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_array_buffer_transfer_and_detach() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var b = new ArrayBuffer(4);
+            new Uint8Array(b)[0] = 42;
+            var n = b.transfer(4);
+            var copied = new Uint8Array(n)[0] === 42;
+            var resizeThrew = false;
+            try { n.resize(1); } catch (e) { resizeThrew = e instanceof TypeError; }
+            [
+                b.detached === true,
+                b.byteLength === 0,
+                n.byteLength === 4,
+                copied,
+                resizeThrew,
+                typeof b.transferToFixedLength === "function",
+                typeof b.sliceToImmutable === "function"
+            ].join("|") === "true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

@@ -136,6 +136,15 @@ impl RuneArrayBuffer {
         }
     }
 
+    /// Detach the buffer: data pointer cleared and length zeroed.
+    pub unsafe fn detach(ptr: *mut u8) {
+        unsafe { Self::set_data_and_length(ptr, std::ptr::null_mut(), 0) }
+    }
+
+    pub unsafe fn is_detached(ptr: *mut u8) -> bool {
+        unsafe { Self::data(ptr).is_null() && Self::byte_length(ptr) == 0 }
+    }
+
     pub unsafe fn copy_from(
         ptr: *mut u8,
         dst_off: usize,

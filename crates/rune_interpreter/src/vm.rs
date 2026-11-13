@@ -2363,6 +2363,23 @@ impl Vm {
                 ab_proto_entries.push(("slice", h));
             }
             for (name, key) in [
+                ("transfer", "ArrayBuffer_prototype_transfer"),
+                (
+                    "transferToFixedLength",
+                    "ArrayBuffer_prototype_transferToFixedLength",
+                ),
+                (
+                    "transferToImmutable",
+                    "ArrayBuffer_prototype_transferToImmutable",
+                ),
+                ("sliceToImmutable", "ArrayBuffer_prototype_sliceToImmutable"),
+                ("resize", "ArrayBuffer_prototype_resize"),
+            ] {
+                if let Some(h) = find_handle(&self.builtins, key) {
+                    ab_proto_entries.push((name, h));
+                }
+            }
+            for (name, key) in [
                 ("byteLength", "ArrayBuffer_prototype_byteLength"),
                 ("detached", "ArrayBuffer_prototype_detached"),
                 ("resizable", "ArrayBuffer_prototype_resizable"),

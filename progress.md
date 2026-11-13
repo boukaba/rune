@@ -1628,6 +1628,25 @@ Integration suite: **819 passed, 0 failed, 3 ignored**.
 
 Integration suite: **820 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — ArrayBuffer transfer/detach (2026-11-13)
+
+- Added a real detach state (`data == null && byteLength == 0`); the
+  `detached` getter now reports it and `byteLength` reads 0.
+- Added:
+  - `ArrayBuffer.prototype.transfer(newLength)`;
+  - `transferToFixedLength(newLength)`;
+  - `transferToImmutable(newLength)`;
+  - `sliceToImmutable(start, end)`;
+  - `resize(newLength)` (TypeError for non-resizable buffers).
+- Transfer copies the overlapping prefix, zero-fills growth, detaches the
+  source, and returns a new buffer.
+- Test262: ArrayBuffer **34 → 56/221**.
+- Regression: `test_array_buffer_transfer_and_detach`.
+- Known gaps: resizable buffers/maxByteLength are fixed; immutable buffers are
+  not enforced; resizing still throws.
+
+Integration suite: **821 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

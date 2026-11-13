@@ -5105,12 +5105,15 @@ pub fn array_buffer_byte_length(
 
 /// get ArrayBuffer.prototype.detached.
 pub fn array_buffer_detached(
-    _gc: &mut SemiSpace,
-    _this: Value,
+    gc: &mut SemiSpace,
+    this: Value,
     _args: &[Value],
-    _vm: &mut Vm,
+    vm: &mut Vm,
 ) -> Value {
-    Value::boolean(false)
+    let Some(ptr) = array_buffer_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    Value::boolean(unsafe { typedarray::RuneArrayBuffer::is_detached(ptr) })
 }
 
 /// get ArrayBuffer.prototype.resizable.
@@ -5134,6 +5137,108 @@ pub fn array_buffer_max_byte_length(
         return Value::undefined();
     };
     Value::smi(unsafe { typedarray::RuneArrayBuffer::byte_length(ptr) } as i32)
+}
+
+fn array_buffer_transfer_impl(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+    detach_old: bool,
+) -> Value {
+    let Some(ptr) = array_buffer_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    if unsafe { typedarray::RuneArrayBuffer::is_detached(ptr) } {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "ArrayBuffer is detached",
+        ));
+        return Value::undefined();
+    }
+    let old_len = unsafe { typedarray::RuneArrayBuffer::byte_length(ptr) };
+    let new_len = match args.first() {
+        None => old_len,
+        Some(v) if v.is_undefined() => old_len,
+        Some(v) => match to_index_typed(gc, vm, *v) {
+            Ok(n) => n,
+            Err(()) => return Value::undefined(),
+        },
+    };
+    let proto = unsafe { typedarray::RuneArrayBuffer::prototype(ptr) };
+    let new_ptr = typedarray::RuneArrayBuffer::allocate(gc, new_len, proto);
+    let copy_len = old_len.min(new_len);
+    if copy_len > 0 {
+        unsafe {
+            typedarray::RuneArrayBuffer::copy_from(
+                new_ptr,
+                0,
+                typedarray::RuneArrayBuffer::data(ptr),
+                0,
+                copy_len,
+            );
+        }
+    }
+    if detach_old {
+        unsafe { typedarray::RuneArrayBuffer::detach(ptr) };
+    }
+    Value::from_heap_ptr(new_ptr)
+}
+
+/// ArrayBuffer.prototype.transfer(newLength).
+pub fn array_buffer_transfer(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    array_buffer_transfer_impl(gc, this, args, vm, true)
+}
+
+/// ArrayBuffer.prototype.transferToFixedLength(newLength).
+pub fn array_buffer_transfer_to_fixed(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    array_buffer_transfer_impl(gc, this, args, vm, true)
+}
+
+/// ArrayBuffer.prototype.transferToImmutable(newLength).
+pub fn array_buffer_transfer_to_immutable(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    array_buffer_transfer_impl(gc, this, args, vm, true)
+}
+
+/// ArrayBuffer.prototype.sliceToImmutable(start, end) — copy without detaching.
+pub fn array_buffer_slice_to_immutable(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    array_buffer_slice_builtin(gc, this, args, vm)
+}
+
+/// ArrayBuffer.prototype.resize(newLength) — non-resizable buffers throw.
+pub fn array_buffer_resize(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    let Some(_ptr) = array_buffer_receiver(gc, this, vm) else {
+        return Value::undefined();
+    };
+    vm.set_pending_exception(crate::errors::error_object(
+        gc,
+        &vm.error_protos,
+        crate::errors::ErrorKind::TypeError,
+        "ArrayBuffer is not resizable",
+    ));
+    Value::undefined()
 }
 
 /// §25.1.5.1 ArrayBuffer.isView ( arg )
@@ -21822,6 +21927,31 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 0,
             name: "ArrayBuffer_prototype_byteLength",
             func: array_buffer_byte_length,
+        },
+        Builtin {
+            length: 1,
+            name: "ArrayBuffer_prototype_transfer",
+            func: array_buffer_transfer,
+        },
+        Builtin {
+            length: 1,
+            name: "ArrayBuffer_prototype_transferToFixedLength",
+            func: array_buffer_transfer_to_fixed,
+        },
+        Builtin {
+            length: 1,
+            name: "ArrayBuffer_prototype_transferToImmutable",
+            func: array_buffer_transfer_to_immutable,
+        },
+        Builtin {
+            length: 2,
+            name: "ArrayBuffer_prototype_sliceToImmutable",
+            func: array_buffer_slice_to_immutable,
+        },
+        Builtin {
+            length: 1,
+            name: "ArrayBuffer_prototype_resize",
+            func: array_buffer_resize,
         },
         Builtin {
             length: 0,

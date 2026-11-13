@@ -16031,3 +16031,31 @@ fn test_set_size_and_brand_checks() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_collection_species_and_for_each_abrupt() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var mapDesc = Object.getOwnPropertyDescriptor(Map, Symbol.species);
+            var setDesc = Object.getOwnPropertyDescriptor(Set, Symbol.species);
+            var s = new Set([1]);
+            var count = 0;
+            var threw = false;
+            try {
+                s.forEach(function () { count += 1; throw new Error("boom"); });
+            } catch (e) { threw = e.message === "boom"; }
+            [
+                Map[Symbol.species] === Map,
+                Set[Symbol.species] === Set,
+                mapDesc.get.name === "get [Symbol.species]",
+                setDesc.get.name === "get [Symbol.species]",
+                Set.prototype.keys === Set.prototype.values,
+                threw && count === 1
+            ].join("|") === "true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

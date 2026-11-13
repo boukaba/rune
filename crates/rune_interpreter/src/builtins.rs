@@ -3432,6 +3432,16 @@ pub fn map_set_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut
     this
 }
 
+/// Map/Set [@@species] getter: returns the receiver.
+pub fn collection_species_get(
+    _gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    _vm: &mut Vm,
+) -> Value {
+    this
+}
+
 /// Map.prototype.size getter (§27.1.3.11).
 pub fn map_size_getter(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
     let Some(map_ptr) = map_strong_receiver(gc, this, vm) else {
@@ -23432,6 +23442,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 2,
             name: "Map_prototype_set",
             func: map_set_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "get [Symbol.species]",
+            func: collection_species_get,
         },
         Builtin {
             length: 0,

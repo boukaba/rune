@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Collection species/forEach (2026-11-13)**: @@species accessors, Set.keys alias, dropped stale foreach machines. Map **183/204**, Set **182/383**. Integration **849**.
 - **Set brand/size (2026-11-13)**: strong receiver, size accessor, symbol attrs. Set **176/383**. Integration **848**.
 - **Map brand/size (2026-11-13)**: strong receiver, size accessor, symbol attrs. Map **179/204**. Integration **847**.
 - **Map upsert (2026-11-13)**: getOrInsert/getOrInsertComputed with brand checks. getOrInsert **14/14**, Map **161/204**. Integration **846**.

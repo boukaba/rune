@@ -2150,6 +2150,22 @@ Integration suite: **847 passed, 0 failed, 3 ignored**.
 
 Integration suite: **848 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Collection species + forEach abrupt cleanup (2026-11-13)
+
+- `Map[@@species]` and `Set[@@species]` are now real accessor properties
+  (`get [Symbol.species]`, length 0, configurable) returning the receiver.
+- `Set.prototype.keys` is the same function object as `values`.
+- Fixed a stale continuation bug: when a `Map`/`Set` `forEach` callback throws
+  and the throw leaves the callback frame (including an `assert.throws`
+  consume), `pending_collection_foreach` is dropped. Previously the machine
+  resumed after the catch and raised a delayed spurious TypeError.
+- Test262: `Map/Symbol.species` **0 → 4/4**, `Set/Symbol.species` **0 → 4/4**,
+  Map **179 → 183/204**, Set **176 → 182/383**.
+- Regression: `test_collection_species_and_for_each_abrupt`.
+- Known remaining `forEach` failures are live-mutation snapshot semantics.
+
+Integration suite: **849 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

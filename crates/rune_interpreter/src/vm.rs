@@ -2199,6 +2199,19 @@ impl Vm {
                 }
             }
             let map_ctor = make_object(gc, &[("prototype", map_proto)]);
+            if let Some(getter) = find_handle(&self.builtins, "get [Symbol.species]") {
+                let pair =
+                    rune_core::accessor::AccessorPair::allocate(gc, getter, Value::undefined());
+                unsafe {
+                    JSObject::add_property_with_attrs(
+                        map_ctor.heap_ptr().unwrap() as *mut JSObject,
+                        PropertyKey::from_symbol(rune_core::symbol::SYM_SPECIES),
+                        "\u{0}".to_string(),
+                        Value::from_heap_ptr(pair),
+                        rune_core::shape::ATTR_CONFIGURABLE,
+                    );
+                }
+            }
             if let Some(h) = find_handle(&self.builtins, "Map_groupBy") {
                 unsafe {
                     JSObject::add_property(
@@ -2221,7 +2234,7 @@ impl Vm {
                 ("clear", "Set_prototype_clear"),
                 ("forEach", "Set_prototype_forEach"),
                 ("entries", "Set_prototype_entries"),
-                ("keys", "Set_prototype_keys"),
+                ("keys", "Set_prototype_values"),
                 ("values", "Set_prototype_values"),
             ] {
                 if let Some(h) = find_handle(&self.builtins, handle) {
@@ -2263,6 +2276,19 @@ impl Vm {
                 }
             }
             let set_ctor = make_object(gc, &[("prototype", set_proto)]);
+            if let Some(getter) = find_handle(&self.builtins, "get [Symbol.species]") {
+                let pair =
+                    rune_core::accessor::AccessorPair::allocate(gc, getter, Value::undefined());
+                unsafe {
+                    JSObject::add_property_with_attrs(
+                        set_ctor.heap_ptr().unwrap() as *mut JSObject,
+                        PropertyKey::from_symbol(rune_core::symbol::SYM_SPECIES),
+                        "\u{0}".to_string(),
+                        Value::from_heap_ptr(pair),
+                        rune_core::shape::ATTR_CONFIGURABLE,
+                    );
+                }
+            }
             self.builtin_wrappers.insert("Set".to_string(), set_ctor);
             self.set_constructor = set_ctor;
             self.set_prototype = set_proto;
@@ -4279,6 +4305,13 @@ impl Vm {
                 return Some(Exit::Throw(val));
             }
             let popped_frame = self.frames.len() - 1;
+            if self
+                .pending_collection_foreach
+                .as_ref()
+                .is_some_and(|p| p.source_frame_depth + 1 >= popped_frame)
+            {
+                self.pending_collection_foreach = None;
+            }
             self.last_locals = self.frames[popped_frame].locals.clone();
             // Truncation target for the assert-consume paths below: the
             // popped (thunk/callback) frame's base — drops exactly its temps
@@ -4312,6 +4345,9 @@ impl Vm {
             if let Some(source_depth) = assert_depth {
                 if self.frames.len() - 1 == source_depth {
                     let pa = self.pending_assert.take().unwrap();
+                    // The asserting thunk is being unwound past; collection
+                    // forEach continuations tied to its callback are dead.
+                    self.pending_collection_foreach = None;
                     if !self.assert_error_matches(pa.expected_error, val) {
                         // Wrong error type — report a mismatch and propagate it.
                         let expected = self.describe_expected_error(pa.expected_error);

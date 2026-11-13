@@ -31,7 +31,7 @@ latest gains come from Promise-constructor semantics, generic `catch`/`finally`
 dispatch, self-resolution rejection, and deferred thenable jobs. The targeted
 `built-ins/Array/prototype/map` suite is 203/216 (94.0%). Adding
 `.constructor` back-references to built-in prototypes lifted `String` from
-454 to 524/1223 and `String.prototype.split` from ~11 to 78/120.
+454 to 523/1223 and `String.prototype.split` from ~11 to 78/120.
 
 The suite includes `Promise.any` and combinator-thenable tests; the numbers
 above were measured after those implementations landed (commit series ending

@@ -1154,7 +1154,7 @@ Integration suite: **794 passed, 0 failed, 3 ignored**; `rune_capi` **8 tests**.
   Promise, Function, and the Error family (including TypeError etc).
 - Existing `RegExp.prototype.constructor` (a bare builtin handle) is overwritten
   with the callable `RegExp` wrapper so identity checks work.
-- Array/String test262 gains: String **524/1223 (was 454)**, Array
+- Array/String test262 gains: String **523/1223 (was 454)**, Array
   **2469/3081**, Object **1529/3411**; `String.prototype.split` jumped from
   ~11 to **78/120**.
 - Regression: `test_builtin_prototype_constructor_backrefs`.

@@ -16402,3 +16402,36 @@ fn test_boolean_number_coercion_and_descriptors() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_symbol_wrappers_and_species() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var sym = Symbol("s");
+            var wrapper = Object(sym);
+            var d = Object.getOwnPropertyDescriptor(Symbol.prototype, Symbol.toPrimitive);
+            var tag = Object.getOwnPropertyDescriptor(Symbol.prototype, Symbol.toStringTag);
+            var species = Object.getOwnPropertyDescriptor(Array, Symbol.species).get;
+            var toStringThrew = false;
+            try { Symbol({ toString: function () { throw new TypeError("x"); } }); }
+            catch (e) { toStringThrew = e instanceof TypeError; }
+            [
+                typeof wrapper === "object",
+                wrapper.valueOf() === sym,
+                wrapper.description === "s",
+                Symbol().hasOwnProperty("description") === false,
+                Symbol.toPrimitive[Symbol.toPrimitive]() === Symbol.toPrimitive,
+                d.writable === false && d.configurable === true && d.enumerable === false,
+                tag.writable === false && tag.configurable === true && tag.enumerable === false,
+                species.name === "get [Symbol.species]",
+                typeof Symbol.dispose === "symbol",
+                Symbol.for("k").description === "k",
+                toStringThrew
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

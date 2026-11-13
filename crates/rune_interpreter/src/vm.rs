@@ -2084,11 +2084,12 @@ impl Vm {
             unsafe {
                 let proto_ptr = sym_proto.heap_ptr().unwrap() as *mut JSObject;
                 if let Some(h) = find_handle(&self.builtins, "Symbol_prototype_toPrimitive") {
-                    JSObject::add_property(
+                    JSObject::add_property_with_attrs(
                         proto_ptr,
                         PropertyKey::from_symbol(rune_core::symbol::SYM_TO_PRIMITIVE),
                         "\u{0}".to_string(),
                         h,
+                        rune_core::shape::ATTR_CONFIGURABLE,
                     );
                 }
                 if let Some(getter) = find_handle(&self.builtins, "Symbol_prototype_description") {
@@ -2103,11 +2104,12 @@ impl Vm {
                     );
                 }
                 let tag_str = HeapString::allocate(gc, "Symbol") as *mut u8;
-                JSObject::add_property(
+                JSObject::add_property_with_attrs(
                     proto_ptr,
                     PropertyKey::from_symbol(rune_core::symbol::SYM_TO_STRING_TAG),
                     "\u{0}".to_string(),
                     Value::from_heap_ptr(tag_str),
+                    rune_core::shape::ATTR_CONFIGURABLE,
                 );
             }
             self.symbol_prototype = sym_proto;
@@ -2144,6 +2146,18 @@ impl Vm {
                     "asyncIterator",
                     Value::symbol(rune_core::symbol::SYM_ASYNC_ITERATOR),
                 ),
+                (
+                    "dispose",
+                    Value::symbol(rune_core::symbol::register_symbol(Some(
+                        "Symbol.dispose".to_string(),
+                    ))),
+                ),
+                (
+                    "asyncDispose",
+                    Value::symbol(rune_core::symbol::register_symbol(Some(
+                        "Symbol.asyncDispose".to_string(),
+                    ))),
+                ),
             ];
             if let Some(h) = find_handle(&self.builtins, "Symbol_for") {
                 ctor_entries.push(("for", h));
@@ -2152,6 +2166,36 @@ impl Vm {
                 ctor_entries.push(("keyFor", h));
             }
             let sym_ctor = make_object(gc, &ctor_entries);
+            if let Some(ptr) = sym_ctor.heap_ptr() {
+                if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_OBJECT {
+                    let obj = ptr as *mut JSObject;
+                    for name in [
+                        "iterator",
+                        "match",
+                        "replace",
+                        "search",
+                        "split",
+                        "toPrimitive",
+                        "hasInstance",
+                        "toStringTag",
+                        "species",
+                        "isConcatSpreadable",
+                        "unscopables",
+                        "matchAll",
+                        "asyncIterator",
+                        "dispose",
+                        "asyncDispose",
+                    ] {
+                        let key = PropertyKey::from_string(name);
+                        let shape = unsafe { JSObject::shape_ptr(obj) };
+                        if let Some(slot) = shape.lookup(&key) {
+                            let new_shape =
+                                rune_core::shape::Shape::with_replaced_attr(shape, slot, 0);
+                            unsafe { JSObject::set_shape_ptr(obj, new_shape) };
+                        }
+                    }
+                }
+            }
             self.symbol_ctor = sym_ctor;
             self.builtin_wrappers.insert("Symbol".to_string(), sym_ctor);
         }
@@ -3087,6 +3131,11 @@ impl Vm {
         let obj_proto_shape = Shape::empty();
         let obj_proto_ptr = JSObject::allocate(gc, obj_proto_shape, &[]);
         self.object_prototype = Value::from_heap_ptr(obj_proto_ptr as *mut u8);
+        if let Some(sym_proto) = self.symbol_prototype.heap_ptr() {
+            unsafe {
+                JSObject::set_prototype(sym_proto as *mut JSObject, obj_proto_ptr as *mut u8)
+            };
+        }
         // Namespace objects created before Object.prototype existed (Reflect)
         // get their prototype and @@toStringTag here.
         if let Some(reflect) = self.builtin_wrappers.get("Reflect").copied() {
@@ -3544,6 +3593,40 @@ impl Vm {
                                 Value::smi(length),
                                 rune_core::shape::ATTR_CONFIGURABLE,
                             );
+                        }
+                    }
+                }
+            }
+        }
+
+        // `get [Symbol.species]` on constructors that lack the inherited
+        // accessor (Array/Promise/RegExp; Map/Set add their own).
+        if let Some(species_getter) = find_handle(&self.builtins, "get [Symbol.species]") {
+            for name in ["Array", "Promise", "RegExp"] {
+                if let Some(ctor) = self.builtin_wrappers.get(name).copied() {
+                    if let Some(ptr) = ctor
+                        .heap_ptr()
+                        .map(|p| unsafe { rune_core::gc::resolve_forwarded(p) })
+                    {
+                        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_OBJECT {
+                            let key = PropertyKey::from_symbol(rune_core::symbol::SYM_SPECIES);
+                            let obj = ptr as *mut JSObject;
+                            if unsafe { JSObject::shape_ptr(obj) }.lookup(&key).is_none() {
+                                let pair = rune_core::accessor::AccessorPair::allocate(
+                                    gc,
+                                    species_getter,
+                                    Value::undefined(),
+                                );
+                                unsafe {
+                                    JSObject::add_property_with_attrs(
+                                        obj,
+                                        key,
+                                        "\u{0}".to_string(),
+                                        Value::from_heap_ptr(pair),
+                                        rune_core::shape::ATTR_CONFIGURABLE,
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -6671,7 +6754,18 @@ impl Vm {
         } else if obj.is_symbol() {
             // Symbol property access — Symbol.prototype plus the
             // per-symbol `description` (computed from the registry).
-            if let Some(ptr) = raw_key.heap_ptr() {
+            if raw_key.as_symbol_id().is_some() {
+                if self.symbol_prototype.is_heap_object() {
+                    load_property_recursive(
+                        self.symbol_prototype,
+                        raw_key,
+                        Some(self.function_prototype),
+                        gc,
+                    )
+                } else {
+                    Value::undefined()
+                }
+            } else if let Some(ptr) = raw_key.heap_ptr() {
                 let key_tag = unsafe { (*(ptr as *const GcHeader)).tag() };
                 if key_tag == TAG_STRING {
                     let key_str = unsafe { HeapString::to_string(ptr as *mut HeapString) };
@@ -6684,20 +6778,22 @@ impl Vm {
                             None => Value::undefined(),
                         }
                     } else if self.symbol_prototype.is_heap_object() {
-                        if let Some(proto_ptr) = self.symbol_prototype.heap_ptr() {
-                            let proto_key = PropertyKey::from_string(&key_str);
-                            let shape = unsafe { JSObject::shape_ptr(proto_ptr as *mut JSObject) };
-                            if let Some(slot) = shape.lookup(&proto_key) {
-                                unsafe { JSObject::get_slot(proto_ptr as *mut JSObject, slot) }
-                            } else {
-                                Value::undefined()
-                            }
-                        } else {
-                            Value::undefined()
-                        }
+                        load_property_recursive(
+                            self.symbol_prototype,
+                            raw_key,
+                            Some(self.function_prototype),
+                            gc,
+                        )
                     } else {
                         Value::undefined()
                     }
+                } else if self.symbol_prototype.is_heap_object() {
+                    load_property_recursive(
+                        self.symbol_prototype,
+                        raw_key,
+                        Some(self.function_prototype),
+                        gc,
+                    )
                 } else {
                     Value::undefined()
                 }
@@ -8825,6 +8921,30 @@ impl Vm {
                     } else if let Some(ptr) = obj.heap_ptr() {
                         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
                         if tag == TAG_OBJECT {
+                            if self.global_this.heap_ptr() == Some(ptr) {
+                                if let Some(kptr) = raw_key.heap_ptr() {
+                                    if unsafe { (*(kptr as *const GcHeader)).tag() } == TAG_STRING {
+                                        let name = unsafe {
+                                            HeapString::to_string(kptr as *mut HeapString)
+                                        };
+                                        if matches!(name.as_str(), "NaN" | "Infinity" | "undefined")
+                                        {
+                                            self.push(Value::boolean(false));
+                                            self.frames[fi].pc = pc + 1;
+                                            continue;
+                                        }
+                                        if self.builtin_wrappers.contains_key(&name)
+                                            || self.globals.contains_key(&name)
+                                        {
+                                            self.builtin_wrappers.remove(&name);
+                                            self.globals.remove(&name);
+                                            self.push(Value::boolean(true));
+                                            self.frames[fi].pc = pc + 1;
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
                             let mut deleted = true;
                             if let Some(key) = value_to_prop_key(raw_key) {
                                 let optr = ptr as *mut JSObject;
@@ -14748,6 +14868,9 @@ pub(crate) fn builtin_display_name(name: &'static str) -> &'static str {
     if name == "get set size" {
         return "get size";
     }
+    if name == "Symbol_prototype_toPrimitive" {
+        return "[Symbol.toPrimitive]";
+    }
     if let Some(pos) = name.find("_prototype_") {
         &name[pos + "_prototype_".len()..]
     } else if let Some(pos) = name.find('_') {
@@ -15765,6 +15888,24 @@ pub(crate) fn do_store_property(
             return do_store_property(extra_val, raw_key, value, gc, vm);
         }
         if tag == TAG_OBJECT {
+            // The global object's properties are the global bindings: a store
+            // through `globalThis.X = v` updates the binding rather than
+            // shadowing it with an own property.
+            if vm.global_this.heap_ptr() == Some(ptr) {
+                if let Some(kptr) = raw_key.heap_ptr() {
+                    if unsafe { (*(kptr as *const GcHeader)).tag() } == TAG_STRING {
+                        let name = unsafe { HeapString::to_string(kptr as *mut HeapString) };
+                        if matches!(name.as_str(), "NaN" | "Infinity" | "undefined") {
+                            return false;
+                        }
+                        if vm.builtin_wrappers.contains_key(&name) || vm.globals.contains_key(&name)
+                        {
+                            vm.globals.insert(name, value);
+                            return true;
+                        }
+                    }
+                }
+            }
             if is_proto_key(raw_key) {
                 // __proto__ assignment = SetPrototypeOf (fails on
                 // non-extensible receivers).
@@ -16275,6 +16416,7 @@ pub(crate) fn value_is_constructor(vm: &Vm, v: Value) -> bool {
             || v == vm.object_constructor
             || v == vm.number_constructor
             || v == vm.boolean_constructor
+            || v == vm.symbol_ctor
             || v == vm.string_constructor
             || v == vm.date_constructor
             || v == vm.regexp_constructor
@@ -16586,6 +16728,14 @@ pub(crate) fn to_object_value(gc: &mut SemiSpace, value: Value, vm: &mut Vm) -> 
             crate::builtins::NUMBER_WRAPPER_KEY,
             value,
             vm.number_prototype,
+        );
+    }
+    if value.as_symbol_id().is_some() {
+        return make_wrapper_value(
+            gc,
+            crate::builtins::SYMBOL_WRAPPER_KEY,
+            value,
+            vm.symbol_prototype,
         );
     }
     value

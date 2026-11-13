@@ -407,12 +407,9 @@ fn main() {
                             0
                         }
                     }
-                    Ok(Err(_)) => {
-                        if mode == "ok" {
-                            1
-                        } else {
-                            0
-                        }
+                    Ok(Err(e)) => {
+                        eprintln!("DBGERR: {e}");
+                        if mode == "ok" { 1 } else { 0 }
                     }
                 };
                 std::process::exit(code);

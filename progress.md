@@ -2423,6 +2423,34 @@ Integration suite: **859 passed, 0 failed, 3 ignored**.
 
 Integration suite: **860 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Symbol wrappers + species/global bindings (2026-11-13)
+
+- Well-known symbol properties on `Symbol` get spec attributes
+  (non-writable/non-enumerable/non-configurable) without affecting same-named
+  ordinary methods on other builtins.
+- `Symbol.prototype[@@toStringTag]`/`@@toPrimitive` are configurable-only;
+  the toPrimitive builtin displays as `[Symbol.toPrimitive]`.
+- `Object(symbol)` creates a real Symbol wrapper (hidden `[[SymbolData]]`);
+  `valueOf`/`toString`/`description`/`@@toPrimitive` unwrap it.
+- `Symbol()`/`Symbol.for()` use synchronous ToPrimitive(string) and propagate
+  throws.
+- Symbol primitive property access now handles symbol keys and walks the full
+  prototype chain (`Symbol.toPrimitive[Symbol.toPrimitive]()`,
+  `Symbol().hasOwnProperty`).
+- Added `Symbol.dispose`/`Symbol.asyncDispose`; `Symbol` is recognisable by
+  `isConstructor` while `new Symbol` still throws.
+- Global object bindings: `globalThis.X = v` updates the binding, and
+  `delete globalThis.X` removes configurable builtin bindings (NaN/Infinity/
+  undefined stay non-configurable).
+- Added `get [Symbol.species]` accessors to Array/Promise/RegExp (Map/Set had
+  them); Promise.prototype.then reads species through the accessor-aware Get.
+- Test262: Symbol **45 → 74/98**, Object **2672 → 2674/3411**, Array
+  **2619 → 2626/3081**, Promise **419 → 425/703**, String 848 → 849/1223.
+- Regression: `test_symbol_wrappers_and_species`.
+- Known remaining Symbol failures are Proxy-dependent.
+
+Integration suite: **861 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

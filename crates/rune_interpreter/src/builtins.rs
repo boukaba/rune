@@ -1371,6 +1371,7 @@ pub fn number_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
 
 pub const BOOLEAN_WRAPPER_KEY: &str = "\u{0}boolean";
 pub const NUMBER_WRAPPER_KEY: &str = "\u{0}number";
+pub const SYMBOL_WRAPPER_KEY: &str = "\u{0}symbol";
 
 /// Boolean(value) — ToBoolean (§20.3.1.1).
 pub fn boolean_builtin(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
@@ -1392,6 +1393,13 @@ fn wrapper_value(this: Value, key: &str) -> Option<Value> {
     shape
         .lookup(&PropertyKey::from_string(key))
         .map(|slot| unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) })
+}
+
+fn symbol_value(this: Value) -> Option<Value> {
+    if this.is_symbol() {
+        return Some(this);
+    }
+    wrapper_value(this, SYMBOL_WRAPPER_KEY)
 }
 
 fn wrapper_value_or_throw(
@@ -1821,15 +1829,22 @@ pub fn symbol_ctor_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm:
             ));
             Value::undefined()
         }
-        Some(v) => match to_primitive_string(gc, v, vm) {
-            Some(s) => Value::symbol(register_symbol(Some(s))),
-            None => {
-                // Pending ToString callback — the Return handler wraps the
-                // toString result into the symbol (see PendingSymbolCoercion).
-                vm.pending_symbol_coercion = Some(crate::vm::PendingSymbolCoercion {
-                    source_frame_depth: vm.frame_depth(),
-                    is_for: false,
-                });
+        Some(v) => match to_primitive_sync(gc, vm, v, "string") {
+            Ok(p) => {
+                if p.as_symbol_id().is_some() {
+                    vm.set_pending_exception(crate::errors::error_object(
+                        gc,
+                        &vm.error_protos,
+                        crate::errors::ErrorKind::TypeError,
+                        "Cannot convert a Symbol value to a string",
+                    ));
+                    Value::undefined()
+                } else {
+                    Value::symbol(register_symbol(Some(value_to_js_string(p))))
+                }
+            }
+            Err(e) => {
+                vm.set_pending_exception(e);
                 Value::undefined()
             }
         },
@@ -1848,13 +1863,22 @@ pub fn symbol_for_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: 
         ));
         return Value::undefined();
     }
-    match to_primitive_string(gc, key, vm) {
-        Some(s) => Value::symbol(symbol_for(&s)),
-        None => {
-            vm.pending_symbol_coercion = Some(crate::vm::PendingSymbolCoercion {
-                source_frame_depth: vm.frame_depth(),
-                is_for: true,
-            });
+    match to_primitive_sync(gc, vm, key, "string") {
+        Ok(p) => {
+            if p.as_symbol_id().is_some() {
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "Cannot convert a Symbol value to a string",
+                ));
+                Value::undefined()
+            } else {
+                Value::symbol(symbol_for(&value_to_js_string(p)))
+            }
+        }
+        Err(e) => {
+            vm.set_pending_exception(e);
             Value::undefined()
         }
     }
@@ -1895,7 +1919,7 @@ pub fn symbol_prototype_to_string(
     _args: &[Value],
     vm: &mut Vm,
 ) -> Value {
-    match this.as_symbol_id() {
+    match symbol_value(this).and_then(|v| v.as_symbol_id()) {
         Some(id) => {
             let s = symbol_display(id);
             let ptr = HeapString::allocate(gc, &s);
@@ -1920,7 +1944,7 @@ pub fn symbol_prototype_description(
     _args: &[Value],
     vm: &mut Vm,
 ) -> Value {
-    let Some(id) = this.as_symbol_id() else {
+    let Some(id) = symbol_value(this).and_then(|v| v.as_symbol_id()) else {
         vm.set_pending_exception(crate::errors::error_object(
             gc,
             &vm.error_protos,
@@ -1937,16 +1961,16 @@ pub fn symbol_prototype_description(
 
 /// §20.4.3.4 Symbol.prototype.valueOf() — the symbol itself.
 pub fn symbol_prototype_value_of(
-    _gc: &mut SemiSpace,
+    gc: &mut SemiSpace,
     this: Value,
     _args: &[Value],
     vm: &mut Vm,
 ) -> Value {
-    if this.is_symbol() {
-        this
+    if let Some(v) = symbol_value(this) {
+        v
     } else {
         vm.set_pending_exception(crate::errors::error_object(
-            _gc,
+            gc,
             &vm.error_protos,
             crate::errors::ErrorKind::TypeError,
             "Symbol.prototype.valueOf requires that 'this' be a Symbol",
@@ -1962,8 +1986,8 @@ pub fn symbol_prototype_to_primitive(
     _args: &[Value],
     vm: &mut Vm,
 ) -> Value {
-    if this.is_symbol() {
-        this
+    if let Some(v) = symbol_value(this) {
+        v
     } else {
         vm.set_pending_exception(crate::errors::error_object(
             gc,
@@ -22608,8 +22632,13 @@ fn promise_species_check(gc: &mut SemiSpace, ptr: *mut u8, vm: &mut Vm) -> Resul
         return Err(());
     }
     let species_key = Value::symbol(rune_core::symbol::SYM_SPECIES);
-    let species =
-        crate::vm::load_property_recursive(ctor, species_key, Some(vm.function_prototype), gc);
+    let species = match get_property_value_sync(gc, vm, ctor, species_key) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Err(());
+        }
+    };
     let species = if species.is_undefined() {
         ctor
     } else {

@@ -9873,8 +9873,11 @@ fn test_symbol_new_throws() {
 #[test]
 fn test_symbol_coercion_throws() {
     let mut ctx = Context::new_small();
-    let r = ctx.eval("String(Symbol('x'));");
-    assert!(r.is_err(), "String(Symbol) should throw TypeError");
+    let r = ctx.eval("String(Symbol('x'));").unwrap();
+    assert_eq!(
+        rune_interpreter::builtins::value_to_js_string(r),
+        "Symbol(x)".to_string()
+    );
     let r2 = ctx.eval("\"a\" + Symbol('x');");
     assert!(r2.is_err(), "string + Symbol should throw TypeError");
     let r3 = ctx.eval("Symbol('x') + 1;");
@@ -15057,6 +15060,30 @@ fn test_promise_species_and_define_delete() {
             var defined = q.x === 5 && Object.keys(q).indexOf("x") >= 0;
             var deleted = delete q.x && q.x === undefined && !Object.prototype.hasOwnProperty.call(q, "x");
             [nullCtorThrew, defined, deleted].join("|") === "true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}
+
+#[test]
+fn test_symbol_prototype_intrinsics() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var s = Symbol("x");
+            var getter = Object.getOwnPropertyDescriptor(Symbol.prototype, "description").get;
+            [
+                Object.getPrototypeOf(s) === Symbol.prototype,
+                Object.getPrototypeOf(1) === Number.prototype,
+                Object.getPrototypeOf(true) === Boolean.prototype,
+                getter.call(s) === "x",
+                getter.call(Symbol()) === undefined,
+                String(s) === "Symbol(x)",
+                s.toString() === "Symbol(x)",
+                Symbol.prototype.valueOf.call(s) === s
+            ].join("|") === "true|true|true|true|true|true|true|true";
             "#,
         )
         .unwrap();

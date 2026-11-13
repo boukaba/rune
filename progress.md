@@ -1517,6 +1517,23 @@ Integration suite: **812 passed, 0 failed, 3 ignored**.
 
 Integration suite: **813 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Symbol brand-aware equality + prototype intrinsics (2026-11-13)
+
+- `assert.sameValue`/same-value equality now compares symbols by registry id
+  (previously every symbol pair returned false, breaking brand assertions).
+- `Object.getPrototypeOf` accepts primitive symbols/numbers/booleans and returns
+  Symbol.prototype / Number.prototype / Boolean.prototype.
+- `Symbol.prototype.description` is now a real getter (configurable accessor);
+  `String(Symbol(x))` returns the descriptive string (abstract ToString still
+  throws; `"a" + Symbol()` still throws).
+- Test262: Symbol **21 → 28/98**; Map **97 → 98/204**.
+- Regression: `test_symbol_prototype_intrinsics`; corrected
+  `test_symbol_coercion_throws` to the spec String(Symbol) result.
+- Known gaps: `Symbol.for(object)` does not run user `toString` (no async
+  ToString in the builtin); Symbol wrapper objects are returned as primitives.
+
+Integration suite: **814 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

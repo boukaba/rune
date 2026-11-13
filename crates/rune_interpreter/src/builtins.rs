@@ -1472,15 +1472,11 @@ pub fn number_prototype_to_string(
 /// Per §21.1.2.1: calls ToString via ToPrimitive with string hint.
 pub fn string_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let arg = args.first().copied().unwrap_or(Value::undefined());
-    // §7.1.12.1 ToString(Symbol) throws TypeError.
-    if arg.is_symbol() {
-        vm.set_pending_exception(crate::errors::error_object(
-            gc,
-            &vm.error_protos,
-            crate::errors::ErrorKind::TypeError,
-            "Cannot convert a Symbol value to a string",
-        ));
-        return Value::undefined();
+    // String(sym) is a special case: it returns the descriptive string even
+    // though abstract ToString(Symbol) throws.
+    if let Some(id) = arg.as_symbol_id() {
+        let text = rune_core::symbol::symbol_display(id);
+        return Value::from_heap_ptr(HeapString::allocate(gc, &text) as *mut u8);
     }
     match to_primitive_string(gc, arg, vm) {
         Some(s) => {
@@ -1601,6 +1597,28 @@ pub fn symbol_prototype_to_string(
             ));
             Value::undefined()
         }
+    }
+}
+
+/// §20.4.3.3 get Symbol.prototype.description.
+pub fn symbol_prototype_description(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(id) = this.as_symbol_id() else {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Symbol.prototype.description requires that 'this' be a Symbol",
+        ));
+        return Value::undefined();
+    };
+    match rune_core::symbol::symbol_description(id) {
+        Some(d) => Value::from_heap_ptr(HeapString::allocate(gc, &d) as *mut u8),
+        None => Value::undefined(),
     }
 }
 
@@ -6759,6 +6777,15 @@ pub fn object_get_prototype_of(
     vm: &mut Vm,
 ) -> Value {
     let obj = args.first().copied().unwrap_or(Value::undefined());
+    if obj.is_symbol() {
+        return vm.symbol_prototype;
+    }
+    if obj.is_boolean() {
+        return vm.boolean_prototype;
+    }
+    if obj.as_smi().is_some() {
+        return vm.number_prototype;
+    }
     let Some(ptr) = obj.heap_ptr() else {
         vm.set_pending_exception(crate::errors::error_object(
             gc,
@@ -21109,6 +21136,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             func: symbol_prototype_value_of,
         },
         Builtin {
+            length: 0,
+            name: "Symbol_prototype_description",
+            func: symbol_prototype_description,
+        },
+        Builtin {
             length: 1,
             name: "Symbol_prototype_toPrimitive",
             func: symbol_prototype_to_primitive,
@@ -22649,6 +22681,10 @@ fn same_value(a: Value, b: Value) -> bool {
     }
     if a.is_null() && b.is_null() {
         return true;
+    }
+    // Symbols compare by identity (registry id / well-known id).
+    if a.is_symbol() || b.is_symbol() {
+        return a.is_symbol() && b.is_symbol() && a.raw() == b.raw();
     }
     // Both booleans
     if let (Some(ab), Some(bb)) = (a.to_boolean(), b.to_boolean()) {

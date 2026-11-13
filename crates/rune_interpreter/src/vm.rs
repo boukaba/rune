@@ -2020,7 +2020,6 @@ impl Vm {
             if let Some(h) = find_handle(&self.builtins, "Symbol_prototype_valueOf") {
                 proto_entries.push(("valueOf", h));
             }
-            proto_entries.push(("description", Value::undefined()));
             proto_entries.push(("constructor", sym_ctor_handle));
             let sym_proto = make_object(gc, &proto_entries);
             // Symbol.prototype[@@toPrimitive] and Symbol.prototype[@@toStringTag]
@@ -2032,6 +2031,17 @@ impl Vm {
                         PropertyKey::from_symbol(rune_core::symbol::SYM_TO_PRIMITIVE),
                         "\u{0}".to_string(),
                         h,
+                    );
+                }
+                if let Some(getter) = find_handle(&self.builtins, "Symbol_prototype_description") {
+                    let pair =
+                        rune_core::accessor::AccessorPair::allocate(gc, getter, Value::undefined());
+                    JSObject::add_property_with_attrs(
+                        proto_ptr,
+                        PropertyKey::from_string("description"),
+                        "description".to_string(),
+                        Value::from_heap_ptr(pair),
+                        rune_core::shape::ATTR_CONFIGURABLE,
                     );
                 }
                 let tag_str = HeapString::allocate(gc, "Symbol") as *mut u8;

@@ -1772,6 +1772,8 @@ impl Vm {
 
         // String.prototype methods
         let char_at_handle = find_handle(&self.builtins, "String_prototype_charAt");
+        let at_handle = find_handle(&self.builtins, "String_prototype_at");
+        let is_well_formed_handle = find_handle(&self.builtins, "String_prototype_isWellFormed");
         let slice_handle = find_handle(&self.builtins, "String_prototype_slice");
         let split_handle = find_handle(&self.builtins, "String_prototype_split");
         let index_of_handle = find_handle(&self.builtins, "String_prototype_indexOf");
@@ -1831,6 +1833,12 @@ impl Vm {
             }
             if let Some(cp) = code_point_at_handle {
                 str_proto_entries.push(("codePointAt", cp));
+            }
+            if let Some(at) = at_handle {
+                str_proto_entries.push(("at", at));
+            }
+            if let Some(wf) = is_well_formed_handle {
+                str_proto_entries.push(("isWellFormed", wf));
             }
             if let Some(sb) = substring_handle {
                 str_proto_entries.push(("substring", sb));

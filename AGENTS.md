@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **String at/isWellFormed/coercion (2026-11-13)**: at/isWellFormed, sync ToInteger positions, ToPrimitive length coercion, exponential +/-0. String **907/1223**, Number **329/340**, Object **2695/3411**, Array **2628/3081**. Integration **863**.
 - **String wrapper props/ToInteger (2026-11-13)**: StringObject extra_props, own descriptors, real ToIntegerOrInfinity + sync string positions. String **890/1223**, Object **2695/3411**, Array **2628/3081**. Integration **863**.
 - **Error descriptors/equality (2026-11-13)**: Error attrs, accessor-aware toString, wrapper loose equality. Error **51/93**, Object **2693/3411**, Number **320/340**, Boolean **45/51**. Integration **862**.
 - **Symbol wrappers/species/globals (2026-11-13)**: well-known attrs, Symbol wrappers, symbol-key prototype lookup, global binding writes/deletes, species getters. Symbol **74/98**, Array **2626/3081**, Promise **425/703**, Object **2674/3411**. Integration **861**.

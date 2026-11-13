@@ -1678,6 +1678,13 @@ pub fn number_prototype_to_exponential(
     let Some(x) = number_receiver(gc, vm, this, "Number.prototype.toExponential") else {
         return Value::undefined();
     };
+    if x.is_nan() {
+        return Value::from_heap_ptr(HeapString::allocate(gc, "NaN") as *mut u8);
+    }
+    if x.is_infinite() {
+        let text = if x < 0.0 { "-Infinity" } else { "Infinity" };
+        return Value::from_heap_ptr(HeapString::allocate(gc, text) as *mut u8);
+    }
     let f = match args.first() {
         None => None,
         Some(v) if v.is_undefined() => None,
@@ -1686,13 +1693,7 @@ pub fn number_prototype_to_exponential(
             None => return Value::undefined(),
         },
     };
-    let text = if x.is_nan() {
-        "NaN".to_string()
-    } else if x.is_infinite() {
-        if x < 0.0 { "-Infinity" } else { "Infinity" }.to_string()
-    } else {
-        format_exponential(x, f)
-    };
+    let text = format_exponential(if x == 0.0 { 0.0 } else { x }, f);
     Value::from_heap_ptr(HeapString::allocate(gc, &text) as *mut u8)
 }
 
@@ -1737,6 +1738,13 @@ pub fn number_prototype_to_precision(
     let Some(x) = number_receiver(gc, vm, this, "Number.prototype.toPrecision") else {
         return Value::undefined();
     };
+    if x.is_nan() {
+        return Value::from_heap_ptr(HeapString::allocate(gc, "NaN") as *mut u8);
+    }
+    if x.is_infinite() {
+        let text = if x < 0.0 { "-Infinity" } else { "Infinity" };
+        return Value::from_heap_ptr(HeapString::allocate(gc, text) as *mut u8);
+    }
     let p = match args.first() {
         None => {
             return Value::from_heap_ptr(HeapString::allocate(
@@ -13781,57 +13789,16 @@ fn length_to_number(gc: &mut SemiSpace, vm: &mut Vm, v: Value) -> Result<f64, Va
         }
         // String objects coerce by their inner string (own valueOf
         // overrides are a documented gap — B1f-6 dispatches methods).
-        if tag == TAG_STRING_OBJ {
-            let str_ptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
-            let s = unsafe { HeapString::to_string(str_ptr as *mut HeapString) };
-            let t = s.trim();
-            if t.is_empty() {
-                return Ok(0.0);
-            }
-            return Ok(crate::vm::to_number(v));
-        }
-        if tag == TAG_OBJECT {
-            // OrdinaryToPrimitive needs a callable valueOf or toString: a
-            // method-less object (null prototype, no own methods) throws
-            // TypeError instead of reading 0 (flat null-depth). A name that
-            // resolves to a JS function stays the 6e sync-gap (reads 0).
-            let mut found_any = false;
-            for name in ["valueOf", "toString"] {
-                let key = PropertyKey::from_string(name);
-                let method = toprim_find_method(v, &key);
-                let Some(m) = method else { continue };
-                found_any = true;
-                let Some(smi) = m.as_smi() else { continue };
-                if smi >= 0 {
-                    continue;
-                }
-                let id = ((-smi) as usize) - 1;
-                if id >= vm.builtins.len() {
-                    continue;
-                }
-                let result = (vm.builtins[id].func)(gc, v, &[], vm);
-                if let Some(exc) = vm.pending_exception.take() {
-                    return Err(exc);
-                }
-                if toprim_is_primitive(result) {
-                    if result.is_symbol() {
-                        return Err(sort_type_error(
-                            gc,
-                            vm,
-                            "Cannot convert a Symbol value to a number",
-                        ));
-                    }
-                    return Ok(crate::vm::to_number(result));
-                }
-                // Non-primitive: fall through to the next method.
-            }
-            if !found_any {
+        if tag == TAG_STRING_OBJ || tag == TAG_OBJECT {
+            let prim = to_primitive_sync(gc, vm, v, "number")?;
+            if prim.is_symbol() {
                 return Err(sort_type_error(
                     gc,
                     vm,
-                    "Cannot convert object to primitive value",
+                    "Cannot convert a Symbol value to a number",
                 ));
             }
+            return Ok(crate::vm::to_number(prim));
         }
     }
     Ok(0.0)
@@ -15418,6 +15385,56 @@ pub(crate) fn to_integer_or_infinity(v: Value) -> f64 {
     } else {
         n.trunc()
     }
+}
+
+/// String.prototype.at(index) — §22.1.3.1.
+pub fn string_at(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let Some(s) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let idx = to_int_sync!(gc, vm, args.first().copied().unwrap_or(Value::undefined())) as isize;
+    let units = s.encode_utf16().collect::<Vec<u16>>();
+    let len = units.len() as isize;
+    let index = if idx < 0 { len + idx } else { idx };
+    if index < 0 || index >= len {
+        return Value::undefined();
+    }
+    let unit = units[index as usize];
+    Value::from_heap_ptr(HeapString::allocate(gc, &String::from_utf16_lossy(&[unit])) as *mut u8)
+}
+
+/// String.prototype.isWellFormed() — §22.1.3.29.
+pub fn string_is_well_formed(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let Some(s) = to_primitive_string(gc, this, vm) else {
+        return Value::undefined();
+    };
+    let units = s.encode_utf16().collect::<Vec<u16>>();
+    let mut i = 0;
+    while i < units.len() {
+        let u = units[i];
+        if (0xD800..=0xDBFF).contains(&u) {
+            if i + 1 >= units.len() || !(0xDC00..=0xDFFF).contains(&units[i + 1]) {
+                return Value::boolean(false);
+            }
+            i += 2;
+        } else if (0xDC00..=0xDFFF).contains(&u) {
+            return Value::boolean(false);
+        } else {
+            i += 1;
+        }
+    }
+    Value::boolean(true)
 }
 
 /// String.prototype.charCodeAt(index) — returns 16-bit UTF-16 code unit at position.
@@ -25658,6 +25675,16 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 1,
             name: "String_prototype_charAt",
             func: string_char_at,
+        },
+        Builtin {
+            length: 1,
+            name: "String_prototype_at",
+            func: string_at,
+        },
+        Builtin {
+            length: 0,
+            name: "String_prototype_isWellFormed",
+            func: string_is_well_formed,
         },
         Builtin {
             length: 2,

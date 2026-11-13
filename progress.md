@@ -2497,6 +2497,29 @@ Integration suite: **862 passed, 0 failed, 3 ignored**.
 
 Integration suite: **863 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — String at/isWellFormed + coercion/formatting (2026-11-13)
+
+- Added `String.prototype.at` (relative indices, UTF-16 units, undefined OOB)
+  and `String.prototype.isWellFormed` (surrogate-pair validation); both wired
+  into String.prototype.
+- `to_integer_or_infinity` was a stub; now real ToNumber/truncation, plus a
+  synchronous ToPrimitive(number) path used by:
+  - indexOf/includes/startsWith/endsWith, charCodeAt/codePointAt, charAt;
+  - substring/substr/slice, repeat, padStart/padEnd;
+  - split limit (full ToUint32 object coercion + throw propagation).
+- `length_to_number` now uses OrdinaryToPrimitive (sync ToPrimitive) for
+  String wrappers and objects, so Number formatting methods propagate
+  `valueOf`/`toString` throws instead of defaulting to 0/NaN.
+- toExponential returns NaN/Infinity before fraction digit formatting and
+  normalizes `-0` to `+0`; toFixed keeps spec coercion-before-NaN order.
+- Test262: String **849 → 907/1223**, Number **320 → 329/340**, Object
+  **2674 → 2695/3411**, Array **2626 → 2628/3081**.
+- Regression: `test_string_wrapper_properties_and_position_coercion`.
+- Known: exact toExponential/toPrecision decimal rounding; some Regexp-driven
+  String methods still fail; runner shows occasional formatting-suite noise.
+
+Integration suite: **863 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

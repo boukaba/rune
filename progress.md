@@ -1992,6 +1992,27 @@ Integration suite: **838 passed, 0 failed, 3 ignored**.
 
 Integration suite: **839 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — RegExp lastIndex data property + exec coercion (2026-11-13)
+
+- Retried the previously-reverted `lastIndex` work now that `to_number_sync`
+  exists:
+  - assignments store the **raw** value in the RegExp extra-props object;
+  - the getter/`Get` path reads that data property;
+  - `RegExpBuiltinExec` always ToLengths it through the re-entrant ToNumber
+    path (so `valueOf` runs and can throw), even for non-global regexps where
+    the value is ignored;
+  - global/sticky writes go through the same data property.
+- Updated String.match/search and RegExp `@@match`/`@@search` to read/write the
+  property consistently, including resets to 0.
+- Test262: RegExp/prototype **189 → 194/487**, `exec` **38 → 48/79**,
+  String **833 → 834/1223**.
+- Regression: `test_regexp_last_index_data_property`; corrected
+  `test_regexp_match_global_lastindex` again after the reset-path fix.
+- Known: interim measurements were 196/197 before tightening match resets; a
+  couple of `@@match` cases still differ on final lastIndex.
+
+Integration suite: **840 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

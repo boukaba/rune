@@ -14563,12 +14563,17 @@ pub fn string_match(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
             None => Value::null(),
         }
     } else {
-        unsafe {
-            RegExp::set_last_index(rx_ptr, 0);
-        }
+        regexp_set_last_index_value(gc, rx_ptr, Value::smi(0));
         let mut matched_strings: Vec<String> = Vec::new();
         loop {
-            let last_index = unsafe { RegExp::last_index(rx_ptr) } as usize;
+            let last_index = match to_number_sync(gc, vm, regexp_last_index_value(rx_ptr)) {
+                Ok(n) if !n.is_nan() && n > 0.0 => n as usize,
+                Ok(_) => 0,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            };
             match regexp_exec_internal(gc, rx_ptr, &s, last_index) {
                 Some(groups) => {
                     let (gs, ge) = groups[0];
@@ -14579,9 +14584,7 @@ pub fn string_match(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
                     } else {
                         ge
                     };
-                    unsafe {
-                        RegExp::set_last_index(rx_ptr, next_start as u32);
-                    }
+                    regexp_set_last_index_value(gc, rx_ptr, Value::smi(next_start as i32));
                 }
                 None => break,
             }
@@ -14645,15 +14648,13 @@ pub fn string_search(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
 
     // §22.2.6.12 steps 4-8: lastIndex is reset to 0 before the exec and
     // restored afterwards — search ignores the "lastIndex"/"global" state.
-    let prev_li = unsafe { RegExp::last_index(rx_ptr) };
-    if prev_li != 0 {
-        unsafe { RegExp::set_last_index(rx_ptr, 0) };
-    }
+    let prev_li = regexp_last_index_value(rx_ptr);
+    regexp_set_last_index_value(gc, rx_ptr, Value::smi(0));
     let result = match regexp_exec_internal(gc, rx_ptr, &s, 0) {
         Some(groups) => Value::smi(groups[0].0 as i32),
         None => Value::smi(-1),
     };
-    unsafe { RegExp::set_last_index(rx_ptr, prev_li) };
+    regexp_set_last_index_value(gc, rx_ptr, prev_li);
     result
 }
 
@@ -24517,8 +24518,21 @@ pub fn regexp_exec(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
     let global = unsafe { RegExp::has_flag(regexp_ptr, 0) };
     let sticky = unsafe { RegExp::has_flag(regexp_ptr, 5) };
 
+    // RegExpBuiltinExec reads/ToLengths lastIndex even for non-global regexps
+    // (the value is then ignored unless global/sticky).
+    let last_index_number = match to_number_sync(gc, vm, regexp_last_index_value(regexp_ptr)) {
+        Ok(n) => n,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
     let mut last = if global || sticky {
-        unsafe { RegExp::last_index(regexp_ptr) as usize }
+        if last_index_number.is_nan() || last_index_number <= 0.0 {
+            0usize
+        } else {
+            last_index_number as usize
+        }
     } else {
         0
     };
@@ -24527,7 +24541,7 @@ pub fn regexp_exec(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
         // §22.2.7.2 step 9.a: lastIndex beyond the string → reset + null.
         if last > len {
             if global || sticky {
-                unsafe { RegExp::set_last_index(regexp_ptr, 0) };
+                regexp_set_last_index_value(gc, regexp_ptr, Value::smi(0));
             }
             return Value::null();
         }
@@ -24537,14 +24551,14 @@ pub fn regexp_exec(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
                 // §22.2.7.2 step 10: sticky requires the match to start
                 // exactly at lastIndex; any later match is a failure.
                 if sticky && start != last {
-                    unsafe { RegExp::set_last_index(regexp_ptr, 0) };
+                    regexp_set_last_index_value(gc, regexp_ptr, Value::smi(0));
                     return Value::null();
                 }
                 // §22.2.7.2 step 12: global/sticky advance lastIndex to the
                 // match end (zero-length matches keep the same lastIndex; the
                 // caller advances to avoid infinite loops).
                 if global || sticky {
-                    unsafe { RegExp::set_last_index(regexp_ptr, end as u32) };
+                    regexp_set_last_index_value(gc, regexp_ptr, Value::smi(end as i32));
                 }
                 return make_match_result_array(gc, &groups, &s, start, vm.array_prototype);
             }
@@ -24552,11 +24566,51 @@ pub fn regexp_exec(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
                 // Failure: sticky returns null immediately (lastIndex = 0);
                 // otherwise advance one code unit and retry.
                 if sticky {
-                    unsafe { RegExp::set_last_index(regexp_ptr, 0) };
+                    regexp_set_last_index_value(gc, regexp_ptr, Value::smi(0));
                     return Value::null();
                 }
                 last += 1;
             }
+        }
+    }
+}
+
+/// RegExp lastIndex is an ordinary data property stored in extra_props once
+/// written; RegExpBuiltinExec performs ToLength on it.
+pub(crate) fn regexp_last_index_value(ptr: *mut u8) -> Value {
+    let extra = unsafe { RegExp::extra_props(ptr) };
+    if !extra.is_null() {
+        let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+        if let Some(slot) = shape.lookup(&PropertyKey::from_string("lastIndex")) {
+            return unsafe { JSObject::get_slot(extra as *mut JSObject, slot) };
+        }
+    }
+    Value::smi(unsafe { RegExp::last_index(ptr) } as i32)
+}
+
+pub(crate) fn regexp_set_last_index_value(gc: &mut SemiSpace, ptr: *mut u8, value: Value) {
+    let mut live = unsafe { rune_core::gc::resolve_forwarded(ptr) };
+    let mut extra = unsafe { RegExp::extra_props(live) };
+    if extra.is_null() {
+        let new_extra = JSObject::allocate(gc, Shape::empty(), &[]);
+        live = unsafe { rune_core::gc::resolve_forwarded(live) };
+        unsafe { RegExp::set_extra_props(live, new_extra as *mut u8) };
+        extra = unsafe { RegExp::extra_props(live) };
+    }
+    let eobj = extra as *mut JSObject;
+    let key = PropertyKey::from_string("lastIndex");
+    let shape = unsafe { JSObject::shape_ptr(eobj) };
+    if let Some(slot) = shape.lookup(&key) {
+        unsafe { JSObject::set_slot(eobj, slot, value) };
+    } else {
+        unsafe {
+            JSObject::add_property_with_attrs(
+                eobj,
+                key,
+                "lastIndex".to_string(),
+                value,
+                rune_core::shape::ATTR_WRITABLE,
+            );
         }
     }
 }
@@ -24578,16 +24632,23 @@ pub fn regexp_symbol_match(gc: &mut SemiSpace, this: Value, args: &[Value], vm: 
         .unwrap_or_default();
     let global = unsafe { RegExp::has_flag(rx, 0) };
     if !global {
-        unsafe { RegExp::set_last_index(rx, 0) };
+        regexp_set_last_index_value(gc, rx, Value::smi(0));
         return regexp_exec(gc, this, args, vm);
     }
-    unsafe { RegExp::set_last_index(rx, 0) };
+    regexp_set_last_index_value(gc, rx, Value::smi(0));
     let asym = input.as_bytes();
     let mut matched: Vec<String> = Vec::new();
     loop {
-        let last = unsafe { RegExp::last_index(rx) } as usize;
+        let last = match to_number_sync(gc, vm, regexp_last_index_value(rx)) {
+            Ok(n) if !n.is_nan() && n > 0.0 => n as usize,
+            Ok(_) => 0,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        };
         if last > asym.len() {
-            unsafe { RegExp::set_last_index(rx, 0) };
+            regexp_set_last_index_value(gc, rx, Value::smi(0));
             break;
         }
         match regexp_exec_internal(gc, rx, &input, last) {
@@ -24608,14 +24669,14 @@ pub fn regexp_symbol_match(gc: &mut SemiSpace, this: Value, args: &[Value], vm: 
                 } else {
                     end
                 };
-                unsafe { RegExp::set_last_index(rx, next as u32) };
+                regexp_set_last_index_value(gc, rx, Value::smi(next as i32));
                 if start == end && next >= asym.len() {
-                    unsafe { RegExp::set_last_index(rx, 0) };
+                    regexp_set_last_index_value(gc, rx, Value::smi(0));
                     break;
                 }
             }
             None => {
-                unsafe { RegExp::set_last_index(rx, 0) };
+                regexp_set_last_index_value(gc, rx, Value::smi(0));
                 break;
             }
         }
@@ -24853,13 +24914,13 @@ pub fn regexp_symbol_search(gc: &mut SemiSpace, this: Value, args: &[Value], vm:
         .first()
         .map(|v| string_from_value(*v))
         .unwrap_or_default();
-    let prev = unsafe { RegExp::last_index(rx) };
-    unsafe { RegExp::set_last_index(rx, 0) };
+    let prev = regexp_last_index_value(rx);
+    regexp_set_last_index_value(gc, rx, Value::smi(0));
     let result = match regexp_exec_internal(gc, rx, &input, 0) {
         Some(groups) => Value::smi(groups[0].0 as i32),
         None => Value::smi(-1),
     };
-    unsafe { RegExp::set_last_index(rx, prev) };
+    regexp_set_last_index_value(gc, rx, prev);
     result
 }
 
@@ -25145,6 +25206,5 @@ pub fn regexp_last_index(_gc: &mut SemiSpace, this: Value, _args: &[Value], _vm:
         Some(p) => p,
         None => return Value::undefined(),
     };
-    let li = unsafe { RegExp::last_index(regexp_ptr) };
-    Value::smi(li as i32)
+    regexp_last_index_value(regexp_ptr)
 }

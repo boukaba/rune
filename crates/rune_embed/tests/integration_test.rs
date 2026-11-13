@@ -15740,3 +15740,35 @@ fn test_date_setter_sync_to_number() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_regexp_last_index_data_property() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var gets = 0;
+            var counter = { valueOf: function () { gets += 1; return 0; } };
+            var local = /./;
+            local.lastIndex = counter;
+            var match = local.exec("abc");
+            var global = /a/g;
+            global.lastIndex = 0;
+            var first = global.exec("aba");
+            var advanced = global.lastIndex;
+            global.exec("aba");
+            var done = global.exec("aba");
+            [
+                match[0] === "a",
+                local.lastIndex === counter,
+                gets === 1,
+                first[0] === "a",
+                advanced === 1,
+                done === null,
+                global.lastIndex === 0
+            ].join("|") === "true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

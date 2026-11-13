@@ -15096,8 +15096,7 @@ pub(crate) fn load_property_recursive(
                             return Value::from_heap_ptr(ptr as *mut u8);
                         }
                         if key_str == "lastIndex" {
-                            let li = unsafe { rune_core::regexp::RegExp::last_index(ptr) };
-                            return Value::smi(li as i32);
+                            return crate::builtins::regexp_last_index_value(ptr);
                         }
                     }
                 }
@@ -15707,9 +15706,7 @@ pub(crate) fn do_store_property(
                 if key_tag == TAG_STRING {
                     let key_str = unsafe { HeapString::to_string(key_ptr as *mut HeapString) };
                     if key_str == "lastIndex" {
-                        let n = to_number(value);
-                        let clamped = if n.is_nan() || n <= 0.0 { 0 } else { n as u32 };
-                        unsafe { rune_core::regexp::RegExp::set_last_index(ptr, clamped) };
+                        crate::builtins::regexp_set_last_index_value(gc, ptr, value);
                         handled = true;
                     }
                 }

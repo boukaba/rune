@@ -8281,22 +8281,64 @@ impl Vm {
                     let result = if let Some(ptr) = obj.heap_ptr() {
                         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
                         if tag == TAG_OBJECT {
+                            let mut deleted = true;
                             if let Some(key) = value_to_prop_key(raw_key) {
-                                unsafe { JSObject::remove_property(ptr as *mut JSObject, &key) };
-                            }
-                            // B1f-5: object configurability enforcement stays
-                            // A4-owned (remove_property is authoritative there).
-                            Value::boolean(true)
-                        } else if tag == TAG_PROMISE {
-                            let extra = unsafe { Promise::extra_props(ptr) };
-                            if !extra.is_null() {
-                                if let Some(key) = value_to_prop_key(raw_key) {
-                                    unsafe {
-                                        JSObject::remove_property(extra as *mut JSObject, &key)
-                                    };
+                                let optr = ptr as *mut JSObject;
+                                let shape = unsafe { JSObject::shape_ptr(optr) };
+                                if let Some(slot) = shape.lookup(&key) {
+                                    if shape.attr_at(slot) & rune_core::shape::ATTR_CONFIGURABLE
+                                        == 0
+                                    {
+                                        deleted = false;
+                                    } else {
+                                        unsafe { JSObject::remove_property(optr, &key) };
+                                    }
                                 }
                             }
-                            Value::boolean(true)
+                            if !deleted && self.executing_is_strict(fi) {
+                                let e = crate::errors::error_object(
+                                    gc,
+                                    &self.error_protos,
+                                    crate::errors::ErrorKind::TypeError,
+                                    "Cannot delete property",
+                                );
+                                if let Some(exit) = self.handle_throw(gc, e) {
+                                    return exit;
+                                }
+                                continue 'run;
+                            }
+                            Value::boolean(deleted)
+                        } else if tag == TAG_PROMISE {
+                            let extra = unsafe { Promise::extra_props(ptr) };
+                            let mut deleted = true;
+                            if !extra.is_null() {
+                                if let Some(key) = value_to_prop_key(raw_key) {
+                                    let eptr = extra as *mut JSObject;
+                                    let shape = unsafe { JSObject::shape_ptr(eptr) };
+                                    if let Some(slot) = shape.lookup(&key) {
+                                        if shape.attr_at(slot) & rune_core::shape::ATTR_CONFIGURABLE
+                                            == 0
+                                        {
+                                            deleted = false;
+                                        } else {
+                                            unsafe { JSObject::remove_property(eptr, &key) };
+                                        }
+                                    }
+                                }
+                            }
+                            if !deleted && self.executing_is_strict(fi) {
+                                let e = crate::errors::error_object(
+                                    gc,
+                                    &self.error_protos,
+                                    crate::errors::ErrorKind::TypeError,
+                                    "Cannot delete property",
+                                );
+                                if let Some(exit) = self.handle_throw(gc, e) {
+                                    return exit;
+                                }
+                                continue 'run;
+                            }
+                            Value::boolean(deleted)
                         } else if tag == TAG_ARRAY {
                             // B1f-5: configurability-checked delete (holes and
                             // missing keys succeed vacuously; locked indices
@@ -8310,6 +8352,7 @@ impl Vm {
                                         if let Some(exit) = self.handle_throw(gc, e) {
                                             return exit;
                                         }
+                                        continue 'run;
                                     }
                                     Value::boolean(false)
                                 }

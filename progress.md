@@ -1761,6 +1761,23 @@ Integration suite: **825 passed, 0 failed, 3 ignored**.
 
 Integration suite: **826 passed, 0 failed, 3 ignored**.
 
+### Phase 1 — Delete honors [[Configurable]] (2026-11-13)
+
+- `delete` on plain objects and Promise extra properties previously removed
+  locked properties unconditionally; it now checks the shape's
+  `ATTR_CONFIGURABLE` bit and preserves non-configurable properties.
+- Strict-mode deletion of a non-configurable property throws a catchable
+  TypeError; after a caught strict delete the interpreter resumes at the catch
+  target (`continue 'run`) instead of indexing a stale frame.
+- Test262: Object **2229 → 2436/3411**; Array 2536 → 2542/3081;
+  `defineProperty` 860/1131.
+- Regression: `test_delete_non_configurable_property`.
+- Known gap: `Array.prototype.hasOwnProperty` still misses named extra
+  properties (`a.y` defined via defineProperty), though the property itself is
+  preserved.
+
+Integration suite: **827 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

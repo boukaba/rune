@@ -15412,3 +15412,28 @@ fn test_for_in_break_and_continue_cleanup() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_delete_non_configurable_property() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var o = {};
+            Object.defineProperty(o, "x", { value: 7, configurable: false });
+            var sloppyDelete = delete o.x;
+            var stillThere = o.x === 7;
+            var threw = false;
+            try {
+                (function () { "use strict"; delete o.x; })();
+            } catch (e) {
+                threw = e instanceof TypeError;
+            }
+            var configurable = { y: 1 };
+            var deleted = delete configurable.y;
+            sloppyDelete === false && stillThere && threw && deleted;
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

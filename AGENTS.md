@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Non-configurable delete fixed (2026-11-13)**: delete checks ATTR_CONFIGURABLE, strict TypeError, caught-throw resume. Object 2229→**2436/3411**. Integration **827**.
 - **For-in break/continue fixed (2026-11-13)**: sentinel break/continue jumps patched; break cleanup pops loop state; propertyHelper no longer hangs. Object 2048→**2229/3411**. Integration **826**.
 - **Harness helpers enabled (2026-11-13)**: propertyHelper/dateConstants/nans/byteConversionValues. Object **2046/3411**, Date **357/594**, Math **217/327**, Array **2536/3081**. Integration **825**.
 - **TypedArray Array methods + isPrimitive (2026-11-13)**: Array-compatible prototype methods; Test262 isPrimitive global. TypedArray 15→**89/829**. Integration **825**.

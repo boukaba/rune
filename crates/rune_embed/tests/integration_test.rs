@@ -15437,3 +15437,26 @@ fn test_delete_non_configurable_property() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_array_named_property_has_own_and_enumerable() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var a = [];
+            a.y = 1;
+            Object.defineProperty(a, "z", { value: 2, enumerable: false });
+            [
+                a.hasOwnProperty("y"),
+                a.hasOwnProperty("z"),
+                a.propertyIsEnumerable("y"),
+                !a.propertyIsEnumerable("z"),
+                a.hasOwnProperty("length"),
+                !a.hasOwnProperty("missing")
+            ].join("|") === "true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

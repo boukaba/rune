@@ -7123,8 +7123,19 @@ pub fn object_prototype_has_own_property(
                             index,
                         )
                     } != Value::empty_sentinel()
+            } else if let Some(pk) = value_to_prop_key(key) {
+                if pk.as_u64() == PropertyKey::from_string("length").as_u64() {
+                    true
+                } else {
+                    let extra =
+                        unsafe { rune_core::array::RuneArray::extra_props(ptr as *mut RuneArray) };
+                    !extra.is_null()
+                        && unsafe { JSObject::shape_ptr(extra as *mut JSObject) }
+                            .lookup(&pk)
+                            .is_some()
+                }
             } else {
-                key_is_str("length")
+                false
             }
         }
         TAG_TYPED_ARRAY => {
@@ -7258,8 +7269,23 @@ pub fn object_prototype_property_is_enumerable(
                             index,
                         )
                     } != Value::empty_sentinel()
+            } else if let Some(pk) = value_to_prop_key(key) {
+                if pk.as_u64() == PropertyKey::from_string("length").as_u64() {
+                    true
+                } else {
+                    let overlay =
+                        unsafe { rune_core::array::RuneArray::extra_props(ptr as *mut RuneArray) };
+                    if overlay.is_null() {
+                        false
+                    } else {
+                        let oshape = unsafe { JSObject::shape_ptr(overlay as *mut JSObject) };
+                        oshape.lookup(&pk).is_some_and(|slot| {
+                            oshape.attr_at(slot) & rune_core::shape::ATTR_ENUMERABLE != 0
+                        })
+                    }
+                }
             } else {
-                key_is_str("length")
+                false
             }
         }
         TAG_TYPED_ARRAY => {
@@ -7899,6 +7925,13 @@ pub fn object_has_own(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
                 let extra = unsafe { RuneArray::extra_props(ptr as *mut RuneArray) };
                 if !extra.is_null() {
                     let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                    if std::env::var("RUNE_DEBUG_HASOWN").is_ok() {
+                        eprintln!(
+                            "HASOWN count={} lookup={:?}",
+                            shape.property_count,
+                            shape.lookup(&pk)
+                        );
+                    }
                     Value::boolean(shape.lookup(&pk).is_some())
                 } else {
                     Value::boolean(false)

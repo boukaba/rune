@@ -1778,6 +1778,19 @@ Integration suite: **826 passed, 0 failed, 3 ignored**.
 
 Integration suite: **827 passed, 0 failed, 3 ignored**.
 
+### Phase 1 — Array named properties in ownership checks (2026-11-13)
+
+- `Object.prototype.hasOwnProperty` on arrays previously returned false for
+  named properties stored in the array's extra-props overlay (e.g. `a.y = 1`),
+  while `getOwnPropertyDescriptor` and `Object.keys` already saw them.
+- `hasOwnProperty` and `propertyIsEnumerable` now consult the overlay shape for
+  non-index keys (including stored enumerability) and still special-case
+  `length`.
+- Test262: Object **2436 → 2495/3411**; Array 2542/3081.
+- Regression: `test_array_named_property_has_own_and_enumerable`.
+
+Integration suite: **828 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

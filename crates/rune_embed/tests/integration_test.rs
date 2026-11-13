@@ -16291,3 +16291,26 @@ fn test_string_raw_and_code_point_coercions() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_tagged_template() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            function tag(strings) {
+                var subs = Array.prototype.slice.call(arguments, 1);
+                return strings[0] + subs[0] + strings[1] + "|" +
+                    strings.raw[0] + subs[0] + strings.raw[1];
+            }
+            var obj = { v: 2, m: function (s) { return this.v + s[0]; } };
+            [
+                tag`a${1}b` === "a1b|a1b",
+                String.raw`x${2}y` === "x2y",
+                obj.m`z` === "2z"
+            ].join("|") === "true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

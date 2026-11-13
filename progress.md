@@ -2312,6 +2312,25 @@ Integration suite: **856 passed, 0 failed, 3 ignored**.
 
 Integration suite: **857 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Tagged template literals (2026-11-13)
+
+- Added `Expr::TaggedTemplate` (pollution of an earlier silent misparse that
+  treated `tag\`…\`` as two adjacent expressions).
+- Parser postfix handles `TemplateNoSub`/`TemplateHead` chains.
+- Emitter constructs an argument template object:
+  - cooked array-backed object (indexed reads work);
+  - `raw` array attached through the ordinary StoreProperty path;
+  - substitution expressions passed after the template object;
+  - member tags preserve the receiver (`obj.m\`…\`` has `this === obj`).
+- Test262: `language/expressions/tagged-template` **0 → 11/27**,
+  `String/raw` **24 → 26/30**, String **846 → 847/1223**.
+- Regression: `test_tagged_template`.
+- Known: no per-site template-object caching (identity tests fail), template
+  objects/raw are not frozen, invalid-escape cooked/raw distinctions missing,
+  and `new tag\`…\`` is unsupported.
+
+Integration suite: **858 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

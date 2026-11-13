@@ -3504,6 +3504,51 @@ impl Emitter {
                     _ => {}
                 }
             }
+            Expr::TaggedTemplate {
+                tag, parts, exprs, ..
+            } => {
+                match tag.as_ref() {
+                    Expr::Member(obj, prop, computed, _) => {
+                        self.emit_expression(obj);
+                        self.emit(Opcode::Dup, vec![]);
+                        if *computed {
+                            self.emit_expression(prop);
+                        } else {
+                            let name = prop_name_as_string(prop);
+                            let idx = self.intern_string(&name) as i64;
+                            self.emit(Opcode::LoadStringConst, vec![idx]);
+                        }
+                        self.emit(Opcode::LoadProperty, vec![]);
+                    }
+                    _ => {
+                        self.emit(Opcode::LoadUndefined, vec![]);
+                        self.emit_expression(tag);
+                    }
+                }
+                // Template object: array-backed so cooked indexed reads work;
+                // `raw` is attached as an extra property.
+                self.emit(Opcode::NewArray, vec![0]);
+                for part in parts {
+                    let idx = self.intern_string(part) as i64;
+                    self.emit(Opcode::LoadStringConst, vec![idx]);
+                    self.emit(Opcode::ArrayPush, vec![]);
+                }
+                self.emit(Opcode::Dup, vec![]);
+                let raw_key = self.intern_string("raw") as i64;
+                self.emit(Opcode::LoadStringConst, vec![raw_key]);
+                self.emit(Opcode::NewArray, vec![0]);
+                for part in parts {
+                    let idx = self.intern_string(part) as i64;
+                    self.emit(Opcode::LoadStringConst, vec![idx]);
+                    self.emit(Opcode::ArrayPush, vec![]);
+                }
+                self.emit(Opcode::StoreProperty, vec![]);
+                self.emit(Opcode::Pop, vec![]);
+                for e in exprs {
+                    self.emit_expression(e);
+                }
+                self.emit(Opcode::Call, vec![exprs.len() as i64 + 1, 0]);
+            }
             Expr::Array(elems, _) => {
                 self.emit(Opcode::NewArray, vec![0]);
                 for elem in elems {
@@ -4148,6 +4193,9 @@ fn contains_inner_function_expr(expr: &Expr) -> bool {
             key_fn || contains_inner_function_expr(&p.value)
         }),
         Expr::Template { exprs, .. } => exprs.iter().any(contains_inner_function_expr),
+        Expr::TaggedTemplate { tag, exprs, .. } => {
+            contains_inner_function_expr(tag) || exprs.iter().any(contains_inner_function_expr)
+        }
         Expr::Identifier(_, _)
         | Expr::Number(_, _)
         | Expr::String(_, _)
@@ -4562,6 +4610,9 @@ fn uses_arguments_expr(expr: &Expr) -> bool {
             }
         }
         Expr::Template { exprs, .. } => exprs.iter().any(uses_arguments_expr),
+        Expr::TaggedTemplate { tag, exprs, .. } => {
+            uses_arguments_expr(tag) || exprs.iter().any(uses_arguments_expr)
+        }
         Expr::Update(_, expr, _, _) => uses_arguments_expr(expr),
         Expr::Yield(expr, _) => expr.as_ref().is_some_and(|e| uses_arguments_expr(e)),
         Expr::YieldStar(expr, _) => uses_arguments_expr(expr),

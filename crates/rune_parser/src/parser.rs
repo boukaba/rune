@@ -2918,6 +2918,58 @@ impl Parser {
     fn parse_postfix(&mut self, mut lhs: Expr) -> Expr {
         loop {
             match self.tok.kind {
+                TokenKind::TemplateNoSub => {
+                    let t = self.tok.clone();
+                    self.advance();
+                    let span = Span {
+                        start: 0,
+                        end: t.span.end,
+                    };
+                    lhs = Expr::TaggedTemplate {
+                        tag: Box::new(lhs),
+                        parts: vec![t.value],
+                        exprs: vec![],
+                        span,
+                    };
+                }
+                TokenKind::TemplateHead => {
+                    let t = self.tok.clone();
+                    self.advance();
+                    let mut parts = vec![t.value];
+                    let mut exprs = Vec::new();
+                    let expr = self.parse_expr(0);
+                    exprs.push(expr);
+                    loop {
+                        match &self.tok.kind {
+                            TokenKind::TemplateMiddle => {
+                                let mid = self.tok.clone();
+                                self.advance();
+                                parts.push(mid.value);
+                                let e = self.parse_expr(0);
+                                exprs.push(e);
+                            }
+                            TokenKind::TemplateTail => {
+                                let tail = self.tok.clone();
+                                self.advance();
+                                parts.push(tail.value);
+                                break;
+                            }
+                            _ => {
+                                self.error(
+                                    "Expected template continuation after expression".into(),
+                                );
+                                break;
+                            }
+                        }
+                    }
+                    let end = self.span().end;
+                    lhs = Expr::TaggedTemplate {
+                        tag: Box::new(lhs),
+                        parts,
+                        exprs,
+                        span: Span { start: 0, end },
+                    };
+                }
                 TokenKind::LParen => {
                     let args = self.parse_call_args();
                     let span = self.span();

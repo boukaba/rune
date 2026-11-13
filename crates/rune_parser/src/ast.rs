@@ -43,6 +43,12 @@ pub enum Expr {
         exprs: Vec<Expr>,
         span: Span,
     },
+    TaggedTemplate {
+        tag: Box<Expr>,
+        parts: Vec<String>,
+        exprs: Vec<Expr>,
+        span: Span,
+    },
     This(Span),
     Update(UpdateOp, Box<Expr>, bool, Span), // op, argument, is_prefix, span
     Yield(Option<Box<Expr>>, Span),

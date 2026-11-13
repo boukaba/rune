@@ -1723,6 +1723,25 @@ Integration suite: **824 passed, 0 failed, 3 ignored**.
 
 Integration suite: **825 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Enable broad Test262 harness helpers (2026-11-13)
+
+- Stopped skipping `propertyHelper.js`, `dateConstants.js`, `nans.js`,
+  `byteConversionValues.js`; tests depending on them now run instead of being
+  counted as skipped.
+- Pass gains (same suite totals):
+  - Object **1866 → 2046/3411**;
+  - Date **310 → 357/594**;
+  - Math **182 → 217/327**;
+  - Array **2494 → 2536/3081**;
+  - RegExp/prototype **123 → 134/487**;
+  - TypedArray **89 → 91/1446** (skips 617 → 488).
+- The remaining failures are now visible: more descriptor/`verifyProperty`,
+  Date setter coercion, and TypedArray method semantics.
+- No engine behavior changed in this step; this is honest conformance
+  measurement.
+
+Integration suite: **825 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

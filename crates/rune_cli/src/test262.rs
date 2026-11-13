@@ -172,11 +172,7 @@ fn build_test_source(test: &TestCase) -> Result<String, String> {
         "fnGlobalObject.js",
         "doneprintHandle.js",
         "testBigIntTypedArray.js",
-        "byteConversionValues.js",
-        "nans.js",
         "proxyTrapsHelper.js",
-        "dateConstants.js",
-        "propertyHelper.js",
     ];
 
     // Harness files whose behaviour is emulated by builtins, so tests that

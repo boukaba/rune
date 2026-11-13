@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Harness helpers enabled (2026-11-13)**: propertyHelper/dateConstants/nans/byteConversionValues. Object **2046/3411**, Date **357/594**, Math **217/327**, Array **2536/3081**. Integration **825**.
 - **TypedArray Array methods + isPrimitive (2026-11-13)**: Array-compatible prototype methods; Test262 isPrimitive global. TypedArray 15→**89/829**. Integration **825**.
 - **TypedArray array-like coercions (2026-11-13)**: effective length in array_like_length; ToNumber(array) via join. TypedArray 15/829. Integration **824**.
 - **TypedArray harness baseline (2026-11-13)**: testTypedArray no longer skipped; boolean compareArray helper. Honest TypedArray **14/829**. Integration **823**.

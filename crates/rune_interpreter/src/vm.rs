@@ -8174,6 +8174,16 @@ impl Vm {
                             // B1f-5: object configurability enforcement stays
                             // A4-owned (remove_property is authoritative there).
                             Value::boolean(true)
+                        } else if tag == TAG_PROMISE {
+                            let extra = unsafe { Promise::extra_props(ptr) };
+                            if !extra.is_null() {
+                                if let Some(key) = value_to_prop_key(raw_key) {
+                                    unsafe {
+                                        JSObject::remove_property(extra as *mut JSObject, &key)
+                                    };
+                                }
+                            }
+                            Value::boolean(true)
                         } else if tag == TAG_ARRAY {
                             // B1f-5: configurability-checked delete (holes and
                             // missing keys succeed vacuously; locked indices

@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Promise species + extras define/delete (2026-11-13)**: then validates constructor/@@species; Promise extras support defineProperty/delete. Promise 377→**383/703**. Integration **813**.
 - **Promise own properties (2026-11-13)**: Promise gains tracable extra_props; set/get/keys/gOPD. Promise 374→**377/703**, Object 1860→**1866**. Integration **812**.
 - **Function string coercion (2026-11-13)**: functions ToPrimitive to native source in concat/template/String. Function 167→**173/509**, String 673→**696/1223**. Integration **811**.
 - **Function.toString + try rejection (2026-11-13)**: native-form toString/TypeError; builtin length/name descriptors; Promise.try throws reject. Function toString 4→8/80. Integration **810**.

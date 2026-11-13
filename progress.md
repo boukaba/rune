@@ -1500,6 +1500,23 @@ Integration suite: **811 passed, 0 failed, 3 ignored**.
 
 Integration suite: **812 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Promise species validation + extras define/delete (2026-11-13)
+
+- `Promise.prototype.then` now reads `this.constructor` and `@@species`:
+  - missing/null/non-constructor constructor → TypeError;
+  - null/non-constructor species → TypeError.
+  - Custom species constructors are validated but still fall back to the
+    intrinsic promise (construct dispatch is not wired here).
+- Promise extras now support `Object.defineProperty` and `delete`;
+  `defineProperty` returns the original receiver (also fixes Date/RegExp
+  exotic returns).
+- Test262: Promise **377 → 383/703**.
+- Regression: `test_promise_species_and_define_delete`.
+- Known gaps: constructor/species accessor getters are not invoked (sync read);
+  custom species construction is not dispatched.
+
+Integration suite: **813 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

@@ -7900,6 +7900,7 @@ fn define_extra_target(
             let p = unsafe { rune_core::regexp::RegExp::extra_props(ptr) };
             (!p.is_null()).then_some(p as *mut JSObject)
         }
+        TAG_PROMISE => Some(crate::vm::promise_extra_object(gc, ptr)),
         _ => None,
     };
     if let Some(obj) = existing {
@@ -8526,7 +8527,7 @@ pub fn object_define_property(
         }
     };
     match define_own_property(gc, vm, obj_ptr, key, key_name, &desc) {
-        Ok(live) => Value::from_heap_ptr(live as *mut u8),
+        Ok(_live) => refresh_value(target),
         Err(e) => {
             vm.set_pending_exception(e);
             Value::undefined()
@@ -19450,6 +19451,59 @@ pub(crate) fn settle_promise_reactions(vm: &mut Vm, ptr: *mut u8, value: Value, 
 }
 
 /// Promise.prototype.then(onFulfilled, onRejected)
+/// §27.2.5.4 steps 4-5: validate `this.constructor` and @@species before
+/// allocating the derived promise. Custom species constructors still fall
+/// back to the intrinsic promise (construct dispatch is not available here).
+fn promise_species_check(gc: &mut SemiSpace, ptr: *mut u8, vm: &mut Vm) -> Result<(), ()> {
+    let ctor_key = PropertyKey::from_string("constructor");
+    let mut ctor = Value::undefined();
+    let extra = unsafe { Promise::extra_props(ptr) };
+    if !extra.is_null() {
+        let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+        if let Some(slot) = shape.lookup(&ctor_key) {
+            ctor = unsafe { JSObject::get_slot(extra as *mut JSObject, slot) };
+        }
+    }
+    if ctor.is_undefined() {
+        let proto = unsafe { Promise::prototype(ptr) };
+        if !proto.is_null() {
+            ctor = crate::vm::load_property_recursive(
+                Value::from_heap_ptr(proto),
+                Value::from_heap_ptr(HeapString::allocate(gc, "constructor") as *mut u8),
+                Some(vm.function_prototype),
+                gc,
+            );
+        }
+    }
+    if ctor.is_undefined() || ctor.is_null() || !crate::vm::value_is_constructor(vm, ctor) {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Promise.prototype.then: constructor is not a constructor",
+        ));
+        return Err(());
+    }
+    let species_key = Value::symbol(rune_core::symbol::SYM_SPECIES);
+    let species =
+        crate::vm::load_property_recursive(ctor, species_key, Some(vm.function_prototype), gc);
+    let species = if species.is_undefined() {
+        ctor
+    } else {
+        species
+    };
+    if species.is_null() || !crate::vm::value_is_constructor(vm, species) {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Promise.prototype.then: species is not a constructor",
+        ));
+        return Err(());
+    }
+    Ok(())
+}
+
 pub fn promise_prototype_then(
     gc: &mut SemiSpace,
     this: Value,
@@ -19473,6 +19527,9 @@ pub fn promise_prototype_then(
             crate::errors::ErrorKind::TypeError,
             "Promise.prototype.then called on a non-Promise",
         ));
+        return Value::undefined();
+    }
+    if promise_species_check(gc, ptr, vm).is_err() {
         return Value::undefined();
     }
     let state = unsafe { Promise::state(ptr) };

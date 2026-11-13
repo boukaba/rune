@@ -15041,3 +15041,24 @@ fn test_promise_own_properties() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_promise_species_and_define_delete() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var p = Promise.resolve(1);
+            p.constructor = null;
+            var nullCtorThrew = false;
+            try { p.then(function () {}); } catch (e) { nullCtorThrew = e instanceof TypeError; }
+            var q = Promise.resolve(2);
+            Object.defineProperty(q, "x", { value: 5, enumerable: true, writable: true, configurable: true });
+            var defined = q.x === 5 && Object.keys(q).indexOf("x") >= 0;
+            var deleted = delete q.x && q.x === undefined && !Object.prototype.hasOwnProperty.call(q, "x");
+            [nullCtorThrew, defined, deleted].join("|") === "true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

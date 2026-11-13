@@ -16476,6 +16476,27 @@ pub fn string_match(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
 fn collect_match_all(gc: &mut SemiSpace, rp: *mut u8, s: &str, vm: &mut Vm) -> Value {
     let pattern = unsafe { HeapString::to_string(RegExp::pattern(rp) as *mut HeapString) };
     let flags = unsafe { RegExp::flags(rp) };
+    // Empty pattern: every position (including the end) is an empty match.
+    if pattern.is_empty() {
+        let results = fresh_dense_array(gc, vm);
+        let base = vm.temp_roots.len();
+        vm.temp_roots.push(results);
+        let mut positions: Vec<usize> = s.char_indices().map(|(i, _)| i).collect();
+        positions.push(s.len());
+        for (index, pos) in positions.into_iter().enumerate() {
+            let groups = [(pos, pos)];
+            let m = make_match_result_array(gc, &groups, s, index, vm.array_prototype);
+            let mut results_now = vm.temp_roots[base];
+            if result_push(gc, vm, &mut results_now, m).is_err() {
+                vm.temp_roots.truncate(base);
+                return Value::undefined();
+            }
+            vm.temp_roots[base] = results_now;
+        }
+        let results = vm.temp_roots[base];
+        vm.temp_roots.truncate(base);
+        return array_values_builtin(gc, results, &[], vm);
+    }
     let clone = alloc_regexp_from_string(gc, &pattern, flags, vm.regexp_prototype);
     let input = Value::from_heap_ptr(HeapString::allocate(gc, s) as *mut u8);
     let base = vm.temp_roots.len();
@@ -16566,35 +16587,127 @@ pub fn regexp_match_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
     collect_match_all(gc, rp, &s, vm)
 }
 
+/// Invoke the @@matchAll method on a freshly-created RegExp (spec step 5).
+fn invoke_regexp_match_all(gc: &mut SemiSpace, vm: &mut Vm, re: Value, s: &str) -> Value {
+    let key = Value::symbol(rune_core::symbol::SYM_MATCH_ALL);
+    let method = match get_property_value_sync(gc, vm, re, key) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    if method.is_undefined() || method.is_null() {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "RegExp.prototype[Symbol.matchAll] is not a function",
+        ));
+        return Value::undefined();
+    }
+    let s_val = Value::from_heap_ptr(HeapString::allocate(gc, s) as *mut u8);
+    match vm.call_value_sync(gc, method, re, &[s_val]) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            Value::undefined()
+        }
+    }
+}
+
 /// String.prototype.matchAll(regexp) — §22.1.3.13.
 pub fn string_match_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let Some(s) = to_primitive_string(gc, this, vm) else {
-        return Value::undefined();
-    };
-    let this_value = this;
-    let regexp = args.first().copied().unwrap_or(Value::undefined());
-    if regexp.is_undefined() || regexp.is_null() {
-        let re = alloc_regexp_from_string(gc, "", 1, vm.regexp_prototype);
-        if let Some(rp) = re.heap_ptr() {
-            return collect_match_all(gc, rp, &s, vm);
+    let prim = match to_primitive_sync(gc, vm, this, "string") {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
         }
-        return Value::undefined();
-    }
-    // Primitive regexp arguments throw (only null/undefined are accepted).
-    let primitive_string = regexp
-        .heap_ptr()
-        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_STRING });
-    if regexp.heap_ptr().is_none() || regexp.as_symbol_id().is_some() || primitive_string {
+    };
+    if prim.as_symbol_id().is_some() {
         vm.set_pending_exception(crate::errors::error_object(
             gc,
             &vm.error_protos,
             crate::errors::ErrorKind::TypeError,
-            "String.prototype.matchAll requires an object",
+            "Cannot convert a Symbol value to a string",
         ));
         return Value::undefined();
+    }
+    let s = value_to_js_string(prim);
+    let regexp = args.first().copied().unwrap_or(Value::undefined());
+    if regexp.is_undefined() || regexp.is_null() {
+        let source = if regexp.is_null() { "null" } else { "" };
+        let re = alloc_regexp_from_string(gc, source, 1, vm.regexp_prototype);
+        return invoke_regexp_match_all(gc, vm, re, &s);
+    }
+    let is_primitive = regexp.heap_ptr().is_none()
+        || regexp.as_symbol_id().is_some()
+        || regexp
+            .heap_ptr()
+            .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_STRING });
+    if is_primitive {
+        if regexp.as_symbol_id().is_some() {
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Cannot convert a Symbol value to a string",
+            ));
+            return Value::undefined();
+        }
+        let source = value_to_js_string(regexp);
+        let re = alloc_regexp_from_string(gc, &source, 1, vm.regexp_prototype);
+        return invoke_regexp_match_all(gc, vm, re, &s);
+    }
+    let is_regexp = regexp
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_REGEXP);
+    if is_regexp {
+        let own_flags = {
+            let rp = regexp.heap_ptr().unwrap();
+            let extra = unsafe { RegExp::extra_props(rp) };
+            if extra.is_null() {
+                None
+            } else {
+                let key = PropertyKey::from_string("flags");
+                let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                shape
+                    .lookup(&key)
+                    .map(|slot| unsafe { JSObject::get_slot(extra as *mut JSObject, slot) })
+            }
+        };
+        let flags = match own_flags {
+            Some(v) => v,
+            None => match get_value_sync(gc, vm, regexp, "flags") {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            },
+        };
+        if flags.is_undefined() || flags.is_null() || flags.as_symbol_id().is_some() {
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "RegExp flags must be a coercible string",
+            ));
+            return Value::undefined();
+        }
+        if !value_to_js_string(flags).contains('g') {
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "String.prototype.matchAll requires a global RegExp",
+            ));
+            return Value::undefined();
+        }
     }
     let key = Value::symbol(rune_core::symbol::SYM_MATCH_ALL);
     let method = match get_property_value_sync(gc, vm, regexp, key) {
@@ -16614,20 +16727,18 @@ pub fn string_match_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
             }
         };
     }
-    if let Some(rp) = regexp.heap_ptr() {
-        if unsafe { (*(rp as *const GcHeader)).tag() } == TAG_REGEXP {
-            return collect_match_all(gc, rp, &s, vm);
-        }
+    if is_regexp {
+        // matcher was undefined/null: RegExpCreate(R, "g") then Invoke its
+        // @@matchAll (which may still exist on the prototype).
+        let rp = regexp.heap_ptr().unwrap();
+        let pattern = unsafe { HeapString::to_string(RegExp::pattern(rp) as *mut HeapString) };
+        let flags = unsafe { RegExp::flags(rp) };
+        let re = alloc_regexp_from_string(gc, &pattern, flags, vm.regexp_prototype);
+        return invoke_regexp_match_all(gc, vm, re, &s);
     }
-    // Non-RegExp objects are converted to a global RegExp.
-    let text = value_to_js_string(regexp);
-    let re = alloc_regexp_from_string(gc, &text, 1, vm.regexp_prototype);
-    let _ = this_value;
-    if let Some(rp) = re.heap_ptr() {
-        collect_match_all(gc, rp, &s, vm)
-    } else {
-        Value::undefined()
-    }
+    let source = value_to_js_string(regexp);
+    let re = alloc_regexp_from_string(gc, &source, 1, vm.regexp_prototype);
+    invoke_regexp_match_all(gc, vm, re, &s)
 }
 
 pub fn string_search(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {

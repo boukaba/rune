@@ -16516,8 +16516,7 @@ fn test_string_match_all_and_regexp_protocol() {
             var all = Array.from("a1b22".matchAll(/([a-z])(\d+)/g));
             var custom = "x".matchAll({ [Symbol.matchAll]: function (str) { return ["custom", str]; } });
             var empty = Array.from("abc".matchAll(undefined));
-            var primThrew = false;
-            try { "x".matchAll("a"); } catch (e) { primThrew = e instanceof TypeError; }
+            var primitiveMatch = "a1".matchAll("a").next().value[0];
             var protoThrew = false;
             try { "x".matchAll(/a/); } catch (e) { protoThrew = e instanceof TypeError; }
             [
@@ -16526,7 +16525,7 @@ fn test_string_match_all_and_regexp_protocol() {
                 all[1][0] === "b22" && all[1][2] === "22",
                 custom[0] === "custom" && custom[1] === "x",
                 empty.length === 4 && empty[0][0] === "" && empty[3][0] === "",
-                primThrew,
+                primitiveMatch === "a",
                 protoThrew,
                 typeof RegExp.prototype[Symbol.matchAll] === "function"
             ].join("|") === "true|true|true|true|true|true|true|true";

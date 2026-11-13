@@ -2545,6 +2545,27 @@ Integration suite: **863 passed, 0 failed, 3 ignored**.
 
 Integration suite: **864 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — `matchAll` protocol completion (2026-11-13)
+
+- `String.prototype.matchAll` now:
+  - ToStrings `this` through synchronous ToPrimitive (honours @@toPrimitive);
+  - treats `undefined`/`null` as fresh global RegExps with "" / "null"
+    sources and **invokes** their @@matchAll method;
+  - coerces primitive regexp arguments to global RegExp sources without
+    touching their prototypes;
+  - reads the `flags` property for real RegExps (own extra-prop flags take
+    precedence), requiring ObjectCoercible/global flags;
+  - when a RegExp's own @@matchAll is undefined/null, creates a new RegExp and
+    invokes the prototype method (so deleted prototypes still TypeError).
+- Empty source patterns now produce one empty match at every position
+  (including end) with correct `.index`, avoiding lastIndex reset/loop issues.
+- Test262: String **918 → 927/1223**, String/matchAll **13 → 22/25**.
+- Remaining matchAll failures: BigInt primitive (BigInt unsupported) and
+  prototype `flags` getter interaction.
+- Regression updated: `test_string_match_all_and_regexp_protocol`.
+
+Integration suite: **864 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

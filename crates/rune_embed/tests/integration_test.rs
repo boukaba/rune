@@ -15190,3 +15190,26 @@ fn test_math_hyperbolic_and_signed_zero() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_math_sum_precise_and_minmax_edges() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            [
+                Math.sumPrecise([1, 2, 3]) === 6,
+                Math.sumPrecise(new Set([1, 2])) === 3,
+                Object.is(Math.sumPrecise([]), -0),
+                Object.is(Math.sumPrecise([-0]), -0),
+                Object.is(Math.sumPrecise([-0, 0]), 0),
+                Number.isNaN(Math.sumPrecise([1, NaN])),
+                Math.max("2", 3) === 3,
+                Object.is(Math.max(-0, -0), -0),
+                Object.is(Math.min(-0, 0), -0)
+            ].join("|") === "true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

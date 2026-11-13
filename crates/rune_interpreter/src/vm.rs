@@ -2657,6 +2657,7 @@ impl Vm {
             ("imul", find_handle(&self.builtins, "Math_imul")),
             ("cbrt", find_handle(&self.builtins, "Math_cbrt")),
             ("fround", find_handle(&self.builtins, "Math_fround")),
+            ("sumPrecise", find_handle(&self.builtins, "Math_sumPrecise")),
             ("acosh", find_handle(&self.builtins, "Math_acosh")),
             ("asinh", find_handle(&self.builtins, "Math_asinh")),
             ("atanh", find_handle(&self.builtins, "Math_atanh")),

@@ -14015,6 +14015,117 @@ fn math_op_unary(args: &[Value], op: fn(f64) -> f64) -> Value {
     Value::from_float64(result)
 }
 
+/// Math.sumPrecise(iterable) — compensated summation over arrays/Sets of Numbers.
+pub fn math_sum_precise(_gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let Some(arg) = args.first().copied() else {
+        vm.set_pending_exception(crate::errors::error_object(
+            _gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Math.sumPrecise requires an iterable",
+        ));
+        return Value::undefined();
+    };
+    let Some(ptr) = arg.heap_ptr() else {
+        vm.set_pending_exception(crate::errors::error_object(
+            _gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Math.sumPrecise requires an iterable",
+        ));
+        return Value::undefined();
+    };
+    let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+    let mut values: Vec<f64> = Vec::new();
+    let push_number = |v: Value, values: &mut Vec<f64>| -> bool {
+        if let Some(n) = v.as_smi() {
+            values.push(n as f64);
+            true
+        } else if let Some(n) = v.as_float64() {
+            values.push(n);
+            true
+        } else {
+            false
+        }
+    };
+    match tag {
+        TAG_ARRAY => {
+            let arr = ptr as *mut RuneArray;
+            let len = unsafe { RuneArray::length(arr) } as usize;
+            for i in 0..len {
+                let v = unsafe { RuneArray::get_element(arr, i) };
+                if v == Value::empty_sentinel() {
+                    values.push(f64::NAN);
+                } else if !push_number(v, &mut values) {
+                    vm.set_pending_exception(crate::errors::error_object(
+                        _gc,
+                        &vm.error_protos,
+                        crate::errors::ErrorKind::TypeError,
+                        "Math.sumPrecise requires Number values",
+                    ));
+                    return Value::undefined();
+                }
+            }
+        }
+        TAG_SET => {
+            let entries = unsafe { RuneSet::entries(ptr) } as *mut RuneArray;
+            if !entries.is_null() {
+                let len = unsafe { RuneArray::length(entries) } as usize;
+                for i in 0..len {
+                    let v = unsafe { RuneArray::get_element(entries, i) };
+                    if v == Value::empty_sentinel() {
+                        continue;
+                    }
+                    if !push_number(v, &mut values) {
+                        vm.set_pending_exception(crate::errors::error_object(
+                            _gc,
+                            &vm.error_protos,
+                            crate::errors::ErrorKind::TypeError,
+                            "Math.sumPrecise requires Number values",
+                        ));
+                        return Value::undefined();
+                    }
+                }
+            }
+        }
+        _ => {
+            vm.set_pending_exception(crate::errors::error_object(
+                _gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Math.sumPrecise requires an iterable of Numbers",
+            ));
+            return Value::undefined();
+        }
+    }
+    let empty = values.is_empty();
+    let all_negative_zero = !empty && values.iter().all(|v| *v == 0.0 && v.is_sign_negative());
+    let any_positive_zero = values.iter().any(|v| *v == 0.0 && !v.is_sign_negative());
+    let mut sum = 0.0f64;
+    let mut comp = 0.0f64;
+    for x in values {
+        if x.is_nan() {
+            return Value::from_float64(f64::NAN);
+        }
+        let t = sum + x;
+        if sum.abs() >= x.abs() {
+            comp += (sum - t) + x;
+        } else {
+            comp += (x - t) + sum;
+        }
+        sum = t;
+    }
+    let mut result = sum + comp;
+    if result == 0.0 {
+        if empty || (all_negative_zero && !any_positive_zero) {
+            result = -0.0;
+        } else {
+            result = 0.0;
+        }
+    }
+    Value::from_float64(result)
+}
+
 pub fn math_fround(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     let x = args.first().copied().unwrap_or(Value::smi(0));
     let n = x
@@ -14084,11 +14195,7 @@ pub fn math_min(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm)
     let mut min = f64::INFINITY;
     let mut neg_zero = false;
     for arg in args {
-        let n = arg
-            .as_smi()
-            .map(|v| v as f64)
-            .or_else(|| arg.as_float64())
-            .unwrap_or(f64::NAN);
+        let n = math_to_f64(*arg);
         if n.is_nan() {
             min = f64::NAN;
             break;
@@ -14114,19 +14221,22 @@ pub fn math_min(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm)
 
 pub fn math_max(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     let mut max = f64::NEG_INFINITY;
+    let mut pos_zero = false;
     for arg in args {
-        let n = arg
-            .as_smi()
-            .map(|v| v as f64)
-            .or_else(|| arg.as_float64())
-            .unwrap_or(f64::NAN);
+        let n = math_to_f64(*arg);
         if n.is_nan() {
             max = f64::NAN;
             break;
         }
+        if n == 0.0 && !n.is_sign_negative() {
+            pos_zero = true;
+        }
         if n > max {
             max = n;
         }
+    }
+    if max == 0.0 && !pos_zero {
+        return Value::from_float64(-0.0);
     }
     if max.fract() == 0.0 && max.is_finite() {
         let i = max as i32;
@@ -22847,6 +22957,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 1,
             name: "Math_fround",
             func: math_fround,
+        },
+        Builtin {
+            length: 1,
+            name: "Math_sumPrecise",
+            func: math_sum_precise,
         },
         Builtin {
             length: 1,

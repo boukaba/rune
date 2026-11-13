@@ -1600,6 +1600,20 @@ Integration suite: **817 passed, 0 failed, 3 ignored**.
 
 Integration suite: **818 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Math.sumPrecise + min/max coercion (2026-11-13)
+
+- Added `Math.sumPrecise` (proposal) for Array/Set inputs with compensated
+  summation, Number-only validation, NaN/Infinity and signed-zero rules
+  (empty/all `-0` → `-0`).
+- `Math.min`/`Math.max` now coerce arguments (ToNumber-lite: strings/booleans)
+  and preserve `-0` for all-negative-zero inputs.
+- Test262: Math **178 → 182/327**; `Math.sumPrecise` **3/10**.
+- Regression: `test_math_sum_precise_and_minmax_edges`.
+- Known gaps: sumPrecise only accepts Array/Set (JS iterables/generators are
+  not drained); exact compensated-sum edge cases remain.
+
+Integration suite: **819 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

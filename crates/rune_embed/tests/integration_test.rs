@@ -14542,3 +14542,28 @@ fn test_top_level_lexical_bindings_captured_by_closures() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_function_local_const_captured_write_rejected() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            function f() {
+                const c = 1;
+                let l = 1;
+                var threw = false;
+                (() => {
+                    try { c = 2; } catch (e) { threw = e instanceof TypeError; }
+                    l = 2;
+                })();
+                return threw && c === 1 && l === 2;
+            }
+            const outer = 3;
+            function shadow(outer) { outer = 4; return outer; }
+            f() && shadow(5) === 4 && outer === 3;
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

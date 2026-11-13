@@ -1097,6 +1097,27 @@ Integration suite: **792 passed, 0 failed, 3 ignored**; `rune_capi` **6 tests**.
 
 Integration suite: **793 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — function-local const + binding shadowing (2026-11-13)
+
+- `compile_function` now tracks function-local `const` names alongside
+  inherited top-level consts; captured writes from deeper closures throw
+  TypeError just like top-level const.
+- Root-caused a shadowing bug in binding resolution: parameters/local vars
+  were resolved through an **ancestor** capture env before their own frame
+  slots (`const outer=3; function f(outer){ outer=4 }` mutated `outer`).
+  Resolution is now: local var/param (unless captured by the current function,
+  in which case its env depth from `env_scope_stack`) → ancestor env → lexical.
+- Preserved `for (let i...)` per-iteration envs by using the full
+  `env_scope_stack` depth for captured locals (a raw depth-0 capture read the
+  per-iteration env and broke loop conditions).
+- Regression: `test_function_local_const_captured_write_rejected`, plus the
+  existing JIT closure-capture test.
+- Known edge: a block `let` shadowing an outer const can affect the function-
+  wide const-name set (scope-insensitive shadow analysis); tracked for a
+  scope-aware pass.
+
+Integration suite: **794 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

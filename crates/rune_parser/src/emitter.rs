@@ -715,6 +715,11 @@ impl Emitter {
         for name in &all_var_names {
             sub.script_const_names.remove(name);
         }
+        let mut local_consts: Vec<String> = Vec::new();
+        collect_const_names_stmt(&func.body, &mut local_consts);
+        for name in local_consts {
+            sub.script_const_names.insert(name);
+        }
         for param in &func.params {
             if let Pattern::Identifier(name, _, _) = param {
                 sub.script_const_names.remove(name.as_ref());
@@ -2610,12 +2615,23 @@ impl Emitter {
                 }
             }
             Expr::Identifier(name, _) => {
-                if let Some((depth, slot)) = self.env_captured_slot(name) {
+                // A local/parameter shadows an ancestor capture, but a
+                // captured local must use its env slot; block/loop lexicals
+                // resolve through the nearest env (per-iteration envs).
+                if let Some(idx) = self.local_index(name) {
+                    if self.captured_slot(name).is_some() {
+                        if let Some((depth, slot)) = self.env_captured_slot(name) {
+                            self.emit(Opcode::LoadCaptured, vec![depth as i64, slot as i64]);
+                        } else {
+                            self.emit(Opcode::LoadLocal, vec![idx as i64]);
+                        }
+                    } else {
+                        self.emit(Opcode::LoadLocal, vec![idx as i64]);
+                    }
+                } else if let Some((depth, slot)) = self.env_captured_slot(name) {
                     self.emit(Opcode::LoadCaptured, vec![depth as i64, slot as i64]);
                 } else if let Some(slot) = self.lexical_slot(name) {
                     self.emit(Opcode::LoadLexical, vec![slot as i64]);
-                } else if let Some(idx) = self.local_index(name) {
-                    self.emit(Opcode::LoadLocal, vec![idx as i64]);
                 } else if self.module_mode {
                     if let Some(import_idx) = self.module_imports.get(name) {
                         self.emit(Opcode::LoadModuleImport, vec![*import_idx as i64]);
@@ -3269,15 +3285,22 @@ impl Emitter {
             Expr::Assign(target, value, _) => match target.as_ref() {
                 Expr::Identifier(name, _) => {
                     self.emit_expression(value);
-                    if let Some((depth, slot)) = self.env_captured_slot(name) {
-                        // StoreCaptured pops the value; Dup keeps it for the
-                        // statement's cleanup Pop (net 0).
+                    if let Some(idx) = self.local_index(name) {
+                        if self.captured_slot(name).is_some() {
+                            if let Some((depth, slot)) = self.env_captured_slot(name) {
+                                self.emit(Opcode::Dup, vec![]);
+                                self.emit_store_captured_checked(depth, slot, name);
+                            } else {
+                                self.emit(Opcode::StoreLocal, vec![idx as i64]);
+                            }
+                        } else {
+                            self.emit(Opcode::StoreLocal, vec![idx as i64]);
+                        }
+                    } else if let Some((depth, slot)) = self.env_captured_slot(name) {
                         self.emit(Opcode::Dup, vec![]);
                         self.emit_store_captured_checked(depth, slot, name);
                     } else if let Some(slot) = self.lexical_slot(name) {
                         self.emit(Opcode::StoreLexical, vec![slot as i64]);
-                    } else if let Some(idx) = self.local_index(name) {
-                        self.emit(Opcode::StoreLocal, vec![idx as i64]);
                     } else if self.module_mode {
                         if let Some(import_idx) = self.module_imports.get(name) {
                             // Assigning to an imported binding is a TypeError
@@ -3338,12 +3361,33 @@ impl Emitter {
                 let bin_opcode = compound_binary_opcode(*op);
                 match target.as_ref() {
                     Expr::Identifier(name, _) => {
-                        if let Some((depth, slot)) = self.env_captured_slot(name) {
+                        if let Some(idx) = self.local_index(name) {
+                            if self.captured_slot(name).is_some() {
+                                if let Some((depth, slot)) = self.env_captured_slot(name) {
+                                    self.emit(
+                                        Opcode::LoadCaptured,
+                                        vec![depth as i64, slot as i64],
+                                    );
+                                    self.emit_expression(rhs);
+                                    self.emit(bin_opcode, vec![]);
+                                    self.emit(Opcode::Dup, vec![]);
+                                    self.emit_store_captured_checked(depth, slot, name);
+                                } else {
+                                    self.emit(Opcode::LoadLocal, vec![idx as i64]);
+                                    self.emit_expression(rhs);
+                                    self.emit(bin_opcode, vec![]);
+                                    self.emit(Opcode::StoreLocal, vec![idx as i64]);
+                                }
+                            } else {
+                                self.emit(Opcode::LoadLocal, vec![idx as i64]);
+                                self.emit_expression(rhs);
+                                self.emit(bin_opcode, vec![]);
+                                self.emit(Opcode::StoreLocal, vec![idx as i64]);
+                            }
+                        } else if let Some((depth, slot)) = self.env_captured_slot(name) {
                             self.emit(Opcode::LoadCaptured, vec![depth as i64, slot as i64]);
                             self.emit_expression(rhs);
                             self.emit(bin_opcode, vec![]);
-                            // StoreCaptured pops the result; Dup keeps it for the
-                            // statement's cleanup Pop (net 0).
                             self.emit(Opcode::Dup, vec![]);
                             self.emit_store_captured_checked(depth, slot, name);
                         } else if let Some(slot) = self.lexical_slot(name) {
@@ -3351,11 +3395,6 @@ impl Emitter {
                             self.emit_expression(rhs);
                             self.emit(bin_opcode, vec![]);
                             self.emit(Opcode::StoreLexical, vec![slot as i64]);
-                        } else if let Some(idx) = self.local_index(name) {
-                            self.emit(Opcode::LoadLocal, vec![idx as i64]);
-                            self.emit_expression(rhs);
-                            self.emit(bin_opcode, vec![]);
-                            self.emit(Opcode::StoreLocal, vec![idx as i64]);
                         } else {
                             let name_idx = self.intern_string(name) as i64;
                             self.emit(Opcode::LoadGlobal, vec![name_idx]);
@@ -3737,15 +3776,22 @@ impl Emitter {
     /// (StoreLocal/StoreGlobal push the value back; StoreCaptured/StoreLexical
     /// pop it, so only the net-0 stores need a trailing Pop.)
     fn emit_assign_store(&mut self, name: &str) {
-        if let Some(env_slot) = self.captured_slot(name) {
-            self.emit_store_captured_checked(0, env_slot, name);
+        if let Some(idx) = self.local_index(name) {
+            if self.captured_slot(name).is_some() {
+                if let Some((depth, slot)) = self.env_captured_slot(name) {
+                    self.emit_store_captured_checked(depth, slot, name);
+                } else {
+                    self.emit(Opcode::StoreLocal, vec![idx as i64]);
+                    self.emit(Opcode::Pop, vec![]);
+                }
+            } else {
+                self.emit(Opcode::StoreLocal, vec![idx as i64]);
+                self.emit(Opcode::Pop, vec![]);
+            }
         } else if let Some((depth, slot)) = self.env_captured_slot(name) {
             self.emit_store_captured_checked(depth, slot, name);
         } else if let Some(slot) = self.lexical_slot(name) {
             self.emit(Opcode::StoreLexical, vec![slot as i64]);
-        } else if let Some(idx) = self.local_index(name) {
-            self.emit(Opcode::StoreLocal, vec![idx as i64]);
-            self.emit(Opcode::Pop, vec![]);
         } else if self.module_mode {
             if let Some(import_idx) = self.module_imports.get(name) {
                 // Assignment to an imported binding is a TypeError at runtime.
@@ -3765,14 +3811,20 @@ impl Emitter {
     }
 
     fn emit_target_store(&mut self, name: &str) {
-        if let Some(env_slot) = self.captured_slot(name) {
-            self.emit_store_captured_checked(0, env_slot, name);
+        if let Some(idx) = self.local_index(name) {
+            if self.captured_slot(name).is_some() {
+                if let Some((depth, slot)) = self.env_captured_slot(name) {
+                    self.emit_store_captured_checked(depth, slot, name);
+                } else {
+                    self.emit(Opcode::StoreLocal, vec![idx as i64]);
+                }
+            } else {
+                self.emit(Opcode::StoreLocal, vec![idx as i64]);
+            }
         } else if let Some((depth, slot)) = self.env_captured_slot(name) {
             self.emit_store_captured_checked(depth, slot, name);
         } else if let Some(slot) = self.lexical_slot(name) {
             self.emit(Opcode::StoreLexical, vec![slot as i64]);
-        } else if let Some(idx) = self.local_index(name) {
-            self.emit(Opcode::StoreLocal, vec![idx as i64]);
         } else if self.module_mode {
             if let Some(import_idx) = self.module_imports.get(name) {
                 self.emit(Opcode::StoreModuleImport, vec![*import_idx as i64]);
@@ -4150,6 +4202,87 @@ fn collect_var_names_stmt(stmt: &Stmt, names: &mut Vec<String>) {
 /// recursively through block/branch/loop/try structure. Function and class
 /// declaration names must be captured alongside vars: they are never globals,
 /// so inner functions referencing them resolve through the env chain.
+fn collect_const_names_stmt(stmt: &Stmt, names: &mut Vec<String>) {
+    match stmt {
+        Stmt::Var(VarKind::Const, decls, _) => {
+            for decl in decls {
+                push_pattern_binding_names(&decl.pattern, &decl.name, names);
+            }
+        }
+        Stmt::Function(_, _) | Stmt::Class(_, _) => {}
+        Stmt::Block(stmts, _) => stmts
+            .iter()
+            .for_each(|s| collect_const_names_stmt(s, names)),
+        Stmt::If(_, then, else_, _) => {
+            collect_const_names_stmt(then, names);
+            if let Some(s) = else_ {
+                collect_const_names_stmt(s, names);
+            }
+        }
+        Stmt::While(_, body, _) => collect_const_names_stmt(body, names),
+        Stmt::DoWhile(_, body, _) => collect_const_names_stmt(body, names),
+        Stmt::For(init, _, _, body, _) => {
+            if let Some(s) = init {
+                collect_const_names_stmt(s, names);
+            }
+            collect_const_names_stmt(body, names);
+        }
+        Stmt::ForIn(_, _, body, _) => collect_const_names_stmt(body, names),
+        Stmt::ForOf(_, _, body, _) => collect_const_names_stmt(body, names),
+        Stmt::Switch(_, cases, default, _) => {
+            for c in cases {
+                c.body
+                    .iter()
+                    .for_each(|s| collect_const_names_stmt(s, names));
+            }
+            if let Some(stmts) = default {
+                stmts
+                    .iter()
+                    .for_each(|s| collect_const_names_stmt(s, names));
+            }
+        }
+        Stmt::Try(body, catch, finally, _) => {
+            body.iter().for_each(|s| collect_const_names_stmt(s, names));
+            if let Some(c) = catch {
+                c.body
+                    .iter()
+                    .for_each(|s| collect_const_names_stmt(s, names));
+            }
+            if let Some(f) = finally {
+                f.iter().for_each(|s| collect_const_names_stmt(s, names));
+            }
+        }
+        Stmt::Labeled(_, body, _) => collect_const_names_stmt(body, names),
+        _ => {}
+    }
+}
+
+fn push_pattern_binding_names(pattern: &Option<Pattern>, name: &str, names: &mut Vec<String>) {
+    match pattern {
+        None => names.push(name.to_string()),
+        Some(Pattern::Identifier(n, _, _)) => names.push(n.to_string()),
+        Some(Pattern::Object(props, rest, _)) => {
+            for prop in props {
+                push_pattern_binding_names(&Some(prop.pattern.clone()), name, names);
+            }
+            if let Some(rest) = rest {
+                push_pattern_binding_names(&Some((**rest).clone()), name, names);
+            }
+        }
+        Some(Pattern::Array(items, _)) => {
+            for pattern in items.iter().flatten() {
+                push_pattern_binding_names(&Some(pattern.clone()), name, names);
+            }
+        }
+        Some(Pattern::Default(p, _)) => {
+            push_pattern_binding_names(&Some((**p).clone()), name, names)
+        }
+        Some(Pattern::Rest(inner, _)) => {
+            push_pattern_binding_names(&Some((**inner).clone()), name, names)
+        }
+    }
+}
+
 fn collect_decl_names_stmt(stmt: &Stmt, names: &mut Vec<String>) {
     match stmt {
         Stmt::Function(f, _) => {

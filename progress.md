@@ -2714,6 +2714,35 @@ Integration suite: **869 passed, 0 failed, 3 ignored**.
 
 Integration suite: **870 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Builtin-handle tag + Number formatting (2026-11-13)
+
+- `Value` gains a distinct `BUILTIN_TAG` (7) for builtin-function handles:
+  `Value::builtin(id)`, `is_builtin()`, `builtin_id()`. `as_smi()` still maps
+  handles to a synthetic negative value so existing builtin dispatch keeps
+  working, while ordinary negative numbers remain normal Smis.
+- Property access, `typeof`, `Object.getPrototypeOf`,
+  `Object.prototype.toString`, extensibility, call dispatch, call/apply, and
+  setter classification now distinguish `is_builtin()` from negative numbers:
+  - `(-10).toPrecision(2)`, `.toFixed`, `.toString()` work through
+    Number.prototype;
+  - `typeof (-10)` is `"number"`, builtin methods stay `"function"`;
+  - calling a negative number throws TypeError instead of dispatching a
+    builtin id.
+- Number formatting fixes:
+  - `format_exponential` performs decimal half-up rounding (25 → `3e+1`),
+    supports shortest form when fractionDigits is undefined/absent, and
+    produces correctly padded digits;
+  - `toExponential`/`toPrecision` coerce the digits argument before the
+    NaN/Infinity return and only then range-check;
+  - `length_to_number` now applies ToPrimitive(number) to all object
+    receivers (array/date/function argument coercion), so `[2]` works as a
+    digits argument.
+- Test262: Number **329 → 337/340 (0 failures; 3 feature-skipped)**,
+  String **942 → 959/1223**.
+- Regression: `test_builtin_tag_and_negative_number_methods`.
+
+Integration suite: **871 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

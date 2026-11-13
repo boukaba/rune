@@ -16700,3 +16700,32 @@ fn test_script_var_hoisting() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_builtin_tag_and_negative_number_methods() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var callThrew = false;
+            try { (-1)(); } catch (e) { callThrew = e instanceof TypeError; }
+            [
+                typeof Math.max === "function",
+                typeof (-10) === "number",
+                Object.getPrototypeOf(Math.max) === Function.prototype,
+                Object.getPrototypeOf(-10) === Number.prototype,
+                Object.prototype.toString.call(Math.max) === "[object Function]",
+                Object.prototype.toString.call(-10) === "[object Number]",
+                (-10).toPrecision(2) === "-10",
+                (-10).toFixed(2) === "-10.00",
+                (-10).toString() === "-10",
+                (25).toExponential(0) === "3e+1",
+                (123.456).toExponential([2]) === "1.23e+2",
+                (123.456).toExponential(undefined) === "1.23456e+2",
+                callThrew
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

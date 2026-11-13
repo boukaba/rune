@@ -42,6 +42,7 @@ const NULL_TAG: u64 = 3;
 const FALSE_TAG: u64 = 4;
 const TRUE_TAG: u64 = 5;
 const SYMBOL_TAG: u64 = 6;
+const BUILTIN_TAG: u64 = 7;
 
 // Payload mask: bits 0-44 (45 bits)
 const PAYLOAD_MASK: u64 = (1 << 45) - 1;
@@ -71,9 +72,34 @@ impl Value {
     }
 
     pub fn as_smi(&self) -> Option<i32> {
+        if self.is_builtin() {
+            // Legacy compatibility: builtin handles still flow through the
+            // negative-Smi dispatch paths. Use is_builtin()/builtin_id() when
+            // the distinction from a real negative number matters.
+            let id = (self.0 & PAYLOAD_MASK) as i32;
+            return Some(-id - 1);
+        }
         if self.is_smi() {
             let payload = self.0 & PAYLOAD_MASK;
             Some((payload >> 1) as i32)
+        } else {
+            None
+        }
+    }
+
+    /// Builtin-function handle (distinct from negative numbers).
+    pub fn builtin(id: usize) -> Self {
+        debug_assert!(id < (1usize << 45), "builtin id out of range");
+        Value(QNAN_PREFIX | (BUILTIN_TAG << TAG_SHIFT) | (id as u64 & PAYLOAD_MASK))
+    }
+
+    pub fn is_builtin(&self) -> bool {
+        self.is_non_float() && self.tag() == BUILTIN_TAG
+    }
+
+    pub fn builtin_id(&self) -> Option<usize> {
+        if self.is_builtin() {
+            Some((self.0 & PAYLOAD_MASK) as usize)
         } else {
             None
         }

@@ -1008,7 +1008,7 @@ pub(crate) fn toprim_resume_valueof(
         ));
     };
     if let Some(smi) = method.as_smi() {
-        if smi < 0 {
+        if method.is_builtin() {
             let id = ((-smi) as usize) - 1;
             if id < vm.builtins.len() {
                 let result = (vm.builtins[id].func)(gc, value, &[], vm);
@@ -1090,7 +1090,7 @@ pub(crate) fn to_primitive_string(gc: &mut SemiSpace, val: Value, vm: &mut Vm) -
         let key = PropertyKey::from_string("toString");
         if let Some(to_string_val) = find_method(&key) {
             if let Some(smi) = to_string_val.as_smi() {
-                if smi < 0 {
+                if to_string_val.is_builtin() {
                     // Builtin toString — call it directly
                     let id = ((-smi) as usize) - 1;
                     if id < vm.builtins.len() {
@@ -1133,7 +1133,7 @@ pub(crate) fn to_primitive_string(gc: &mut SemiSpace, val: Value, vm: &mut Vm) -
         let value_of_key = PropertyKey::from_string("valueOf");
         if let Some(value_of_val) = find_method(&value_of_key) {
             if let Some(smi) = value_of_val.as_smi() {
-                if smi < 0 {
+                if value_of_val.is_builtin() {
                     let id = ((-smi) as usize) - 1;
                     if id < vm.builtins.len() {
                         let result = (vm.builtins[id].func)(gc, val, &[], vm);
@@ -1221,7 +1221,7 @@ pub(crate) fn to_primitive_string_sync(val: Value, gc: &mut SemiSpace, vm: &mut 
         let key = PropertyKey::from_string("toString");
         if let Some(to_string_val) = find_method(&key) {
             if let Some(smi) = to_string_val.as_smi() {
-                if smi < 0 {
+                if to_string_val.is_builtin() {
                     let id = ((-smi) as usize) - 1;
                     if id < vm.builtins.len() {
                         let result = (vm.builtins[id].func)(gc, val, &[], vm);
@@ -1247,7 +1247,7 @@ pub(crate) fn to_primitive_string_sync(val: Value, gc: &mut SemiSpace, vm: &mut 
         let value_of_key = PropertyKey::from_string("valueOf");
         if let Some(value_of_val) = find_method(&value_of_key) {
             if let Some(smi) = value_of_val.as_smi() {
-                if smi < 0 {
+                if value_of_val.is_builtin() {
                     let id = ((-smi) as usize) - 1;
                     if id < vm.builtins.len() {
                         let result = (vm.builtins[id].func)(gc, val, &[], vm);
@@ -1655,19 +1655,76 @@ fn number_fraction_digits(
 }
 
 fn format_exponential(x: f64, fraction_digits: Option<usize>) -> String {
-    let s = match fraction_digits {
-        Some(f) => format!("{:.*e}", f, x),
-        None => format!("{:e}", x),
-    };
-    let Some((mantissa, exp)) = s.split_once('e') else {
-        return s;
-    };
-    let exp_num: i32 = exp.parse().unwrap_or(0);
-    format!(
-        "{mantissa}e{}{}",
-        if exp_num < 0 { '-' } else { '+' },
-        exp_num.abs()
-    )
+    if fraction_digits.is_none() {
+        if x == 0.0 {
+            return "0e+0".to_string();
+        }
+        let raw = format!("{:e}", x.abs());
+        let (mant, exp) = raw.split_once('e').unwrap();
+        let exp_num: i32 = exp.parse().unwrap_or(0);
+        return format!(
+            "{}{mant}e{}{}",
+            if x.is_sign_negative() { "-" } else { "" },
+            if exp_num < 0 { '-' } else { '+' },
+            exp_num.abs()
+        );
+    }
+    let f = fraction_digits.unwrap_or(0);
+    if x == 0.0 {
+        if f == 0 {
+            return "0e+0".to_string();
+        }
+        return format!("0.{}e+0", "0".repeat(f));
+    }
+    let negative = x.is_sign_negative();
+    let ax = x.abs();
+    // Correctly rounded decimal expansion with plenty of digits so that the
+    // half-up rounding below sees the exact binary value.
+    let raw = format!("{:.*e}", 400, ax);
+    let (mant, exp) = raw.split_once('e').unwrap();
+    let mut exp_num: i32 = exp.parse().unwrap_or(0);
+    let mut digits: Vec<u8> = mant.bytes().filter(|b| b.is_ascii_digit()).collect();
+    let keep = f + 1;
+    let round_up = digits.get(keep).is_some_and(|d| *d >= b'5');
+    digits.truncate(keep);
+    if round_up {
+        let mut i = digits.len();
+        loop {
+            if i == 0 {
+                digits.insert(0, b'1');
+                if digits.len() > keep {
+                    digits.pop();
+                    exp_num += 1;
+                }
+                break;
+            }
+            i -= 1;
+            if digits[i] == b'9' {
+                digits[i] = b'0';
+            } else {
+                digits[i] += 1;
+                break;
+            }
+        }
+    }
+    while digits.len() < keep {
+        digits.push(b'0');
+    }
+    let mut out = String::new();
+    if negative {
+        out.push('-');
+    }
+    out.push(digits[0] as char);
+    if f > 0 {
+        out.push('.');
+        for d in &digits[1..] {
+            out.push(*d as char);
+        }
+    }
+    out.push('e');
+    out.push(if exp_num < 0 { '-' } else { '+' });
+    out.push_str(&exp_num.abs().to_string());
+    out
 }
 
 /// §21.1.3.3 Number.prototype.toExponential(fractionDigits).
@@ -1680,6 +1737,20 @@ pub fn number_prototype_to_exponential(
     let Some(x) = number_receiver(gc, vm, this, "Number.prototype.toExponential") else {
         return Value::undefined();
     };
+    let f = match args.first() {
+        None => None,
+        Some(v) if v.is_undefined() => None,
+        Some(v) => {
+            let n = match to_integer_sync(gc, vm, *v) {
+                Ok(n) => n,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            };
+            Some(n)
+        }
+    };
     if x.is_nan() {
         return Value::from_heap_ptr(HeapString::allocate(gc, "NaN") as *mut u8);
     }
@@ -1687,13 +1758,20 @@ pub fn number_prototype_to_exponential(
         let text = if x < 0.0 { "-Infinity" } else { "Infinity" };
         return Value::from_heap_ptr(HeapString::allocate(gc, text) as *mut u8);
     }
-    let f = match args.first() {
+    let f = match f {
         None => None,
-        Some(v) if v.is_undefined() => None,
-        Some(_) => match number_fraction_digits(gc, vm, args, Some(0), "toExponential") {
-            Some(n) => Some(n),
-            None => return Value::undefined(),
-        },
+        Some(n) => {
+            if !(0.0..=100.0).contains(&n) {
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::RangeError,
+                    "toExponential fractionDigits out of range",
+                ));
+                return Value::undefined();
+            }
+            Some(n as usize)
+        }
     };
     let text = format_exponential(if x == 0.0 { 0.0 } else { x }, f);
     Value::from_heap_ptr(HeapString::allocate(gc, &text) as *mut u8)
@@ -1740,13 +1818,6 @@ pub fn number_prototype_to_precision(
     let Some(x) = number_receiver(gc, vm, this, "Number.prototype.toPrecision") else {
         return Value::undefined();
     };
-    if x.is_nan() {
-        return Value::from_heap_ptr(HeapString::allocate(gc, "NaN") as *mut u8);
-    }
-    if x.is_infinite() {
-        let text = if x < 0.0 { "-Infinity" } else { "Infinity" };
-        return Value::from_heap_ptr(HeapString::allocate(gc, text) as *mut u8);
-    }
     let p = match args.first() {
         None => {
             return Value::from_heap_ptr(HeapString::allocate(
@@ -1768,6 +1839,13 @@ pub fn number_prototype_to_precision(
                     return Value::undefined();
                 }
             };
+            if x.is_nan() {
+                return Value::from_heap_ptr(HeapString::allocate(gc, "NaN") as *mut u8);
+            }
+            if x.is_infinite() {
+                let text = if x < 0.0 { "-Infinity" } else { "Infinity" };
+                return Value::from_heap_ptr(HeapString::allocate(gc, text) as *mut u8);
+            }
             if !(1.0..=100.0).contains(&n) {
                 vm.set_pending_exception(crate::errors::error_object(
                     gc,
@@ -2033,7 +2111,7 @@ fn find_handle(builtins: &[Builtin], name: &str) -> Option<Value> {
     builtins
         .iter()
         .position(|b| b.name == name)
-        .map(|id| Value::smi(-(id as i32) - 1))
+        .map(Value::builtin)
 }
 
 /// Create an iterator object: own `next` property, hidden per-instance state
@@ -2325,7 +2403,7 @@ pub(crate) fn ys_read_gen(
 fn classify_method(m: Value) -> Result<Option<Value>, ()> {
     if m.is_undefined() || m.is_null() {
         Ok(None)
-    } else if m.as_smi().is_some_and(|s| s < 0)
+    } else if m.is_builtin()
         || m.heap_ptr()
             .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC })
     {
@@ -2890,7 +2968,7 @@ fn forward_call_delegate_method(
     call_arg: Value,
     closing: bool,
 ) -> AfrOut {
-    if method.as_smi().is_some_and(|s| s < 0) {
+    if method.is_builtin() {
         match call_builtin_sync(vm, gc, method, iter, &[call_arg]) {
             Ok(v) => {
                 if closing {
@@ -3440,7 +3518,7 @@ fn set_receiver(gc: &mut SemiSpace, this: Value, vm: &mut Vm) -> Option<*mut u8>
 }
 
 fn is_callable_value(v: Value) -> bool {
-    v.as_smi().is_some_and(|s| s < 0)
+    v.is_builtin()
         || v.heap_ptr()
             .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC })
 }
@@ -4058,7 +4136,7 @@ pub fn reflect_apply(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut 
     let callable = target
         .heap_ptr()
         .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC)
-        || target.as_smi().is_some_and(|s| s < 0);
+        || target.is_builtin();
     if !callable {
         vm.set_pending_exception(crate::errors::error_object(
             gc,
@@ -4169,7 +4247,7 @@ pub fn map_get_or_insert_computed_builtin(
     let callable = callback
         .heap_ptr()
         .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC)
-        || callback.as_smi().is_some_and(|s| s < 0);
+        || callback.is_builtin();
     if !callable {
         vm.set_pending_exception(crate::errors::error_object(
             gc,
@@ -5083,7 +5161,7 @@ pub fn date_to_primitive_builtin(
         let callable = method
             .heap_ptr()
             .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC)
-            || method.as_smi().is_some_and(|s| s < 0);
+            || method.is_builtin();
         if !callable {
             continue;
         }
@@ -5250,7 +5328,7 @@ pub fn date_to_json_builtin(
     let callable = method
         .heap_ptr()
         .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC)
-        || method.as_smi().is_some_and(|s| s < 0);
+        || method.is_builtin();
     if !callable {
         vm.set_pending_exception(crate::errors::error_object(
             gc,
@@ -5342,7 +5420,7 @@ fn to_primitive_sync(
             let callable = method
                 .heap_ptr()
                 .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC })
-                || method.as_smi().is_some_and(|s| s < 0);
+                || method.is_builtin();
             if !callable {
                 return Err(crate::errors::error_object(
                     gc,
@@ -5375,7 +5453,7 @@ fn to_primitive_sync(
             let is_callable = method
                 .heap_ptr()
                 .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC })
-                || method.as_smi().is_some_and(|s| s < 0);
+                || method.is_builtin();
             if !is_callable {
                 continue;
             }
@@ -7190,7 +7268,7 @@ pub(crate) fn fill_collection_from_iterator(
         return FillOutcome::Threw;
     }
     let next = load_property_recursive(iterator, vm.next_key, Some(vm.function_prototype), gc);
-    if next.as_smi().is_some_and(|s| s < 0) {
+    if next.is_builtin() {
         loop {
             let id = (-next.as_smi().unwrap() as usize) - 1;
             let result = if id < vm.builtins.len() {
@@ -7263,7 +7341,7 @@ fn fill_collection_sync(
     let adder_ok = adder
         .heap_ptr()
         .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC })
-        || adder.as_smi().is_some_and(|s| s < 0);
+        || adder.is_builtin();
     if !adder_ok {
         vm.temp_roots.truncate(base);
         return Err(crate::errors::error_object(
@@ -7436,7 +7514,7 @@ fn fill_collection_from_iterable(
             return FillOutcome::Threw;
         }
     };
-    if method.as_smi().is_some_and(|s| s < 0) {
+    if method.is_builtin() {
         let id = (-method.as_smi().unwrap() as usize) - 1;
         let iterator = if id < vm.builtins.len() {
             let r = (vm.builtins[id].func)(gc, iterable, &[], vm);
@@ -7636,7 +7714,7 @@ fn to_string_for_error(val: Value, gc: &mut SemiSpace, vm: &mut Vm) -> ErrorMess
             if let Some(slot) = shape.lookup(&key) {
                 let m = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
                 if let Some(smi) = m.as_smi() {
-                    if smi < 0 {
+                    if m.is_builtin() {
                         let id = ((-smi) as usize) - 1;
                         if id < vm.builtins.len() {
                             let r = (vm.builtins[id].func)(gc, cur, &[], vm);
@@ -8023,7 +8101,7 @@ pub fn object_prototype_to_string(
             return Value::from_heap_ptr(crate::vm::heap_string(gc, &out));
         }
         "Object".to_string()
-    } else if this.as_smi().is_some_and(|s| s < 0) {
+    } else if this.is_builtin() {
         "Function".to_string()
     } else if this.is_smi() || this.as_float64().is_some() {
         if let Some(tag) = to_string_tag_on_chain(vm.number_prototype) {
@@ -8332,7 +8410,7 @@ fn legacy_define_accessor(
     }
     let key = args.first().copied().unwrap_or(Value::undefined());
     let func = args.get(1).copied().unwrap_or(Value::undefined());
-    let callable = func.as_smi().is_some_and(|s| s < 0)
+    let callable = func.is_builtin()
         || func
             .heap_ptr()
             .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC);
@@ -8628,7 +8706,7 @@ pub fn object_prototype_property_is_enumerable(
         return Value::undefined();
     }
     let key = args.first().copied().unwrap_or(Value::undefined());
-    if this.as_smi().is_some_and(|s| s < 0) {
+    if this.is_builtin() {
         return Value::boolean(false);
     }
     let Some(ptr) = this.heap_ptr() else {
@@ -8782,7 +8860,7 @@ pub fn object_get_prototype_of(
     if obj.is_boolean() {
         return vm.boolean_prototype;
     }
-    if obj.as_smi().is_some_and(|s| s < 0) {
+    if obj.is_builtin() {
         return vm.function_prototype;
     }
     if obj.as_smi().is_some() {
@@ -9322,7 +9400,7 @@ pub fn object_group_by(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mu
     let callable = callback
         .heap_ptr()
         .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC)
-        || callback.as_smi().is_some_and(|s| s < 0);
+        || callback.is_builtin();
     if !callable {
         vm.set_pending_exception(crate::errors::error_object(
             gc,
@@ -9475,7 +9553,7 @@ pub fn map_group_by(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut V
     let callable = callback
         .heap_ptr()
         .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC)
-        || callback.as_smi().is_some_and(|s| s < 0);
+        || callback.is_builtin();
     if !callable {
         vm.set_pending_exception(crate::errors::error_object(
             gc,
@@ -9750,7 +9828,7 @@ fn close_iterator(gc: &mut SemiSpace, vm: &mut Vm, iterator: Value) {
     let callable = ret
         .heap_ptr()
         .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC })
-        || ret.as_smi().is_some_and(|s| s < 0);
+        || ret.is_builtin();
     if !callable {
         return;
     }
@@ -11865,7 +11943,7 @@ macro_rules! integrity_test_builtin {
             let _ = gc;
             let _ = vm;
             let target = args.first().copied().unwrap_or(Value::undefined());
-            if target.as_smi().is_some_and(|s| s < 0) {
+            if target.is_builtin() {
                 // Builtin function handles are functions: extensible, not
                 // sealed/frozen.
                 return Value::boolean($kind == 0);
@@ -12223,7 +12301,7 @@ fn of_set_length(gc: &mut SemiSpace, vm: &mut Vm, made: Value, len: u64, args: &
         return Value::undefined();
     }
     if let Some(smi) = setter.as_smi() {
-        if smi < 0 {
+        if setter.is_builtin() {
             let id = ((-smi) as usize) - 1;
             if id < vm.builtins.len() {
                 let r = (vm.builtins[id].func)(gc, made, &[length_value(len)], vm);
@@ -12340,7 +12418,7 @@ fn from_call(
     await_kind: crate::vm::FromAwait,
 ) -> FromCallOut {
     if let Some(smi) = callee.as_smi() {
-        if smi < 0 {
+        if callee.is_builtin() {
             let id = ((-smi) as usize) - 1;
             if id < vm.builtins.len() {
                 let r = (vm.builtins[id].func)(gc, this, &args, vm);
@@ -12396,7 +12474,7 @@ fn from_prop_value(
         return FromPropOut::Ready(Value::undefined());
     }
     if let Some(smi) = getter.as_smi() {
-        if smi < 0 {
+        if getter.is_builtin() {
             let id = ((-smi) as usize) - 1;
             if id < vm.builtins.len() {
                 let r = (vm.builtins[id].func)(gc, obj, &[], vm);
@@ -12547,7 +12625,7 @@ pub(crate) fn from_close(
         return FromStepOut::Raise(abrupt);
     }
     if let Some(smi) = ret.as_smi() {
-        if smi < 0 {
+        if ret.is_builtin() {
             let id = ((-smi) as usize) - 1;
             if id < vm.builtins.len() {
                 (vm.builtins[id].func)(gc, iter, &[], vm);
@@ -12678,7 +12756,7 @@ fn from_factory_result(
         Some(aptr) if unsafe { (*(aptr as *const GcHeader)).tag() } == TAG_ACCESSOR => {
             let getter = unsafe { rune_core::accessor::AccessorPair::getter(aptr) };
             if let Some(smi) = getter.as_smi() {
-                if smi < 0 {
+                if getter.is_builtin() {
                     let id = ((-smi) as usize) - 1;
                     if id < vm.builtins.len() {
                         let r = (vm.builtins[id].func)(gc, res, &[], vm);
@@ -12699,7 +12777,7 @@ fn from_factory_result(
         }
         _ => raw,
     };
-    if !(nxt.as_smi().is_some_and(|s| s < 0)
+    if !(nxt.is_builtin()
         || nxt
             .heap_ptr()
             .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC))
@@ -13507,7 +13585,7 @@ fn length_call_method(
         return LengthCallOut::Skip;
     }
     if let Some(smi) = method.as_smi() {
-        if smi < 0 {
+        if method.is_builtin() {
             let id = ((-smi) as usize) - 1;
             if id < vm.builtins.len() {
                 let r = (vm.builtins[id].func)(gc, recv, &[], vm);
@@ -13673,7 +13751,7 @@ pub(crate) fn length_drive(
         return length_chain(vm, gc, op);
     }
     if let Some(smi) = getter.as_smi() {
-        if smi < 0 {
+        if getter.is_builtin() {
             let id = ((-smi) as usize) - 1;
             if id < vm.builtins.len() {
                 let r = (vm.builtins[id].func)(gc, op.stash_this, &[], vm);
@@ -13885,19 +13963,16 @@ fn length_to_number(gc: &mut SemiSpace, vm: &mut Vm, v: Value) -> Result<f64, Va
             }
             return Ok(crate::vm::to_number(v));
         }
-        // String objects coerce by their inner string (own valueOf
-        // overrides are a documented gap — B1f-6 dispatches methods).
-        if tag == TAG_STRING_OBJ || tag == TAG_OBJECT {
-            let prim = to_primitive_sync(gc, vm, v, "number")?;
-            if prim.is_symbol() {
-                return Err(sort_type_error(
-                    gc,
-                    vm,
-                    "Cannot convert a Symbol value to a number",
-                ));
-            }
-            return Ok(crate::vm::to_number(prim));
+        // All object receivers go through ToPrimitive(number).
+        let prim = to_primitive_sync(gc, vm, v, "number")?;
+        if prim.is_symbol() {
+            return Err(sort_type_error(
+                gc,
+                vm,
+                "Cannot convert a Symbol value to a number",
+            ));
         }
+        return Ok(crate::vm::to_number(prim));
     }
     Ok(0.0)
 }
@@ -14001,10 +14076,10 @@ pub(crate) fn classify_store(gc: &mut SemiSpace, obj: Value, idx: usize) -> Stor
     if setter.is_undefined() || setter.is_null() {
         return StoreTarget::GetterOnly;
     }
-    if let Some(smi) = setter.as_smi() {
-        if smi < 0 {
-            return StoreTarget::SetterBuiltin(setter);
-        }
+    if setter.is_builtin() {
+        return StoreTarget::SetterBuiltin(setter);
+    }
+    if setter.as_smi().is_some() {
         return StoreTarget::SetterInvalid;
     }
     if setter
@@ -14140,7 +14215,7 @@ fn mutator_read(
         return Ok(Value::undefined());
     }
     if let Some(smi) = getter.as_smi() {
-        if smi < 0 {
+        if getter.is_builtin() {
             let id = ((-smi) as usize) - 1;
             if id < vm.builtins.len() {
                 let result = (vm.builtins[id].func)(gc, *obj, &[], vm);
@@ -14430,7 +14505,7 @@ fn set_length_checked(
                     ));
                 }
                 if let Some(smi) = setter.as_smi() {
-                    if smi < 0 {
+                    if setter.is_builtin() {
                         let id = ((-smi) as usize) - 1;
                         if id < vm.builtins.len() {
                             (vm.builtins[id].func)(gc, *obj, &[length_value(len)], vm);
@@ -18512,7 +18587,7 @@ pub fn call_builtin(_gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
     // If target is a builtin, call it directly.
     // If it sets up pending_array_op (like array methods), that works naturally.
     if let Some(smi) = target.as_smi() {
-        if smi < 0 {
+        if target.is_builtin() {
             let id = ((-smi) as usize) - 1;
             if id < vm.builtins.len() {
                 return (vm.builtins[id].func)(_gc, new_this, &call_args, vm);
@@ -18557,7 +18632,11 @@ pub fn apply_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
     }
 
     // Step 2: IsCallable(func) else TypeError
-    let target_smi = target.as_smi().filter(|&s| s < 0);
+    let target_smi = if target.is_builtin() {
+        target.as_smi()
+    } else {
+        None
+    };
     let is_js_func = target
         .heap_ptr()
         .map(|ptr| unsafe { (*(ptr as *const GcHeader)).tag() } == rune_core::gc::TAG_FUNC)
@@ -18663,7 +18742,7 @@ fn species_read(
         return SpeciesReadOut::Done(Value::undefined());
     }
     if let Some(smi) = getter.as_smi() {
-        if smi < 0 {
+        if getter.is_builtin() {
             let id = ((-smi) as usize) - 1;
             if id < vm.builtins.len() {
                 let r = (vm.builtins[id].func)(gc, recv, &[], vm);
@@ -19195,7 +19274,7 @@ fn is_concat_spreadable_sync(gc: &mut SemiSpace, vm: &mut Vm, item: Value) -> Re
             if getter.is_undefined() || getter.is_null() {
                 Value::undefined()
             } else if let Some(smi) = getter.as_smi() {
-                if smi < 0 {
+                if getter.is_builtin() {
                     let id = ((-smi) as usize) - 1;
                     if id < vm.builtins.len() {
                         let r = (vm.builtins[id].func)(gc, item, &[], vm);
@@ -19487,7 +19566,7 @@ fn copy_resolve(
     if getter.is_undefined() || getter.is_null() {
         return ResolveOut::Ready(Value::undefined());
     }
-    if getter.as_smi().is_some_and(|s| s < 0) {
+    if getter.is_builtin() {
         return match crate::vm::call_builtin_sync(vm, gc, getter, *source, &[]) {
             Ok(v) => {
                 *source = refresh_value(*source);
@@ -21001,7 +21080,7 @@ fn array_iter_prologue(
     }
     let length = len_u64.min(u32::MAX as u64) as u32;
     let callback = args.first().copied().unwrap_or(Value::undefined());
-    let callable = callback.as_smi().is_some_and(|s| s < 0)
+    let callable = callback.is_builtin()
         || callback
             .heap_ptr()
             .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC });
@@ -22035,7 +22114,7 @@ fn sort_to_prim(
     let name_val = Value::from_heap_ptr(HeapString::allocate(gc, name) as *mut u8);
     let method = crate::vm::load_property_recursive(value, name_val, None, gc);
     if let Some(smi) = method.as_smi() {
-        if smi < 0 {
+        if method.is_builtin() {
             let id = ((-smi) as usize) - 1;
             if id < vm.builtins.len() {
                 let result = (vm.builtins[id].func)(gc, value, &[], vm);
@@ -22186,7 +22265,7 @@ fn sort_begin_length(
                 return SortStepOut::Progress;
             }
             if let Some(smi) = getter.as_smi() {
-                if smi < 0 {
+                if getter.is_builtin() {
                     let id = ((-smi) as usize) - 1;
                     if id < vm.builtins.len() {
                         let result = (vm.builtins[id].func)(gc, obj, &[], vm);
@@ -22435,7 +22514,7 @@ fn sort_compare_step(
         }
         let cmp = sop.comparator;
         if let Some(smi) = cmp.as_smi() {
-            if smi < 0 {
+            if cmp.is_builtin() {
                 let id = ((-smi) as usize) - 1;
                 if id < vm.builtins.len() {
                     let result = (vm.builtins[id].func)(gc, Value::undefined(), &[x, y], vm);
@@ -24035,7 +24114,7 @@ fn promise_static_precheck(
             let shape = unsafe { JSObject::shape_ptr(ctor as *mut JSObject) };
             if let Some(slot) = shape.lookup(&PropertyKey::from_string("resolve")) {
                 let resolve = unsafe { JSObject::get_slot(ctor as *mut JSObject, slot) };
-                let callable = resolve.as_smi().is_some_and(|n| n < 0)
+                let callable = resolve.is_builtin()
                     || resolve
                         .heap_ptr()
                         .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC);
@@ -24240,7 +24319,7 @@ pub fn function_prototype_to_string(
 }
 
 pub fn function_bind(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let callable = this.as_smi().is_some_and(|s| s < 0)
+    let callable = this.is_builtin()
         || this
             .heap_ptr()
             .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC });
@@ -24342,7 +24421,7 @@ pub fn promise_try(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm)
         return Value::undefined();
     }
     let callback = args.first().copied().unwrap_or(Value::undefined());
-    let callable = callback.as_smi().is_some_and(|s| s < 0)
+    let callable = callback.is_builtin()
         || callback
             .heap_ptr()
             .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC);

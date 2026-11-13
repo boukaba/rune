@@ -1536,7 +1536,7 @@ impl Vm {
             builtins
                 .iter()
                 .position(|b| b.name == name)
-                .map(|id| Value::smi(-(id as i32) - 1))
+                .map(Value::builtin)
         }
         fn make_object(gc: &mut SemiSpace, pairs: &[(&str, Value)]) -> Value {
             let keys: Vec<(PropertyKey, usize)> = pairs
@@ -3788,7 +3788,7 @@ impl Vm {
     ) -> Value {
         let id = self.builtins.len();
         self.builtins.push(Builtin { name, length, func });
-        Value::smi(-(id as i32) - 1)
+        Value::builtin(id)
     }
 
     /// Retain a Value across host/runtime callbacks. Returns a stable slot id.
@@ -3867,7 +3867,7 @@ impl Vm {
         self.builtins
             .iter()
             .position(|b| b.name == name)
-            .map(|id| Value::smi(-(id as i32) - 1))
+            .map(Value::builtin)
     }
 
     /// Create a resolve/reject bridge function that closes over a promise
@@ -3877,7 +3877,7 @@ impl Vm {
         self.builtins
             .iter()
             .position(|b| b.name == name)
-            .map(|id| Value::smi(-(id as i32) - 1))
+            .map(Value::builtin)
             .unwrap_or(Value::undefined())
     }
 
@@ -4124,7 +4124,7 @@ impl Vm {
             return true;
         }
         if let Some(smi) = expected.as_smi() {
-            if smi < 0 {
+            if expected.is_builtin() {
                 let id = (-smi - 1) as usize;
                 if let Some(b) = self.builtins.get(id) {
                     return crate::builtins::read_error_name(thrown).as_deref() == Some(b.name);
@@ -4166,7 +4166,7 @@ impl Vm {
             }
         }
         if let Some(smi) = expected.as_smi() {
-            if smi < 0 {
+            if expected.is_builtin() {
                 let id = (-smi - 1) as usize;
                 if let Some(b) = self.builtins.get(id) {
                     return b.name.to_string();
@@ -5495,7 +5495,7 @@ impl Vm {
         }
         // Smi builtins: only Test262Error constructs (New-arm rule).
         if let Some(smi_val) = ctor.as_smi() {
-            if smi_val < 0 {
+            if ctor.is_builtin() {
                 let id = ((-smi_val) as usize) - 1;
                 if id < self.builtins.len() {
                     if self.builtins[id].name != "Test262Error" {
@@ -5886,7 +5886,7 @@ impl Vm {
         if getter.is_undefined() {
             return YsGetOut::Ready(Value::undefined());
         }
-        if getter.as_smi().is_some_and(|s| s < 0) {
+        if getter.is_builtin() {
             return match call_builtin_sync(self, gc, getter, obj, &[]) {
                 Ok(v) => YsGetOut::Ready(v),
                 Err(Some(exit)) => YsGetOut::Bail(Some(exit)),
@@ -6777,7 +6777,7 @@ impl Vm {
                 Value::undefined()
             }
         } else if let Some(smi) = obj.as_smi() {
-            if smi < 0 {
+            if obj.is_builtin() {
                 // Negative Smi = builtin handle — expose name/length
                 // metadata (Function.prototype fallback for the rest).
                 let id = ((-smi) as usize) - 1;
@@ -8632,7 +8632,7 @@ impl Vm {
                             continue;
                         }
                         SymbolMethodResult::Found(method) => {
-                            if method.as_smi().is_some_and(|s| s < 0) {
+                            if method.is_builtin() {
                                 let result =
                                     match call_builtin_sync(self, gc, method, expr_val, &[]) {
                                         Ok(v) => v,
@@ -8670,7 +8670,7 @@ impl Vm {
                     let next = self.stack[len - 1 - prefix];
                     let iter = self.stack[len - 2 - prefix];
 
-                    if next.as_smi().is_some_and(|s| s < 0) {
+                    if next.is_builtin() {
                         let result = match call_builtin_sync(self, gc, next, iter, &[]) {
                             Ok(v) => v,
                             Err(Some(exit)) => return exit,
@@ -8705,7 +8705,7 @@ impl Vm {
                     let len = self.stack.len();
                     let next = self.stack[len - 1];
                     let iter = self.stack[len - 2];
-                    if next.as_smi().is_some_and(|s| s < 0) {
+                    if next.is_builtin() {
                         let result = match call_builtin_sync(self, gc, next, iter, &[sent]) {
                             Ok(v) => v,
                             Err(Some(exit)) => return exit,
@@ -8779,7 +8779,7 @@ impl Vm {
                             continue;
                         }
                         SymbolMethodResult::Found(method) => {
-                            if method.as_smi().is_some_and(|s| s < 0) {
+                            if method.is_builtin() {
                                 let result = match call_builtin_sync(self, gc, method, x, &[]) {
                                     Ok(v) => v,
                                     Err(Some(exit)) => return exit,
@@ -9945,9 +9945,11 @@ impl Vm {
                         "boolean"
                     } else if val.is_symbol() {
                         "symbol"
+                    } else if val.is_builtin() {
+                        "function"
                     } else if val.is_smi() {
                         // Negative Smis are builtin handles — they are callable.
-                        if val.as_smi().unwrap() < 0 {
+                        if val.is_builtin() {
                             "function"
                         } else {
                             "number"
@@ -11327,7 +11329,7 @@ impl Vm {
                     let obj_val = Value::from_heap_ptr(obj as *mut u8);
                     // If constructor is a builtin, call it with the new object as `this`
                     if let Some(smi_val) = constructor.as_smi() {
-                        if smi_val < 0 {
+                        if constructor.is_builtin() {
                             let id = ((-smi_val) as usize) - 1;
                             if id < self.builtins.len() {
                                 // §20.5.2.4: only Test262Error (the harness error
@@ -11551,7 +11553,7 @@ impl Vm {
 
                     // Builtin dispatch: negative Smi handles
                     if let Some(smi_val) = callee.as_smi() {
-                        if smi_val < 0 {
+                        if callee.is_builtin() {
                             let id = ((-smi_val) as usize) - 1;
                             if id < self.builtins.len() {
                                 let result = (self.builtins[id].func)(gc, this, &args, &mut *self);
@@ -11579,6 +11581,19 @@ impl Vm {
                                 self.frames[fi].pc = pc + 1;
                                 continue;
                             }
+                        } else if smi_val < 0 {
+                            // Negative non-builtin Smi = ordinary negative
+                            // number: not callable.
+                            let exc = crate::errors::error_object(
+                                gc,
+                                &self.error_protos,
+                                crate::errors::ErrorKind::TypeError,
+                                "callee is not a function",
+                            );
+                            if let Some(exit) = self.handle_throw(gc, exc) {
+                                return exit;
+                            }
+                            continue;
                         } else {
                             // Positive Smi: generator handle — push undefined
                             self.push(Value::undefined());
@@ -13377,7 +13392,7 @@ impl Vm {
                                     } else {
                                         k
                                     };
-                                    if pfe.callback.as_smi().is_some_and(|s| s < 0) {
+                                    if pfe.callback.is_builtin() {
                                         let id = (-pfe.callback.as_smi().unwrap() as usize) - 1;
                                         if id < self.builtins.len() {
                                             (self.builtins[id].func)(
@@ -14032,7 +14047,7 @@ impl Vm {
 
                     // Builtin dispatch: negative Smi handles
                     if let Some(smi_val) = callee.as_smi() {
-                        if smi_val < 0 {
+                        if callee.is_builtin() {
                             let id = ((-smi_val) as usize) - 1;
                             if id < self.builtins.len() {
                                 let result = (self.builtins[id].func)(gc, this, &args, &mut *self);
@@ -15068,7 +15083,7 @@ pub(crate) fn get_symbol_method(
     let callable = method
         .heap_ptr()
         .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC })
-        || method.as_smi().is_some_and(|s| s < 0);
+        || method.is_builtin();
     if callable {
         SymbolMethodResult::Found(method)
     } else {
@@ -15095,7 +15110,7 @@ pub(crate) fn get_iter_method(vm: &mut Vm, gc: &mut SemiSpace, value: Value) -> 
                         }
                         let callable = m.heap_ptr().is_some_and(|p| unsafe {
                             (*(p as *const GcHeader)).tag() == TAG_FUNC
-                        }) || m.as_smi().is_some_and(|s| s < 0);
+                        }) || m.is_builtin();
                         return if callable {
                             SymbolMethodResult::Found(m)
                         } else {
@@ -15140,7 +15155,7 @@ pub(crate) fn call_builtin_sync(
     args: &[Value],
 ) -> Result<Value, Option<Exit>> {
     if let Some(smi) = handle.as_smi() {
-        if smi < 0 {
+        if handle.is_builtin() {
             let id = ((-smi) as usize) - 1;
             if id < vm.builtins.len() {
                 let result = (vm.builtins[id].func)(gc, this, args, vm);
@@ -15182,7 +15197,7 @@ fn complete_for_of_init(vm: &mut Vm, gc: &mut SemiSpace, iterator: Value) -> Res
         return Ok(());
     }
     let next = load_property_recursive(iterator, vm.next_key, Some(vm.function_prototype), gc);
-    let callable = next.as_smi().is_some_and(|s| s < 0)
+    let callable = next.is_builtin()
         || next
             .heap_ptr()
             .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC });
@@ -15337,7 +15352,7 @@ fn drain_iterator(
         return Err(vm.throw_type_error(gc, "value is not iterable"));
     }
     let next = load_property_recursive(iterator, vm.next_key, Some(vm.function_prototype), gc);
-    if next.as_smi().is_some_and(|s| s < 0) {
+    if next.is_builtin() {
         // Builtin next — drain synchronously.
         let mut cur = arr;
         loop {
@@ -15411,26 +15426,24 @@ pub(crate) fn load_property_recursive(
             return Value::undefined();
         }
         depth += 1;
-        // Builtin handles (negative Smis) are function-like: check Function.prototype
-        if let Some(smi) = current.as_smi() {
-            if smi < 0 {
-                if let Some(fp) = function_prototype {
-                    if fp.is_heap_object() {
-                        if let Some(ptr) = fp.heap_ptr() {
-                            if let Some(key) = value_to_prop_key(raw_key) {
-                                let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
-                                if let Some(slot) = shape.lookup(&key) {
-                                    return unsafe {
-                                        JSObject::get_slot(ptr as *mut JSObject, slot)
-                                    };
-                                }
+        // Builtin handles are function-like: check Function.prototype.
+        if current.is_builtin() {
+            if let Some(fp) = function_prototype {
+                if fp.is_heap_object() {
+                    if let Some(ptr) = fp.heap_ptr() {
+                        if let Some(key) = value_to_prop_key(raw_key) {
+                            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                            if let Some(slot) = shape.lookup(&key) {
+                                return unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
                             }
                         }
                     }
                 }
-                return Value::undefined();
             }
-            // Non-negative Smis (real integers) have no properties
+            return Value::undefined();
+        }
+        if current.as_smi().is_some() {
+            // Real integers have no own properties here.
             return Value::undefined();
         }
         if let Some(ptr) = current.heap_ptr() {
@@ -16600,7 +16613,7 @@ pub(crate) fn value_is_constructor(vm: &Vm, v: Value) -> bool {
         return false;
     }
     if let Some(smi) = v.as_smi() {
-        if smi < 0 {
+        if v.is_builtin() {
             let id = ((-smi) as usize) - 1;
             return id < vm.builtins.len() && vm.builtins[id].name == "Test262Error";
         }
@@ -16609,16 +16622,16 @@ pub(crate) fn value_is_constructor(vm: &Vm, v: Value) -> bool {
 }
 
 pub(crate) fn has_property(obj: Value, raw_key: Value, function_prototype: Option<Value>) -> bool {
-    // Builtin handles (negative Smis) are function-like: check Function.prototype
-    if let Some(smi) = obj.as_smi() {
-        if smi < 0 {
-            if let Some(fp) = function_prototype {
-                if fp.is_heap_object() {
-                    return has_property(fp, raw_key, function_prototype);
-                }
+    // Builtin handles are function-like: check Function.prototype.
+    if obj.is_builtin() {
+        if let Some(fp) = function_prototype {
+            if fp.is_heap_object() {
+                return has_property(fp, raw_key, function_prototype);
             }
-            return false;
         }
+        return false;
+    }
+    if obj.as_smi().is_some() {
         return false;
     }
     if let Some(ptr) = obj.heap_ptr() {
@@ -16959,7 +16972,7 @@ pub(crate) fn ordinary_has_instance(
 ) -> bool {
     // Builtin function handles are negative Smis; their [[Prototype]] is
     // %Function.prototype%, so `builtinMethod instanceof Function` is true.
-    if lhs.as_smi().is_some_and(|s| s < 0) {
+    if lhs.is_builtin() {
         return !function_proto.is_null() && rhs_proto_ptr == function_proto;
     }
     let mut current = lhs;
@@ -17292,7 +17305,7 @@ pub(crate) fn array_element_value(
     if getter.is_undefined() || getter.is_null() {
         return ArrayElemOut::Ready(Value::undefined());
     }
-    if getter.as_smi().is_some_and(|s| s < 0) {
+    if getter.is_builtin() {
         return match call_builtin_sync(vm, gc, getter, source, &[]) {
             Ok(v) => ArrayElemOut::Ready(v),
             Err(_) => {
@@ -18030,7 +18043,7 @@ pub extern "C" fn rune_jit_typeof_helper(vm_ptr: *mut u8, value_raw: u64) -> u64
         TYPEOF_BOOLEAN
     } else if val.is_smi() {
         // Negative Smis are builtin handles — they are callable.
-        if val.as_smi().unwrap() < 0 {
+        if val.is_builtin() {
             TYPEOF_FUNCTION
         } else {
             TYPEOF_NUMBER

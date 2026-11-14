@@ -359,6 +359,12 @@ fn run_test(test: &TestCase) -> Outcome {
                     .unwrap_or_default()
             ),
         },
+        Ok(1) if neg_type.is_some() => Outcome::Fail {
+            message: format!(
+                "expected {} but source completed normally",
+                neg_type.unwrap_or("exception")
+            ),
+        },
         Ok(_) => {
             if neg_type.is_some() {
                 Outcome::Pass
@@ -418,12 +424,12 @@ fn parse_metadata(source: &str) -> TestMeta {
         } else if line == "negative:" {
             negative_next = true;
         } else if negative_next {
-            if let Some(val) = line.strip_prefix("  type: ") {
+            // Lines were trimmed above, so match the indentation-less keys.
+            if let Some(val) = line.strip_prefix("type: ") {
                 meta.negative_type = Some(val.trim().to_string());
-            } else if let Some(val) = line.strip_prefix("  phase: ") {
+            } else if let Some(val) = line.strip_prefix("phase: ") {
                 meta.negative_phase = Some(val.trim().to_string());
-            }
-            if line.is_empty() || !line.starts_with("  ") {
+            } else if !line.is_empty() {
                 negative_next = false;
             }
         }

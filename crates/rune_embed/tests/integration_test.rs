@@ -18848,3 +18848,38 @@ fn test_catch_parameter_environment_and_pattern_default_closures() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_switch_caseblock_lexical_environment() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            let x = "outside";
+            var probe1, probe2, probeSelector;
+
+            switch (null) {
+                case null:
+                    let x = "inside";
+                    probe1 = function () { return x; };
+                case null:
+                    probe2 = function () { return x; };
+            }
+
+            switch (probeSelector = function () { return x; }, null) {
+                case null:
+                    let x = "selector-inside";
+                    probe1 = function () { return x; };
+            }
+
+            [
+                probe2() === "inside",
+                probe1() === "selector-inside",
+                probeSelector() === "outside",
+                x === "outside"
+            ].join("|") === "true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

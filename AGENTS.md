@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Switch CaseBlock scope + honest negatives (2026-11-14)**: one CaseBlock lexical env with closure capture/cleanup, negative metadata type/phase parsing, no-throw negatives fail. switch **35/111**, class **1636/4367**, class expr **1566/4059**, object **648/1170**. Integration **932**.
 - **Catch parameter environment (2026-11-14)**: catch params in declarative env, closures capture, pattern-default closure detection. try **150/201**. Integration **931**.
 - **Switch default position/fallthrough (2026-11-14)**: default_index in AST, source-order body layout, comma discriminant/case tests. switch **33/111**. Integration **930**.
 - **Eval completion values (2026-11-14)**: statement-mode eval returns completion local; resets for if/switch/try/loops, per-iteration loop reset, finally suppression. if **27/69 (0 fail)**, switch **23/111**, try **146/201**, while **20/38**, do-while **17/36**, eval-code **119/347**. Integration **929**.

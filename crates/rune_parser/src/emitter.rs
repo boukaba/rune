@@ -2745,6 +2745,36 @@ impl Emitter {
                 let switch_marker = self.switch_break_jumps.len();
                 self.switch_exit_stack.push(switch_marker);
 
+                // CaseBlock is a single lexical block: let/const declarations
+                // in any clause are visible to every selector/statement and
+                // captured closures.
+                let mut switch_stmts: Vec<Stmt> = Vec::new();
+                for case in cases {
+                    switch_stmts.extend(case.body.iter().cloned());
+                }
+                if let Some(body) = &default_body {
+                    switch_stmts.extend(body.iter().cloned());
+                }
+                let lexical_count = self.count_lexicals(&switch_stmts);
+                let switch_env_depth = self.env_scope_stack.len();
+                if lexical_count > 0 {
+                    self.enter_lexical_scope(&switch_stmts, lexical_count);
+                    self.emit(Opcode::BlockEnter, vec![lexical_count as i64]);
+                    let mut block_names: Vec<String> = Vec::new();
+                    for s in &switch_stmts {
+                        if let Stmt::Var(VarKind::Let | VarKind::Const, decls, _) = s {
+                            for d in decls {
+                                push_pattern_binding_names(&d.pattern, &d.name, &mut block_names);
+                            }
+                        }
+                    }
+                    if !block_names.is_empty() {
+                        self.env_scope_stack.push(block_names);
+                        let name_count = self.env_scope_stack.last().map(|n| n.len()).unwrap_or(0);
+                        self.emit(Opcode::MakeEnv, vec![name_count as i64]);
+                    }
+                }
+
                 // === COMPARISON CHAIN ===
                 // Each case: Dup, load test, StrictEq, JumpIfFalse → skip
                 // If matched: Pop (remove dup), Jump → body entry in body section
@@ -2795,14 +2825,24 @@ impl Emitter {
                     default_target = Some(self.current());
                 }
 
-                let after_pc = self.current();
+                let cleanup_pc = self.current();
+                // Exit the CaseBlock lexical environment (breaks jump here).
+                if self.env_scope_stack.len() > switch_env_depth {
+                    self.emit(Opcode::RestoreEnv, vec![]);
+                    self.env_scope_stack.truncate(switch_env_depth);
+                }
+                if lexical_count > 0 {
+                    self.emit(Opcode::BlockLeave, vec![]);
+                    self.leave_lexical_scope();
+                }
                 // Patch break jumps made inside case bodies
                 for i in switch_marker..self.switch_break_jumps.len() {
-                    self.patch(self.switch_break_jumps[i], after_pc);
+                    self.patch(self.switch_break_jumps[i], cleanup_pc);
                 }
                 self.switch_break_jumps.truncate(switch_marker);
-                // Patch no-match jump to default or past switch
-                self.patch(no_match_target, default_target.unwrap());
+                // Patch no-match jump to default or past the CaseBlock
+                let no_match_pc = default_target.unwrap_or(cleanup_pc);
+                self.patch(no_match_target, no_match_pc);
                 self.switch_exit_stack.pop();
             }
         }

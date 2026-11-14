@@ -4076,6 +4076,29 @@ Integration suite: **930 passed, 0 failed, 3 ignored**.
 
 Integration suite: **931 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Switch CaseBlock scope + honest negative tests (2026-11-14)
+
+- Switch evaluation now creates one lexical environment for the whole
+  CaseBlock: let/const declarations in any clause are visible to selectors,
+  statements and captured closures, and restored on exit (breaks jump to the
+  cleanup sequence). All six `scope-lex-*` switch tests now exercise real
+  CaseBlock scoping.
+- Test262 metadata parsing now recognizes `negative:` `type:`/`phase:` lines.
+  Previously indentation was trimmed before matching two-space prefixes, so
+  every negative test was treated as positive.
+- The runner now rejects a negative runtime test that completes normally
+  (child exit 1 for throw/parse modes) instead of silently passing it. Several
+  pre-existing negative tests became honest failures as a result (mostly
+  function/class/generator declaration hoisting that should still be
+  ReferenceErrors).
+- Test262: language/statements/switch **33 → 35/111** (six scope tests fixed,
+  four previously hidden negative tests now honestly fail),
+  language/statements/class **1633 → 1636/4367**, expressions/class
+  **1563 → 1566/4059**, expressions/object **646 → 648/1170**.
+- Regression: `test_switch_caseblock_lexical_environment`.
+
+Integration suite: **932 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

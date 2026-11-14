@@ -14818,6 +14818,11 @@ pub fn array_copy_within(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &m
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
+    let this = if is_object_value(this) || this.is_builtin() {
+        this
+    } else {
+        crate::vm::to_object_value(gc, this, vm)
+    };
     let length = match checked_array_length(gc, vm, this) {
         Ok(len) => len as i64,
         Err(e) => {
@@ -14902,19 +14907,6 @@ pub fn array_copy_within(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &m
     this
 }
 
-/// Clamp an index argument per ToIntegerOrInfinity + relative clamping:
-/// negative counts from len, out-of-range clamps to [0, len]. `def` is the
-/// default when the argument is missing.
-fn clamp_index_arg(arg: Option<Value>, len: i64, def: i64) -> i64 {
-    let Some(v) = arg else { return def };
-    let n = to_integer_or_infinity(v);
-    if n.is_infinite() {
-        return if n > 0.0 { len } else { 0 };
-    }
-    let n = n as i64;
-    if n < 0 { (len + n).max(0) } else { n.min(len) }
-}
-
 /// Throwing clamp (B1d): symbols fail ToIntegerOrInfinity with TypeError.
 /// Used by copyWithin/toSpliced/with index arguments (return-abrupt-from-*
 /// tests). Value-coercion via valueOf stays a sync gap (0 fallback).
@@ -14925,53 +14917,26 @@ fn clamp_index_throwing(
     len: i64,
     def: i64,
 ) -> Result<i64, Value> {
-    if let Some(v) = arg {
-        if v.is_symbol() {
-            return Err(crate::errors::error_object(
-                gc,
-                &vm.error_protos,
-                crate::errors::ErrorKind::TypeError,
-                "Cannot convert a Symbol value to a number",
-            ));
-        }
+    let Some(v) = arg else {
+        return Ok(def);
+    };
+    if v.is_undefined() {
+        return Ok(def);
     }
-    Ok(clamp_index_arg(arg, len, def))
+    let n = to_integer_or_infinity_sync(gc, vm, v)?;
+    if n.is_infinite() {
+        return Ok(if n > 0.0 { len } else { 0 });
+    }
+    let n = n as i64;
+    Ok(if n < 0 { (len + n).max(0) } else { n.min(len) })
 }
 
 /// LengthOfArrayLike with the symbol abrupt (B1d): a symbol `length`
 /// throws via ToNumber. Ok(length) or Err(error value to raise).
 fn checked_array_length(gc: &mut SemiSpace, vm: &mut Vm, this: Value) -> Result<u32, Value> {
-    // B1f: LengthOfArrayLike reads through the proto chain (A5_T1 sets
-    // Object.prototype.length) — a symbol anywhere on it throws.
-    let mut current = this;
-    for _ in 0..crate::vm::MAX_PROTOTYPE_DEPTH {
-        let Some(ptr) = current.heap_ptr() else {
-            break;
-        };
-        if unsafe { (*(ptr as *const GcHeader)).tag() } != TAG_OBJECT {
-            break;
-        }
-        let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
-        if let Some(slot) = shape.lookup(&PropertyKey::from_string("length")) {
-            let lv = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
-            if lv.is_symbol() {
-                return Err(crate::errors::error_object(
-                    gc,
-                    &vm.error_protos,
-                    crate::errors::ErrorKind::TypeError,
-                    "Cannot convert a Symbol value to a number",
-                ));
-            }
-            break;
-        }
-        let proto = unsafe { JSObject::prototype(ptr as *mut JSObject) };
-        if proto.is_null() {
-            break;
-        }
-        current = Value::from_heap_ptr(proto);
-    }
-    Ok(crate::vm::array_like_length(this).unwrap_or(0))
+    array_like_length_sync(gc, vm, this)
 }
+
 /// Array.prototype.toSpliced(start, skipCount, ...items) — §23.1.3.35 audit:
 /// generic receiver, LengthOfArrayLike via the length machine (JS lengths
 /// suspend, incl. the valueOf-object form in length-tolength), ToClampedIndex
@@ -17404,22 +17369,6 @@ pub fn string_ends_with(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
         }
     };
     Value::boolean(units[..end].ends_with(&search_units))
-}
-
-/// ToIntegerOrInfinity lite (B1b: shared with vm.rs search stepping).
-/// Handles undefined/null/bool/Smi/float directly; numeric strings
-/// (incl. exponents and Infinity) parse per ToNumber-lite; anything else
-/// (objects with valueOf, hex, unparseable) yields 0 — documented gap
-/// shared with the string repeat/pad paths that also use this helper.
-pub(crate) fn to_integer_or_infinity(v: Value) -> f64 {
-    let n = crate::vm::to_number(v);
-    if n.is_nan() || n == 0.0 {
-        0.0
-    } else if n.is_infinite() {
-        n
-    } else {
-        n.trunc()
-    }
 }
 
 /// String.prototype.at(index) — §22.1.3.1.
@@ -23753,28 +23702,58 @@ pub fn array_join(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
-    let length = match crate::vm::array_like_length(this) {
-        Some(len) => len,
-        None => return Value::from_heap_ptr(crate::vm::heap_string(gc, "")),
+    let length = match array_like_length_sync(gc, vm, this) {
+        Ok(len) => len,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
     };
-    let sep = match args.first().copied().unwrap_or(Value::undefined()) {
-        v if v.is_undefined() => ",".to_string(),
-        v => value_to_js_string(v),
+    let base = vm.temp_roots.len();
+    vm.temp_roots.push(this);
+    let sep_val = args.first().copied().unwrap_or(Value::undefined());
+    vm.temp_roots.push(sep_val);
+    let sep = if sep_val.is_undefined() {
+        ",".to_string()
+    } else {
+        match to_primitive_string(gc, vm.temp_roots[base + 1], vm) {
+            Some(v) => v,
+            None => {
+                vm.temp_roots.truncate(base);
+                return Value::undefined();
+            }
+        }
     };
     if length == 0 {
+        vm.temp_roots.truncate(base);
         return Value::from_heap_ptr(crate::vm::heap_string(gc, ""));
     }
     let mut parts: Vec<String> = Vec::new();
     for i in 0..length {
-        let elem = crate::vm::array_like_index(this, i).unwrap_or(Value::undefined());
+        let live_this = vm.temp_roots[base];
+        let elem = match get_value_sync(gc, vm, live_this, &i.to_string()) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.temp_roots.truncate(base);
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        };
         let next = if elem.is_undefined() || elem.is_null() {
             String::new()
         } else {
-            value_to_js_string(elem)
+            match to_primitive_string(gc, elem, vm) {
+                Some(v) => v,
+                None => {
+                    vm.temp_roots.truncate(base);
+                    return Value::undefined();
+                }
+            }
         };
         parts.push(next);
     }
     let joined = parts.join(&sep);
+    vm.temp_roots.truncate(base);
     Value::from_heap_ptr(crate::vm::heap_string(gc, &joined))
 }
 

@@ -18219,3 +18219,45 @@ fn test_array_search_array_like_length_and_from_index() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_array_join_and_copy_within_edges() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var a = [0, 1, 2, 3].copyWithin(0, 1, undefined);
+            var boolBox = Array.prototype.copyWithin.call(true);
+            var boxedLength = {};
+            boxedLength.join = Array.prototype.join;
+            boxedLength.length = new Number(4);
+            var boxedJoined = boxedLength.join();
+
+            var conversions = [];
+            var elem = { toString: function () { conversions.push("e"); return "E"; } };
+            var sep = { toString: function () { conversions.push("s"); return "-"; } };
+            var joined = [elem, elem].join(sep);
+            var throwJoin = false;
+            var bad = { toString: function () { throw new TypeError("join"); } };
+            try { [bad].join(); } catch (e) { throwJoin = e instanceof TypeError; }
+
+            Array.prototype[1] = 1;
+            var protoSource = [0];
+            protoSource.length = 2;
+            var protoJoin = protoSource.join();
+            delete Array.prototype[1];
+
+            [
+                a.join(",") === "1,2,3,3",
+                boolBox instanceof Boolean,
+                boxedJoined === ",,,",
+                joined === "E-E",
+                conversions.join("") === "see",
+                throwJoin,
+                protoJoin === "0,1"
+            ].join("|") === "true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

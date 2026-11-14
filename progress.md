@@ -3750,6 +3750,29 @@ Integration suite: **913 passed, 0 failed, 3 ignored**.
 
 Integration suite: **914 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Array join observable ToString + copyWithin coercion (2026-11-14)
+
+- `Array.prototype.join` now:
+  - resolves `length` through the observable ToLength funnel (Number-wrapper
+    and object lengths, getters);
+  - performs `ToString(separator)` and per-element `ToString` with frames,
+    so user `toString`/`valueOf` calls, throwing conversions and ordering are
+    observable;
+  - reads elements through the property funnel, so holes fall through to
+    `Array.prototype` (prototype-provided elements join correctly).
+- `Array.prototype.copyWithin` now:
+  - uses the synchronous LengthOfArrayLike reader (length getters and object
+    lengths run);
+  - converts target/start/end with re-entrant ToIntegerOrInfinity (abrupt
+    user conversions throw);
+  - treats explicit `undefined` end as `length` (spec default);
+  - boxes primitive receivers, returning the wrapper object (e.g. Boolean).
+- Test262: Array **2728 → 2742/3081**, join **15 → 20/23**,
+  copyWithin **25 → 31/39**.
+- Regression: `test_array_join_and_copy_within_edges`.
+
+Integration suite: **915 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

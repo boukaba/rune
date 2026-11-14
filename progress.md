@@ -3334,6 +3334,21 @@ Integration suite: **894 passed, 0 failed, 3 ignored**.
 
 Integration suite: **895 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Array generic receivers + Array.prototype.at (2026-11-14)
+
+- Added `Array.prototype.at(index)` (generic ToObject receiver, LengthOfArrayLike,
+  ToIntegerOrInfinity relative index, out-of-range → undefined, values read
+  through the property funnel).
+- indexOf/lastIndexOf/includes box primitive receivers via ToObject.
+- `array_like_length`/`array_like_index` now walk the prototype chain for
+  ordinary objects (generic methods on Boolean/Number wrappers observe
+  `Boolean.prototype.length`/indexed properties).
+- Test262: Array **2641 → 2657/3081**, at **10/13**, indexOf **163/201**,
+  lastIndexOf **157/198**.
+- Regression: `test_array_at_and_primitive_receivers`.
+
+Integration suite: **896 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

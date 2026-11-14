@@ -1669,6 +1669,7 @@ impl Vm {
         let for_each_handle = find_handle(&self.builtins, "Array_prototype_forEach");
         let slice_handle = find_handle(&self.builtins, "Array_prototype_slice");
         let includes_handle = find_handle(&self.builtins, "Array_prototype_includes");
+        let at_handle = find_handle(&self.builtins, "Array_prototype_at");
         let index_of_handle = find_handle(&self.builtins, "Array_prototype_indexOf");
         let find_h = find_handle(&self.builtins, "Array_prototype_find");
         let find_index_h = find_handle(&self.builtins, "Array_prototype_findIndex");
@@ -1703,6 +1704,9 @@ impl Vm {
             }
             if let Some(incl) = includes_handle {
                 proto_entries.push(("includes", incl));
+            }
+            if let Some(at) = at_handle {
+                proto_entries.push(("at", at));
             }
             if let Some(iof) = index_of_handle {
                 proto_entries.push(("indexOf", iof));
@@ -17376,21 +17380,30 @@ pub(crate) fn array_like_length(this: Value) -> Option<u32> {
             })
         }
         TAG_OBJECT => {
-            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
             let key = PropertyKey::from_string("length");
-            shape.lookup(&key).map(|slot| {
-                let val = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
-                if let Some(n) = val.as_smi() {
-                    n.max(0) as u32
-                } else if let Some(f) = val.as_float64() {
-                    f.max(0.0) as u32
-                } else if val.to_boolean().is_some_and(|b| b) {
-                    // B1f-3: ToLength(true) is 1 ({length: true} — 3-2).
-                    1
-                } else {
-                    0
+            let mut cur = ptr;
+            for _ in 0..MAX_PROTOTYPE_DEPTH {
+                let shape = unsafe { JSObject::shape_ptr(cur as *mut JSObject) };
+                if let Some(slot) = shape.lookup(&key) {
+                    let val = unsafe { JSObject::get_slot(cur as *mut JSObject, slot) };
+                    return if let Some(n) = val.as_smi() {
+                        Some(n.max(0) as u32)
+                    } else if let Some(f) = val.as_float64() {
+                        Some(f.max(0.0) as u32)
+                    } else if val.to_boolean().is_some_and(|b| b) {
+                        // B1f-3: ToLength(true) is 1 ({length: true} — 3-2).
+                        Some(1)
+                    } else {
+                        Some(0)
+                    };
                 }
-            })
+                let next = unsafe { JSObject::prototype(cur as *mut JSObject) };
+                if next.is_null() {
+                    return None;
+                }
+                cur = next;
+            }
+            None
         }
         _ => None,
     }
@@ -17421,11 +17434,23 @@ pub(crate) fn array_like_index(this: Value, i: u32) -> Option<Value> {
             }
         }
         TAG_OBJECT => {
-            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
             let key = PropertyKey::from_string(&i.to_string());
-            shape
-                .lookup(&key)
-                .map(|slot| unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) })
+            let mut cur = ptr;
+            for _ in 0..MAX_PROTOTYPE_DEPTH {
+                let shape = unsafe { JSObject::shape_ptr(cur as *mut JSObject) };
+                if let Some(slot) = shape.lookup(&key) {
+                    return Some(unsafe { JSObject::get_slot(cur as *mut JSObject, slot) });
+                }
+                let next = unsafe { JSObject::prototype(cur as *mut JSObject) };
+                if next.is_null() {
+                    return None;
+                }
+                if unsafe { (*(next as *const GcHeader)).tag() } != TAG_OBJECT {
+                    return None;
+                }
+                cur = next;
+            }
+            None
         }
         TAG_REGEXP => {
             let extra = unsafe { rune_core::regexp::RegExp::extra_props(ptr) };

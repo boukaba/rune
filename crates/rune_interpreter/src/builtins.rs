@@ -22574,6 +22574,12 @@ fn array_index_search(
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
+    // Generic methods box primitive receivers (ToObject).
+    let this = if !this.is_heap_object() {
+        crate::vm::to_object_value(gc, this, vm)
+    } else {
+        this
+    };
     // B1c: symbol lengths throw (see array_iter_prologue).
     if let Some(ptr) = this.heap_ptr() {
         if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_OBJECT {
@@ -22714,6 +22720,51 @@ pub fn array_join(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
 }
 
 /// Array.prototype.includes(searchElement, fromIndex) — SameValueZero search.
+/// Array.prototype.at(index) — generic relative indexing (§23.1.3.1).
+pub fn array_at(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let this = if this.heap_ptr().is_none()
+        || this
+            .heap_ptr()
+            .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_STRING)
+    {
+        crate::vm::to_object_value(gc, this, vm)
+    } else {
+        this
+    };
+    let Some(len) = crate::vm::array_like_length(this) else {
+        return Value::undefined();
+    };
+    let n = match to_integer_or_infinity_sync(
+        gc,
+        vm,
+        args.first().copied().unwrap_or(Value::undefined()),
+    ) {
+        Ok(n) => n,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    if n.is_nan() {
+        return get_value_sync(gc, vm, this, "0").unwrap_or(Value::undefined());
+    }
+    let k = if n < 0.0 { len as f64 + n } else { n };
+    if k < 0.0 || k >= len as f64 {
+        return Value::undefined();
+    }
+    let key = (k as usize).to_string();
+    match get_value_sync(gc, vm, this, &key) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            Value::undefined()
+        }
+    }
+}
+
 pub fn array_includes(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     array_index_search(gc, vm, this, args, crate::vm::ArrayOpKind::Includes)
 }
@@ -28601,6 +28652,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 1,
             name: "Array_prototype_slice",
             func: array_slice,
+        },
+        Builtin {
+            length: 1,
+            name: "Array_prototype_at",
+            func: array_at,
         },
         Builtin {
             length: 2,

@@ -17432,3 +17432,28 @@ fn test_string_pad_coercion() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_array_at_and_primitive_receivers() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var target = {};
+            Boolean.prototype[1] = target;
+            Boolean.prototype.length = 2;
+            [
+                [10, 20, 30].at(0) === 10,
+                [10, 20, 30].at(-1) === 30,
+                [10, 20, 30].at(9) === undefined,
+                [10, 20, 30].at(-9) === undefined,
+                Array.prototype.indexOf.call(true, target) === 1,
+                Array.prototype.lastIndexOf.call(true, target) === 1,
+                Array.prototype.at.call(true, 1) === target,
+                Array.prototype.at.call(true, 2) === undefined
+            ].join("|") === "true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

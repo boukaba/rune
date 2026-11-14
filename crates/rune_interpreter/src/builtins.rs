@@ -12510,7 +12510,16 @@ pub fn object_get_own_property_descriptor(
         // Primitives have no own properties to describe.
         return Value::undefined();
     };
-    let raw_key = args.get(1).copied().unwrap_or(Value::undefined());
+    let mut raw_key = args.get(1).copied().unwrap_or(Value::undefined());
+    if is_object_value(raw_key) {
+        match to_primitive_sync(gc, vm, raw_key, "string") {
+            Ok(v) => raw_key = v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
+    }
     if vm.global_this.heap_ptr() == Some(ptr) {
         if let Some(kptr) = raw_key.heap_ptr() {
             if unsafe { (*(kptr as *const GcHeader)).tag() } == TAG_STRING {

@@ -17902,3 +17902,43 @@ fn test_descriptor_string_fields_and_array_define_properties() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_for_in_function_prototype_and_gopd_object_key() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var f = function () {};
+            Object.defineProperty(Function.prototype, "zzBoundProp", {
+                value: 1,
+                writable: true,
+                enumerable: true,
+                configurable: true
+            });
+            var bound = f.bind({});
+            var seenBound = false;
+            for (var p in bound) if (p === "zzBoundProp") seenBound = true;
+            var seenPlain = false;
+            for (var q in f) if (q === "zzBoundProp") seenPlain = true;
+            delete Function.prototype.zzBoundProp;
+            var obj = { abc: 1 };
+            var valueOfAccessed = false;
+            var toStringAccessed = false;
+            var key = {
+                toString: function () { toStringAccessed = true; return {}; },
+                valueOf: function () { valueOfAccessed = true; return "abc"; }
+            };
+            var d = Object.getOwnPropertyDescriptor(obj, key);
+            [
+                seenBound,
+                seenPlain,
+                d.value === 1,
+                valueOfAccessed,
+                toStringAccessed
+            ].join("|") === "true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

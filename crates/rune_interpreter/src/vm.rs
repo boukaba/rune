@@ -8889,18 +8889,22 @@ impl Vm {
                             }
                             TAG_OBJECT => {
                                 let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                                let count = unsafe { JSObject::slot_count(ptr as *mut JSObject) };
                                 // §14.7.5.9: symbol-keyed properties are excluded
                                 // from for-in enumeration. A4: so are
                                 // non-enumerable own properties.
                                 let mut idx = index;
-                                while idx < shape.property_count
+                                while idx < count
                                     && (shape.entries[idx].0.is_symbol()
                                         || shape.attr_at(idx) & rune_core::shape::ATTR_ENUMERABLE
-                                            == 0)
+                                            == 0
+                                        || shape
+                                            .key_name_at(idx)
+                                            .is_none_or(crate::builtins::is_internal_key))
                                 {
                                     idx += 1;
                                 }
-                                if idx < shape.property_count {
+                                if idx < count {
                                     let key_name = shape.key_name_at(idx).unwrap_or("");
                                     let key = HeapString::allocate(gc, key_name);
                                     self.push(Value::smi((idx + 1) as i32));
@@ -8916,6 +8920,27 @@ impl Vm {
                         true
                     };
                     if done {
+                        let current = self.peek();
+                        let cur_tag = current
+                            .heap_ptr()
+                            .map(|cp| unsafe { (*(cp as *const GcHeader)).tag() });
+                        // Function objects iterate towards
+                        // %Function.prototype% (the Func layout's internal
+                        // "prototype" slot is the `.prototype` property, not
+                        // [[Prototype]]).
+                        let next = if cur_tag == Some(TAG_FUNC) {
+                            self.function_prototype.heap_ptr()
+                        } else {
+                            crate::vm::value_prototype(current)
+                        }
+                        .filter(|p| !p.is_null() && current.heap_ptr() != Some(*p));
+                        if let Some(proto) = next {
+                            let last = self.stack.len() - 1;
+                            self.stack[last] = Value::from_heap_ptr(proto);
+                            self.push(Value::smi(0));
+                            self.frames[fi].pc = pc;
+                            continue;
+                        }
                         self.pop(); // pop obj
                         self.frames[fi].pc = end_target;
                     } else {

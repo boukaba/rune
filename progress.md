@@ -3590,6 +3590,24 @@ Integration suite: **906 passed, 0 failed, 3 ignored**.
 
 Integration suite: **907 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — for-in prototype chain + gOPD object keys (2026-11-14)
+
+- for-in now walks the prototype chain after own properties are exhausted:
+  - the iterator state is advanced by re-running `ForInNext` (not by jumping
+    into the loop body), eliminating a phantom `"0"` key;
+  - Function objects walk towards `%Function.prototype%` (the Func layout's
+    internal prototype slot is `.prototype`, not `[[Prototype]]`), so bound
+    and ordinary functions observe inherited enumerable properties;
+  - ordinary objects walk their real `[[Prototype]]` chain to null.
+- `Object.getOwnPropertyDescriptor` converts object property keys with
+  observable `ToPrimitive(hint string)` (valueOf then toString), so
+  `Object.getOwnPropertyDescriptor(obj, keyObject)` works.
+- Test262: Object **3247 → 3264/3411**, getOwnPropertyDescriptor
+  **309/310**.
+- Regression: `test_for_in_function_prototype_and_gopd_object_key`.
+
+Integration suite: **908 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

@@ -529,7 +529,7 @@ fn parse_char_class(chars: &[char], i: &mut usize) -> Result<RegexExpr, String> 
     if negated {
         *i += 1;
     }
-    let mut ranges = Vec::new();
+    let mut ranges: Vec<(char, char)> = Vec::new();
     loop {
         if *i >= chars.len() {
             return Err("Unclosed character class".into());
@@ -538,16 +538,128 @@ fn parse_char_class(chars: &[char], i: &mut usize) -> Result<RegexExpr, String> 
             *i += 1;
             break;
         }
-        let start = chars[*i];
-        *i += 1;
+        // Class atoms: escapes that denote character sets (\d, \p{..}) add
+        // their ranges directly; escapes that denote single characters become
+        // a potential range start.
+        let start = if chars[*i] == '\\' {
+            *i += 1;
+            if *i >= chars.len() {
+                return Err("Trailing backslash in character class".into());
+            }
+            let c = chars[*i];
+            *i += 1;
+            let set = match c {
+                'd' => Some(vec![('0', '9')]),
+                'w' => Some(vec![('0', '9'), ('A', 'Z'), ('a', 'z'), ('_', '_')]),
+                's' => Some(vec![
+                    ('\t', '\r'),
+                    (' ', ' '),
+                    ('\u{00A0}', '\u{00A0}'),
+                    ('\u{1680}', '\u{1680}'),
+                    ('\u{2000}', '\u{200A}'),
+                    ('\u{2028}', '\u{2029}'),
+                    ('\u{202F}', '\u{202F}'),
+                    ('\u{205F}', '\u{205F}'),
+                    ('\u{3000}', '\u{3000}'),
+                    ('\u{FEFF}', '\u{FEFF}'),
+                ]),
+                'D' => Some(complement_ranges(&[('0', '9')])),
+                'W' => Some(complement_ranges(&[
+                    ('0', '9'),
+                    ('A', 'Z'),
+                    ('a', 'z'),
+                    ('_', '_'),
+                ])),
+                'S' => Some(complement_ranges(&[
+                    ('\t', '\r'),
+                    (' ', ' '),
+                    ('\u{00A0}', '\u{00A0}'),
+                    ('\u{1680}', '\u{1680}'),
+                    ('\u{2000}', '\u{200A}'),
+                    ('\u{2028}', '\u{2029}'),
+                    ('\u{202F}', '\u{202F}'),
+                    ('\u{205F}', '\u{205F}'),
+                    ('\u{3000}', '\u{3000}'),
+                    ('\u{FEFF}', '\u{FEFF}'),
+                ])),
+                'p' | 'P' => {
+                    if *i >= chars.len() && chars[*i] != '{' {
+                        return Err("Invalid Unicode property escape".into());
+                    }
+                    if *i < chars.len() && chars[*i] == '{' {
+                        *i += 1;
+                        let mut name = String::new();
+                        while *i < chars.len() && chars[*i] != '}' {
+                            name.push(chars[*i]);
+                            *i += 1;
+                        }
+                        if *i >= chars.len() {
+                            return Err("Unterminated Unicode property escape".into());
+                        }
+                        *i += 1;
+                        let r = unicode_class_ranges(&name)?;
+                        Some(if c == 'P' { complement_ranges(&r) } else { r })
+                    } else {
+                        Some(vec![('p', 'p')])
+                    }
+                }
+                _ => None,
+            };
+            if let Some(set) = set {
+                ranges.extend(set);
+                continue;
+            }
+            match c {
+                'b' => '\u{0008}',
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                'f' => '\u{000C}',
+                'v' => '\u{000B}',
+                '0' => '\0',
+                'x' => parse_hex(chars, i, 2)? as u8 as char,
+                'u' => parse_unicode_escape(chars, i)?,
+                'c' => {
+                    if *i >= chars.len() {
+                        return Err("Invalid control escape".into());
+                    }
+                    let ch = chars[*i];
+                    *i += 1;
+                    if ch.is_ascii_alphabetic() {
+                        char::from_u32((ch.to_ascii_uppercase() as u32) % 32).unwrap()
+                    } else {
+                        'c'
+                    }
+                }
+                other => other,
+            }
+        } else {
+            let c = chars[*i];
+            *i += 1;
+            c
+        };
         if *i < chars.len() && chars[*i] == '-' {
             *i += 1;
             if *i >= chars.len() || chars[*i] == ']' {
                 ranges.push((start, start));
                 ranges.push(('-', '-'));
             } else {
-                let end = chars[*i];
+                let mut end = chars[*i];
                 *i += 1;
+                if end == '\\' && *i < chars.len() {
+                    let c = chars[*i];
+                    *i += 1;
+                    end = match c {
+                        'n' => '\n',
+                        'r' => '\r',
+                        't' => '\t',
+                        'f' => '\u{000C}',
+                        'v' => '\u{000B}',
+                        'x' => parse_hex(chars, i, 2)? as u8 as char,
+                        'u' => parse_unicode_escape(chars, i)?,
+                        other => other,
+                    };
+                }
                 ranges.push((start, end));
             }
         } else {

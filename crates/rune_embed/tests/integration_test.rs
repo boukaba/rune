@@ -17184,3 +17184,27 @@ fn test_function_bind_metadata_and_wrappers() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_regex_character_class_escapes() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var cap = "Boston, Mass. 02134".match(/([\d]{5})([-\ ]?[\d]{4})?$/);
+            [
+                /[\d]+/.exec("a123")[0] === "123",
+                /[\w]+/.exec("ab_1")[0] === "ab_1",
+                /[\D]/.test("a"),
+                /[\D]/.test("1") === false,
+                /[\s]/.test(" "),
+                /[\S]/.test(" ") === false,
+                /([\d]{5})$/.test("02134"),
+                cap !== null && cap[0] === "02134" && cap.index === 14,
+                /[\p{L}]+/u.exec("héllo")[0] === "héllo"
+            ].join("|") === "true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

@@ -3163,6 +3163,30 @@ Integration suite: **886 passed, 0 failed, 3 ignored**.
 
 Integration suite: **887 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Character-class escapes + String match/search dispatch (2026-11-14)
+
+- `parse_char_class` now expands character-class escapes instead of treating
+  them as literals:
+  - `[\d]`, `[\w]`, `[\s]` add their ranges; `[\D]`, `[\W]`, `[\S]` add
+    complements;
+  - `[\p{...}]` / `[\P{...}]` add Unicode property ranges (negated → complement);
+  - escapes as range endpoints (`[\x00-\x1f]`), `[\b]` (U+0008), control,
+    hex and Unicode escapes;
+  - this was a broad regex correctness bug (captured class quantifiers like
+    `/([\d]{5})/` previously matched nothing).
+- `String.prototype.match` / `String.prototype.search` now follow the spec
+  dispatch order: ToString(receiver), GetMethod(regexp, @@match/@@search),
+  Call with the string argument, else RegExpCreate(regexp) and Invoke.
+  - non-RegExp patterns are coerced with observable ToPrimitive (user
+    toString/valueOf), not `[object Object]`;
+  - custom matcher/searcher overrides on RegExp.prototype are honoured;
+  - null patterns behave as `/null/`.
+- Test262: String **1094 → 1120/1223 (91.6%)**, String/match **47/51**,
+  String/search **39/43**, RegExp **816/1879**, RegExp/prototype **401/487**.
+- Regression: `test_regex_character_class_escapes`.
+
+Integration suite: **888 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

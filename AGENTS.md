@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Class escapes + match/search dispatch (2026-11-14)**: `[\d\w\s\D\W\S\p{}]` ranges, spec @@match/@@search dispatch with ToPrimitive patterns. String **1120/1223 (91.6%)**, match **47/51**, search **39/43**, RegExp **816/1879**. Integration **888**.
 - **bind metadata + wrapper calls (2026-11-14)**: ToIntegerOrInfinity length, observable name, configurable deletion, wrapper targets (Date/RegExp etc), generic proto chain, bound caller poison. Function **307/509**, bind **92/100**, String **1094/1223**, Object **2716/3411**. Integration **887**.
 - **Function ctor + slice/exotic descriptors (2026-11-14)**: dynamic Function/new Function, slice ToNumber, gOPD RegExp lastIndex/extras. String **1092/1223**, Function **274/509**, Object **2711/3411**. Integration **886**.
 - **@@replace substitution/index edges (2026-11-14)**: `$0n`, backward-index skip, AdvanceStringIndex, float lastIndex, receiver rooting, own-prop precedence. RegExp/prototype **401/487**, Symbol.replace **59/70**, String **1084/1223**. Integration **885**.

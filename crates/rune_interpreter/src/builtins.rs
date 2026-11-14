@@ -17109,10 +17109,6 @@ pub fn string_replace_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
     Value::from_heap_ptr(HeapString::allocate(gc, &result) as *mut u8)
 }
 
-fn has_regexp_flag(regexp_ptr: *mut u8, flag: u8) -> bool {
-    unsafe { RegExp::has_flag(regexp_ptr, flag) }
-}
-
 fn regexp_exec_internal(
     _gc: &mut SemiSpace,
     regexp_ptr: *mut u8,
@@ -17424,7 +17420,13 @@ fn alloc_split_array(gc: &mut SemiSpace, vm: &Vm, pieces: &[String], lim: u32) -
 
 fn value_to_pattern_string(v: Option<Value>, gc: &mut SemiSpace, vm: &mut Vm) -> String {
     match v {
-        Some(val) if !val.is_undefined() && !val.is_null() => arg_to_string(gc, v, vm),
+        Some(val) if !val.is_undefined() && !val.is_null() => {
+            if is_object_value(val) {
+                to_primitive_string(gc, val, vm).unwrap_or_default()
+            } else {
+                value_to_js_string(val)
+            }
+        }
         _ => String::new(),
     }
 }
@@ -17436,99 +17438,67 @@ pub fn string_match(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
     let Some(s) = to_primitive_string(gc, this, vm) else {
         return Value::undefined();
     };
-    let regexp_val = args.first().copied();
-
-    // §21.1.3.39 step 2: if regexp is an object with a callable @@match,
-    // dispatch to it and return its result.
-    if let Some(v) = regexp_val {
-        match dispatch_symbol_method(gc, v, SYM_MATCH, this, &[], vm) {
-            Ok(Some(v)) => return v,
-            Ok(None) => {}
-            Err(()) => return Value::undefined(),
-        }
-    }
-
-    let regexp_ptr = regexp_val.and_then(|v| {
-        v.heap_ptr().and_then(|ptr| {
-            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-            if tag == TAG_REGEXP { Some(ptr) } else { None }
-        })
-    });
-
-    let (rx_ptr, _rx_owned) = if let Some(ptr) = regexp_ptr {
-        (ptr, false)
-    } else {
-        let pattern_str = value_to_pattern_string(regexp_val, gc, vm);
-        let rx = alloc_regexp_from_string(gc, &pattern_str, 0, vm.regexp_prototype);
-        match rx.heap_ptr() {
-            Some(p) => (p, true),
-            None => return Value::null(),
-        }
-    };
-
-    let is_global = has_regexp_flag(rx_ptr, 0u8);
-
-    if !is_global {
-        match regexp_exec_internal(gc, rx_ptr, &s, 0) {
-            Some(groups) => {
-                let match_index = groups[0].0;
-                make_match_result_array(
-                    gc,
-                    &groups,
-                    &s,
-                    match_index,
-                    vm.array_prototype,
-                    &[],
-                    false,
-                )
+    let s_val = Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8);
+    let regexp_val = args.first().copied().unwrap_or(Value::undefined());
+    let key = Value::symbol(SYM_MATCH);
+    if !regexp_val.is_undefined() && !regexp_val.is_null() {
+        let matcher = match get_property_value_sync(gc, vm, regexp_val, key) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
             }
-            None => Value::null(),
-        }
-    } else {
-        regexp_set_last_index_value(gc, rx_ptr, Value::smi(0));
-        let mut matched_strings: Vec<String> = Vec::new();
-        loop {
-            let last_index = match to_number_sync(gc, vm, regexp_last_index_value(rx_ptr)) {
-                Ok(n) if !n.is_nan() && n > 0.0 => n as usize,
-                Ok(_) => 0,
+        };
+        if !matcher.is_undefined() && !matcher.is_null() {
+            if !is_callable_value(matcher) {
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "@@match method is not callable",
+                ));
+                return Value::undefined();
+            }
+            return match vm.call_value_sync(gc, matcher, regexp_val, &[s_val]) {
+                Ok(v) => v,
                 Err(e) => {
                     vm.set_pending_exception(e);
-                    return Value::undefined();
+                    Value::undefined()
                 }
             };
-            match regexp_exec_internal(gc, rx_ptr, &s, last_index) {
-                Some(groups) => {
-                    let (gs, ge) = groups[0];
-                    let match_str = &s[gs..ge];
-                    matched_strings.push(match_str.to_string());
-                    let next_start = if match_str.is_empty() {
-                        if gs < s.len() { gs + 1 } else { s.len() }
-                    } else {
-                        ge
-                    };
-                    regexp_set_last_index_value(gc, rx_ptr, Value::smi(next_start as i32));
-                }
-                None => break,
-            }
         }
-        if matched_strings.is_empty() {
-            return Value::null();
+    }
+    let pattern = if regexp_val.is_undefined() {
+        String::new()
+    } else {
+        value_to_pattern_string(Some(regexp_val), gc, vm)
+    };
+    if vm.pending_exception.is_some() {
+        return Value::undefined();
+    }
+    let rx = alloc_regexp_from_string(gc, &pattern, 0, vm.regexp_prototype);
+    let method = match get_property_value_sync(gc, vm, rx, key) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
         }
-        let mut elements = Vec::with_capacity(matched_strings.len());
-        for ms in &matched_strings {
-            let heap_str = HeapString::allocate(gc, ms);
-            elements.push(Value::from_heap_ptr(heap_str as *mut u8));
+    };
+    if !is_callable_value(method) {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "@@match method is not callable",
+        ));
+        return Value::undefined();
+    }
+    match vm.call_value_sync(gc, method, rx, &[s_val]) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            Value::undefined()
         }
-        let arr = RuneArray::allocate(gc, &elements);
-        unsafe {
-            let ptr = arr as *mut u8;
-            *(ptr.add(8) as *mut *const rune_core::shape::Shape) =
-                *DENSE_ARRAY_SHAPE as *const rune_core::shape::Shape;
-            if let Some(proto) = vm.array_prototype.heap_ptr() {
-                *(ptr.add(24) as *mut *mut u8) = proto;
-            }
-        }
-        Value::from_heap_ptr(arr as *mut u8)
     }
 }
 
@@ -17942,45 +17912,69 @@ pub fn string_search(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
     let Some(s) = to_primitive_string(gc, this, vm) else {
         return Value::undefined();
     };
-    let regexp_val = args.first().copied();
-
-    // §21.1.3.22 step 2: @@search dispatch.
-    if let Some(v) = regexp_val {
-        match dispatch_symbol_method(gc, v, SYM_SEARCH, this, &[], vm) {
-            Ok(Some(v)) => return v,
-            Ok(None) => {}
-            Err(()) => return Value::undefined(),
+    let s_val = Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8);
+    let regexp_val = args.first().copied().unwrap_or(Value::undefined());
+    let key = Value::symbol(SYM_SEARCH);
+    if !regexp_val.is_undefined() && !regexp_val.is_null() {
+        let searcher = match get_property_value_sync(gc, vm, regexp_val, key) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        };
+        if !searcher.is_undefined() && !searcher.is_null() {
+            if !is_callable_value(searcher) {
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "@@search method is not callable",
+                ));
+                return Value::undefined();
+            }
+            return match vm.call_value_sync(gc, searcher, regexp_val, &[s_val]) {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    Value::undefined()
+                }
+            };
         }
     }
-
-    let regexp_ptr = regexp_val.and_then(|v| {
-        v.heap_ptr().and_then(|ptr| {
-            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-            if tag == TAG_REGEXP { Some(ptr) } else { None }
-        })
-    });
-
-    let (rx_ptr, _rx_owned) = if let Some(ptr) = regexp_ptr {
-        (ptr, false)
+    // Fallback: RegExpCreate(regexp), then Invoke(rx, @@search, « string »).
+    let pattern = if regexp_val.is_undefined() {
+        String::new()
     } else {
-        let pattern_str = value_to_pattern_string(regexp_val, gc, vm);
-        let rx = alloc_regexp_from_string(gc, &pattern_str, 0, vm.regexp_prototype);
-        match rx.heap_ptr() {
-            Some(p) => (p, true),
-            None => return Value::smi(-1),
+        value_to_pattern_string(Some(regexp_val), gc, vm)
+    };
+    if vm.pending_exception.is_some() {
+        return Value::undefined();
+    }
+    let rx = alloc_regexp_from_string(gc, &pattern, 0, vm.regexp_prototype);
+    let method = match get_property_value_sync(gc, vm, rx, key) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
         }
     };
-
-    // §22.2.6.12 steps 4-8: lastIndex is reset to 0 before the exec and
-    // restored afterwards — search ignores the "lastIndex"/"global" state.
-    let prev_li = regexp_last_index_value(rx_ptr);
-    regexp_set_last_index_value(gc, rx_ptr, Value::smi(0));
-    let result = match regexp_exec_internal(gc, rx_ptr, &s, 0) {
-        Some(groups) => Value::smi(groups[0].0 as i32),
-        None => Value::smi(-1),
-    };
-    regexp_set_last_index_value(gc, rx_ptr, prev_li);
-    result
+    if !is_callable_value(method) {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "@@search method is not callable",
+        ));
+        return Value::undefined();
+    }
+    match vm.call_value_sync(gc, method, rx, &[s_val]) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            Value::undefined()
+        }
+    }
 }
 
 /// Math.floor(x) — rounds down.

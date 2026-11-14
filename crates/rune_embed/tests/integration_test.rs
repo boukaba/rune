@@ -18782,3 +18782,35 @@ fn test_eval_statement_completion_values() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_switch_default_clause_position_and_fallthrough() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var log = [];
+            switch (1) {
+                case 1: log.push(1);
+                default: log.push("d");
+                case 2: log.push(2);
+            }
+
+            var noMatchLog = [];
+            switch (9) {
+                default: noMatchLog.push("d");
+                case 1: noMatchLog.push(1);
+                case 2: noMatchLog.push(2);
+            }
+
+            [
+                eval('switch ("a") { default: case "b": case "c": 3; }') === 3,
+                eval('switch (2) { case 1: 4; default: 5; case 2: 6; }') === 6,
+                log.join(",") === "1,d,2",
+                noMatchLog.join(",") === "d,1,2"
+            ].join("|") === "true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

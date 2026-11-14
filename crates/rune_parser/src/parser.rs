@@ -1122,17 +1122,18 @@ impl Parser {
         let start = self.span();
         self.expect(TokenKind::Switch);
         self.expect(TokenKind::LParen);
-        let discriminant = Box::new(self.parse_expr(0));
+        let discriminant = Box::new(self.parse_expr_comma());
         self.expect(TokenKind::RParen);
         self.expect(TokenKind::LBrace);
         let mut cases: Vec<SwitchCase> = Vec::new();
         let mut default_body: Option<Box<[Stmt]>> = None;
+        let mut default_index = usize::MAX;
         loop {
             match self.tok.kind {
                 TokenKind::Case => {
                     let cs = self.span();
                     self.advance();
-                    let test = self.parse_expr(0);
+                    let test = self.parse_expr_comma();
                     self.expect(TokenKind::Colon);
                     let mut body = Vec::new();
                     while self.tok.kind != TokenKind::Case
@@ -1159,6 +1160,7 @@ impl Parser {
                     {
                         body.push(self.parse_statement());
                     }
+                    default_index = cases.len();
                     default_body = Some(body.into_boxed_slice());
                 }
                 TokenKind::RBrace => {
@@ -1174,6 +1176,7 @@ impl Parser {
             discriminant,
             cases,
             default_body,
+            default_index,
             Span {
                 start: start.start,
                 end: self.span().end,

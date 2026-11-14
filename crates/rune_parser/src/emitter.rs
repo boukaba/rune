@@ -2723,7 +2723,7 @@ impl Emitter {
                     self.patch(pos, target);
                 }
             }
-            Stmt::Switch(discriminant, cases, default_body, _) => {
+            Stmt::Switch(discriminant, cases, default_body, default_index, _) => {
                 self.reset_completion_value();
                 self.emit_expression(discriminant);
 
@@ -2754,21 +2754,31 @@ impl Emitter {
                 let no_match_target = self.current();
                 self.emit(Opcode::Jump, vec![0]);
 
-                // === BODY SECTION ===
-                // Patch each case's body jump to its body location
-                for (i, &body_target) in body_targets.iter().enumerate() {
-                    self.patch(body_target, self.current());
-                    for stmt in &cases[i].body {
-                        self.emit_statement(stmt);
+                // === BODY SECTION (source order, default interleaved) ===
+                // Bodies are laid out in source order so a matched clause
+                // falls through into every following clause (including the
+                // default clause when it appears later) and a no-match jump
+                // enters the default clause in place.
+                let mut default_target = None;
+                for i in 0..=cases.len() {
+                    if i == *default_index {
+                        default_target = Some(self.current());
+                        if let Some(body) = &default_body {
+                            for stmt in body.iter() {
+                                self.emit_statement(stmt);
+                            }
+                        }
+                    }
+                    if i < cases.len() {
+                        self.patch(body_targets[i], self.current());
+                        for stmt in &cases[i].body {
+                            self.emit_statement(stmt);
+                        }
                     }
                 }
-
-                // Default case body (also reachable via fall-through from last case)
-                let default_target = self.current();
-                if let Some(body) = default_body {
-                    for stmt in body.iter() {
-                        self.emit_statement(stmt);
-                    }
+                if default_target.is_none() {
+                    // No default: a no-match jumps past the switch.
+                    default_target = Some(self.current());
                 }
 
                 let after_pc = self.current();
@@ -2778,7 +2788,7 @@ impl Emitter {
                 }
                 self.switch_break_jumps.truncate(switch_marker);
                 // Patch no-match jump to default or past switch
-                self.patch(no_match_target, default_target);
+                self.patch(no_match_target, default_target.unwrap());
                 self.switch_exit_stack.pop();
             }
         }
@@ -4519,7 +4529,7 @@ fn contains_inner_function_stmt(stmt: &Stmt) -> bool {
         }
         Stmt::ForIn(_, _, body, _) => contains_inner_function_stmt(body),
         Stmt::ForOf(_, _, body, _) => contains_inner_function_stmt(body),
-        Stmt::Switch(target, cases, default_body, _) => {
+        Stmt::Switch(target, cases, default_body, _, _) => {
             contains_inner_function_expr(target)
                 || cases.iter().any(|c| {
                     contains_inner_function_expr(&c.test)
@@ -4641,7 +4651,7 @@ fn collect_var_names_stmt(stmt: &Stmt, names: &mut Vec<String>) {
         }
         Stmt::ForIn(_, _, body, _) => collect_var_names_stmt(body, names),
         Stmt::ForOf(_, _, body, _) => collect_var_names_stmt(body, names),
-        Stmt::Switch(_, cases, default, _) => {
+        Stmt::Switch(_, cases, default, _, _) => {
             for c in cases {
                 c.body.iter().for_each(|s| collect_var_names_stmt(s, names));
             }
@@ -4694,7 +4704,7 @@ fn collect_const_names_stmt(stmt: &Stmt, names: &mut Vec<String>) {
         }
         Stmt::ForIn(_, _, body, _) => collect_const_names_stmt(body, names),
         Stmt::ForOf(_, _, body, _) => collect_const_names_stmt(body, names),
-        Stmt::Switch(_, cases, default, _) => {
+        Stmt::Switch(_, cases, default, _, _) => {
             for c in cases {
                 c.body
                     .iter()
@@ -4821,7 +4831,7 @@ fn collect_decl_names_stmt(stmt: &Stmt, names: &mut Vec<String>) {
         }
         Stmt::ForIn(_, _, body, _) => collect_decl_names_stmt(body, names),
         Stmt::ForOf(_, _, body, _) => collect_decl_names_stmt(body, names),
-        Stmt::Switch(_, cases, default, _) => {
+        Stmt::Switch(_, cases, default, _, _) => {
             for c in cases {
                 c.body
                     .iter()
@@ -4886,7 +4896,7 @@ fn collect_script_decl_names_stmt(stmt: &Stmt, names: &mut Vec<String>) {
         }
         Stmt::ForIn(_, _, body, _) => collect_script_decl_names_stmt(body, names),
         Stmt::ForOf(_, _, body, _) => collect_script_decl_names_stmt(body, names),
-        Stmt::Switch(_, cases, default, _) => {
+        Stmt::Switch(_, cases, default, _, _) => {
             for c in cases {
                 c.body
                     .iter()
@@ -4970,7 +4980,7 @@ fn uses_arguments_stmt(stmt: &Stmt) -> bool {
                     .as_ref()
                     .is_some_and(|stmts| stmts.iter().any(uses_arguments_stmt))
         }
-        Stmt::Switch(discr, cases, default, _) => {
+        Stmt::Switch(discr, cases, default, _, _) => {
             uses_arguments_expr(discr)
                 || cases
                     .iter()

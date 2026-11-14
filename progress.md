@@ -4045,6 +4045,23 @@ Integration suite: **928 passed, 0 failed, 3 ignored**.
 
 Integration suite: **929 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Switch default position + comma tests (2026-11-14)
+
+- `Stmt::Switch` now records the `default` clause position among the cases
+  (`usize::MAX` when absent).
+- The switch emitter lays out case/default bodies in source order, so:
+  - a matched case falls through into the default clause when it appears later;
+  - a no-match jump enters the default clause in place and falls through into
+    the following cases;
+  - a matched later case skips an earlier default.
+- Switch discriminant and case tests accept comma expressions (the previous
+  `parse_expr(0)` rejected them), fixing the scope probe tests.
+- Test262 language/statements/switch **23 → 33/111**. Remaining failures are
+  the lexical-scope environment tests.
+- Regression: `test_switch_default_clause_position_and_fallthrough`.
+
+Integration suite: **930 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

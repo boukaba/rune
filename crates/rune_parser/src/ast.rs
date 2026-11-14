@@ -236,7 +236,15 @@ pub enum Stmt {
     Break(Option<Box<str>>, Span),
     Continue(Option<Box<str>>, Span),
     Try(Box<[Stmt]>, Option<CatchClause>, Option<Box<[Stmt]>>, Span),
-    Switch(Box<Expr>, Vec<SwitchCase>, Option<Box<[Stmt]>>, Span),
+    Switch(
+        Box<Expr>,
+        Vec<SwitchCase>,
+        Option<Box<[Stmt]>>,
+        /// Position of the `default` clause among the case list
+        /// (`usize::MAX` when absent).
+        usize,
+        Span,
+    ),
     Function(Box<FnNode>, Span),
     Empty(Span),
     Class(Box<ClassNode>, Span),

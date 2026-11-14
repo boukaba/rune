@@ -3098,6 +3098,30 @@ Integration suite: **883 passed, 0 failed, 3 ignored**.
 
 Integration suite: **884 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — @@replace substitution/index edges (2026-11-14)
+
+- GetSubstitution `$0n` is the two-digit capture `n` (so `$01` is capture 1,
+  `$00` is never replaced) while `$nn` beyond the capture count stays literal.
+- Results whose `index` moves backwards relative to `nextSourcePosition` are
+  ignored per spec (ill-behaved exec override handling).
+- `AdvanceStringIndex` no longer clamps an empty suffix to `length + 1`; it
+  returns `index + 1` (surrogate-aware when unicode), fixing huge-lastIndex
+  advance and empty-match handling.
+- `lastIndex` writes above `i32::MAX` are stored as float64 instead of a
+  truncated Smi (2^53 survives).
+- The `@@replace` receiver is rooted across observable exec/replacer calls, and
+  reg-exp own data properties now take precedence over prototype accessors
+  during stores (so `Object.defineProperty(r, "global", ...)` + assignment
+  works).
+- Empty-match loops stop when the matched index stops advancing (no hangs on
+  surrogate-split inputs the UTF-8 string model cannot represent).
+- Test262: RegExp/prototype **396 → 401/487**, Symbol.replace **56 → 59/70**,
+  String **1074 → 1084/1223**.
+- Remaining replace failure (`coerce-unicode`) needs lone-surrogate JS strings.
+- Regression: `test_regexp_replace_getsubstitution_and_lastindex`.
+
+Integration suite: **885 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

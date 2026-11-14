@@ -17036,7 +17036,7 @@ fn utf16_slice(s: &str, start: usize, end: usize) -> String {
 fn advance_utf16_index(s: &str, index: usize, unicode: bool) -> usize {
     let units: Vec<u16> = s.encode_utf16().collect();
     if index >= units.len() {
-        return units.len() + 1;
+        return index.saturating_add(1);
     }
     if unicode
         && (0xD800..=0xDBFF).contains(&units[index])
@@ -29313,6 +29313,23 @@ fn get_substitution(
             Some(d) if d.is_ascii_digit() => {
                 let first = (d as u8 - b'0') as usize;
                 if first == 0 {
+                    // `$0n` is the two-digit capture n (00 is never replaced).
+                    if let Some(&d2) = chars.peek() {
+                        if d2.is_ascii_digit() {
+                            let n = (d2 as u8 - b'0') as usize;
+                            if n >= 1 && n <= captures.len() {
+                                chars.next();
+                                if let Some(cap) = &captures[n - 1] {
+                                    out.push_str(cap);
+                                }
+                                continue;
+                            }
+                            chars.next();
+                            out.push_str("$0");
+                            out.push(d2);
+                            continue;
+                        }
+                    }
                     out.push_str("$0");
                     continue;
                 }
@@ -29414,13 +29431,17 @@ pub fn regexp_symbol_replace(
         ));
         return Value::undefined();
     }
+    let rx_base = vm.temp_roots.len();
+    vm.temp_roots.push(rx);
     let results_base = vm.temp_roots.len();
+    let mut last_empty_index: Option<usize> = None;
     loop {
+        let rx = vm.temp_roots[rx_base];
         let result = match regexp_exec_abstract(gc, vm, rx, &input) {
             Ok(v) => v,
             Err(e) => {
                 vm.set_pending_exception(e);
-                vm.temp_roots.truncate(results_base);
+                vm.temp_roots.truncate(rx_base);
                 return Value::undefined();
             }
         };
@@ -29435,20 +29456,36 @@ pub fn regexp_symbol_replace(
             Ok(v) => v,
             Err(e) => {
                 vm.set_pending_exception(e);
-                vm.temp_roots.truncate(results_base);
+                vm.temp_roots.truncate(rx_base);
                 return Value::undefined();
             }
         };
         let Some(matched) = to_primitive_string(gc, matched_val, vm) else {
-            vm.temp_roots.truncate(results_base);
+            vm.temp_roots.truncate(rx_base);
             return Value::undefined();
         };
         if matched.is_empty() {
+            let match_index_val = match get_value_sync(gc, vm, result, "index") {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    vm.temp_roots.truncate(rx_base);
+                    return Value::undefined();
+                }
+            };
+            let match_index = match to_number_sync(gc, vm, match_index_val) {
+                Ok(n) if !n.is_nan() && n >= 0.0 => n.trunc() as usize,
+                _ => 0,
+            };
+            if last_empty_index.is_some_and(|prev| match_index <= prev) {
+                break;
+            }
+            last_empty_index = Some(match_index);
             let last_val = match get_value_sync(gc, vm, rx, "lastIndex") {
                 Ok(v) => v,
                 Err(e) => {
                     vm.set_pending_exception(e);
-                    vm.temp_roots.truncate(results_base);
+                    vm.temp_roots.truncate(rx_base);
                     return Value::undefined();
                 }
             };
@@ -29456,22 +29493,24 @@ pub fn regexp_symbol_replace(
                 Ok(n) => n,
                 Err(e) => {
                     vm.set_pending_exception(e);
-                    vm.temp_roots.truncate(results_base);
+                    vm.temp_roots.truncate(rx_base);
                     return Value::undefined();
                 }
             };
             let next = advance_utf16_index(&input, last, full_unicode);
-            if vm
-                .set_property_sync(gc, rx, "lastIndex", Value::smi(next as i32))
-                .is_err()
-            {
+            let next_val = if next <= i32::MAX as usize {
+                Value::smi(next as i32)
+            } else {
+                Value::from_float64(next as f64)
+            };
+            if vm.set_property_sync(gc, rx, "lastIndex", next_val).is_err() {
                 vm.set_pending_exception(crate::errors::error_object(
                     gc,
                     &vm.error_protos,
                     crate::errors::ErrorKind::TypeError,
                     "Cannot set lastIndex",
                 ));
-                vm.temp_roots.truncate(results_base);
+                vm.temp_roots.truncate(rx_base);
                 return Value::undefined();
             }
         }
@@ -29485,7 +29524,7 @@ pub fn regexp_symbol_replace(
             Ok(v) => v,
             Err(e) => {
                 vm.set_pending_exception(e);
-                vm.temp_roots.truncate(results_base);
+                vm.temp_roots.truncate(rx_base);
                 return Value::undefined();
             }
         };
@@ -29493,7 +29532,7 @@ pub fn regexp_symbol_replace(
             Ok(n) => n,
             Err(e) => {
                 vm.set_pending_exception(e);
-                vm.temp_roots.truncate(results_base);
+                vm.temp_roots.truncate(rx_base);
                 return Value::undefined();
             }
         };
@@ -29502,12 +29541,12 @@ pub fn regexp_symbol_replace(
             Ok(v) => v,
             Err(e) => {
                 vm.set_pending_exception(e);
-                vm.temp_roots.truncate(results_base);
+                vm.temp_roots.truncate(rx_base);
                 return Value::undefined();
             }
         };
         let Some(matched) = to_primitive_string(gc, matched_val, vm) else {
-            vm.temp_roots.truncate(results_base);
+            vm.temp_roots.truncate(rx_base);
             return Value::undefined();
         };
         let matched_units = utf16_len(&matched);
@@ -29515,7 +29554,7 @@ pub fn regexp_symbol_replace(
             Ok(v) => v,
             Err(e) => {
                 vm.set_pending_exception(e);
-                vm.temp_roots.truncate(results_base);
+                vm.temp_roots.truncate(rx_base);
                 return Value::undefined();
             }
         };
@@ -29523,7 +29562,7 @@ pub fn regexp_symbol_replace(
             Ok(n) => n,
             Err(e) => {
                 vm.set_pending_exception(e);
-                vm.temp_roots.truncate(results_base);
+                vm.temp_roots.truncate(rx_base);
                 return Value::undefined();
             }
         };
@@ -29532,6 +29571,9 @@ pub fn regexp_symbol_replace(
         } else {
             (index_num.trunc() as usize).min(length_s)
         };
+        if position < next_source_position {
+            continue;
+        }
         let mut capture_strings: Vec<Option<String>> = Vec::with_capacity(n_captures as usize);
         let mut capture_values: Vec<Value> = Vec::with_capacity(n_captures as usize);
         for i in 1..=n_captures {
@@ -29540,7 +29582,7 @@ pub fn regexp_symbol_replace(
                 Ok(v) => v,
                 Err(e) => {
                     vm.set_pending_exception(e);
-                    vm.temp_roots.truncate(results_base);
+                    vm.temp_roots.truncate(rx_base);
                     return Value::undefined();
                 }
             };
@@ -29549,7 +29591,7 @@ pub fn regexp_symbol_replace(
                 capture_values.push(Value::undefined());
             } else {
                 let Some(s) = to_primitive_string(gc, value, vm) else {
-                    vm.temp_roots.truncate(results_base);
+                    vm.temp_roots.truncate(rx_base);
                     return Value::undefined();
                 };
                 capture_values.push(Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8));
@@ -29560,7 +29602,7 @@ pub fn regexp_symbol_replace(
             Ok(v) => v,
             Err(e) => {
                 vm.set_pending_exception(e);
-                vm.temp_roots.truncate(results_base);
+                vm.temp_roots.truncate(rx_base);
                 return Value::undefined();
             }
         };
@@ -29581,12 +29623,12 @@ pub fn regexp_symbol_replace(
                 Ok(v) => v,
                 Err(e) => {
                     vm.set_pending_exception(e);
-                    vm.temp_roots.truncate(results_base);
+                    vm.temp_roots.truncate(rx_base);
                     return Value::undefined();
                 }
             };
             let Some(s) = to_primitive_string(gc, value, vm) else {
-                vm.temp_roots.truncate(results_base);
+                vm.temp_roots.truncate(rx_base);
                 return Value::undefined();
             };
             s
@@ -29606,7 +29648,7 @@ pub fn regexp_symbol_replace(
                 Ok(s) => s,
                 Err(e) => {
                     vm.set_pending_exception(e);
-                    vm.temp_roots.truncate(results_base);
+                    vm.temp_roots.truncate(rx_base);
                     return Value::undefined();
                 }
             }
@@ -29616,7 +29658,7 @@ pub fn regexp_symbol_replace(
         next_source_position = position + matched_units;
     }
     accumulated.push_str(&utf16_slice(&input, next_source_position, length_s));
-    vm.temp_roots.truncate(results_base);
+    vm.temp_roots.truncate(rx_base);
     Value::from_heap_ptr(HeapString::allocate(gc, &accumulated) as *mut u8)
 }
 

@@ -17096,3 +17096,36 @@ fn test_eval_expression_completion() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_regexp_replace_getsubstitution_and_lastindex() {
+    let mut ctx = Context::new_small();
+    assert_eq!(
+        eval_str(
+            &mut ctx,
+            r#"/b(c)(z)?(.)/[Symbol.replace]('abcde', '[$01$02$03]')"#
+        ),
+        "a[cd]e"
+    );
+    assert_eq!(
+        eval_str(&mut ctx, r#"/^/g[Symbol.replace]('ab', 'X')"#),
+        "Xab"
+    );
+    let r = ctx
+        .eval(
+            r#"
+            var re = /a/;
+            Object.defineProperty(re, "global", { writable: true });
+            re.global = true;
+            var calls = 0;
+            re.exec = function () {
+                calls += 1;
+                return calls === 1 ? ["a"] : null;
+            };
+            re[Symbol.replace]("aa", "b");
+            calls === 2;
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

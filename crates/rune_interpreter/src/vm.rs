@@ -16384,6 +16384,16 @@ pub(crate) fn do_store_property(
             }
             if !handled {
                 if let Some(key) = value_to_prop_key(raw_key) {
+                    let mut re_ptr = unsafe { rune_core::gc::resolve_forwarded(ptr) };
+                    let extra = unsafe { rune_core::regexp::RegExp::extra_props(re_ptr) };
+                    if !extra.is_null() {
+                        let extra_obj = extra as *mut JSObject;
+                        let shape = unsafe { JSObject::shape_ptr(extra_obj) };
+                        if let Some(slot) = shape.lookup(&key) {
+                            unsafe { JSObject::set_slot(extra_obj, slot, value) };
+                            return true;
+                        }
+                    }
                     // A prototype accessor with no setter makes the assignment a
                     // no-op (sloppy mode) instead of creating a shadowing own prop.
                     let mut proto = unsafe {
@@ -16411,7 +16421,7 @@ pub(crate) fn do_store_property(
                         }
                         proto = unsafe { JSObject::prototype(proto as *mut JSObject) };
                     }
-                    let mut re_ptr = unsafe { rune_core::gc::resolve_forwarded(ptr) };
+                    re_ptr = unsafe { rune_core::gc::resolve_forwarded(ptr) };
                     let mut extra = unsafe { rune_core::regexp::RegExp::extra_props(re_ptr) };
                     if extra.is_null() {
                         let new_extra = JSObject::allocate(gc, Shape::empty(), &[]);

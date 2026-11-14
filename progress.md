@@ -4099,6 +4099,21 @@ Integration suite: **931 passed, 0 failed, 3 ignored**.
 
 Integration suite: **932 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Block-scoped function/class declarations (2026-11-14)
+
+- Script-level and function-level declaration pre-scans now collect
+  function/class declarations **only directly in the body**. Nested block
+  declarations (switch CaseBlock, if/loop/try blocks) no longer become
+  script/function bindings.
+- The switch emitter snapshots `locals` before evaluating the CaseBlock and
+  restores them after, so a `class`/`function` executed in a case does not
+  leak to the code following the switch. Together with the CaseBlock lexical
+  environment this makes all switch scope probes pass.
+- Test262 language/statements/switch **35 → 39/111 (0 failures)**.
+- Regression: `test_switch_block_declarations_do_not_leak`.
+
+Integration suite: **933 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

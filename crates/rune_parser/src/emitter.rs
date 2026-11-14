@@ -743,7 +743,32 @@ impl Emitter {
         // references them resolves through the env chain (they are never
         // globals).
         let mut all_var_names: Vec<String> = Vec::new();
-        collect_decl_names_stmt(&func.body, &mut all_var_names);
+        collect_var_names_stmt(&func.body, &mut all_var_names);
+        // Only declarations directly in the function body are function-scoped
+        // bindings; nested block/switch declarations stay block-scoped.
+        let body_stmts: &[Stmt] = match &func.body {
+            Stmt::Block(stmts, _) => stmts,
+            other => std::slice::from_ref(other),
+        };
+        for stmt in body_stmts {
+            match stmt {
+                Stmt::Function(f, _) => {
+                    if let Some(name) = &f.name {
+                        if !all_var_names.contains(&name.to_string()) {
+                            all_var_names.push(name.to_string());
+                        }
+                    }
+                }
+                Stmt::Class(c, _) => {
+                    if let Some(name) = &c.name {
+                        if !all_var_names.contains(&name.to_string()) {
+                            all_var_names.push(name.to_string());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         for name in &all_var_names {
             if !sub.locals.contains(name) {
                 sub.locals.push(name.clone());
@@ -2739,6 +2764,9 @@ impl Emitter {
             }
             Stmt::Switch(discriminant, cases, default_body, default_index, _) => {
                 self.reset_completion_value();
+                // Function/class declarations executed inside case bodies must
+                // not leak into the enclosing scope (CaseBlock is a block).
+                let switch_saved_locals = self.locals.clone();
                 self.emit_expression(discriminant);
 
                 // Mark switch context for break statements
@@ -2844,6 +2872,7 @@ impl Emitter {
                 let no_match_pc = default_target.unwrap_or(cleanup_pc);
                 self.patch(no_match_target, no_match_pc);
                 self.switch_exit_stack.pop();
+                self.locals = switch_saved_locals;
             }
         }
     }
@@ -4869,79 +4898,14 @@ fn is_anonymous_definition(expr: &Expr) -> bool {
     }
 }
 
-fn collect_decl_names_stmt(stmt: &Stmt, names: &mut Vec<String>) {
-    match stmt {
-        Stmt::Function(f, _) => {
-            if let Some(name) = &f.name {
-                if !names.contains(&name.to_string()) {
-                    names.push(name.to_string());
-                }
-            }
-            return; // body belongs to the function's own scope
-        }
-        Stmt::Class(c, _) => {
-            if let Some(name) = &c.name {
-                if !names.contains(&name.to_string()) {
-                    names.push(name.to_string());
-                }
-            }
-            return; // body belongs to the class's own scope
-        }
-        _ => {}
-    }
-    collect_var_names_stmt(stmt, names);
-    // Recurse structurally for declaration arms that collect_var_names_stmt
-    // skips (its `_ => {}` swallows Function/Class without descent).
-    match stmt {
-        Stmt::Function(_, _) | Stmt::Class(_, _) => {}
-        Stmt::Block(stmts, _) => stmts.iter().for_each(|s| collect_decl_names_stmt(s, names)),
-        Stmt::If(_, then, else_, _) => {
-            collect_decl_names_stmt(then, names);
-            if let Some(s) = else_ {
-                collect_decl_names_stmt(s, names);
-            }
-        }
-        Stmt::While(_, body, _) => collect_decl_names_stmt(body, names),
-        Stmt::DoWhile(_, body, _) => collect_decl_names_stmt(body, names),
-        Stmt::For(init, _, _, body, _) => {
-            if let Some(s) = init {
-                collect_decl_names_stmt(s, names);
-            }
-            collect_decl_names_stmt(body, names);
-        }
-        Stmt::ForIn(_, _, body, _) => collect_decl_names_stmt(body, names),
-        Stmt::ForOf(_, _, body, _) => collect_decl_names_stmt(body, names),
-        Stmt::Switch(_, cases, default, _, _) => {
-            for c in cases {
-                c.body
-                    .iter()
-                    .for_each(|s| collect_decl_names_stmt(s, names));
-            }
-            if let Some(stmts) = default {
-                stmts.iter().for_each(|s| collect_decl_names_stmt(s, names));
-            }
-        }
-        Stmt::Try(body, catch, finally, _) => {
-            body.iter().for_each(|s| collect_decl_names_stmt(s, names));
-            if let Some(c) = catch {
-                c.body
-                    .iter()
-                    .for_each(|s| collect_decl_names_stmt(s, names));
-            }
-            if let Some(f) = finally {
-                f.iter().for_each(|s| collect_decl_names_stmt(s, names));
-            }
-        }
-        Stmt::Labeled(_, body, _) => collect_decl_names_stmt(body, names),
-        _ => {}
-    }
-}
-
 /// Collect ONLY function/class declaration names, recursively through
 /// block/branch/loop/try structure without descending into function/class
 /// bodies. Used at SCRIPT level where vars stay global and only declarations
 /// need capture.
 fn collect_script_decl_names_stmt(stmt: &Stmt, names: &mut Vec<String>) {
+    // Only declarations directly in the script body become script bindings.
+    // Function/class declarations nested in blocks (switch CaseBlock, if
+    // branches, loops, try) are block-scoped and must not leak to script scope.
     match stmt {
         Stmt::Function(f, _) => {
             if let Some(name) = &f.name {
@@ -4957,51 +4921,6 @@ fn collect_script_decl_names_stmt(stmt: &Stmt, names: &mut Vec<String>) {
                 }
             }
         }
-        Stmt::Block(stmts, _) => stmts
-            .iter()
-            .for_each(|s| collect_script_decl_names_stmt(s, names)),
-        Stmt::If(_, then, else_, _) => {
-            collect_script_decl_names_stmt(then, names);
-            if let Some(s) = else_ {
-                collect_script_decl_names_stmt(s, names);
-            }
-        }
-        Stmt::While(_, body, _) => collect_script_decl_names_stmt(body, names),
-        Stmt::DoWhile(_, body, _) => collect_script_decl_names_stmt(body, names),
-        Stmt::For(init, _, _, body, _) => {
-            if let Some(s) = init {
-                collect_script_decl_names_stmt(s, names);
-            }
-            collect_script_decl_names_stmt(body, names);
-        }
-        Stmt::ForIn(_, _, body, _) => collect_script_decl_names_stmt(body, names),
-        Stmt::ForOf(_, _, body, _) => collect_script_decl_names_stmt(body, names),
-        Stmt::Switch(_, cases, default, _, _) => {
-            for c in cases {
-                c.body
-                    .iter()
-                    .for_each(|s| collect_script_decl_names_stmt(s, names));
-            }
-            if let Some(stmts) = default {
-                stmts
-                    .iter()
-                    .for_each(|s| collect_script_decl_names_stmt(s, names));
-            }
-        }
-        Stmt::Try(body, catch, finally, _) => {
-            body.iter()
-                .for_each(|s| collect_script_decl_names_stmt(s, names));
-            if let Some(c) = catch {
-                c.body
-                    .iter()
-                    .for_each(|s| collect_script_decl_names_stmt(s, names));
-            }
-            if let Some(f) = finally {
-                f.iter()
-                    .for_each(|s| collect_script_decl_names_stmt(s, names));
-            }
-        }
-        Stmt::Labeled(_, body, _) => collect_script_decl_names_stmt(body, names),
         _ => {}
     }
 }

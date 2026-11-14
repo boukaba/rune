@@ -18883,3 +18883,30 @@ fn test_switch_caseblock_lexical_environment() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_switch_block_declarations_do_not_leak() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var classThrew = false;
+            try {
+                eval('switch (0) { default: class Leak {} } Leak;');
+            } catch (e) {
+                classThrew = e instanceof ReferenceError;
+            }
+
+            var functionThrew = false;
+            try {
+                eval('switch (0) { default: function* Leak() {} } Leak;');
+            } catch (e) {
+                functionThrew = e instanceof ReferenceError;
+            }
+
+            [classThrew, functionThrew].join("|") === "true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Block-scoped function/class declarations (2026-11-14)**: direct-only script/function declaration pre-scans, switch locals restore. switch **39/111 (0 fail)**. Integration **933**.
 - **Switch CaseBlock scope + honest negatives (2026-11-14)**: one CaseBlock lexical env with closure capture/cleanup, negative metadata type/phase parsing, no-throw negatives fail. switch **35/111**, class **1636/4367**, class expr **1566/4059**, object **648/1170**. Integration **932**.
 - **Catch parameter environment (2026-11-14)**: catch params in declarative env, closures capture, pattern-default closure detection. try **150/201**. Integration **931**.
 - **Switch default position/fallthrough (2026-11-14)**: default_index in AST, source-order body layout, comma discriminant/case tests. switch **33/111**. Integration **930**.

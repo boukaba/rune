@@ -3541,6 +3541,31 @@ Integration suite: **904 passed, 0 failed, 3 ignored**.
 
 Integration suite: **905 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Property descriptors over prototypes + generic Properties (2026-11-14)
+
+- `ToPropertyDescriptor` field reads now use `HasProperty` + observable `Get`
+  instead of reading own exotic slots directly:
+  - inherited descriptor fields work (e.g. `RegExp.prototype.enumerable`
+    supplies `enumerable` for a RegExp used as a descriptor);
+  - accessor fields on descriptors run their getters with the descriptor as
+    receiver;
+  - Arguments objects used as descriptors see their named extra properties.
+- `has_property` for arrays now recognizes named extra-props keys (not only
+  canonical indices), so `in`/HasProperty agrees with `Get` for Arguments and
+  expando properties.
+- `Object.create` skips internal (`\0...`) keys when collecting enumerable
+  descriptor keys, fixing Number/String wrapper Properties objects.
+- `Object.defineProperties` now performs ToObject(Properties) and reads each
+  descriptor value with an observable `Get`:
+  - String wrappers, functions, Arguments and Number wrappers work as the
+    Properties object;
+  - getter side effects run with the Properties object as receiver.
+- Test262: Object **3094 → 3154/3411**, defineProperty **1088/1131**,
+  defineProperties **547/632**.
+- Regression: `test_descriptor_proto_and_define_properties_objects`.
+
+Integration suite: **906 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

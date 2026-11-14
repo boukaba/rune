@@ -17304,6 +17304,17 @@ pub(crate) fn has_property(obj: Value, raw_key: Value, function_prototype: Optio
                     }
                 }
             }
+            // Named extra properties (arguments objects, accessor/data
+            // overlays, user expando properties).
+            if let Some(key) = value_to_prop_key(raw_key) {
+                let extra = unsafe { RuneArray::extra_props(ptr as *mut RuneArray) };
+                if !extra.is_null() {
+                    let eshape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                    if eshape.lookup(&key).is_some() {
+                        return true;
+                    }
+                }
+            }
             // Walk prototype chain for non-numeric keys on arrays
             has_property(
                 unsafe {

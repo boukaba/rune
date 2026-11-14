@@ -17802,3 +17802,53 @@ fn test_define_property_array_data_guard_and_keys() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_descriptor_proto_and_define_properties_objects() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var o = {};
+            RegExp.prototype.enumerable = true;
+            Object.defineProperty(o, "p", new RegExp());
+            var pd = Object.getOwnPropertyDescriptor(o, "p");
+            delete RegExp.prototype.enumerable;
+            var data = "data";
+            var args = (function () { return arguments; })();
+            args.set = function (v) { data = v; };
+            var created = Object.create({}, { prop: args });
+            created.prop = "override";
+            var strProps = new String();
+            var strGetterCalled = false;
+            Object.defineProperty(strProps, "prop", {
+                get: function () {
+                    strGetterCalled = this instanceof String;
+                    return { value: 5, enumerable: true };
+                },
+                enumerable: true
+            });
+            var fromStr = {};
+            Object.defineProperties(fromStr, strProps);
+            var fnProps = function () {};
+            fnProps.prop = { value: 7, enumerable: true };
+            var fromFn = {};
+            Object.defineProperties(fromFn, fnProps);
+            var numProps = new Number(-9);
+            numProps.prop = { value: 12, enumerable: true };
+            var fromNum = Object.create({}, numProps);
+            [
+                pd.enumerable === true,
+                data === "override",
+                created.hasOwnProperty("prop"),
+                strGetterCalled,
+                fromStr.prop === 5,
+                fromFn.prop === 7,
+                fromNum.prop === 12,
+                Object.getOwnPropertyNames(fromNum).join(",") === "prop"
+            ].join("|") === "true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

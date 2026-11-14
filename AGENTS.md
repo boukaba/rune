@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Descriptors over prototypes + generic Properties (2026-11-14)**: desc_field HasProperty/Get, array named extras in `in`, Object.create internal-key filter, defineProperties ToObject/Get for function/String wrappers. Object **3154/3411**, defineProperty **1088/1131**, defineProperties **547/632**. Integration **906**.
 - **defineProperty locked data + String integrity (2026-11-14)**: fixed padded-overlay data guard, accessor preservation, object keys ToPropertyKey, String non-extensible/isFrozen, resizable TA freeze. Object **3094/3411**, defineProperty **1057/1131**. Integration **905**.
 - **Object enumeration: names/for-in/values/entries (2026-11-14)**: all own names, array/string/exotic for-in, observable values/entries Gets. Object **3066/3411**, names **41/45**, keys **54/59**, values **18/20**, entries **20/21**. Integration **904**.
 - **Object.prototype + integrity/legacy accessors (2026-11-14)**: immutable Object.prototype, isPrototypeOf/valueOf, legacy accessor names/semantics, preventExtensions attr fix, __proto__ cycle/extensibility. Object **3023/3411**, prototype **201/248**. Integration **903**.

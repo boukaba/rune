@@ -10999,74 +10999,21 @@ fn desc_field(
     desc_obj: Value,
     name: &str,
 ) -> Result<(bool, Value), Value> {
-    let Some(dptr) = desc_obj.heap_ptr() else {
+    let base = vm.temp_roots.len();
+    vm.temp_roots.push(desc_obj);
+    let key = Value::from_heap_ptr(HeapString::allocate(gc, name) as *mut u8);
+    let live = refresh_value(vm.temp_roots[base]);
+    let present = crate::vm::has_property(live, key, Some(vm.function_prototype));
+    if !present {
+        vm.temp_roots.truncate(base);
         return Ok((false, Value::undefined()));
-    };
-    let dtag = unsafe { (*(dptr as *const GcHeader)).tag() };
-    // Function descriptors store fields on their extra_props object.
-    let start = if dtag == TAG_FUNC {
-        let ep = unsafe {
-            rune_core::function::Func::extra_props(dptr as *mut rune_core::function::Func)
-        };
-        if ep.is_null() {
-            return Ok((false, Value::undefined()));
-        }
-        ep
-    } else if dtag == TAG_OBJECT {
-        dptr
-    } else if dtag == TAG_DATE {
-        let ep = unsafe { rune_core::date::RuneDate::extra_props(dptr) };
-        if ep.is_null() {
-            return Ok((false, Value::undefined()));
-        }
-        ep
-    } else if dtag == TAG_REGEXP {
-        let ep = unsafe { rune_core::regexp::RegExp::extra_props(dptr) };
-        if ep.is_null() {
-            return Ok((false, Value::undefined()));
-        }
-        ep
-    } else if dtag == TAG_ARRAY {
-        let ep = unsafe { RuneArray::extra_props(dptr as *mut RuneArray) };
-        if ep.is_null() {
-            return Ok((false, Value::undefined()));
-        }
-        ep
-    } else if dtag == TAG_STRING_OBJ {
-        let ep = unsafe { StringObject::extra_props(dptr as *mut StringObject) };
-        if ep.is_null() {
-            return Ok((false, Value::undefined()));
-        }
-        ep
-    } else {
-        return Ok((false, Value::undefined()));
-    };
-    let key = PropertyKey::from_string(name);
-    let mut current = start;
-    for _ in 0..64 {
-        let shape = unsafe { JSObject::shape_ptr(current as *mut JSObject) };
-        if let Some(slot) = shape.lookup(&key) {
-            let v = unsafe { JSObject::get_slot(current as *mut JSObject, slot) };
-            if v.heap_ptr()
-                .is_some_and(|vp| unsafe { (*(vp as *const GcHeader)).tag() == TAG_ACCESSOR })
-            {
-                let vp = v.heap_ptr().unwrap();
-                let getter = unsafe { rune_core::accessor::AccessorPair::getter(vp) };
-                if getter.is_undefined() {
-                    return Ok((false, Value::undefined()));
-                }
-                let value = vm.call_value_sync(gc, getter, desc_obj, &[])?;
-                return Ok((true, value));
-            }
-            return Ok((true, v));
-        }
-        let proto = unsafe { JSObject::prototype(current as *mut JSObject) };
-        if proto.is_null() {
-            return Ok((false, Value::undefined()));
-        }
-        current = proto;
     }
-    Ok((false, Value::undefined()))
+    let value = get_value_sync(gc, vm, refresh_value(vm.temp_roots[base]), name);
+    vm.temp_roots.truncate(base);
+    match value {
+        Ok(v) => Ok((true, v)),
+        Err(e) => Err(e),
+    }
 }
 
 /// ToPropertyDescriptor (§6.1.7.1 + §20.1.2.3 validation): parse a
@@ -12341,43 +12288,31 @@ pub fn object_define_properties(
         ));
         return Value::undefined();
     }
-    // Collect own enumerable string keys of the properties object, then
-    // define each in order (partial failure leaves earlier ones defined).
-    let keys: Vec<(PropertyKey, String, Value)> = {
-        let shape = match props.heap_ptr() {
-            Some(pptr) if unsafe { (*(pptr as *const GcHeader)).tag() } == TAG_OBJECT => unsafe {
-                JSObject::shape_ptr(pptr as *mut JSObject)
-            },
-            _ => {
-                vm.set_pending_exception(crate::errors::error_object(
-                    gc,
-                    &vm.error_protos,
-                    crate::errors::ErrorKind::TypeError,
-                    "Property list must be an object",
-                ));
+    // ToObject(Properties): primitives box; own enumerable string keys are
+    // snapshotted, then each descriptor value is read with an observable Get.
+    let props = if is_object_value(props) {
+        props
+    } else {
+        crate::vm::to_object_value(gc, props, vm)
+    };
+    let keys = match object_own_entries(gc, props, vm) {
+        Ok(k) => k,
+        Err(()) => return Value::undefined(),
+    };
+    vm.push(target);
+    let target_slot = vm.stack.len() - 1;
+    vm.push(props);
+    let props_slot = vm.stack.len() - 1;
+    for (name, _) in keys {
+        let live_props = refresh_value(vm.stack[props_slot]);
+        let desc_obj = match get_value_sync(gc, vm, live_props, &name) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                vm.stack.truncate(target_slot);
                 return Value::undefined();
             }
         };
-        let count = unsafe { JSObject::slot_count(props.heap_ptr().unwrap() as *mut JSObject) };
-        let mut out = Vec::new();
-        for i in 0..count {
-            if shape.entries[i].0.is_symbol()
-                || shape.attr_at(i) & rune_core::shape::ATTR_ENUMERABLE == 0
-            {
-                continue;
-            }
-            let v = unsafe { JSObject::get_slot(props.heap_ptr().unwrap() as *mut JSObject, i) };
-            let name = shape.key_name_at(i).unwrap_or("").to_string();
-            out.push((shape.entries[i].0, name, v));
-        }
-        out
-    };
-    // Root the target on the operand stack: descriptor parsing and object
-    // allocation below may trigger GC, which moves unrooted values (args
-    // live in a plain Rust Vec). Re-derive the raw pointer per iteration.
-    vm.push(target);
-    let target_slot = vm.stack.len() - 1;
-    for (pkey, name, desc_obj) in keys {
         let desc = match to_property_descriptor(gc, vm, desc_obj) {
             Ok(d) => d,
             Err(e) => {
@@ -12395,6 +12330,7 @@ pub fn object_define_properties(
                 return Value::undefined();
             }
         };
+        let pkey = PropertyKey::from_string(&name);
         if let Err(e) = define_own_property(gc, vm, live_ptr, pkey, name, &desc) {
             vm.set_pending_exception(e);
             let current = vm.stack[target_slot];
@@ -13191,6 +13127,9 @@ pub fn object_create_builtin(
                 continue;
             }
             let name = shape.key_name_at(i).unwrap_or("").to_string();
+            if is_internal_key(&name) {
+                continue;
+            }
             out.push((shape.entries[i].0, name));
         }
     }

@@ -17276,105 +17276,117 @@ pub fn string_match(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
     }
 }
 
-/// Collect all global-regexp matches into an array iterator.
-fn collect_match_all(gc: &mut SemiSpace, rp: *mut u8, s: &str, vm: &mut Vm) -> Value {
-    let pattern = unsafe { HeapString::to_string(RegExp::pattern(rp) as *mut HeapString) };
-    let flags = unsafe { RegExp::flags(rp) };
-    // Empty pattern: every position (including the end) is an empty match.
-    if pattern.is_empty() {
-        let results = fresh_dense_array(gc, vm);
-        let base = vm.temp_roots.len();
-        vm.temp_roots.push(results);
-        let mut positions: Vec<usize> = s.char_indices().map(|(i, _)| i).collect();
-        positions.push(s.len());
-        for (index, pos) in positions.into_iter().enumerate() {
-            let groups = [(pos, pos)];
-            let m = make_match_result_array(gc, &groups, s, index, vm.array_prototype, &[], false);
-            let mut results_now = vm.temp_roots[base];
-            if result_push(gc, vm, &mut results_now, m).is_err() {
-                vm.temp_roots.truncate(base);
-                return Value::undefined();
-            }
-            vm.temp_roots[base] = results_now;
-        }
-        let results = vm.temp_roots[base];
-        vm.temp_roots.truncate(base);
-        return array_values_builtin(gc, results, &[], vm);
-    }
-    let clone = alloc_regexp_from_string(gc, &pattern, flags, vm.regexp_prototype);
-    let input = Value::from_heap_ptr(HeapString::allocate(gc, s) as *mut u8);
-    let base = vm.temp_roots.len();
-    vm.temp_roots.push(clone);
-    vm.temp_roots.push(input);
-    let results = fresh_dense_array(gc, vm);
-    vm.temp_roots.push(results);
-    let results_slot = vm.temp_roots.len() - 1;
-    let mut guard = 0usize;
-    loop {
-        guard += 1;
-        if guard > 1_000_000 {
-            break;
-        }
-        let clone = vm.temp_roots[base];
-        let input = vm.temp_roots[base + 1];
-        let m = regexp_exec(gc, clone, &[input], vm);
-        if vm.pending_exception.is_some() {
-            vm.temp_roots.truncate(base);
-            return Value::undefined();
-        }
-        if m.is_null() {
-            break;
-        }
-        let empty = m
-            .heap_ptr()
-            .filter(|p| unsafe { (*(*p as *const GcHeader)).tag() } == TAG_ARRAY)
-            .map(|p| {
-                let arr = p as *mut RuneArray;
-                let first = unsafe { RuneArray::get_element(arr, 0) };
-                first
-                    .heap_ptr()
-                    .map(|sp| unsafe { HeapString::to_string(sp as *mut HeapString) }.is_empty())
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false);
-        let mut results_now = vm.temp_roots[results_slot];
-        if result_push(gc, vm, &mut results_now, m).is_err() {
-            vm.temp_roots.truncate(base);
-            return Value::undefined();
-        }
-        vm.temp_roots[results_slot] = results_now;
-        if empty {
-            let clone = vm.temp_roots[base];
-            if let Some(cp) = clone.heap_ptr() {
-                if unsafe { (*(cp as *const GcHeader)).tag() } == TAG_REGEXP {
-                    let next = unsafe { RegExp::last_index(cp) }.saturating_add(1);
-                    unsafe { RegExp::set_last_index(cp, next) };
-                    if next as usize > s.encode_utf16().count() {
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    vm.temp_roots.truncate(base);
-    array_values_builtin(gc, results, &[], vm)
-}
-
-/// RegExp.prototype[@@matchAll](string) — §22.2.6.9.
 pub fn regexp_match_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some(rp) = this.heap_ptr() else {
-        return Value::undefined();
-    };
-    if unsafe { (*(rp as *const GcHeader)).tag() } != TAG_REGEXP {
+    // §22.2.6.9 RegExp.prototype[@@matchAll](string)
+    let rx = this;
+    if !is_object_value(rx) {
         vm.set_pending_exception(crate::errors::error_object(
             gc,
             &vm.error_protos,
             crate::errors::ErrorKind::TypeError,
-            "RegExp.prototype[Symbol.matchAll] requires a RegExp",
+            "RegExp.prototype[Symbol.matchAll] called on non-object",
         ));
         return Value::undefined();
     }
-    if !unsafe { RegExp::has_flag(rp, 0) } {
+    let input_val = args.first().copied().unwrap_or(Value::undefined());
+    let Some(input) = to_primitive_string(gc, input_val, vm) else {
+        return Value::undefined();
+    };
+    let ctor = match get_value_sync(gc, vm, rx, "constructor") {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let species = if ctor.is_undefined() || ctor.is_null() {
+        Value::undefined()
+    } else {
+        match get_property_value_sync(gc, vm, ctor, Value::symbol(rune_core::symbol::SYM_SPECIES)) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
+    };
+    let custom_species =
+        !species.is_undefined() && !species.is_null() && species != vm.regexp_constructor;
+    if custom_species && !is_callable_value(species) && !is_object_value(species) {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "RegExp @@species is not a constructor",
+        ));
+        return Value::undefined();
+    }
+    let flags_val = match get_value_sync(gc, vm, rx, "flags") {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let Some(flags) = to_primitive_string(gc, flags_val, vm) else {
+        return Value::undefined();
+    };
+    let is_re = match is_regexp_value(gc, vm, rx) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let matcher = if custom_species {
+        let flags_val = Value::from_heap_ptr(HeapString::allocate(gc, &flags) as *mut u8);
+        let base = vm.temp_roots.len();
+        vm.temp_roots.push(rx);
+        let result = vm.construct_value_sync(gc, species, vec![rx, flags_val]);
+        vm.temp_roots.truncate(base);
+        match result {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
+    } else {
+        let source_val = match get_value_sync(gc, vm, rx, "source") {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        };
+        let Some(source) = to_primitive_string(gc, source_val, vm) else {
+            return Value::undefined();
+        };
+        let mut bits = 0u32;
+        for ch in flags.chars() {
+            bits |= match ch {
+                'g' => 1,
+                'i' => 2,
+                'm' => 4,
+                's' => 8,
+                'u' => 16,
+                'y' => 32,
+                'd' => 64,
+                'v' => 128,
+                _ => 0,
+            };
+        }
+        alloc_regexp_from_string(gc, &source, bits, vm.regexp_prototype)
+    };
+    let global_val = match get_value_sync(gc, vm, matcher, "global") {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let global = value_truthy(global_val);
+    if !global && is_re {
         vm.set_pending_exception(crate::errors::error_object(
             gc,
             &vm.error_protos,
@@ -17383,12 +17395,100 @@ pub fn regexp_match_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
         ));
         return Value::undefined();
     }
-    let s = args
-        .first()
-        .copied()
-        .map(value_to_js_string)
-        .unwrap_or_default();
-    collect_match_all(gc, rp, &s, vm)
+    let unicode_val = match get_value_sync(gc, vm, matcher, "unicode") {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let full_unicode = value_truthy(unicode_val);
+    if vm
+        .set_property_sync(gc, matcher, "lastIndex", Value::smi(0))
+        .is_err()
+    {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Cannot set lastIndex",
+        ));
+        return Value::undefined();
+    }
+
+    let mut out = fresh_dense_array(gc, vm);
+    let base = vm.temp_roots.len();
+    vm.temp_roots.push(matcher);
+    vm.temp_roots.push(out);
+    loop {
+        let matcher = vm.temp_roots[base];
+        let result = match regexp_exec_abstract(gc, vm, matcher, &input) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                vm.temp_roots.truncate(base);
+                return Value::undefined();
+            }
+        };
+        if result.is_null() {
+            break;
+        }
+        if result_push(gc, vm, &mut out, result).is_err() {
+            vm.temp_roots.truncate(base);
+            return Value::undefined();
+        }
+        out = vm.temp_roots[base + 1];
+        if !global {
+            break;
+        }
+        let matched_val = match get_value_sync(gc, vm, result, "0") {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                vm.temp_roots.truncate(base);
+                return Value::undefined();
+            }
+        };
+        let Some(matched) = to_primitive_string(gc, matched_val, vm) else {
+            vm.temp_roots.truncate(base);
+            return Value::undefined();
+        };
+        if matched.is_empty() {
+            let matcher = vm.temp_roots[base];
+            let last_val = match get_value_sync(gc, vm, matcher, "lastIndex") {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    vm.temp_roots.truncate(base);
+                    return Value::undefined();
+                }
+            };
+            let last = match to_length_sync(gc, vm, last_val) {
+                Ok(n) => n,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    vm.temp_roots.truncate(base);
+                    return Value::undefined();
+                }
+            };
+            let next = advance_utf16_index(&input, last, full_unicode);
+            if vm
+                .set_property_sync(gc, matcher, "lastIndex", Value::smi(next as i32))
+                .is_err()
+            {
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "Cannot set lastIndex",
+                ));
+                vm.temp_roots.truncate(base);
+                return Value::undefined();
+            }
+        }
+    }
+    vm.temp_roots.truncate(base);
+    array_values_builtin(gc, out, &[], vm)
 }
 
 /// Invoke the @@matchAll method on a freshly-created RegExp (spec step 5).

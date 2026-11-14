@@ -3029,6 +3029,29 @@ Integration suite: **882 passed, 0 failed, 3 ignored**.
 
 Integration suite: **883 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Generic RegExp @@matchAll (2026-11-14)
+
+- `RegExp.prototype[@@matchAll]` now follows MatchAllIterator/CreateRegExp-
+  StringIterator setup:
+  - ToString(string) first, then observable `flags` Get+ToString, then
+    `IsRegExp(this)` (observable `@@match` Get, getter throws propagate);
+  - `SpeciesConstructor(this, %RegExp%)` with custom constructors and the
+    default clone path;
+  - observable `global`/`unicode` Gets on the matcher, `lastIndex` reset;
+  - global regexps collect through observable `exec`, advancing by code point
+    on empty matches (u/v aware);
+  - non-global matchers yield at most one result (direct @@matchAll), while
+    non-RegExp receivers no longer throw spuriously;
+  - `[Symbol.matchAll]` function name is `[Symbol.matchAll]`.
+- Eager iterator caveat: results are still materialized into an array iterator,
+  so lastIndex-dependent laziness tests remain failing.
+- Test262: RegExp/prototype **352 → 365/487**, Symbol.matchAll **7 → 20/26**,
+  String/matchAll **23/25**, String **1074/1223**.
+- Remaining: lazy RegExp String Iterator (lastIndex cached/ToLength throws),
+  species matcher error propagation, `regexpcreate-this-throws`.
+
+Integration suite: **883 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

@@ -15025,6 +15025,9 @@ pub(crate) fn builtin_display_name(name: &'static str) -> &'static str {
     if name == "RegExp_prototype_source" {
         return "get source";
     }
+    if name == "RegExp_prototype_matchAll" {
+        return "[Symbol.matchAll]";
+    }
     if name == "RegExp_prototype_flags" {
         return "get flags";
     }

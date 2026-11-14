@@ -15,8 +15,8 @@ tracing = { workspace = true }
 url = "2.5"
 num-bigint = "0.4"
 num-traits = "0.2"
+unicode-normalization-alignments = "0.1"
 
 [features]
 default = ["jit"]
 jit = ["rune_jit_baseline"]
-

@@ -3713,6 +3713,27 @@ Integration suite: **912 passed, 0 failed, 3 ignored**.
 
 Integration suite: **912 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Unicode normalization + String coercion edges (2026-11-14)
+
+- `String.prototype.normalize` now performs real Unicode NFC/NFD/NFKC/NFKD
+  normalization using the offline-vendored `unicode-normalization-alignments`
+  crate (previously identity).
+- `String.prototype.localeCompare` compares NFC-normalized strings, so
+  canonically equivalent sequences compare equal.
+- `ToIntegerOrInfinity` now goes through `ToNumber` (Symbols throw TypeError,
+  NaN/-0 → +0, infinities preserved) instead of truncating primitives;
+  `String.prototype.at(Symbol())` throws as required.
+- `String.prototype.lastIndexOf` handles a NaN position as +∞ before
+  conversion, fixing legacy position tests.
+- `String.prototype.split` calls `ToString(separator)` before the limit
+  conversion (observable abrupt completion even when limit is 0).
+- RegExp: incomplete `\x` escapes are identity escapes (`x`) instead of NUL.
+- Test262 String **1159 → 1172/1223**, split **116 → 117/120**,
+  Number **337/340** (0 failures), Array **2668 → 2670/3081**.
+- Regression: `test_string_normalization_and_coercion_edges`.
+
+Integration suite: **913 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

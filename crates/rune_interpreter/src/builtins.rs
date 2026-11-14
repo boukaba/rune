@@ -35,8 +35,14 @@ use rune_core::value::Value;
 use url::Url;
 
 fn to_integer_or_infinity_sync(gc: &mut SemiSpace, vm: &mut Vm, v: Value) -> Result<f64, Value> {
-    let prim = to_primitive_sync(gc, vm, v, "number")?;
-    Ok(to_integer_or_infinity(prim))
+    let n = to_number_sync(gc, vm, v)?;
+    if n.is_nan() || n == 0.0 {
+        Ok(0.0)
+    } else if n.is_infinite() {
+        Ok(n)
+    } else {
+        Ok(n.trunc())
+    }
 }
 
 macro_rules! to_int_sync {
@@ -16978,7 +16984,14 @@ pub fn string_normalize(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
         ));
         return Value::undefined();
     }
-    Value::from_heap_ptr(HeapString::allocate(gc, &text) as *mut u8)
+    use unicode_normalization_alignments::UnicodeNormalization;
+    let normalized = match form.as_str() {
+        "NFD" => text.nfd().map(|(c, _)| c).collect::<String>(),
+        "NFKC" => text.nfkc().map(|(c, _)| c).collect::<String>(),
+        "NFKD" => text.nfkd().map(|(c, _)| c).collect::<String>(),
+        _ => text.nfc().map(|(c, _)| c).collect::<String>(),
+    };
+    Value::from_heap_ptr(HeapString::allocate(gc, &normalized) as *mut u8)
 }
 
 /// String.prototype.toWellFormed() — engine strings cannot hold lone
@@ -17275,13 +17288,19 @@ pub fn string_last_index_of(gc: &mut SemiSpace, this: Value, args: &[Value], vm:
     let pos = if pos.is_undefined() {
         len
     } else {
-        let f = to_int_sync!(gc, vm, pos);
+        let f = match to_number_sync(gc, vm, pos) {
+            Ok(n) => n,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        };
         if f.is_nan() || f > len as f64 {
             len
-        } else if f < 0.0 {
+        } else if f < 0.0 || f == f64::NEG_INFINITY {
             0
         } else {
-            f as usize
+            f.trunc() as usize
         }
     };
     if search_units.is_empty() {
@@ -17677,7 +17696,10 @@ pub fn string_locale_compare(
     let Some(right) = to_primitive_string(gc, that, vm) else {
         return Value::undefined();
     };
-    let ordering = left.encode_utf16().cmp(right.encode_utf16());
+    use unicode_normalization_alignments::UnicodeNormalization;
+    let left_n: String = left.nfc().map(|(c, _)| c).collect();
+    let right_n: String = right.nfc().map(|(c, _)| c).collect();
+    let ordering = left_n.encode_utf16().cmp(right_n.encode_utf16());
     Value::smi(match ordering {
         std::cmp::Ordering::Less => -1,
         std::cmp::Ordering::Equal => 0,
@@ -17840,6 +17862,16 @@ pub fn string_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
     let Some(s) = to_primitive_string(gc, this, vm) else {
         return Value::undefined();
     };
+    // ToString(separator) precedes the limit conversion for non-RegExp,
+    // non-undefined separators (observable abrupt completions).
+    let separator_is_regexp = separator
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_REGEXP });
+    if !separator.is_undefined() && !separator_is_regexp {
+        if to_primitive_string(gc, separator, vm).is_none() {
+            return Value::undefined();
+        }
+    }
 
     let lim = if limit.is_undefined() {
         u32::MAX

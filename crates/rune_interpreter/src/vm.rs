@@ -2756,11 +2756,12 @@ impl Vm {
                 unsafe {
                     let proto_ptr = self.string_prototype.heap_ptr().unwrap() as *mut JSObject;
                     if let Some(h) = find_handle(&self.builtins, "String_prototype_iterator") {
-                        JSObject::add_property(
+                        JSObject::add_property_with_attrs(
                             proto_ptr,
                             PropertyKey::from_symbol(rune_core::symbol::SYM_ITERATOR),
                             "\u{0}".to_string(),
                             h,
+                            rune_core::shape::ATTR_WRITABLE | rune_core::shape::ATTR_CONFIGURABLE,
                         );
                     }
                 }
@@ -16085,6 +16086,9 @@ pub(crate) fn builtin_display_name(name: &'static str) -> &'static str {
     }
     if name == "Symbol_prototype_toPrimitive" {
         return "[Symbol.toPrimitive]";
+    }
+    if name == "String_prototype_iterator" {
+        return "[Symbol.iterator]";
     }
     if let Some(special) = name.strip_prefix("Object_prototype_") {
         match special {

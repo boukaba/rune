@@ -383,7 +383,16 @@ fn parse_atom(chars: &[char], i: &mut usize, captures: &mut usize) -> Result<Reg
                 't' => Ok(RegexExpr::Literal('\t')),
                 'f' => Ok(RegexExpr::Literal('\x0C')),
                 'v' => Ok(RegexExpr::Literal('\x0B')),
-                'x' => Ok(RegexExpr::Literal(parse_hex(chars, i, 2)? as u8 as char)),
+                'x' => {
+                    if *i + 2 <= chars.len()
+                        && hex_digit(chars[*i]).is_some()
+                        && hex_digit(chars[*i + 1]).is_some()
+                    {
+                        Ok(RegexExpr::Literal(parse_hex(chars, i, 2)? as u8 as char))
+                    } else {
+                        Ok(RegexExpr::Literal('x'))
+                    }
+                }
                 'u' => Ok(RegexExpr::Literal(parse_unicode_escape(chars, i)?)),
                 'c' => {
                     if *i >= chars.len() {
@@ -617,7 +626,16 @@ fn parse_char_class(chars: &[char], i: &mut usize) -> Result<RegexExpr, String> 
                 'f' => '\u{000C}',
                 'v' => '\u{000B}',
                 '0' => '\0',
-                'x' => parse_hex(chars, i, 2)? as u8 as char,
+                'x' => {
+                    if *i + 2 <= chars.len()
+                        && hex_digit(chars[*i]).is_some()
+                        && hex_digit(chars[*i + 1]).is_some()
+                    {
+                        parse_hex(chars, i, 2)? as u8 as char
+                    } else {
+                        'x'
+                    }
+                }
                 'u' => parse_unicode_escape(chars, i)?,
                 'c' => {
                     if *i >= chars.len() {

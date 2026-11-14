@@ -18141,3 +18141,37 @@ fn test_proxy_chaining_reflect_and_function_protocols() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_string_normalization_and_coercion_edges() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var nfd = "\u00C5".normalize("NFD");
+            var nfc = "A\u030A".normalize("NFC");
+            var locale = "\u00F6".localeCompare("o\u0308");
+            var symbolAt = false;
+            try { "01".at(Symbol()); } catch (e) { symbolAt = e instanceof TypeError; }
+            var last = "ABBABABAB".lastIndexOf("AB", { valueOf: function () { return NaN; } });
+            var splitThrew = false;
+            var bad = { toString: function () { throw new TypeError("split"); } };
+            try { "foo".split(bad, 0); } catch (e) { splitThrew = e instanceof TypeError; }
+            var splitX = "x".split(/\x/);
+            var normalizeBad = false;
+            try { "a".normalize("BAD"); } catch (e) { normalizeBad = e instanceof RangeError; }
+            [
+                nfd === "A\u030A",
+                nfc === "\u00C5",
+                locale === 0,
+                symbolAt,
+                last === 7,
+                splitThrew,
+                splitX.length === 2 && splitX[0] === "" && splitX[1] === "",
+                normalizeBad
+            ].join("|") === "true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Unicode normalization + String coercion edges (2026-11-14)**: real NFC/NFD/NFKC/NFKD, NFC localeCompare, ToNumber-based ToInteger, NaN lastIndexOf, split ToString order, regex identity `\x`. String **1172/1223**, Number **337/340**, Array **2670**. Integration **913**.
 - **Proxy invariants + prototype-aware `in` (2026-11-14)**: has/delete/extensibility/setPrototypeOf invariants, chain-aware `in`, revoke metadata/arrow, Reflect.ownKeys trap. Proxy **207/311**, Reflect **147/153**. Integration **912**.
 - **Proxy chaining/Reflect/Array.prototype.length (2026-11-14)**: recursive proxy fallback, ToBoolean trap results, Function.call/apply proxies, Reflect trap booleans, real Array.prototype.length. Proxy **195/311**, Reflect **146/153**. Integration **912**.
 - **Proxy stage 2 (2026-11-14)**: revocable + ownKeys/gOPD/defineProperty/setPrototypeOf/extensibility/apply/construct traps, callable typeof. Proxy **170/311**; Object **3283**, JSON **134**, Reflect **143**. Integration **911**.

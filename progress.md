@@ -3608,6 +3608,21 @@ Integration suite: **907 passed, 0 failed, 3 ignored**.
 
 Integration suite: **908 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — array for-in attributes + exotic store gating (2026-11-14)
+
+- for-in over arrays now honors per-index attributes and holes:
+  - accessor/locked overlay indices are enumerated only when their stored
+    enumerable bit is set;
+  - dense holes and length-extended tails are skipped;
+  - extra properties start at the correct overlay slot after index scanning.
+- Date/RegExp extra-property stores now gate on the stored writable bit and
+  on the exotic integrity marker (non-extensible objects reject new
+  properties), so `verifyNotWritable` and strict writes behave correctly.
+- Test262: Object **3264 → 3267/3411**, defineProperties **621 → 624/632**.
+- Regression: `test_for_in_array_attrs_and_exotic_store_gating`.
+
+Integration suite: **909 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

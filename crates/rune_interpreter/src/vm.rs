@@ -8742,45 +8742,68 @@ impl Vm {
                         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
                         match tag {
                             TAG_ARRAY => {
-                                let len =
-                                    unsafe { RuneArray::length(ptr as *mut RuneArray) } as usize;
-                                if index < len {
-                                    let key_str = index.to_string();
-                                    let key = HeapString::allocate(gc, &key_str);
-                                    self.push(Value::smi((index + 1) as i32));
-                                    self.push(Value::from_heap_ptr(key as *mut u8));
-                                    false
-                                } else {
-                                    let extra =
-                                        unsafe { RuneArray::extra_props(ptr as *mut RuneArray) };
-                                    if extra.is_null() {
-                                        true
+                                let arr_ptr = ptr as *mut RuneArray;
+                                let len = unsafe { RuneArray::length(arr_ptr) } as usize;
+                                let extra = unsafe { RuneArray::extra_props(arr_ptr) };
+                                let mut idx = index;
+                                let chosen = loop {
+                                    if idx >= len {
+                                        break None;
+                                    }
+                                    let key = PropertyKey::from_string(&idx.to_string());
+                                    let overlay_attr = if extra.is_null() {
+                                        None
                                     } else {
                                         let shape =
                                             unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
-                                        let count =
-                                            unsafe { JSObject::slot_count(extra as *mut JSObject) };
-                                        let mut slot = index - len;
-                                        while slot < count
-                                            && (shape.entries[slot].0.is_symbol()
-                                                || shape.attr_at(slot)
-                                                    & rune_core::shape::ATTR_ENUMERABLE
-                                                    == 0
-                                                || shape
-                                                    .key_name_at(slot)
-                                                    .is_none_or(crate::builtins::is_internal_key))
-                                        {
-                                            slot += 1;
-                                        }
-                                        if slot < count {
-                                            let key_name = shape.key_name_at(slot).unwrap_or("");
-                                            let key = HeapString::allocate(gc, key_name);
-                                            self.push(Value::smi((len + slot + 1) as i32));
-                                            self.push(Value::from_heap_ptr(key as *mut u8));
-                                            false
-                                        } else {
-                                            true
-                                        }
+                                        shape.lookup(&key).map(|slot| shape.attr_at(slot))
+                                    };
+                                    let enumerable = if let Some(attr) = overlay_attr {
+                                        attr & rune_core::shape::ATTR_ENUMERABLE != 0
+                                    } else {
+                                        let cap = unsafe { RuneArray::capacity(arr_ptr) } as usize;
+                                        idx < cap
+                                            && unsafe { RuneArray::get_element(arr_ptr, idx) }
+                                                != Value::empty_sentinel()
+                                    };
+                                    if enumerable {
+                                        break Some(idx);
+                                    }
+                                    idx += 1;
+                                };
+                                if let Some(idx) = chosen {
+                                    let key_str = idx.to_string();
+                                    let key = HeapString::allocate(gc, &key_str);
+                                    self.push(Value::smi((idx + 1) as i32));
+                                    self.push(Value::from_heap_ptr(key as *mut u8));
+                                    false
+                                } else if extra.is_null() {
+                                    true
+                                } else {
+                                    let shape =
+                                        unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                                    let count =
+                                        unsafe { JSObject::slot_count(extra as *mut JSObject) };
+                                    let mut slot = index.saturating_sub(len);
+                                    while slot < count
+                                        && (shape.entries[slot].0.is_symbol()
+                                            || shape.attr_at(slot)
+                                                & rune_core::shape::ATTR_ENUMERABLE
+                                                == 0
+                                            || shape
+                                                .key_name_at(slot)
+                                                .is_none_or(crate::builtins::is_internal_key))
+                                    {
+                                        slot += 1;
+                                    }
+                                    if slot < count {
+                                        let key_name = shape.key_name_at(slot).unwrap_or("");
+                                        let key = HeapString::allocate(gc, key_name);
+                                        self.push(Value::smi((len + slot + 1) as i32));
+                                        self.push(Value::from_heap_ptr(key as *mut u8));
+                                        false
+                                    } else {
+                                        true
                                     }
                                 }
                             }
@@ -16941,8 +16964,14 @@ pub(crate) fn do_store_property(
                     let extra_obj = extra as *mut JSObject;
                     let shape = unsafe { JSObject::shape_ptr(extra_obj) };
                     if let Some(slot) = shape.lookup(&key) {
+                        if shape.attr_at(slot) & rune_core::shape::ATTR_WRITABLE == 0 {
+                            return false;
+                        }
                         unsafe { JSObject::set_slot(extra_obj, slot, value) };
                     } else {
+                        if crate::builtins::exotic_integrity_level(ptr).is_some() {
+                            return false;
+                        }
                         let key_name = value_to_debug_string(raw_key);
                         let live = vm.ensure_object_capacity(gc, extra_obj);
                         unsafe { JSObject::add_property(live, key, key_name, value) };
@@ -16963,8 +16992,14 @@ pub(crate) fn do_store_property(
                 let extra_obj = extra as *mut JSObject;
                 let shape = unsafe { JSObject::shape_ptr(extra_obj) };
                 if let Some(slot) = shape.lookup(&key) {
+                    if shape.attr_at(slot) & rune_core::shape::ATTR_WRITABLE == 0 {
+                        return false;
+                    }
                     unsafe { JSObject::set_slot(extra_obj, slot, value) };
                 } else {
+                    if crate::builtins::exotic_integrity_level(ptr).is_some() {
+                        return false;
+                    }
                     let key_name = value_to_debug_string(raw_key);
                     let live = vm.ensure_object_capacity(gc, extra_obj);
                     unsafe { JSObject::add_property(live, key, key_name, value) };

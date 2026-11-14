@@ -17942,3 +17942,36 @@ fn test_for_in_function_prototype_and_gopd_object_key() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_for_in_array_attrs_and_exotic_store_gating() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var a = [];
+            Object.defineProperties(a, {
+                "0": { value: 1001, writable: true, configurable: true }
+            });
+            var seenZero = false;
+            for (var p in a) if (p === "0") seenZero = true;
+            var b = [1, 2];
+            b.length = 3;
+            var seenHole = false;
+            var keys = [];
+            for (var q in b) { keys.push(q); if (q === "2") seenHole = true; }
+            var d = new Date(0);
+            Object.defineProperty(d, "prop", { value: 11, configurable: false });
+            d.prop = 12;
+            [
+                seenZero === false,
+                seenHole === false,
+                keys.join(",") === "0,1",
+                d.prop === 11,
+                Object.getOwnPropertyDescriptor(d, "prop").writable === false
+            ].join("|") === "true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

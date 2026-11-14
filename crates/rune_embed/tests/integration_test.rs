@@ -14985,7 +14985,7 @@ fn test_function_to_string_callable_rules() {
                 rejected = e.message === "boom";
             });
             [
-                /native code/.test(source),
+                /function named/.test(source) && !/native code/.test(source),
                 threw,
                 d.configurable === true,
                 Function.prototype.toString.hasOwnProperty("length"),
@@ -15007,11 +15007,12 @@ fn test_function_string_coercion() {
             var concat = "" + fn;
             var template = `${fn}`;
             [
-                /native code/.test(concat),
+                concat === fn.toString(),
+                !/native code/.test(concat),
                 template === concat,
                 String(fn) === concat,
                 typeof (fn + 1) === "string"
-            ].join("|") === "true|true|true|true";
+            ].join("|") === "true|true|true|true|true";
             "#,
         )
         .unwrap();
@@ -17238,6 +17239,30 @@ fn test_replace_all_dispatch_and_fallback() {
                 literal === "aa z z aa",
                 callback === "a11b13"
             ].join("|") === "true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}
+
+#[test]
+fn test_function_to_string_preserves_source() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var fn = function named(a){ return a; };
+            var arrow = (x)=>x+1;
+            var obj = { method(){ return 1; } };
+            var gen = function*(){ yield 1; };
+            [
+                fn.toString() === "function named(a){ return a; }",
+                arrow.toString() === "(x)=>x+1",
+                obj.method.toString() === "method(){ return 1; }",
+                gen.toString() === "function*(){ yield 1; }",
+                String(fn).indexOf("function named") === 0,
+                !/native code/.test(fn.toString())
+            ].join("|") === "true|true|true|true|true|true";
             "#,
         )
         .unwrap();

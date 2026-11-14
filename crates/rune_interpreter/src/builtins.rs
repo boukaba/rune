@@ -12358,7 +12358,7 @@ pub fn function_constructor(
         ));
         return Value::undefined();
     }
-    let mut emitter = rune_parser::emitter::Emitter::new();
+    let mut emitter = rune_parser::emitter::Emitter::new().with_source(&source);
     emitter.emit_program(&program);
     let mut outer = emitter.into_bytecode();
     if outer.functions.is_empty() {
@@ -12437,7 +12437,7 @@ pub fn eval_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut V
         if !parser.errors.is_empty() {
             return None;
         }
-        let mut emitter = rune_parser::emitter::Emitter::new();
+        let mut emitter = rune_parser::emitter::Emitter::new().with_source(text);
         emitter.emit_program(&program);
         Some(emitter.into_bytecode())
     };
@@ -25583,6 +25583,14 @@ pub fn function_prototype_to_string(
                 "Function.prototype.toString requires a callable receiver",
             ));
             return Value::undefined();
+        }
+        let func = ptr as *mut Func;
+        let idx = unsafe { Func::func_index(func) } as usize;
+        let creator = unsafe { &*(Func::prog_ptr(func) as *const BytecodeProgram) };
+        if let Some(prog) = creator.functions.get(idx) {
+            if !prog.source_text.is_empty() {
+                return Value::from_heap_ptr(HeapString::allocate(gc, &prog.source_text) as *mut u8);
+            }
         }
     } else {
         vm.set_pending_exception(crate::errors::error_object(

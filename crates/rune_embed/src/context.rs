@@ -172,7 +172,7 @@ impl Context {
         }
 
         // Emit bytecode
-        let mut emitter = rune_parser::emitter::Emitter::new();
+        let mut emitter = rune_parser::emitter::Emitter::new().with_source(source);
         emitter.emit_program(&program);
         Ok(emitter.into_bytecode())
     }

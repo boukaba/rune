@@ -238,6 +238,8 @@ pub struct BytecodeProgram {
     pub param_count: u32,
     /// Source-level function name for Function.prototype.name ("" anonymous).
     pub display_name: String,
+    /// Verbatim source slice for Function.prototype.toString ("" when unknown).
+    pub source_text: String,
 }
 
 /// Linkage metadata for an ESM module program.
@@ -293,6 +295,7 @@ impl BytecodeProgram {
             module: None,
             param_count: 0,
             display_name: String::new(),
+            source_text: String::new(),
         }
     }
 

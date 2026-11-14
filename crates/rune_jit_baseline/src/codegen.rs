@@ -1300,6 +1300,7 @@ mod tests {
             module: None,
             param_count: 0,
             display_name: String::new(),
+            source_text: String::new(),
         }
     }
 

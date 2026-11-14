@@ -103,6 +103,10 @@ pub struct Emitter {
     /// store of the stored name, an ExportSync for each export name is emitted.
     module_export_renames: HashMap<String, Vec<String>>,
     template_site_counter: usize,
+    /// Original source text, when known (Function.prototype.toString).
+    source: Option<String>,
+    /// Verbatim source slice of the function this emitter compiles ("" for scripts).
+    own_source: String,
 }
 
 impl Default for Emitter {
@@ -114,6 +118,8 @@ impl Default for Emitter {
 impl Emitter {
     pub fn new() -> Self {
         Emitter {
+            source: None,
+            own_source: String::new(),
             instructions: Vec::new(),
             is_generator: false,
             is_async: false,
@@ -642,6 +648,12 @@ impl Emitter {
     /// Compile a function node into a nested BytecodeProgram and return its index.
     fn compile_function(&mut self, func: &FnNode) -> usize {
         let mut sub = Emitter::new();
+        sub.source = self.source.clone();
+        sub.own_source = self
+            .source
+            .as_ref()
+            .map(|s| function_source_slice(s, func.span))
+            .unwrap_or_default();
         sub.env_scope_stack = self.env_scope_stack.clone();
         sub.env_scope_is_per_iter = self.env_scope_is_per_iter.clone();
         sub.script_const_names = self.script_const_names.clone();
@@ -806,6 +818,12 @@ impl Emitter {
     /// constructor).
     fn compile_function_into(&mut self, func: &FnNode) -> BytecodeProgram {
         let mut sub = Emitter::new();
+        sub.source = self.source.clone();
+        sub.own_source = self
+            .source
+            .as_ref()
+            .map(|s| function_source_slice(s, func.span))
+            .unwrap_or_default();
         sub.env_scope_stack = self.env_scope_stack.clone();
         sub.env_scope_is_per_iter = self.env_scope_is_per_iter.clone();
         sub.lexical_scope_shadowing = self.lexical_scope_shadowing.clone();
@@ -4084,6 +4102,11 @@ impl Emitter {
         None
     }
 
+    pub fn with_source(mut self, source: &str) -> Self {
+        self.source = Some(source.to_string());
+        self
+    }
+
     pub fn into_bytecode(self) -> BytecodeProgram {
         let instructions = self.instructions;
         let mut program = BytecodeProgram::new(instructions, self.string_pool, self.nested_funcs);
@@ -4095,9 +4118,154 @@ impl Emitter {
         program.captured_env_size = self.captured_env_size;
         program.float_pool = self.float_pool;
         program.regex_pool = self.regex_pool;
+        program.source_text = self.own_source;
         program.assign_ic_indices();
         program
     }
+}
+
+fn skip_ws_comments(s: &[u8], mut i: usize) -> usize {
+    loop {
+        while i < s.len() && (s[i] as char).is_whitespace() {
+            i += 1;
+        }
+        if i + 1 < s.len() && s[i] == b'/' && s[i + 1] == b'/' {
+            i += 2;
+            while i < s.len() && s[i] != b'\n' {
+                i += 1;
+            }
+        } else if i + 1 < s.len() && s[i] == b'/' && s[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < s.len() && !(s[i] == b'*' && s[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(s.len());
+        } else {
+            return i;
+        }
+    }
+}
+
+fn skip_string(s: &[u8], mut i: usize) -> usize {
+    let quote = s[i];
+    i += 1;
+    while i < s.len() {
+        if s[i] == b'\\' {
+            i += 2;
+        } else if s[i] == quote {
+            return i + 1;
+        } else {
+            i += 1;
+        }
+    }
+    i
+}
+
+fn find_matching(s: &[u8], mut i: usize, open: u8, close: u8) -> Option<usize> {
+    let mut depth = 0usize;
+    while i < s.len() {
+        let c = s[i];
+        if c == b'/' && i + 1 < s.len() && (s[i + 1] == b'/' || s[i + 1] == b'*') {
+            i = skip_ws_comments(s, i);
+            continue;
+        }
+        if c == b'\'' || c == b'"' || c == b'`' {
+            i = skip_string(s, i);
+            continue;
+        }
+        if c == open {
+            depth += 1;
+        } else if c == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i + 1);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn function_source_slice(source: &str, span: Span) -> String {
+    let Some(raw) = source.get(span.start..span.end) else {
+        return String::new();
+    };
+    let bytes = raw.as_bytes();
+    let mut i = 0usize;
+    let mut paren: Option<usize> = None;
+    let mut arrow: Option<usize> = None;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'/' && i + 1 < bytes.len() && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*') {
+            i = skip_ws_comments(bytes, i);
+            continue;
+        }
+        if c == b'\'' || c == b'"' || c == b'`' {
+            i = skip_string(bytes, i);
+            continue;
+        }
+        if c == b'(' {
+            if paren.is_none() {
+                paren = Some(i);
+            }
+        } else if c == b')' {
+            if let Some(start) = paren {
+                if let Some(after) = find_matching(bytes, start, b'(', b')') {
+                    let j = skip_ws_comments(bytes, after);
+                    if j < bytes.len() && bytes[j] == b'=' && bytes.get(j + 1) == Some(&b'>') {
+                        arrow = Some(j + 2);
+                        break;
+                    }
+                }
+            }
+        } else if c == b'=' && bytes.get(i + 1) == Some(&b'>') {
+            arrow = Some(i + 2);
+            break;
+        } else if c == b'{' {
+            break;
+        }
+        i += 1;
+    }
+    let body_start = if let Some(a) = arrow {
+        skip_ws_comments(bytes, a)
+    } else {
+        let Some(p) = paren else {
+            return raw.trim_end().to_string();
+        };
+        let Some(after) = find_matching(bytes, p, b'(', b')') else {
+            return raw.trim_end().to_string();
+        };
+        let b = skip_ws_comments(bytes, after);
+        if b < bytes.len() && bytes[b] == b'{' {
+            b
+        } else {
+            return raw.trim_end().to_string();
+        }
+    };
+    if body_start < bytes.len() && bytes[body_start] == b'{' {
+        if let Some(end) = find_matching(bytes, body_start, b'{', b'}') {
+            return raw[..end].to_string();
+        }
+        return raw[..body_start].to_string();
+    }
+    // Arrow expression body: drop trailing comments, whitespace and `;`.
+    let mut end = bytes.len();
+    loop {
+        let trimmed = raw[..end].trim_end();
+        end = trimmed.len();
+        if end >= 2 && raw[..end].ends_with("*/") {
+            if let Some(open) = raw[..end - 2].rfind("/*") {
+                end = open;
+                continue;
+            }
+        }
+        if raw[..end].ends_with(';') {
+            end -= 1;
+            continue;
+        }
+        break;
+    }
+    raw[..end].trim_end().to_string()
 }
 
 /// Recursively check if a statement contains any inner function or arrow.

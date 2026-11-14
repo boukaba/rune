@@ -3210,6 +3210,27 @@ Integration suite: **888 passed, 0 failed, 3 ignored**.
 
 Integration suite: **889 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Function.prototype.toString source preservation (2026-11-14)
+
+- `BytecodeProgram` now stores `source_text` (verbatim source of the function).
+- The emitter accepts the original source (`Emitter::with_source`) and slices
+  each compiled function from its parser span, sanitising boundaries:
+  - block-bodied declarations/expressions/methods end at the matching `}`;
+  - arrow expression bodies drop trailing comments/whitespace/`;`;
+  - comments/strings are skipped while matching braces/parens.
+- `Context::compile`, `eval`, and the `Function` constructor pass source text
+  through; `Function.prototype.toString` returns the stored source for JS
+  functions, falling back to the native form for builtins/bound/synthetic
+  functions.
+- Test262: Function/prototype/toString **26 → 36/80**, Function
+  **322 → 332/509**.
+- Regression: `test_function_to_string_preserves_source`; the two legacy
+  native-source expectations were updated to real source.
+- Remaining: async/generator methods and class syntactic forms are not parsed
+  yet; proxy source exceptions.
+
+Integration suite: **890 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

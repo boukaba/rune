@@ -3982,6 +3982,27 @@ Integration suite: **925 passed, 0 failed, 3 ignored**.
 
 Integration suite: **926 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Public class fields + class element grammar (2026-11-14)
+
+- Added `ClassField` to the AST and parser support for public instance/static
+  fields: `x;`, `x = init;`, `static y = init;` (computed field names and
+  semicolon-less ASI remain incomplete).
+- The class emitter installs instance fields by compiling each initializer as a
+  synthetic function called with `this` = instance; static initializers run
+  with `this` = constructor. Fields without initializers define `undefined`.
+  Injection currently happens before the constructor's final Return, so
+  base-constructor bodies observing fields before return still differ from the
+  spec's InitializeInstanceElements ordering; proxy defineProperty traps and
+  computed field names are not yet routed.
+- Empty class elements (`class C { ;;; }`) are accepted.
+- Private identifiers accept keyword IdentifierNames (`#if`, …).
+- Test262: language/statements/class **1576 → 1628/4367**,
+  language/expressions/class **1511 → 1560/4059**, class/elements
+  **100 → 147/1534**.
+- Regression: `test_public_class_fields_instance_static_and_derived`.
+
+Integration suite: **927 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

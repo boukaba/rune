@@ -1316,6 +1316,57 @@ impl Emitter {
             }
         }
 
+        // 4.6 Inject public instance field initialization into the
+        //     constructor. Each initializer is compiled as a synthetic
+        //     function called with `this` = instance, so it observes the
+        //     class definition scope and the correct receiver. Injection is
+        //     placed before the final Return (field-vs-body ordering for
+        //     base classes is refined in later rounds).
+        if class.fields.iter().any(|f| !f.is_static) {
+            let mut inject: Vec<Instruction> = Vec::new();
+            for field in class.fields.iter().filter(|f| !f.is_static) {
+                let key_str = match &field.key {
+                    PropKey::Identifier(n) => Some(n.to_string()),
+                    PropKey::String(n) => Some(n.to_string()),
+                    PropKey::Number(n) => Some(n.to_string()),
+                    PropKey::Computed(_) => None,
+                };
+                let Some(key_str) = key_str else { continue };
+                let init_program = field
+                    .init
+                    .as_ref()
+                    .map(|init| self.compile_function_into(&field_initializer_function(init)));
+                let ctor_prog = &mut self.nested_funcs[ctor_idx];
+                let key_idx = intern_program_string(ctor_prog, &key_str);
+                if let Some(program) = init_program {
+                    let idx = ctor_prog.functions.len();
+                    ctor_prog.functions.push(program);
+                    inject.push(Instruction::new(Opcode::LoadThis, vec![]));
+                    inject.push(Instruction::new(Opcode::Dup, vec![]));
+                    inject.push(Instruction::new(Opcode::MakeFunction, vec![idx as i64]));
+                    inject.push(Instruction::new(Opcode::Call, vec![0]));
+                } else {
+                    inject.push(Instruction::new(Opcode::LoadThis, vec![]));
+                    inject.push(Instruction::new(Opcode::LoadUndefined, vec![]));
+                }
+                inject.push(Instruction::new(Opcode::DefineProperty, vec![key_idx]));
+                inject.push(Instruction::new(Opcode::Pop, vec![]));
+            }
+            let return_pos = self.nested_funcs[ctor_idx]
+                .instructions
+                .iter()
+                .rposition(|i| i.opcode == Opcode::Return);
+            if let Some(pos) = return_pos {
+                for (i, instr) in inject.into_iter().enumerate() {
+                    self.nested_funcs[ctor_idx]
+                        .instructions
+                        .insert(pos + i, instr);
+                }
+            } else {
+                self.nested_funcs[ctor_idx].instructions.extend(inject);
+            }
+        }
+
         // 5. Save constructor to a local slot so it can be restored after
         //    StoreProperty (which consumes it as the obj argument and pushes
         //    the value back instead). Named classes use the class-name local.
@@ -1352,6 +1403,33 @@ impl Emitter {
             if let Some(ctor_slot) = save_slot {
                 self.emit(Opcode::LoadLocal, vec![ctor_slot as i64]);
                 self.emit(Opcode::StoreCaptured, vec![0i64, 0i64]);
+            }
+        }
+
+        // 7.7 Static public fields (evaluated in class-element order after
+        //     static methods/accessors for now).
+        if let Some(ctor_slot) = save_slot {
+            for field in class.fields.iter().filter(|f| f.is_static) {
+                let key_idx = match &field.key {
+                    PropKey::Identifier(n) => Some(self.intern_string(n) as i64),
+                    PropKey::String(n) => Some(self.intern_string(n) as i64),
+                    PropKey::Number(n) => Some(self.intern_string(&n.to_string()) as i64),
+                    PropKey::Computed(_) => None,
+                };
+                let Some(key_idx) = key_idx else { continue };
+                if let Some(init) = &field.init {
+                    let synth = field_initializer_function(init);
+                    let idx = self.compile_function(&synth);
+                    self.emit(Opcode::LoadLocal, vec![ctor_slot as i64]);
+                    self.emit(Opcode::Dup, vec![]);
+                    self.emit(Opcode::MakeFunction, vec![idx as i64]);
+                    self.emit(Opcode::Call, vec![0]);
+                } else {
+                    self.emit(Opcode::LoadLocal, vec![ctor_slot as i64]);
+                    self.emit(Opcode::LoadUndefined, vec![]);
+                }
+                self.emit(Opcode::DefineProperty, vec![key_idx]);
+                self.emit(Opcode::Pop, vec![]);
             }
         }
 
@@ -4594,6 +4672,34 @@ fn push_pattern_binding_names(pattern: &Option<Pattern>, name: &str, names: &mut
             push_pattern_binding_names(&Some((**inner).clone()), name, names)
         }
         Some(Pattern::Target(_, _)) => {}
+    }
+}
+
+fn intern_program_string(program: &mut BytecodeProgram, s: &str) -> i64 {
+    if let Some(idx) = program.string_pool.iter().position(|x| x == s) {
+        return idx as i64;
+    }
+    let idx = program.string_pool.len();
+    program.string_pool.push(s.to_string());
+    idx as i64
+}
+
+/// Synthetic field-initializer function: `function () { return <init>; }`.
+/// Called with the instance/constructor as `this`.
+fn field_initializer_function(init: &Expr) -> FnNode {
+    FnNode {
+        name: None,
+        params: Vec::new(),
+        rest_param: None,
+        body: Stmt::Block(
+            vec![Stmt::Return(Some(Box::new(init.clone())), Span::default())],
+            Span::default(),
+        ),
+        is_generator: false,
+        is_async: false,
+        is_arrow: false,
+        is_strict: false,
+        span: Span::default(),
     }
 }
 

@@ -18672,3 +18672,46 @@ fn test_assignment_destructuring_targets_and_ident_escapes() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_public_class_fields_instance_static_and_derived() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            class Base {
+                x = 1;
+                y;
+                static z = 2;
+                getY() { return this.y; }
+            }
+
+            class Derived extends Base {
+                a = 3;
+                b = this.a + 1;
+            }
+
+            class StaticChain {
+                static first = 10;
+                static second = this.first + 5;
+            }
+
+            var base = new Base();
+            base.y = 7;
+            var derived = new Derived();
+
+            [
+                base.x === 1,
+                Object.prototype.hasOwnProperty.call(base, "y"),
+                base.getY() === 7,
+                Base.z === 2,
+                derived.x === 1,
+                derived.a === 3,
+                derived.b === 4,
+                StaticChain.second === 15
+            ].join("|") === "true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

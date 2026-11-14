@@ -176,6 +176,16 @@ pub struct ClassNode {
     pub heritage: Option<Box<Expr>>,
     pub methods: Vec<ClassMethod>,
     pub private_fields: Vec<PrivateField>,
+    /// Public instance/static fields (`x = 1;`, `static y;`).
+    pub fields: Vec<ClassField>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClassField {
+    pub key: PropKey,
+    pub init: Option<Box<Expr>>,
+    pub is_static: bool,
     pub span: Span,
 }
 

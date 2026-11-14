@@ -528,13 +528,14 @@ impl Parser {
         } else {
             None
         };
-        let (methods, private_fields) = self.parse_class_body();
+        let (methods, private_fields, fields) = self.parse_class_body();
         Stmt::Class(
             Box::new(ClassNode {
                 name: name.clone(),
                 heritage,
                 methods,
                 private_fields,
+                fields,
                 span: Span {
                     start: start.start,
                     end: self.span().end,
@@ -563,13 +564,14 @@ impl Parser {
         } else {
             None
         };
-        let (methods, private_fields) = self.parse_class_body();
+        let (methods, private_fields, fields) = self.parse_class_body();
         Expr::Class(
             Box::new(ClassNode {
                 name,
                 heritage,
                 methods,
                 private_fields,
+                fields,
                 span: Span {
                     start: start.start,
                     end: self.span().end,
@@ -582,11 +584,17 @@ impl Parser {
         )
     }
 
-    fn parse_class_body(&mut self) -> (Vec<ClassMethod>, Vec<PrivateField>) {
+    fn parse_class_body(&mut self) -> (Vec<ClassMethod>, Vec<PrivateField>, Vec<ClassField>) {
         self.expect(TokenKind::LBrace);
         let mut methods = Vec::new();
         let mut private_fields: Vec<PrivateField> = Vec::new();
+        let mut fields: Vec<ClassField> = Vec::new();
         while self.tok.kind != TokenKind::RBrace && self.tok.kind != TokenKind::Eof {
+            // ClassElement : `;` (empty class elements are valid).
+            if self.tok.kind == TokenKind::Semicolon {
+                self.advance();
+                continue;
+            }
             let mstart = self.span();
             let is_static = if self.tok.kind == TokenKind::Identifier
                 && self.tok.value == "static"
@@ -641,7 +649,7 @@ impl Parser {
             // Detect private element: #name, #name = expr, #name() {}, get #x() {}
             if self.tok.kind == TokenKind::Hash {
                 self.advance(); // consume '#'
-                let name = if self.tok.kind == TokenKind::Identifier {
+                let name = if self.is_identifier_name_token() {
                     let t = self.tok.clone();
                     self.advance();
                     t.value.into_boxed_str()
@@ -773,6 +781,26 @@ impl Parser {
                         end: self.span().end,
                     },
                 });
+            } else if self.tok.kind == TokenKind::EqAssign
+                || self.tok.kind == TokenKind::Semicolon
+                || self.tok.kind == TokenKind::RBrace
+            {
+                // Public field: `key;`, `key = init;`, `static key = init;`
+                let init = if self.tok.kind == TokenKind::EqAssign {
+                    self.advance();
+                    Some(Box::new(self.parse_expr(0)))
+                } else {
+                    None
+                };
+                fields.push(ClassField {
+                    key,
+                    init,
+                    is_static,
+                    span: Span {
+                        start: mstart.start,
+                        end: self.span().end,
+                    },
+                });
             } else {
                 self.error("Expected method definition".to_string());
                 self.advance();
@@ -811,7 +839,7 @@ impl Parser {
             }
             checked.push((pf.name.clone(), pf.is_static));
         }
-        (methods, private_fields)
+        (methods, private_fields, fields)
     }
 
     fn parse_function_body(
@@ -2920,10 +2948,35 @@ impl Parser {
         }
     }
 
+    /// True for tokens usable as IdentifierName/PrivateIdentifier (keywords
+    /// included; literals and punctuation excluded).
+    fn is_identifier_name_token(&self) -> bool {
+        if matches!(
+            self.tok.kind,
+            TokenKind::String
+                | TokenKind::Number
+                | TokenKind::Template
+                | TokenKind::RegExp
+                | TokenKind::Eof
+        ) {
+            return false;
+        }
+        self.tok
+            .value
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
+            && self
+                .tok
+                .value
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '$' || c > '\u{007F}')
+    }
+
     /// Private name after `.#` / `?.#`: consumes `#` and the identifier.
     fn parse_private_name(&mut self) -> Box<str> {
         self.advance(); // consume '#'
-        if self.tok.kind == TokenKind::Identifier {
+        if self.is_identifier_name_token() {
             let t = self.tok.clone();
             self.advance();
             t.value.into_boxed_str()
@@ -3218,7 +3271,7 @@ impl Parser {
                     if self.tok.kind == TokenKind::Hash {
                         // Private member access: obj.#name
                         self.advance();
-                        let name = if self.tok.kind == TokenKind::Identifier {
+                        let name = if self.is_identifier_name_token() {
                             let t = self.tok.clone();
                             self.advance();
                             t.value.into_boxed_str()
@@ -3323,7 +3376,7 @@ impl Parser {
                     if self.tok.kind == TokenKind::Hash {
                         // Private member access: new X().#name
                         self.advance();
-                        let name = if self.tok.kind == TokenKind::Identifier {
+                        let name = if self.is_identifier_name_token() {
                             let t = self.tok.clone();
                             self.advance();
                             t.value.into_boxed_str()

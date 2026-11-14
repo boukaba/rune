@@ -17013,3 +17013,32 @@ fn test_regexp_symbol_method_protocols() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_regexp_symbol_replace_protocol() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var calls = 0;
+            var fnResult = "a1b2".replace(/\d/g, function (m, pos, s) {
+                calls += 1;
+                return "<" + m + ":" + pos + ">";
+            });
+            var custom = {
+                lastIndex: 0, global: false, unicode: false, flags: "",
+                exec: function (s) { this.lastIndex = 0; return { 0: "b", index: 1, length: 1 }; }
+            };
+            [
+                "abc".replace(/b/, "X") === "aXc",
+                "2026-11".replace(/(\d+)-(\d+)/, "$2/$1") === "11/2026",
+                fnResult === "a<1:1>b<2:3>" && calls === 2,
+                "abc".replace(/b/, "$`[$&]$'") === "aa[b]cc",
+                RegExp.prototype[Symbol.replace].call(custom, "abc", "X") === "aXc",
+                "ab".replace(/(?<x>a)/, "$<x>$<x>") === "aa" + "b"
+            ].join("|") === "true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

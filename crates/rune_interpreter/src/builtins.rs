@@ -28992,125 +28992,381 @@ pub fn regexp_symbol_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: 
     result
 }
 
-/// §22.2.6.11 RegExp.prototype[@@replace](string, replaceValue)
+#[allow(clippy::too_many_arguments)]
+fn get_substitution(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    input: &str,
+    matched: &str,
+    captures: &[Option<String>],
+    position: usize,
+    matched_units: usize,
+    named: Option<Value>,
+    replacement: &str,
+) -> Result<String, Value> {
+    let mut out = String::new();
+    let mut chars = replacement.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '$' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('$') => out.push('$'),
+            Some('&') => out.push_str(matched),
+            Some('`') => out.push_str(&utf16_slice(input, 0, position)),
+            Some('\'') => out.push_str(&utf16_slice(
+                input,
+                position + matched_units,
+                utf16_len(input),
+            )),
+            Some('<') => {
+                let mut name = String::new();
+                let mut closed = false;
+                for ch in chars.by_ref() {
+                    if ch == '>' {
+                        closed = true;
+                        break;
+                    }
+                    name.push(ch);
+                }
+                let mut replaced = false;
+                if closed {
+                    if let Some(named) = named {
+                        if !named.is_undefined() && !named.is_null() {
+                            let value = get_value_sync(gc, vm, named, &name)?;
+                            if !value.is_undefined() {
+                                let prim = to_primitive_sync(gc, vm, value, "string")?;
+                                if prim.as_symbol_id().is_some() {
+                                    return Err(crate::errors::error_object(
+                                        gc,
+                                        &vm.error_protos,
+                                        crate::errors::ErrorKind::TypeError,
+                                        "Cannot convert a Symbol value to a string",
+                                    ));
+                                }
+                                out.push_str(&value_to_js_string(prim));
+                                replaced = true;
+                            }
+                        }
+                    }
+                }
+                if !replaced {
+                    out.push_str("$<");
+                    out.push_str(&name);
+                    if closed {
+                        out.push('>');
+                    }
+                }
+            }
+            Some(d) if d.is_ascii_digit() => {
+                let first = (d as u8 - b'0') as usize;
+                if first == 0 {
+                    out.push_str("$0");
+                    continue;
+                }
+                let mut n = first;
+                let mut two = false;
+                if let Some(&d2) = chars.peek() {
+                    if d2.is_ascii_digit() {
+                        let combined = first * 10 + (d2 as u8 - b'0') as usize;
+                        if combined <= captures.len() {
+                            n = combined;
+                            two = true;
+                        }
+                    }
+                }
+                if n <= captures.len() {
+                    if two {
+                        chars.next();
+                    }
+                    if let Some(cap) = &captures[n - 1] {
+                        out.push_str(cap);
+                    }
+                } else {
+                    out.push('$');
+                    if two {
+                        chars.next();
+                        out.push_str(&format!("{n}"));
+                    } else {
+                        out.push(d);
+                    }
+                }
+            }
+            Some(other) => {
+                out.push('$');
+                out.push(other);
+            }
+            None => out.push('$'),
+        }
+    }
+    Ok(out)
+}
+
 pub fn regexp_symbol_replace(
     gc: &mut SemiSpace,
     this: Value,
     args: &[Value],
     vm: &mut Vm,
 ) -> Value {
-    let Some(rx) = get_regexp_this(this) else {
+    // §22.2.6.11 RegExp.prototype[@@replace](string, replaceValue)
+    let rx = this;
+    let input_val = args.first().copied().unwrap_or(Value::undefined());
+    let Some(input) = to_primitive_string(gc, input_val, vm) else {
+        return Value::undefined();
+    };
+    let length_s = utf16_len(&input);
+    let mut replacement = args.get(1).copied().unwrap_or(Value::undefined());
+    let functional = is_callable_value(replacement);
+    if !functional {
+        let Some(s) = to_primitive_string(gc, replacement, vm) else {
+            return Value::undefined();
+        };
+        replacement = Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8);
+    }
+    let flags_val = match get_value_sync(gc, vm, rx, "flags") {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let Some(_flags) = to_primitive_string(gc, flags_val, vm) else {
+        return Value::undefined();
+    };
+    let global_val = match get_value_sync(gc, vm, rx, "global") {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let unicode_val = match get_value_sync(gc, vm, rx, "unicode") {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let global = value_truthy(global_val);
+    let full_unicode = value_truthy(unicode_val);
+    if global
+        && vm
+            .set_property_sync(gc, rx, "lastIndex", Value::smi(0))
+            .is_err()
+    {
         vm.set_pending_exception(crate::errors::error_object(
             gc,
             &vm.error_protos,
             crate::errors::ErrorKind::TypeError,
-            "RegExp.prototype[Symbol.replace] called on incompatible receiver",
+            "Cannot set lastIndex",
         ));
         return Value::undefined();
-    };
-    let input = args
-        .first()
-        .map(|v| string_from_value(*v))
-        .unwrap_or_default();
-    let replacement = args.get(1).copied().unwrap_or(Value::undefined());
-    let pattern_ptr = unsafe { RegExp::pattern(rx) };
-    let pattern = unsafe { HeapString::to_string(pattern_ptr as *mut HeapString) };
-    let named: Vec<(String, usize)> = rune_regex::parse_regex(&pattern)
-        .map(|e| rune_regex::ast::named_captures(&e))
-        .unwrap_or_default();
-    let is_fn = replacement
-        .heap_ptr()
-        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC);
-    let global = unsafe { RegExp::has_flag(rx, 0) };
-    if !global {
-        unsafe { RegExp::set_last_index(rx, 0) };
-        let Some(groups) = regexp_exec_internal(gc, rx, &input, 0) else {
-            return Value::from_heap_ptr(HeapString::allocate(gc, &input) as *mut u8);
-        };
-        let (start, end) = groups[0];
-        if is_fn {
-            let mut fn_args = Vec::with_capacity(groups.len() + 2);
-            fn_args.push(Value::from_heap_ptr(
-                HeapString::allocate(gc, &input[start..end]) as *mut u8,
-            ));
-            for &(gs, ge) in groups.iter().skip(1) {
-                if gs == usize::MAX {
-                    fn_args.push(Value::undefined());
-                } else {
-                    fn_args.push(Value::from_heap_ptr(
-                        HeapString::allocate(gc, &input[gs..ge]) as *mut u8,
-                    ));
-                }
+    }
+    let results_base = vm.temp_roots.len();
+    loop {
+        let result = match regexp_exec_abstract(gc, vm, rx, &input) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                vm.temp_roots.truncate(results_base);
+                return Value::undefined();
             }
-            fn_args.push(Value::smi(start as i32));
-            fn_args.push(Value::from_heap_ptr(
+        };
+        if result.is_null() {
+            break;
+        }
+        vm.temp_roots.push(result);
+        if !global {
+            break;
+        }
+        let matched_val = match get_value_sync(gc, vm, result, "0") {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                vm.temp_roots.truncate(results_base);
+                return Value::undefined();
+            }
+        };
+        let Some(matched) = to_primitive_string(gc, matched_val, vm) else {
+            vm.temp_roots.truncate(results_base);
+            return Value::undefined();
+        };
+        if matched.is_empty() {
+            let last_val = match get_value_sync(gc, vm, rx, "lastIndex") {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    vm.temp_roots.truncate(results_base);
+                    return Value::undefined();
+                }
+            };
+            let last = match to_length_sync(gc, vm, last_val) {
+                Ok(n) => n,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    vm.temp_roots.truncate(results_base);
+                    return Value::undefined();
+                }
+            };
+            let next = advance_utf16_index(&input, last, full_unicode);
+            if vm
+                .set_property_sync(gc, rx, "lastIndex", Value::smi(next as i32))
+                .is_err()
+            {
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "Cannot set lastIndex",
+                ));
+                vm.temp_roots.truncate(results_base);
+                return Value::undefined();
+            }
+        }
+    }
+    let mut accumulated = String::new();
+    let mut next_source_position = 0usize;
+    let count = vm.temp_roots.len() - results_base;
+    for k in 0..count {
+        let result = vm.temp_roots[results_base + k];
+        let length_val = match get_value_sync(gc, vm, result, "length") {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                vm.temp_roots.truncate(results_base);
+                return Value::undefined();
+            }
+        };
+        let result_length = match to_length_sync(gc, vm, length_val) {
+            Ok(n) => n,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                vm.temp_roots.truncate(results_base);
+                return Value::undefined();
+            }
+        };
+        let n_captures = result_length.saturating_sub(1);
+        let matched_val = match get_value_sync(gc, vm, result, "0") {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                vm.temp_roots.truncate(results_base);
+                return Value::undefined();
+            }
+        };
+        let Some(matched) = to_primitive_string(gc, matched_val, vm) else {
+            vm.temp_roots.truncate(results_base);
+            return Value::undefined();
+        };
+        let matched_units = utf16_len(&matched);
+        let index_val = match get_value_sync(gc, vm, result, "index") {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                vm.temp_roots.truncate(results_base);
+                return Value::undefined();
+            }
+        };
+        let index_num = match to_number_sync(gc, vm, index_val) {
+            Ok(n) => n,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                vm.temp_roots.truncate(results_base);
+                return Value::undefined();
+            }
+        };
+        let position = if index_num.is_nan() || index_num <= 0.0 {
+            0
+        } else {
+            (index_num.trunc() as usize).min(length_s)
+        };
+        let mut capture_strings: Vec<Option<String>> = Vec::with_capacity(n_captures as usize);
+        let mut capture_values: Vec<Value> = Vec::with_capacity(n_captures as usize);
+        for i in 1..=n_captures {
+            let key = i.to_string();
+            let value = match get_value_sync(gc, vm, result, &key) {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    vm.temp_roots.truncate(results_base);
+                    return Value::undefined();
+                }
+            };
+            if value.is_undefined() {
+                capture_strings.push(None);
+                capture_values.push(Value::undefined());
+            } else {
+                let Some(s) = to_primitive_string(gc, value, vm) else {
+                    vm.temp_roots.truncate(results_base);
+                    return Value::undefined();
+                };
+                capture_values.push(Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8));
+                capture_strings.push(Some(s));
+            }
+        }
+        let named = match get_value_sync(gc, vm, result, "groups") {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                vm.temp_roots.truncate(results_base);
+                return Value::undefined();
+            }
+        };
+        let replacement_text = if functional {
+            let mut call_args: Vec<Value> = Vec::with_capacity(capture_values.len() + 4);
+            call_args.push(Value::from_heap_ptr(
+                HeapString::allocate(gc, &matched) as *mut u8
+            ));
+            call_args.extend(capture_values.iter().copied());
+            call_args.push(Value::smi(position as i32));
+            call_args.push(Value::from_heap_ptr(
                 HeapString::allocate(gc, &input) as *mut u8
             ));
-            vm.pending_replace_op = Some(crate::vm::PendingReplaceOp {
-                source_frame_depth: 0,
-                input: input.clone(),
-                groups,
-            });
-            vm.push_callback_call(gc, replacement, Value::undefined(), fn_args);
-            return Value::undefined();
-        }
-        let repl = arg_to_string(gc, Some(replacement), vm);
-        let expanded = expand_replacement(&input, &groups, &repl, &named);
-        let result = input[..start].to_string() + &expanded + &input[end..];
-        return Value::from_heap_ptr(HeapString::allocate(gc, &result) as *mut u8);
-    }
-    // Global: iterate matches from the beginning.
-    let mut out = String::new();
-    let mut pos = 0usize;
-    let mut matched = false;
-    loop {
-        if pos > input.len() {
-            break;
-        }
-        let Some(groups) = regexp_exec_internal(gc, rx, &input, pos) else {
-            break;
-        };
-        matched = true;
-        let (start, end) = groups[0];
-        if start > pos {
-            out.push_str(&input[pos..start]);
-        }
-        if is_fn {
-            // Function replacers for global regexps need a per-match callback
-            // continuation stack; unsupported here.
-            vm.set_pending_exception(crate::errors::error_object(
-                gc,
-                &vm.error_protos,
-                crate::errors::ErrorKind::TypeError,
-                "RegExp[Symbol.replace] with a function replacer and global flag is not supported",
-            ));
-            return Value::undefined();
-        }
-        let repl = arg_to_string(gc, Some(replacement), vm);
-        out.push_str(&expand_replacement(&input, &groups, &repl, &named));
-        pos = end;
-        if start == end {
-            if pos < input.len() {
-                let step = input[pos..]
-                    .chars()
-                    .next()
-                    .map(|c| c.len_utf8())
-                    .unwrap_or(1);
-                out.push_str(&input[pos..pos + step]);
-                pos += step;
-            } else {
-                break;
+            if !named.is_undefined() {
+                call_args.push(named);
             }
-        }
+            let value = match vm.call_value_sync(gc, replacement, Value::undefined(), &call_args) {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    vm.temp_roots.truncate(results_base);
+                    return Value::undefined();
+                }
+            };
+            let Some(s) = to_primitive_string(gc, value, vm) else {
+                vm.temp_roots.truncate(results_base);
+                return Value::undefined();
+            };
+            s
+        } else {
+            let repl = value_to_js_string(replacement);
+            match get_substitution(
+                gc,
+                vm,
+                &input,
+                &matched,
+                &capture_strings,
+                position,
+                matched_units,
+                Some(named),
+                &repl,
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    vm.temp_roots.truncate(results_base);
+                    return Value::undefined();
+                }
+            }
+        };
+        accumulated.push_str(&utf16_slice(&input, next_source_position, position));
+        accumulated.push_str(&replacement_text);
+        next_source_position = position + matched_units;
     }
-    if matched {
-        if pos <= input.len() {
-            out.push_str(&input[pos..]);
-        }
-        unsafe { RegExp::set_last_index(rx, 0) };
-        return Value::from_heap_ptr(HeapString::allocate(gc, &out) as *mut u8);
-    }
-    Value::from_heap_ptr(HeapString::allocate(gc, &input) as *mut u8)
+    accumulated.push_str(&utf16_slice(&input, next_source_position, length_s));
+    vm.temp_roots.truncate(results_base);
+    Value::from_heap_ptr(HeapString::allocate(gc, &accumulated) as *mut u8)
 }
 
 /// §22.2.6.9 RegExp.prototype[@@search](string)

@@ -2985,6 +2985,27 @@ Integration suite: **880 passed, 0 failed, 3 ignored**.
 
 Integration suite: **881 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Generic RegExp @@replace (2026-11-14)
+
+- `RegExp.prototype[@@replace]` now implements the spec algorithm:
+  - observable `flags`, `global`, `unicode` Gets and ToString/ToBoolean coercions;
+  - non-functional replaceValue is coerced once; functional replacers receive
+    matched, captures, position, input and (only when present) named groups;
+  - global loop calls the observable `exec` for every match, advances
+    `lastIndex` by code point on empty matches, and preserves `lastIndex`
+    observable writes/errors;
+  - GetSubstitution supports `$$`, `$&`, `` $` ``, `$'`, `$n`, `$nn` and
+    `$<name>` with undefined captures/named groups;
+  - UTF-16 positions/slicing and result clamping to the input length.
+- Test262: RegExp/prototype **299 → 336/487**, Symbol.replace **19 → 56/70**,
+  String **1070 → 1073/1223**, String/prototype/replace **46/55**,
+  replaceAll **27/45**.
+- Remaining: negative lastIndex/sticky decrement, unicode=false surrogate
+  splitting, `$nn` two-digit fallback edge, unobservable lastIndex coercion.
+- Regression: `test_regexp_symbol_replace_protocol`.
+
+Integration suite: **882 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

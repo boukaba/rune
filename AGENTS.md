@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Object.getOwnPropertySymbols (2026-11-14)**: own symbol keys across plain/array/function/String objects, primitive/null handling. JSON **129/165**, rawJSON **9/10**, Object **2875/3411**, symbols **8/12**. Integration **899**.
 - **Harness Test262Error + callable discipline (2026-11-14)**: real prototype/instanceof/String, non-callable positive Smis throw, JSON @@toStringTag attrs. JSON **128/165**, integration **898**.
 - **Array method metadata + concat receivers (2026-11-14)**: corrected lengths, primitive receiver boxing in concat. Array **2664/3081**, indexOf **164/201**, concat **50/69**. Integration **897**.
 - **Array generic receivers + at (2026-11-14)**: Array.prototype.at, primitive receiver boxing, prototype-chain length/index reads. Array **2657/3081**, at **10/13**, indexOf **163/201**. Integration **896**.

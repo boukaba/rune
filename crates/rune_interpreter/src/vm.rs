@@ -1614,6 +1614,9 @@ impl Vm {
             if let Some(h) = find_handle(&self.builtins, "Object_getOwnPropertyNames") {
                 obj_entries.push(("getOwnPropertyNames", h));
             }
+            if let Some(h) = find_handle(&self.builtins, "Object_getOwnPropertySymbols") {
+                obj_entries.push(("getOwnPropertySymbols", h));
+            }
             if let Some(h) = find_handle(&self.builtins, "Object_fromEntries") {
                 obj_entries.push(("fromEntries", h));
             }

@@ -9596,6 +9596,65 @@ pub fn object_get_own_property_names(
     build_array(gc, &keys, vm)
 }
 
+/// Object.getOwnPropertySymbols(O) — own symbol-keyed properties (§20.1.2.9).
+pub fn object_get_own_property_symbols(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let target = args.first().copied().unwrap_or(Value::undefined());
+    if target.is_undefined() || target.is_null() {
+        let err = crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Object.getOwnPropertySymbols called on null or undefined",
+        );
+        vm.set_pending_exception(err);
+        return Value::undefined();
+    }
+    // ToObject: other primitives have no own symbol properties (ToObject
+    // wrappers only expose inherited properties, which are not own).
+    let Some(some_ptr) = target.heap_ptr().filter(|_| is_object_value(target)) else {
+        return build_array(gc, &[], vm);
+    };
+    let tag = unsafe { (*(some_ptr as *const GcHeader)).tag() };
+    let mut ids: Vec<u32> = Vec::new();
+    let mut push_from = |obj: *mut JSObject| {
+        if obj.is_null() {
+            return;
+        }
+        let shape = unsafe { JSObject::shape_ptr(obj) };
+        for key in &shape.entries {
+            if let Some(id) = key.0.symbol_id() {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+    };
+    match tag {
+        TAG_OBJECT => push_from(some_ptr as *mut JSObject),
+        TAG_ARRAY => {
+            push_from(some_ptr as *mut JSObject);
+            let extra = unsafe { RuneArray::extra_props(some_ptr as *mut RuneArray) };
+            push_from(extra as *mut JSObject);
+        }
+        TAG_FUNC => {
+            let extra = unsafe { Func::extra_props(some_ptr as *mut Func) };
+            push_from(extra as *mut JSObject);
+        }
+        TAG_STRING_OBJ => {
+            let extra = unsafe { StringObject::extra_props(some_ptr as *mut StringObject) };
+            push_from(extra as *mut JSObject);
+        }
+        _ => {}
+    }
+    let values: Vec<Value> = ids.into_iter().map(Value::symbol).collect();
+    build_array(gc, &values, vm)
+}
+
 fn object_own_entries(
     gc: &mut SemiSpace,
     val: Value,
@@ -28082,6 +28141,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 1,
             name: "Object_getOwnPropertyNames",
             func: object_get_own_property_names,
+        },
+        Builtin {
+            length: 1,
+            name: "Object_getOwnPropertySymbols",
+            func: object_get_own_property_symbols,
         },
         Builtin {
             length: 1,

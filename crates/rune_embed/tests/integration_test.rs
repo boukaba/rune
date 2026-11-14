@@ -17508,3 +17508,31 @@ fn test_harness_error_and_noncallable_calls() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_own_property_symbols_and_raw_json() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var s = Symbol("s");
+            var o = { a: 1 };
+            o[s] = 2;
+            var raw = JSON.rawJSON(123);
+            var nullThrew = false;
+            try { Object.getOwnPropertySymbols(null); } catch (e) { nullThrew = e instanceof TypeError; }
+            [
+                Object.getOwnPropertySymbols(o).length === 1,
+                Object.getOwnPropertySymbols(o)[0] === s,
+                Object.getOwnPropertySymbols(true).length === 0,
+                nullThrew,
+                Object.getPrototypeOf(raw) === null,
+                Object.getOwnPropertyNames(raw).length === 1,
+                raw.rawJSON === "123",
+                JSON.stringify(raw) === "123"
+            ].join("|") === "true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

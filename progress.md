@@ -3381,6 +3381,21 @@ Integration suite: **897 passed, 0 failed, 3 ignored**.
 
 Integration suite: **898 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Object.getOwnPropertySymbols (2026-11-14)
+
+- Implemented `Object.getOwnPropertySymbols(O)`:
+  - own symbol keys from plain objects, arrays (including the extra-props
+    overlay), functions and String wrappers, in insertion order, deduplicated;
+  - null/undefined throw TypeError; other primitives are boxed per ToObject
+    and yield `[]`.
+- This unblocks `JSON.rawJSON` shape tests (`Object.getOwnPropertySymbols` was
+  missing from the harness path).
+- Test262: JSON **128 → 129/165**, rawJSON **9/10**, Object **2875/3411**,
+  getOwnPropertySymbols **8/12** (remaining four are Proxy invariants).
+- Regression: `test_own_property_symbols_and_raw_json`.
+
+Integration suite: **899 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

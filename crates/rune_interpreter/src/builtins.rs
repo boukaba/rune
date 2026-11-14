@@ -8902,7 +8902,21 @@ pub fn object_prototype_has_own_property(
             };
             if let Some(index) = value_to_array_index(key) {
                 let text = unsafe { HeapString::to_string(sptr as *mut HeapString) };
-                index < text.encode_utf16().count()
+                if index < text.encode_utf16().count() {
+                    true
+                } else if let Some(pk) = value_to_prop_key(key) {
+                    let extra = unsafe {
+                        rune_core::string_object::StringObject::extra_props(
+                            ptr as *mut rune_core::string_object::StringObject,
+                        )
+                    };
+                    !extra.is_null()
+                        && unsafe { JSObject::shape_ptr(extra as *mut JSObject) }
+                            .lookup(&pk)
+                            .is_some()
+                } else {
+                    false
+                }
             } else if key_is_str("length") {
                 true
             } else if let Some(pk) = value_to_prop_key(key) {
@@ -9342,7 +9356,7 @@ pub fn object_builtin(gc: &mut SemiSpace, _this: Value, _args: &[Value], _vm: &m
 
 /// Iterate own enumerable string-keyed properties of a value.
 /// Returns Ok(entries) or Err(()) if a TypeError was thrown (null/undefined).
-fn is_internal_key(name: &str) -> bool {
+pub(crate) fn is_internal_key(name: &str) -> bool {
     let bytes = name.as_bytes();
     bytes.len() > 1 && bytes[0] == 0 && (bytes[1].is_ascii_alphabetic() || bytes[1] == b'_')
 }
@@ -9430,6 +9444,9 @@ fn object_own_entries_mode(
                     }
                     entries.push((i.to_string(), value));
                 }
+                if !only_enumerable {
+                    entries.push(("length".to_string(), Value::smi(len as i32)));
+                }
                 // Named properties (e.g. "index"/"input" on match-result arrays,
                 // user assignments like a.foo) are own enumerable properties.
                 let extra_ptr = unsafe { RuneArray::extra_props(ptr as *mut RuneArray) };
@@ -9440,7 +9457,9 @@ fn object_own_entries_mode(
                         if shape.entries[i].0.is_symbol() {
                             continue;
                         }
-                        if shape.attr_at(i) & rune_core::shape::ATTR_ENUMERABLE == 0 {
+                        if only_enumerable
+                            && shape.attr_at(i) & rune_core::shape::ATTR_ENUMERABLE == 0
+                        {
                             continue;
                         }
                         let key = shape.key_name_at(i).unwrap_or("").to_string();
@@ -9461,17 +9480,48 @@ fn object_own_entries_mode(
                     let ch_val = Value::from_heap_ptr(HeapString::allocate(gc, &ch) as *mut u8);
                     entries.push((i.to_string(), ch_val));
                 }
+                if !only_enumerable {
+                    entries.push((
+                        "length".to_string(),
+                        Value::smi(s.encode_utf16().count() as i32),
+                    ));
+                }
                 Ok(entries)
             }
             TAG_STRING_OBJ => {
                 let str_ptr = unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
                 let s = unsafe { HeapString::to_string(str_ptr as *mut HeapString) };
                 let units: Vec<u16> = s.encode_utf16().collect();
+                let units_len = units.len();
                 let mut entries = Vec::with_capacity(units.len());
                 for (i, u) in units.into_iter().enumerate() {
                     let ch = String::from_utf16_lossy(&[u]);
                     let ch_val = Value::from_heap_ptr(HeapString::allocate(gc, &ch) as *mut u8);
                     entries.push((i.to_string(), ch_val));
+                }
+                let extra = unsafe { StringObject::extra_props(ptr as *mut StringObject) };
+                if !extra.is_null() {
+                    let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                    let count = unsafe { JSObject::slot_count(extra as *mut JSObject) };
+                    for i in 0..count {
+                        if shape.entries[i].0.is_symbol() {
+                            continue;
+                        }
+                        if only_enumerable
+                            && shape.attr_at(i) & rune_core::shape::ATTR_ENUMERABLE == 0
+                        {
+                            continue;
+                        }
+                        let key = shape.key_name_at(i).unwrap_or("").to_string();
+                        if is_internal_key(&key) {
+                            continue;
+                        }
+                        let value = unsafe { JSObject::get_slot(extra as *mut JSObject, i) };
+                        entries.push((key, value));
+                    }
+                }
+                if !only_enumerable {
+                    entries.push(("length".to_string(), Value::smi(units_len as i32)));
                 }
                 Ok(entries)
             }
@@ -9493,7 +9543,8 @@ fn object_own_entries_mode(
                 let mut entries = Vec::with_capacity(count);
                 for i in 0..count {
                     if shape.entries[i].0.is_symbol()
-                        || shape.attr_at(i) & rune_core::shape::ATTR_ENUMERABLE == 0
+                        || (only_enumerable
+                            && shape.attr_at(i) & rune_core::shape::ATTR_ENUMERABLE == 0)
                     {
                         continue;
                     }
@@ -9561,38 +9612,96 @@ pub fn object_keys(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm
 /// Object.values(obj) — returns array of own enumerable property values.
 pub fn object_values(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let target = args.first().copied().unwrap_or(Value::undefined());
-    let entries = match object_own_entries(gc, target, vm) {
+    let keys = match object_own_entries(gc, target, vm) {
         Ok(e) => e,
         Err(()) => return Value::undefined(),
     };
-    let vals: Vec<Value> = entries.iter().map(|(_, v)| *v).collect();
-    build_array(gc, &vals, vm)
+    let base = vm.temp_roots.len();
+    vm.temp_roots.push(target);
+    let result = fresh_dense_array(gc, vm);
+    vm.temp_roots.push(result);
+    let result_slot = base + 1;
+    for (key, _) in keys {
+        let live_target = refresh_value(vm.temp_roots[base]);
+        // Snapshot semantics: a getter may delete/non-enumerate future keys.
+        let still = object_own_entries(gc, live_target, vm)
+            .map(|es| es.iter().any(|(k, _)| k == &key))
+            .unwrap_or(false);
+        if !still {
+            continue;
+        }
+        let value = match get_value_sync(gc, vm, live_target, &key) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                vm.temp_roots.truncate(base);
+                return Value::undefined();
+            }
+        };
+        let arr = refresh_value(vm.temp_roots[result_slot])
+            .heap_ptr()
+            .unwrap() as *mut RuneArray;
+        let arr = unsafe { RuneArray::push(gc, arr, value) };
+        vm.temp_roots[result_slot] = Value::from_heap_ptr(arr as *mut u8);
+    }
+    let result = vm.temp_roots[result_slot];
+    vm.temp_roots.truncate(base);
+    result
 }
 
 /// Object.entries(obj) — returns array of [key, value] pairs.
 pub fn object_entries(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let target = args.first().copied().unwrap_or(Value::undefined());
-    let entries = match object_own_entries(gc, target, vm) {
+    let keys = match object_own_entries(gc, target, vm) {
         Ok(e) => e,
         Err(()) => return Value::undefined(),
     };
-    let pairs: Vec<Value> = entries
-        .iter()
-        .map(|(k, v)| {
-            let key_val = Value::from_heap_ptr(HeapString::allocate(gc, k) as *mut u8);
-            let pair_elems = [key_val, *v];
-            let pair_arr = RuneArray::allocate(gc, &pair_elems);
-            unsafe {
-                let ptr = pair_arr as *mut u8;
-                *(ptr.add(8) as *mut *const Shape) = *DENSE_ARRAY_SHAPE as *const Shape;
-                if let Some(proto) = vm.array_prototype.heap_ptr() {
-                    *(ptr.add(24) as *mut *mut u8) = proto;
-                }
+    let base = vm.temp_roots.len();
+    vm.temp_roots.push(target);
+    let result = fresh_dense_array(gc, vm);
+    vm.temp_roots.push(result);
+    let result_slot = base + 1;
+    for (key, _) in keys {
+        let live_target = refresh_value(vm.temp_roots[base]);
+        let still = object_own_entries(gc, live_target, vm)
+            .map(|es| es.iter().any(|(k, _)| k == &key))
+            .unwrap_or(false);
+        if !still {
+            continue;
+        }
+        let value = match get_value_sync(gc, vm, live_target, &key) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                vm.temp_roots.truncate(base);
+                return Value::undefined();
             }
-            Value::from_heap_ptr(pair_arr as *mut u8)
-        })
-        .collect();
-    build_array(gc, &pairs, vm)
+        };
+        vm.temp_roots.push(value);
+        let value_slot = vm.temp_roots.len() - 1;
+        let key_val = Value::from_heap_ptr(HeapString::allocate(gc, &key) as *mut u8);
+        vm.temp_roots.push(key_val);
+        let key_slot = vm.temp_roots.len() - 1;
+        let pair = fresh_dense_array(gc, vm);
+        vm.temp_roots.push(pair);
+        let pair_slot = vm.temp_roots.len() - 1;
+        for slot in [key_slot, value_slot] {
+            let item = refresh_value(vm.temp_roots[slot]);
+            let arr = refresh_value(vm.temp_roots[pair_slot]).heap_ptr().unwrap() as *mut RuneArray;
+            let arr = unsafe { RuneArray::push(gc, arr, item) };
+            vm.temp_roots[pair_slot] = Value::from_heap_ptr(arr as *mut u8);
+        }
+        let pair_val = refresh_value(vm.temp_roots[pair_slot]);
+        let arr = refresh_value(vm.temp_roots[result_slot])
+            .heap_ptr()
+            .unwrap() as *mut RuneArray;
+        let arr = unsafe { RuneArray::push(gc, arr, pair_val) };
+        vm.temp_roots[result_slot] = Value::from_heap_ptr(arr as *mut u8);
+        vm.temp_roots.truncate(pair_slot);
+    }
+    let result = vm.temp_roots[result_slot];
+    vm.temp_roots.truncate(base);
+    result
 }
 
 /// Object.assign(target, ...sources) — §20.1.2.1: copies own enumerable
@@ -9810,7 +9919,7 @@ pub fn object_get_own_property_names(
     vm: &mut Vm,
 ) -> Value {
     let target = args.first().copied().unwrap_or(Value::undefined());
-    let entries = match object_own_entries(gc, target, vm) {
+    let entries = match object_own_entries_mode(gc, target, vm, false) {
         Ok(e) => e,
         Err(()) => return Value::undefined(),
     };
@@ -9818,6 +9927,46 @@ pub fn object_get_own_property_names(
         .iter()
         .map(|(k, _)| Value::from_heap_ptr(HeapString::allocate(gc, k) as *mut u8))
         .collect();
+    // The global object owns the intrinsic globals even when they are served
+    // from the runtime tables rather than shape slots.
+    let is_global = target
+        .heap_ptr()
+        .zip(vm.global_this.heap_ptr())
+        .is_some_and(|(a, b)| a == b);
+    let mut keys = keys;
+    if is_global {
+        let mut have: std::collections::HashSet<String> =
+            entries.iter().map(|(k, _)| k.clone()).collect();
+        let mut candidates: Vec<String> = vm
+            .builtin_wrappers
+            .keys()
+            .cloned()
+            .chain(vm.globals.keys().cloned())
+            .collect();
+        for name in [
+            "NaN",
+            "Infinity",
+            "undefined",
+            "eval",
+            "parseInt",
+            "parseFloat",
+            "isNaN",
+            "isFinite",
+            "decodeURI",
+            "decodeURIComponent",
+            "encodeURI",
+            "encodeURIComponent",
+        ] {
+            candidates.push(name.to_string());
+        }
+        for name in candidates {
+            if have.insert(name.clone()) {
+                keys.push(Value::from_heap_ptr(
+                    HeapString::allocate(gc, &name) as *mut u8
+                ));
+            }
+        }
+    }
     build_array(gc, &keys, vm)
 }
 
@@ -20106,7 +20255,7 @@ pub fn json_raw_json(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut 
         JSObject::add_property_with_attrs(
             obj,
             PropertyKey::from_string(RAW_JSON_SLOT),
-            "\u{0}".to_string(),
+            RAW_JSON_SLOT.to_string(),
             text_val,
             rune_core::shape::ATTR_WRITABLE | rune_core::shape::ATTR_CONFIGURABLE,
         );

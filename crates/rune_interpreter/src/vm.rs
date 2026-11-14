@@ -1085,7 +1085,7 @@ pub struct Vm {
     #[cfg(feature = "jit")]
     _compiled_trace_mem: Vec<rune_jit_baseline::assembler::ExecutableMemory>,
     /// Pre-built constructor objects (like `Object`) that expose methods via property access.
-    builtin_wrappers: HashMap<String, Value>,
+    pub(crate) builtin_wrappers: HashMap<String, Value>,
     /// AFPC: cached JIT entry points by function index. When a cache is loaded,
     /// native code blobs are mmap'd and their addresses stored here; MakeFunction
     /// installs them on the newly-created Func objects.
@@ -8749,7 +8749,140 @@ impl Vm {
                                     self.push(Value::from_heap_ptr(key as *mut u8));
                                     false
                                 } else {
+                                    let extra =
+                                        unsafe { RuneArray::extra_props(ptr as *mut RuneArray) };
+                                    if extra.is_null() {
+                                        true
+                                    } else {
+                                        let shape =
+                                            unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                                        let count =
+                                            unsafe { JSObject::slot_count(extra as *mut JSObject) };
+                                        let mut slot = index - len;
+                                        while slot < count
+                                            && (shape.entries[slot].0.is_symbol()
+                                                || shape.attr_at(slot)
+                                                    & rune_core::shape::ATTR_ENUMERABLE
+                                                    == 0
+                                                || shape
+                                                    .key_name_at(slot)
+                                                    .is_none_or(crate::builtins::is_internal_key))
+                                        {
+                                            slot += 1;
+                                        }
+                                        if slot < count {
+                                            let key_name = shape.key_name_at(slot).unwrap_or("");
+                                            let key = HeapString::allocate(gc, key_name);
+                                            self.push(Value::smi((len + slot + 1) as i32));
+                                            self.push(Value::from_heap_ptr(key as *mut u8));
+                                            false
+                                        } else {
+                                            true
+                                        }
+                                    }
+                                }
+                            }
+                            TAG_STRING => {
+                                let text = unsafe { HeapString::to_string(ptr as *mut HeapString) };
+                                let len = text.encode_utf16().count();
+                                if index < len {
+                                    let key_str = index.to_string();
+                                    let key = HeapString::allocate(gc, &key_str);
+                                    self.push(Value::smi((index + 1) as i32));
+                                    self.push(Value::from_heap_ptr(key as *mut u8));
+                                    false
+                                } else {
                                     true
+                                }
+                            }
+                            TAG_FUNC | TAG_DATE | TAG_REGEXP | TAG_PROMISE => {
+                                let props = unsafe {
+                                    match tag {
+                                        TAG_FUNC => rune_core::function::Func::extra_props(
+                                            ptr as *mut rune_core::function::Func,
+                                        )
+                                            as *mut JSObject,
+                                        TAG_DATE => rune_core::date::RuneDate::extra_props(ptr)
+                                            as *mut JSObject,
+                                        TAG_REGEXP => rune_core::regexp::RegExp::extra_props(ptr)
+                                            as *mut JSObject,
+                                        _ => crate::vm::promise_extra_object(gc, ptr),
+                                    }
+                                };
+                                if props.is_null() {
+                                    true
+                                } else {
+                                    let shape = unsafe { JSObject::shape_ptr(props) };
+                                    let count = unsafe { JSObject::slot_count(props) };
+                                    let mut slot = index;
+                                    while slot < count
+                                        && (shape.entries[slot].0.is_symbol()
+                                            || shape.attr_at(slot)
+                                                & rune_core::shape::ATTR_ENUMERABLE
+                                                == 0
+                                            || shape
+                                                .key_name_at(slot)
+                                                .is_none_or(crate::builtins::is_internal_key))
+                                    {
+                                        slot += 1;
+                                    }
+                                    if slot < count {
+                                        let key_name = shape.key_name_at(slot).unwrap_or("");
+                                        let key = HeapString::allocate(gc, key_name);
+                                        let value = unsafe { JSObject::get_slot(props, slot) };
+                                        let _ = value;
+                                        self.push(Value::smi((slot + 1) as i32));
+                                        self.push(Value::from_heap_ptr(key as *mut u8));
+                                        false
+                                    } else {
+                                        true
+                                    }
+                                }
+                            }
+                            TAG_STRING_OBJ => {
+                                let sp =
+                                    unsafe { StringObject::string_ptr(ptr as *mut StringObject) };
+                                let text = unsafe { HeapString::to_string(sp as *mut HeapString) };
+                                let len = text.encode_utf16().count();
+                                if index < len {
+                                    let key_str = index.to_string();
+                                    let key = HeapString::allocate(gc, &key_str);
+                                    self.push(Value::smi((index + 1) as i32));
+                                    self.push(Value::from_heap_ptr(key as *mut u8));
+                                    false
+                                } else {
+                                    let extra = unsafe {
+                                        StringObject::extra_props(ptr as *mut StringObject)
+                                    };
+                                    if extra.is_null() {
+                                        true
+                                    } else {
+                                        let shape =
+                                            unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                                        let count =
+                                            unsafe { JSObject::slot_count(extra as *mut JSObject) };
+                                        let mut slot = index - len;
+                                        while slot < count
+                                            && (shape.entries[slot].0.is_symbol()
+                                                || shape.attr_at(slot)
+                                                    & rune_core::shape::ATTR_ENUMERABLE
+                                                    == 0
+                                                || shape
+                                                    .key_name_at(slot)
+                                                    .is_none_or(crate::builtins::is_internal_key))
+                                        {
+                                            slot += 1;
+                                        }
+                                        if slot < count {
+                                            let key_name = shape.key_name_at(slot).unwrap_or("");
+                                            let key = HeapString::allocate(gc, key_name);
+                                            self.push(Value::smi((len + slot + 1) as i32));
+                                            self.push(Value::from_heap_ptr(key as *mut u8));
+                                            false
+                                        } else {
+                                            true
+                                        }
+                                    }
                                 }
                             }
                             TAG_OBJECT => {
@@ -15795,6 +15928,39 @@ pub(crate) fn load_property_recursive(
                 } else {
                     return Value::undefined();
                 }
+            } else if tag == TAG_STRING {
+                // Primitive string: indexed characters and "length" are own
+                // string-exotic properties.
+                let text = unsafe { HeapString::to_string(ptr as *mut HeapString) };
+                let units: Vec<u16> = text.encode_utf16().collect();
+                if let Some(index) = value_to_array_index(raw_key) {
+                    if let Some(unit) = units.get(index) {
+                        let ch = char::from_u32(*unit as u32).unwrap_or('\u{FFFD}');
+                        return Value::from_heap_ptr(
+                            HeapString::allocate(gc, &ch.to_string()) as *mut u8
+                        );
+                    }
+                    return Value::undefined();
+                }
+                if let Some(kptr) = raw_key.heap_ptr() {
+                    if unsafe { (*(kptr as *const GcHeader)).tag() } == TAG_STRING {
+                        let key = unsafe { HeapString::to_string(kptr as *mut HeapString) };
+                        if key == "length" {
+                            return Value::smi(units.len() as i32);
+                        }
+                        if let Ok(index) = key.parse::<usize>() {
+                            if let Some(unit) = units.get(index) {
+                                let ch = char::from_u32(*unit as u32).unwrap_or('\u{FFFD}');
+                                return Value::from_heap_ptr(HeapString::allocate(
+                                    gc,
+                                    &ch.to_string(),
+                                )
+                                    as *mut u8);
+                            }
+                        }
+                    }
+                }
+                return Value::undefined();
             } else if tag == TAG_ARRAY {
                 // Dense array: numeric key → overlay entry (accessor pair or
                 // single-locked data), then direct element access; holes (B1e)

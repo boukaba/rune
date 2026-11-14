@@ -3484,6 +3484,35 @@ Integration suite: **902 passed, 0 failed, 3 ignored**.
 
 Integration suite: **903 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Object enumeration: names / for-in / values / entries (2026-11-14)
+
+- `Object.getOwnPropertyNames` now returns **all** own string keys, not just
+  enumerable ones:
+  - Arrays include dense indices, named extra properties and `length`;
+  - String primitives/String wrappers include indices, extras and `length`
+    (String extras appear before `length`);
+  - functions/Date/RegExp include non-enumerable extra properties;
+  - the global object also exposes intrinsic globals served from runtime
+    tables (`NaN`, `Infinity`, `undefined`, URI/parse functions, constructor
+    wrappers, Math/JSON).
+- `for-in` now enumerates array/String-wrapper extra properties, primitive
+  String indices, and Function/Date/RegExp/Promise extra properties (skipping
+  symbols, non-enumerables and internal keys).
+- `hasOwnProperty` on a String wrapper now finds extra indexed properties past
+  the string length.
+- `Object.values`/`Object.entries` now snapshot enumerable keys and then
+  perform a fresh `Get` per key: getters run during enumeration, and keys
+  deleted or made non-enumerable by an earlier getter are skipped; results
+  are built with GC-rooted incremental pushes.
+- String primitives resolve indexed characters through the generic
+  `load_property_recursive` path.
+- Test262: Object **2983 → 3066/3411**; getOwnPropertyNames **41/45**,
+  Object.keys **54/59** (remaining are Proxy), Object.values **18/20**,
+  Object.entries **20/21**.
+- Regression: `test_object_enumeration_names_values_entries`.
+
+Integration suite: **904 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

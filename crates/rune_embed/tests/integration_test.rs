@@ -7030,10 +7030,14 @@ fn test_object_get_own_property_names() {
         eval_str(&mut ctx, "Object.getOwnPropertyNames({b:1,a:2}).join(',')"),
         "b,a"
     );
-    // Arrays include indices and length? Engine exposes dense indices via keys
+    // Arrays expose dense indices plus the non-enumerable length property.
     assert_eq!(
-        eval_array_len(&mut ctx, "Object.getOwnPropertyNames([7,8])"),
-        2
+        eval_str(&mut ctx, "Object.getOwnPropertyNames([7,8]).join(',')"),
+        "0,1,length"
+    );
+    assert_eq!(
+        eval_str(&mut ctx, "Object.getOwnPropertyNames('ab').join(',')"),
+        "0,1,length"
     );
 }
 
@@ -17692,6 +17696,64 @@ fn test_object_prototype_legacy_and_integrity() {
                 nonExtThrew,
                 Object.getPrototypeOf(root) === Object.prototype
             ].join("|") === "true|true|true|true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}
+
+#[test]
+fn test_object_enumeration_names_values_entries() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var arr = [7, 8];
+            arr.extra = 1;
+            var strObj = new String("abc");
+            strObj[5] = "de";
+            var nonenum = {};
+            Object.defineProperty(nonenum, "hidden", { value: 1, enumerable: false });
+            nonenum.visible = 2;
+            var d = new Date(0);
+            d.prop1 = 1;
+            var forIn = [];
+            for (var p in d) forIn.push(p);
+            var sfor = [];
+            var so = new String("xy");
+            so.extra = 1;
+            for (var q in so) sfor.push(q);
+            var bDeletesC = {
+                a: "A",
+                get b() {
+                    Object.defineProperty(this, "c", { enumerable: false });
+                    return "B";
+                },
+                c: "C"
+            };
+            var vals = Object.values(bDeletesC);
+            var order = {};
+            Object.defineProperty(order, "a", {
+                get: function () { return "a"; },
+                enumerable: true,
+                configurable: true
+            });
+            order.b = "b";
+            var entries = Object.entries(order);
+            [
+                Object.getOwnPropertyNames(arr).join(",") === "0,1,length,extra",
+                Object.getOwnPropertyNames("ab").join(",") === "0,1,length",
+                Object.getOwnPropertyNames(strObj).join(",") === "0,1,2,5,length",
+                Object.getOwnPropertyNames(nonenum).join(",") === "hidden,visible",
+                forIn.join(",") === "prop1",
+                sfor.join(",") === "0,1,extra",
+                Object.values("abc").join(",") === "a,b,c",
+                vals.length === 2 && vals[0] === "A" && vals[1] === "B",
+                entries.length === 2,
+                entries[0][0] === "a" && entries[0][1] === "a",
+                entries[1][0] === "b" && entries[1][1] === "b",
+                Object.keys(order).length === 2
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true|true|true";
             "#,
         )
         .unwrap();

@@ -11951,7 +11951,41 @@ pub fn object_get_own_property_descriptor(
             vm,
         );
     }
-    if unsafe { (*(ptr as *const GcHeader)).tag() } != TAG_OBJECT {
+    let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+    if matches!(tag, TAG_FUNC | TAG_DATE | TAG_REGEXP) {
+        if tag == TAG_REGEXP {
+            if let Some(kptr) = raw_key.heap_ptr() {
+                if unsafe { (*(kptr as *const GcHeader)).tag() } == TAG_STRING {
+                    let name = unsafe { HeapString::to_string(kptr as *mut HeapString) };
+                    if name == "lastIndex" {
+                        return make_descriptor_object(
+                            gc,
+                            regexp_last_index_value(ptr),
+                            rune_core::shape::ATTR_WRITABLE,
+                            vm.object_prototype.heap_ptr(),
+                        );
+                    }
+                }
+            }
+        }
+        let extra = unsafe {
+            match tag {
+                TAG_FUNC => rune_core::function::Func::extra_props(ptr as *mut Func),
+                TAG_DATE => rune_core::date::RuneDate::extra_props(ptr),
+                _ => RegExp::extra_props(ptr),
+            }
+        };
+        if extra.is_null() {
+            return Value::undefined();
+        }
+        return object_get_own_property_descriptor(
+            gc,
+            _this,
+            &[Value::from_heap_ptr(extra), raw_key],
+            vm,
+        );
+    }
+    if tag != TAG_OBJECT {
         return Value::undefined();
     }
     let (key, _) = match define_key_and_name(raw_key) {
@@ -12269,6 +12303,85 @@ pub fn object_create_builtin(
         return result;
     }
     Value::from_heap_ptr(ptr as *mut u8)
+}
+
+/// Function(...args) — compile a dynamic function through the parser/emitter.
+/// The last argument is the body; preceding ones are parameters.
+pub fn function_constructor(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let mut params = String::new();
+    let body = if args.is_empty() {
+        String::new()
+    } else {
+        let mut parts = Vec::with_capacity(args.len());
+        for v in args.iter().take(args.len() - 1) {
+            let Some(s) = to_primitive_string(gc, *v, vm) else {
+                return Value::undefined();
+            };
+            parts.push(s);
+        }
+        params = parts.join(",");
+        let Some(b) = to_primitive_string(gc, args[args.len() - 1], vm) else {
+            return Value::undefined();
+        };
+        b
+    };
+    let source = format!("(function({params}){{\n{body}\n}})");
+    let mut parser = rune_parser::Parser::new(&source);
+    let program = parser.parse();
+    if !parser.errors.is_empty() {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::SyntaxError,
+            "Invalid function body or parameters",
+        ));
+        return Value::undefined();
+    }
+    let mut emitter = rune_parser::emitter::Emitter::new();
+    emitter.emit_program(&program);
+    let mut outer = emitter.into_bytecode();
+    if outer.functions.is_empty() {
+        return Value::undefined();
+    }
+    if let Some(first) = outer.functions.first() {
+        let strict = first.is_strict;
+        outer.functions[0].is_strict = strict;
+    }
+    let strict = outer.functions[0].is_strict;
+    vm.eval_programs.push(Box::new(outer));
+    let prog_ptr = &**vm.eval_programs.last().unwrap() as *const _ as *const u8;
+    let param_count = vm
+        .eval_programs
+        .last()
+        .and_then(|p| p.functions.first())
+        .map(|f| f.param_count)
+        .unwrap_or(0);
+    let func_ptr = Func::allocate(gc, 0, prog_ptr, false, std::ptr::null_mut());
+    if strict {
+        unsafe { Func::set_strict(func_ptr, true) };
+    }
+    let func_ptr = vm.set_function_metadata(gc, func_ptr, param_count, "anonymous");
+    let proto = JSObject::allocate(gc, Shape::empty(), &[]);
+    if let Some(p) = vm.object_prototype.heap_ptr() {
+        unsafe { JSObject::set_prototype(proto, p) };
+    }
+    let live = unsafe { rune_core::gc::resolve_forwarded(func_ptr as *mut u8) } as *mut Func;
+    unsafe { Func::set_prototype(live, proto as *mut u8) };
+    unsafe {
+        JSObject::add_property(
+            proto,
+            PropertyKey::from_string("constructor"),
+            "constructor".to_string(),
+            Value::from_heap_ptr(live as *mut u8),
+        )
+    };
+    let live = unsafe { rune_core::gc::resolve_forwarded(live as *mut u8) } as *mut Func;
+    Value::from_heap_ptr(live as *mut u8)
 }
 
 /// eval(source) — basic script evaluation.
@@ -15579,12 +15692,32 @@ pub fn string_slice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
     };
     let units = s.encode_utf16().collect::<Vec<u16>>();
     let len = units.len() as f64;
-    let raw_start = to_number(args.first().copied().unwrap_or(Value::undefined()));
-    let raw_end = args.get(1).map(|&v| to_number(v));
-    let int_start = if raw_start.is_nan() { 0.0 } else { raw_start };
+    let raw_start =
+        match to_number_sync(gc, vm, args.first().copied().unwrap_or(Value::undefined())) {
+            Ok(n) => n,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        };
+    let raw_end = match args.get(1).copied() {
+        Some(v) => match to_number_sync(gc, vm, v) {
+            Ok(n) => Some(n),
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        },
+        None => None,
+    };
+    let int_start = if raw_start.is_nan() {
+        0.0
+    } else {
+        raw_start.trunc()
+    };
     let int_end = match raw_end {
         Some(e) if e.is_nan() => 0.0,
-        Some(e) => e,
+        Some(e) => e.trunc(),
         None => len,
     };
     let clamp = |v: f64| -> usize {

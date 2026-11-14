@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Function ctor + slice/exotic descriptors (2026-11-14)**: dynamic Function/new Function, slice ToNumber, gOPD RegExp lastIndex/extras. String **1092/1223**, Function **274/509**, Object **2711/3411**. Integration **886**.
 - **@@replace substitution/index edges (2026-11-14)**: `$0n`, backward-index skip, AdvanceStringIndex, float lastIndex, receiver rooting, own-prop precedence. RegExp/prototype **401/487**, Symbol.replace **59/70**, String **1084/1223**. Integration **885**.
 - **Basic eval (2026-11-14)**: synthetic-function compile + reentrant call, expression completion, SyntaxError objects; direct-eval locals/var-global semantics missing. eval-code **103/347**, RegExp/source **10/12**, RegExp/prototype **396/487**. Integration **884**.
 - **MatchAll/split/search completion (2026-11-14)**: cached lastIndex, non-global/non-RegExp matchAll, ToUint32 split limits, sync accessor setters, no-setter prototype store. RegExp/prototype **391/487 (80.3%)**, matchAll **26/26**, split **43/44**, search **22/23**, String **1074/1223**. Integration **883**.

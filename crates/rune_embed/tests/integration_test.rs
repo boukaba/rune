@@ -17129,3 +17129,27 @@ fn test_regexp_replace_getsubstitution_and_lastindex() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_function_constructor_dynamic() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var add = Function("a", "b", "return a + b;");
+            [
+                typeof add === "function",
+                add(2, 3) === 5,
+                add.length === 2,
+                add.name === "anonymous",
+                typeof add.prototype === "object",
+                add.prototype.constructor === add,
+                Function("return 7")() === 7,
+                typeof new Function("return this") === "function",
+                Function.prototype.constructor === Function
+            ].join("|") === "true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

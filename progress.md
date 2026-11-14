@@ -3122,6 +3122,25 @@ Integration suite: **884 passed, 0 failed, 3 ignored**.
 
 Integration suite: **885 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Function constructor + String slice/exotic descriptors (2026-11-14)
+
+- `Function(...args)` and `new Function(...args)` now compile dynamically through
+  the parser/emitter, sharing the eval program-retention path:
+  - last argument is the body, preceding arguments are parameters;
+  - result is a real callable with `length` (parameter count), `name`
+    ("anonymous"), `.prototype` object and `constructor` back-ref;
+  - strict bodies set the Func strict flag; parse errors throw SyntaxError;
+  - works through normal calls, `new`, and re-entrant `call/construct_value_sync`.
+- `String.prototype.slice` now uses synchronous ToNumber (user `valueOf`/
+  `toString`) and ToInteger truncation for start/end.
+- `Object.getOwnPropertyDescriptor` now reports exotic own properties:
+  RegExp `lastIndex` (writable), plus Date/Function/RegExp extra-props objects.
+- Test262: String **1084 → 1092/1223**, String/slice **26 → 35/38**,
+  String/substring **41 → 42/46**, Function **274/509**, Object **2711/3411**.
+- Regression: `test_function_constructor_dynamic`.
+
+Integration suite: **886 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

@@ -5366,6 +5366,13 @@ impl Vm {
                 }
             }
         }
+        if self.builtin_wrappers.get("Function").copied() == Some(callee) {
+            let result = crate::builtins::function_constructor(gc, Value::undefined(), args, self);
+            if let Some(exc) = self.pending_exception.take() {
+                return Err(exc);
+            }
+            return Ok(result);
+        }
         let Some(ptr) = callee.heap_ptr() else {
             return Err(crate::errors::error_object(
                 gc,
@@ -5420,6 +5427,13 @@ impl Vm {
         ctor: Value,
         args: Vec<Value>,
     ) -> Result<Value, Value> {
+        if self.builtin_wrappers.get("Function").copied() == Some(ctor) {
+            let result = crate::builtins::function_constructor(gc, Value::undefined(), &args, self);
+            if let Some(exc) = self.pending_exception.take() {
+                return Err(exc);
+            }
+            return Ok(result);
+        }
         match self.push_construct_frame(gc, ctor, args) {
             ConstructOut::Done(v) => Ok(v),
             ConstructOut::Fail(e) => Err(e),
@@ -11053,6 +11067,24 @@ impl Vm {
                         self.frames[fi].pc = pc + 1;
                         continue;
                     }
+                    // `new Function(...)` behaves like Function(...).
+                    if self.builtin_wrappers.get("Function").copied() == Some(constructor) {
+                        let result = crate::builtins::function_constructor(
+                            gc,
+                            Value::undefined(),
+                            &args,
+                            self,
+                        );
+                        if let Some(exc) = self.pending_exception.take() {
+                            if let Some(exit) = self.handle_throw(gc, exc) {
+                                return exit;
+                            }
+                            continue;
+                        }
+                        self.push(result);
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    }
                     // §20.4.1.1: `new Symbol()` throws a TypeError — Symbol is not a constructor.
                     if constructor == self.symbol_ctor {
                         if let Some(exit) = self.throw_type_error(gc, "Symbol is not a constructor")
@@ -11634,6 +11666,25 @@ impl Vm {
                             self.frames[fi].pc = pc + 1;
                             continue;
                         }
+                    }
+
+                    // Function(...) — dynamic function compilation.
+                    if self.builtin_wrappers.get("Function").copied() == Some(callee) {
+                        let result = crate::builtins::function_constructor(
+                            gc,
+                            Value::undefined(),
+                            &args,
+                            self,
+                        );
+                        if let Some(exc) = self.pending_exception.take() {
+                            if let Some(exit) = self.handle_throw(gc, exc) {
+                                return exit;
+                            }
+                            continue;
+                        }
+                        self.push(result);
+                        self.frames[fi].pc = pc + 1;
+                        continue;
                     }
 
                     // String constructor called as a function (not new)

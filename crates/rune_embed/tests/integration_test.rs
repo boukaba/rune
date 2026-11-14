@@ -7909,7 +7909,7 @@ fn test_regexp_constructor_basic() {
         ),
         "1/4"
     );
-    assert_eq!(eval_str(&mut ctx, r#"new RegExp().source"#), "");
+    assert_eq!(eval_str(&mut ctx, r#"new RegExp().source"#), "(?:)");
     assert_eq!(eval_str(&mut ctx, r#"new RegExp("xy").flags"#), "");
 }
 
@@ -7958,7 +7958,7 @@ fn test_regexp_constructor_flags_validation() {
     // Valid flags still work; .flags returns them in canonical order.
     assert_eq!(
         eval_str(&mut ctx, r#"new RegExp("a", "dgimsuvy").flags"#),
-        "gimsuydv"
+        "dgimsuvy"
     );
 }
 
@@ -17037,6 +17037,38 @@ fn test_regexp_symbol_replace_protocol() {
                 RegExp.prototype[Symbol.replace].call(custom, "abc", "X") === "aXc",
                 "ab".replace(/(?<x>a)/, "$<x>$<x>") === "aa" + "b"
             ].join("|") === "true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}
+
+#[test]
+fn test_regexp_flags_source_accessors() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var flagsDesc = Object.getOwnPropertyDescriptor(RegExp.prototype, "flags");
+            var sourceDesc = Object.getOwnPropertyDescriptor(RegExp.prototype, "source");
+            var generic = {};
+            Object.defineProperty(generic, "global", { get: function () { return true; } });
+            generic.ignoreCase = 1;
+            generic.multiline = "";
+            generic.dotAll = 0;
+            generic.unicode = {};
+            generic.sticky = "x";
+            [
+                typeof flagsDesc.get === "function" && !flagsDesc.enumerable && flagsDesc.configurable,
+                typeof sourceDesc.get === "function" && !sourceDesc.enumerable && sourceDesc.configurable,
+                flagsDesc.get.name === "get flags" && flagsDesc.get.length === 0,
+                sourceDesc.get.name === "get source" && sourceDesc.get.length === 0,
+                flagsDesc.get.call(RegExp.prototype) === "",
+                sourceDesc.get.call(RegExp.prototype) === "(?:)",
+                new RegExp("/", "gi").flags === "gi",
+                new RegExp("/", "gi").source === "\\/",
+                flagsDesc.get.call(generic) === "giuy"
+            ].join("|") === "true|true|true|true|true|true|true|true|true";
             "#,
         )
         .unwrap();

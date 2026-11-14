@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **RegExp source/flags accessors (2026-11-14)**: real accessors, escape patterns, observable flag Gets in dgimsuvy order. RegExp/prototype **352/487**, flags **10/16**, source **5/12**, String **1074/1223**. Integration **883**. Global `eval` remains a stub.
 - **Generic RegExp @@replace (2026-11-14)**: flags/global/unicode Gets, observable exec loop, GetSubstitution, functional args. RegExp/prototype **336/487**, Symbol.replace **56/70**, String **1073/1223**. Integration **882**.
 - **RegExp symbol protocols (2026-11-14)**: spec @@match/@@search/@@split via exec/flags/lastIndex/species. RegExp/prototype **299/487**, Symbol.match **48/53**, search **18/23**, split **34/44**, String **1070/1223**. Integration **881**.
 - **RegExp exec/test lastIndex/lazy (2026-11-14)**: brand TypeErrors, ToString input, UTF-16 lastIndex/index, non-writable lastIndex, lazy shortest match. RegExp/prototype **246/487**, exec **73/79**, test **45/45**. Integration **880**.

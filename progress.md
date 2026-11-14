@@ -3006,6 +3006,29 @@ Integration suite: **881 passed, 0 failed, 3 ignored**.
 
 Integration suite: **882 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — RegExp source/flags accessors (2026-11-14)
+
+- `RegExp.prototype.flags` and `.source` are real accessor properties (getter
+  name/length/attributes match spec) instead of data properties; the RegExp
+  instance fast path no longer bypasses them.
+- `source` getter:
+  - TypeError for primitives/non-RegExp objects;
+  - `(?:)` for `RegExp.prototype` and empty patterns;
+  - EscapeRegExpPattern for `/`, line terminators, U+2028/U+2029, preserving
+    existing escapes.
+- `flags` getter builds the string from observable Gets of
+  `hasIndices/global/ignoreCase/multiline/dotAll/unicode/unicodeSets/sticky`
+  with ToBoolean coercion, in spec order `dgimsuvy`.
+- Test262: RegExp/prototype **336 → 352/487**, flags **0 → 10/16**, source
+  **0 → 5/12**; String **1073 → 1074/1223**.
+- Remaining source tests require a working `eval` that returns expression
+  completion values (currently `eval` is a stub returning undefined); flags
+  `this-val-non-obj` needs BigInt literal support.
+- Regressions: `test_regexp_flags_source_accessors`; legacy source/flags
+  expectations updated to `(?:)` and canonical `dgimsuvy` order.
+
+Integration suite: **883 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

@@ -29727,48 +29727,104 @@ pub fn regexp_to_string(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &m
 }
 
 /// RegExp.prototype.source getter — returns the pattern string.
-pub fn regexp_source(gc: &mut SemiSpace, this: Value, _args: &[Value], _vm: &mut Vm) -> Value {
-    let regexp_ptr = match get_regexp_this(this) {
-        Some(p) => p,
-        None => return Value::undefined(),
+pub fn regexp_source(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    if !is_object_value(this) {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "RegExp.prototype.source getter called on non-object",
+        ));
+        return Value::undefined();
+    }
+    if this.heap_ptr() == vm.regexp_prototype.heap_ptr() {
+        return Value::from_heap_ptr(HeapString::allocate(gc, "(?:)") as *mut u8);
+    }
+    let Some(regexp_ptr) = get_regexp_this(this) else {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "RegExp.prototype.source getter called on incompatible receiver",
+        ));
+        return Value::undefined();
     };
     let pattern = unsafe { HeapString::to_string(RegExp::pattern(regexp_ptr) as *mut HeapString) };
-    Value::from_heap_ptr(HeapString::allocate(gc, &pattern) as *mut u8)
+    if pattern.is_empty() {
+        return Value::from_heap_ptr(HeapString::allocate(gc, "(?:)") as *mut u8);
+    }
+    let mut escaped = String::with_capacity(pattern.len());
+    let mut backslashes = 0usize;
+    for c in pattern.chars() {
+        match c {
+            '\\' => {
+                backslashes += 1;
+                escaped.push(c);
+            }
+            '/' if backslashes.is_multiple_of(2) => {
+                escaped.push('\\');
+                escaped.push('/');
+                backslashes = 0;
+            }
+            '\n' => {
+                escaped.push_str("\\n");
+                backslashes = 0;
+            }
+            '\r' => {
+                escaped.push_str("\\r");
+                backslashes = 0;
+            }
+            '\u{2028}' => {
+                escaped.push_str("\\u2028");
+                backslashes = 0;
+            }
+            '\u{2029}' => {
+                escaped.push_str("\\u2029");
+                backslashes = 0;
+            }
+            _ => {
+                escaped.push(c);
+                backslashes = 0;
+            }
+        }
+    }
+    Value::from_heap_ptr(HeapString::allocate(gc, &escaped) as *mut u8)
 }
 
 /// RegExp.prototype.flags getter — returns a string like "gimsuyd".
-pub fn regexp_flags(gc: &mut SemiSpace, this: Value, _args: &[Value], _vm: &mut Vm) -> Value {
-    let regexp_ptr = match get_regexp_this(this) {
-        Some(p) => p,
-        None => return Value::undefined(),
-    };
-    let flags = unsafe { RegExp::flags(regexp_ptr) };
-    let mut s = String::new();
-    if flags & 1 != 0 {
-        s.push('g');
+pub fn regexp_flags(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    if !is_object_value(this) {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "RegExp.prototype.flags getter called on non-object",
+        ));
+        return Value::undefined();
     }
-    if flags & 2 != 0 {
-        s.push('i');
+    let mut out = String::new();
+    for (name, ch) in [
+        ("hasIndices", 'd'),
+        ("global", 'g'),
+        ("ignoreCase", 'i'),
+        ("multiline", 'm'),
+        ("dotAll", 's'),
+        ("unicode", 'u'),
+        ("unicodeSets", 'v'),
+        ("sticky", 'y'),
+    ] {
+        let value = match get_value_sync(gc, vm, this, name) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        };
+        if value_truthy(value) {
+            out.push(ch);
+        }
     }
-    if flags & 4 != 0 {
-        s.push('m');
-    }
-    if flags & 8 != 0 {
-        s.push('s');
-    }
-    if flags & 16 != 0 {
-        s.push('u');
-    }
-    if flags & 32 != 0 {
-        s.push('y');
-    }
-    if flags & 64 != 0 {
-        s.push('d');
-    }
-    if flags & 128 != 0 {
-        s.push('v');
-    }
-    Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8)
+    Value::from_heap_ptr(HeapString::allocate(gc, &out) as *mut u8)
 }
 
 fn regexp_flag_bit(

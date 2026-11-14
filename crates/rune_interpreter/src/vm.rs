@@ -2810,12 +2810,8 @@ impl Vm {
             if let Some(h) = test_h {
                 proto_entries.push(("test", h));
             }
-            if let Some(h) = source_h {
-                proto_entries.push(("source", h));
-            }
-            if let Some(h) = flags_h {
-                proto_entries.push(("flags", h));
-            }
+            let _ = source_h;
+            let _ = flags_h;
             if let Some(h) = find_handle(&self.builtins, "RegExp_prototype_toString") {
                 proto_entries.push(("toString", h));
             }
@@ -2823,6 +2819,8 @@ impl Vm {
                 proto_entries.push(("lastIndex", h));
             }
             for (name, key) in [
+                ("source", "RegExp_prototype_source"),
+                ("flags", "RegExp_prototype_flags"),
                 ("global", "RegExp_prototype_global"),
                 ("ignoreCase", "RegExp_prototype_ignoreCase"),
                 ("multiline", "RegExp_prototype_multiline"),
@@ -15024,6 +15022,12 @@ pub(crate) fn builtin_display_name(name: &'static str) -> &'static str {
     if name == "get set size" {
         return "get size";
     }
+    if name == "RegExp_prototype_source" {
+        return "get source";
+    }
+    if name == "RegExp_prototype_flags" {
+        return "get flags";
+    }
     if name == "Symbol_prototype_toPrimitive" {
         return "[Symbol.toPrimitive]";
     }
@@ -15654,40 +15658,6 @@ pub(crate) fn load_property_recursive(
                 if let Some(key_ptr) = raw_key.heap_ptr() {
                     if unsafe { (*(key_ptr as *const GcHeader)).tag() == TAG_STRING } {
                         let key_str = unsafe { HeapString::to_string(key_ptr as *mut HeapString) };
-                        if key_str == "source" {
-                            let pattern_ptr = unsafe { rune_core::regexp::RegExp::pattern(ptr) };
-                            return Value::from_heap_ptr(pattern_ptr);
-                        }
-                        if key_str == "flags" {
-                            let f = unsafe { rune_core::regexp::RegExp::flags(ptr) };
-                            let mut s = String::new();
-                            if f & 1 != 0 {
-                                s.push('g');
-                            }
-                            if f & 2 != 0 {
-                                s.push('i');
-                            }
-                            if f & 4 != 0 {
-                                s.push('m');
-                            }
-                            if f & 8 != 0 {
-                                s.push('s');
-                            }
-                            if f & 16 != 0 {
-                                s.push('u');
-                            }
-                            if f & 32 != 0 {
-                                s.push('y');
-                            }
-                            if f & 64 != 0 {
-                                s.push('d');
-                            }
-                            if f & 128 != 0 {
-                                s.push('v');
-                            }
-                            let ptr = HeapString::allocate(gc, &s);
-                            return Value::from_heap_ptr(ptr as *mut u8);
-                        }
                         if key_str == "lastIndex" {
                             return crate::builtins::regexp_last_index_value(ptr);
                         }

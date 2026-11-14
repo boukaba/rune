@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Object.create own-key semantics (2026-11-14)**: null TypeError, primitive ToObject, array/string keys, observable descriptor Gets, live return. Object **2965/3411**, create **307/320**. Integration **901**.
 - **defineProperties exotics + accessor presence (2026-11-14)**: array/String extra-props targets, `{get:undefined}` stays accessor. Object **2950/3411**, defineProperties **507/632**, defineProperty **1014/1131**. Integration **900**.
 - **Object.getOwnPropertySymbols (2026-11-14)**: own symbol keys across plain/array/function/String objects, primitive/null handling. JSON **129/165**, rawJSON **9/10**, Object **2875/3411**, symbols **8/12**. Integration **899**.
 - **Harness Test262Error + callable discipline (2026-11-14)**: real prototype/instanceof/String, non-callable positive Smis throw, JSON @@toStringTag attrs. JSON **128/165**, integration **898**.

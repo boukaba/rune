@@ -15832,6 +15832,15 @@ pub(crate) fn load_property_recursive(
                                     as *mut u8);
                             }
                         }
+                        // Own extra properties on the wrapper.
+                        let extra = unsafe { StringObject::extra_props(ptr as *mut StringObject) };
+                        if !extra.is_null() {
+                            let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                            let pk = PropertyKey::from_string(&key_str);
+                            if let Some(slot) = shape.lookup(&pk) {
+                                return unsafe { JSObject::get_slot(extra as *mut JSObject, slot) };
+                            }
+                        }
                     }
                 }
                 // Walk to String.prototype

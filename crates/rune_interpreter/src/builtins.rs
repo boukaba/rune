@@ -11128,8 +11128,17 @@ fn define_extra_target(
             Some(p as *mut JSObject)
         }
         TAG_STRING_OBJ => {
-            let extra = unsafe { StringObject::extra_props(ptr as *mut StringObject) };
-            (!extra.is_null()).then_some(extra as *mut JSObject)
+            let sobj = ptr as *mut StringObject;
+            let mut extra = unsafe { StringObject::extra_props(sobj) };
+            if extra.is_null() {
+                let obj = JSObject::allocate(gc, Shape::empty(), &[]);
+                if let Some(proto) = vm.object_prototype.heap_ptr() {
+                    unsafe { JSObject::set_prototype(obj, proto) };
+                }
+                extra = obj as *mut u8;
+                unsafe { StringObject::set_extra_props(sobj, extra) };
+            }
+            Some(extra as *mut JSObject)
         }
         _ => None,
     };
@@ -12709,65 +12718,111 @@ pub fn object_create_builtin(
             ));
         }
     }
-    // A4: Object.create(proto, propertiesObject) — define each own
-    // enumerable property of propertiesObject on the new object (§20.1.2.2
-    // step 2, via the shared defineProperty core).
-    if args.len() >= 2 && !args[1].is_undefined() {
+    fn collect_own_enum(obj: *mut JSObject, out: &mut Vec<(PropertyKey, String)>) {
+        let shape = unsafe { JSObject::shape_ptr(obj) };
+        let count = unsafe { JSObject::slot_count(obj) };
+        for i in 0..count {
+            if shape.entries[i].0.is_symbol()
+                || shape.attr_at(i) & rune_core::shape::ATTR_ENUMERABLE == 0
+            {
+                continue;
+            }
+            let name = shape.key_name_at(i).unwrap_or("").to_string();
+            out.push((shape.entries[i].0, name));
+        }
+    }
+
+    // §20.1.2.2 step 2: ToObject(properties) then read each own enumerable
+    // key (Get, so accessors run) and define the resulting descriptor.
+    if args.len() >= 2 {
         let props = args[1];
-        let keys: Vec<(PropertyKey, String, Value)> = match props.heap_ptr() {
-            Some(pptr) if unsafe { (*(pptr as *const GcHeader)).tag() } == TAG_OBJECT => {
-                let shape = unsafe { JSObject::shape_ptr(pptr as *mut JSObject) };
-                let count = unsafe { JSObject::slot_count(pptr as *mut JSObject) };
-                let mut out = Vec::new();
-                for i in 0..count {
-                    if shape.entries[i].0.is_symbol()
-                        || shape.attr_at(i) & rune_core::shape::ATTR_ENUMERABLE == 0
-                    {
-                        continue;
+        if props.is_null() {
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Object.create properties must be an object",
+            ));
+            return Value::undefined();
+        }
+        if !props.is_undefined() {
+            let keys: Vec<(PropertyKey, String)> = {
+                let pptr = match props.heap_ptr() {
+                    Some(p) => p,
+                    None => return Value::from_heap_ptr(ptr as *mut u8),
+                };
+                let tag = unsafe { (*(pptr as *const GcHeader)).tag() };
+                let mut out: Vec<(PropertyKey, String)> = Vec::new();
+                match tag {
+                    TAG_OBJECT => collect_own_enum(pptr as *mut JSObject, &mut out),
+                    TAG_ARRAY => {
+                        let len = unsafe { RuneArray::length(pptr as *mut RuneArray) };
+                        for i in 0..len {
+                            out.push((PropertyKey::from_string(&i.to_string()), i.to_string()));
+                        }
+                        let extra = unsafe { RuneArray::extra_props(pptr as *mut RuneArray) };
+                        if !extra.is_null() {
+                            collect_own_enum(extra as *mut JSObject, &mut out);
+                        }
                     }
-                    let v = unsafe { JSObject::get_slot(pptr as *mut JSObject, i) };
-                    let name = shape.key_name_at(i).unwrap_or("").to_string();
-                    out.push((shape.entries[i].0, name, v));
+                    TAG_STRING => {
+                        let text = unsafe { HeapString::to_string(pptr as *mut HeapString) };
+                        for i in 0..text.encode_utf16().count() {
+                            out.push((PropertyKey::from_string(&i.to_string()), i.to_string()));
+                        }
+                    }
+                    TAG_STRING_OBJ => {
+                        let sp = unsafe { StringObject::string_ptr(pptr as *mut StringObject) };
+                        let text = unsafe { HeapString::to_string(sp as *mut HeapString) };
+                        for i in 0..text.encode_utf16().count() {
+                            out.push((PropertyKey::from_string(&i.to_string()), i.to_string()));
+                        }
+                        let extra = unsafe { StringObject::extra_props(pptr as *mut StringObject) };
+                        if !extra.is_null() {
+                            collect_own_enum(extra as *mut JSObject, &mut out);
+                        }
+                    }
+                    _ => {}
                 }
                 out
-            }
-            _ => {
-                vm.set_pending_exception(crate::errors::error_object(
-                    gc,
-                    &vm.error_protos,
-                    crate::errors::ErrorKind::TypeError,
-                    "Property list must be an object",
-                ));
-                return Value::from_heap_ptr(ptr as *mut u8);
-            }
-        };
-        // The new object may move during descriptor parsing allocations —
-        // re-resolve through a rooted stack slot (same discipline as the
-        // error constructor).
-        let obj_val = Value::from_heap_ptr(ptr as *mut u8);
-        vm.push(obj_val);
-        let obj_slot = vm.stack.len() - 1;
-        for (pkey, name, desc_obj) in keys {
-            let desc = match to_property_descriptor(gc, vm, desc_obj) {
-                Ok(d) => d,
-                Err(e) => {
-                    vm.set_pending_exception(e);
-                    vm.stack.truncate(obj_slot);
-                    return Value::from_heap_ptr(ptr as *mut u8);
-                }
             };
-            let live = vm.stack[obj_slot].heap_ptr().unwrap() as *mut JSObject;
-            if let Err(e) = define_own_property(gc, vm, live, pkey, name, &desc) {
-                vm.set_pending_exception(e);
-                // Stack slots are GC-updated, so this is the live object.
-                let current = vm.stack[obj_slot];
-                vm.stack.truncate(obj_slot);
-                return current;
+            // Root the new object and the properties object across getter
+            // calls (both may move / run arbitrary JS).
+            let obj_val = Value::from_heap_ptr(ptr as *mut u8);
+            vm.push(obj_val);
+            let obj_slot = vm.stack.len() - 1;
+            vm.push(props);
+            let props_slot = vm.stack.len() - 1;
+            for (pkey, name) in keys {
+                let live_props = refresh_value(vm.stack[props_slot]);
+                let desc_obj = match get_value_sync(gc, vm, live_props, &name) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        vm.set_pending_exception(e);
+                        vm.stack.truncate(obj_slot);
+                        return Value::from_heap_ptr(ptr as *mut u8);
+                    }
+                };
+                let desc = match to_property_descriptor(gc, vm, desc_obj) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        vm.set_pending_exception(e);
+                        vm.stack.truncate(obj_slot);
+                        return Value::from_heap_ptr(ptr as *mut u8);
+                    }
+                };
+                let live = vm.stack[obj_slot].heap_ptr().unwrap() as *mut JSObject;
+                if let Err(e) = define_own_property(gc, vm, live, pkey, name, &desc) {
+                    vm.set_pending_exception(e);
+                    let current = vm.stack[obj_slot];
+                    vm.stack.truncate(obj_slot);
+                    return current;
+                }
             }
+            let result = vm.stack[obj_slot];
+            vm.stack.truncate(obj_slot);
+            return result;
         }
-        let result = vm.stack[obj_slot];
-        vm.stack.truncate(obj_slot);
-        return result;
     }
     Value::from_heap_ptr(ptr as *mut u8)
 }

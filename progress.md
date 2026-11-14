@@ -3413,6 +3413,27 @@ Integration suite: **899 passed, 0 failed, 3 ignored**.
 
 Integration suite: **900 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Object.create own-key semantics (2026-11-14)
+
+- `Object.create(proto, properties)` now follows §20.1.2.2:
+  - `null` properties throw TypeError; primitives behave as ToObject and
+    contribute no keys;
+  - enumerable own keys are collected from ordinary objects, Arrays (indices +
+    extra-props), String primitives and String wrappers (indices + extra
+    properties);
+  - each descriptor value is read with an observable `Get` (accessor getters
+    run with the properties object as receiver) rather than reading the raw
+    slot, then ToPropertyDescriptor/CreateDataProperty are applied;
+  - both the new object and properties object are rooted across getter calls,
+    and the live (possibly moved) object is returned.
+- String wrappers now resolve own extra properties in the property-load path
+  (previously only indices/length then prototype), and `defineProperty` lazily
+  creates their extra-props overlay.
+- Test262: Object **2950 → 2965/3411**, Object.create **307/320**.
+- Regression: `test_object_create_properties_object`.
+
+Integration suite: **901 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

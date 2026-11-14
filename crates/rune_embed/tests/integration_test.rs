@@ -17571,3 +17571,45 @@ fn test_array_define_properties_and_accessor_undefined() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_object_create_properties_object() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var calls = 0;
+            var props = {};
+            Object.defineProperty(props, "p", {
+                get: function () {
+                    calls++;
+                    return { value: 1, writable: true, enumerable: true, configurable: true };
+                },
+                enumerable: true
+            });
+            var o = Object.create({ inherited: 2 }, props);
+            var nullThrew = false;
+            var stringThrew = false;
+            try { Object.create({}, null); } catch (e) { nullThrew = e instanceof TypeError; }
+            try { Object.create({}, "hello"); } catch (e) { stringThrew = e instanceof TypeError; }
+            var sp = new String();
+            Object.defineProperty(sp, "prop", {
+                get: function () { return { value: 3, enumerable: true }; },
+                enumerable: true
+            });
+            var spo = Object.create({}, sp);
+            [
+                calls === 1,
+                o.p === 1,
+                o.hasOwnProperty("p"),
+                o.inherited === 2,
+                Object.getOwnPropertyNames(Object.create({}, 1)).length === 0,
+                nullThrew,
+                stringThrew,
+                spo.prop === 3
+            ].join("|") === "true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

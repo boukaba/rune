@@ -13467,7 +13467,42 @@ impl Vm {
                                 if op.awaiting_acc {
                                     op.awaiting_acc = false;
                                     op.accumulator = Some(result);
-                                    let next = op.index;
+                                    // The next index was precomputed before the
+                                    // first-element getter ran; that getter may
+                                    // have created properties (including on the
+                                    // prototype chain), so rescan HasProperty
+                                    // from just after the first element now.
+                                    let backward = array_op_is_backward(op.kind);
+                                    let mut next = usize::MAX;
+                                    if backward {
+                                        if idx > 0 {
+                                            let mut i = idx;
+                                            while i > 0 {
+                                                i -= 1;
+                                                if has_property(
+                                                    op.source_val,
+                                                    Value::from_float64(i as f64),
+                                                    Some(self.function_prototype),
+                                                ) {
+                                                    next = i;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        let mut i = idx + 1;
+                                        while i < op.length as usize {
+                                            if has_property(
+                                                op.source_val,
+                                                Value::from_float64(i as f64),
+                                                Some(self.function_prototype),
+                                            ) {
+                                                next = i;
+                                                break;
+                                            }
+                                            i += 1;
+                                        }
+                                    }
                                     if next == usize::MAX {
                                         self.finish_array_op();
                                         self.stack.truncate(callee_base);
@@ -16628,6 +16663,14 @@ pub(crate) fn load_property_recursive(
                             return elem;
                         }
                     }
+                    let extra = unsafe { RuneArray::extra_props(ptr as *mut RuneArray) };
+                    if !extra.is_null() {
+                        let key = PropertyKey::from_string(&index.to_string());
+                        let extra_shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                        if let Some(slot) = extra_shape.lookup(&key) {
+                            return unsafe { JSObject::get_slot(extra as *mut JSObject, slot) };
+                        }
+                    }
                 }
                 // "length" property → return stored length
                 if let Some(key_ptr) = raw_key.heap_ptr() {
@@ -17264,6 +17307,23 @@ pub(crate) fn do_store_property(
         } else if tag == TAG_ARRAY {
             if let Some(index) = value_to_array_index(raw_key) {
                 let len = unsafe { RuneArray::length(ptr as *mut RuneArray) };
+                if index as u32 >= len && array_is_arguments(ptr as *mut RuneArray) {
+                    let extra = unsafe { RuneArray::extra_props(ptr as *mut RuneArray) };
+                    if !extra.is_null() {
+                        if let Some(key) = value_to_prop_key(raw_key) {
+                            let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                            let live = if shape.lookup(&key).is_none() {
+                                vm.ensure_object_capacity(gc, extra as *mut JSObject)
+                            } else {
+                                extra as *mut JSObject
+                            };
+                            unsafe {
+                                JSObject::add_property(live, key, index.to_string(), value);
+                            }
+                        }
+                        return true;
+                    }
+                }
                 if (index as u32) < len {
                     // B1f-5 integrity gates: frozen elements reject all
                     // in-bounds writes; hole-fills create (need extensible).
@@ -18512,6 +18572,17 @@ pub(crate) fn value_to_array_index(v: Value) -> Option<usize> {
 
 /// Get the length of an array-like value.
 /// Returns None if `this` is not an array-like (neither TAG_ARRAY nor TAG_OBJECT with "length" property).
+fn array_is_arguments(arr: *mut RuneArray) -> bool {
+    let extra = unsafe { RuneArray::extra_props(arr) };
+    if extra.is_null() {
+        return false;
+    }
+    let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+    shape
+        .lookup(&PropertyKey::from_string("\0arguments"))
+        .is_some()
+}
+
 pub(crate) fn array_like_length(this: Value) -> Option<u32> {
     let ptr = this.heap_ptr()?;
     let tag = unsafe { (*(ptr as *const GcHeader)).tag() };

@@ -3793,6 +3793,26 @@ Integration suite: **915 passed, 0 failed, 3 ignored**.
 
 Integration suite: **916 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Array reduce rescan, inherited lengths, Arguments indices (2026-11-14)
+
+- Array reduce/reduceRight now re-run LengthOfArrayLike's element search after
+  the first-element getter returns. A getter that creates new own/prototype
+  properties is therefore visible to the following iteration (previously the
+  precomputed "next index" could be stale and reduce stopped early).
+- The LengthOfArrayLike chain reader follows array and string prototypes, so
+  `new Foo()` with `Foo.prototype = [1]` inherits length 1 for reduce and the
+  other array-iteration methods.
+- Arguments objects keep their fixed `length` when an index at or beyond it is
+  written (`arguments[2] = 9` stores a named extra property; reads see 9,
+  length stays argument count), matching their non-extending length semantics.
+- Numeric extras on arrays are consulted by the property loader before the
+  prototype walk, so arguments/huge-index extras remain readable.
+- Test262 Array **2742 → 2773/3081**, reduce **244 → 256/260**,
+  reduceRight **241 → 255/260**.
+- Regression: `test_array_reduce_prototype_growth_and_arguments_indices`.
+
+Integration suite: **917 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

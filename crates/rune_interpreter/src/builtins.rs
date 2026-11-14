@@ -15631,7 +15631,18 @@ fn length_walk_value(this: Value) -> Value {
         let Some(cptr) = current.heap_ptr() else {
             return Value::undefined();
         };
-        if unsafe { (*(cptr as *const GcHeader)).tag() } != TAG_OBJECT {
+        let chain_tag = unsafe { (*(cptr as *const GcHeader)).tag() };
+        if chain_tag == TAG_ARRAY {
+            let len = unsafe { RuneArray::length(cptr as *mut RuneArray) };
+            return length_value(len as u64);
+        }
+        if chain_tag == TAG_STRING {
+            let len = unsafe { HeapString::to_string(cptr as *mut HeapString) }
+                .encode_utf16()
+                .count();
+            return length_value(len as u64);
+        }
+        if chain_tag != TAG_OBJECT {
             return Value::undefined();
         }
         let shape = unsafe { JSObject::shape_ptr(cptr as *mut JSObject) };

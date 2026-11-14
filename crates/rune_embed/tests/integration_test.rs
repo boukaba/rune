@@ -18303,3 +18303,48 @@ fn test_function_prototype_primitive_and_date_new_target() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_array_reduce_prototype_growth_and_arguments_indices() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            function Foo() {}
+            Foo.prototype = [1];
+            var inheritedLength = new Foo().reduce(function (a, v) { return a + v; });
+
+            var seen = [];
+            var obj = { length: 2 };
+            Object.defineProperty(obj, "0", {
+                get: function () {
+                    Object.defineProperty(Object.prototype, "1", {
+                        get: function () { return 6.99; },
+                        configurable: true
+                    });
+                    return 5;
+                },
+                configurable: true
+            });
+            Array.prototype.reduce.call(obj, function (acc, v, i) {
+                seen.push(v);
+                return acc;
+            });
+            delete Object.prototype[1];
+
+            function args(a, b) {
+                arguments[2] = 9;
+                return [arguments.length, arguments[2]];
+            }
+            var a = args(1, 2);
+
+            [
+                inheritedLength === 1,
+                seen.length === 1 && seen[0] === 6.99,
+                a[0] === 2 && a[1] === 9
+            ].join("|") === "true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

@@ -3922,6 +3922,24 @@ Integration suite: **922 passed, 0 failed, 3 ignored**.
 
 Integration suite: **923 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Arrow function parameter grammar (2026-11-14)
+
+- The parser speculatively parses a full ArrowParameters list: binding
+  patterns (array/object, nested), defaults (`= expr`), multiple parameters,
+  rest parameters and trailing commas. If the closing paren is not followed by
+  `=>`, the lexer/token/error state is restored and the parens parse as an
+  ordinary expression.
+- Lexer is now `Clone`, enabling cheap parser backtracking without changing
+  token streams.
+- This fixes single destructured parameters (`([a]) =>`, `({x}) =>`),
+  parameter defaults (`([a] = [1]) =>`, `(x = 2) =>`), defaults on later
+  parameters, and trailing commas.
+- Test262 language/expressions/arrow-function **43 → 223/343**,
+  arrow-function/dstr **0 → 172/231**.
+- Regression: `test_arrow_destructuring_parameters_and_defaults`.
+
+Integration suite: **924 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

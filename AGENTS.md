@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Arrow parameter grammar (2026-11-14)**: speculative full ArrowParameters parse (patterns, defaults, rest, trailing comma) with lexer backtracking. arrow **223/343**, arrow/dstr **172/231**. Integration **924**.
 - **IteratorClose in array patterns + class static name (2026-11-14)**: non-exhausted patterns close iterators, function DefineProperty handles name/length through OrdinaryDefineOwnProperty. for **325/385**, for/dstr **267/285 (0 fail)**, for-of **357**, for-of/dstr **276**, object/dstr **348**. Integration **923**.
 - **const for-head bindings + sync generator calls (2026-11-14)**: no const copy-back in per-iteration wrap-up, call_value_sync returns generator instances. for **313/385**, for/dstr **255/285**. Integration **922**.
 - **Catch binding patterns + optional catch (2026-11-14)**: destructured catch params via temp+lexical declaration, optional catch binding. try **137/201**, try/dstr **83/93**. Integration **921**.

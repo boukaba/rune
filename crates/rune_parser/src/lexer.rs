@@ -145,6 +145,7 @@ impl Token {
     }
 }
 
+#[derive(Clone)]
 pub struct Lexer {
     chars: Vec<char>,
     pos: usize,

@@ -18571,3 +18571,35 @@ fn test_destructuring_iterator_close_and_class_static_name() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_arrow_destructuring_parameters_and_defaults() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var f = ([a, { b }], c = 3, ...rest) => a + b + c + (rest[0] || 0);
+            var defaults = f([1, { b: 2 }]);
+            var supplied = f([4, { b: 5 }], 6, 7);
+
+            var g = ({ x: y = 9 } = {}) => y;
+            var patternDefault = g();
+
+            var h = (a, b = 39,) => a + b;
+            var trailingComma = h(1);
+
+            var nested = ([{ value = 11 } = {}]) => value;
+            var nestedDefault = nested([]);
+
+            [
+                defaults === 6,
+                supplied === 22,
+                patternDefault === 9,
+                trailingComma === 40,
+                nestedDefault === 11
+            ].join("|") === "true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

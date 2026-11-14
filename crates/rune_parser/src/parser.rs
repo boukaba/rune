@@ -1962,6 +1962,63 @@ impl Parser {
                         end: self.span().end,
                     });
                 }
+                // Speculative ArrowParameters parse: binding patterns with
+                // defaults, multiple parameters and a trailing comma. If the
+                // closing paren is not followed by `=>`, restore the lexer and
+                // parse the parens as an ordinary expression.
+                {
+                    let saved_lexer = self.lexer.clone();
+                    let saved_tok = self.tok.clone();
+                    let saved_errors = self.errors.len();
+                    let mut params: Vec<Pattern> = Vec::new();
+                    let mut rest_name: Option<Box<str>> = None;
+                    let mut ok = true;
+                    loop {
+                        if self.tok.kind == TokenKind::Ellipsis {
+                            self.advance();
+                            if self.tok.kind == TokenKind::Identifier {
+                                rest_name = Some(self.tok.value.clone().into_boxed_str());
+                                self.advance();
+                            } else {
+                                ok = false;
+                            }
+                            break;
+                        }
+                        if !matches!(
+                            self.tok.kind,
+                            TokenKind::Identifier | TokenKind::LBrace | TokenKind::LBracket
+                        ) {
+                            ok = false;
+                            break;
+                        }
+                        let mut pat = self.parse_binding_pattern();
+                        if self.tok.kind == TokenKind::EqAssign {
+                            self.advance();
+                            let default = self.parse_expr(0);
+                            pat = Pattern::Default(Box::new(pat), Box::new(default));
+                        }
+                        params.push(pat);
+                        if self.tok.kind == TokenKind::Comma {
+                            self.advance();
+                            if self.tok.kind == TokenKind::RParen {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    if ok && self.tok.kind == TokenKind::RParen {
+                        self.advance();
+                        if self.tok.kind == TokenKind::Arrow
+                            && (!params.is_empty() || rest_name.is_some())
+                        {
+                            return self.parse_arrow_body(params, rest_name, false, start);
+                        }
+                    }
+                    self.lexer = saved_lexer;
+                    self.tok = saved_tok;
+                    self.errors.truncate(saved_errors);
+                }
                 // Handle (...rest) => arrow with rest param only
                 if self.tok.kind == TokenKind::Ellipsis {
                     self.advance();
@@ -2092,6 +2149,15 @@ impl Parser {
                             false,
                             start,
                         );
+                    }
+                    if let Expr::Assign(left, right, _) = &expr {
+                        if let Expr::Identifier(name, id_span) = left.as_ref() {
+                            let pat = Pattern::Default(
+                                Box::new(Pattern::Identifier(name.clone(), *id_span, None)),
+                                right.clone(),
+                            );
+                            return self.parse_arrow_body(vec![pat], None, false, start);
+                        }
                     }
                 }
                 expr

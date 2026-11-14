@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Object.assign Get/Set semantics (2026-11-14)**: wrapper targets, observable Gets, symbol keys, accessor setters, throw on failed Set. Object **2983/3411**, assign **34/38**. Integration **902**.
 - **Object.create own-key semantics (2026-11-14)**: null TypeError, primitive ToObject, array/string keys, observable descriptor Gets, live return. Object **2965/3411**, create **307/320**. Integration **901**.
 - **defineProperties exotics + accessor presence (2026-11-14)**: array/String extra-props targets, `{get:undefined}` stays accessor. Object **2950/3411**, defineProperties **507/632**, defineProperty **1014/1131**. Integration **900**.
 - **Object.getOwnPropertySymbols (2026-11-14)**: own symbol keys across plain/array/function/String objects, primitive/null handling. JSON **129/165**, rawJSON **9/10**, Object **2875/3411**, symbols **8/12**. Integration **899**.

@@ -17613,3 +17613,35 @@ fn test_object_create_properties_object() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_object_assign_string_target_symbols_accessors() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var strTarget = Object.assign("test", { a: 1 });
+            var sealed = Object.seal({ foo: 1 });
+            Object.assign(sealed, { foo: 2 });
+            var sym = Symbol("s");
+            var seen = 0;
+            var frozen = Object.freeze({
+                set [sym](v) { seen = v; }
+            });
+            Object.assign(frozen, { [sym]: 7 });
+            var target = {};
+            Object.assign(target, { b: 1, [sym]: 2 });
+            [
+                typeof strTarget === "object",
+                strTarget.valueOf() === "test",
+                strTarget.a === 1,
+                sealed.foo === 2,
+                seen === 7,
+                target[sym] === 2,
+                target.b === 1
+            ].join("|") === "true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

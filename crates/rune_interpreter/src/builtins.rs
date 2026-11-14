@@ -9514,9 +9514,7 @@ pub fn object_entries(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
 /// the order object_own_entries already produces) onto target.
 pub fn object_assign(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let target = args.first().copied().unwrap_or(Value::undefined());
-    // Step 1: ToObject(target) — null/undefined throw; primitives become
-    // fresh empty objects (engine ToObject-lite).
-    let target_obj = if target.is_null() || target.is_undefined() {
+    if target.is_null() || target.is_undefined() {
         vm.set_pending_exception(crate::errors::error_object(
             gc,
             &vm.error_protos,
@@ -9524,35 +9522,176 @@ pub fn object_assign(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut 
             "Cannot convert undefined or null to object",
         ));
         return Value::undefined();
-    } else if target.heap_ptr().is_none() {
-        let shape = Shape::empty();
-        let ptr = JSObject::allocate(gc, shape, &[]);
-        unsafe {
-            if let Some(proto) = vm.object_prototype.heap_ptr() {
-                *((ptr as *mut u8).add(24) as *mut *mut u8) = proto;
-            }
-        }
-        Value::from_heap_ptr(ptr as *mut u8)
-    } else {
+    }
+    // ToObject(target): primitives become real wrappers so valueOf/length and
+    // ordinary assignment behave like the spec.
+    let target_obj = if is_object_value(target) {
         target
+    } else {
+        crate::vm::to_object_value(gc, target, vm)
     };
-    // Step 3: for each source (skip undefined/null)
+    let result_root = vm.temp_roots.len();
+    vm.temp_roots.push(target_obj);
     for &next_source in args.iter().skip(1) {
         if next_source.is_null() || next_source.is_undefined() {
             continue;
         }
-        let entries = match object_own_entries(gc, next_source, vm) {
-            Ok(e) => e,
-            Err(()) => return Value::undefined(),
+        let source = if is_object_value(next_source) {
+            next_source
+        } else {
+            crate::vm::to_object_value(gc, next_source, vm)
         };
-        for (key, value) in entries {
-            // Set(targetObj, key, value, true) via the VM's store path so
-            // dense arrays / extra_props / shapes all behave identically.
-            let key_val = Value::from_heap_ptr(HeapString::allocate(gc, &key) as *mut u8);
-            crate::vm::do_store_property(target_obj, key_val, value, gc, vm);
+        vm.temp_roots.push(source);
+        let source_slot = vm.temp_roots.len() - 1;
+        let entries = match object_own_entries(gc, source, vm) {
+            Ok(e) => e,
+            Err(()) => {
+                vm.temp_roots.truncate(result_root);
+                return Value::undefined();
+            }
+        };
+        let mut symbol_ids: Vec<u32> = Vec::new();
+        if let Some(sptr) = source.heap_ptr() {
+            let tag = unsafe { (*(sptr as *const GcHeader)).tag() };
+            let mut collect = |obj: *mut JSObject| {
+                let shape = unsafe { JSObject::shape_ptr(obj) };
+                for (pk, _) in &shape.entries {
+                    if let Some(id) = pk.symbol_id() {
+                        if !symbol_ids.contains(&id) {
+                            symbol_ids.push(id);
+                        }
+                    }
+                }
+            };
+            match tag {
+                TAG_OBJECT => collect(sptr as *mut JSObject),
+                TAG_ARRAY => {
+                    let extra = unsafe { RuneArray::extra_props(sptr as *mut RuneArray) };
+                    if !extra.is_null() {
+                        collect(extra as *mut JSObject);
+                    }
+                }
+                TAG_STRING_OBJ => {
+                    let extra = unsafe { StringObject::extra_props(sptr as *mut StringObject) };
+                    if !extra.is_null() {
+                        collect(extra as *mut JSObject);
+                    }
+                }
+                _ => {}
+            }
         }
+        for (key, _) in entries {
+            let live_source = refresh_value(vm.temp_roots[source_slot]);
+            let value = match get_value_sync(gc, vm, live_source, &key) {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    vm.temp_roots.truncate(result_root);
+                    return Value::undefined();
+                }
+            };
+            let live_target = refresh_value(vm.temp_roots[result_root]);
+            let key_val = Value::from_heap_ptr(HeapString::allocate(gc, &key) as *mut u8);
+            let ptr = live_target.heap_ptr().unwrap();
+            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+            let ok = if tag == TAG_OBJECT {
+                // Own accessor wins; otherwise ordinary data store.
+                let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+                let own_setter = shape
+                    .lookup(&PropertyKey::from_string(&key))
+                    .map(|slot| unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) })
+                    .and_then(|v| v.heap_ptr())
+                    .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_ACCESSOR });
+                if own_setter {
+                    match set_value_sync(gc, vm, live_target, &key, value) {
+                        Ok(()) => true,
+                        Err(e) => {
+                            vm.set_pending_exception(e);
+                            vm.temp_roots.truncate(result_root);
+                            return Value::undefined();
+                        }
+                    }
+                } else {
+                    crate::vm::do_store_property(live_target, key_val, value, gc, vm)
+                }
+            } else {
+                crate::vm::do_store_property(live_target, key_val, value, gc, vm)
+            };
+            if !ok {
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    &format!("Cannot assign to read only property '{key}'"),
+                ));
+                vm.temp_roots.truncate(result_root);
+                return Value::undefined();
+            }
+        }
+        for id in symbol_ids {
+            let live_source = refresh_value(vm.temp_roots[source_slot]);
+            let key_val = Value::symbol(id);
+            let value = match get_property_value_sync(gc, vm, live_source, key_val) {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    vm.temp_roots.truncate(result_root);
+                    return Value::undefined();
+                }
+            };
+            vm.temp_roots.push(value);
+            let value_slot = vm.temp_roots.len() - 1;
+            let live_target = refresh_value(vm.temp_roots[result_root]);
+            let pk = PropertyKey::from_symbol(id);
+            let tptr = live_target.heap_ptr().unwrap();
+            let own_setter = if unsafe { (*(tptr as *const GcHeader)).tag() } == TAG_OBJECT {
+                let shape = unsafe { JSObject::shape_ptr(tptr as *mut JSObject) };
+                shape
+                    .lookup(&pk)
+                    .map(|slot| unsafe { JSObject::get_slot(tptr as *mut JSObject, slot) })
+                    .and_then(|v| v.heap_ptr())
+                    .filter(|p| unsafe { (*(*p as *const GcHeader)).tag() == TAG_ACCESSOR })
+                    .map(|p| unsafe { rune_core::accessor::AccessorPair::setter(p) })
+            } else {
+                None
+            };
+            if let Some(setter) = own_setter {
+                if setter.is_undefined() || setter.is_null() {
+                    vm.set_pending_exception(crate::errors::error_object(
+                        gc,
+                        &vm.error_protos,
+                        crate::errors::ErrorKind::TypeError,
+                        "Cannot assign to a getter-only property",
+                    ));
+                    vm.temp_roots.truncate(result_root);
+                    return Value::undefined();
+                }
+                let value = vm.temp_roots[value_slot];
+                if let Err(e) = vm.call_value_sync(gc, setter, live_target, &[value]) {
+                    vm.set_pending_exception(e);
+                    vm.temp_roots.truncate(result_root);
+                    return Value::undefined();
+                }
+            } else {
+                let value = vm.temp_roots[value_slot];
+                if !crate::vm::do_store_property(live_target, key_val, value, gc, vm) {
+                    vm.set_pending_exception(crate::errors::error_object(
+                        gc,
+                        &vm.error_protos,
+                        crate::errors::ErrorKind::TypeError,
+                        "Cannot assign to read only symbol property",
+                    ));
+                    vm.temp_roots.truncate(result_root);
+                    return Value::undefined();
+                }
+            }
+            vm.temp_roots.truncate(value_slot);
+        }
+        vm.temp_roots.truncate(source_slot);
     }
-    target_obj
+    let result = vm.temp_roots[result_root];
+    vm.temp_roots.truncate(result_root);
+    result
 }
 
 /// Object.is(value1, value2) — §20.1.2.15 SameValue: NaN↔NaN true, ±0 distinct.

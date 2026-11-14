@@ -3434,6 +3434,24 @@ Integration suite: **900 passed, 0 failed, 3 ignored**.
 
 Integration suite: **901 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Object.assign Get/Set semantics (2026-11-14)
+
+- Rewrote `Object.assign` around spec operations:
+  - ToObject(target) creates real String/Number/Boolean/Symbol wrappers, so
+    `Object.assign("test", …)` returns an object whose `valueOf()` is `"test"`;
+  - source own enumerable string keys are read with an observable `Get`
+    (accessor getters run), followed by own enumerable symbol keys in
+    insertion order;
+  - target assignment invokes own accessor setters with the receiver, uses the
+    ordinary store path otherwise, and throws TypeError when `Set` fails
+    (non-writable data, sealed/frozen creation);
+  - target/source/value roots are traced across getter/setter calls.
+- Test262: Object **2965 → 2983/3411**, Object.assign **16 → 34/38**
+  (remaining four are Proxy cases).
+- Regression: `test_object_assign_string_target_symbols_accessors`.
+
+Integration suite: **902 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

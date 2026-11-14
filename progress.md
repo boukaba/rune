@@ -3885,6 +3885,25 @@ Integration suite: **920 passed, 0 failed, 3 ignored**.
 
 Integration suite: **921 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — const for-head bindings + generator iterators through sync calls (2026-11-14)
+
+- Per-iteration `const` bindings in C-style `for` heads are no longer copied
+  back into the outer binding during the loop wrap-up. The copy is skipped for
+  the whole head when the declaration kind is const, so
+  `for (const [x] = …; …)` initializes once and iterates instead of throwing
+  "Assignment to constant variable"; `let` heads still carry body mutations
+  back for the update expression.
+- `call_value_sync` now recognizes generator function values: it creates a
+  suspended Generator and returns its iterator instance instead of executing
+  the body synchronously. This lets re-entrant helpers (destructuring's
+  iterator reader, Array iterator overrides) call user generator functions
+  without producing "unexpected yield during synchronous call".
+- Test262 language/statements/for **159 → 313/385**, for/dstr
+  **205 → 255/285**.
+- Regression: `test_for_const_destructuring_and_generator_iterator_binding`.
+
+Integration suite: **922 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

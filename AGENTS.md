@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **const for-head bindings + sync generator calls (2026-11-14)**: no const copy-back in per-iteration wrap-up, call_value_sync returns generator instances. for **313/385**, for/dstr **255/285**. Integration **922**.
 - **Catch binding patterns + optional catch (2026-11-14)**: destructured catch params via temp+lexical declaration, optional catch binding. try **137/201**, try/dstr **83/93**. Integration **921**.
 - **Destructuring iterator/rest/name inference (2026-11-14)**: iterator-protocol array patterns + rest, object rest excluding opcode (getters/enumerability), catchable nullish destructuring, inferred anonymous function/class names. object **494/1170**, dstr **332/561**, for-of **345/751**, for-of/dstr **264/569**. Integration **920**.
 - **for-of per-iteration bindings + destructuring captures + return cleanup (2026-11-14)**: fresh body lexical per iteration, pattern binding env registration, pre-unwind stack normalization, find-family hole visits, Array toLocaleString. Array **2783/3081**, for-of **216**, for **159**. Integration **918**.

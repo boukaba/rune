@@ -1963,6 +1963,8 @@ impl Emitter {
                 if let Some(init_stmt) = init {
                     self.emit_statement(init_stmt);
                 }
+                let init_is_const =
+                    matches!(init.as_deref(), Some(Stmt::Var(VarKind::Const, _, _)));
                 // Collect per-iteration let variable info
                 let mut per_iteration_vars: Vec<(String, usize)> = Vec::new();
                 if init_has_scope {
@@ -2064,7 +2066,13 @@ impl Emitter {
                     self.env_scope_stack.truncate(saved_env_depth);
                     self.env_scope_is_per_iter.truncate(saved_env_depth);
                     if update.is_none() {
-                        for (k, (_, outer_slot)) in per_iteration_vars.iter().enumerate() {
+                        for (k, (_name, outer_slot)) in per_iteration_vars.iter().enumerate() {
+                            // const head bindings are initialized once and may
+                            // not be written again; carrying the env value back
+                            // would throw "Assignment to constant variable".
+                            if init_is_const {
+                                continue;
+                            }
                             self.emit(Opcode::LoadCaptured, vec![0, k as i64]);
                             self.emit(Opcode::StoreLexical, vec![*outer_slot as i64]);
                         }
@@ -2073,7 +2081,10 @@ impl Emitter {
                     if let Some(upd) = update {
                         self.emit_expression(upd);
                         self.emit(Opcode::Pop, vec![]);
-                        for (i, (_, outer_slot)) in per_iteration_vars.iter().enumerate() {
+                        for (i, (_name, outer_slot)) in per_iteration_vars.iter().enumerate() {
+                            if init_is_const {
+                                continue;
+                            }
                             let inner_slot = shadow_start_slot + i;
                             self.emit(
                                 Opcode::CopyLexical,

@@ -5581,6 +5581,28 @@ impl Vm {
                 "value is not callable",
             ));
         }
+        {
+            let func_idx = unsafe { Func::func_index(ptr as *mut Func) } as usize;
+            let creator_prog =
+                unsafe { &*(Func::prog_ptr(ptr as *mut Func) as *const BytecodeProgram) };
+            if func_idx < creator_prog.functions.len()
+                && creator_prog.functions[func_idx].is_generator
+            {
+                let func_prog = &creator_prog.functions[func_idx];
+                let mut gen_locals = if func_prog.named_function {
+                    vec![callee]
+                } else {
+                    vec![]
+                };
+                gen_locals.extend(args.iter().copied());
+                let mut g = Generator::new(gen_locals, func_prog as *const BytecodeProgram);
+                g.this = this;
+                g.env = unsafe { Func::env_ptr(ptr as *mut Func) };
+                let gen_id = self.generators.len();
+                self.generators.push(g);
+                return Ok(crate::builtins::make_generator_instance(gc, self, gen_id));
+            }
+        }
         let floor = self.frames.len();
         let base = self.stack.len();
         self.push_callback_call(gc, callee, this, args.to_vec());

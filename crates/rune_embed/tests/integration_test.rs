@@ -18501,3 +18501,37 @@ fn test_catch_binding_patterns_and_optional_binding() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_for_const_destructuring_and_generator_iterator_binding() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var iterCount = 0;
+            var sums = 0;
+            for (const [{ x, y, z } = { x: 44, y: 55, z: 66 }] = [{ x: 11, y: 22, z: 33 }];
+                 iterCount < 2;) {
+                sums += x + y + z;
+                iterCount++;
+            }
+
+            var saved = Array.prototype[Symbol.iterator];
+            Array.prototype[Symbol.iterator] = function* () {
+                yield 1;
+                yield 2;
+            };
+            var [a, b] = [];
+            Array.prototype[Symbol.iterator] = saved;
+
+            [
+                sums === 132,
+                iterCount === 2,
+                a === 1,
+                b === 2
+            ].join("|") === "true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

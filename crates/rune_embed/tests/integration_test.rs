@@ -18089,3 +18089,53 @@ fn test_proxy_revocable_and_meta_traps() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_proxy_chaining_reflect_and_function_protocols() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var inner = new Proxy({ a: 1 }, {
+                get: function (t, k) { return k === "g" ? 5 : t[k]; },
+                has: function (t, k) { return k === "h"; },
+                deleteProperty: function (t, k) { delete t[k]; return true; }
+            });
+            var outer = new Proxy(inner, {});
+            var chainedGet = outer.a;
+            var chainedTrap = outer.g;
+            var chainedHas = ("h" in outer) && !("a" in outer);
+            var chainedDelete = delete outer.a;
+            var innerGone = inner.a === undefined;
+
+            var zero = new Proxy({}, {
+                set: function () { return 0; },
+                defineProperty: function () { return 0; },
+                setPrototypeOf: function () { return 0; }
+            });
+            var setFalse = Reflect.set(zero, "x", 1) === false;
+            var defineFalse = Reflect.defineProperty(zero, "y", { value: 1 }) === false;
+            var protoFalse = Reflect.setPrototypeOf(zero, {}) === false;
+
+            var fn = function (a, b) { return a * 10 + b; };
+            var fp = new Proxy(fn, {});
+            var callOk = fp.call(null, 4, 2) === 42;
+            var applyOk = fp.apply(null, [7, 1]) === 71;
+
+            [
+                chainedGet === 1,
+                chainedTrap === 5,
+                chainedHas,
+                chainedDelete,
+                innerGone,
+                setFalse,
+                defineFalse,
+                protoFalse,
+                callOk,
+                applyOk
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

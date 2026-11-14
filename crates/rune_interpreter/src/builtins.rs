@@ -1706,7 +1706,7 @@ pub fn boolean_prototype_to_string(
         };
         v
     };
-    let b = v.to_boolean().unwrap_or(false);
+    let b = v.to_bool();
     Value::from_heap_ptr(HeapString::allocate(gc, if b { "true" } else { "false" }) as *mut u8)
 }
 
@@ -3914,7 +3914,7 @@ fn reflect_target(gc: &mut SemiSpace, args: &[Value], vm: &mut Vm) -> Option<Val
 }
 
 pub fn reflect_get(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some(target) = reflect_target(gc, args, vm) else {
+    let Some(mut target) = reflect_target(gc, args, vm) else {
         return Value::undefined();
     };
     let key = match reflect_key_value(gc, vm, args.get(1).copied().unwrap_or(Value::undefined())) {
@@ -3925,6 +3925,16 @@ pub fn reflect_get(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm
         }
     };
     let receiver = args.get(2).copied().unwrap_or(target);
+    if let Some((inner, _h, _r)) = crate::vm::proxy_parts(target) {
+        match vm.proxy_trap_invoke_public(gc, target, "get", &[inner, key, receiver]) {
+            Ok(Some(v)) => return v,
+            Ok(None) => target = inner,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
+    }
     match get_property_value_sync_receiver(gc, vm, target, key, receiver) {
         Ok(v) => v,
         Err(e) => {
@@ -3935,7 +3945,7 @@ pub fn reflect_get(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm
 }
 
 pub fn reflect_set(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some(target) = reflect_target(gc, args, vm) else {
+    let Some(mut target) = reflect_target(gc, args, vm) else {
         return Value::undefined();
     };
     let key = match reflect_key_value(gc, vm, args.get(1).copied().unwrap_or(Value::undefined())) {
@@ -3947,6 +3957,16 @@ pub fn reflect_set(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm
     };
     let value = args.get(2).copied().unwrap_or(Value::undefined());
     let receiver = args.get(3).copied().unwrap_or(target);
+    if let Some((inner, _h, _r)) = crate::vm::proxy_parts(target) {
+        match vm.proxy_trap_invoke_public(gc, target, "set", &[inner, key, value, receiver]) {
+            Ok(Some(v)) => return Value::boolean(v.to_bool()),
+            Ok(None) => target = inner,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
+    }
     let base = vm.temp_roots.len();
     vm.temp_roots.push(target);
     vm.temp_roots.push(key);
@@ -4055,7 +4075,7 @@ pub fn reflect_set(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm
 }
 
 pub fn reflect_has(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some(target) = reflect_target(gc, args, vm) else {
+    let Some(mut target) = reflect_target(gc, args, vm) else {
         return Value::undefined();
     };
     let key = match reflect_key_value(gc, vm, args.get(1).copied().unwrap_or(Value::undefined())) {
@@ -4065,6 +4085,16 @@ pub fn reflect_has(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm
             return Value::undefined();
         }
     };
+    if let Some((inner, _h, _r)) = crate::vm::proxy_parts(target) {
+        match vm.proxy_trap_invoke_public(gc, target, "has", &[inner, key]) {
+            Ok(Some(v)) => return Value::boolean(v.to_bool()),
+            Ok(None) => target = inner,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
+    }
     Value::boolean(crate::vm::has_property(
         target,
         key,
@@ -4097,7 +4127,7 @@ pub fn reflect_define_property(
     args: &[Value],
     vm: &mut Vm,
 ) -> Value {
-    let Some(target) = reflect_target(gc, args, vm) else {
+    let Some(mut target) = reflect_target(gc, args, vm) else {
         return Value::undefined();
     };
     let key = match reflect_key_value(gc, vm, args.get(1).copied().unwrap_or(Value::undefined())) {
@@ -4115,6 +4145,16 @@ pub fn reflect_define_property(
             return Value::undefined();
         }
     };
+    if let Some((inner, _h, _r)) = crate::vm::proxy_parts(target) {
+        match vm.proxy_trap_invoke_public(gc, target, "defineProperty", &[inner, key, descriptor]) {
+            Ok(Some(v)) => return Value::boolean(v.to_bool()),
+            Ok(None) => target = inner,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
+    }
     let Some(pk) = crate::vm::value_to_prop_key(key) else {
         return Value::boolean(false);
     };
@@ -4160,7 +4200,7 @@ pub fn reflect_set_prototype_of(
     args: &[Value],
     vm: &mut Vm,
 ) -> Value {
-    let Some(target) = reflect_target(gc, args, vm) else {
+    let Some(mut target) = reflect_target(gc, args, vm) else {
         return Value::undefined();
     };
     let proto = args.get(1).copied().unwrap_or(Value::undefined());
@@ -4172,6 +4212,16 @@ pub fn reflect_set_prototype_of(
             "Reflect.setPrototypeOf prototype is not an object",
         ));
         return Value::undefined();
+    }
+    if let Some((inner, _h, _r)) = crate::vm::proxy_parts(target) {
+        match vm.proxy_trap_invoke_public(gc, target, "setPrototypeOf", &[inner, proto]) {
+            Ok(Some(v)) => return Value::boolean(v.to_bool()),
+            Ok(None) => target = inner,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
     }
     let tptr = target.heap_ptr().unwrap();
     let pptr = if proto.is_null() {
@@ -7620,7 +7670,7 @@ fn fill_collection_sync(
             }
         };
         let done = match get_value_sync(gc, vm, result, "done") {
-            Ok(v) => v.to_boolean().unwrap_or(false),
+            Ok(v) => v.to_bool(),
             Err(e) => {
                 close_iterator(gc, vm, vm.temp_roots[islot]);
                 vm.temp_roots.truncate(base);
@@ -9393,7 +9443,7 @@ fn sort_own_entries(entries: &mut [(String, Value)]) {
 
 fn object_own_entries_mode(
     gc: &mut SemiSpace,
-    mut val: Value,
+    val: Value,
     vm: &mut Vm,
     only_enumerable: bool,
 ) -> Result<Vec<(String, Value)>, ()> {
@@ -9470,7 +9520,7 @@ fn object_own_entries_mode(
             }
             return Ok(out);
         }
-        val = target;
+        return object_own_entries_mode(gc, target, vm, only_enumerable);
     }
     if let Some(ptr) = val.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
@@ -10500,7 +10550,7 @@ pub fn map_group_by(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut V
                     }
                 };
                 let done = match get_value_sync(gc, vm, result, "done") {
-                    Ok(v) => v.to_boolean().unwrap_or(false),
+                    Ok(v) => v.to_bool(),
                     Err(e) => {
                         vm.temp_roots.truncate(root_base);
                         vm.set_pending_exception(e);
@@ -11042,7 +11092,7 @@ pub fn object_set_prototype_of(
     if let Some((target, _h, _r)) = crate::vm::proxy_parts(obj) {
         match vm.proxy_trap_invoke_public(gc, obj, "setPrototypeOf", &[target, proto]) {
             Ok(Some(v)) => {
-                if !v.to_boolean().unwrap_or(false) {
+                if !v.to_bool() {
                     vm.set_pending_exception(crate::errors::error_object(
                         gc,
                         &vm.error_protos,
@@ -12192,7 +12242,7 @@ pub fn object_define_property(
         match vm.proxy_trap_invoke_public(gc, target, "defineProperty", &[inner, raw_key, desc_obj])
         {
             Ok(Some(v)) => {
-                if !v.to_boolean().unwrap_or(false) {
+                if !v.to_bool() {
                     vm.set_pending_exception(crate::errors::error_object(
                         gc,
                         &vm.error_protos,
@@ -13228,7 +13278,7 @@ macro_rules! integrity_builtin {
             if let Some((inner, _h, _r)) = crate::vm::proxy_parts(target) {
                 match vm.proxy_trap_invoke_public(gc, target, "preventExtensions", &[inner]) {
                     Ok(Some(v)) => {
-                        if !v.to_boolean().unwrap_or(false) {
+                        if !v.to_bool() {
                             vm.set_pending_exception(crate::errors::error_object(
                                 gc,
                                 &vm.error_protos,
@@ -13276,7 +13326,7 @@ macro_rules! integrity_test_builtin {
             if $kind == 0 {
                 if let Some((inner, _h, _r)) = crate::vm::proxy_parts(target) {
                     match vm.proxy_trap_invoke_public(gc, target, "isExtensible", &[inner]) {
-                        Ok(Some(v)) => return Value::boolean(v.to_boolean().unwrap_or(false)),
+                        Ok(Some(v)) => return Value::boolean(v.to_bool()),
                         Ok(None) => {}
                         Err(e) => {
                             vm.set_pending_exception(e);
@@ -19308,7 +19358,7 @@ pub fn math_sum_precise(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &m
             }
         };
         let done = match get_value_sync(gc, vm, result, "done") {
-            Ok(v) => v.to_boolean().unwrap_or(false),
+            Ok(v) => v.to_bool(),
             Err(e) => {
                 close_iterator(gc, vm, vm.temp_roots[base]);
                 vm.temp_roots.truncate(base);
@@ -21109,6 +21159,15 @@ pub fn call_builtin(_gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
             }
         }
     }
+    if crate::vm::proxy_parts(target).is_some() {
+        match vm.call_value_sync(_gc, target, new_this, &call_args) {
+            Ok(v) => return v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
+    }
     // If target is a JS function, use the pending callback pattern.
     if let Some(ptr) = target.heap_ptr() {
         let tag = unsafe { (*(ptr as *const rune_core::gc::GcHeader)).tag() };
@@ -21136,6 +21195,21 @@ pub fn apply_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
     let target = this;
     let new_this = args.first().copied().unwrap_or(Value::undefined());
     let arg_array = args.get(1).copied().unwrap_or(Value::undefined());
+    if crate::vm::proxy_parts(target).is_some() {
+        let p_args: Vec<Value> = match crate::vm::array_like_length(arg_array) {
+            Some(len) => (0..len)
+                .map(|i| crate::vm::array_like_index(arg_array, i).unwrap_or(Value::undefined()))
+                .collect(),
+            None => Vec::new(),
+        };
+        match vm.call_value_sync(gc, target, new_this, &p_args) {
+            Ok(v) => return v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
+    }
     if target == vm.promise_constructor {
         let p_args: Vec<Value> = match crate::vm::array_like_length(arg_array) {
             Some(len) => (0..len)

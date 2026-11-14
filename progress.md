@@ -3668,6 +3668,26 @@ Integration suite: **910 passed, 0 failed, 3 ignored**.
 
 Integration suite: **911 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Proxy chaining, Array.prototype.length, Reflect traps (2026-11-14)
+
+- Proxy fallbacks now follow proxy chains recursively for get/set/has/delete,
+  ownKeys and Reflect operations (target-is-proxy cases).
+- Trap results use ECMAScript ToBoolean (numbers/strings/objects are truthy),
+  not only boolean tags.
+- `Array.prototype.length` is now a real own data property (0, non-writable,
+  non-enumerable, non-configurable), fixing `"length" in Array.prototype` and
+  inherited array-length checks.
+- `Function.prototype.call/apply` route proxy receivers through the synchronous
+  call path (`apply` trap + target fallback); direct proxy calls, `.call` and
+  `.apply` all work.
+- Reflect.get/set/has/defineProperty/setPrototypeOf now dispatch proxy traps
+  directly and return booleans instead of throwing on `false` trap results.
+- Test262 Proxy **170 → 195/311**, Reflect **143 → 146/153**; Object
+  **3283/3411**, JSON **134/165**.
+- Regression: `test_proxy_chaining_reflect_and_function_protocols`.
+
+Integration suite: **912 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

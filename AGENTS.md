@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Proxy chaining/Reflect/Array.prototype.length (2026-11-14)**: recursive proxy fallback, ToBoolean trap results, Function.call/apply proxies, Reflect trap booleans, real Array.prototype.length. Proxy **195/311**, Reflect **146/153**. Integration **912**.
 - **Proxy stage 2 (2026-11-14)**: revocable + ownKeys/gOPD/defineProperty/setPrototypeOf/extensibility/apply/construct traps, callable typeof. Proxy **170/311**; Object **3283**, JSON **134**, Reflect **143**. Integration **911**.
 - **Proxy foundation (2026-11-14)**: Proxy wrapper/new validation, hidden target/handler/revoked slots, get/set/has/delete/getPrototypeOf traps with target fallback. Proxy **87/311**; Object **3268**, JSON **130**, Array **2668**. Integration **910**.
 - **Array for-in attrs + exotic store gating (2026-11-14)**: per-index enumerability/holes, Date/RegExp writable/integrity stores. Object **3267/3411**, defineProperties **624/632**. Integration **909**.

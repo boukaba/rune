@@ -1792,6 +1792,17 @@ impl Vm {
                 proto_entries.push(("toSorted", sh));
             }
             let arr_proto = make_object(gc, &proto_entries);
+            if let Some(ptr) = arr_proto.heap_ptr() {
+                unsafe {
+                    JSObject::add_property_with_attrs(
+                        ptr as *mut JSObject,
+                        PropertyKey::from_string("length"),
+                        "length".to_string(),
+                        Value::smi(0),
+                        0,
+                    );
+                }
+            }
             self.builtin_wrappers
                 .insert("Array.prototype".to_string(), arr_proto);
             self.array_prototype = arr_proto;
@@ -5490,6 +5501,46 @@ impl Vm {
         this: Value,
         args: &[Value],
     ) -> Result<Value, Value> {
+        if let Some((target, _h, revoked)) = crate::vm::proxy_parts(callee) {
+            if revoked {
+                return Err(crate::errors::error_object(
+                    gc,
+                    &self.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "Cannot call a revoked proxy",
+                ));
+            }
+            let base = self.temp_roots.len();
+            self.temp_roots.push(target);
+            for arg in args {
+                self.temp_roots.push(*arg);
+            }
+            let live_target = self.temp_roots[base];
+            let mut live_args = Vec::with_capacity(args.len());
+            for i in 0..args.len() {
+                live_args.push(self.temp_roots[base + 1 + i]);
+            }
+            let arg_array = crate::builtins::build_array(gc, &live_args, self);
+            let trap =
+                self.proxy_trap_invoke_public(gc, callee, "apply", &[live_target, this, arg_array]);
+            match trap {
+                Ok(Some(v)) => {
+                    self.temp_roots.truncate(base);
+                    return Ok(v);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    self.temp_roots.truncate(base);
+                    return Err(e);
+                }
+            }
+            let live_target = self.temp_roots[base];
+            let call_args = (0..args.len())
+                .map(|i| self.temp_roots[base + 1 + i])
+                .collect::<Vec<_>>();
+            self.temp_roots.truncate(base);
+            return self.call_value_sync(gc, live_target, this, &call_args);
+        }
         if let Some(sid) = callee.as_smi() {
             if sid < 0 {
                 let id = (-sid as usize) - 1;
@@ -6695,6 +6746,40 @@ impl Vm {
         self.proxy_trap_invoke(gc, proxy, trap, args)
     }
 
+    fn proxy_has_chain(
+        &mut self,
+        gc: &mut SemiSpace,
+        mut proxy: Value,
+        key: Value,
+    ) -> Result<(Option<bool>, Value), Value> {
+        loop {
+            let Some((target, _h, _r)) = crate::vm::proxy_parts(proxy) else {
+                return Ok((None, proxy));
+            };
+            match self.proxy_trap_invoke(gc, proxy, "has", &[target, key])? {
+                Some(v) => return Ok((Some(v.to_bool()), proxy)),
+                None => proxy = target,
+            }
+        }
+    }
+
+    fn proxy_delete_chain(
+        &mut self,
+        gc: &mut SemiSpace,
+        mut proxy: Value,
+        key: Value,
+    ) -> Result<(Option<bool>, Value), Value> {
+        loop {
+            let Some((target, _h, _r)) = crate::vm::proxy_parts(proxy) else {
+                return Ok((None, proxy));
+            };
+            match self.proxy_trap_invoke(gc, proxy, "deleteProperty", &[target, key])? {
+                Some(v) => return Ok((Some(v.to_bool()), proxy)),
+                None => proxy = target,
+            }
+        }
+    }
+
     fn proxy_trap_invoke(
         &mut self,
         gc: &mut SemiSpace,
@@ -6779,7 +6864,7 @@ impl Vm {
                 None => PropGetOut::Bail(None),
             };
         }
-        if let Some((target, _handler, _revoked)) = crate::vm::proxy_parts(obj) {
+        while let Some((target, _handler, _revoked)) = crate::vm::proxy_parts(obj) {
             match self.proxy_trap_invoke(gc, obj, "get", &[target, raw_key, obj]) {
                 Ok(Some(value)) => return PropGetOut::Ready(value),
                 Ok(None) => obj = target,
@@ -7236,10 +7321,10 @@ impl Vm {
                 };
             }
         }
-        if let Some((target, _handler, _revoked)) = crate::vm::proxy_parts(obj) {
+        while let Some((target, _handler, _revoked)) = crate::vm::proxy_parts(obj) {
             match self.proxy_trap_invoke(gc, obj, "set", &[target, raw_key, value, obj]) {
                 Ok(Some(result)) => {
-                    let ok = result.to_boolean().unwrap_or(false);
+                    let ok = result.to_bool();
                     if !ok && site.is_strict {
                         let err = crate::errors::error_object(
                             gc,
@@ -8517,11 +8602,14 @@ impl Vm {
                 Opcode::In => {
                     let mut obj = self.pop();
                     let key = self.pop();
-                    let mut trapped = None;
-                    if let Some((target, _h, _r)) = crate::vm::proxy_parts(obj) {
-                        match self.proxy_trap_invoke(gc, obj, "has", &[target, key]) {
-                            Ok(Some(v)) => trapped = Some(v.to_boolean().unwrap_or(false)),
-                            Ok(None) => obj = target,
+                    if crate::vm::proxy_parts(obj).is_some() {
+                        match self.proxy_has_chain(gc, obj, key) {
+                            Ok((Some(found), _)) => {
+                                self.push(Value::boolean(found));
+                                self.frames[fi].pc = pc + 1;
+                                continue;
+                            }
+                            Ok((None, fallback)) => obj = fallback,
                             Err(e) => {
                                 if let Some(exit) = self.handle_throw(gc, e) {
                                     return exit;
@@ -8530,8 +8618,7 @@ impl Vm {
                             }
                         }
                     }
-                    let found = trapped
-                        .unwrap_or_else(|| has_property(obj, key, Some(self.function_prototype)));
+                    let found = has_property(obj, key, Some(self.function_prototype));
                     self.push(Value::boolean(found));
                     self.frames[fi].pc = pc + 1;
                 }
@@ -9532,15 +9619,14 @@ impl Vm {
                 Opcode::DeleteProperty => {
                     let raw_key = self.pop();
                     let mut obj = self.pop();
-                    if let Some((target, _h, _r)) = crate::vm::proxy_parts(obj) {
-                        match self.proxy_trap_invoke(gc, obj, "deleteProperty", &[target, raw_key])
-                        {
-                            Ok(Some(v)) => {
-                                self.push(Value::boolean(v.to_boolean().unwrap_or(false)));
+                    if crate::vm::proxy_parts(obj).is_some() {
+                        match self.proxy_delete_chain(gc, obj, raw_key) {
+                            Ok((Some(result), _)) => {
+                                self.push(Value::boolean(result));
                                 self.frames[fi].pc = pc + 1;
                                 continue;
                             }
-                            Ok(None) => obj = target,
+                            Ok((None, fallback)) => obj = fallback,
                             Err(e) => {
                                 if let Some(exit) = self.handle_throw(gc, e) {
                                     return exit;

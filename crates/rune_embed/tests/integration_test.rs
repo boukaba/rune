@@ -17208,3 +17208,38 @@ fn test_regex_character_class_escapes() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_replace_all_dispatch_and_fallback() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var customCalled = 0;
+            var custom = {};
+            custom[Symbol.replace] = function (str, rep) {
+                customCalled += 1;
+                return "custom:" + str + ":" + rep;
+            };
+            var nonGlobalThrows = false;
+            try { "aa".replaceAll(/a/, "z"); } catch (e) { nonGlobalThrows = e instanceof TypeError; }
+            var search = /./g;
+            Object.defineProperty(search, Symbol.replace, { value: undefined });
+            var literal = "aa /./g /./g aa".replaceAll(search, "z");
+            var callback = "a1b1".replaceAll("1", function (m, pos) { return m + pos; });
+            [
+                "aa".replaceAll(/a/g, "z") === "zz",
+                "aaa".replaceAll("a", "b") === "bbb",
+                "a1b1".replaceAll("1", "x") === "axbx",
+                "abc".replaceAll("", "-") === "-a-b-c-",
+                custom[Symbol.replace] && "xy".replaceAll(custom, "R") === "custom:xy:R",
+                customCalled === 1,
+                nonGlobalThrows,
+                literal === "aa z z aa",
+                callback === "a11b13"
+            ].join("|") === "true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

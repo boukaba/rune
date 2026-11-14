@@ -16903,13 +16903,36 @@ pub fn string_replace_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
     }
     let search = args.first().copied().unwrap_or(Value::undefined());
     let replacement = args.get(1).copied().unwrap_or(Value::undefined());
-    // §22.1.3.19 step 2: RegExp searchValue dispatches @@replace before
-    // ToString(this).
-    if search
-        .heap_ptr()
-        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_REGEXP })
-    {
-        let key = Value::symbol(rune_core::symbol::SYM_REPLACE);
+    if !search.is_undefined() && !search.is_null() {
+        let is_re = match is_regexp_value(gc, vm, search) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        };
+        if is_re {
+            let flags_val = match get_value_sync(gc, vm, search, "flags") {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            };
+            let Some(flags) = to_primitive_string(gc, flags_val, vm) else {
+                return Value::undefined();
+            };
+            if !flags.contains('g') {
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "String.prototype.replaceAll requires a global RegExp",
+                ));
+                return Value::undefined();
+            }
+        }
+        let key = Value::symbol(SYM_REPLACE);
         let replacer = match get_property_value_sync(gc, vm, search, key) {
             Ok(v) => v,
             Err(e) => {
@@ -16918,124 +16941,36 @@ pub fn string_replace_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
             }
         };
         if !replacer.is_undefined() && !replacer.is_null() {
-            // The internal replaceAll machine handles function replacers for
-            // the built-in RegExp @@replace; only custom methods need the
-            // generic dispatch path here.
-            let builtin_replace = find_handle(&vm.builtins, "RegExp_prototype_[Symbol.replace]");
-            if is_callable_value(replacement)
-                && builtin_replace.is_some()
-                && Some(replacer) == builtin_replace
-            {
-                // fall through to the internal implementation below
-            } else {
-                return match vm.call_value_sync(gc, replacer, search, &[this, replacement]) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        vm.set_pending_exception(e);
-                        Value::undefined()
-                    }
-                };
+            if !is_callable_value(replacer) {
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "@@replace method is not callable",
+                ));
+                return Value::undefined();
             }
+            return match vm.call_value_sync(gc, replacer, search, &[this, replacement]) {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    Value::undefined()
+                }
+            };
         }
     }
     let Some(s) = to_primitive_string(gc, this, vm) else {
         return Value::undefined();
     };
     let replacement_fn = args.get(1).copied();
-    let is_fn_replacement = replacement_fn.is_some_and(|v| {
-        v.heap_ptr()
-            .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC })
-    });
+    let is_fn_replacement = replacement_fn.is_some_and(is_callable_value);
 
-    // Check if search is a RegExp
-    if let Some(ptr) = search.heap_ptr() {
-        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
-        if tag == TAG_REGEXP {
-            let pattern_ptr = unsafe { RegExp::pattern(ptr) };
-            let pattern = unsafe { HeapString::to_string(pattern_ptr as *mut HeapString) };
-            match rune_regex::parse_regex(&pattern) {
-                Ok(expr) => {
-                    let named = rune_regex::ast::named_captures(&expr);
-                    let nfa = rune_regex::nfa::compile(&expr);
-                    let pike_vm = rune_regex::pikevm::PikeVm::new();
-                    let flags = unsafe { RegExp::flags(ptr) };
-                    if is_fn_replacement {
-                        // Callable replacement: state machine in the Return
-                        // handler re-invokes fn per match (spec §22.1.3.20
-                        // @@replace path: fn(match, ...captures, position, string)).
-                        let fn_val = replacement_fn.unwrap();
-                        match pike_vm.exec_with_flags(&nfa, &s, 0, flags) {
-                            Some(m) => {
-                                let (start, end) = m.groups[0];
-                                let mut fn_args = Vec::with_capacity(m.groups.len() + 2);
-                                let match_str = HeapString::allocate(gc, &s[start..end]);
-                                fn_args.push(Value::from_heap_ptr(match_str as *mut u8));
-                                for i in 1..m.groups.len() {
-                                    let (gs, ge) = m.groups[i];
-                                    let cap_str = HeapString::allocate(gc, &s[gs..ge]);
-                                    fn_args.push(Value::from_heap_ptr(cap_str as *mut u8));
-                                }
-                                fn_args.push(Value::smi(start as i32));
-                                let input_str = HeapString::allocate(gc, &s);
-                                fn_args.push(Value::from_heap_ptr(input_str as *mut u8));
-                                let empty = start == end;
-                                vm.pending_replace_all_op = Some(crate::vm::PendingReplaceAllOp {
-                                    source_frame_depth: 0,
-                                    input: s.clone(),
-                                    search_str: String::new(),
-                                    regex_pattern: Some(pattern.clone()),
-                                    regex_flags: flags,
-                                    fn_val,
-                                    next_pos: if empty { start + 1 } else { end },
-                                    accumulated: s[..start].to_string(),
-                                    last_end: end,
-                                });
-                                vm.push_callback_call(gc, fn_val, Value::undefined(), fn_args);
-                                return Value::undefined();
-                            }
-                            None => {
-                                return Value::from_heap_ptr(
-                                    HeapString::allocate(gc, &s) as *mut u8
-                                );
-                            }
-                        }
-                    }
-                    let replacement = match replacement_to_string(
-                        gc,
-                        vm,
-                        replacement_fn.unwrap_or(Value::undefined()),
-                    ) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            vm.set_pending_exception(e);
-                            return Value::undefined();
-                        }
-                    };
-                    let mut result = String::new();
-                    let mut last_end = 0;
-                    while let Some(m) = pike_vm.exec_with_flags(&nfa, &s, last_end, flags) {
-                        let (start, end) = m.groups[0];
-                        result.push_str(&s[last_end..start]);
-                        result.push_str(&expand_replacement(&s, &m.groups, &replacement, &named));
-                        last_end = end;
-                        if start == end {
-                            // Avoid infinite loop for zero-length matches
-                            result.push_str(&s[last_end..last_end + 1]);
-                            last_end += 1;
-                        }
-                    }
-                    result.push_str(&s[last_end..]);
-                    return Value::from_heap_ptr(HeapString::allocate(gc, &result) as *mut u8);
-                }
-                Err(_) => {
-                    return Value::from_heap_ptr(HeapString::allocate(gc, &s) as *mut u8);
-                }
-            }
-        }
-    }
-
-    // String pattern (original logic)
-    let search_str = arg_to_string(gc, args.first().copied(), vm);
+    // String pattern (no @@replace hook): observable ToString(searchValue).
+    let search_str =
+        match to_primitive_string(gc, args.first().copied().unwrap_or(Value::undefined()), vm) {
+            Some(v) => v,
+            None => return Value::undefined(),
+        };
     if is_fn_replacement {
         // Callable replacement for a string search:
         // fn(searchString, position, string) per occurrence.

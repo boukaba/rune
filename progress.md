@@ -3187,6 +3187,29 @@ Integration suite: **887 passed, 0 failed, 3 ignored**.
 
 Integration suite: **888 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — String replaceAll spec dispatch (2026-11-14)
+
+- `String.prototype.replaceAll` now follows the spec algorithm:
+  - IsRegExp(searchValue) → observable `flags` Get + ToString, TypeError when
+    the flag string lacks `g` (and RequireObjectCoercible on flags);
+  - GetMethod(@@replace) for every non-null search value (including plain
+    objects with a symbol hook), called with the original receiver and
+    replaceValue;
+  - only when no @@replace hook exists does it fall back to ToString(searchValue)
+    string replacement (a RegExp whose @@replace was removed is treated as a
+    literal `/source/flags` string), with observable search/receiver ToString
+    and results coerced through the re-entrant ToString path;
+  - callback results are ToString-coerced observably (throwing toString and
+    Symbol results propagate).
+- Removed the legacy internal RegExp replacement branch from replaceAll.
+- Test262: String **1120 → 1134/1223 (92.7%)**, replaceAll **27 → 41/45**,
+  replace **49/55**.
+- Regression: `test_replace_all_dispatch_and_fallback`.
+- Remaining: RegExp subclass instances (`class RE extends RegExp`) and BigInt
+  primitives.
+
+Integration suite: **889 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

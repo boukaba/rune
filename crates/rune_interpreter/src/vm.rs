@@ -13790,7 +13790,17 @@ impl Vm {
                     if let Some(ref pra) = self.pending_replace_all_op {
                         if self.frames.len() == pra.source_frame_depth {
                             let mut pra = self.pending_replace_all_op.take().unwrap();
-                            let repl_str = crate::builtins::value_to_js_string(result);
+                            let Some(repl_str) =
+                                crate::builtins::to_primitive_string(gc, result, self)
+                            else {
+                                if let Some(exc) = self.pending_exception.take() {
+                                    if let Some(exit) = self.handle_throw(gc, exc) {
+                                        return exit;
+                                    }
+                                    continue;
+                                }
+                                continue;
+                            };
                             pra.accumulated.push_str(&repl_str);
                             let input = pra.input.clone();
                             let search_str = pra.search_str.clone();

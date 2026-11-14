@@ -3647,6 +3647,27 @@ Integration suite: **909 passed, 0 failed, 3 ignored**.
 
 Integration suite: **910 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Proxy stage 2: revocable + meta traps (2026-11-14)
+
+- `Proxy.revocable` now returns `{ proxy, revoke }`; revoke functions are
+  synthetic captured-env functions backed by a GC-rooted proxy table.
+  Revocation clears target/handler and makes every subsequent operation throw
+  TypeError; repeated calls are no-ops.
+- Added trap dispatch for:
+  - `ownKeys` (Object.keys/values/entries/getOwnPropertyNames, filtered against
+    target descriptors, trap order preserved);
+  - `getOwnPropertyDescriptor` and `defineProperty`;
+  - `setPrototypeOf`, `isExtensible`, `preventExtensions`;
+  - `apply` (callable proxies, arguments array, target fallback);
+  - `construct` (object-result validation, target fallback through the normal
+    constructor path).
+- `typeof` reports `"function"` for proxies whose target is callable.
+- Test262 Proxy **87 → 170/311**; Object **3268 → 3283/3411**, JSON
+  **130 → 134/165**, Reflect **137 → 143/153**.
+- Regression: `test_proxy_revocable_and_meta_traps`.
+
+Integration suite: **911 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

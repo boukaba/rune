@@ -18022,3 +18022,70 @@ fn test_proxy_core_traps() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_proxy_revocable_and_meta_traps() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var target = { a: 1, b: 2 };
+            var handler = {
+                ownKeys: function () { return ["b", "x"]; },
+                getOwnPropertyDescriptor: function (t, k) {
+                    return { value: 9, writable: true, enumerable: true, configurable: true };
+                },
+                defineProperty: function (t, k, d) { t[k] = d.value; return true; },
+                isExtensible: function () { return false; },
+                preventExtensions: function () { return true; },
+                setPrototypeOf: function (t, p) { return p === null; }
+            };
+            var p = new Proxy(target, handler);
+            var keys = Object.keys(p).join(",");
+            var names = Object.getOwnPropertyNames(p).join(",");
+            var desc = Object.getOwnPropertyDescriptor(p, "a").value;
+            var defined = Object.defineProperty(p, "c", { value: 5 }) === p && target.c === 5;
+            var protoOk = Object.setPrototypeOf(p, null) === p;
+            var protoBad = false;
+            try { Object.setPrototypeOf(p, {}); } catch (e) { protoBad = e instanceof TypeError; }
+            var ext = Object.isExtensible(p) === false;
+            var prevented = Object.preventExtensions(p) === p;
+
+            var fn = function (x) { return x + 1; };
+            var fp = new Proxy(fn, {});
+            var trapCall = new Proxy(fn, {
+                apply: function (t, th, a) { return t(a[0]) * 2; }
+            });
+            var trapNew = new Proxy(function (x) { this.x = x; }, {
+                construct: function (t, a) { return { q: a[0] * 3 }; }
+            });
+
+            var r = Proxy.revocable({ z: 7 }, {});
+            var before = r.proxy.z;
+            var revokeType = typeof r.revoke === "function";
+            r.revoke();
+            r.revoke();
+            var revoked = false;
+            try { r.proxy.z; } catch (e) { revoked = e instanceof TypeError; }
+
+            [
+                keys === "b",
+                names === "b,x",
+                desc === 9,
+                defined,
+                protoOk && protoBad,
+                ext,
+                prevented,
+                typeof fp === "function",
+                fp(2) === 3,
+                trapCall(3) === 8,
+                new trapNew(4).q === 12,
+                before === 7,
+                revokeType,
+                revoked
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

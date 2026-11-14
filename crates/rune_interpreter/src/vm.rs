@@ -1165,6 +1165,9 @@ pub struct Vm {
     pub aggregate_error_prototype: Value,
     /// Prototype of Test262Error instances (test harness `instanceof`).
     pub test262_error_prototype: Value,
+    /// Proxies referenced by live Proxy.revocable revoke functions.
+    pub proxy_revocables: Vec<Value>,
+    proxy_revoke_prog: *const BytecodeProgram,
     /// Wrapper objects that behave as functions (builtin constructors with
     /// Call/New dispatch). Their [[Prototype]] is %Function.prototype% and
     /// `typeof` reports "function".
@@ -1443,6 +1446,8 @@ impl Vm {
             aggregate_error_constructor: Value::undefined(),
             aggregate_error_prototype: Value::undefined(),
             test262_error_prototype: Value::undefined(),
+            proxy_revocables: Vec::new(),
+            proxy_revoke_prog: std::ptr::null(),
             symbol_prototype: Value::undefined(),
             pending_symbol_dispatch: None,
             pending_symbol_coercion: None,
@@ -2766,6 +2771,18 @@ impl Vm {
             );
             let bridge_prog = Box::new(BytecodeProgram::new(vec![], vec![], vec![bridge_inner]));
             self.promise_bridge_prog = Box::leak(bridge_prog) as *const BytecodeProgram;
+            let revoke_inner = BytecodeProgram::new(
+                vec![
+                    Instruction::new(Opcode::LoadCaptured, vec![0, 0]),
+                    Instruction::new(Opcode::LoadCaptured, vec![0, 1]),
+                    Instruction::new(Opcode::Call, vec![0]),
+                    Instruction::new(Opcode::Return, vec![]),
+                ],
+                vec![],
+                vec![],
+            );
+            let revoke_prog = Box::new(BytecodeProgram::new(vec![], vec![], vec![revoke_inner]));
+            self.proxy_revoke_prog = Box::leak(revoke_prog) as *const BytecodeProgram;
         }
         if find_handle(&self.builtins, "Promise").is_some() {
             let tf = find_handle(&self.builtins, "Promise_prototype_then");
@@ -3521,6 +3538,19 @@ impl Vm {
         {
             let proxy_name = Value::from_heap_ptr(HeapString::allocate(gc, "Proxy") as *mut u8);
             let wrapper = make_object(gc, &[("length", Value::smi(2)), ("name", proxy_name)]);
+            if let Some(h) = find_handle(&self.builtins, "Proxy_revocable") {
+                if let Some(ptr) = wrapper.heap_ptr() {
+                    unsafe {
+                        JSObject::add_property_with_attrs(
+                            ptr as *mut JSObject,
+                            PropertyKey::from_string("revocable"),
+                            "revocable".to_string(),
+                            h,
+                            rune_core::shape::ATTR_WRITABLE | rune_core::shape::ATTR_CONFIGURABLE,
+                        );
+                    }
+                }
+            }
             self.builtin_wrappers.insert("Proxy".to_string(), wrapper);
         }
 
@@ -3976,6 +4006,33 @@ impl Vm {
                 gc,
                 0,
                 self.promise_bridge_prog as *const u8,
+                false,
+                resolved_env as *mut u8,
+            );
+            let resolved_func = if (*(func as *const GcHeader)).is_forwarded() {
+                (*(func as *const GcHeader)).forwarding_addr() as *mut Func
+            } else {
+                func
+            };
+            Value::from_heap_ptr(resolved_func as *mut u8)
+        }
+    }
+
+    pub fn create_proxy_revoke_bridge(&mut self, gc: &mut SemiSpace, id: usize) -> Value {
+        let handle = self.find_builtin_handle("_proxy_revoke");
+        let env = EnvObject::allocate(gc, 2, std::ptr::null_mut()) as *mut u8;
+        unsafe {
+            let resolved_env = if (*(env as *const GcHeader)).is_forwarded() {
+                (*(env as *const GcHeader)).forwarding_addr() as *mut EnvObject
+            } else {
+                env as *mut EnvObject
+            };
+            EnvObject::set_slot(resolved_env, 0, Value::smi(id as i32));
+            EnvObject::set_slot(resolved_env, 1, handle);
+            let func = Func::allocate(
+                gc,
+                0,
+                self.proxy_revoke_prog as *const u8,
                 false,
                 resolved_env as *mut u8,
             );
@@ -4878,6 +4935,9 @@ impl Vm {
         gc.push_root(&self.aggregate_error_constructor as *const Value as *mut u64);
         gc.push_root(&self.aggregate_error_prototype as *const Value as *mut u64);
         gc.push_root(&self.test262_error_prototype as *const Value as *mut u64);
+        for v in self.proxy_revocables.iter_mut() {
+            gc.push_root(v as *mut Value as *mut u64);
+        }
         for v in self.error_ctors.iter_mut() {
             gc.push_root(v as *mut Value as *mut u64);
         }
@@ -10515,6 +10575,12 @@ impl Vm {
                                     .callable_wrappers
                                     .iter()
                                     .any(|w| w.heap_ptr() == Some(ptr))
+                                    || crate::vm::proxy_parts(val).is_some_and(|(target, _, _)| {
+                                        target.heap_ptr().is_some_and(|tp| {
+                                            let t = unsafe { (*(tp as *const GcHeader)).tag() };
+                                            t == TAG_FUNC
+                                        }) || target.is_builtin()
+                                    })
                                 {
                                     "function"
                                 } else {
@@ -11503,7 +11569,76 @@ impl Vm {
                     let argc = instr.operands[0] as usize;
                     let mut args: Vec<Value> = (0..argc).map(|_| self.pop()).collect();
                     args.reverse();
-                    let constructor = self.pop();
+                    let mut constructor = self.pop();
+                    if crate::vm::proxy_parts(constructor).is_some() {
+                        let (target, _h, revoked) = crate::vm::proxy_parts(constructor).unwrap();
+                        if revoked {
+                            let exc = crate::errors::error_object(
+                                gc,
+                                &self.error_protos,
+                                crate::errors::ErrorKind::TypeError,
+                                "Cannot construct a revoked proxy",
+                            );
+                            if let Some(exit) = self.handle_throw(gc, exc) {
+                                return exit;
+                            }
+                            continue;
+                        }
+                        let base = self.temp_roots.len();
+                        self.temp_roots.push(target);
+                        for arg in &args {
+                            self.temp_roots.push(*arg);
+                        }
+                        let live_target = self.temp_roots[base];
+                        let mut live_args = Vec::with_capacity(args.len());
+                        for i in 0..args.len() {
+                            live_args.push(self.temp_roots[base + 1 + i]);
+                        }
+                        let arg_array = crate::builtins::build_array(gc, &live_args, self);
+                        let trap_result = self.proxy_trap_invoke_public(
+                            gc,
+                            constructor,
+                            "construct",
+                            &[live_target, arg_array, constructor],
+                        );
+                        let trap_result = match trap_result {
+                            Ok(v) => v,
+                            Err(e) => {
+                                self.temp_roots.truncate(base);
+                                if let Some(exit) = self.handle_throw(gc, e) {
+                                    return exit;
+                                }
+                                continue;
+                            }
+                        };
+                        if let Some(v) = trap_result {
+                            self.temp_roots.truncate(base);
+                            let is_object = v.heap_ptr().is_some_and(|vp| {
+                                let t = unsafe { (*(vp as *const GcHeader)).tag() };
+                                matches!(t, TAG_OBJECT | TAG_ARRAY | TAG_FUNC)
+                            });
+                            if !is_object {
+                                let exc = crate::errors::error_object(
+                                    gc,
+                                    &self.error_protos,
+                                    crate::errors::ErrorKind::TypeError,
+                                    "Proxy construct trap must return an object",
+                                );
+                                if let Some(exit) = self.handle_throw(gc, exc) {
+                                    return exit;
+                                }
+                                continue;
+                            }
+                            self.push(v);
+                            self.frames[fi].pc = pc + 1;
+                            continue;
+                        }
+                        constructor = self.temp_roots[base];
+                        args = (0..args.len())
+                            .map(|i| self.temp_roots[base + 1 + i])
+                            .collect();
+                        self.temp_roots.truncate(base);
+                    }
                     if constructor == self.text_encoder_constructor {
                         let obj = crate::builtins::text_instance(
                             gc,
@@ -12147,6 +12282,82 @@ impl Vm {
                     args.reverse();
                     let callee = self.pop();
                     let this = self.pop();
+
+                    // Proxy callable: [[Call]] -> apply trap, else target.
+                    if crate::vm::proxy_parts(callee).is_some() {
+                        let (target, _h, revoked) = crate::vm::proxy_parts(callee).unwrap();
+                        if revoked {
+                            let exc = crate::errors::error_object(
+                                gc,
+                                &self.error_protos,
+                                crate::errors::ErrorKind::TypeError,
+                                "Cannot call a revoked proxy",
+                            );
+                            if let Some(exit) = self.handle_throw(gc, exc) {
+                                return exit;
+                            }
+                            continue;
+                        }
+                        let base = self.temp_roots.len();
+                        self.temp_roots.push(target);
+                        self.temp_roots.push(this);
+                        for arg in &args {
+                            self.temp_roots.push(*arg);
+                        }
+                        let live_target = self.temp_roots[base];
+                        let live_this = self.temp_roots[base + 1];
+                        let mut live_args = Vec::with_capacity(args.len());
+                        for i in 0..args.len() {
+                            live_args.push(self.temp_roots[base + 2 + i]);
+                        }
+                        let arg_array = crate::builtins::build_array(gc, &live_args, self);
+                        let trap_result = self.proxy_trap_invoke_public(
+                            gc,
+                            callee,
+                            "apply",
+                            &[live_target, live_this, arg_array],
+                        );
+                        let trap_result = match trap_result {
+                            Ok(v) => v,
+                            Err(e) => {
+                                self.temp_roots.truncate(base);
+                                if let Some(exit) = self.handle_throw(gc, e) {
+                                    return exit;
+                                }
+                                continue;
+                            }
+                        };
+                        let live_target = self.temp_roots[base];
+                        let live_this = self.temp_roots[base + 1];
+                        let call_args = match trap_result {
+                            Some(v) => {
+                                self.temp_roots.truncate(base);
+                                self.push(v);
+                                self.frames[fi].pc = pc + 1;
+                                continue;
+                            }
+                            None => live_args
+                                .iter()
+                                .enumerate()
+                                .map(|(i, _)| self.temp_roots[base + 2 + i])
+                                .collect::<Vec<_>>(),
+                        };
+                        let result = self.call_value_sync(gc, live_target, live_this, &call_args);
+                        self.temp_roots.truncate(base);
+                        match result {
+                            Ok(v) => {
+                                self.push(v);
+                                self.frames[fi].pc = pc + 1;
+                                continue;
+                            }
+                            Err(e) => {
+                                if let Some(exit) = self.handle_throw(gc, e) {
+                                    return exit;
+                                }
+                                continue;
+                            }
+                        }
+                    }
 
                     // Builtin dispatch: negative Smi handles
                     if let Some(smi_val) = callee.as_smi() {
@@ -18958,6 +19169,12 @@ pub extern "C" fn rune_jit_typeof_helper(vm_ptr: *mut u8, value_raw: u64) -> u64
                     .callable_wrappers
                     .iter()
                     .any(|w| w.heap_ptr() == Some(ptr))
+                    || crate::vm::proxy_parts(val).is_some_and(|(target, _, _)| {
+                        target.heap_ptr().is_some_and(|tp| {
+                            let t = unsafe { (*(tp as *const GcHeader)).tag() };
+                            t == TAG_FUNC
+                        }) || target.is_builtin()
+                    })
                 {
                     TYPEOF_FUNCTION
                 } else {

@@ -9393,7 +9393,7 @@ fn sort_own_entries(entries: &mut [(String, Value)]) {
 
 fn object_own_entries_mode(
     gc: &mut SemiSpace,
-    val: Value,
+    mut val: Value,
     vm: &mut Vm,
     only_enumerable: bool,
 ) -> Result<Vec<(String, Value)>, ()> {
@@ -9406,6 +9406,71 @@ fn object_own_entries_mode(
         );
         vm.set_pending_exception(msg);
         return Err(());
+    }
+    if let Some((target, _h, _r)) = crate::vm::proxy_parts(val) {
+        let trap = match vm.proxy_trap_invoke_public(gc, val, "ownKeys", &[target]) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Err(());
+            }
+        };
+        if let Some(result) = trap {
+            let Some(arr_ptr) = result.heap_ptr() else {
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "Proxy ownKeys trap must return an array",
+                ));
+                return Err(());
+            };
+            if unsafe { (*(arr_ptr as *const GcHeader)).tag() } != TAG_ARRAY {
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "Proxy ownKeys trap must return an array",
+                ));
+                return Err(());
+            }
+            let arr = arr_ptr as *mut RuneArray;
+            let len = unsafe { RuneArray::length(arr) } as usize;
+            let mut trap_keys: Vec<String> = Vec::with_capacity(len);
+            for i in 0..len {
+                let key = unsafe { RuneArray::get_element(arr, i) };
+                if key == Value::empty_sentinel() {
+                    continue;
+                }
+                if key.is_symbol() {
+                    continue;
+                }
+                if let Some(kptr) = key.heap_ptr() {
+                    if unsafe { (*(kptr as *const GcHeader)).tag() } == TAG_STRING {
+                        trap_keys.push(unsafe { HeapString::to_string(kptr as *mut HeapString) });
+                        continue;
+                    }
+                }
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "Proxy ownKeys trap returned a non-property-key",
+                ));
+                return Err(());
+            }
+            let target_entries = object_own_entries_mode(gc, target, vm, only_enumerable)?;
+            let mut out = Vec::with_capacity(trap_keys.len());
+            for key in trap_keys {
+                if let Some((_, value)) = target_entries.iter().find(|(k, _)| *k == key) {
+                    out.push((key, *value));
+                } else if !only_enumerable {
+                    out.push((key, Value::undefined()));
+                }
+            }
+            return Ok(out);
+        }
+        val = target;
     }
     if let Some(ptr) = val.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
@@ -9577,6 +9642,52 @@ fn object_own_entries_mode(
 }
 
 /// Build a dense RuneArray from element values, wired to Array.prototype.
+/// Proxy.revocable(target, handler) — { proxy, revoke }.
+pub fn proxy_revocable(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let base = vm.temp_roots.len();
+    let proxy = proxy_create(gc, Value::undefined(), args, vm);
+    if vm.pending_exception.is_some() {
+        return Value::undefined();
+    }
+    vm.temp_roots.push(proxy);
+    let id = vm.proxy_revocables.len();
+    vm.proxy_revocables.push(proxy);
+    let revoke = vm.create_proxy_revoke_bridge(gc, id);
+    vm.temp_roots.push(revoke);
+    let live_proxy = refresh_value(vm.temp_roots[base]);
+    let live_revoke = refresh_value(vm.temp_roots[base + 1]);
+    let shape = Shape::intern(
+        vec![
+            (PropertyKey::from_string("proxy"), 0usize),
+            (PropertyKey::from_string("revoke"), 1usize),
+        ],
+        vec!["proxy".to_string(), "revoke".to_string()],
+    );
+    let obj = JSObject::allocate(gc, shape, &[live_proxy, live_revoke]);
+    if let Some(proto) = vm.object_prototype.heap_ptr() {
+        unsafe { JSObject::set_prototype(obj, proto) };
+    }
+    vm.temp_roots.truncate(base);
+    Value::from_heap_ptr(obj as *mut u8)
+}
+
+/// Internal: revoke the proxy captured by a Proxy.revocable revoke function.
+pub fn proxy_revoke_builtin(
+    _gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    if let Some(id) = this.as_smi() {
+        if id >= 0 {
+            if let Some(proxy) = vm.proxy_revocables.get(id as usize).copied() {
+                crate::vm::revoke_proxy(proxy);
+            }
+        }
+    }
+    Value::undefined()
+}
+
 /// Proxy(target, handler) constructor validation + allocation.
 pub fn proxy_create(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let target = args.first().copied().unwrap_or(Value::undefined());
@@ -10898,7 +11009,7 @@ pub fn object_set_prototype_of(
     args: &[Value],
     vm: &mut Vm,
 ) -> Value {
-    let obj = args.first().copied().unwrap_or(Value::undefined());
+    let mut obj = args.first().copied().unwrap_or(Value::undefined());
     let proto = args.get(1).copied().unwrap_or(Value::undefined());
     // Step 1: RequireObjectCoercible(obj)
     if obj.is_null() || obj.is_undefined() {
@@ -10927,6 +11038,27 @@ pub fn object_set_prototype_of(
             "prototype must be an Object or null",
         ));
         return Value::undefined();
+    }
+    if let Some((target, _h, _r)) = crate::vm::proxy_parts(obj) {
+        match vm.proxy_trap_invoke_public(gc, obj, "setPrototypeOf", &[target, proto]) {
+            Ok(Some(v)) => {
+                if !v.to_boolean().unwrap_or(false) {
+                    vm.set_pending_exception(crate::errors::error_object(
+                        gc,
+                        &vm.error_protos,
+                        crate::errors::ErrorKind::TypeError,
+                        "Proxy setPrototypeOf trap returned false",
+                    ));
+                    return Value::undefined();
+                }
+                return obj;
+            }
+            Ok(None) => obj = target,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
     }
     // Step 3: non-object obj returned as-is
     let Some(ptr) = obj.heap_ptr() else {
@@ -12025,7 +12157,7 @@ pub fn object_define_property(
     args: &[Value],
     vm: &mut Vm,
 ) -> Value {
-    let target = args.first().copied().unwrap_or(Value::undefined());
+    let mut target = args.first().copied().unwrap_or(Value::undefined());
     let mut raw_key = args.get(1).copied().unwrap_or(Value::undefined());
     if is_object_value(raw_key) {
         match to_primitive_sync(gc, vm, raw_key, "string") {
@@ -12056,6 +12188,28 @@ pub fn object_define_property(
             return Value::undefined();
         }
     };
+    if let Some((inner, _h, _r)) = crate::vm::proxy_parts(target) {
+        match vm.proxy_trap_invoke_public(gc, target, "defineProperty", &[inner, raw_key, desc_obj])
+        {
+            Ok(Some(v)) => {
+                if !v.to_boolean().unwrap_or(false) {
+                    vm.set_pending_exception(crate::errors::error_object(
+                        gc,
+                        &vm.error_protos,
+                        crate::errors::ErrorKind::TypeError,
+                        "Proxy defineProperty trap returned false",
+                    ));
+                    return Value::undefined();
+                }
+                return target;
+            }
+            Ok(None) => target = inner,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
+    }
     // String wrappers: defining a new indexed/named property on a
     // non-extensible wrapper is a TypeError ([[DefineOwnProperty]] on the
     // String exotic object checks extensibility for absent properties).
@@ -12494,7 +12648,7 @@ pub fn object_get_own_property_descriptor(
     args: &[Value],
     vm: &mut Vm,
 ) -> Value {
-    let target = args.first().copied().unwrap_or(Value::undefined());
+    let mut target = args.first().copied().unwrap_or(Value::undefined());
     if target.is_null() || target.is_undefined() {
         vm.set_pending_exception(crate::errors::error_object(
             gc,
@@ -12547,7 +12701,7 @@ pub fn object_get_own_property_descriptor(
         }
         return Value::undefined();
     }
-    let Some(ptr) = target.heap_ptr() else {
+    let Some(mut ptr) = target.heap_ptr() else {
         // Primitives have no own properties to describe.
         return Value::undefined();
     };
@@ -12555,6 +12709,20 @@ pub fn object_get_own_property_descriptor(
     if is_object_value(raw_key) {
         match to_primitive_sync(gc, vm, raw_key, "string") {
             Ok(v) => raw_key = v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
+    }
+    if let Some((inner, _h, _r)) = crate::vm::proxy_parts(target) {
+        match vm.proxy_trap_invoke_public(gc, target, "getOwnPropertyDescriptor", &[inner, raw_key])
+        {
+            Ok(Some(v)) => return v,
+            Ok(None) => {
+                target = inner;
+                ptr = target.heap_ptr().unwrap_or(ptr);
+            }
             Err(e) => {
                 vm.set_pending_exception(e);
                 return Value::undefined();
@@ -13055,14 +13223,36 @@ fn set_integrity_level(
 macro_rules! integrity_builtin {
     ($name:ident, $what:expr, $level:expr) => {
         pub fn $name(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
-            let target = args.first().copied().unwrap_or(Value::undefined());
+            let mut target = args.first().copied().unwrap_or(Value::undefined());
+            let original = target;
+            if let Some((inner, _h, _r)) = crate::vm::proxy_parts(target) {
+                match vm.proxy_trap_invoke_public(gc, target, "preventExtensions", &[inner]) {
+                    Ok(Some(v)) => {
+                        if !v.to_boolean().unwrap_or(false) {
+                            vm.set_pending_exception(crate::errors::error_object(
+                                gc,
+                                &vm.error_protos,
+                                crate::errors::ErrorKind::TypeError,
+                                "Proxy preventExtensions trap returned false",
+                            ));
+                            return Value::undefined();
+                        }
+                        return target;
+                    }
+                    Ok(None) => target = inner,
+                    Err(e) => {
+                        vm.set_pending_exception(e);
+                        return Value::undefined();
+                    }
+                }
+            }
             // Primitive values (including strings, which are heap strings but
             // not Objects) are returned unchanged.
             if !is_object_value(target) {
                 return target;
             }
             match set_integrity_level(gc, vm, $what, target, $level) {
-                Ok(v) => v,
+                Ok(_) => original,
                 Err(e) => {
                     vm.set_pending_exception(e);
                     Value::undefined()
@@ -13082,8 +13272,19 @@ macro_rules! integrity_test_builtin {
     ($name:ident, $kind:expr) => {
         pub fn $name(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
             let _ = gc;
-            let _ = vm;
             let target = args.first().copied().unwrap_or(Value::undefined());
+            if $kind == 0 {
+                if let Some((inner, _h, _r)) = crate::vm::proxy_parts(target) {
+                    match vm.proxy_trap_invoke_public(gc, target, "isExtensible", &[inner]) {
+                        Ok(Some(v)) => return Value::boolean(v.to_boolean().unwrap_or(false)),
+                        Ok(None) => {}
+                        Err(e) => {
+                            vm.set_pending_exception(e);
+                            return Value::undefined();
+                        }
+                    }
+                }
+            }
             if target.is_builtin() {
                 // Builtin function handles are functions: extensible, not
                 // sealed/frozen.
@@ -28692,6 +28893,16 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 2,
             name: "Object_assign",
             func: object_assign,
+        },
+        Builtin {
+            length: 2,
+            name: "Proxy_revocable",
+            func: proxy_revocable,
+        },
+        Builtin {
+            length: 0,
+            name: "_proxy_revoke",
+            func: proxy_revoke_builtin,
         },
         Builtin {
             length: 2,

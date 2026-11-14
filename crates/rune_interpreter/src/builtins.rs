@@ -10726,39 +10726,32 @@ fn to_property_descriptor(
     d.writable = v.to_bool();
     let (has_get, get) = desc_field(gc, vm, desc_obj, "get")?;
     let (has_set, set) = desc_field(gc, vm, desc_obj, "set")?;
-    // Present-but-undefined means absent; present null is NOT callable and
-    // must throw (only undefined is exempt).
-    if has_get && !get.is_undefined() {
-        match classify_method(get) {
-            Ok(Some(_)) => {
-                d.has_get = true;
-                d.get = get;
-            }
-            _ => {
-                return Err(crate::errors::error_object(
-                    gc,
-                    &vm.error_protos,
-                    crate::errors::ErrorKind::TypeError,
-                    "Getter must be a function",
-                ));
-            }
+    // A present accessor field marks an accessor descriptor even when its
+    // value is undefined (it then clears that half on merge). Present null is
+    // NOT callable and throws.
+    if has_get {
+        if !get.is_undefined() && !matches!(classify_method(get), Ok(Some(_))) {
+            return Err(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Getter must be a function",
+            ));
         }
+        d.has_get = true;
+        d.get = get;
     }
-    if has_set && !set.is_undefined() {
-        match classify_method(set) {
-            Ok(Some(_)) => {
-                d.has_set = true;
-                d.set = set;
-            }
-            _ => {
-                return Err(crate::errors::error_object(
-                    gc,
-                    &vm.error_protos,
-                    crate::errors::ErrorKind::TypeError,
-                    "Setter must be a function",
-                ));
-            }
+    if has_set {
+        if !set.is_undefined() && !matches!(classify_method(set), Ok(Some(_))) {
+            return Err(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Setter must be a function",
+            ));
         }
+        d.has_set = true;
+        d.set = set;
     }
     if (d.has_value || d.has_writable) && (d.has_get || d.has_set) {
         return Err(crate::errors::error_object(
@@ -11121,6 +11114,23 @@ fn define_extra_target(
             (!p.is_null()).then_some(p as *mut JSObject)
         }
         TAG_PROMISE => Some(crate::vm::promise_extra_object(gc, ptr)),
+        TAG_ARRAY => {
+            let arr = ptr as *mut RuneArray;
+            let mut p = unsafe { RuneArray::extra_props(arr) };
+            if p.is_null() {
+                let obj = JSObject::allocate(gc, Shape::empty(), &[]);
+                if let Some(proto) = vm.object_prototype.heap_ptr() {
+                    unsafe { JSObject::set_prototype(obj, proto) };
+                }
+                p = obj as *mut u8;
+                unsafe { RuneArray::set_extra_props(arr, p) };
+            }
+            Some(p as *mut JSObject)
+        }
+        TAG_STRING_OBJ => {
+            let extra = unsafe { StringObject::extra_props(ptr as *mut StringObject) };
+            (!extra.is_null()).then_some(extra as *mut JSObject)
+        }
         _ => None,
     };
     if let Some(obj) = existing {

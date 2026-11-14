@@ -3396,6 +3396,23 @@ Integration suite: **898 passed, 0 failed, 3 ignored**.
 
 Integration suite: **899 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — defineProperties exotics + accessor descriptor presence (2026-11-14)
+
+- `Object.defineProperties` now accepts Arrays and String wrappers: the
+  descriptor target resolves to the array/String extra-props overlay (created
+  on demand, Object.prototype), so named/accessor definitions and indexed
+  overlay entries work instead of throwing "called on non-object".
+- `ToPropertyDescriptor` now marks an accessor descriptor whenever `get`/`set`
+  is *present*, even if its value is `undefined` (present null still throws).
+  `{ get: undefined }` previously looked like an empty data descriptor and
+  silently converted an accessor into a data property, dropping
+  enumerable/configurable.
+- Test262: Object **2875 → 2950/3411**, defineProperties **459 → 507/632**,
+  defineProperty **1014/1131**.
+- Regression: `test_array_define_properties_and_accessor_undefined`.
+
+Integration suite: **900 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

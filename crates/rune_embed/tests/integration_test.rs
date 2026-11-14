@@ -17536,3 +17536,38 @@ fn test_own_property_symbols_and_raw_json() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_array_define_properties_and_accessor_undefined() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var a = [];
+            var getter = function () { return 36; };
+            Object.defineProperty(a, "0", {
+                get: getter,
+                configurable: true,
+                enumerable: true
+            });
+            Object.defineProperty(a, "0", { get: undefined });
+            var d = Object.getOwnPropertyDescriptor(a, "0");
+            Object.defineProperties(a, {
+                x: { value: 3, writable: true, enumerable: true, configurable: true },
+                y: { get: function () { return 4; }, configurable: true }
+            });
+            [
+                typeof d.get === "undefined",
+                typeof d.value === "undefined",
+                d.configurable === true,
+                d.enumerable === true,
+                a.x === 3,
+                a.y === 4,
+                Object.keys(a).join(",") === "0,x",
+                Object.getOwnPropertyDescriptor(a, "x").value === 3
+            ].join("|") === "true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

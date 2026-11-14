@@ -3869,6 +3869,22 @@ Integration suite: **918 passed, 0 failed, 3 ignored**.
 
 Integration suite: **920 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Catch binding patterns + optional catch binding (2026-11-14)
+
+- `try {} catch (pattern) {}` now accepts object/array destructuring
+  parameters: the parser allocates a temporary catch binding and prepends a
+  lexical declaration (`let pattern = temp`) to the catch body, so the
+  existing destructuring/iterator/name-inference machinery applies.
+- Optional catch binding (`try {} catch {}`) is accepted and simply discards
+  the thrown value.
+- Nested catch/destructuring and catch parameters continue to work with the
+  block capture environment.
+- Test262 language/statements/try **50 → 137/201** and try/dstr
+  **6 → 83/93**.
+- Regression: `test_catch_binding_patterns_and_optional_binding`.
+
+Integration suite: **921 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

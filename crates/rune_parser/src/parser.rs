@@ -1021,24 +1021,52 @@ impl Parser {
         };
         let catch = if self.tok.kind == TokenKind::Catch {
             self.advance();
-            self.expect(TokenKind::LParen);
-            let param = if self.tok.kind == TokenKind::Identifier {
-                let t = self.tok.clone();
-                self.advance();
-                t.value.to_string()
+            if self.tok.kind == TokenKind::LBrace {
+                // Optional catch binding: `try {} catch { ... }`
+                let body = match self.parse_block() {
+                    Stmt::Block(stmts, _) => stmts.into_boxed_slice(),
+                    _ => vec![].into_boxed_slice(),
+                };
+                Some(CatchClause {
+                    param: "".into(),
+                    body,
+                    span: self.span(),
+                })
             } else {
-                String::new()
-            };
-            self.expect(TokenKind::RParen);
-            let body = match self.parse_block() {
-                Stmt::Block(stmts, _) => stmts.into_boxed_slice(),
-                _ => vec![].into_boxed_slice(),
-            };
-            Some(CatchClause {
-                param: param.into_boxed_str(),
-                body,
-                span: self.span(),
-            })
+                self.expect(TokenKind::LParen);
+                let mut pattern: Option<Pattern> = None;
+                let param = if self.tok.kind == TokenKind::Identifier {
+                    let t = self.tok.clone();
+                    self.advance();
+                    t.value.to_string()
+                } else {
+                    let pat = self.parse_binding_pattern();
+                    pattern = Some(pat);
+                    "__rune_catch_tmp__".to_string()
+                };
+                self.expect(TokenKind::RParen);
+                let mut stmts = match self.parse_block() {
+                    Stmt::Block(stmts, _) => stmts,
+                    _ => Vec::new(),
+                };
+                if let Some(pat) = pattern {
+                    let decl = Decl {
+                        name: "_destructure".into(),
+                        pattern: Some(pat),
+                        init: Some(Box::new(Expr::Identifier(
+                            param.clone().into_boxed_str(),
+                            Span::default(),
+                        ))),
+                        span: Span::default(),
+                    };
+                    stmts.insert(0, Stmt::Var(VarKind::Let, vec![decl], Span::default()));
+                }
+                Some(CatchClause {
+                    param: param.into_boxed_str(),
+                    body: stmts.into_boxed_slice(),
+                    span: self.span(),
+                })
+            }
         } else {
             None
         };

@@ -18463,3 +18463,41 @@ fn test_destructuring_inferred_function_names() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_catch_binding_patterns_and_optional_binding() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var seen = 0;
+            try {
+                throw { a: 1, b: [2, 3] };
+            } catch ({ a, b: [first, ...restValues] }) {
+                seen = a + first + restValues[0];
+            }
+
+            var optional = false;
+            try {
+                throw new Error("ignored");
+            } catch {
+                optional = true;
+            }
+
+            var nested = 0;
+            try {
+                throw new Error("x");
+            } catch (e) {
+                try {
+                    throw { inner: 7 };
+                } catch ({ inner }) {
+                    nested = inner + (e.message === "x" ? 1 : 0);
+                }
+            }
+
+            [seen === 6, optional, nested === 8].join("|") === "true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

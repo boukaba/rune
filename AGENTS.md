@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Catch binding patterns + optional catch (2026-11-14)**: destructured catch params via temp+lexical declaration, optional catch binding. try **137/201**, try/dstr **83/93**. Integration **921**.
 - **Destructuring iterator/rest/name inference (2026-11-14)**: iterator-protocol array patterns + rest, object rest excluding opcode (getters/enumerability), catchable nullish destructuring, inferred anonymous function/class names. object **494/1170**, dstr **332/561**, for-of **345/751**, for-of/dstr **264/569**. Integration **920**.
 - **for-of per-iteration bindings + destructuring captures + return cleanup (2026-11-14)**: fresh body lexical per iteration, pattern binding env registration, pre-unwind stack normalization, find-family hole visits, Array toLocaleString. Array **2783/3081**, for-of **216**, for **159**. Integration **918**.
 - **Array reduce rescan/inherited length/Arguments indices (2026-11-14)**: post-getter index rescan, array/string prototype length chains, non-extending arguments indices. Array **2773/3081**, reduce **256/260**, reduceRight **255/260**. Integration **917**.

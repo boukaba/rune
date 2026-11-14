@@ -3840,6 +3840,35 @@ Integration suite: **917 passed, 0 failed, 3 ignored**.
 
 Integration suite: **918 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Destructuring semantics: iterator, object rest, inferred names (2026-11-14)
+
+- Object binding patterns accept defaults after a property binding
+  (`{ x: y = 33 }`), fixing method/parameter destructuring parse errors.
+- Array destructuring now runs the iterator protocol through a new
+  `_destructure_array` builtin: gets `@@iterator`, steps `next`, supplies
+  `undefined` after `done`, collects rest into a real Array, and closes the
+  iterator on abrupt next/value errors. Elisions consume iterator steps.
+- Object rest has a dedicated `SpreadIntoObjectExcluding` opcode:
+  - copies only own enumerable properties;
+  - skips keys already bound by the pattern **without reading their getters**;
+  - invokes getters for copied properties through the re-entrant property
+    funnel; internal/additional keys are filtered.
+- `ThrowIfNullish` now routes through `handle_throw` instead of a hand-rolled
+  unwind, so null/undefined destructuring TypeErrors are catchable by
+  `try/catch` and `assert.throws` (including inside pending callbacks).
+- Added `SetFunctionName` opcode + emitter inference for anonymous
+  function/class default initializers in binding patterns:
+  functions/classes get the bound name; already-named functions, non-string
+  own `name` properties and non-anonymous initializer expressions
+  (sequence/conditional) keep their name.
+- Test262: language/expressions/object **330 → 494/1170**,
+  object/dstr **168 → 332/561**, language/statements/for-of
+  **216 → 345/751**, for-of/dstr **135 → 264/569**.
+- Regression: `test_destructuring_iterator_and_object_rest`,
+  `test_destructuring_inferred_function_names`.
+
+Integration suite: **920 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

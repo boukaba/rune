@@ -157,8 +157,15 @@ pub enum Opcode {
     ExportSync, // pop value; store into the current module environment under the
     // string-pool name operands[0]; push value back
     ModuleTdz, // operands[0] = string-pool name; mark the module binding as
-               // uninitialized (TDZ sentinel) — reads throw ReferenceError until
-               // the initializer runs (§9.2.2.2 InitializeBinding / TDZ reads)
+    // uninitialized (TDZ sentinel) — reads throw ReferenceError until
+    // the initializer runs (§9.2.2.2 InitializeBinding / TDZ reads)
+    // Object rest destructuring: pop excluded-key array, source, target; copy
+    // source's own enumerable properties except excluded keys, then push the
+    // target. Avoids reading excluded getters.
+    SpreadIntoObjectExcluding,
+    // Infer a function's name from a static binding name (operands[0] = string
+    // pool index). No-op for non-functions or already-named functions.
+    SetFunctionName,
 }
 
 #[derive(Clone, Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]

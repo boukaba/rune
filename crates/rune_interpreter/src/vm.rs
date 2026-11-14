@@ -10103,10 +10103,27 @@ impl Vm {
                                     unsafe { JSObject::shape_ptr(src_ptr as *mut JSObject) };
                                 let count = src_shape.entries.len();
                                 for i in 0..count {
+                                    if src_shape.attr_at(i) & rune_core::shape::ATTR_ENUMERABLE == 0
+                                    {
+                                        continue;
+                                    }
                                     let key = src_shape.entries[i].0;
                                     let key_name = src_shape.key_names[i].clone();
-                                    let val =
-                                        unsafe { JSObject::get_slot(src_ptr as *mut JSObject, i) };
+                                    let val = if key.is_symbol() {
+                                        unsafe { JSObject::get_slot(src_ptr as *mut JSObject, i) }
+                                    } else {
+                                        match crate::builtins::get_value_sync(
+                                            gc, self, source, &key_name,
+                                        ) {
+                                            Ok(v) => v,
+                                            Err(e) => {
+                                                if let Some(exit) = self.handle_throw(gc, e) {
+                                                    return exit;
+                                                }
+                                                continue;
+                                            }
+                                        }
+                                    };
                                     let tgt_shape =
                                         unsafe { JSObject::shape_ptr(tgt_ptr as *mut JSObject) };
                                     if let Some(slot) = tgt_shape.lookup(&key) {
@@ -10173,6 +10190,83 @@ impl Vm {
                         }
                     }
                     self.push(tgt);
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::SpreadIntoObjectExcluding => {
+                    let excluded = self.pop();
+                    let source = self.pop();
+                    let mut tgt = self.pop();
+                    let mut excluded_keys: Vec<String> = Vec::new();
+                    if let Some(ep) = excluded.heap_ptr() {
+                        if unsafe { (*(ep as *const GcHeader)).tag() } == TAG_ARRAY {
+                            let ea = ep as *mut RuneArray;
+                            let len = unsafe { RuneArray::length(ea) };
+                            for i in 0..len as usize {
+                                let k = unsafe { RuneArray::get_element(ea, i) };
+                                if let Some(kp) = k.heap_ptr() {
+                                    if unsafe { (*(kp as *const GcHeader)).tag() } == TAG_STRING {
+                                        excluded_keys.push(unsafe {
+                                            HeapString::to_string(kp as *mut HeapString)
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some(src_ptr) = source.heap_ptr() {
+                        let tag = unsafe { (*(src_ptr as *const GcHeader)).tag() };
+                        if tag == TAG_OBJECT {
+                            let src_shape =
+                                unsafe { JSObject::shape_ptr(src_ptr as *mut JSObject) };
+                            let count = unsafe { JSObject::slot_count(src_ptr as *mut JSObject) };
+                            for i in 0..count {
+                                if src_shape.attr_at(i) & rune_core::shape::ATTR_ENUMERABLE == 0 {
+                                    continue;
+                                }
+                                let key = src_shape.entries[i].0;
+                                let key_name = src_shape.key_names[i].clone();
+                                if crate::builtins::is_internal_key(&key_name) {
+                                    continue;
+                                }
+                                if excluded_keys.contains(&key_name) {
+                                    continue;
+                                }
+                                let val = if key.is_symbol() {
+                                    unsafe { JSObject::get_slot(src_ptr as *mut JSObject, i) }
+                                } else {
+                                    match crate::builtins::get_value_sync(
+                                        gc, self, source, &key_name,
+                                    ) {
+                                        Ok(v) => v,
+                                        Err(e) => {
+                                            if let Some(exit) = self.handle_throw(gc, e) {
+                                                return exit;
+                                            }
+                                            continue;
+                                        }
+                                    }
+                                };
+                                let tgt_ptr = tgt.heap_ptr().unwrap() as *mut JSObject;
+                                let tgt_shape = unsafe { JSObject::shape_ptr(tgt_ptr) };
+                                if let Some(slot) = tgt_shape.lookup(&key) {
+                                    unsafe { JSObject::set_slot(tgt_ptr, slot, val) };
+                                } else {
+                                    let live = self.ensure_object_capacity(gc, tgt_ptr);
+                                    unsafe { JSObject::add_property(live, key, key_name, val) };
+                                    tgt = Value::from_heap_ptr(live as *mut u8);
+                                }
+                            }
+                        }
+                    }
+                    self.push(tgt);
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::SetFunctionName => {
+                    let name_idx = instr.operands[0] as usize;
+                    if let Some(name) = self.frames[fi].prog_str(name_idx) {
+                        let value = self.peek();
+                        crate::builtins::set_function_name(gc, self, value, &name);
+                    }
                     self.frames[fi].pc = pc + 1;
                 }
                 Opcode::LoadGlobal => {
@@ -11068,89 +11162,10 @@ impl Vm {
                             crate::errors::ErrorKind::TypeError,
                             "Cannot destructure null or undefined",
                         );
-                        // Now behave like Opcode::Throw
-                        let handler_idx = self
-                            .try_stack
-                            .iter()
-                            .rposition(|tf| tf.frame_depth == self.frames.len());
-                        if let Some(idx) = handler_idx {
-                            let (catch_pc, finally_pc, stack_depth, in_catch) = {
-                                let tf = &self.try_stack[idx];
-                                (tf.catch_pc, tf.finally_pc, tf.stack_depth, tf.in_catch)
-                            };
-                            if in_catch && finally_pc != 0 {
-                                self.try_stack[idx].saved_exception = Some(exc);
-                                self.stack.truncate(stack_depth);
-                                self.frames[fi].pc = finally_pc;
-                                continue;
-                            }
-                            if catch_pc != 0 && !in_catch {
-                                if finally_pc != 0 {
-                                    self.try_stack[idx].in_catch = true;
-                                } else {
-                                    self.try_stack.remove(idx);
-                                }
-                                self.stack.truncate(stack_depth);
-                                self.push(exc);
-                                self.frames[fi].pc = catch_pc;
-                                continue;
-                            }
-                            if finally_pc != 0 {
-                                self.try_stack[idx].saved_exception = Some(exc);
-                                self.stack.truncate(stack_depth);
-                                self.frames[fi].pc = finally_pc;
-                                continue;
-                            }
+                        if let Some(exit) = self.handle_throw(gc, exc) {
+                            return exit;
                         }
-                        // No handler — pop frame and check caller
-                        let callee_base = self.frames.last().unwrap().stack_base;
-                        let popped_frame = self.frames.len() - 1;
-                        self.last_locals = self.frames[popped_frame].locals.clone();
-                        self.frames.pop();
-                        self.try_stack
-                            .retain(|tf| tf.frame_depth != popped_frame + 1);
-                        if self.frames.is_empty() {
-                            self.stack.clear();
-                            return Exit::Throw(exc);
-                        }
-                        let new_fi = self.frames.len() - 1;
-                        let caller_idx = self
-                            .try_stack
-                            .iter()
-                            .rposition(|tf| tf.frame_depth == self.frames.len());
-                        if let Some(idx) = caller_idx {
-                            let (catch_pc, finally_pc, stack_depth, in_catch) = {
-                                let tf = &self.try_stack[idx];
-                                (tf.catch_pc, tf.finally_pc, tf.stack_depth, tf.in_catch)
-                            };
-                            if in_catch && finally_pc != 0 {
-                                self.try_stack[idx].saved_exception = Some(exc);
-                                self.stack.truncate(stack_depth);
-                                self.frames[new_fi].pc = finally_pc;
-                                continue;
-                            }
-                            if catch_pc != 0 && !in_catch {
-                                if finally_pc != 0 {
-                                    self.try_stack[idx].in_catch = true;
-                                } else {
-                                    self.try_stack.remove(idx);
-                                }
-                                self.stack.truncate(stack_depth);
-                                self.push(exc);
-                                self.frames[new_fi].pc = catch_pc;
-                                continue;
-                            }
-                            if finally_pc != 0 {
-                                self.try_stack[idx].saved_exception = Some(exc);
-                                self.stack.truncate(stack_depth);
-                                self.frames[new_fi].pc = finally_pc;
-                                continue;
-                            }
-                        }
-                        self.stack.truncate(callee_base);
-                        self.push(exc);
-                        self.frames[new_fi].pc += 1;
-                        return Exit::Throw(exc);
+                        continue;
                     }
                     self.frames[fi].pc += 1;
                 }

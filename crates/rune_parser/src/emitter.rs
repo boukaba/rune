@@ -1584,9 +1584,10 @@ impl Emitter {
                     self.emit(Opcode::Dup, vec![]);
                     self.emit(Opcode::NewObject, vec![0]);
                     self.emit(Opcode::Swap, vec![]);
-                    self.emit(Opcode::SpreadIntoObject, vec![]);
+                    // Excluded key array (string keys; computed keys are left
+                    // to the runtime path when they are statically known).
+                    self.emit(Opcode::NewArray, vec![0]);
                     for prop in props {
-                        self.emit(Opcode::Dup, vec![]);
                         let key_str = match &prop.key {
                             PropKey::Identifier(s) => s.to_string(),
                             PropKey::String(s) => s.to_string(),
@@ -1595,27 +1596,40 @@ impl Emitter {
                         };
                         let idx = self.intern_string(&key_str);
                         self.emit(Opcode::LoadStringConst, vec![idx as i64]);
-                        self.emit(Opcode::DeleteProperty, vec![]);
-                        self.emit(Opcode::Pop, vec![]);
+                        self.emit(Opcode::ArrayPush, vec![]);
                     }
+                    self.emit(Opcode::SpreadIntoObjectExcluding, vec![]);
                     self.emit_destructuring_binding(rest_pattern, kind);
                 }
                 self.emit(Opcode::Pop, vec![]);
             }
             Pattern::Array(items, _) => {
+                let rest_pos = items
+                    .iter()
+                    .position(|p| matches!(p, Some(Pattern::Rest(..))));
+                let fixed = rest_pos.unwrap_or(items.len());
+                let has_rest = rest_pos.is_some();
+                // this = source value; callee = _destructure_array(fixed, has_rest)
+                self.emit(Opcode::Dup, vec![]);
+                let helper_idx = self.intern_string("_destructure_array") as i64;
+                self.emit(Opcode::LoadGlobal, vec![helper_idx]);
+                self.emit(Opcode::LoadSmi, vec![fixed as i64]);
+                self.emit(Opcode::LoadSmi, vec![if has_rest { 1 } else { 0 }]);
+                self.emit(Opcode::Call, vec![2]);
                 for (i, item) in items.iter().enumerate() {
-                    self.emit(Opcode::Dup, vec![]);
                     if let Some(pattern) = item {
-                        if matches!(pattern, Pattern::Rest(..)) {
-                            self.emit(Opcode::LoadSmi, vec![i as i64]);
-                            self.emit(Opcode::ArraySlice, vec![]);
+                        self.emit(Opcode::Dup, vec![]);
+                        let index = if matches!(pattern, Pattern::Rest(..)) {
+                            fixed
                         } else {
-                            self.emit(Opcode::LoadSmi, vec![i as i64]);
-                            self.emit(Opcode::LoadProperty, vec![]);
-                        }
+                            i
+                        };
+                        self.emit(Opcode::LoadSmi, vec![index as i64]);
+                        self.emit(Opcode::LoadProperty, vec![]);
                         self.emit_destructuring_binding(pattern, kind);
                     }
                 }
+                self.emit(Opcode::Pop, vec![]);
                 self.emit(Opcode::Pop, vec![]);
             }
             Pattern::Identifier(name, _, default) => {
@@ -1646,6 +1660,12 @@ impl Emitter {
                 let jump_pos = self.current() - 1;
                 self.emit(Opcode::Pop, vec![]);
                 self.emit_expression(expr);
+                if is_anonymous_definition(expr) {
+                    if let Pattern::Identifier(name, _, _) = inner.as_ref() {
+                        let name_idx = self.intern_string(name) as i64;
+                        self.emit(Opcode::SetFunctionName, vec![name_idx]);
+                    }
+                }
                 self.instructions[jump_pos].operands[0] = self.current() as i64;
                 // Recurse with the (possibly defaulted) value
                 self.emit_destructuring_binding(inner, kind);
@@ -1675,6 +1695,10 @@ impl Emitter {
             let jump_pos = self.current() - 1;
             self.emit(Opcode::Pop, vec![]);
             self.emit_expression(expr);
+            if is_anonymous_definition(expr) {
+                let name_idx = self.intern_string(name) as i64;
+                self.emit(Opcode::SetFunctionName, vec![name_idx]);
+            }
             self.instructions[jump_pos].operands[0] = self.current() as i64;
         }
         self.emit_store_binding(name, kind);
@@ -4526,6 +4550,17 @@ fn push_pattern_binding_names(pattern: &Option<Pattern>, name: &str, names: &mut
         Some(Pattern::Rest(inner, _)) => {
             push_pattern_binding_names(&Some((**inner).clone()), name, names)
         }
+    }
+}
+
+/// True for anonymous function/class expressions (the only Initializers for
+/// which SetFunctionName is performed). Parentheses are not represented in the
+/// AST; sequence/conditional/other expressions must not infer a name.
+fn is_anonymous_definition(expr: &Expr) -> bool {
+    match expr {
+        Expr::Function(f, _) => f.name.is_none(),
+        Expr::Class(c, _) => c.name.is_none(),
+        _ => false,
     }
 }
 

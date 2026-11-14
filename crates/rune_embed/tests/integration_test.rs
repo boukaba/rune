@@ -18391,3 +18391,75 @@ fn test_for_of_capture_return_and_array_edges() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_destructuring_iterator_and_object_rest() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var closed = 0;
+            var iterable = {};
+            iterable[Symbol.iterator] = function () {
+                var i = 0;
+                return {
+                    next: function () { i++; return { value: i, done: i > 3 }; },
+                    return: function () { closed++; return { done: true }; }
+                };
+            };
+            var [a, , ...rest] = iterable;
+            var iteratorOk = a === 1 && rest.length === 1 && rest[0] === 3;
+
+            var obj = { m({ x: y = 33 }) { return y; } };
+            var defaultParsed = obj.m({}) === 33;
+
+            var calls = 0;
+            var src = {};
+            Object.defineProperty(src, "hidden", { value: 1, enumerable: false });
+            Object.defineProperty(src, "seen", {
+                enumerable: true,
+                get: function () { calls++; return 2; }
+            });
+            src.plain = 3;
+            var { seen, ...others } = src;
+            var restOk = seen === 2 && calls === 1 &&
+                others.hidden === undefined &&
+                others.seen === undefined &&
+                others.plain === 3;
+
+            var [first = 7, second = function () {}] = [];
+            var emptyDefaults = first === 7 && second() === undefined;
+
+            [
+                iteratorOk,
+                defaultParsed,
+                restOk,
+                emptyDefaults,
+                closed === 0
+            ].join("|") === "true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}
+
+#[test]
+fn test_destructuring_inferred_function_names() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var { fn = function () {}, cls = class {}, seq = (0, function () {}), holder = 1 } = {};
+            var [ary = function () {}] = [];
+            [
+                fn.name === "fn",
+                cls.name === "cls",
+                seq.name === "",
+                holder === 1,
+                ary.name === "ary"
+            ].join("|") === "true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

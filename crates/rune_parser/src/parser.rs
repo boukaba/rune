@@ -2607,7 +2607,13 @@ impl Parser {
                         let key = self.parse_prop_key();
                         let pattern = if self.tok.kind == TokenKind::Colon {
                             self.advance();
-                            self.parse_binding_pattern()
+                            let mut pat = self.parse_binding_pattern();
+                            if self.tok.kind == TokenKind::EqAssign {
+                                self.advance();
+                                let default = self.parse_expr(0);
+                                pat = Pattern::Default(Box::new(pat), Box::new(default));
+                            }
+                            pat
                         } else if let PropKey::Identifier(id) = &key {
                             // Check for default: {a = expr}
                             let default = if self.tok.kind == TokenKind::EqAssign {

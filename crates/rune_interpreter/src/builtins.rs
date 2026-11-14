@@ -23741,6 +23741,200 @@ pub fn array_prototype_to_string(
     object_prototype_to_string(gc, this, &[], vm)
 }
 
+/// Set a function's own `name` when it is currently empty/anonymous.
+pub(crate) fn set_function_name(gc: &mut SemiSpace, vm: &mut Vm, func: Value, name: &str) {
+    let Some(ptr) = func.heap_ptr() else { return };
+    if unsafe { (*(ptr as *const GcHeader)).tag() } != TAG_FUNC {
+        return;
+    }
+    let mut fptr = unsafe { rune_core::gc::resolve_forwarded(ptr) } as *mut Func;
+    let key = PropertyKey::from_string("name");
+    unsafe {
+        let mut props = Func::extra_props(fptr);
+        if !props.is_null() {
+            let shape = JSObject::shape_ptr(props as *mut JSObject);
+            if let Some(slot) = shape.lookup(&key) {
+                let cur = JSObject::get_slot(props as *mut JSObject, slot);
+                if let Some(cp) = cur.heap_ptr() {
+                    if (*(cp as *const GcHeader)).tag() != TAG_STRING {
+                        // An own non-string `name` (e.g. a class static name()
+                        // method) already exists — do not override it.
+                        return;
+                    }
+                    if !HeapString::to_string(cp as *mut HeapString).is_empty() {
+                        return;
+                    }
+                }
+            }
+        }
+        let new_name = HeapString::allocate(gc, name) as *mut u8;
+        if props.is_null() {
+            let obj = JSObject::allocate(gc, Shape::empty(), &[]);
+            fptr = rune_core::gc::resolve_forwarded(fptr as *mut u8) as *mut Func;
+            Func::set_extra_props(fptr, obj as *mut u8);
+            props = Func::extra_props(fptr);
+        }
+        let live = vm.ensure_object_capacity(gc, props as *mut JSObject);
+        let shape = JSObject::shape_ptr(live);
+        if let Some(slot) = shape.lookup(&key) {
+            JSObject::set_slot(live, slot, Value::from_heap_ptr(new_name));
+        } else {
+            JSObject::add_property_with_attrs(
+                live,
+                key,
+                "name".to_string(),
+                Value::from_heap_ptr(new_name),
+                rune_core::shape::ATTR_CONFIGURABLE,
+            );
+        }
+    }
+}
+
+/// Internal helper for array destructuring: consume an iterator.
+/// `this` is the iterable, args[0] the fixed element count and args[1] a
+/// boolean requesting a rest array. Returns the fixed values followed by the
+/// rest array (when requested). On abrupt completion the iterator is closed.
+pub fn destructure_iter(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let fixed = args
+        .first()
+        .and_then(|v| v.as_smi())
+        .map(|n| n.max(0) as usize)
+        .unwrap_or(0);
+    let want_rest = args.get(1).copied().is_some_and(|v| v.to_bool());
+    if std::env::var_os("DBGDESTR").is_some() {
+        eprintln!(
+            "DBGDESTR args={:?} fixed={} rest={}",
+            args, fixed, want_rest
+        );
+    }
+    let method = match get_iter_method(vm, gc, this) {
+        SymbolMethodResult::Found(m) => m,
+        _ => {
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "value is not iterable",
+            ));
+            return Value::undefined();
+        }
+    };
+    let base = vm.temp_roots.len();
+    vm.temp_roots.push(this);
+    let iterator = match vm.call_value_sync(gc, method, this, &[]) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.temp_roots.truncate(base);
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    vm.temp_roots.push(iterator);
+    let next = match get_value_sync(gc, vm, vm.temp_roots[base + 1], "next") {
+        Ok(v) => v,
+        Err(e) => {
+            close_iterator(gc, vm, vm.temp_roots[base + 1]);
+            vm.temp_roots.truncate(base);
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    vm.temp_roots.push(next);
+    let mut out_len = 0usize;
+    let mut done = false;
+    for _ in 0..fixed {
+        let mut value = Value::undefined();
+        if !done {
+            let iter = vm.temp_roots[base + 1];
+            let nxt = vm.temp_roots[base + 2];
+            let result = match vm.call_value_sync(gc, nxt, iter, &[]) {
+                Ok(v) => v,
+                Err(e) => {
+                    close_iterator(gc, vm, vm.temp_roots[base + 1]);
+                    vm.temp_roots.truncate(base);
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            };
+            let done_val = match get_value_sync(gc, vm, result, "done") {
+                Ok(v) => v.to_bool(),
+                Err(e) => {
+                    close_iterator(gc, vm, vm.temp_roots[base + 1]);
+                    vm.temp_roots.truncate(base);
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            };
+            if done_val {
+                done = true;
+            } else {
+                match get_value_sync(gc, vm, result, "value") {
+                    Ok(v) => value = v,
+                    Err(e) => {
+                        close_iterator(gc, vm, vm.temp_roots[base + 1]);
+                        vm.temp_roots.truncate(base);
+                        vm.set_pending_exception(e);
+                        return Value::undefined();
+                    }
+                }
+            }
+        }
+        vm.temp_roots.push(value);
+        out_len += 1;
+    }
+    if want_rest {
+        let rest_root_start = vm.temp_roots.len();
+        loop {
+            let iter = vm.temp_roots[base + 1];
+            let nxt = vm.temp_roots[base + 2];
+            let result = match vm.call_value_sync(gc, nxt, iter, &[]) {
+                Ok(v) => v,
+                Err(e) => {
+                    close_iterator(gc, vm, vm.temp_roots[base + 1]);
+                    vm.temp_roots.truncate(base);
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            };
+            let done_val = match get_value_sync(gc, vm, result, "done") {
+                Ok(v) => v.to_bool(),
+                Err(e) => {
+                    close_iterator(gc, vm, vm.temp_roots[base + 1]);
+                    vm.temp_roots.truncate(base);
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            };
+            if done_val {
+                break;
+            }
+            match get_value_sync(gc, vm, result, "value") {
+                Ok(v) => {
+                    vm.temp_roots.push(v);
+                }
+                Err(e) => {
+                    close_iterator(gc, vm, vm.temp_roots[base + 1]);
+                    vm.temp_roots.truncate(base);
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            }
+        }
+        let rest_vals: Vec<Value> = vm.temp_roots[rest_root_start..].to_vec();
+        let rest_arr = build_array(gc, &rest_vals, vm);
+        vm.temp_roots.push(rest_arr);
+        let mut values: Vec<Value> = vm.temp_roots[base + 3..rest_root_start].to_vec();
+        values.push(rest_arr);
+        let arr = build_array(gc, &values, vm);
+        vm.temp_roots.truncate(base);
+        return arr;
+    }
+    let values: Vec<Value> = vm.temp_roots[base + 3..base + 3 + out_len].to_vec();
+    let arr = build_array(gc, &values, vm);
+    vm.temp_roots.truncate(base);
+    arr
+}
+
 /// Array.prototype.toLocaleString — joins elements, invoking each object
 /// element's toLocaleString with no arguments; null/undefined become "".
 pub fn array_to_locale_string(
@@ -29880,6 +30074,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 1,
             name: "Array_prototype_lastIndexOf",
             func: array_last_index_of,
+        },
+        Builtin {
+            length: 2,
+            name: "_destructure_array",
+            func: destructure_iter,
         },
         Builtin {
             length: 0,

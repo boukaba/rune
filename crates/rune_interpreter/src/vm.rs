@@ -3529,11 +3529,12 @@ impl Vm {
                     unsafe {
                         let shape = JSObject::shape_ptr(ptr as *mut JSObject);
                         if shape.lookup(&PROTOTYPE_KEY).is_none() {
-                            JSObject::add_property(
+                            JSObject::add_property_with_attrs(
                                 ptr as *mut JSObject,
                                 *PROTOTYPE_KEY,
                                 "prototype".to_string(),
                                 self.object_prototype,
+                                0,
                             );
                         }
                         // Object.getPrototypeOf (constructor static).
@@ -7091,15 +7092,53 @@ impl Vm {
             if let Some(ptr) = obj.heap_ptr() {
                 let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
                 if tag == TAG_OBJECT || tag == TAG_ARRAY {
-                    if !unsafe { JSObject::is_extensible(ptr as *mut JSObject) } {
+                    let obj_ptr = ptr as *mut JSObject;
+                    let is_object_proto = self.object_prototype.heap_ptr() == Some(ptr);
+                    // A user-defined own `__proto__` property shadows the
+                    // Object.prototype accessor; fall through to ordinary Set.
+                    let own_shadow = !is_object_proto
+                        && unsafe {
+                            JSObject::shape_ptr(obj_ptr)
+                                .lookup(&PropertyKey::from_string("__proto__"))
+                                .is_some()
+                        };
+                    if !own_shadow {
+                        // __proto__ setter: non-object, non-null V is ignored.
+                        if !value.is_null() && !value.is_heap_object() {
+                            return PropSetOut::Ready(Value::undefined());
+                        }
+                        let new_proto = if value.is_null() {
+                            std::ptr::null_mut()
+                        } else {
+                            unsafe { rune_core::gc::resolve_forwarded(value.heap_ptr().unwrap()) }
+                        };
+                        let current = unsafe { JSObject::prototype(obj_ptr) };
+                        if new_proto == current {
+                            return PropSetOut::Ready(Value::undefined());
+                        }
+                        let fail = is_object_proto
+                            || unsafe { !JSObject::is_extensible(obj_ptr) }
+                            || (!new_proto.is_null()
+                                && crate::builtins::is_on_proto_chain(
+                                    new_proto,
+                                    ptr,
+                                    self.function_prototype.heap_ptr(),
+                                ));
+                        if fail {
+                            let err = crate::errors::error_object(
+                                gc,
+                                &self.error_protos,
+                                crate::errors::ErrorKind::TypeError,
+                                "Cannot set prototype of this object",
+                            );
+                            return match self.handle_throw(gc, err) {
+                                Some(exit) => PropSetOut::Bail(Some(exit)),
+                                None => PropSetOut::Bail(None),
+                            };
+                        }
+                        unsafe { JSObject::set_prototype(obj_ptr, new_proto) };
                         return PropSetOut::Ready(Value::undefined());
                     }
-                    let proto = value
-                        .heap_ptr()
-                        .map(|p| unsafe { rune_core::gc::resolve_forwarded(p) })
-                        .unwrap_or(std::ptr::null_mut());
-                    unsafe { JSObject::set_prototype(ptr as *mut JSObject, proto) };
-                    return PropSetOut::Ready(Value::undefined());
                 }
             }
         }
@@ -15272,6 +15311,17 @@ pub(crate) fn builtin_display_name(name: &'static str) -> &'static str {
     }
     if name == "Symbol_prototype_toPrimitive" {
         return "[Symbol.toPrimitive]";
+    }
+    if let Some(special) = name.strip_prefix("Object_prototype_") {
+        match special {
+            "defineGetter" => return "__defineGetter__",
+            "defineSetter" => return "__defineSetter__",
+            "lookupGetter" => return "__lookupGetter__",
+            "lookupSetter" => return "__lookupSetter__",
+            "proto_get" => return "get __proto__",
+            "proto_set" => return "set __proto__",
+            _ => {}
+        }
     }
     if let Some(pos) = name.find("_prototype_") {
         &name[pos + "_prototype_".len()..]

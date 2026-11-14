@@ -3452,6 +3452,38 @@ Integration suite: **901 passed, 0 failed, 3 ignored**.
 
 Integration suite: **902 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Object.prototype + integrity/legacy accessors (2026-11-14)
+
+- `Object.prototype` is now an immutable data property on the Object
+  constructor (`writable/enumerable/configurable = false`).
+- `Object.prototype.isPrototypeOf` checks `Type(V)` before ToObject(this):
+  primitive/undefined/null arguments return false; primitive receivers box.
+- `Object.prototype.valueOf` performs ToObject (Boolean/Number/String/Symbol
+  wrappers) and throws only for null/undefined.
+- Legacy accessors:
+  - builtin names are `__defineGetter__`/`__defineSetter__`/
+    `__lookupGetter__`/`__lookupSetter__`, and `__proto__` accessors report
+    `get __proto__`/`set __proto__`;
+  - `__defineGetter__`/`__defineSetter__` perform observable ToPropertyKey
+    (symbol keys supported, throwing conversions propagate), preserve the
+    other pair half, set enumerable/configurable true on redefinition, throw
+    for non-configurable existing properties and when creating on a
+    non-extensible object.
+- Fixed a broad integrity bug: `Object.preventExtensions` cleared the
+  configurable bit on every own property (it now leaves attributes untouched;
+  only seal clears configurable and freeze also clears writable).
+- `__proto__ = value` fast path now:
+  - ignores primitive values, treats null as null prototype;
+  - throws TypeError for cycles, non-extensible receivers, and the immutable
+    Object.prototype;
+  - honors a user-defined own `__proto__` property by falling through to an
+    ordinary Set.
+- Test262: Object **2983 → 3023/3411**, Object.prototype **184 → 201/248**;
+  legacy getter/setter suites **10/11** each, `__proto__` **12/15**.
+- Regression: `test_object_prototype_legacy_and_integrity`.
+
+Integration suite: **903 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

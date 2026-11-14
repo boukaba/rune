@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Object.prototype + integrity/legacy accessors (2026-11-14)**: immutable Object.prototype, isPrototypeOf/valueOf, legacy accessor names/semantics, preventExtensions attr fix, __proto__ cycle/extensibility. Object **3023/3411**, prototype **201/248**. Integration **903**.
 - **Object.assign Get/Set semantics (2026-11-14)**: wrapper targets, observable Gets, symbol keys, accessor setters, throw on failed Set. Object **2983/3411**, assign **34/38**. Integration **902**.
 - **Object.create own-key semantics (2026-11-14)**: null TypeError, primitive ToObject, array/string keys, observable descriptor Gets, live return. Object **2965/3411**, create **307/320**. Integration **901**.
 - **defineProperties exotics + accessor presence (2026-11-14)**: array/String extra-props targets, `{get:undefined}` stays accessor. Object **2950/3411**, defineProperties **507/632**, defineProperty **1014/1131**. Integration **900**.

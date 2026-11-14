@@ -8452,7 +8452,11 @@ pub fn object_prototype_to_string(
 }
 
 /// True iff `obj` (exclusive) has `proto` somewhere in its prototype chain.
-fn is_on_proto_chain(obj: *mut u8, proto: *mut u8, function_proto: Option<*mut u8>) -> bool {
+pub(crate) fn is_on_proto_chain(
+    obj: *mut u8,
+    proto: *mut u8,
+    function_proto: Option<*mut u8>,
+) -> bool {
     if unsafe { (*(obj as *const GcHeader)).tag() } == TAG_FUNC && function_proto == Some(proto) {
         return true;
     }
@@ -8681,8 +8685,45 @@ fn legacy_define_accessor(
         ));
         return Value::undefined();
     }
-    let name = arg_to_string(gc, Some(key), vm);
-    let pkey = PropertyKey::from_string(&name);
+    // ToPropertyKey(P): observable ToPrimitive with symbol preservation.
+    let (name, pkey) = if let Some(id) = key.as_symbol_id() {
+        (String::new(), PropertyKey::from_symbol(id))
+    } else {
+        let prim = match to_primitive_sync(gc, vm, key, "string") {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        };
+        if let Some(id) = prim.as_symbol_id() {
+            // Legacy accessor helpers accept symbol property keys.
+            let pair = if is_getter {
+                rune_core::accessor::AccessorPair::allocate(gc, func, Value::undefined())
+            } else {
+                rune_core::accessor::AccessorPair::allocate(gc, Value::undefined(), func)
+            };
+            let live = unsafe { rune_core::gc::resolve_forwarded(ptr) } as *mut JSObject;
+            let pkey = PropertyKey::from_symbol(id);
+            if let Some(slot) = unsafe { JSObject::shape_ptr(live) }.lookup(&pkey) {
+                unsafe { JSObject::set_slot(live, slot, Value::from_heap_ptr(pair)) };
+            } else {
+                let live = vm.ensure_object_capacity(gc, live);
+                unsafe {
+                    JSObject::add_property_with_attrs(
+                        live,
+                        pkey,
+                        "\0".to_string(),
+                        Value::from_heap_ptr(pair),
+                        rune_core::shape::ATTR_ENUMERABLE | rune_core::shape::ATTR_CONFIGURABLE,
+                    );
+                }
+            }
+            return Value::undefined();
+        }
+        let name = value_to_js_string(prim);
+        (name.clone(), PropertyKey::from_string(&name))
+    };
     let obj_ptr = unsafe { rune_core::gc::resolve_forwarded(ptr) } as *mut JSObject;
     let shape = unsafe { JSObject::shape_ptr(obj_ptr) };
     if let Some(slot) = shape.lookup(&pkey) {
@@ -8701,12 +8742,42 @@ fn legacy_define_accessor(
         } else {
             (Value::undefined(), Value::undefined())
         };
+        if shape.attr_at(slot) & rune_core::shape::ATTR_CONFIGURABLE == 0 {
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Cannot redefine non-configurable property",
+            ));
+            return Value::undefined();
+        }
         let pair = if is_getter {
             rune_core::accessor::AccessorPair::allocate(gc, func, old_set)
         } else {
             rune_core::accessor::AccessorPair::allocate(gc, old_get, func)
         };
-        unsafe { JSObject::set_slot(obj_ptr, slot, Value::from_heap_ptr(pair)) };
+        // Re-resolve after the allocation (GC may have moved the object).
+        let live = unsafe { rune_core::gc::resolve_forwarded(ptr) } as *mut JSObject;
+        let live_shape = unsafe { JSObject::shape_ptr(live) };
+        let live_slot = live_shape.lookup(&pkey).unwrap_or(slot);
+        let new_shape = Shape::with_replaced_attr(
+            live_shape,
+            live_slot,
+            rune_core::shape::ATTR_ENUMERABLE | rune_core::shape::ATTR_CONFIGURABLE,
+        );
+        unsafe {
+            JSObject::set_shape_ptr(live, new_shape);
+            JSObject::set_slot(live, live_slot, Value::from_heap_ptr(pair));
+        }
+        return Value::undefined();
+    }
+    if !unsafe { JSObject::is_extensible(obj_ptr) } {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Cannot define property on a non-extensible object",
+        ));
         return Value::undefined();
     }
     let live = vm.ensure_object_capacity(gc, obj_ptr);
@@ -9076,14 +9147,17 @@ pub fn object_prototype_value_of(
     _args: &[Value],
     vm: &mut Vm,
 ) -> Value {
-    if !this.is_heap_object() {
+    if this.is_null() || this.is_undefined() {
         vm.set_pending_exception(crate::errors::error_object(
             gc,
             &vm.error_protos,
             crate::errors::ErrorKind::TypeError,
-            "Object.prototype.valueOf called on non-object",
+            "Object.prototype.valueOf called on null or undefined",
         ));
         return Value::undefined();
+    }
+    if !is_object_value(this) {
+        return crate::vm::to_object_value(gc, this, vm);
     }
     this
 }
@@ -9142,16 +9216,28 @@ pub fn object_prototype_is_prototype_of(
     args: &[Value],
     vm: &mut Vm,
 ) -> Value {
-    let Some(this_ptr) = this.heap_ptr() else {
+    let target = args.first().copied().unwrap_or(Value::undefined());
+    // Step 1 precedes ToObject(this): primitive/null/undefined V → false.
+    if !is_object_value(target) {
+        return Value::boolean(false);
+    }
+    if this.is_null() || this.is_undefined() {
         vm.set_pending_exception(crate::errors::error_object(
             gc,
             &vm.error_protos,
             crate::errors::ErrorKind::TypeError,
-            "Object.prototype.isPrototypeOf called on non-object",
+            "Object.prototype.isPrototypeOf called on null or undefined",
         ));
         return Value::undefined();
+    }
+    let this = if is_object_value(this) {
+        this
+    } else {
+        crate::vm::to_object_value(gc, this, vm)
     };
-    let target = args.first().copied().unwrap_or(Value::undefined());
+    let Some(this_ptr) = this.heap_ptr() else {
+        return Value::boolean(false);
+    };
     let Some(tgt_ptr) = target.heap_ptr() else {
         return Value::boolean(false);
     };
@@ -12552,7 +12638,9 @@ fn set_exotic_integrity(
         attrs.push(rune_core::shape::ATTR_DEFAULT);
     }
     for (i, a) in attrs.iter_mut().enumerate() {
-        *a &= !rune_core::shape::ATTR_CONFIGURABLE;
+        if level >= 1 {
+            *a &= !rune_core::shape::ATTR_CONFIGURABLE;
+        }
         if level >= 2 {
             let is_accessor = unsafe {
                 JSObject::get_slot(obj_ptr, i)
@@ -12629,7 +12717,9 @@ fn apply_integrity_attrs(obj_ptr: *mut JSObject, level: u8) {
         attrs.push(rune_core::shape::ATTR_DEFAULT);
     }
     for (i, a) in attrs.iter_mut().enumerate() {
-        *a &= !rune_core::shape::ATTR_CONFIGURABLE;
+        if level >= 1 {
+            *a &= !rune_core::shape::ATTR_CONFIGURABLE;
+        }
         if level >= 2 {
             let is_accessor = unsafe {
                 JSObject::get_slot(obj_ptr, i)

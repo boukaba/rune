@@ -17645,3 +17645,55 @@ fn test_object_assign_string_target_symbols_accessors() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_object_prototype_legacy_and_integrity() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var op = Object.getOwnPropertyDescriptor(Object, "prototype");
+            var protoDesc = Object.getOwnPropertyDescriptor(Object.prototype, "__proto__");
+            var subject = {};
+            Object.defineProperty(subject, "x", {
+                get: function () { return 1; },
+                set: function () {},
+                enumerable: false,
+                configurable: true
+            });
+            subject.__defineGetter__("x", function () { return 2; });
+            var d = Object.getOwnPropertyDescriptor(subject, "x");
+            var ext = Object.preventExtensions({ existing: null });
+            ext.__defineGetter__("existing", function () { return 3; });
+            var extDesc = Object.getOwnPropertyDescriptor(ext, "existing");
+            var newThrew = false;
+            try { ext.__defineGetter__("brandNew", function () {}); } catch (e) { newThrew = e instanceof TypeError; }
+            var root = {};
+            var mid = Object.create(root);
+            var leaf = Object.create(mid);
+            var cycleThrew = false;
+            try { root.__proto__ = leaf; } catch (e) { cycleThrew = e instanceof TypeError; }
+            var frozenProto = Object.create({});
+            Object.preventExtensions(frozenProto);
+            var nonExtThrew = false;
+            try { frozenProto.__proto__ = {}; } catch (e) { nonExtThrew = e instanceof TypeError; }
+            [
+                op.writable === false && op.enumerable === false && op.configurable === false,
+                Object.prototype.isPrototypeOf.call(null, undefined) === false,
+                typeof Object.prototype.valueOf.call(false) === "object",
+                Object.prototype.__defineGetter__.name === "__defineGetter__",
+                protoDesc.get.name === "get __proto__",
+                protoDesc.set.name === "set __proto__",
+                subject.x === 2 && d.enumerable === true && d.configurable === true,
+                typeof d.set === "function",
+                ext.existing === 3 && extDesc.configurable === true,
+                newThrew,
+                cycleThrew,
+                nonExtThrew,
+                Object.getPrototypeOf(root) === Object.prototype
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

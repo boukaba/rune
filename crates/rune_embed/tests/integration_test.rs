@@ -18715,3 +18715,48 @@ fn test_public_class_fields_instance_static_and_derived() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_new_target_and_class_field_initialization_order() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            function F() { return new.target; }
+            var plainCall = F();
+            var constructed = new F();
+
+            class Base {
+                constructor() { this.baseNewTarget = new.target; }
+            }
+            class Derived extends Base {}
+
+            function viaArrow() {
+                var inner = () => new.target;
+                return inner();
+            }
+
+            function viaReflect() {
+                return Reflect.construct(Base, [], viaReflect).baseNewTarget;
+            }
+
+            class Fields {
+                x = 1;
+                constructor() { this.observed = this.x; }
+            }
+            var fields = new Fields();
+            var derived = new Derived();
+
+            [
+                plainCall === undefined,
+                constructed === F,
+                derived.baseNewTarget === Derived,
+                new viaArrow() === viaArrow,
+                viaReflect() === viaReflect,
+                fields.observed === 1
+            ].join("|") === "true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

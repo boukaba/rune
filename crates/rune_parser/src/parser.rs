@@ -1754,6 +1754,18 @@ impl Parser {
             }
             TokenKind::New => {
                 self.advance();
+                if self.tok.kind == TokenKind::Dot {
+                    self.advance();
+                    if self.tok.value == "target" {
+                        let span = Span {
+                            start: start.start,
+                            end: self.span().end,
+                        };
+                        self.advance();
+                        return self.parse_postfix(Expr::NewTarget(span));
+                    }
+                    self.error("Expected 'target' after 'new.'".to_string());
+                }
                 // Parse callee as a member expression (dot/bracket postfix only, NO calls)
                 let mut callee = Box::new(self.parse_member_expr());
                 while matches!(

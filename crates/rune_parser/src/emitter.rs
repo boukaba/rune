@@ -975,6 +975,7 @@ impl Emitter {
         let mut static_getter_funcs: Vec<(PropKey, usize)> = Vec::new();
         let mut static_setter_funcs: Vec<(PropKey, usize)> = Vec::new();
 
+        let has_heritage = class.heritage.is_some();
         for method in &class.methods {
             let is_constructor =
                 matches!(&method.key, PropKey::Identifier(n) if n.as_ref() == "constructor");
@@ -991,6 +992,27 @@ impl Emitter {
 
             let mut func = method.func.clone();
             func.name = func_name;
+            if is_constructor && !class.fields.is_empty() {
+                let init_stmt = Stmt::FieldInit(class.fields.clone(), Span::default());
+                func.body = match func.body {
+                    Stmt::Block(mut stmts, span) => {
+                        if has_heritage {
+                            stmts.push(init_stmt);
+                        } else {
+                            stmts.insert(0, init_stmt);
+                        }
+                        Stmt::Block(stmts, span)
+                    }
+                    other => {
+                        let stmts = if has_heritage {
+                            vec![other, init_stmt]
+                        } else {
+                            vec![init_stmt, other]
+                        };
+                        Stmt::Block(stmts, Span::default())
+                    }
+                };
+            }
             let idx = self.compile_function(&func);
             if is_constructor {
                 constructor_idx = Some(idx);
@@ -1155,7 +1177,6 @@ impl Emitter {
         }
 
         // 4. Create constructor function
-        let has_heritage = class.heritage.is_some();
         let ctor_idx = constructor_idx.unwrap_or_else(|| {
             let body = if has_heritage {
                 // Derived class default constructor: constructor(...args) { super(...args); }
@@ -1181,6 +1202,22 @@ impl Emitter {
             } else {
                 // Base class default constructor: empty body
                 Stmt::Block(vec![], Span { start: 0, end: 0 })
+            };
+            let body = if class.fields.is_empty() {
+                body
+            } else {
+                let init_stmt = Stmt::FieldInit(class.fields.clone(), Span::default());
+                match body {
+                    Stmt::Block(mut stmts, span) => {
+                        if has_heritage {
+                            stmts.push(init_stmt);
+                        } else {
+                            stmts.insert(0, init_stmt);
+                        }
+                        Stmt::Block(stmts, span)
+                    }
+                    other => Stmt::Block(vec![other, init_stmt], Span::default()),
+                }
             };
             let synth = FnNode {
                 name: class.name.clone(),
@@ -1313,57 +1350,6 @@ impl Emitter {
                 ctor_prog
                     .instructions
                     .push(Instruction::new(Opcode::Return, vec![]));
-            }
-        }
-
-        // 4.6 Inject public instance field initialization into the
-        //     constructor. Each initializer is compiled as a synthetic
-        //     function called with `this` = instance, so it observes the
-        //     class definition scope and the correct receiver. Injection is
-        //     placed before the final Return (field-vs-body ordering for
-        //     base classes is refined in later rounds).
-        if class.fields.iter().any(|f| !f.is_static) {
-            let mut inject: Vec<Instruction> = Vec::new();
-            for field in class.fields.iter().filter(|f| !f.is_static) {
-                let key_str = match &field.key {
-                    PropKey::Identifier(n) => Some(n.to_string()),
-                    PropKey::String(n) => Some(n.to_string()),
-                    PropKey::Number(n) => Some(n.to_string()),
-                    PropKey::Computed(_) => None,
-                };
-                let Some(key_str) = key_str else { continue };
-                let init_program = field
-                    .init
-                    .as_ref()
-                    .map(|init| self.compile_function_into(&field_initializer_function(init)));
-                let ctor_prog = &mut self.nested_funcs[ctor_idx];
-                let key_idx = intern_program_string(ctor_prog, &key_str);
-                if let Some(program) = init_program {
-                    let idx = ctor_prog.functions.len();
-                    ctor_prog.functions.push(program);
-                    inject.push(Instruction::new(Opcode::LoadThis, vec![]));
-                    inject.push(Instruction::new(Opcode::Dup, vec![]));
-                    inject.push(Instruction::new(Opcode::MakeFunction, vec![idx as i64]));
-                    inject.push(Instruction::new(Opcode::Call, vec![0]));
-                } else {
-                    inject.push(Instruction::new(Opcode::LoadThis, vec![]));
-                    inject.push(Instruction::new(Opcode::LoadUndefined, vec![]));
-                }
-                inject.push(Instruction::new(Opcode::DefineProperty, vec![key_idx]));
-                inject.push(Instruction::new(Opcode::Pop, vec![]));
-            }
-            let return_pos = self.nested_funcs[ctor_idx]
-                .instructions
-                .iter()
-                .rposition(|i| i.opcode == Opcode::Return);
-            if let Some(pos) = return_pos {
-                for (i, instr) in inject.into_iter().enumerate() {
-                    self.nested_funcs[ctor_idx]
-                        .instructions
-                        .insert(pos + i, instr);
-                }
-            } else {
-                self.nested_funcs[ctor_idx].instructions.extend(inject);
             }
         }
 
@@ -2522,6 +2508,25 @@ impl Emitter {
                     }
                 }
             }
+            Stmt::FieldInit(fields, _) => {
+                for field in fields {
+                    let key_idx = match &field.key {
+                        PropKey::Identifier(n) => Some(self.intern_string(n) as i64),
+                        PropKey::String(n) => Some(self.intern_string(n) as i64),
+                        PropKey::Number(n) => Some(self.intern_string(&n.to_string()) as i64),
+                        PropKey::Computed(_) => None,
+                    };
+                    let Some(key_idx) = key_idx else { continue };
+                    self.emit(Opcode::LoadThis, vec![]);
+                    if let Some(init) = &field.init {
+                        self.emit_expression(init);
+                    } else {
+                        self.emit(Opcode::LoadUndefined, vec![]);
+                    }
+                    self.emit(Opcode::DefineProperty, vec![key_idx]);
+                    self.emit(Opcode::Pop, vec![]);
+                }
+            }
             Stmt::Labeled(label, body, _) => {
                 // Attach the label to the next loop frame pushed while
                 // emitting the body. Non-loop bodies simply emit (a label on
@@ -2845,6 +2850,9 @@ impl Emitter {
             }
             Expr::This(_) => {
                 self.emit(Opcode::LoadThis, vec![]);
+            }
+            Expr::NewTarget(_) => {
+                self.emit(Opcode::LoadNewTarget, vec![]);
             }
             Expr::Unary(op, arg, _) => {
                 // `typeof <unresolved identifier>` must not throw; use the
@@ -4427,6 +4435,11 @@ fn contains_inner_function_stmt(stmt: &Stmt) -> bool {
                 .as_ref()
                 .is_some_and(|e| contains_inner_function_expr(e))
         }),
+        Stmt::FieldInit(fields, _) => fields.iter().any(|f| {
+            f.init
+                .as_ref()
+                .is_some_and(|e| contains_inner_function_expr(e))
+        }),
         Stmt::If(cond, then, else_, _) => {
             contains_inner_function_expr(cond)
                 || contains_inner_function_stmt(then)
@@ -4533,7 +4546,8 @@ fn contains_inner_function_expr(expr: &Expr) -> bool {
         | Expr::This(_)
         | Expr::Yield(_, _)
         | Expr::YieldStar(_, _)
-        | Expr::RegExp(_, _, _) => false,
+        | Expr::RegExp(_, _, _)
+        | Expr::NewTarget(_) => false,
         Expr::Super(_) => false,
         Expr::Class(_, _) => true,
         Expr::Await(expr, _) => contains_inner_function_expr(expr),
@@ -4673,15 +4687,6 @@ fn push_pattern_binding_names(pattern: &Option<Pattern>, name: &str, names: &mut
         }
         Some(Pattern::Target(_, _)) => {}
     }
-}
-
-fn intern_program_string(program: &mut BytecodeProgram, s: &str) -> i64 {
-    if let Some(idx) = program.string_pool.iter().position(|x| x == s) {
-        return idx as i64;
-    }
-    let idx = program.string_pool.len();
-    program.string_pool.push(s.to_string());
-    idx as i64
 }
 
 /// Synthetic field-initializer function: `function () { return <init>; }`.
@@ -4857,6 +4862,7 @@ fn uses_arguments_stmt(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Expr(expr, _) => uses_arguments_expr(expr),
         Stmt::Import(_, _) | Stmt::Export(_, _) => false,
+        Stmt::FieldInit(_, _) => false,
         Stmt::Block(stmts, _) => stmts.iter().any(uses_arguments_stmt),
         Stmt::If(cond, then, else_, _) => {
             uses_arguments_expr(cond)
@@ -4936,6 +4942,7 @@ fn uses_arguments_expr(expr: &Expr) -> bool {
         | Expr::Boolean(_, _)
         | Expr::Null(_)
         | Expr::Undefined(_)
+        | Expr::NewTarget(_)
         | Expr::This(_) => false,
         Expr::Array(elements, _) => elements.iter().any(|e| uses_arguments_expr(&e.expr)),
         Expr::Object(props, _) => props.iter().any(|p| uses_arguments_expr(&p.value)),

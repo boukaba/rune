@@ -119,6 +119,7 @@ struct Frame {
     this: Value,
     is_constructor_call: bool,
     constructed_object: Value,
+    new_target: Value,
     /// Pointer to this frame's lexical environment object (may be null).
     /// Set by MakeEnv at function entry. Child closures capture this pointer.
     env: *mut u8,
@@ -5338,6 +5339,7 @@ impl Vm {
             generator_id: Some(pag.gen_id),
             this,
             is_constructor_call: false,
+            new_target: Value::undefined(),
             constructed_object: Value::undefined(),
             env,
             func_ptr: std::ptr::null_mut(),
@@ -5481,6 +5483,7 @@ impl Vm {
             generator_id: None,
             this,
             is_constructor_call: false,
+            new_target: Value::undefined(),
             constructed_object: Value::undefined(),
             env: func_env,
             func_ptr: func_ptr as *mut u8,
@@ -5639,6 +5642,7 @@ impl Vm {
         &mut self,
         gc: &mut SemiSpace,
         ctor: Value,
+        new_target: Value,
         args: Vec<Value>,
     ) -> Result<Value, Value> {
         if self.builtin_wrappers.get("Function").copied() == Some(ctor) {
@@ -5648,7 +5652,7 @@ impl Vm {
             }
             return Ok(result);
         }
-        match self.push_construct_frame(gc, ctor, args) {
+        match self.push_construct_frame(gc, ctor, new_target, args) {
             ConstructOut::Done(v) => Ok(v),
             ConstructOut::Fail(e) => Err(e),
             ConstructOut::Pushed(this_val) => {
@@ -5706,6 +5710,7 @@ impl Vm {
         &mut self,
         gc: &mut SemiSpace,
         ctor: Value,
+        new_target: Value,
         args: Vec<Value>,
     ) -> ConstructOut {
         // Array [[Construct]] inline (single-arg length form et al).
@@ -5829,6 +5834,7 @@ impl Vm {
                         this: obj_val,
                         is_constructor_call: true,
                         constructed_object: obj_val,
+                        new_target,
                         env: func_env,
                         func_ptr: func_ptr as *mut u8,
                         private_name_ids: std::ptr::null_mut(),
@@ -6077,6 +6083,7 @@ impl Vm {
                                     generator_id: None,
                                     this,
                                     is_constructor_call: false,
+                                    new_target: Value::undefined(),
                                     constructed_object: Value::undefined(),
                                     env: func_env,
                                     func_ptr,
@@ -6161,6 +6168,7 @@ impl Vm {
             generator_id: None,
             this: obj,
             is_constructor_call: false,
+            new_target: Value::undefined(),
             constructed_object: Value::undefined(),
             env: func_env,
             func_ptr,
@@ -6214,6 +6222,7 @@ impl Vm {
                 self.global_this
             },
             is_constructor_call: false,
+            new_target: Value::undefined(),
             constructed_object: Value::undefined(),
             env: std::ptr::null_mut(),
             func_ptr: std::ptr::null_mut(),
@@ -6342,6 +6351,7 @@ impl Vm {
             generator_id: None,
             this: Value::undefined(),
             is_constructor_call: false,
+            new_target: Value::undefined(),
             constructed_object: Value::undefined(),
             env: std::ptr::null_mut(),
             func_ptr: std::ptr::null_mut(),
@@ -6604,6 +6614,7 @@ impl Vm {
             generator_id: Some(gen_id),
             this: saved_this,
             is_constructor_call: false,
+            new_target: Value::undefined(),
             constructed_object: Value::undefined(),
             env: saved_env,
             func_ptr: std::ptr::null_mut(),
@@ -7655,6 +7666,7 @@ impl Vm {
                                                         generator_id: None,
                                                         this: obj,
                                                         is_constructor_call: false,
+                                                        new_target: Value::undefined(),
                                                         constructed_object: Value::undefined(),
                                                         env: func_env,
                                                         func_ptr,
@@ -8068,6 +8080,22 @@ impl Vm {
                 }
 
                 // ---- `this` binding ----
+                Opcode::LoadNewTarget => {
+                    let fp = self.frames[fi].func_ptr;
+                    let mut nt = self.frames[fi].new_target;
+                    if !fp.is_null() && unsafe { Func::is_arrow(fp as *mut Func) } {
+                        let props = unsafe { Func::extra_props(fp as *mut Func) };
+                        if !props.is_null() {
+                            let key = PropertyKey::from_string("\0new_target");
+                            let shape = unsafe { JSObject::shape_ptr(props as *mut JSObject) };
+                            if let Some(slot) = shape.lookup(&key) {
+                                nt = unsafe { JSObject::get_slot(props as *mut JSObject, slot) };
+                            }
+                        }
+                    }
+                    self.push(nt);
+                    self.frames[fi].pc = pc + 1;
+                }
                 Opcode::LoadThis => {
                     let fp = self.frames[fi].func_ptr;
                     let mut this = {
@@ -11527,6 +11555,25 @@ impl Vm {
                                 &func_prog.display_name,
                             );
                         }
+                        // Arrows inherit `new.target` lexically from their
+                        // creation site. Store it on the function's hidden
+                        // extra-props slot.
+                        if is_arrow {
+                            let hidden = "\0new_target";
+                            let key = PropertyKey::from_string(hidden);
+                            let props = Func::extra_props(resolved_ptr);
+                            if !props.is_null() {
+                                let live = self.ensure_object_capacity(gc, props as *mut JSObject);
+                                let shape = JSObject::shape_ptr(live);
+                                let nt = self.frames[fi].new_target;
+                                if let Some(slot) = shape.lookup(&key) {
+                                    JSObject::set_slot(live, slot, nt);
+                                } else {
+                                    JSObject::add_property(live, key, hidden.to_string(), nt);
+                                }
+                                Func::set_extra_props(resolved_ptr, live as *mut u8);
+                            }
+                        }
                         self.push(Value::from_heap_ptr(resolved_ptr as *mut u8));
                     }
                     self.frames[fi].pc = pc + 1;
@@ -11743,6 +11790,7 @@ impl Vm {
                                                 generator_id: None,
                                                 this: obj,
                                                 is_constructor_call: false,
+                                                new_target: Value::undefined(),
                                                 constructed_object: Value::undefined(),
                                                 env: func_env,
                                                 func_ptr,
@@ -12446,6 +12494,7 @@ impl Vm {
                                     this: obj_val,
                                     is_constructor_call: true,
                                     constructed_object: obj_val,
+                                    new_target: constructor,
                                     env: func_env,
                                     func_ptr: func_ptr as *mut u8,
                                     private_name_ids: std::ptr::null_mut(),
@@ -12942,6 +12991,7 @@ impl Vm {
                                         generator_id: Some(gen_id),
                                         this,
                                         is_constructor_call: false,
+                                        new_target: Value::undefined(),
                                         constructed_object: Value::undefined(),
                                         env: func_env,
                                         func_ptr: func_ptr as *mut u8,
@@ -13065,6 +13115,7 @@ impl Vm {
                                                     generator_id: None,
                                                     this,
                                                     is_constructor_call: false,
+                                                    new_target: Value::undefined(),
                                                     constructed_object: Value::undefined(),
                                                     env: func_env,
                                                     func_ptr: ptr,
@@ -13233,6 +13284,7 @@ impl Vm {
                                             generator_id: None,
                                             this,
                                             is_constructor_call: false,
+                                            new_target: Value::undefined(),
                                             constructed_object: Value::undefined(),
                                             env: func_env,
                                             func_ptr: ptr,
@@ -13293,6 +13345,14 @@ impl Vm {
                                 };
                                 let passed_argc = args.len();
                                 locals.extend(args);
+                                // super(...) re-enters the superclass
+                                // constructor; new.target is inherited from the
+                                // currently executing constructor.
+                                let call_is_super =
+                                    instr.operands.get(1).copied().unwrap_or(0) != 0;
+                                let super_construct =
+                                    call_is_super && func_prog.is_class_constructor;
+                                let caller_new_target = self.frames[fi].new_target;
                                 self.frames.push(Frame {
                                     locals,
                                     lexical_slots: Vec::new(),
@@ -13305,8 +13365,17 @@ impl Vm {
                                     prog: func_prog as *const BytecodeProgram,
                                     generator_id: None,
                                     this,
-                                    is_constructor_call: false,
-                                    constructed_object: Value::undefined(),
+                                    is_constructor_call: super_construct,
+                                    new_target: if super_construct {
+                                        caller_new_target
+                                    } else {
+                                        Value::undefined()
+                                    },
+                                    constructed_object: if super_construct {
+                                        this
+                                    } else {
+                                        Value::undefined()
+                                    },
                                     env: func_env,
                                     func_ptr: func_ptr as *mut u8,
                                     private_name_ids: std::ptr::null_mut(),
@@ -15255,6 +15324,7 @@ impl Vm {
                                         generator_id: Some(gen_id),
                                         this,
                                         is_constructor_call: false,
+                                        new_target: Value::undefined(),
                                         constructed_object: Value::undefined(),
                                         env: func_env,
                                         func_ptr: func_ptr as *mut u8,
@@ -15295,6 +15365,11 @@ impl Vm {
                                 };
                                 let passed_argc = args.len();
                                 locals.extend(args);
+                                let call_is_super =
+                                    instr.operands.first().copied().unwrap_or(0) != 0;
+                                let super_construct =
+                                    call_is_super && func_prog.is_class_constructor;
+                                let caller_new_target = self.frames[fi].new_target;
                                 self.frames.push(Frame {
                                     locals,
                                     lexical_slots: Vec::new(),
@@ -15307,8 +15382,17 @@ impl Vm {
                                     prog: func_prog as *const BytecodeProgram,
                                     generator_id: None,
                                     this,
-                                    is_constructor_call: false,
-                                    constructed_object: Value::undefined(),
+                                    is_constructor_call: super_construct,
+                                    new_target: if super_construct {
+                                        caller_new_target
+                                    } else {
+                                        Value::undefined()
+                                    },
+                                    constructed_object: if super_construct {
+                                        this
+                                    } else {
+                                        Value::undefined()
+                                    },
                                     env: func_env,
                                     func_ptr: func_ptr as *mut u8,
                                     private_name_ids: std::ptr::null_mut(),
@@ -18838,6 +18922,7 @@ pub(crate) fn push_accessor_frame(
         generator_id: None,
         this: receiver,
         is_constructor_call: false,
+        new_target: Value::undefined(),
         constructed_object: Value::undefined(),
         env: func_env,
         func_ptr: gptr,
@@ -19464,6 +19549,7 @@ pub unsafe extern "C" fn rune_jit_call_helper(
                         generator_id: None,
                         this: Value::from_raw(this_raw),
                         is_constructor_call: false,
+                        new_target: Value::undefined(),
                         constructed_object: Value::undefined(),
                         env: func_env,
                         func_ptr: func_ptr as *mut u8,

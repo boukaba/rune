@@ -4003,6 +4003,30 @@ Integration suite: **926 passed, 0 failed, 3 ignored**.
 
 Integration suite: **927 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — new.target + class-field initialization order (2026-11-14)
+
+- Implemented `new.target`:
+  - parser recognizes `new.target` (and postfix chains);
+  - new `LoadNewTarget` opcode reads a per-activation `new_target` field;
+  - constructor frames record the newTarget, ordinary calls use undefined;
+  - `super()` (plain and spread) propagates the caller constructor's newTarget
+    into the superclass activation;
+  - arrow functions snapshot newTarget into a hidden function property at
+    creation and load it lexically;
+  - `Reflect.construct(target, args, newTarget)` threads newTarget through
+    `construct_value_sync`/`push_construct_frame`.
+  Test262 new.target: **0 → 12/14** (2 skipped). Arrow function suite
+  **229 → 231/343**.
+- Class public instance fields are now initialized through a synthetic
+  `FieldInit` statement embedded in the constructor body: before the user body
+  for base classes and after it for derived classes (default derived
+  constructors run it right after `super(...args)`), so base constructors can
+  observe their fields. Test262 class statements **1628 → 1633/4367**,
+  class expressions **1560 → 1563/4059**.
+- Regression: `test_new_target_and_class_field_initialization_order`.
+
+Integration suite: **928 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

@@ -3809,7 +3809,7 @@ pub fn reflect_construct(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &
     };
     let result = if let Some(ptr) = target.heap_ptr() {
         if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_FUNC {
-            match vm.construct_value_sync(gc, target, call_args) {
+            match vm.construct_value_sync(gc, target, new_target, call_args) {
                 Ok(v) => v,
                 Err(e) => {
                     vm.set_pending_exception(e);
@@ -3852,7 +3852,7 @@ pub fn reflect_construct(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &
                 }
             }
         } else {
-            match vm.construct_value_sync(gc, target, call_args) {
+            match vm.construct_value_sync(gc, target, new_target, call_args) {
                 Ok(v) => v,
                 Err(e) => {
                     vm.set_pending_exception(e);
@@ -3861,7 +3861,7 @@ pub fn reflect_construct(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &
             }
         }
     } else {
-        match vm.construct_value_sync(gc, target, call_args) {
+        match vm.construct_value_sync(gc, target, new_target, call_args) {
             Ok(v) => v,
             Err(e) => {
                 vm.set_pending_exception(e);
@@ -13974,7 +13974,7 @@ pub fn array_of(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) ->
         return build_array(gc, args, vm);
     }
     let len_value = length_value(args.len() as u64);
-    match vm.push_construct_frame(gc, this, vec![len_value]) {
+    match vm.push_construct_frame(gc, this, this, vec![len_value]) {
         crate::vm::ConstructOut::Done(r) => of_install(gc, vm, r, args),
         crate::vm::ConstructOut::Pushed(fresh_this) => {
             let op = crate::vm::PendingSpeciesOp {
@@ -14700,7 +14700,7 @@ pub fn array_from(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
         && this != vm.array_constructor
         && this != vm.object_constructor
     {
-        match vm.push_construct_frame(gc, this, vec![]) {
+        match vm.push_construct_frame(gc, this, this, vec![]) {
             crate::vm::ConstructOut::Done(r) => {
                 if r.heap_ptr().is_none() {
                     vm.set_pending_exception(sort_type_error(
@@ -18934,7 +18934,7 @@ pub fn regexp_match_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
             let flags_val = Value::from_heap_ptr(HeapString::allocate(gc, &flags) as *mut u8);
             let base = vm.temp_roots.len();
             vm.temp_roots.push(rx);
-            let result = vm.construct_value_sync(gc, species, vec![rx, flags_val]);
+            let result = vm.construct_value_sync(gc, species, species, vec![rx, flags_val]);
             vm.temp_roots.truncate(base);
             match result {
                 Ok(v) => v,
@@ -21585,7 +21585,7 @@ fn species_construct(
     ctor: Value,
 ) -> SpeciesOut {
     let len_value = length_value(op.construct_len);
-    match vm.push_construct_frame(gc, ctor, vec![len_value]) {
+    match vm.push_construct_frame(gc, ctor, ctor, vec![len_value]) {
         crate::vm::ConstructOut::Done(r) => {
             if r.heap_ptr().is_none() {
                 return SpeciesOut::Fail(sort_type_error(
@@ -31159,7 +31159,7 @@ pub fn regexp_symbol_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: 
         let new_flags_val = Value::from_heap_ptr(HeapString::allocate(gc, &new_flags) as *mut u8);
         let base = vm.temp_roots.len();
         vm.temp_roots.push(rx);
-        let result = vm.construct_value_sync(gc, species, vec![rx, new_flags_val]);
+        let result = vm.construct_value_sync(gc, species, species, vec![rx, new_flags_val]);
         vm.temp_roots.truncate(base);
         match result {
             Ok(v) => v,

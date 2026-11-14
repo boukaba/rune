@@ -168,6 +168,8 @@ pub enum Opcode {
     SetFunctionName,
     // Rotate the top three stack slots: [a, b, c] -> [b, c, a].
     Rot3,
+    // Push the current activation's `new.target` (undefined for ordinary calls).
+    LoadNewTarget,
 }
 
 #[derive(Clone, Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]

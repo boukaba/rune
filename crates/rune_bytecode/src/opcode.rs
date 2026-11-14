@@ -166,6 +166,8 @@ pub enum Opcode {
     // Infer a function's name from a static binding name (operands[0] = string
     // pool index). No-op for non-functions or already-named functions.
     SetFunctionName,
+    // Rotate the top three stack slots: [a, b, c] -> [b, c, a].
+    Rot3,
 }
 
 #[derive(Clone, Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]

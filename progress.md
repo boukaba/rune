@@ -3961,6 +3961,27 @@ Integration suite: **924 passed, 0 failed, 3 ignored**.
 
 Integration suite: **925 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Assignment-pattern targets, cover initialized names, identifier escapes (2026-11-14)
+
+- Added `Pattern::Target` for non-binding destructuring assignment targets
+  (`[...obj.prop] = …`, `[a[expr]] = …`, `{x: obj.y = d} = …`).
+- New `Rot3` opcode rotates `[value, obj, key]` to `[obj, key, value]` so a
+  member target can be stored without a scratch local; the assignment
+  expression now preserves the RHS value as its result (`Dup` before the
+  pattern).
+- Object literals accept CoverInitializedName (`{ x = default }`), enabling
+  object assignment patterns with shorthand defaults.
+- Identifier lexing decodes `\uXXXX` escapes, including escaped property
+  names and reserved words (`\u0066inally` → `finally`). This fixes the
+  ident-name escape family across object/class/assignment suites.
+- Test262: language/expressions/assignment **75 → 275/485**,
+  assignment/dstr **47 → 205/368**, language/expressions/object
+  **523 → 646/1170**, language/statements/class **1531 → 1576/4367**,
+  language/expressions/class **1466 → 1511/4059**.
+- Regression: `test_assignment_destructuring_targets_and_ident_escapes`.
+
+Integration suite: **926 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

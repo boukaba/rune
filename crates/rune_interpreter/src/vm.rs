@@ -8141,6 +8141,15 @@ impl Vm {
                     self.push(b);
                     self.frames[fi].pc = pc + 1;
                 }
+                Opcode::Rot3 => {
+                    let c = self.pop();
+                    let b = self.pop();
+                    let a = self.pop();
+                    self.push(b);
+                    self.push(c);
+                    self.push(a);
+                    self.frames[fi].pc = pc + 1;
+                }
 
                 // ---- Unary ----
                 Opcode::UnaryPlus => {

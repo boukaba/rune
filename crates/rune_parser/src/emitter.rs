@@ -1641,6 +1641,9 @@ impl Emitter {
             Pattern::Rest(inner, _) => {
                 self.emit_destructuring_binding(inner, kind);
             }
+            Pattern::Target(target, _) => {
+                self.emit_target_assignment(target);
+            }
         }
     }
 
@@ -1676,6 +1679,30 @@ impl Emitter {
             Pattern::Rest(inner, _) => {
                 self.emit_destructuring_binding(inner, kind);
             }
+            Pattern::Target(target, _) => {
+                self.emit_target_assignment(target);
+            }
+        }
+    }
+
+    /// Assign the value on top of the stack to a non-binding target
+    /// (`obj.prop` / `obj[expr]`), preserving no result.
+    fn emit_target_assignment(&mut self, target: &Expr) {
+        match target {
+            Expr::Member(obj, prop, computed, _) => {
+                self.emit_expression(obj);
+                if *computed {
+                    self.emit_expression(prop);
+                } else {
+                    let name = prop_name_as_string(prop);
+                    let idx = self.intern_string(&name) as i64;
+                    self.emit(Opcode::LoadStringConst, vec![idx]);
+                }
+                self.emit(Opcode::Rot3, vec![]);
+                self.emit(Opcode::StoreProperty, vec![]);
+                self.emit(Opcode::Pop, vec![]);
+            }
+            _ => self.emit(Opcode::Pop, vec![]),
         }
     }
 
@@ -2949,6 +2976,7 @@ impl Emitter {
                 // Evaluate RHS, destructure into the pattern, and leave
                 // the RHS value as the expression result.
                 self.emit_expression(rhs);
+                self.emit(Opcode::Dup, vec![]);
                 self.emit_destructuring(pattern, &DestructureStore::Assign);
             }
             Expr::Binary(op, lhs, rhs, _) => {
@@ -4011,6 +4039,7 @@ impl Emitter {
                 }
                 count
             }
+            Some(Pattern::Target(_, _)) => 0,
             Some(Pattern::Array(items, _)) => items
                 .iter()
                 .map(|item| match item {
@@ -4070,6 +4099,7 @@ impl Emitter {
                     self.collect_lexical_bindings(&Some(pattern.clone()), name, bindings);
                 }
             }
+            Some(Pattern::Target(_, _)) => {}
             Some(Pattern::Identifier(n, _, _)) => {
                 bindings.push(LexicalBinding {
                     name: n.to_string(),
@@ -4563,6 +4593,7 @@ fn push_pattern_binding_names(pattern: &Option<Pattern>, name: &str, names: &mut
         Some(Pattern::Rest(inner, _)) => {
             push_pattern_binding_names(&Some((**inner).clone()), name, names)
         }
+        Some(Pattern::Target(_, _)) => {}
     }
 }
 

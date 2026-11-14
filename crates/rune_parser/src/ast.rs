@@ -301,6 +301,8 @@ pub enum Pattern {
     Array(Vec<Option<Pattern>>, Span),
     Default(Box<Pattern>, Box<Expr>),
     Rest(Box<Pattern>, Span),
+    /// Assignment target that is not a binding (member/computed/private).
+    Target(Box<Expr>, Span),
 }
 
 #[derive(Clone, Debug, PartialEq)]

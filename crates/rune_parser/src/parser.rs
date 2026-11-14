@@ -2413,13 +2413,28 @@ impl Parser {
                                     Box::from("_error")
                                 }
                             };
-                            let value = Expr::Identifier(
+                            let mut value = Expr::Identifier(
                                 name,
                                 Span {
                                     start: pstart.start,
                                     end: self.span().end,
                                 },
                             );
+                            // CoverInitializedName: `{ x = default }` is valid
+                            // when the object literal is later converted to a
+                            // destructuring assignment target.
+                            if self.tok.kind == TokenKind::EqAssign {
+                                self.advance();
+                                let default = self.parse_expr(0);
+                                value = Expr::Assign(
+                                    Box::new(value),
+                                    Box::new(default),
+                                    Span {
+                                        start: pstart.start,
+                                        end: self.span().end,
+                                    },
+                                );
+                            }
                             props.push(Property {
                                 key,
                                 value,
@@ -2633,6 +2648,9 @@ impl Parser {
                 }
                 Some(Pattern::Object(out, rest, *span))
             }
+            Expr::Member(_, _, _, span) | Expr::PrivateMember(_, _, span) => {
+                Some(Pattern::Target(Box::new(expr.clone()), *span))
+            }
             Expr::Assign(target, default, _) => {
                 // [a = 1] / {a = 1}: shorthand default
                 if let Expr::Identifier(name, ispan) = target.as_ref() {
@@ -2664,6 +2682,9 @@ impl Parser {
                     let inner = self.expr_to_pattern(target).unwrap_or_else(fallback);
                     Pattern::Default(Box::new(inner), default.clone())
                 }
+            }
+            Expr::Member(_, _, _, span) | Expr::PrivateMember(_, _, span) => {
+                Pattern::Target(Box::new(expr.clone()), *span)
             }
             _ => self.expr_to_pattern(expr).unwrap_or_else(fallback),
         }

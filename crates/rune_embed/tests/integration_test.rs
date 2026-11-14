@@ -18638,3 +18638,37 @@ fn test_closures_created_in_assignment_expressions_capture_lexicals() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_assignment_destructuring_targets_and_ident_escapes() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var vals = [1, 2, 3];
+            var holder = {};
+            var result = [...holder.rest] = vals;
+
+            var target = {};
+            var objectResult;
+            objectResult = { a: target.x, b: target.y = 9 } = { a: 5 };
+
+            var computed = [0];
+            [computed[0]] = [7];
+
+            var escaped;
+            ({ \u0066inally: escaped } = { finally: 42 });
+
+            [
+                result === vals,
+                holder.rest.length === 3 && holder.rest[2] === 3,
+                target.x === 5 && target.y === 9,
+                computed[0] === 7,
+                escaped === 42,
+                objectResult.a === 5
+            ].join("|") === "true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

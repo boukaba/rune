@@ -562,16 +562,28 @@ impl Lexer {
         Token::new(TokenKind::TemplateTail, start, end, value)
     }
 
-    fn scan_identifier(&mut self, _first: char) -> Token {
+    fn scan_identifier(&mut self, first: char) -> Token {
         self.start = self.pos - 1;
+        let mut word = String::new();
+        if first == '\\' {
+            // `\uXXXX` escape as the first IdentifierStart character.
+            self.advance(); // 'u'
+            word.push(self.scan_identifier_escape_char());
+        } else {
+            word.push(first);
+        }
         while let Some(ch) = self.peek() {
-            if ch.is_alphanumeric() || ch == '_' || ch == '$' || ch > '\u{007F}' {
+            if ch == '\\' && self.peek_next() == Some('u') {
+                self.advance();
+                self.advance();
+                word.push(self.scan_identifier_escape_char());
+            } else if ch.is_alphanumeric() || ch == '_' || ch == '$' || ch > '\u{007F}' {
+                word.push(ch);
                 self.advance();
             } else {
                 break;
             }
         }
-        let word = self.source_slice();
         let kind = match word.as_str() {
             "true" => TokenKind::True,
             "false" => TokenKind::False,
@@ -614,6 +626,23 @@ impl Lexer {
             _ => TokenKind::Identifier,
         };
         Token::new(kind, self.start, self.pos, word)
+    }
+
+    /// Read the four hex digits following `\u` in an identifier escape.
+    fn scan_identifier_escape_char(&mut self) -> char {
+        let mut cp = 0u32;
+        for _ in 0..4 {
+            let Some(ch) = self.peek() else { break };
+            let digit = match ch {
+                '0'..='9' => ch as u32 - '0' as u32,
+                'a'..='f' => ch as u32 - 'a' as u32 + 10,
+                'A'..='F' => ch as u32 - 'A' as u32 + 10,
+                _ => break,
+            };
+            cp = cp * 16 + digit;
+            self.advance();
+        }
+        char::from_u32(cp).unwrap_or('\u{FFFD}')
     }
 
     fn source_slice(&self) -> String {
@@ -697,6 +726,7 @@ impl Lexer {
             '0'..='9' => self.scan_number(ch),
 
             // Identifier or keyword
+            '\\' if self.peek() == Some('u') => self.scan_identifier(ch),
             c if c.is_alphabetic() || c == '_' || c == '$' => self.scan_identifier(ch),
 
             // Operators

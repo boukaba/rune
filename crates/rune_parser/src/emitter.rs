@@ -2482,17 +2482,24 @@ impl Emitter {
                         self.emit(Opcode::Jump, vec![0]);
                         let catch_entry = self.current();
                         self.patch(try_idx, catch_entry);
-                        if !c.param.is_empty() {
-                            if !self.locals.contains(&c.param.to_string()) {
-                                self.locals.push(c.param.to_string());
-                            }
-                            self.emit(
-                                Opcode::StoreLocal,
-                                vec![self.local_index(&c.param).unwrap() as i64],
-                            );
-                        }
-                        self.emit(Opcode::Pop, vec![]);
+                        let catch_env = if !c.param.is_empty() {
+                            // Catch parameters live in their own declarative
+                            // environment, visible only inside the catch body.
+                            self.env_scope_stack.push(vec![c.param.to_string()]);
+                            self.env_scope_is_per_iter.push(false);
+                            self.emit(Opcode::MakeEnv, vec![1]);
+                            self.emit(Opcode::StoreCaptured, vec![0, 0]);
+                            true
+                        } else {
+                            self.emit(Opcode::Pop, vec![]);
+                            false
+                        };
                         self.emit_statement(&Stmt::Block(c.body.to_vec(), c.span));
+                        if catch_env {
+                            self.emit(Opcode::RestoreEnv, vec![]);
+                            self.env_scope_stack.pop();
+                            self.env_scope_is_per_iter.pop();
+                        }
                         self.patch(past_catch, self.current());
                     }
                     (None, Some(fin)) => {
@@ -2515,17 +2522,24 @@ impl Emitter {
                         self.emit(Opcode::Jump, vec![0]);
                         let catch_entry = self.current();
                         self.patch(try_idx, catch_entry);
-                        if !c.param.is_empty() {
-                            if !self.locals.contains(&c.param.to_string()) {
-                                self.locals.push(c.param.to_string());
-                            }
-                            self.emit(
-                                Opcode::StoreLocal,
-                                vec![self.local_index(&c.param).unwrap() as i64],
-                            );
-                        }
-                        self.emit(Opcode::Pop, vec![]);
+                        let catch_env = if !c.param.is_empty() {
+                            // Catch parameters live in their own declarative
+                            // environment, visible only inside the catch body.
+                            self.env_scope_stack.push(vec![c.param.to_string()]);
+                            self.env_scope_is_per_iter.push(false);
+                            self.emit(Opcode::MakeEnv, vec![1]);
+                            self.emit(Opcode::StoreCaptured, vec![0, 0]);
+                            true
+                        } else {
+                            self.emit(Opcode::Pop, vec![]);
+                            false
+                        };
                         self.emit_statement(&Stmt::Block(c.body.to_vec(), c.span));
+                        if catch_env {
+                            self.emit(Opcode::RestoreEnv, vec![]);
+                            self.env_scope_stack.pop();
+                            self.env_scope_is_per_iter.pop();
+                        }
                         let fin_entry = self.current();
                         self.patch(past_catch, fin_entry);
                         self.patch_operand(try_idx, 1, fin_entry as i64);
@@ -4492,6 +4506,31 @@ fn function_source_slice(source: &str, span: Span) -> String {
     raw[..end].trim_end().to_string()
 }
 
+/// Whether a binding pattern contains a function/arrow in a default
+/// initializer (destructuring defaults can create closures).
+fn pattern_contains_inner_function(pattern: &Option<Pattern>) -> bool {
+    match pattern {
+        None => false,
+        Some(Pattern::Identifier(_, _, Some(default))) => contains_inner_function_expr(default),
+        Some(Pattern::Identifier(_, _, None)) => false,
+        Some(Pattern::Default(inner, default)) => {
+            contains_inner_function_expr(default)
+                || pattern_contains_inner_function(&Some((**inner).clone()))
+        }
+        Some(Pattern::Object(props, rest, _)) => {
+            props
+                .iter()
+                .any(|p| pattern_contains_inner_function(&Some(p.pattern.clone())))
+                || rest
+                    .as_ref()
+                    .is_some_and(|r| pattern_contains_inner_function(&Some((**r).clone())))
+        }
+        Some(Pattern::Array(items, _)) => items.iter().any(pattern_contains_inner_function),
+        Some(Pattern::Rest(inner, _)) => pattern_contains_inner_function(&Some((**inner).clone())),
+        Some(Pattern::Target(_, _)) => false,
+    }
+}
+
 /// Recursively check if a statement contains any inner function or arrow.
 fn contains_inner_function_stmt(stmt: &Stmt) -> bool {
     match stmt {
@@ -4504,6 +4543,7 @@ fn contains_inner_function_stmt(stmt: &Stmt) -> bool {
             d.init
                 .as_ref()
                 .is_some_and(|e| contains_inner_function_expr(e))
+                || pattern_contains_inner_function(&d.pattern)
         }),
         Stmt::FieldInit(fields, _) => fields.iter().any(|f| {
             f.init

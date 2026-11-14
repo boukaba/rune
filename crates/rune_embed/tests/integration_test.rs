@@ -18814,3 +18814,37 @@ fn test_switch_default_clause_position_and_fallthrough() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_catch_parameter_environment_and_pattern_default_closures() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var outer = "outer";
+            var captured;
+            var fromDefault;
+
+            try {
+                throw "inner";
+            } catch (x) {
+                captured = function () { return x; };
+            }
+
+            try {
+                throw { a: 1 };
+            } catch ({ a, b = function () { return a; } }) {
+                fromDefault = b;
+            }
+
+            [
+                captured() === "inner",
+                outer === "outer",
+                fromDefault() === 1,
+                typeof x === "undefined"
+            ].join("|") === "true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

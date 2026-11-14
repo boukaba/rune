@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Catch parameter environment (2026-11-14)**: catch params in declarative env, closures capture, pattern-default closure detection. try **150/201**. Integration **931**.
 - **Switch default position/fallthrough (2026-11-14)**: default_index in AST, source-order body layout, comma discriminant/case tests. switch **33/111**. Integration **930**.
 - **Eval completion values (2026-11-14)**: statement-mode eval returns completion local; resets for if/switch/try/loops, per-iteration loop reset, finally suppression. if **27/69 (0 fail)**, switch **23/111**, try **146/201**, while **20/38**, do-while **17/36**, eval-code **119/347**. Integration **929**.
 - **new.target + field init order (2026-11-14)**: LoadNewTarget/Frame new_target, super and Reflect.construct propagation, arrow lexical snapshot, FieldInit statement before base ctor body. new.target **12/14**, arrow **231/343**, class statements **1633/4367**. Integration **928**.

@@ -4062,6 +4062,20 @@ Integration suite: **929 passed, 0 failed, 3 ignored**.
 
 Integration suite: **930 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Catch parameter environment + pattern-default closures (2026-11-14)
+
+- Catch parameters now live in a dedicated declarative environment
+  (`MakeEnv`/`StoreCaptured` on entry, `RestoreEnv` on exit) instead of a
+  function-wide local. Closures created inside the catch capture the parameter,
+  and it is no longer visible after the catch clause.
+- `contains_inner_function_stmt` descends into binding-pattern default
+  initializers, so a block environment is created when a closure appears only
+  in a destructuring default (`{ a, b = () => a }`).
+- Test262 language/statements/try **146 → 150/201**.
+- Regression: `test_catch_parameter_environment_and_pattern_default_closures`.
+
+Integration suite: **931 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

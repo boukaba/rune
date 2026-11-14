@@ -23572,6 +23572,32 @@ unsafe fn grow_dense_array(gc: &mut SemiSpace, vm: &mut Vm, cur: *mut RuneArray)
 }
 
 /// Array.prototype.indexOf(searchElement, fromIndex) — returns index of first match, -1 if not found.
+fn array_like_length_sync(gc: &mut SemiSpace, vm: &mut Vm, this: Value) -> Result<u32, Value> {
+    // Arrays/strings have internal length slots that are authoritative and
+    // cannot be shadowed by user properties.
+    if let Some(ptr) = this.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if matches!(
+            tag,
+            TAG_ARRAY | TAG_STRING | TAG_STRING_OBJ | TAG_TYPED_ARRAY
+        ) {
+            return Ok(crate::vm::array_like_length(this).unwrap_or(0));
+        }
+    }
+    let len = get_value_sync(gc, vm, this, "length")?;
+    if len.is_undefined() {
+        return Ok(0);
+    }
+    let n = to_number_sync(gc, vm, len)?;
+    if n.is_nan() || n <= 0.0 {
+        return Ok(0);
+    }
+    if n >= u32::MAX as f64 {
+        return Ok(u32::MAX);
+    }
+    Ok(n.trunc() as u32)
+}
+
 pub fn array_index_of(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     array_index_search(gc, vm, this, args, crate::vm::ArrayOpKind::IndexOf)
 }
@@ -23614,7 +23640,13 @@ fn array_index_search(
         }
     }
     let search = args.first().copied().unwrap_or(Value::undefined());
-    let len = crate::vm::array_like_length(this).unwrap_or(0);
+    let len = match array_like_length_sync(gc, vm, this) {
+        Ok(n) => n,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
     let backward = kind == crate::vm::ArrayOpKind::LastIndexOf;
     // Clamp the start index (§23.1.3.16-kanon: indexOf/includes forward
     // from max(n,0)/immediate miss; lastIndexOf backward from min(n,len-1)).
@@ -23624,7 +23656,13 @@ fn array_index_search(
         } else if args.len() < 2 || args[1].is_undefined() {
             Some(len as usize - 1)
         } else {
-            let n = to_integer_or_infinity(args[1]);
+            let n = match to_integer_or_infinity_sync(gc, vm, args[1]) {
+                Ok(n) => n,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            };
             if n >= 0.0 {
                 Some((n as usize).min(len as usize - 1))
             } else {
@@ -23636,7 +23674,13 @@ fn array_index_search(
         let n = if args.len() < 2 {
             0.0
         } else {
-            to_integer_or_infinity(args[1])
+            match to_integer_or_infinity_sync(gc, vm, args[1]) {
+                Ok(n) => n,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            }
         };
         if n >= len as f64 {
             None

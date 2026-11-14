@@ -3734,6 +3734,22 @@ Integration suite: **912 passed, 0 failed, 3 ignored**.
 
 Integration suite: **913 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Array search LengthOfArrayLike + fromIndex coercion (2026-11-14)
+
+- `Array.prototype.indexOf`/`lastIndexOf` (and `includes` through the shared
+  search prologue) now resolve array-like `length` through the property funnel:
+  getters run, `ToNumber` handles hex/binary/exponent strings, booleans and
+  objects, and the result is ToLength-clamped.
+- Their `fromIndex` argument now goes through re-entrant
+  `ToIntegerOrInfinity` (object `valueOf`/`toString` run with frames, throwing
+  conversions propagate as TypeError), so observable side effects in
+  `valueOf` are visible to the subsequent search.
+- Test262: Array **2670 → 2728/3081**, indexOf **165 → 191/201**,
+  lastIndexOf **159 → 185/198**.
+- Regression: `test_array_search_array_like_length_and_from_index`.
+
+Integration suite: **914 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

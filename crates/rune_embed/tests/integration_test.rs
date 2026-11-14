@@ -18175,3 +18175,47 @@ fn test_string_normalization_and_coercion_edges() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_array_search_array_like_length_and_from_index() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var hexLike = { 10: true, length: "0x00B" };
+            var hexIndex = Array.prototype.indexOf.call(hexLike, true);
+
+            var dynamic = { length: 30 };
+            var target = function () {};
+            var valueOfCalled = false;
+            var fromIndex = {
+                valueOf: function () {
+                    valueOfCalled = true;
+                    dynamic[4] = target;
+                    return 3;
+                }
+            };
+            var dynamicIndex = Array.prototype.indexOf.call(dynamic, target, fromIndex);
+
+            var getterObj = {};
+            Object.defineProperty(getterObj, "length", {
+                get: function () { getterObj[2] = "length"; return 3; },
+                configurable: true
+            });
+            var getterIndex = Array.prototype.indexOf.call(getterObj, "length");
+
+            var last = [0, true, target, 3, false];
+            var lastIndex = last.lastIndexOf(target);
+
+            [
+                hexIndex === 10,
+                dynamicIndex === 4,
+                valueOfCalled,
+                getterIndex === 2,
+                lastIndex === 2
+            ].join("|") === "true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

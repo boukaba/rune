@@ -3940,6 +3940,27 @@ Integration suite: **923 passed, 0 failed, 3 ignored**.
 
 Integration suite: **924 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Assignment-created closure capture + arrow constructor rules (2026-11-14)
+
+- `contains_inner_function_expr` now descends into `Expr::Assign` targets and
+  values. The script environment is therefore created when the only inner
+  function appears on the RHS of an assignment (`var f; f = function () {
+  return outerLet; }`), restoring capture of top-level `let`/`const` bindings
+  for these closures instead of resolving them as absent globals.
+- `new` on an arrow function routes the "Arrow function is not a constructor"
+  TypeError through `handle_throw` rather than a hand-rolled unwind, so
+  `assert.throws`/`try…catch` observe it.
+- `in` on an arrow function no longer reports an own/inherited `prototype`
+  property.
+- Test262: language/expressions/arrow-function **223 → 229/343**,
+  arrow/dstr **172 → 174/231 (0 failures)**, function/dstr
+  **172 → 174/186 (0 failures)**, language/expressions/object
+  **494 → 523/1170**, language/statements/class **1493 → 1531/4367**,
+  language/expressions/class **1428 → 1466/4059**, for-of **357 → 360/751**.
+- Regression: `test_closures_created_in_assignment_expressions_capture_lexicals`.
+
+Integration suite: **925 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

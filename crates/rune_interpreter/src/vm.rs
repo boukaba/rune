@@ -12397,94 +12397,16 @@ impl Vm {
                         if tag == TAG_FUNC {
                             // §16.2.1.1.1: Arrow functions have [[Construct]]: undefined
                             if unsafe { Func::is_arrow(ptr as *mut Func) } {
-                                let msg = crate::errors::error_object(
+                                let exc = crate::errors::error_object(
                                     gc,
                                     &self.error_protos,
                                     crate::errors::ErrorKind::TypeError,
                                     "Arrow function is not a constructor",
                                 );
-                                self.push(msg);
-                                let val = self.pop();
-                                // Manually unwind through try_stack like Opcode::Throw does
-                                let handler_idx = self
-                                    .try_stack
-                                    .iter()
-                                    .rposition(|tf| tf.frame_depth == self.frames.len());
-                                if let Some(idx) = handler_idx {
-                                    let (catch_pc, finally_pc, stack_depth, in_catch) = {
-                                        let tf = &self.try_stack[idx];
-                                        (tf.catch_pc, tf.finally_pc, tf.stack_depth, tf.in_catch)
-                                    };
-                                    if in_catch && finally_pc != 0 {
-                                        self.try_stack[idx].saved_exception = Some(val);
-                                        self.stack.truncate(stack_depth);
-                                        self.frames[fi].pc = finally_pc;
-                                        continue;
-                                    }
-                                    if catch_pc != 0 && !in_catch {
-                                        if finally_pc != 0 {
-                                            self.try_stack[idx].in_catch = true;
-                                        } else {
-                                            self.try_stack.remove(idx);
-                                        }
-                                        self.stack.truncate(stack_depth);
-                                        self.push(val);
-                                        self.frames[fi].pc = catch_pc;
-                                        continue;
-                                    }
-                                    if finally_pc != 0 {
-                                        self.try_stack[idx].saved_exception = Some(val);
-                                        self.stack.truncate(stack_depth);
-                                        self.frames[fi].pc = finally_pc;
-                                        continue;
-                                    }
+                                if let Some(exit) = self.handle_throw(gc, exc) {
+                                    return exit;
                                 }
-                                // No handler — pop frame and check caller
-                                let popped_frame = self.frames.len() - 1;
-                                self.last_locals = self.frames[popped_frame].locals.clone();
-                                self.frames.pop();
-                                self.try_stack
-                                    .retain(|tf| tf.frame_depth != popped_frame + 1);
-                                if self.frames.is_empty() {
-                                    self.stack.clear();
-                                    return Exit::Throw(val);
-                                }
-                                let new_fi = self.frames.len() - 1;
-                                let caller_idx = self
-                                    .try_stack
-                                    .iter()
-                                    .rposition(|tf| tf.frame_depth == self.frames.len());
-                                if let Some(idx) = caller_idx {
-                                    let (catch_pc, finally_pc, stack_depth, in_catch) = {
-                                        let tf = &self.try_stack[idx];
-                                        (tf.catch_pc, tf.finally_pc, tf.stack_depth, tf.in_catch)
-                                    };
-                                    if in_catch && finally_pc != 0 {
-                                        self.try_stack[idx].saved_exception = Some(val);
-                                        self.stack.truncate(stack_depth);
-                                        self.frames[new_fi].pc = finally_pc;
-                                        continue;
-                                    }
-                                    if catch_pc != 0 && !in_catch {
-                                        if finally_pc != 0 {
-                                            self.try_stack[idx].in_catch = true;
-                                        } else {
-                                            self.try_stack.remove(idx);
-                                        }
-                                        self.stack.truncate(stack_depth);
-                                        self.push(val);
-                                        self.frames[new_fi].pc = catch_pc;
-                                        continue;
-                                    }
-                                    if finally_pc != 0 {
-                                        self.try_stack[idx].saved_exception = Some(val);
-                                        self.stack.truncate(stack_depth);
-                                        self.frames[new_fi].pc = finally_pc;
-                                        continue;
-                                    }
-                                }
-                                self.stack.clear();
-                                return Exit::Throw(val);
+                                continue;
                             }
                             let func_idx = unsafe { Func::func_index(ptr as *mut Func) } as usize;
                             let creator_prog = unsafe {
@@ -18078,7 +18000,8 @@ pub(crate) fn has_property(obj: Value, raw_key: Value, function_prototype: Optio
             // Static methods/private elements live on the function's extra_props
             if let Some(key) = value_to_prop_key(raw_key) {
                 if key == *PROTOTYPE_KEY {
-                    return true;
+                    // Arrow functions have no own `prototype` property.
+                    return !unsafe { Func::is_arrow(ptr as *mut Func) };
                 }
                 let extra = unsafe { Func::extra_props(ptr as *mut Func) };
                 if !extra.is_null() {

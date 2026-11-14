@@ -18603,3 +18603,38 @@ fn test_arrow_destructuring_parameters_and_defaults() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_closures_created_in_assignment_expressions_capture_lexicals() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            let outerX = 1;
+            const outerY = 2;
+            var f;
+            f = function () { return outerX + outerY; };
+            var g;
+            g = () => outerX * outerY;
+            outerX = 3;
+
+            var obj = {
+                method() {
+                    let inner = 10;
+                    var h;
+                    h = function () { return inner + outerX; };
+                    inner = 20;
+                    return h();
+                }
+            };
+
+            [
+                f() === 5,
+                g() === 6,
+                obj.method() === 23
+            ].join("|") === "true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

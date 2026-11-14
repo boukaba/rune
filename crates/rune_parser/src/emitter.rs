@@ -4395,6 +4395,9 @@ fn contains_inner_function_expr(expr: &Expr) -> bool {
         Expr::Binary(_, lhs, rhs, _) | Expr::CompoundAssign(_, lhs, rhs, _) => {
             contains_inner_function_expr(lhs) || contains_inner_function_expr(rhs)
         }
+        Expr::Assign(lhs, rhs, _) => {
+            contains_inner_function_expr(lhs) || contains_inner_function_expr(rhs)
+        }
         Expr::DestructureAssign(_, rhs, _) => contains_inner_function_expr(rhs),
         Expr::Conditional(cond, then, else_, _) => {
             contains_inner_function_expr(cond)
@@ -4420,7 +4423,6 @@ fn contains_inner_function_expr(expr: &Expr) -> bool {
         | Expr::Null(_)
         | Expr::Undefined(_)
         | Expr::This(_)
-        | Expr::Assign(_, _, _)
         | Expr::Yield(_, _)
         | Expr::YieldStar(_, _)
         | Expr::RegExp(_, _, _) => false,

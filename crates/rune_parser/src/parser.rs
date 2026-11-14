@@ -1273,7 +1273,38 @@ impl Parser {
                             );
                             (tmp, Box::new(new_body))
                         } else {
-                            (decls[0].name.clone(), Box::new(user_body))
+                            let kind = match &var_stmt {
+                                Stmt::Var(k, _, _) => k.clone(),
+                                _ => VarKind::Var,
+                            };
+                            if matches!(kind, VarKind::Let | VarKind::Const) {
+                                // Desugar `for (let x of it) BODY` into
+                                // `for (var __tmp of it) { let x = __tmp; BODY }`
+                                // so the body declaration creates a fresh
+                                // per-iteration lexical binding (closures see
+                                // that iteration's value).
+                                let tmp: Box<str> = "__rune_forof_tmp__".into();
+                                let decl = Decl {
+                                    name: decls[0].name.clone(),
+                                    pattern: None,
+                                    init: Some(Box::new(Expr::Identifier(
+                                        tmp.clone(),
+                                        Span::default(),
+                                    ))),
+                                    span: Span::default(),
+                                };
+                                let span = Span {
+                                    start: start.start,
+                                    end: self.span().end,
+                                };
+                                let new_body = Stmt::Block(
+                                    vec![Stmt::Var(kind, vec![decl], span), user_body],
+                                    span,
+                                );
+                                (tmp, Box::new(new_body))
+                            } else {
+                                (decls[0].name.clone(), Box::new(user_body))
+                            }
                         }
                     }
                     _ => {

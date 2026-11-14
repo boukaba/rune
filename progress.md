@@ -3813,6 +3813,33 @@ Integration suite: **916 passed, 0 failed, 3 ignored**.
 
 Integration suite: **917 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — for-of per-iteration bindings, destructuring captures, return cleanup (2026-11-14)
+
+- `for (const/let x of ...)` now desugars to a fresh body block declaration, so
+  each iteration has its own lexical binding and closures capture that
+  iteration's value (`[1,2]` closures return 1 and 2, not 2/2).
+- Destructured lexical declarations (`const {a} = ...`) are registered in the
+  block capture environment with their pattern binding names and mirrored into
+  the env after `DeclareLet`/`DeclareConst`; closures now resolve `a` instead of
+  throwing ReferenceError (also fixes top-level destructured `let`).
+- `return` normalizes the operand stack to `[frame_base, result]` before
+  unwinding, discarding for-of iterator state/destructuring temporaries. This
+  removes the "stack too deep" debug panic and fixes return-from-for-of and
+  return-from-`for`/nested-expression cases.
+- Find-family methods (`find`, `findIndex`, `findLast`, `findLastIndex`) visit
+  every index in the fixed length as the spec requires, calling the predicate
+  for holes with `undefined` instead of skipping them.
+- Added a real `Array.prototype.toLocaleString`: joins elements, skips
+  null/undefined, and invokes object elements' `toLocaleString` with no
+  arguments (generic receivers/length).
+- Test262: Array **2773 → 2783/3081**, find/findIndex **16 → 18/23**,
+  findLast/findLastIndex **17 → 18/24**, toLocaleString **6 → 7/12**;
+  language/statements/for-of **207 → 216/751**,
+  language/statements/for **141 → 159/385**.
+- Regression: `test_for_of_capture_return_and_array_edges`.
+
+Integration suite: **918 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

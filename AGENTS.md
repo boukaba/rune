@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **for-of per-iteration bindings + destructuring captures + return cleanup (2026-11-14)**: fresh body lexical per iteration, pattern binding env registration, pre-unwind stack normalization, find-family hole visits, Array toLocaleString. Array **2783/3081**, for-of **216**, for **159**. Integration **918**.
 - **Array reduce rescan/inherited length/Arguments indices (2026-11-14)**: post-getter index rescan, array/string prototype length chains, non-extending arguments indices. Array **2773/3081**, reduce **256/260**, reduceRight **255/260**. Integration **917**.
 - **Function prototype primitives + Reflect Date newTarget (2026-11-14)**: primitive prototype storage/descriptors, Date [[DateValue]] via Reflect.construct, Function constructor recognition. Date **589/0**, Function **349/509**. Integration **916**.
 - **Array join/copyWithin coercion (2026-11-14)**: observable join ToString/prototype fallback, sync copyWithin length/args/undefined-end and receiver boxing. Array **2742/3081**, join **20/23**, copyWithin **31/39**. Integration **915**.

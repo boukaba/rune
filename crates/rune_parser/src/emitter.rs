@@ -608,7 +608,7 @@ impl Emitter {
                     if let Some(pattern) = &decl.pattern {
                         if let Some(init) = &decl.init {
                             self.emit_expression(init);
-                            self.emit_destructuring(pattern, &DestructureStore::Decl(VarKind::Var));
+                            self.emit_destructuring(pattern, &DestructureStore::Decl(kind.clone()));
                         }
                     } else if let Some(init) = &decl.init {
                         self.emit_expression(init);
@@ -1737,6 +1737,16 @@ impl Emitter {
                         Opcode::DeclareLet
                     };
                     self.emit(op, vec![slot as i64]);
+                    // Mirror the initialized lexical binding into the block
+                    // capture env so closures created after the destructuring
+                    // declaration resolve it (ordinary `let` declarations do
+                    // this in the Stmt::Var arm).
+                    if let Some((depth, env_slot)) = self.env_captured_slot(name) {
+                        if depth == 0 && !self.shadows_per_iter_env(name) {
+                            self.emit(Opcode::LoadLexical, vec![slot as i64]);
+                            self.emit(Opcode::StoreCaptured, vec![0, env_slot as i64]);
+                        }
+                    }
                 }
             }
         }
@@ -1803,21 +1813,14 @@ impl Emitter {
                 let saved_env_depth = self.env_scope_stack.len();
                 if lexical_count > 0 && stmts.iter().any(contains_inner_function_stmt) {
                     // Create a block env so inner functions can capture lexical bindings
-                    let block_names: Vec<String> = stmts
-                        .iter()
-                        .filter_map(|s| match s {
-                            Stmt::Var(VarKind::Let | VarKind::Const, decls, _) => Some(decls),
-                            _ => None,
-                        })
-                        .flatten()
-                        .filter_map(|d| {
-                            if d.pattern.is_none() {
-                                Some(d.name.to_string())
-                            } else {
-                                None
+                    let mut block_names: Vec<String> = Vec::new();
+                    for s in stmts {
+                        if let Stmt::Var(VarKind::Let | VarKind::Const, decls, _) = s {
+                            for d in decls {
+                                push_pattern_binding_names(&d.pattern, &d.name, &mut block_names);
                             }
-                        })
-                        .collect();
+                        }
+                    }
                     if !block_names.is_empty() {
                         let name_count = block_names.len();
                         self.env_scope_stack.push(block_names);

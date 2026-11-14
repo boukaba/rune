@@ -23741,6 +23741,104 @@ pub fn array_prototype_to_string(
     object_prototype_to_string(gc, this, &[], vm)
 }
 
+/// Array.prototype.toLocaleString — joins elements, invoking each object
+/// element's toLocaleString with no arguments; null/undefined become "".
+pub fn array_to_locale_string(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    if !require_object_coercible(this, vm, gc) {
+        return Value::undefined();
+    }
+    let this = if is_object_value(this) || this.is_builtin() {
+        this
+    } else {
+        crate::vm::to_object_value(gc, this, vm)
+    };
+    let len = match array_like_length_sync(gc, vm, this) {
+        Ok(n) => n,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let base = vm.temp_roots.len();
+    vm.temp_roots.push(this);
+    let mut parts: Vec<String> = Vec::with_capacity(len as usize);
+    for i in 0..len {
+        let live = vm.temp_roots[base];
+        let element = match get_value_sync(gc, vm, live, &i.to_string()) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.temp_roots.truncate(base);
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        };
+        if element.is_undefined() || element.is_null() {
+            parts.push(String::new());
+            continue;
+        }
+        let is_object = element.heap_ptr().is_some_and(|p| {
+            matches!(
+                unsafe { (*(p as *const GcHeader)).tag() },
+                TAG_OBJECT | TAG_ARRAY | TAG_FUNC | TAG_STRING_OBJ | TAG_DATE | TAG_REGEXP
+            )
+        }) || element.is_builtin();
+        if is_object {
+            let method = match get_value_sync(gc, vm, element, "toLocaleString") {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.temp_roots.truncate(base);
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            };
+            let callable = method.is_builtin()
+                || method
+                    .heap_ptr()
+                    .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() } == TAG_FUNC);
+            if !callable {
+                vm.temp_roots.truncate(base);
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "toLocaleString is not a function",
+                ));
+                return Value::undefined();
+            }
+            match vm.call_value_sync(gc, method, element, &[]) {
+                Ok(v) => match to_primitive_string(gc, v, vm) {
+                    Some(text) => parts.push(text),
+                    None => {
+                        vm.temp_roots.truncate(base);
+                        return Value::undefined();
+                    }
+                },
+                Err(e) => {
+                    vm.temp_roots.truncate(base);
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            }
+        } else {
+            match to_primitive_string(gc, element, vm) {
+                Some(text) => parts.push(text),
+                None => {
+                    vm.temp_roots.truncate(base);
+                    return Value::undefined();
+                }
+            }
+        }
+    }
+    let joined = parts.join(",");
+    vm.temp_roots.truncate(base);
+    Value::from_heap_ptr(crate::vm::heap_string(gc, &joined))
+}
+
 pub fn array_join(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
@@ -23963,6 +24061,20 @@ fn first_existing_index(this: Value, len: u32) -> Option<usize> {
 /// First present index in [from, len) (HasProperty semantics, see above).
 fn next_existing_index(this: Value, from: usize, len: u32) -> Option<usize> {
     (from..len as usize).find(|&i| crate::vm::has_property(this, Value::smi(i as i32), None))
+}
+
+/// Find-family methods visit every index in the (fixed) length, holes included
+/// and read as undefined (the spec has no HasProperty gate).
+fn find_first_index(len: u32) -> Option<usize> {
+    if len == 0 { None } else { Some(0) }
+}
+
+fn find_last_index(len: u32) -> Option<usize> {
+    if len == 0 {
+        None
+    } else {
+        Some(len as usize - 1)
+    }
 }
 
 /// Last present index in [0, len) (B1c: backward iteration seeds).
@@ -24510,7 +24622,7 @@ pub fn array_find_last(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: 
         return Value::undefined();
     };
     this = boxed_this;
-    let Some(last) = last_existing_index(this, length) else {
+    let Some(last) = find_last_index(length) else {
         return Value::undefined();
     };
     vm.push_array_op(crate::vm::ArrayOpState {
@@ -24569,7 +24681,7 @@ pub fn array_find_last_index(
         return Value::smi(-1);
     };
     this = boxed_this;
-    let Some(last) = last_existing_index(this, length) else {
+    let Some(last) = find_last_index(length) else {
         return Value::smi(-1);
     };
     vm.push_array_op(crate::vm::ArrayOpState {
@@ -24618,7 +24730,7 @@ pub fn array_find(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut 
         return Value::undefined();
     };
     this = boxed_this;
-    let Some(first) = first_existing_index(this, length) else {
+    let Some(first) = find_first_index(length) else {
         return Value::undefined();
     };
     vm.push_array_op(crate::vm::ArrayOpState {
@@ -24674,7 +24786,7 @@ pub fn array_find_index(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm:
         return Value::smi(-1);
     };
     this = boxed_this;
-    let Some(first) = first_existing_index(this, length) else {
+    let Some(first) = find_first_index(length) else {
         return Value::smi(-1);
     };
     vm.push_array_op(crate::vm::ArrayOpState {
@@ -29768,6 +29880,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 1,
             name: "Array_prototype_lastIndexOf",
             func: array_last_index_of,
+        },
+        Builtin {
+            length: 0,
+            name: "Array_prototype_toLocaleString",
+            func: array_to_locale_string,
         },
         Builtin {
             length: 1,

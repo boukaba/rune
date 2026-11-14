@@ -1791,6 +1791,9 @@ impl Vm {
             if let Some(sh) = find_handle(&self.builtins, "Array_prototype_toSorted") {
                 proto_entries.push(("toSorted", sh));
             }
+            if let Some(h) = find_handle(&self.builtins, "Array_prototype_toLocaleString") {
+                proto_entries.push(("toLocaleString", h));
+            }
             let arr_proto = make_object(gc, &proto_entries);
             if let Some(ptr) = arr_proto.heap_ptr() {
                 unsafe {
@@ -13373,6 +13376,20 @@ impl Vm {
                         self.frames[fi].pc = tf.finally_pc;
                         continue;
                     }
+                    // A `return` may execute with loop-iteration state (for-of
+                    // iterator + next method, destructuring temporaries) still
+                    // on the operand stack. Only the function result survives;
+                    // normalize to [base..base+1] before unwinding so the
+                    // debug envelopes below and every return path see the
+                    // canonical shape.
+                    {
+                        let base = self.frames.last().unwrap().stack_base;
+                        if self.stack.len() > base + 1 {
+                            let result = *self.stack.last().unwrap();
+                            self.stack.truncate(base);
+                            self.stack.push(result);
+                        }
+                    }
                     debug_assert!(
                         self.stack.len() > self.frames.last().unwrap().stack_base,
                         "Return: stack underflow (len={}, base={})",
@@ -13745,7 +13762,27 @@ impl Vm {
                             let current_len = op.length;
                             let op_kind = op.kind;
                             let backward = array_op_is_backward(op_kind);
+                            let visit_holes = matches!(
+                                op_kind,
+                                ArrayOpKind::Find
+                                    | ArrayOpKind::FindIndex
+                                    | ArrayOpKind::FindLast
+                                    | ArrayOpKind::FindLastIndex
+                            );
                             let next_index = 'search: {
+                                if visit_holes {
+                                    if backward {
+                                        if op.index == 0 {
+                                            break 'search None::<usize>;
+                                        }
+                                        break 'search Some(op.index - 1);
+                                    }
+                                    op.index += 1;
+                                    if op.index < current_len as usize {
+                                        break 'search Some(op.index);
+                                    }
+                                    break 'search None::<usize>;
+                                }
                                 if backward {
                                     if op.index == 0 {
                                         break 'search None::<usize>;

@@ -18348,3 +18348,46 @@ fn test_array_reduce_prototype_growth_and_arguments_indices() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_for_of_capture_return_and_array_edges() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var closures = [];
+            for (const x of [1, 2]) closures.push(function () { return x; });
+            var perIteration = closures[0]() === 1 && closures[1]() === 2;
+
+            function capturedDestructure() {
+                const { label } = { label: "inner" };
+                return function () { return label; };
+            }
+            var destructured = capturedDestructure()() === "inner";
+
+            function returnFromForOf() {
+                for (var value of [1, 2]) {
+                    if (value === 1) return 34;
+                }
+                return 0;
+            }
+            var returned = returnFromForOf() === 34;
+
+            var called = 0;
+            [undefined, , , "foo"].find(function () { called++; });
+            var findHoles = called === 4;
+
+            var locale = [ { toLocaleString: function () { return "ok"; } }, null ].toLocaleString();
+
+            [
+                perIteration,
+                destructured,
+                returned,
+                findHoles,
+                locale === "ok,"
+            ].join("|") === "true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

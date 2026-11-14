@@ -17480,3 +17480,31 @@ fn test_array_method_lengths_and_concat_receiver() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_harness_error_and_noncallable_calls() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var e = new Test262Error("boom");
+            var callThrew = false;
+            try { (5)(); } catch (err) { callThrew = err instanceof TypeError; }
+            var d = Object.getOwnPropertyDescriptor(JSON, Symbol.toStringTag);
+            [
+                e instanceof Test262Error,
+                e instanceof Error,
+                String(e) === "Test262Error: boom",
+                e.message === "boom",
+                e.constructor === Test262Error,
+                callThrew,
+                d.writable === false,
+                d.enumerable === false,
+                d.configurable === true,
+                JSON[Symbol.toStringTag] === "JSON"
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

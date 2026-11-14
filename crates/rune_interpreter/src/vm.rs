@@ -1163,6 +1163,8 @@ pub struct Vm {
     pub error_protos: Vec<Value>,
     pub aggregate_error_constructor: Value,
     pub aggregate_error_prototype: Value,
+    /// Prototype of Test262Error instances (test harness `instanceof`).
+    pub test262_error_prototype: Value,
     /// Wrapper objects that behave as functions (builtin constructors with
     /// Call/New dispatch). Their [[Prototype]] is %Function.prototype% and
     /// `typeof` reports "function".
@@ -1440,6 +1442,7 @@ impl Vm {
             error_protos: Vec::new(),
             aggregate_error_constructor: Value::undefined(),
             aggregate_error_prototype: Value::undefined(),
+            test262_error_prototype: Value::undefined(),
             symbol_prototype: Value::undefined(),
             pending_symbol_dispatch: None,
             pending_symbol_coercion: None,
@@ -3008,11 +3011,12 @@ impl Vm {
             if let Some(ptr) = json_obj.heap_ptr() {
                 let tag = Value::from_heap_ptr(HeapString::allocate(gc, "JSON") as *mut u8);
                 unsafe {
-                    JSObject::add_property(
+                    JSObject::add_property_with_attrs(
                         ptr as *mut JSObject,
                         PropertyKey::from_symbol(rune_core::symbol::SYM_TO_STRING_TAG),
                         "\0".to_string(),
                         tag,
+                        rune_core::shape::ATTR_CONFIGURABLE,
                     );
                 }
             }
@@ -3487,6 +3491,27 @@ impl Vm {
             self.aggregate_error_constructor = agg_ctor;
             self.builtin_wrappers
                 .insert("AggregateError".to_string(), agg_ctor);
+
+            // Test262Error: harness constructor; instances need a real
+            // prototype so `instanceof Test262Error` and String(e) work.
+            let t262_name =
+                Value::from_heap_ptr(HeapString::allocate(gc, "Test262Error") as *mut u8);
+            let t262_proto = make_object(gc, &[("name", t262_name)]);
+            unsafe {
+                JSObject::set_prototype(
+                    t262_proto.heap_ptr().unwrap() as *mut JSObject,
+                    err_proto.heap_ptr().unwrap(),
+                );
+                if let Some(h) = find_handle(&self.builtins, "Test262Error") {
+                    JSObject::add_property(
+                        t262_proto.heap_ptr().unwrap() as *mut JSObject,
+                        PropertyKey::from_string("constructor"),
+                        "constructor".to_string(),
+                        h,
+                    );
+                }
+            }
+            self.test262_error_prototype = t262_proto;
         }
 
         // Wire the callable wrapper set: every builtin constructor wrapper
@@ -4839,6 +4864,7 @@ impl Vm {
         gc.push_root(&self.global_this as *const Value as *mut u64);
         gc.push_root(&self.aggregate_error_constructor as *const Value as *mut u64);
         gc.push_root(&self.aggregate_error_prototype as *const Value as *mut u64);
+        gc.push_root(&self.test262_error_prototype as *const Value as *mut u64);
         for v in self.error_ctors.iter_mut() {
             gc.push_root(v as *mut Value as *mut u64);
         }
@@ -8280,9 +8306,35 @@ impl Vm {
                     let rhs = self.pop();
                     let lhs = self.pop();
                     // Builtin function handles are Objects (no [[Prototype]]
-                    // data property exposed); OrdinaryHasInstance yields false.
+                    // data property exposed); OrdinaryHasInstance yields false,
+                    // except the harness Test262Error constructor whose
+                    // prototype is tracked explicitly.
                     if rhs.is_builtin() {
-                        self.push(Value::boolean(false));
+                        let mut yes = false;
+                        let id = ((-rhs.as_smi().unwrap_or(0)) as usize).saturating_sub(1);
+                        if self
+                            .builtins
+                            .get(id)
+                            .is_some_and(|b| b.name == "Test262Error")
+                        {
+                            if let Some(tp) = self.test262_error_prototype.heap_ptr() {
+                                let mut cur = lhs.heap_ptr();
+                                for _ in 0..MAX_PROTOTYPE_DEPTH {
+                                    let Some(cp) = cur else { break };
+                                    if cp == tp {
+                                        yes = true;
+                                        break;
+                                    }
+                                    let tag = unsafe { (*(cp as *const GcHeader)).tag() };
+                                    if tag != TAG_OBJECT {
+                                        break;
+                                    }
+                                    let next = unsafe { JSObject::prototype(cp as *mut JSObject) };
+                                    cur = if next.is_null() { None } else { Some(next) };
+                                }
+                            }
+                        }
+                        self.push(Value::boolean(yes));
                         self.frames[fi].pc = pc + 1;
                         continue;
                     }
@@ -11754,9 +11806,16 @@ impl Vm {
                             }
                             continue;
                         } else {
-                            // Positive Smi: generator handle — push undefined
-                            self.push(Value::undefined());
-                            self.frames[fi].pc = pc + 1;
+                            // Positive Smi is an ordinary number: not callable.
+                            let exc = crate::errors::error_object(
+                                gc,
+                                &self.error_protos,
+                                crate::errors::ErrorKind::TypeError,
+                                "callee is not a function",
+                            );
+                            if let Some(exit) = self.handle_throw(gc, exc) {
+                                return exit;
+                            }
                             continue;
                         }
                     }

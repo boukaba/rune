@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Harness Test262Error + callable discipline (2026-11-14)**: real prototype/instanceof/String, non-callable positive Smis throw, JSON @@toStringTag attrs. JSON **128/165**, integration **898**.
 - **Array method metadata + concat receivers (2026-11-14)**: corrected lengths, primitive receiver boxing in concat. Array **2664/3081**, indexOf **164/201**, concat **50/69**. Integration **897**.
 - **Array generic receivers + at (2026-11-14)**: Array.prototype.at, primitive receiver boxing, prototype-chain length/index reads. Array **2657/3081**, at **10/13**, indexOf **163/201**. Integration **896**.
 - **padStart/padEnd + arguments semantics (2026-11-14)**: ToInteger edge cases, observable fill ToString, Object-prototype Arguments with hidden marker. String **1159/1223**, pads **13/13**, trim **128/129**. Integration **895**.

@@ -9201,13 +9201,13 @@ pub fn test262_error_builtin(
     gc: &mut SemiSpace,
     _this: Value,
     args: &[Value],
-    _vm: &mut Vm,
+    vm: &mut Vm,
 ) -> Value {
-    error_with_name(gc, args, "Test262Error")
+    error_with_name(gc, args, "Test262Error", Some(vm.test262_error_prototype))
 }
 
 /// Create an Error-shaped object with `name` and `message` properties.
-fn error_with_name(gc: &mut SemiSpace, args: &[Value], name: &str) -> Value {
+fn error_with_name(gc: &mut SemiSpace, args: &[Value], name: &str, proto: Option<Value>) -> Value {
     let msg = if let Some(arg) = args.first() {
         value_to_js_string(*arg)
     } else {
@@ -9229,6 +9229,9 @@ fn error_with_name(gc: &mut SemiSpace, args: &[Value], name: &str) -> Value {
             Value::from_heap_ptr(msg_str),
         ],
     );
+    if let Some(proto) = proto.and_then(|p| p.heap_ptr()) {
+        unsafe { JSObject::set_prototype(obj, proto) };
+    }
     Value::from_heap_ptr(obj as *mut u8)
 }
 

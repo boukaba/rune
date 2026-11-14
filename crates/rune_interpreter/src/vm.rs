@@ -3543,11 +3543,13 @@ impl Vm {
                                 .lookup(&PropertyKey::from_string("getPrototypeOf"))
                                 .is_none()
                             {
-                                JSObject::add_property(
+                                JSObject::add_property_with_attrs(
                                     ptr as *mut JSObject,
                                     PropertyKey::from_string("getPrototypeOf"),
                                     "getPrototypeOf".to_string(),
                                     h,
+                                    rune_core::shape::ATTR_WRITABLE
+                                        | rune_core::shape::ATTR_CONFIGURABLE,
                                 );
                             }
                         }
@@ -17354,7 +17356,26 @@ pub(crate) fn has_property(obj: Value, raw_key: Value, function_prototype: Optio
                 let units = unsafe { HeapString::to_string(sp as *mut HeapString) }
                     .encode_utf16()
                     .count();
-                return index < units;
+                if index < units {
+                    return true;
+                }
+                if let Some(key) = value_to_prop_key(raw_key) {
+                    let extra = unsafe { StringObject::extra_props(ptr as *mut StringObject) };
+                    if !extra.is_null() {
+                        let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                        return shape.lookup(&key).is_some();
+                    }
+                }
+                return false;
+            }
+            if let Some(key) = value_to_prop_key(raw_key) {
+                let extra = unsafe { StringObject::extra_props(ptr as *mut StringObject) };
+                if !extra.is_null() {
+                    let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                    if shape.lookup(&key).is_some() {
+                        return true;
+                    }
+                }
             }
             let proto = unsafe { StringObject::prototype(ptr as *mut StringObject) };
             if !proto.is_null() {

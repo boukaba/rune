@@ -11145,7 +11145,13 @@ fn define_own_property(
         )
     };
     let shape = unsafe { JSObject::shape_ptr(obj_ptr) };
-    let is_accessor_desc = desc.has_get || desc.has_set;
+    let cur_is_accessor_for_kind = shape.lookup(&key).is_some_and(|slot| {
+        unsafe { JSObject::get_slot(obj_ptr, slot) }
+            .heap_ptr()
+            .is_some_and(|vp| unsafe { (*(vp as *const GcHeader)).tag() == TAG_ACCESSOR })
+    });
+    let only_attrs = !desc.has_value && !desc.has_writable && !desc.has_get && !desc.has_set;
+    let is_accessor_desc = desc.has_get || desc.has_set || (cur_is_accessor_for_kind && only_attrs);
     let attr_for = |d: &PropDesc| -> u8 {
         let mut a = 0u8;
         if d.has_enumerable && d.enumerable {
@@ -11518,7 +11524,6 @@ fn define_array_index_property(
     key_name: String,
     desc: &PropDesc,
 ) -> Result<(), Value> {
-    let is_accessor_desc = desc.has_get || desc.has_set;
     let overlay_key = PropertyKey::from_string(&idx.to_string());
     // Fetch (and lazily allocate) the overlay object.
     let overlay = unsafe {
@@ -11539,6 +11544,12 @@ fn define_array_index_property(
         let cur = unsafe { JSObject::get_slot(overlay as *mut JSObject, slot) };
         (slot, attr, cur)
     });
+    let cur_is_pair = existing.is_some_and(|(_, _, cur)| {
+        cur.heap_ptr()
+            .is_some_and(|vp| unsafe { (*(vp as *const GcHeader)).tag() == TAG_ACCESSOR })
+    });
+    let only_attrs = !desc.has_value && !desc.has_writable && !desc.has_get && !desc.has_set;
+    let is_accessor_desc = desc.has_get || desc.has_set || (cur_is_pair && only_attrs);
     if let Some((_, attr, cur)) = existing {
         use rune_core::shape::{ATTR_CONFIGURABLE, ATTR_ENUMERABLE};
         // Effective configurability: the whole-array seal bit overrides
@@ -12331,7 +12342,34 @@ pub fn object_define_properties(
             }
         };
         let pkey = PropertyKey::from_string(&name);
-        if let Err(e) = define_own_property(gc, vm, live_ptr, pkey, name, &desc) {
+        let target_tag = unsafe { (*(live_target.heap_ptr().unwrap() as *const GcHeader)).tag() };
+        let result = if target_tag == TAG_ARRAY {
+            let idx = name
+                .parse::<u32>()
+                .ok()
+                .filter(|i| i.to_string() == name)
+                .map(|i| i as usize);
+            match idx {
+                Some(i) => define_array_index_property(
+                    gc,
+                    vm,
+                    live_target,
+                    live_target.heap_ptr().unwrap() as *mut RuneArray,
+                    i,
+                    name.clone(),
+                    &desc,
+                ),
+                None if name == "length" => {
+                    define_array_length_property(gc, vm, live_target, &desc).map(|_| ())
+                }
+                None => {
+                    define_own_property(gc, vm, live_ptr, pkey, name.clone(), &desc).map(|_| ())
+                }
+            }
+        } else {
+            define_own_property(gc, vm, live_ptr, pkey, name.clone(), &desc).map(|_| ())
+        };
+        if let Err(e) = result {
             vm.set_pending_exception(e);
             let current = vm.stack[target_slot];
             vm.stack.truncate(target_slot);
@@ -15233,6 +15271,12 @@ fn length_walk_value(this: Value) -> Value {
 fn length_to_number(gc: &mut SemiSpace, vm: &mut Vm, v: Value) -> Result<f64, Value> {
     if let Some(n) = v.as_smi().map(|v| v as f64).or_else(|| v.as_float64()) {
         return Ok(n);
+    }
+    if v.is_undefined() {
+        return Ok(f64::NAN);
+    }
+    if v.is_null() {
+        return Ok(0.0);
     }
     // B1f-3: ToNumber(true) is 1 (boolean lengths: {length: true} → 1).
     if let Some(b) = v.to_boolean() {

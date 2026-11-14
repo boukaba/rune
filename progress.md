@@ -3566,6 +3566,30 @@ Integration suite: **905 passed, 0 failed, 3 ignored**.
 
 Integration suite: **906 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Array defineProperties + accessor-kind preservation (2026-11-14)
+
+- `Object.defineProperties` now routes entries whose key is an array index (or
+  `"length"`) through the array exotic define paths instead of the generic
+  extra-props overlay. Existing descriptors keep their writable/enumerable/
+  configurable flags and value updates behave like `defineProperty`
+  (`{ "0": { value: undefined } }` on `[12]` keeps all three true).
+- Descriptor-to-accessor kind is preserved when the descriptor only carries
+  attributes: redefining an existing accessor with `{ configurable: false }`
+  no longer converts it to a data property (both generic objects and array
+  index overlays); setters/getters stay live.
+- `has_property` on String wrappers now also finds extra-props keys, so String
+  objects work as descriptor objects (`writable`/`get` fields).
+- `Array.prototype.length = undefined` / `defineProperty(length,{value:
+  undefined})` now RangeError (ToNumber(undefined)=NaN) instead of silently
+  setting 0; null remains 0.
+- `Object.getPrototypeOf` static property has spec attributes
+  (writable/configurable, non-enumerable).
+- Test262: Object **3154 → 3247/3411**, defineProperty **1088 → 1100/1131**,
+  defineProperties **547 → 621/632**.
+- Regression: `test_descriptor_string_fields_and_array_define_properties`.
+
+Integration suite: **907 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

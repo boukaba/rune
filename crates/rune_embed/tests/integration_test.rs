@@ -17852,3 +17852,53 @@ fn test_descriptor_proto_and_define_properties_objects() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_descriptor_string_fields_and_array_define_properties() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var o = {};
+            var strDesc = new String("abc");
+            strDesc.writable = true;
+            Object.defineProperty(o, "w", strDesc);
+            var writableDesc = Object.getOwnPropertyDescriptor(o, "w");
+            var getDesc = new String();
+            getDesc.get = function () { return "fromString"; };
+            Object.defineProperty(o, "g", getDesc);
+            var a = [];
+            var seen;
+            Object.defineProperty(a, "0", {
+                set: function (v) { seen = v; },
+                configurable: true
+            });
+            Object.defineProperty(a, "0", { configurable: false });
+            var accessorDesc = Object.getOwnPropertyDescriptor(a, "0");
+            a[0] = 5;
+            var lengthThrew = false;
+            try { Object.defineProperty(a, "length", { value: undefined }); } catch (e) { lengthThrew = e instanceof RangeError; }
+            var b = [12];
+            Object.defineProperties(b, { "0": { value: undefined } });
+            var bd = Object.getOwnPropertyDescriptor(b, "0");
+            var gpd = Object.getOwnPropertyDescriptor(Object, "getPrototypeOf");
+            [
+                writableDesc.writable === true,
+                o.g === "fromString",
+                typeof accessorDesc.set === "function",
+                accessorDesc.configurable === false,
+                seen === 5,
+                lengthThrew,
+                bd.value === undefined,
+                bd.writable === true,
+                bd.enumerable === true,
+                bd.configurable === true,
+                gpd.enumerable === false,
+                gpd.writable === true,
+                gpd.configurable === true
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

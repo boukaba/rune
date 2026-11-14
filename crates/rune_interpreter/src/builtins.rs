@@ -8297,11 +8297,10 @@ pub fn object_prototype_to_string(
                     // (no [[ErrorData]] slot) — only *instances* whose chain
                     // reaches an error prototype get the "Error" tag.
                     "Object".to_string()
-                } else if vm
-                    .error_protos
-                    .iter()
-                    .any(|ep| ep.heap_ptr().is_some_and(|p| is_on_proto_chain(ptr, p)))
-                {
+                } else if vm.error_protos.iter().any(|ep| {
+                    ep.heap_ptr()
+                        .is_some_and(|p| is_on_proto_chain(ptr, p, None))
+                }) {
                     "Error".to_string()
                 } else {
                     "Object".to_string()
@@ -8316,16 +8315,19 @@ pub fn object_prototype_to_string(
 }
 
 /// True iff `obj` (exclusive) has `proto` somewhere in its prototype chain.
-fn is_on_proto_chain(obj: *mut u8, proto: *mut u8) -> bool {
-    let mut cur = unsafe { JSObject::prototype(obj as *mut JSObject) };
+fn is_on_proto_chain(obj: *mut u8, proto: *mut u8, function_proto: Option<*mut u8>) -> bool {
+    if unsafe { (*(obj as *const GcHeader)).tag() } == TAG_FUNC && function_proto == Some(proto) {
+        return true;
+    }
+    let mut cur = crate::vm::value_prototype(Value::from_heap_ptr(obj));
     for _ in 0..MAX_PROTOTYPE_DEPTH {
-        if cur.is_null() {
+        let Some(p) = cur else {
             return false;
-        }
-        if cur == proto {
+        };
+        if p == proto {
             return true;
         }
-        cur = unsafe { JSObject::prototype(cur as *mut JSObject) };
+        cur = crate::vm::value_prototype(Value::from_heap_ptr(p));
     }
     false
 }
@@ -8408,7 +8410,9 @@ pub fn object_prototype_proto_set(
             return Value::undefined();
         }
         let target = unsafe { rune_core::gc::resolve_forwarded(ptr) };
-        if target == receiver_ptr as *mut u8 || is_on_proto_chain(target, receiver_ptr as *mut u8) {
+        if target == receiver_ptr as *mut u8
+            || is_on_proto_chain(target, receiver_ptr as *mut u8, None)
+        {
             vm.set_pending_exception(crate::errors::error_object(
                 gc,
                 &vm.error_protos,
@@ -9020,7 +9024,11 @@ pub fn object_prototype_is_prototype_of(
     if tgt_ptr == this_ptr {
         return Value::boolean(true);
     }
-    Value::boolean(is_on_proto_chain(tgt_ptr, this_ptr))
+    Value::boolean(is_on_proto_chain(
+        tgt_ptr,
+        this_ptr,
+        vm.function_prototype.heap_ptr(),
+    ))
 }
 
 /// §20.5.2.4 Error.isError(value) — true iff value has an [[ErrorData]]
@@ -12303,6 +12311,14 @@ pub fn object_create_builtin(
         return result;
     }
     Value::from_heap_ptr(ptr as *mut u8)
+}
+
+pub(crate) fn func_extra_props(func: *mut Func) -> *mut u8 {
+    unsafe { Func::extra_props(func) }
+}
+
+pub(crate) fn regexp_extra_props(ptr: *mut u8) -> *mut u8 {
+    unsafe { RegExp::extra_props(ptr) }
 }
 
 /// Function(...args) — compile a dynamic function through the parser/emitter.
@@ -19869,6 +19885,48 @@ pub fn json_stringify(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut
 
 /// Function.prototype.call(thisArg, ...args) — calls `this` with the given thisArg and arguments.
 /// `this` is the function to call, args[0] is the new this value, args[1..] are call arguments.
+/// Callable constructor wrappers (Object/Array/Boolean/String/Number/Function)
+/// are ordinary objects with special [[Call]] behavior. Route bound calls and
+/// call/apply through the same behavior as direct call sites.
+fn call_constructor_wrapper(
+    gc: &mut SemiSpace,
+    target: Value,
+    call_args: &[Value],
+    vm: &mut Vm,
+) -> Option<Value> {
+    if target == vm.number_constructor {
+        return Some(number_builtin(gc, Value::undefined(), call_args, vm));
+    }
+    if target == vm.string_constructor {
+        return Some(string_builtin(gc, Value::undefined(), call_args, vm));
+    }
+    if target == vm.boolean_constructor {
+        return Some(boolean_builtin(gc, Value::undefined(), call_args, vm));
+    }
+    if target == vm.array_constructor {
+        return Some(array_constructor(gc, Value::undefined(), call_args, vm));
+    }
+    if target == vm.object_constructor {
+        return Some(crate::vm::to_object_value(
+            gc,
+            call_args.first().copied().unwrap_or(Value::undefined()),
+            vm,
+        ));
+    }
+    if target == vm.date_constructor {
+        let tv = rune_core::date::now_ms();
+        let s = rune_core::date::to_date_string(tv);
+        return Some(Value::from_heap_ptr(crate::vm::heap_string(gc, &s)));
+    }
+    if target == vm.regexp_constructor {
+        return Some(regexp_constructor(gc, Value::undefined(), call_args, vm));
+    }
+    if vm.function_constructor_value() == Some(target) {
+        return Some(function_constructor(gc, Value::undefined(), call_args, vm));
+    }
+    None
+}
+
 pub fn call_builtin(_gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     let target = this;
     let new_this = args.first().copied().unwrap_or(Value::undefined());
@@ -19878,6 +19936,9 @@ pub fn call_builtin(_gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
     // reach the [[Call]] behavior (and its NewTarget TypeError).
     if target == vm.promise_constructor {
         return promise_constructor(_gc, new_this, &call_args, vm);
+    }
+    if let Some(result) = call_constructor_wrapper(_gc, target, &call_args, vm) {
+        return result;
     }
 
     // If target is a builtin, call it directly.
@@ -19937,7 +19998,15 @@ pub fn apply_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
         .heap_ptr()
         .map(|ptr| unsafe { (*(ptr as *const GcHeader)).tag() } == rune_core::gc::TAG_FUNC)
         .unwrap_or(false);
-    if !(target_smi.is_some() || is_js_func) {
+    let is_wrapper = target == vm.number_constructor
+        || target == vm.string_constructor
+        || target == vm.boolean_constructor
+        || target == vm.array_constructor
+        || target == vm.object_constructor
+        || target == vm.date_constructor
+        || target == vm.regexp_constructor
+        || vm.function_constructor_value() == Some(target);
+    if !(target_smi.is_some() || is_js_func || is_wrapper) {
         vm.set_pending_exception(crate::errors::error_object(
             gc,
             &vm.error_protos,
@@ -19966,6 +20035,10 @@ pub fn apply_builtin(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
             }
         }
     };
+
+    if let Some(result) = call_constructor_wrapper(gc, target, &call_args, vm) {
+        return result;
+    }
 
     // Step 6: builtin target → direct call; JS function → pending callback
     if let Some(smi) = target_smi {
@@ -25524,37 +25597,21 @@ pub fn promise_static_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &
 }
 
 /// Read a function's own `length`/`name` metadata (empty/0 when absent).
-fn function_metadata(target: Value) -> (u32, String) {
-    let Some(ptr) = target.heap_ptr() else {
-        return (0, String::new());
-    };
-    if unsafe { (*(ptr as *const GcHeader)).tag() } != TAG_FUNC {
-        return (0, String::new());
-    }
-    let func = ptr as *mut Func;
-    let props = unsafe { Func::extra_props(func) };
-    if props.is_null() {
-        return (0, String::new());
-    }
-    let obj = props as *mut JSObject;
-    let shape = unsafe { JSObject::shape_ptr(obj) };
-    let mut length = 0u32;
+fn function_metadata(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    target: Value,
+) -> Result<(f64, String), Value> {
+    let len_val = get_value_sync(gc, vm, target, "length")?;
+    let length = to_integer_or_infinity_sync(gc, vm, len_val)?.max(0.0);
+    let name_val = get_value_sync(gc, vm, target, "name")?;
     let mut name = String::new();
-    if let Some(slot) = shape.lookup(&PropertyKey::from_string("length")) {
-        length = unsafe { JSObject::get_slot(obj, slot) }
-            .as_smi()
-            .unwrap_or(0)
-            .max(0) as u32;
-    }
-    if let Some(slot) = shape.lookup(&PropertyKey::from_string("name")) {
-        let v = unsafe { JSObject::get_slot(obj, slot) };
-        if let Some(sp) = v.heap_ptr() {
-            if unsafe { (*(sp as *const GcHeader)).tag() } == TAG_STRING {
-                name = unsafe { HeapString::to_string(sp as *mut HeapString) };
-            }
+    if let Some(sp) = name_val.heap_ptr() {
+        if unsafe { (*(sp as *const GcHeader)).tag() } == TAG_STRING {
+            name = unsafe { HeapString::to_string(sp as *mut HeapString) };
         }
     }
-    (length, name)
+    Ok((length, name))
 }
 
 /// Function.prototype.bind(thisArg[, ...boundArgs]).
@@ -25618,7 +25675,15 @@ pub fn function_bind(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
     let callable = this.is_builtin()
         || this
             .heap_ptr()
-            .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC });
+            .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC })
+        || this == vm.number_constructor
+        || this == vm.string_constructor
+        || this == vm.boolean_constructor
+        || this == vm.array_constructor
+        || this == vm.object_constructor
+        || this == vm.date_constructor
+        || this == vm.regexp_constructor
+        || vm.function_constructor_value() == Some(this);
     if !callable {
         vm.set_pending_exception(crate::errors::error_object(
             gc,
@@ -25668,10 +25733,41 @@ pub fn function_bind(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut V
         EnvObject::set_slot(env, 3, invoke_handle);
         Func::set_env_ptr(func, env as *mut u8);
     }
-    let (target_len, target_name) = function_metadata(target);
-    let bound_len = target_len.saturating_sub(bound_rest.len() as u32);
+    let (target_len, target_name) = match function_metadata(gc, vm, target) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    let bound_len = if target_len.is_finite() {
+        (target_len - bound_rest.len() as f64).max(0.0)
+    } else {
+        target_len
+    };
     let bound_name = format!("bound {target_name}");
-    let func = vm.set_function_metadata(gc, func, bound_len, &bound_name);
+    let len_u32 = if bound_len.is_finite() && bound_len < (1 << 30) as f64 {
+        bound_len as u32
+    } else {
+        0
+    };
+    let func = vm.set_function_metadata(gc, func, len_u32, &bound_name);
+    unsafe { Func::set_strict(func, true) };
+    // `length` may exceed i32 or be Infinity: overwrite the metadata slot.
+    let func = unsafe { rune_core::gc::resolve_forwarded(func as *mut u8) } as *mut Func;
+    let props = unsafe { Func::extra_props(func) };
+    if !props.is_null() {
+        let obj = props as *mut JSObject;
+        let shape = unsafe { JSObject::shape_ptr(obj) };
+        if let Some(slot) = shape.lookup(&PropertyKey::from_string("length")) {
+            let value = if bound_len.is_finite() && bound_len <= i32::MAX as f64 {
+                Value::smi(bound_len as i32)
+            } else {
+                Value::from_float64(bound_len)
+            };
+            unsafe { JSObject::set_slot(obj, slot, value) };
+        }
+    }
     Value::from_heap_ptr(func as *mut u8)
 }
 

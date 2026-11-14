@@ -5288,6 +5288,10 @@ impl Vm {
         }
     }
 
+    pub(crate) fn function_constructor_value(&self) -> Option<Value> {
+        self.builtin_wrappers.get("Function").copied()
+    }
+
     pub fn current_call_is_constructor(&self) -> bool {
         self.frames
             .last()
@@ -9137,6 +9141,43 @@ impl Vm {
                                     Value::boolean(false)
                                 }
                             }
+                        } else if matches!(tag, TAG_FUNC | TAG_DATE | TAG_REGEXP) {
+                            let extra = unsafe {
+                                match tag {
+                                    TAG_FUNC => crate::builtins::func_extra_props(ptr as *mut Func),
+                                    TAG_DATE => rune_core::date::RuneDate::extra_props(ptr),
+                                    _ => crate::builtins::regexp_extra_props(ptr),
+                                }
+                            };
+                            let mut deleted = true;
+                            if !extra.is_null() {
+                                if let Some(key) = value_to_prop_key(raw_key) {
+                                    let eptr = extra as *mut JSObject;
+                                    let shape = unsafe { JSObject::shape_ptr(eptr) };
+                                    if let Some(slot) = shape.lookup(&key) {
+                                        if shape.attr_at(slot) & rune_core::shape::ATTR_CONFIGURABLE
+                                            == 0
+                                        {
+                                            deleted = false;
+                                        } else {
+                                            unsafe { JSObject::remove_property(eptr, &key) };
+                                        }
+                                    }
+                                }
+                            }
+                            if !deleted && self.executing_is_strict(fi) {
+                                let e = crate::errors::error_object(
+                                    gc,
+                                    &self.error_protos,
+                                    crate::errors::ErrorKind::TypeError,
+                                    "Cannot delete property",
+                                );
+                                if let Some(exit) = self.handle_throw(gc, e) {
+                                    return exit;
+                                }
+                                continue 'run;
+                            }
+                            Value::boolean(deleted)
                         } else {
                             Value::boolean(true)
                         }

@@ -17153,3 +17153,34 @@ fn test_function_constructor_dynamic() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_function_bind_metadata_and_wrappers() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            function add(a, b) { return a + b; }
+            var bound = add.bind(null, 1);
+            var callerThrows = false;
+            try { bound.caller; } catch (e) { callerThrows = e instanceof TypeError; }
+            var keptName = bound.name;
+            var removed = delete bound.name;
+            [
+                bound(2) === 3,
+                bound.length === 1,
+                keptName === "bound add",
+                Function.prototype.isPrototypeOf(bound),
+                bound.hasOwnProperty("caller") === false,
+                callerThrows,
+                removed === true,
+                bound.name === "",
+                Number.bind(null)(42) === 42,
+                typeof Date.bind(null)() === "string",
+                Function.bind(null, "return 9")()() === 9
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

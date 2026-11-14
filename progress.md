@@ -3141,6 +3141,28 @@ Integration suite: **885 passed, 0 failed, 3 ignored**.
 
 Integration suite: **886 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — bind metadata + constructor-wrapper calls (2026-11-14)
+
+- `Function.prototype.bind` now derives metadata observably:
+  - `length` via ToIntegerOrInfinity(Get(target, "length")) minus bound args,
+    supporting Infinity and values above int32 (stored as float64);
+  - `name` via Get(target, "name") ("bound " prefix, empty for non-strings);
+  - metadata is configurable and deletable (Function/Date/RegExp extra-props
+    delete now honours configurable attrs);
+  - bound functions are marked restricted so `caller`/`arguments` throw.
+- Callable builtin constructor wrappers now route through `bind`, `call`, and
+  `apply`: Number/String/Boolean/Array/Object/Function plus Date (plain call
+  returns the date string) and RegExp.
+- `Function.prototype.isPrototypeOf` walks the generic `value_prototype` chain
+  (Func/Array/exotics) instead of assuming the JSObject layout.
+- Test262: Function **274 → 307/509**, bind **78 → 92/100**,
+  String **1092 → 1094/1223**, Object **2711 → 2716/3411**.
+- Regression: `test_function_bind_metadata_and_wrappers`.
+- Remaining bind failures concern new.target propagation (bound-target
+  construction) and the two legacy caller-poison tests.
+
+Integration suite: **887 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

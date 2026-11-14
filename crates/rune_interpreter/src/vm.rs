@@ -1028,6 +1028,9 @@ pub struct Vm {
     pub return_stack_floor: Option<usize>,
     /// Per-(program, template-site) tagged-template object cache.
     pub template_cache: std::collections::HashMap<(usize, usize), Value>,
+    /// Bytecode programs created by `eval`; kept alive because evaluated code
+    /// may create functions whose prog_ptr points into them.
+    pub eval_programs: Vec<Box<rune_bytecode::opcode::BytecodeProgram>>,
     /// While a generator's nested run_loop is active: the frame index the
     /// generator frame occupies. Return inside it must NOT run the module-
     /// style caller-stack truncation (the real caller lives outside this
@@ -1360,6 +1363,7 @@ impl Vm {
             return_frame_floor: 0,
             return_stack_floor: None,
             template_cache: std::collections::HashMap::new(),
+            eval_programs: Vec::new(),
             nested_gen_floor: None,
             generator_return_sentinel: None,
             generator_return_value: None,

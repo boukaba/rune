@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Basic eval (2026-11-14)**: synthetic-function compile + reentrant call, expression completion, SyntaxError objects; direct-eval locals/var-global semantics missing. eval-code **103/347**, RegExp/source **10/12**, RegExp/prototype **396/487**. Integration **884**.
 - **MatchAll/split/search completion (2026-11-14)**: cached lastIndex, non-global/non-RegExp matchAll, ToUint32 split limits, sync accessor setters, no-setter prototype store. RegExp/prototype **391/487 (80.3%)**, matchAll **26/26**, split **43/44**, search **22/23**, String **1074/1223**. Integration **883**.
 - **Generic RegExp @@matchAll (2026-11-14)**: IsRegExp/species/flags/global/unicode Gets, matcher construction. RegExp/prototype **365/487**, Symbol.matchAll **20/26**, String **1074/1223**. Integration **883**. Eager array iterator caveat.
 - **RegExp source/flags accessors (2026-11-14)**: real accessors, escape patterns, observable flag Gets in dgimsuvy order. RegExp/prototype **352/487**, flags **10/16**, source **5/12**, String **1074/1223**. Integration **883**. Global `eval` remains a stub.

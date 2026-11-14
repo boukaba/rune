@@ -3078,6 +3078,26 @@ Integration suite: **883 passed, 0 failed, 3 ignored**.
 
 Integration suite: **883 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Basic `eval` evaluation (2026-11-14)
+
+- `eval(source)` is no longer a stub:
+  - ToString(source); Symbols throw TypeError;
+  - compiles the source as a synthetic function through the parser/emitter,
+    first as an expression (`return (source);`) and then as a statement body;
+  - executes through the re-entrant `call_value_sync` path, so the caller's
+    frames/stack are untouched;
+  - bytecode is retained on `Vm::eval_programs` for evaluated functions;
+  - syntax errors surface as a SyntaxError object;
+  - non-string arguments return their ToString eval result (`eval(41)` → 41).
+- Known limitations documented: direct-eval local-scope capture and
+  `var`-declares-global semantics are not implemented; statement sources return
+  undefined rather than their completion value.
+- Test262: `language/eval-code` **80 → 103/347**, RegExp/source **5 → 10/12**,
+  RegExp/prototype **391 → 396/487**, builtins/eval 8/10.
+- Regression: `test_eval_expression_completion`.
+
+Integration suite: **884 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

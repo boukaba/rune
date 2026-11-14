@@ -17074,3 +17074,25 @@ fn test_regexp_flags_source_accessors() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_eval_expression_completion() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var outer = 7;
+            [
+                eval("1 + 1") === 2,
+                eval("outer * 2") === 14,
+                eval("({ a: 1 }).a") === 1,
+                eval("/a/").test("a"),
+                eval("var internal = 3; internal + 1") === undefined,
+                eval(41) === 41,
+                eval() === undefined
+            ].join("|") === "true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

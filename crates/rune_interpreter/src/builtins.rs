@@ -12271,9 +12271,75 @@ pub fn object_create_builtin(
     Value::from_heap_ptr(ptr as *mut u8)
 }
 
-/// eval(source) — currently not implemented; returns undefined.
-pub fn eval_builtin(_gc: &mut SemiSpace, _this: Value, _args: &[Value], _vm: &mut Vm) -> Value {
-    Value::undefined()
+/// eval(source) — basic script evaluation.
+///
+/// The source is compiled as a synthetic function so it can run through the
+/// re-entrant call path without disturbing the caller's frames. Expression
+/// sources return their completion value; statement sources run for effect
+/// and return undefined. Direct-eval local-scope capture is not implemented.
+pub fn eval_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let source_val = args.first().copied().unwrap_or(Value::undefined());
+    if source_val.as_symbol_id().is_some() {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Cannot convert a Symbol value to a string",
+        ));
+        return Value::undefined();
+    }
+    let Some(source) = to_primitive_string(gc, source_val, vm) else {
+        return Value::undefined();
+    };
+    if source_val
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_STRING })
+        && source
+            == source_val
+                .heap_ptr()
+                .map(|p| unsafe { HeapString::to_string(p as *mut HeapString) })
+                .unwrap_or_default()
+    {
+        // String source: fall through to compilation below.
+    }
+    let compile = |text: &str| -> Option<rune_bytecode::opcode::BytecodeProgram> {
+        let mut parser = rune_parser::Parser::new(text);
+        let program = parser.parse();
+        if !parser.errors.is_empty() {
+            return None;
+        }
+        let mut emitter = rune_parser::emitter::Emitter::new();
+        emitter.emit_program(&program);
+        Some(emitter.into_bytecode())
+    };
+    let expression_text = format!("(function(){{\nreturn (\n{source}\n);\n}})");
+    let statement_text = format!("(function(){{\n{source}\n}})");
+    let program = compile(&expression_text).or_else(|| compile(&statement_text));
+    let Some(mut program) = program else {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::SyntaxError,
+            "Invalid or unsupported eval source",
+        ));
+        return Value::undefined();
+    };
+    if program.functions.is_empty() {
+        return Value::undefined();
+    }
+    let function_program = program.functions.remove(0);
+    program.functions.push(function_program);
+    vm.eval_programs.push(Box::new(program));
+    let prog_ptr = &**vm.eval_programs.last().unwrap() as *const _ as *const u8;
+    let func_ptr = Func::allocate(gc, 0, prog_ptr, false, std::ptr::null_mut());
+    let func = Value::from_heap_ptr(func_ptr as *mut u8);
+    match vm.call_value_sync(gc, func, Value::undefined(), &[]) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            Value::undefined()
+        }
+    }
 }
 
 /// Array.isArray(arg) — returns true if arg is a dense array.

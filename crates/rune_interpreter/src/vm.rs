@@ -17608,6 +17608,51 @@ pub(crate) fn do_store_property(
                         unsafe {
                             Func::set_prototype(ptr as *mut Func, val_ptr);
                         }
+                        let obj_ptr = obj.heap_ptr().unwrap();
+                        let props = unsafe { Func::extra_props(obj_ptr as *mut Func) };
+                        if !props.is_null() {
+                            let shape = unsafe { JSObject::shape_ptr(props as *mut JSObject) };
+                            if shape.lookup(&PROTOTYPE_KEY).is_some() {
+                                unsafe {
+                                    JSObject::remove_property(
+                                        props as *mut JSObject,
+                                        &PROTOTYPE_KEY,
+                                    )
+                                };
+                            }
+                        }
+                    } else {
+                        unsafe {
+                            Func::set_prototype(ptr as *mut Func, std::ptr::null_mut());
+                        }
+                        let mut obj_ptr = obj.heap_ptr().unwrap();
+                        unsafe {
+                            let mut props = Func::extra_props(obj_ptr as *mut Func);
+                            if props.is_null() {
+                                let new_obj = JSObject::allocate(gc, Shape::empty(), &[]);
+                                let gc_tag = (*(obj_ptr as *const GcHeader)).tag();
+                                if gc_tag == TAG_FUNC
+                                    && (*(obj_ptr as *const GcHeader)).is_forwarded()
+                                {
+                                    obj_ptr = (*(obj_ptr as *const GcHeader)).forwarding_addr();
+                                }
+                                Func::set_extra_props(obj_ptr as *mut Func, new_obj as *mut u8);
+                                props = new_obj as *mut u8;
+                            }
+                            let props_obj = props as *mut JSObject;
+                            let shape = JSObject::shape_ptr(props_obj);
+                            if let Some(slot) = shape.lookup(&PROTOTYPE_KEY) {
+                                JSObject::set_slot(props_obj, slot, value);
+                            } else {
+                                JSObject::add_property_with_attrs(
+                                    props_obj,
+                                    *PROTOTYPE_KEY,
+                                    "prototype".to_string(),
+                                    value,
+                                    rune_core::shape::ATTR_WRITABLE,
+                                );
+                            }
+                        }
                     }
                 } else {
                     // Store arbitrary properties on the function's extra_props object
@@ -17800,6 +17845,7 @@ pub(crate) fn value_is_constructor(vm: &Vm, v: Value) -> bool {
             || v == vm.map_constructor
             || v == vm.set_constructor
             || v == vm.array_buffer_constructor
+            || vm.function_constructor_value() == Some(v)
         {
             return true;
         }

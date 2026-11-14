@@ -3830,6 +3830,14 @@ pub fn reflect_construct(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &
                     return Value::undefined();
                 }
             }
+        } else if target == vm.date_constructor {
+            let proto = vm.date_prototype.heap_ptr().unwrap_or(std::ptr::null_mut());
+            let obj = rune_core::date::RuneDate::allocate(gc, proto);
+            let obj_val = Value::from_heap_ptr(obj);
+            match date_constructor(gc, obj_val, &call_args, vm) {
+                _ if vm.pending_exception.is_some() => return Value::undefined(),
+                v => v,
+            }
         } else if target == vm.set_constructor {
             let set = RuneSet::allocate(
                 gc,
@@ -8916,6 +8924,13 @@ fn exotic_extra_props_has(ptr: *mut u8, key: Value) -> bool {
     let Some(pk) = value_to_prop_key(key) else {
         return false;
     };
+    if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_FUNC
+        && pk == PropertyKey::from_string("prototype")
+        && !unsafe { rune_core::function::Func::prototype(ptr as *mut rune_core::function::Func) }
+            .is_null()
+    {
+        return true;
+    }
     let props = unsafe {
         match (*(ptr as *const GcHeader)).tag() {
             TAG_FUNC => {
@@ -12978,6 +12993,23 @@ pub fn object_get_own_property_descriptor(
                         return make_descriptor_object(
                             gc,
                             regexp_last_index_value(ptr),
+                            rune_core::shape::ATTR_WRITABLE,
+                            vm.object_prototype.heap_ptr(),
+                        );
+                    }
+                }
+            }
+        }
+        if tag == TAG_FUNC {
+            if let Some(pk) = value_to_prop_key(raw_key) {
+                if pk.as_u64() == PropertyKey::from_string("prototype").as_u64() {
+                    let proto = unsafe {
+                        rune_core::function::Func::prototype(ptr as *mut rune_core::function::Func)
+                    };
+                    if !proto.is_null() {
+                        return make_descriptor_object(
+                            gc,
+                            Value::from_heap_ptr(proto),
                             rune_core::shape::ATTR_WRITABLE,
                             vm.object_prototype.heap_ptr(),
                         );

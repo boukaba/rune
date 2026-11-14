@@ -18261,3 +18261,45 @@ fn test_array_join_and_copy_within_edges() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_function_prototype_primitive_and_date_new_target() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            function C() { this.called = true; }
+            var ownBefore = C.hasOwnProperty("prototype");
+            var descBefore = Object.getOwnPropertyDescriptor(C, "prototype");
+            C.prototype = null;
+            var ownNull = C.hasOwnProperty("prototype");
+            var descNull = Object.getOwnPropertyDescriptor(C, "prototype");
+            var valueNull = C.prototype === null;
+
+            var calleeCalled = false;
+            function Ctor() { calleeCalled = true; }
+            var first = Reflect.construct(Date, [64], Ctor);
+            var firstTime = Date.prototype.getTime.call(first);
+            var firstProto = Object.getPrototypeOf(first) === Ctor.prototype;
+            Ctor.prototype = null;
+            var second = Reflect.construct(Date, [64], Ctor);
+            var secondTime = Date.prototype.getTime.call(second);
+            var secondProto = Object.getPrototypeOf(second) === Date.prototype;
+
+            [
+                ownBefore,
+                descBefore.writable === true && descBefore.enumerable === false,
+                ownNull,
+                descNull && descNull.value === null,
+                valueNull,
+                firstTime === 64,
+                firstProto,
+                secondTime === 64,
+                secondProto,
+                calleeCalled === false
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

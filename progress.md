@@ -3773,6 +3773,26 @@ Integration suite: **914 passed, 0 failed, 3 ignored**.
 
 Integration suite: **915 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Function prototype primitives + Reflect Date newTarget (2026-11-14)
+
+- Function `prototype` can now hold primitive values (including null):
+  non-object assignments are stored on the function's extra-properties
+  overlay with `{writable: true, enumerable: false, configurable: false}`,
+  while object assignments use the Func prototype slot and clear the overlay.
+  `get`, `hasOwnProperty`, `Object.getOwnPropertyDescriptor` and prototype
+  lookups all observe the stored primitive; reassigning an object restores
+  the normal constructor prototype.
+- `Reflect.construct(Date, args, newTarget)` now allocates a real
+  `[[DateValue]]`-bearing Date and then applies `newTarget.prototype`, instead
+  of falling into the generic "not a constructor" path. Subclass-style calls
+  preserve `Date.prototype` when `newTarget.prototype` is null.
+- `Function` is recognized by `value_is_constructor`, so
+  `Reflect.construct(Function, ...)`/`isConstructor(Function)` work.
+- Test262 Date **589/594, 0 failed**, Function **345 → 349/509**.
+- Regression: `test_function_prototype_primitive_and_date_new_target`.
+
+Integration suite: **916 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

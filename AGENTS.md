@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Function prototype primitives + Reflect Date newTarget (2026-11-14)**: primitive prototype storage/descriptors, Date [[DateValue]] via Reflect.construct, Function constructor recognition. Date **589/0**, Function **349/509**. Integration **916**.
 - **Array join/copyWithin coercion (2026-11-14)**: observable join ToString/prototype fallback, sync copyWithin length/args/undefined-end and receiver boxing. Array **2742/3081**, join **20/23**, copyWithin **31/39**. Integration **915**.
 - **Array search LengthOfArrayLike + fromIndex (2026-11-14)**: observable getter/hex/object lengths, sync ToIntegerOrInfinity fromIndex. Array **2728/3081**, indexOf **191/201**, lastIndexOf **185/198**. Integration **914**.
 - **Unicode normalization + String coercion edges (2026-11-14)**: real NFC/NFD/NFKC/NFKD, NFC localeCompare, ToNumber-based ToInteger, NaN lastIndexOf, split ToString order, regex identity `\x`. String **1172/1223**, Number **337/340**, Array **2670**. Integration **913**.

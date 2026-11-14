@@ -41,6 +41,10 @@ pub struct Emitter {
     lexical_slot_count: usize,
     /// Names of variables in THIS function that are captured by inner closures.
     captured_names: Vec<String>,
+    /// Eval statement-mode completion tracking: the top-level synthetic
+    /// function keeps the last expression-statement value in a local.
+    eval_completion: bool,
+    completion_slot: Option<usize>,
     /// How many env slots this function's env object has (0 = no env).
     captured_env_size: usize,
     /// Captured_names of enclosing functions, ordered closest-first.
@@ -133,6 +137,8 @@ impl Emitter {
             lexical_scopes: Vec::new(),
             lexical_slot_count: 0,
             captured_names: Vec::new(),
+            eval_completion: false,
+            completion_slot: None,
             captured_env_size: 0,
             env_scope_stack: Vec::new(),
             env_scope_is_per_iter: Vec::new(),
@@ -661,6 +667,8 @@ impl Emitter {
         sub.function_depth = self.function_depth + 1;
         sub.lexical_scope_shadowing = self.lexical_scope_shadowing.clone();
         sub.script_scope_depth = self.script_scope_depth;
+        let eval_completion = self.eval_completion;
+        sub.eval_completion = false;
         sub.private_field_names = self.private_field_names.clone();
         sub.module_mode = self.module_mode;
         sub.module_imports = self.module_imports.clone();
@@ -776,6 +784,14 @@ impl Emitter {
             // Push captured_names onto env_scope_stack so inner functions can resolve
             sub.env_scope_stack.push(sub.captured_names.clone());
         }
+        if eval_completion {
+            let slot = sub.locals.len();
+            sub.locals.push("__eval_completion".to_string());
+            sub.completion_slot = Some(slot);
+            sub.emit(Opcode::LoadUndefined, vec![]);
+            sub.emit(Opcode::StoreLocal, vec![slot as i64]);
+            sub.emit(Opcode::Pop, vec![]);
+        }
         // Emit body: for arrow expression body (Stmt::Expr), use it as return value
         let is_arrow_expr = func.name.is_none() && matches!(&func.body, Stmt::Expr(..));
         match &func.body {
@@ -795,7 +811,11 @@ impl Emitter {
                     None => true,
                 };
                 if needs_return {
-                    sub.emit(Opcode::LoadUndefined, vec![]);
+                    if let Some(slot) = sub.completion_slot {
+                        sub.emit(Opcode::LoadLocal, vec![slot as i64]);
+                    } else {
+                        sub.emit(Opcode::LoadUndefined, vec![]);
+                    }
                     sub.emit(Opcode::Return, vec![]);
                 }
             }
@@ -1912,6 +1932,9 @@ impl Emitter {
         match stmt {
             Stmt::Expr(expr, _) => {
                 self.emit_expression(expr);
+                if let Some(slot) = self.completion_slot {
+                    self.emit(Opcode::StoreLocal, vec![slot as i64]);
+                }
                 self.emit(Opcode::Pop, vec![]);
             }
             Stmt::Import(_, _) | Stmt::Export(_, _) => {
@@ -1957,6 +1980,7 @@ impl Emitter {
                 }
             }
             Stmt::If(cond, then, else_, _) => {
+                self.reset_completion_value();
                 self.emit_expression(cond);
                 let else_jump = self.current();
                 self.emit(Opcode::JumpIfFalse, vec![0]);
@@ -1972,6 +1996,7 @@ impl Emitter {
                 }
             }
             Stmt::While(cond, body, _) => {
+                self.reset_completion_value();
                 let loop_start = self.current();
                 self.emit_expression(cond);
                 let exit_jump = self.current();
@@ -1985,6 +2010,8 @@ impl Emitter {
                 let labels = std::mem::take(&mut self.pending_labels);
                 self.active_loop_labels.push(labels);
                 self.active_loop_has_env.push(false);
+                self.reset_completion_value();
+                self.reset_completion_value();
                 self.emit_statement(body);
                 self.active_loop_has_env.pop();
                 self.active_loop_labels.pop();
@@ -2002,6 +2029,7 @@ impl Emitter {
                 }
             }
             Stmt::DoWhile(cond, body, _) => {
+                self.reset_completion_value();
                 let loop_start = self.current();
                 // Sentinels: `break`/`continue` in a do-while emit patchable
                 // Jumps instead of jumping to a placeholder (a placeholder at
@@ -2013,6 +2041,8 @@ impl Emitter {
                 let labels = std::mem::take(&mut self.pending_labels);
                 self.active_loop_labels.push(labels);
                 self.active_loop_has_env.push(false);
+                self.reset_completion_value();
+                self.reset_completion_value();
                 self.emit_statement(body);
                 self.active_loop_has_env.pop();
                 self.active_loop_labels.pop();
@@ -2032,6 +2062,7 @@ impl Emitter {
                 }
             }
             Stmt::For(init, cond, update, body, _) => {
+                self.reset_completion_value();
                 // Enter lexical scope for for-init's let/const declarations
                 let init_has_scope = if let Some(init_stmt) = init {
                     let init_ref: &Stmt = init_stmt.as_ref();
@@ -2128,6 +2159,7 @@ impl Emitter {
                 let labels = std::mem::take(&mut self.pending_labels);
                 self.active_loop_labels.push(labels);
                 self.active_loop_has_env.push(per_iteration_count > 0);
+                self.reset_completion_value();
                 self.emit_statement(body);
                 self.active_loop_has_env.pop();
                 self.active_loop_labels.pop();
@@ -2432,6 +2464,7 @@ impl Emitter {
                 self.emit_class(class, false);
             }
             Stmt::Try(body, catch_opt, finalizer_opt, span) => {
+                self.reset_completion_value();
                 let try_idx = self.current();
                 self.emit(Opcode::TryBegin, vec![0, 0]);
 
@@ -2466,7 +2499,9 @@ impl Emitter {
                         // try-finally (no catch) — no TryEnd, fall through to finally
                         let fin_entry = self.current();
                         self.patch_operand(try_idx, 1, fin_entry as i64);
+                        let saved_completion = self.completion_slot.take();
                         self.emit_statement(&Stmt::Block(fin.to_vec(), *span));
+                        self.completion_slot = saved_completion;
                         let fd_pc = self.current();
                         let rethrow_pc = fd_pc + 2;
                         self.emit(Opcode::FinallyDone, vec![rethrow_pc as i64]);
@@ -2494,7 +2529,9 @@ impl Emitter {
                         let fin_entry = self.current();
                         self.patch(past_catch, fin_entry);
                         self.patch_operand(try_idx, 1, fin_entry as i64);
+                        let saved_completion = self.completion_slot.take();
                         self.emit_statement(&Stmt::Block(fin.to_vec(), *span));
+                        self.completion_slot = saved_completion;
                         let fd_pc = self.current();
                         let rethrow_pc = fd_pc + 2;
                         self.emit(Opcode::FinallyDone, vec![rethrow_pc as i64]);
@@ -2537,6 +2574,7 @@ impl Emitter {
             }
             Stmt::Empty(_) => {}
             Stmt::ForIn(lhs, obj, body, _) => {
+                self.reset_completion_value();
                 // for (var key in obj) { body }
                 // Register the loop variable as a local inside functions.
                 // At script top level it must flow to the global binding.
@@ -2572,6 +2610,7 @@ impl Emitter {
                 let labels = std::mem::take(&mut self.pending_labels);
                 self.active_loop_labels.push(labels);
                 self.active_loop_has_env.push(false);
+                self.reset_completion_value();
                 self.emit_statement(body);
                 self.active_loop_has_env.pop();
                 self.active_loop_labels.pop();
@@ -2600,6 +2639,7 @@ impl Emitter {
                 }
             }
             Stmt::ForOf(lhs, iterable, body, _) => {
+                self.reset_completion_value();
                 // for (x of iterable) { body }
                 // Register the loop variable as a local inside functions.
                 if self.function_depth > 0 {
@@ -2658,6 +2698,8 @@ impl Emitter {
                         self.emit(Opcode::Pop, vec![]);
                     }
                 }
+                self.reset_completion_value();
+                self.reset_completion_value();
                 self.emit_statement(body);
                 self.active_loop_labels.pop();
                 self.loop_cont_stack.pop();
@@ -2682,6 +2724,7 @@ impl Emitter {
                 }
             }
             Stmt::Switch(discriminant, cases, default_body, _) => {
+                self.reset_completion_value();
                 self.emit_expression(discriminant);
 
                 // Mark switch context for break statements
@@ -2738,6 +2781,16 @@ impl Emitter {
                 self.patch(no_match_target, default_target);
                 self.switch_exit_stack.pop();
             }
+        }
+    }
+
+    /// Reset eval completion tracking to empty (used at the start of
+    /// statements with their own completion-value rules).
+    fn reset_completion_value(&mut self) {
+        if let Some(slot) = self.completion_slot {
+            self.emit(Opcode::LoadUndefined, vec![]);
+            self.emit(Opcode::StoreLocal, vec![slot as i64]);
+            self.emit(Opcode::Pop, vec![]);
         }
     }
 
@@ -4254,6 +4307,13 @@ impl Emitter {
             }
         }
         None
+    }
+
+    /// Enable eval statement-mode completion tracking for the next top-level
+    /// function compiled by this emitter.
+    pub fn with_eval_completion(mut self) -> Self {
+        self.eval_completion = true;
+        self
     }
 
     pub fn with_source(mut self, source: &str) -> Self {

@@ -13838,19 +13838,23 @@ pub fn eval_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut V
     {
         // String source: fall through to compilation below.
     }
-    let compile = |text: &str| -> Option<rune_bytecode::opcode::BytecodeProgram> {
-        let mut parser = rune_parser::Parser::new(text);
-        let program = parser.parse();
-        if !parser.errors.is_empty() {
-            return None;
-        }
-        let mut emitter = rune_parser::emitter::Emitter::new().with_source(text);
-        emitter.emit_program(&program);
-        Some(emitter.into_bytecode())
-    };
+    let compile =
+        |text: &str, eval_completion: bool| -> Option<rune_bytecode::opcode::BytecodeProgram> {
+            let mut parser = rune_parser::Parser::new(text);
+            let program = parser.parse();
+            if !parser.errors.is_empty() {
+                return None;
+            }
+            let mut emitter = rune_parser::emitter::Emitter::new().with_source(text);
+            if eval_completion {
+                emitter = emitter.with_eval_completion();
+            }
+            emitter.emit_program(&program);
+            Some(emitter.into_bytecode())
+        };
     let expression_text = format!("(function(){{\nreturn (\n{source}\n);\n}})");
     let statement_text = format!("(function(){{\n{source}\n}})");
-    let program = compile(&expression_text).or_else(|| compile(&statement_text));
+    let program = compile(&expression_text, false).or_else(|| compile(&statement_text, true));
     let Some(mut program) = program else {
         vm.set_pending_exception(crate::errors::error_object(
             gc,

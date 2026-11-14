@@ -4027,6 +4027,24 @@ Integration suite: **927 passed, 0 failed, 3 ignored**.
 
 Integration suite: **928 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Eval statement completion values (2026-11-14)
+
+- Eval statement mode now returns the script completion value instead of
+  `undefined`. The synthetic top-level function reserves a completion local;
+  every expression statement stores its value there.
+- Compound statements reset the completion value where the spec returns an
+  empty/undefined completion: `if`, `switch`, `try`, and all loops. Loop bodies
+  reset per iteration. `finally` blocks do not overwrite a normal try/catch
+  value (the spec uses the try/catch completion when both are normal).
+- Results: language/statements/if **20 → 27/69 (0 failures)**,
+  switch **8 → 23/111**, try **137 → 146/201**, while **15 → 20/38**,
+  do-while **11 → 17/36**, for **325 → 327/385**,
+  language/eval-code **103 → 119/347**.
+- Regression: `test_eval_statement_completion_values`; updated the old
+  `eval("var internal = 3; internal + 1")` expectation from `undefined` to `4`.
+
+Integration suite: **929 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

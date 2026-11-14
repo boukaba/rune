@@ -17092,7 +17092,7 @@ fn test_eval_expression_completion() {
                 eval("outer * 2") === 14,
                 eval("({ a: 1 }).a") === 1,
                 eval("/a/").test("a"),
-                eval("var internal = 3; internal + 1") === undefined,
+                eval("var internal = 3; internal + 1") === 4,
                 eval(41) === 41,
                 eval() === undefined
             ].join("|") === "true|true|true|true|true|true|true";
@@ -18755,6 +18755,28 @@ fn test_new_target_and_class_field_initialization_order() {
                 viaReflect() === viaReflect,
                 fields.observed === 1
             ].join("|") === "true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}
+
+#[test]
+fn test_eval_statement_completion_values() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            [
+                eval("1; { 2; }") === 2,
+                eval("3; if (false) { 4; }") === undefined,
+                eval("5; try { 6; } catch (e) { 7; } finally { 8; }") === 6,
+                eval("9; try { throw null; } catch (e) { 10; }") === 10,
+                eval("11; while (false) { 12; }") === undefined,
+                eval('13; switch (2) { case 1: 14; break; case 2: 15; break; }') === 15,
+                eval("16; for (var i = 0; i < 2; i++) { i + 20; }") === 21,
+                eval("var local = 2; local + 1") === 3
+            ].join("|") === "true|true|true|true|true|true|true|true";
             "#,
         )
         .unwrap();

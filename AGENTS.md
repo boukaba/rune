@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Eval completion values (2026-11-14)**: statement-mode eval returns completion local; resets for if/switch/try/loops, per-iteration loop reset, finally suppression. if **27/69 (0 fail)**, switch **23/111**, try **146/201**, while **20/38**, do-while **17/36**, eval-code **119/347**. Integration **929**.
 - **new.target + field init order (2026-11-14)**: LoadNewTarget/Frame new_target, super and Reflect.construct propagation, arrow lexical snapshot, FieldInit statement before base ctor body. new.target **12/14**, arrow **231/343**, class statements **1633/4367**. Integration **928**.
 - **Public class fields (2026-11-14)**: ClassField AST/parser, instance field initializer functions (this=instance), static initializers (this=ctor), empty class elements, keyword private names. class statements **1628/4367**, class expressions **1560/4059**, elements **147/1534**. Integration **927**. Known: field ordering, computed names, proxy define traps.
 - **Assignment-pattern targets + identifier escapes (2026-11-14)**: Pattern::Target/Rot3 member targets, RHS result, CoverInitializedName, \uXXXX identifier decoding. assignment **275/485**, assignment/dstr **205/368**, object **646/1170**, class statements **1576/4367**. Integration **926**.

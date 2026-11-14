@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Exotic-object integrity (2026-11-14)**: extra-props markers + GC-traced side table, store gating, primitive string freeze, arguments named props. Object **2867/3411**, seal **82/94**, freeze **47/53**. Integration **893**.
 - **Descriptor/global conformance (2026-11-14)**: primitive keys, StringWrapper descriptors, array accessor attrs, overlay enumerability, gOPD strings/globals, URI/escape globals. Object **2812/3411**, defineProperty **989/1131**, gOPD **298/310**. Integration **892**.
 - **Async/generator methods + mixed-proto IC (2026-11-14)**: method parsing, static source exclusion, IC panic fix. Function **342/509**, toString **44/80**, apply **30/48**. Integration **891**.
 - **Function.toString source preservation (2026-11-14)**: BytecodeProgram source_text, emitter span slicing, JS functions report real source. Function **332/509**, toString **36/80**. Integration **890**.

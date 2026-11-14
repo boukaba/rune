@@ -17336,3 +17336,42 @@ fn test_object_define_descriptors_and_globals() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_exotic_integrity_levels() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var d = new Date(0);
+            Object.preventExtensions(d);
+            d.extra = 1;
+            var m = new Map();
+            Object.seal(m);
+            m.extra = 1;
+            var ab = new ArrayBuffer(2);
+            Object.freeze(ab);
+            var ta = new Uint8Array(1);
+            Object.freeze(ta);
+            ta[0] = 9;
+            function args() { return arguments; }
+            var a = args();
+            a.foo = 10;
+            Object.freeze(a);
+            var ad = Object.getOwnPropertyDescriptor(a, "foo");
+            [
+                Object.isExtensible(d) === false && d.extra === undefined,
+                Object.isSealed(m) === true && Object.isExtensible(m) === false && m.extra === undefined,
+                Object.isFrozen(ab) === true && Object.isExtensible(ab) === false,
+                Object.isFrozen(ta) === true && ta[0] === 0,
+                ad.writable === false && ad.configurable === false,
+                Object.freeze("abc") === "abc",
+                Object.isFrozen("abc") === true,
+                Object.isExtensible("abc") === false,
+                Object.isFrozen(d) === true
+            ].join("|") === "true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

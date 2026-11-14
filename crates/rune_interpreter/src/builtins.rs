@@ -12258,6 +12258,164 @@ fn make_descriptor_object(
     Value::from_heap_ptr(obj as *mut u8)
 }
 
+fn exotic_extra_ptr(ptr: *mut u8) -> Option<*mut JSObject> {
+    let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+    let p = unsafe {
+        match tag {
+            TAG_FUNC => rune_core::function::Func::extra_props(ptr as *mut Func),
+            TAG_DATE => rune_core::date::RuneDate::extra_props(ptr),
+            TAG_REGEXP => RegExp::extra_props(ptr),
+            TAG_PROMISE => Promise::extra_props(ptr),
+            _ => std::ptr::null_mut(),
+        }
+    };
+    (!p.is_null()).then_some(p as *mut JSObject)
+}
+
+fn exotic_marker_key() -> PropertyKey {
+    PropertyKey::from_string("\0integrity")
+}
+
+/// Integrity level stored on an exotic object's extra-props overlay.
+pub(crate) fn exotic_integrity_level(ptr: *mut u8) -> Option<u8> {
+    let obj = exotic_extra_ptr(ptr)?;
+    let shape = unsafe { JSObject::shape_ptr(obj) };
+    let slot = shape.lookup(&exotic_marker_key())?;
+    let v = unsafe { JSObject::get_slot(obj, slot) };
+    v.as_smi().and_then(|n| u8::try_from(n).ok())
+}
+
+pub(crate) fn exotic_own_value(ptr: *mut u8, key: &PropertyKey) -> Option<Value> {
+    if let Some(obj) = exotic_extra_ptr(ptr) {
+        let shape = unsafe { JSObject::shape_ptr(obj) };
+        if let Some(slot) = shape.lookup(key) {
+            return Some(unsafe { JSObject::get_slot(obj, slot) });
+        }
+    }
+    let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+    if tag == TAG_REGEXP && *key == PropertyKey::from_string("lastIndex") {
+        return Some(regexp_last_index_value(ptr));
+    }
+    if tag == TAG_FUNC && *key == PropertyKey::from_string("prototype") {
+        let proto = unsafe { Func::prototype(ptr as *mut Func) };
+        if !proto.is_null() {
+            return Some(Value::from_heap_ptr(proto));
+        }
+    }
+    None
+}
+
+fn set_exotic_integrity(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    what: &str,
+    target: Value,
+    level: u8,
+) -> Result<Value, Value> {
+    let obj_ptr = define_extra_target(gc, vm, what, target)?;
+    let shape = unsafe { JSObject::shape_ptr(obj_ptr) };
+    let mut attrs = shape.attrs.clone();
+    while attrs.len() < shape.entries.len() {
+        attrs.push(rune_core::shape::ATTR_DEFAULT);
+    }
+    for (i, a) in attrs.iter_mut().enumerate() {
+        *a &= !rune_core::shape::ATTR_CONFIGURABLE;
+        if level >= 2 {
+            let is_accessor = unsafe {
+                JSObject::get_slot(obj_ptr, i)
+                    .heap_ptr()
+                    .is_some_and(|vp| (*(vp as *const GcHeader)).tag() == TAG_ACCESSOR)
+            };
+            if !is_accessor {
+                *a &= !rune_core::shape::ATTR_WRITABLE;
+            }
+        }
+    }
+    let new_shape = rune_core::shape::Shape::intern_with_attrs(
+        shape.entries.clone(),
+        shape.key_names.clone(),
+        attrs,
+    );
+    unsafe { JSObject::set_shape_ptr(obj_ptr, new_shape) };
+    // Hidden marker (non-enumerable/non-writable/non-configurable).
+    let obj_ptr = resolve_forwarded(obj_ptr as *mut u8) as *mut JSObject;
+    let shape = unsafe { JSObject::shape_ptr(obj_ptr) };
+    let key = exotic_marker_key();
+    if let Some(slot) = shape.lookup(&key) {
+        unsafe { JSObject::set_slot(obj_ptr, slot, Value::smi(level as i32)) };
+    } else {
+        unsafe {
+            JSObject::add_property_with_attrs(
+                obj_ptr,
+                key,
+                "\0integrity".to_string(),
+                Value::smi(level as i32),
+                0,
+            )
+        };
+    }
+    Ok(target)
+}
+
+fn exotic_is_sealed(ptr: *mut u8) -> bool {
+    if exotic_integrity_level(ptr).is_none() {
+        return false;
+    }
+    let Some(obj) = exotic_extra_ptr(ptr) else {
+        return true;
+    };
+    let shape = unsafe { JSObject::shape_ptr(obj) };
+    shape
+        .attrs
+        .iter()
+        .all(|&a| a & rune_core::shape::ATTR_CONFIGURABLE == 0)
+}
+
+fn exotic_is_frozen(ptr: *mut u8) -> bool {
+    if !exotic_is_sealed(ptr) {
+        return false;
+    }
+    let Some(obj) = exotic_extra_ptr(ptr) else {
+        return true;
+    };
+    let shape = unsafe { JSObject::shape_ptr(obj) };
+    (0..shape.entries.len()).all(|i| {
+        let is_accessor = unsafe {
+            JSObject::get_slot(obj, i)
+                .heap_ptr()
+                .is_some_and(|vp| (*(vp as *const GcHeader)).tag() == TAG_ACCESSOR)
+        };
+        is_accessor || shape.attr_at(i) & rune_core::shape::ATTR_WRITABLE == 0
+    })
+}
+
+fn apply_integrity_attrs(obj_ptr: *mut JSObject, level: u8) {
+    let shape = unsafe { JSObject::shape_ptr(obj_ptr) };
+    let mut attrs = shape.attrs.clone();
+    while attrs.len() < shape.entries.len() {
+        attrs.push(rune_core::shape::ATTR_DEFAULT);
+    }
+    for (i, a) in attrs.iter_mut().enumerate() {
+        *a &= !rune_core::shape::ATTR_CONFIGURABLE;
+        if level >= 2 {
+            let is_accessor = unsafe {
+                JSObject::get_slot(obj_ptr, i)
+                    .heap_ptr()
+                    .is_some_and(|vp| (*(vp as *const GcHeader)).tag() == TAG_ACCESSOR)
+            };
+            if !is_accessor {
+                *a &= !rune_core::shape::ATTR_WRITABLE;
+            }
+        }
+    }
+    let new_shape = rune_core::shape::Shape::intern_with_attrs(
+        shape.entries.clone(),
+        shape.key_names.clone(),
+        attrs,
+    );
+    unsafe { JSObject::set_shape_ptr(obj_ptr, new_shape) };
+}
+
 /// Shared integrity-level helper/// Shared integrity-level helper: preventExtensions (level 0), seal (1),
 /// freeze (2). Mass-updates attributes via shape transitions and clears the
 /// extensible bit. Returns obj (seal/freeze/preventExtensions) — the
@@ -12282,39 +12440,38 @@ fn set_integrity_level(
                     RuneArray::seal_elements(arr, level >= 2);
                 }
             }
+            // Named properties live on the extra_props overlay (arguments
+            // objects, custom named keys): freeze those too.
+            let extra = unsafe { RuneArray::extra_props(arr) };
+            if !extra.is_null() {
+                apply_integrity_attrs(extra as *mut JSObject, level);
+            }
+            return Ok(target);
+        }
+        if matches!(
+            unsafe { (*(tptr as *const GcHeader)).tag() },
+            TAG_FUNC | TAG_DATE | TAG_REGEXP | TAG_PROMISE
+        ) {
+            return set_exotic_integrity(gc, vm, what, target, level);
+        }
+        let tag = unsafe { (*(tptr as *const GcHeader)).tag() };
+        if matches!(
+            tag,
+            TAG_MAP | TAG_SET | TAG_ARRAY_BUFFER | TAG_TYPED_ARRAY | TAG_STRING_OBJ
+        ) {
+            if tag == TAG_STRING_OBJ {
+                let extra = unsafe { StringObject::extra_props(tptr as *mut StringObject) };
+                if !extra.is_null() {
+                    apply_integrity_attrs(extra as *mut JSObject, level);
+                }
+            }
+            vm.set_side_integrity(target, level);
             return Ok(target);
         }
     }
     let obj_ptr = define_target(gc, vm, what, target)?;
-    let shape = unsafe { JSObject::shape_ptr(obj_ptr) };
-    let mut attrs = shape.attrs.clone();
-    while attrs.len() < shape.entries.len() {
-        attrs.push(rune_core::shape::ATTR_DEFAULT);
-    }
-    for (i, a) in attrs.iter_mut().enumerate() {
-        // seal: configurable → false. freeze: additionally writable → false
-        // for data properties (accessor slots keep no writable bit).
-        *a &= !rune_core::shape::ATTR_CONFIGURABLE;
-        if level >= 2 {
-            let is_accessor = unsafe {
-                JSObject::get_slot(obj_ptr, i)
-                    .heap_ptr()
-                    .is_some_and(|vp| (*(vp as *const GcHeader)).tag() == TAG_ACCESSOR)
-            };
-            if !is_accessor {
-                *a &= !rune_core::shape::ATTR_WRITABLE;
-            }
-        }
-    }
-    let new_shape = rune_core::shape::Shape::intern_with_attrs(
-        shape.entries.clone(),
-        shape.key_names.clone(),
-        attrs,
-    );
-    unsafe {
-        JSObject::set_shape_ptr(obj_ptr, new_shape);
-        JSObject::set_extensible(obj_ptr, false);
-    }
+    apply_integrity_attrs(obj_ptr, level);
+    unsafe { JSObject::set_extensible(obj_ptr, false) };
     Ok(target)
 }
 
@@ -12323,9 +12480,9 @@ macro_rules! integrity_builtin {
     ($name:ident, $what:expr, $level:expr) => {
         pub fn $name(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
             let target = args.first().copied().unwrap_or(Value::undefined());
-            // Primitives (incl. null/undefined) return as-is (spec ToObject
-            // would box, but integrity on a transient is unobservable).
-            if !target.is_heap_object() {
+            // Primitive values (including strings, which are heap strings but
+            // not Objects) are returned unchanged.
+            if !is_object_value(target) {
                 return target;
             }
             match set_integrity_level(gc, vm, $what, target, $level) {
@@ -12359,6 +12516,9 @@ macro_rules! integrity_test_builtin {
             let Some(ptr) = target.heap_ptr() else {
                 return Value::boolean($kind != 0);
             };
+            if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_STRING {
+                return Value::boolean($kind != 0);
+            }
             // B1f-5: dense arrays carry whole-array integrity bits (seal/freeze
             // lock uniformly and growth is impossible once non-extensible, so
             // bits stay exact — no per-index tables needed).
@@ -12378,7 +12538,25 @@ macro_rules! integrity_test_builtin {
                     }
                 });
             }
-            if unsafe { (*(ptr as *const GcHeader)).tag() } != TAG_OBJECT {
+            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+            if matches!(tag, TAG_FUNC | TAG_DATE | TAG_REGEXP | TAG_PROMISE) {
+                return Value::boolean(match $kind {
+                    0 => exotic_integrity_level(ptr).is_none(),
+                    1 => exotic_is_sealed(ptr),
+                    _ => exotic_is_frozen(ptr),
+                });
+            }
+            if matches!(
+                tag,
+                TAG_MAP | TAG_SET | TAG_ARRAY_BUFFER | TAG_TYPED_ARRAY | TAG_STRING_OBJ
+            ) {
+                let level = vm.side_integrity_level(ptr);
+                return Value::boolean(match $kind {
+                    0 => level.is_none(),
+                    _ => level.is_some(),
+                });
+            }
+            if tag != TAG_OBJECT {
                 // Remaining exotic receivers (wrappers, etc.): always
                 // extensible in this engine's model (no per-object seal
                 // tracking there).

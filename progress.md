@@ -3275,6 +3275,28 @@ Integration suite: **891 passed, 0 failed, 3 ignored**.
 
 Integration suite: **892 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Exotic-object integrity levels (2026-11-14)
+
+- `Object.preventExtensions/seal/freeze` now cover engine exotics:
+  - Function/Date/RegExp/Promise store an integrity level + non-configurable
+    attributes on their extra-props overlay (hidden marker);
+  - Map/Set/ArrayBuffer/TypedArray/StringObject use a GC-traced side table of
+    (object, level) pairs;
+  - property stores gate on the marker: new keys rejected once non-extensible,
+    writes rejected when frozen (TypedArray indices reject at freeze only);
+  - array named/extra properties and Arguments-object named properties are
+    frozen with the array elements.
+- `Object.isExtensible/isSealed/isFrozen` consult exotic markers; primitive
+  strings are treated as sealed/frozen non-objects; `Object.freeze("abc")`
+  returns the primitive.
+- Test262: Object **2812 → 2867/3411**, seal **48 → 82/94**, freeze
+  **41 → 47/53**.
+- Regression: `test_exotic_integrity_levels`.
+- Remaining: Proxy, WeakRef/FinalizationRegistry, DataView/SharedArrayBuffer,
+  BigInt typed arrays (unsupported constructors).
+
+Integration suite: **893 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

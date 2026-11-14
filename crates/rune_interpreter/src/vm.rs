@@ -1265,6 +1265,10 @@ pub struct Vm {
     /// Values retained by the embedder/runtime (timer callbacks, queued host
     /// work). Slots are rooted and released lazily.
     pub retained_values: Vec<Value>,
+    /// Exotic objects whose integrity level is tracked outside their layout
+    /// (Map/Set/ArrayBuffer/TypedArray ...). GC-traced so pointers stay live.
+    pub integrity_objects: Vec<Value>,
+    pub integrity_levels: Vec<u8>,
     /// Pending promise reactions: (callback, chained_promise) pairs keyed by promise ptr.
     pub(crate) promise_reactions: HashMap<*mut u8, Vec<(Value, Value)>>,
     /// Async generator tasks: maps gen_id → outer Promise so the Return handler can resolve it.
@@ -1477,6 +1481,8 @@ impl Vm {
             microtask_queue: Vec::new(),
             host_functions: Vec::new(),
             retained_values: Vec::new(),
+            integrity_objects: Vec::new(),
+            integrity_levels: Vec::new(),
             promise_reactions: HashMap::new(),
             async_tasks: Vec::new(),
             pending_async_gen: None,
@@ -3798,6 +3804,26 @@ impl Vm {
     }
 
     /// Retain a Value across host/runtime callbacks. Returns a stable slot id.
+    pub(crate) fn set_side_integrity(&mut self, target: Value, level: u8) {
+        if let Some(ptr) = target.heap_ptr() {
+            for (i, v) in self.integrity_objects.iter().enumerate() {
+                if v.heap_ptr() == Some(ptr) {
+                    self.integrity_levels[i] = level;
+                    return;
+                }
+            }
+            self.integrity_objects.push(target);
+            self.integrity_levels.push(level);
+        }
+    }
+
+    pub(crate) fn side_integrity_level(&self, ptr: *mut u8) -> Option<u8> {
+        self.integrity_objects
+            .iter()
+            .position(|v| v.heap_ptr() == Some(ptr))
+            .map(|i| self.integrity_levels[i])
+    }
+
     pub fn retain_value(&mut self, value: Value) -> usize {
         let id = self.retained_values.len();
         self.retained_values.push(value);
@@ -4835,6 +4861,9 @@ impl Vm {
         gc.push_root(&self.text_encoder_prototype as *const Value as *mut u64);
         gc.push_root(&self.text_decoder_constructor as *const Value as *mut u64);
         gc.push_root(&self.text_decoder_prototype as *const Value as *mut u64);
+        for v in &self.integrity_objects {
+            gc.push_root(v as *const Value as *mut u64);
+        }
         for v in &self.retained_values {
             gc.push_root(v as *const Value as *mut u64);
         }
@@ -16147,6 +16176,39 @@ pub(crate) fn do_store_property(
 ) -> bool {
     if let Some(ptr) = obj.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if matches!(
+            tag,
+            TAG_MAP | TAG_SET | TAG_ARRAY_BUFFER | TAG_TYPED_ARRAY | TAG_STRING_OBJ
+        ) {
+            if let Some(level) = vm.side_integrity_level(ptr) {
+                if tag == TAG_TYPED_ARRAY && value_to_array_index(raw_key).is_some() {
+                    if level >= 2 {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+            }
+        }
+        if matches!(tag, TAG_FUNC | TAG_DATE | TAG_REGEXP | TAG_PROMISE) {
+            if let Some(level) = crate::builtins::exotic_integrity_level(ptr) {
+                let Some(key) = value_to_prop_key(raw_key) else {
+                    return false;
+                };
+                match crate::builtins::exotic_own_value(ptr, &key) {
+                    Some(cur) => {
+                        if level >= 2
+                            && !cur.heap_ptr().is_some_and(|vp| unsafe {
+                                (*(vp as *const GcHeader)).tag() == TAG_ACCESSOR
+                            })
+                        {
+                            return false;
+                        }
+                    }
+                    None => return false,
+                }
+            }
+        }
         if tag == TAG_PROMISE {
             let extra = promise_extra_object(gc, ptr);
             let extra_val = Value::from_heap_ptr(extra as *mut u8);

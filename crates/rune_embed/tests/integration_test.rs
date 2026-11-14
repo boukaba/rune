@@ -14386,7 +14386,7 @@ fn test_arguments_object_to_string_tag() {
                 Array.isArray(args),
                 args.length,
                 args[Symbol.toStringTag]
-            ].join("|") === "[object Arguments]|[object Array]|true|2|Arguments";
+            ].join("|") === "[object Arguments]|[object Array]|false|2|Arguments";
             "#,
         )
         .unwrap();
@@ -17397,6 +17397,36 @@ fn test_string_coercion_and_replace_getters() {
                 getterThrew,
                 (3 instanceof parseInt) === false
             ].join("|") === "true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}
+
+#[test]
+fn test_string_pad_coercion() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var fill = { toString: function () { return "xy"; } };
+            var symbolThrew = false;
+            try { "a".padStart(3, Symbol()); } catch (e) { symbolThrew = e instanceof TypeError; }
+            function args() { return arguments; }
+            var a = args(1, 2, true);
+            [
+                "abc".padStart(undefined, "def") === "abc",
+                "abc".padStart(NaN, "def") === "abc",
+                "abc".padStart(-1, "def") === "abc",
+                "abc".padStart(3.9, "def") === "abc",
+                "abc".padStart(6, "def") === "defabc",
+                "abc".padEnd(5, fill) === "abcxy",
+                symbolThrew,
+                Object.getPrototypeOf(a) === Object.prototype,
+                Array.isArray(a) === false,
+                String(a) === "[object Arguments]",
+                String(a).trim() === "[object Arguments]"
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true|true";
             "#,
         )
         .unwrap();

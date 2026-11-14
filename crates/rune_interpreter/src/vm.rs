@@ -10539,11 +10539,10 @@ impl Vm {
                         let ptr = arr as *mut u8;
                         let shape_ptr = ptr.add(8) as *mut *const Shape;
                         *shape_ptr = *DENSE_ARRAY_SHAPE as *const Shape;
+                        // Arguments objects inherit from Object.prototype.
                         let proto_ptr = ptr.add(24) as *mut *mut u8;
-                        if self.array_prototype.is_heap_object() {
-                            if let Some(proto) = self.array_prototype.heap_ptr() {
-                                *proto_ptr = proto;
-                            }
+                        if let Some(proto) = self.object_prototype.heap_ptr() {
+                            *proto_ptr = proto;
                         }
                     }
                     // `Object.prototype.toString` must report Arguments, not
@@ -10570,6 +10569,12 @@ impl Vm {
                             PropertyKey::from_symbol(rune_core::symbol::SYM_TO_STRING_TAG),
                             "\0".to_string(),
                             Value::from_heap_ptr(tag_now),
+                        );
+                        JSObject::add_property(
+                            extra_now as *mut JSObject,
+                            PropertyKey::from_string("\0arguments"),
+                            "\0arguments".to_string(),
+                            Value::boolean(true),
                         );
                         RuneArray::set_extra_props(arr_now as *mut RuneArray, extra_now);
                     }

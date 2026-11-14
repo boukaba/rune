@@ -12859,12 +12859,23 @@ pub fn eval_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut V
 }
 
 /// Array.isArray(arg) — returns true if arg is a dense array.
+/// True for the internal Arguments array representation.
+pub(crate) fn array_is_arguments(ptr: *mut u8) -> bool {
+    let extra = unsafe { RuneArray::extra_props(ptr as *mut RuneArray) };
+    if extra.is_null() {
+        return false;
+    }
+    let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+    shape
+        .lookup(&PropertyKey::from_string("\0arguments"))
+        .is_some()
+}
+
 pub fn array_is_array(_gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
     let val = args.first().copied().unwrap_or(Value::undefined());
-    Value::boolean(
-        val.heap_ptr()
-            .is_some_and(|ptr| unsafe { (*(ptr as *const GcHeader)).tag() == TAG_ARRAY }),
-    )
+    Value::boolean(val.heap_ptr().is_some_and(|ptr| unsafe {
+        (*(ptr as *const GcHeader)).tag() == TAG_ARRAY && !array_is_arguments(ptr)
+    }))
 }
 
 /// Array constructor body, shared by `new Array()` and plain `Array()` calls
@@ -16769,18 +16780,21 @@ fn string_pad(gc: &mut SemiSpace, vm: &mut Vm, this: Value, args: &[Value], at_e
     let units = s.encode_utf16().collect::<Vec<u16>>();
     let max_len = args.first().copied().unwrap_or(Value::undefined());
     let target_f = to_int_sync!(gc, vm, max_len);
-    if target_f.is_nan() || !target_f.is_finite() || target_f > 9_007_199_254_740_991.0 {
+    if target_f.is_nan() || target_f <= 0.0 || target_f <= units.len() as f64 {
+        let result = HeapString::allocate(gc, &s);
+        return Value::from_heap_ptr(result as *mut u8);
+    }
+    if !target_f.is_finite() || target_f > 9_007_199_254_740_991.0 {
         let err = make_error(gc, &vm.error_protos, "RangeError: Invalid string length");
         vm.set_pending_exception(err);
         return Value::undefined();
     }
-    let target_len = target_f.max(0.0) as usize;
-    if target_len <= units.len() {
-        let result = HeapString::allocate(gc, &s);
-        return Value::from_heap_ptr(result as *mut u8);
-    }
+    let target_len = target_f as usize;
     let fill = match args.get(1) {
-        Some(v) if !v.is_undefined() => arg_to_string(gc, Some(*v), vm),
+        Some(v) if !v.is_undefined() => match to_primitive_string(gc, *v, vm) {
+            Some(v) => v,
+            None => return Value::undefined(),
+        },
         _ => " ".to_string(),
     };
     if fill.is_empty() {

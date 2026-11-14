@@ -3314,6 +3314,26 @@ Integration suite: **893 passed, 0 failed, 3 ignored**.
 
 Integration suite: **894 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — padStart/padEnd + Arguments object semantics (2026-11-14)
+
+- `String.prototype.padStart/padEnd`:
+  - undefined/NaN/negative target lengths return the receiver unchanged
+    (ToIntegerOrInfinity 0) instead of throwing RangeError;
+  - fillString uses observable ToString (user toString/valueOf) and Symbols
+    throw TypeError;
+  - large/finite targets still RangeError.
+- Arguments objects now inherit from `Object.prototype` (not
+  `Array.prototype`), carry a hidden `\0arguments` marker, and
+  `Array.isArray(arguments)` is false; rest-parameter arrays remain real
+  Arrays. `String(arguments)`/`Object.prototype.toString` report
+  `[object Arguments]`.
+- Test262: String **1152 → 1159/1223**, padStart **13/13**, padEnd **13/13**,
+  trim **128/129**.
+- Regression: `test_string_pad_coercion`; the legacy arguments test now
+  expects `Array.isArray(arguments) === false`.
+
+Integration suite: **895 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

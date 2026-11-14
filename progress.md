@@ -3623,6 +3623,30 @@ Integration suite: **908 passed, 0 failed, 3 ignored**.
 
 Integration suite: **909 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Proxy foundation (2026-11-14)
+
+- Added the `Proxy` constructor as a callable wrapper (typeof function,
+  `length` 2, `name` "Proxy", no `Proxy.prototype`); plain calls throw
+  TypeError, `new` validates Object target/handler.
+- Proxy instances are ordinary objects carrying GC-traced hidden slots
+  (target, handler, revoked); their [[Prototype]] starts at the target's
+  prototype for fallback operations.
+- Implemented synchronous trap dispatch for:
+  - `get` (receiver = proxy) with fallback to the target when absent;
+  - `set` (receiver = proxy), false throws in strict mode, fallback to target;
+  - `has` used by the `in` operator;
+  - `deleteProperty` used by the delete operator;
+  - `getPrototypeOf` via `Object.getPrototypeOf`.
+  Trap calls root target/handler/arguments; non-callable traps and revoked
+  proxies throw TypeError.
+- Test262 Proxy **0 → 87/311** (the rest need revocable, ownKeys/descriptor/
+  defineProperty/extensibility/apply/construct traps and invariant checks).
+- Cross-suite gains: Object **3267 → 3268**, JSON **129 → 130**, Array
+  **2664 → 2668**.
+- Regression: `test_proxy_core_traps`.
+
+Integration suite: **910 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Proxy foundation (2026-11-14)**: Proxy wrapper/new validation, hidden target/handler/revoked slots, get/set/has/delete/getPrototypeOf traps with target fallback. Proxy **87/311**; Object **3268**, JSON **130**, Array **2668**. Integration **910**.
 - **Array for-in attrs + exotic store gating (2026-11-14)**: per-index enumerability/holes, Date/RegExp writable/integrity stores. Object **3267/3411**, defineProperties **624/632**. Integration **909**.
 - **for-in prototype chain + gOPD object keys (2026-11-14)**: inherited for-in via ForInNext retry, Func→Function.prototype, gOPD ToPropertyKey. Object **3264/3411**, gOPD **309/310**. Integration **908**.
 - **Array defineProperties + accessor-kind preservation (2026-11-14)**: array index/length routing, only-attrs descriptors keep accessor kind, String wrapper HasProperty extras, length undefined RangeError. Object **3247/3411**, defineProperty **1100/1131**, defineProperties **621/632**. Integration **907**.

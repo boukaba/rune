@@ -9183,7 +9183,18 @@ pub fn object_get_prototype_of(
     args: &[Value],
     vm: &mut Vm,
 ) -> Value {
-    let obj = args.first().copied().unwrap_or(Value::undefined());
+    let mut obj = args.first().copied().unwrap_or(Value::undefined());
+    if crate::vm::proxy_parts(obj).is_some() {
+        let target = crate::vm::proxy_parts(obj).unwrap().0;
+        match vm.proxy_trap_invoke_public(gc, obj, "getPrototypeOf", &[target]) {
+            Ok(Some(v)) => return v,
+            Ok(None) => obj = target,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
+    }
     if obj.is_symbol() {
         return vm.symbol_prototype;
     }
@@ -9566,6 +9577,36 @@ fn object_own_entries_mode(
 }
 
 /// Build a dense RuneArray from element values, wired to Array.prototype.
+/// Proxy(target, handler) constructor validation + allocation.
+pub fn proxy_create(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let target = args.first().copied().unwrap_or(Value::undefined());
+    let handler = args.get(1).copied().unwrap_or(Value::undefined());
+    let target_ok = is_object_value(target) || target.is_builtin();
+    let handler_ok = is_object_value(handler) || handler.is_builtin();
+    if !target_ok || !handler_ok {
+        let message = if !target_ok {
+            "Cannot create proxy with a non-object as target"
+        } else {
+            "Cannot create proxy with a non-object as handler"
+        };
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            message,
+        ));
+        return Value::undefined();
+    }
+    let base = vm.temp_roots.len();
+    vm.temp_roots.push(target);
+    vm.temp_roots.push(handler);
+    let live_target = refresh_value(vm.temp_roots[base]);
+    let live_handler = refresh_value(vm.temp_roots[base + 1]);
+    let proxy = crate::vm::make_proxy_value(gc, live_target, live_handler);
+    vm.temp_roots.truncate(base);
+    proxy
+}
+
 pub(crate) fn build_array(gc: &mut SemiSpace, elements: &[Value], vm: &Vm) -> Value {
     let arr = RuneArray::allocate(gc, elements);
     unsafe {
@@ -10558,7 +10599,7 @@ fn set_value_sync(
     })
 }
 
-fn get_value_sync(
+pub(crate) fn get_value_sync(
     gc: &mut SemiSpace,
     vm: &mut Vm,
     object: Value,

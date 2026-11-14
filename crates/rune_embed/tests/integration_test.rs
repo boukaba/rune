@@ -17975,3 +17975,50 @@ fn test_for_in_array_attrs_and_exotic_store_gating() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_proxy_core_traps() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var target = { a: 1 };
+            var handler = {
+                get: function (t, k) { return k === "g" ? "get" : t[k]; },
+                set: function (t, k, v) { t[k] = v * 2; return true; },
+                has: function (t, k) { return k === "h" || k in t; },
+                deleteProperty: function (t, k) { delete t[k]; return true; },
+                getPrototypeOf: function () { return null; }
+            };
+            var p = new Proxy(target, handler);
+            var fallback = new Proxy({ b: 2 }, {});
+            var plainHas = "b" in fallback;
+            var plainProto = Object.getPrototypeOf(fallback) === Object.prototype;
+            var plainGet = fallback.b;
+            var badTarget = false;
+            var badHandler = false;
+            var callThrew = false;
+            try { new Proxy(1, {}); } catch (e) { badTarget = e instanceof TypeError; }
+            try { new Proxy({}, 1); } catch (e) { badHandler = e instanceof TypeError; }
+            try { Proxy({}, {}); } catch (e) { callThrew = e instanceof TypeError; }
+            [
+                typeof Proxy === "function",
+                Proxy.length === 2,
+                Proxy.name === "Proxy",
+                typeof p === "object",
+                p.a === 1,
+                p.g === "get",
+                ("h" in p) === true,
+                ("a" in p) === true,
+                plainHas && plainProto && plainGet === 2,
+                delete p.a === true,
+                target.a === undefined,
+                Object.getPrototypeOf(p) === null,
+                badTarget && badHandler && callThrew,
+                typeof Proxy.prototype === "undefined"
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

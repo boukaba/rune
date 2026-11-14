@@ -16043,6 +16043,12 @@ fn load_property_recursive_ic(
                             if depth >= MAX_PROTOTYPE_DEPTH {
                                 break;
                             }
+                            // Mixed prototype chains (functions, exotics) do
+                            // not use the JSObject slot layout; leave the IC
+                            // cold and let the generic lookup handle it.
+                            if unsafe { (*(next as *const GcHeader)).tag() } != TAG_OBJECT {
+                                break;
+                            }
                             let next_shape = unsafe { JSObject::shape_ptr(next as *mut JSObject) };
                             if let Some(offset) = next_shape.lookup(&key) {
                                 ics[ic_idx].insert(

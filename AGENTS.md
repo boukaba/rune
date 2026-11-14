@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Async/generator methods + mixed-proto IC (2026-11-14)**: method parsing, static source exclusion, IC panic fix. Function **342/509**, toString **44/80**, apply **30/48**. Integration **891**.
 - **Function.toString source preservation (2026-11-14)**: BytecodeProgram source_text, emitter span slicing, JS functions report real source. Function **332/509**, toString **36/80**. Integration **890**.
 - **replaceAll spec dispatch (2026-11-14)**: flags g check, @@replace for any search, literal fallback, reentrant result ToString. String **1134/1223 (92.7%)**, replaceAll **41/45**, replace **49/55**. Integration **889**.
 - **Class escapes + match/search dispatch (2026-11-14)**: `[\d\w\s\D\W\S\p{}]` ranges, spec @@match/@@search dispatch with ToPrimitive patterns. String **1120/1223 (91.6%)**, match **47/51**, search **39/43**, RegExp **816/1879**. Integration **888**.

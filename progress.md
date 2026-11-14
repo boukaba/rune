@@ -3231,6 +3231,27 @@ Integration suite: **889 passed, 0 failed, 3 ignored**.
 
 Integration suite: **890 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Async/generator methods + mixed prototype IC (2026-11-14)
+
+- Object literals and classes now parse `async name(...)`, `*name(...)`,
+  `async *name(...)`, computed async methods and private async/generator
+  methods; `async` is accepted as the Async token or identifier and only when
+  followed by a property name (not `(`/`:`/`=`/`,`/`}`).
+- Class method source spans start after `static`, so
+  `Function.prototype.toString` returns `get f(){}`/`async m(){}` without the
+  static modifier (spec shape).
+- `load_property_recursive_ic` no longer assumes every prototype-chain link is
+  a JSObject: mixed chains (object inheriting from a function) leave the IC
+  cold and use the generic lookup, fixing an engine PANIC in
+  `Function.prototype.apply` on non-callable function-prototype objects.
+- Test262: Function/prototype/toString **36 → 44/80**, Function
+  **332 → 342/509**, apply **26 → 30/48**.
+- Regression: `test_async_generator_methods_and_mixed_proto_chain`.
+- Remaining toString failures: async generators (runtime), Proxy source
+  exceptions, line-terminator normalisation, built-in symbol names.
+
+Integration suite: **891 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

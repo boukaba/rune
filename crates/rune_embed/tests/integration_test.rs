@@ -17268,3 +17268,35 @@ fn test_function_to_string_preserves_source() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_async_generator_methods_and_mixed_proto_chain() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            class F {
+                async m(){ return 1; }
+                *g(){ yield 2; }
+                static async s(){ return 3; }
+                async [Symbol.iterator](){ return 4; }
+            }
+            var f = new F();
+            var proto = Function();
+            function C(){}
+            C.prototype = proto;
+            var o = new C();
+            var applyThrew = false;
+            try { o.apply(); } catch (e) { applyThrew = e instanceof TypeError; }
+            [
+                f.m.toString() === "async m(){ return 1; }",
+                f.g.toString() === "*g(){ yield 2; }",
+                F.s.toString() === "async s(){ return 3; }",
+                typeof f[Symbol.iterator] === "function",
+                applyThrew
+            ].join("|") === "true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

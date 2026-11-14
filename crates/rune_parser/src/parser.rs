@@ -597,14 +597,39 @@ impl Parser {
             } else {
                 false
             };
+            // Function source starts after `static` (static is not part of
+            // Function.prototype.toString output).
+            let fstart = self.span();
+            // `async name(...)` / `async *name(...)` method modifiers.
+            let is_async = (self.tok.kind == TokenKind::Async
+                || (self.tok.kind == TokenKind::Identifier && self.tok.value == "async"))
+                && !matches!(
+                    self.lexer.peek_token().kind,
+                    TokenKind::LParen
+                        | TokenKind::Colon
+                        | TokenKind::EqAssign
+                        | TokenKind::Comma
+                        | TokenKind::RBrace
+                );
+            if is_async {
+                self.advance();
+            }
+            let is_generator = self.tok.kind == TokenKind::Star;
+            if is_generator {
+                self.advance();
+            }
             // Detect getter/setter: `get foo() {}` / `set foo(v) {}` / `get #x() {}`
-            let (is_getter, is_setter) = if self.tok.kind == TokenKind::Identifier
+            let (is_getter, is_setter) = if !is_async
+                && !is_generator
+                && self.tok.kind == TokenKind::Identifier
                 && self.tok.value == "get"
                 && self.lexer.peek_token().kind != TokenKind::LParen
             {
                 self.advance();
                 (true, false)
-            } else if self.tok.kind == TokenKind::Identifier
+            } else if !is_async
+                && !is_generator
+                && self.tok.kind == TokenKind::Identifier
                 && self.tok.value == "set"
                 && self.lexer.peek_token().kind != TokenKind::LParen
             {
@@ -626,7 +651,12 @@ impl Parser {
                 };
                 if self.tok.kind == TokenKind::LParen {
                     // Private method / accessor: #m() {} | get #x() {} | set #x(v) {}
-                    let func = self.parse_function_body(Some(name.clone()), false, false, mstart);
+                    let func = self.parse_function_body(
+                        Some(name.clone()),
+                        is_generator,
+                        is_async,
+                        mstart,
+                    );
                     if is_getter && !func.params.is_empty() {
                         self.error("Getter must have 0 parameters".to_string());
                     }
@@ -724,7 +754,7 @@ impl Parser {
                     PropKey::Number(n) => Some(Box::from(n.to_string())),
                     _ => None,
                 };
-                let func = self.parse_function_body(name, false, false, mstart);
+                let func = self.parse_function_body(name, is_generator, is_async, fstart);
                 // Validate getter/setter param counts
                 if is_getter && !func.params.is_empty() {
                     self.error("Getter must have 0 parameters".to_string());
@@ -2058,6 +2088,23 @@ impl Parser {
                 let mut props = Vec::new();
                 while self.tok.kind != TokenKind::RBrace && self.tok.kind != TokenKind::Eof {
                     let pstart = self.span();
+                    let is_async = (self.tok.kind == TokenKind::Async
+                        || (self.tok.kind == TokenKind::Identifier && self.tok.value == "async"))
+                        && !matches!(
+                            self.lexer.peek_token().kind,
+                            TokenKind::LParen
+                                | TokenKind::Colon
+                                | TokenKind::EqAssign
+                                | TokenKind::Comma
+                                | TokenKind::RBrace
+                        );
+                    if is_async {
+                        self.advance();
+                    }
+                    let is_generator = self.tok.kind == TokenKind::Star;
+                    if is_generator {
+                        self.advance();
+                    }
                     if self.tok.kind == TokenKind::Ellipsis {
                         self.advance();
                         let value = self.parse_expr(0);
@@ -2080,7 +2127,8 @@ impl Parser {
                         if self.tok.kind == TokenKind::LParen {
                             // Computed method name: { [expr]() { body } }
                             let name = None;
-                            let fn_body = self.parse_function_body(name, false, false, pstart);
+                            let fn_body =
+                                self.parse_function_body(name, is_generator, is_async, pstart);
                             props.push(Property {
                                 key: PropKey::Computed(Box::new(key_expr)),
                                 value: Expr::Function(
@@ -2116,14 +2164,18 @@ impl Parser {
                     } else {
                         // Detect accessor: `get key() {}` / `set key(v) {}`
                         // (not when followed by ':' — regular key named get/set)
-                        let (is_getter, is_setter) = if self.tok.kind == TokenKind::Identifier
+                        let (is_getter, is_setter) = if !is_async
+                            && !is_generator
+                            && self.tok.kind == TokenKind::Identifier
                             && self.tok.value == "get"
                             && self.lexer.peek_token().kind != TokenKind::LParen
                             && self.lexer.peek_token().kind != TokenKind::Colon
                         {
                             self.advance();
                             (true, false)
-                        } else if self.tok.kind == TokenKind::Identifier
+                        } else if !is_async
+                            && !is_generator
+                            && self.tok.kind == TokenKind::Identifier
                             && self.tok.value == "set"
                             && self.lexer.peek_token().kind != TokenKind::LParen
                             && self.lexer.peek_token().kind != TokenKind::Colon
@@ -2193,7 +2245,8 @@ impl Parser {
                                 PropKey::Number(n) => Some(Box::from(n.to_string())),
                                 _ => None,
                             };
-                            let fn_body = self.parse_function_body(name, false, false, pstart);
+                            let fn_body =
+                                self.parse_function_body(name, is_generator, is_async, pstart);
                             props.push(Property {
                                 key,
                                 value: Expr::Function(

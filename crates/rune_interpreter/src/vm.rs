@@ -4044,7 +4044,7 @@ impl Vm {
                 gc,
                 0,
                 self.proxy_revoke_prog as *const u8,
-                false,
+                true,
                 resolved_env as *mut u8,
             );
             let resolved_func = if (*(func as *const GcHeader)).is_forwarded() {
@@ -4052,6 +4052,7 @@ impl Vm {
             } else {
                 func
             };
+            let resolved_func = self.set_function_metadata(gc, resolved_func, 0, "");
             Value::from_heap_ptr(resolved_func as *mut u8)
         }
     }
@@ -6746,6 +6747,72 @@ impl Vm {
         self.proxy_trap_invoke(gc, proxy, trap, args)
     }
 
+    pub(crate) fn has_property_with_vm(
+        &mut self,
+        gc: &mut SemiSpace,
+        obj: Value,
+        key: Value,
+    ) -> Result<bool, Value> {
+        let key_string = if key.is_symbol() {
+            None
+        } else {
+            Some(crate::builtins::value_to_js_string(key))
+        };
+        let mut current = obj;
+        let mut depth = 0usize;
+        while let Some(ptr) = current.heap_ptr() {
+            depth += 1;
+            if depth > 256 {
+                break;
+            }
+            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+            if crate::vm::proxy_parts(current).is_some() {
+                match self.proxy_has_chain(gc, current, key)? {
+                    (Some(result), _) => return Ok(result),
+                    (None, fallback) => {
+                        current = fallback;
+                        continue;
+                    }
+                }
+            }
+            if let Some(ref expected) = key_string {
+                if matches!(tag, TAG_OBJECT | TAG_ARRAY | TAG_STRING | TAG_STRING_OBJ) {
+                    let entries =
+                        match crate::builtins::object_own_entries_mode(gc, current, self, false) {
+                            Ok(v) => v,
+                            Err(()) => {
+                                return Err(self
+                                    .pending_exception
+                                    .take()
+                                    .unwrap_or(Value::undefined()));
+                            }
+                        };
+                    if entries.iter().any(|(k, _)| k == expected) {
+                        return Ok(true);
+                    }
+                } else if !has_property(current, key, Some(self.function_prototype)) {
+                    // Exotic tag with no own match; continue to its prototype.
+                } else {
+                    return Ok(true);
+                }
+            } else if has_property(current, key, Some(self.function_prototype)) {
+                return Ok(true);
+            }
+            let next = if tag == TAG_FUNC {
+                self.function_prototype.heap_ptr()
+            } else {
+                crate::vm::value_prototype(current)
+            };
+            match next {
+                Some(p) if !p.is_null() && current.heap_ptr() != Some(p) => {
+                    current = Value::from_heap_ptr(p);
+                }
+                _ => return Ok(false),
+            }
+        }
+        Ok(false)
+    }
+
     fn proxy_has_chain(
         &mut self,
         gc: &mut SemiSpace,
@@ -6757,7 +6824,30 @@ impl Vm {
                 return Ok((None, proxy));
             };
             match self.proxy_trap_invoke(gc, proxy, "has", &[target, key])? {
-                Some(v) => return Ok((Some(v.to_bool()), proxy)),
+                Some(v) => {
+                    let trap_result = v.to_bool();
+                    let target_has = has_property(target, key, Some(self.function_prototype));
+                    if !target_has && !value_is_extensible(target) {
+                        return Err(crate::errors::error_object(
+                            gc,
+                            &self.error_protos,
+                            crate::errors::ErrorKind::TypeError,
+                            "Proxy has trap returned true for a non-extensible target's missing property",
+                        ));
+                    }
+                    if !trap_result
+                        && target_has
+                        && value_own_prop_configurable(target, key) == Some(false)
+                    {
+                        return Err(crate::errors::error_object(
+                            gc,
+                            &self.error_protos,
+                            crate::errors::ErrorKind::TypeError,
+                            "Proxy has trap hid a non-configurable target property",
+                        ));
+                    }
+                    return Ok((Some(trap_result), proxy));
+                }
                 None => proxy = target,
             }
         }
@@ -6774,7 +6864,30 @@ impl Vm {
                 return Ok((None, proxy));
             };
             match self.proxy_trap_invoke(gc, proxy, "deleteProperty", &[target, key])? {
-                Some(v) => return Ok((Some(v.to_bool()), proxy)),
+                Some(v) => {
+                    let trap_result = v.to_bool();
+                    let target_has = has_property(target, key, Some(self.function_prototype));
+                    if target_has && value_own_prop_configurable(target, key) == Some(false) {
+                        if trap_result {
+                            return Err(crate::errors::error_object(
+                                gc,
+                                &self.error_protos,
+                                crate::errors::ErrorKind::TypeError,
+                                "Proxy delete trap removed a non-configurable target property",
+                            ));
+                        }
+                        return Ok((Some(false), proxy));
+                    }
+                    if target_has && !trap_result && !value_is_extensible(target) {
+                        return Err(crate::errors::error_object(
+                            gc,
+                            &self.error_protos,
+                            crate::errors::ErrorKind::TypeError,
+                            "Proxy delete trap returned false for a non-extensible target",
+                        ));
+                    }
+                    return Ok((Some(trap_result), proxy));
+                }
                 None => proxy = target,
             }
         }
@@ -8618,7 +8731,15 @@ impl Vm {
                             }
                         }
                     }
-                    let found = has_property(obj, key, Some(self.function_prototype));
+                    let found = match self.has_property_with_vm(gc, obj, key) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            if let Some(exit) = self.handle_throw(gc, e) {
+                                return exit;
+                            }
+                            continue;
+                        }
+                    };
                     self.push(Value::boolean(found));
                     self.frames[fi].pc = pc + 1;
                 }
@@ -18114,6 +18235,113 @@ pub(crate) fn make_proxy_value(gc: &mut SemiSpace, target: Value, handler: Value
         unsafe { JSObject::set_prototype(obj, proto) };
     }
     Value::from_heap_ptr(obj as *mut u8)
+}
+
+/// Ordinary IsExtensible for any heap value (proxy targets are already
+/// resolved by callers).
+pub(crate) fn value_is_extensible(value: Value) -> bool {
+    if value.is_builtin() {
+        return true;
+    }
+    let Some(ptr) = value.heap_ptr() else {
+        return false;
+    };
+    match unsafe { (*(ptr as *const GcHeader)).tag() } {
+        TAG_OBJECT => unsafe { JSObject::is_extensible(ptr as *mut JSObject) },
+        TAG_ARRAY => unsafe { RuneArray::is_extensible(ptr as *mut RuneArray) },
+        TAG_STRING => false,
+        _ => true,
+    }
+}
+
+/// Configurable bit of an own property, or None when the target does not have
+/// the property. Used by Proxy invariant checks.
+pub(crate) fn value_own_prop_configurable(target: Value, key: Value) -> Option<bool> {
+    let ptr = target.heap_ptr()?;
+    let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+    if let Some(idx) = value_to_array_index(key) {
+        match tag {
+            TAG_ARRAY => {
+                let arr = ptr as *mut RuneArray;
+                let extra = unsafe { RuneArray::extra_props(arr) };
+                if !extra.is_null() {
+                    let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                    if let Some(slot) = shape.lookup(&PropertyKey::from_string(&idx.to_string())) {
+                        return Some(
+                            shape.attr_at(slot) & rune_core::shape::ATTR_CONFIGURABLE != 0,
+                        );
+                    }
+                }
+                let cap = unsafe { RuneArray::capacity(arr) } as usize;
+                if idx < cap {
+                    let v = unsafe { RuneArray::get_element(arr, idx) };
+                    if v != Value::empty_sentinel() {
+                        return Some(true);
+                    }
+                }
+                return None;
+            }
+            TAG_STRING => {
+                let text = unsafe { HeapString::to_string(ptr as *mut HeapString) };
+                if idx < text.encode_utf16().count() {
+                    return Some(false);
+                }
+                return None;
+            }
+            _ => {}
+        }
+    }
+    let pk = value_to_prop_key(key)?;
+    match tag {
+        TAG_OBJECT => {
+            let obj = ptr as *mut JSObject;
+            let shape = unsafe { JSObject::shape_ptr(obj) };
+            shape
+                .lookup(&pk)
+                .map(|slot| shape.attr_at(slot) & rune_core::shape::ATTR_CONFIGURABLE != 0)
+        }
+        TAG_STRING => {
+            let non_empty = !unsafe { HeapString::to_string(ptr as *mut HeapString) }.is_empty();
+            let is_length = pk.as_u64() == PropertyKey::from_string("length").as_u64();
+            if non_empty && pk != *PROTOTYPE_KEY && is_length {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        TAG_STRING_OBJ => {
+            let extra = unsafe {
+                rune_core::string_object::StringObject::extra_props(
+                    ptr as *mut rune_core::string_object::StringObject,
+                )
+            };
+            if extra.is_null() {
+                return None;
+            }
+            let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+            shape
+                .lookup(&pk)
+                .map(|slot| shape.attr_at(slot) & rune_core::shape::ATTR_CONFIGURABLE != 0)
+        }
+        TAG_FUNC | TAG_DATE | TAG_REGEXP | TAG_PROMISE => {
+            let extra = unsafe {
+                match tag {
+                    TAG_FUNC => Func::extra_props(ptr as *mut Func),
+                    TAG_DATE => date::RuneDate::extra_props(ptr),
+                    TAG_REGEXP => rune_core::regexp::RegExp::extra_props(ptr),
+                    _ => Promise::extra_props(ptr),
+                }
+            };
+            if extra.is_null() {
+                return None;
+            }
+            let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+            shape
+                .lookup(&pk)
+                .map(|slot| shape.attr_at(slot) & rune_core::shape::ATTR_CONFIGURABLE != 0)
+        }
+        _ => None,
+    }
 }
 
 #[allow(dead_code)]

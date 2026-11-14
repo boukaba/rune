@@ -4095,11 +4095,13 @@ pub fn reflect_has(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm
             }
         }
     }
-    Value::boolean(crate::vm::has_property(
-        target,
-        key,
-        Some(vm.function_prototype),
-    ))
+    match vm.has_property_with_vm(gc, target, key) {
+        Ok(v) => Value::boolean(v),
+        Err(e) => {
+            vm.set_pending_exception(e);
+            Value::undefined()
+        }
+    }
 }
 
 pub fn reflect_get_own_property_descriptor(
@@ -4213,9 +4215,28 @@ pub fn reflect_set_prototype_of(
         ));
         return Value::undefined();
     }
-    if let Some((inner, _h, _r)) = crate::vm::proxy_parts(target) {
+    while let Some((inner, _h, _r)) = crate::vm::proxy_parts(target) {
         match vm.proxy_trap_invoke_public(gc, target, "setPrototypeOf", &[inner, proto]) {
-            Ok(Some(v)) => return Value::boolean(v.to_bool()),
+            Ok(Some(v)) => {
+                if !v.to_bool() {
+                    return Value::boolean(false);
+                }
+                let same = match (proto.is_null(), crate::vm::value_prototype(inner)) {
+                    (true, None) => true,
+                    (false, Some(p)) => proto.heap_ptr() == Some(p),
+                    _ => false,
+                };
+                if !same && !crate::vm::value_is_extensible(inner) {
+                    vm.set_pending_exception(crate::errors::error_object(
+                        gc,
+                        &vm.error_protos,
+                        crate::errors::ErrorKind::TypeError,
+                        "Proxy setPrototypeOf changed a non-extensible target's prototype",
+                    ));
+                    return Value::undefined();
+                }
+                return Value::boolean(true);
+            }
             Ok(None) => target = inner,
             Err(e) => {
                 vm.set_pending_exception(e);
@@ -4359,9 +4380,33 @@ fn collect_shape_keys(
 }
 
 pub fn reflect_own_keys(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    let Some(target) = reflect_target(gc, args, vm) else {
+    let Some(mut target) = reflect_target(gc, args, vm) else {
         return Value::undefined();
     };
+    while let Some((inner, _h, _r)) = crate::vm::proxy_parts(target) {
+        match vm.proxy_trap_invoke_public(gc, target, "ownKeys", &[inner]) {
+            Ok(Some(v)) => {
+                let ok = v
+                    .heap_ptr()
+                    .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_ARRAY });
+                if !ok {
+                    vm.set_pending_exception(crate::errors::error_object(
+                        gc,
+                        &vm.error_protos,
+                        crate::errors::ErrorKind::TypeError,
+                        "Proxy ownKeys trap must return an array",
+                    ));
+                    return Value::undefined();
+                }
+                return v;
+            }
+            Ok(None) => target = inner,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
+    }
     let Some(ptr) = target.heap_ptr() else {
         return build_array(gc, &[], vm);
     };
@@ -9441,7 +9486,7 @@ fn sort_own_entries(entries: &mut [(String, Value)]) {
     });
 }
 
-fn object_own_entries_mode(
+pub(crate) fn object_own_entries_mode(
     gc: &mut SemiSpace,
     val: Value,
     vm: &mut Vm,
@@ -11089,7 +11134,7 @@ pub fn object_set_prototype_of(
         ));
         return Value::undefined();
     }
-    if let Some((target, _h, _r)) = crate::vm::proxy_parts(obj) {
+    while let Some((target, _h, _r)) = crate::vm::proxy_parts(obj) {
         match vm.proxy_trap_invoke_public(gc, obj, "setPrototypeOf", &[target, proto]) {
             Ok(Some(v)) => {
                 if !v.to_bool() {
@@ -11098,6 +11143,20 @@ pub fn object_set_prototype_of(
                         &vm.error_protos,
                         crate::errors::ErrorKind::TypeError,
                         "Proxy setPrototypeOf trap returned false",
+                    ));
+                    return Value::undefined();
+                }
+                let same = match (proto.is_null(), crate::vm::value_prototype(target)) {
+                    (true, None) => true,
+                    (false, Some(p)) => proto.heap_ptr() == Some(p),
+                    _ => false,
+                };
+                if !same && !crate::vm::value_is_extensible(target) {
+                    vm.set_pending_exception(crate::errors::error_object(
+                        gc,
+                        &vm.error_protos,
+                        crate::errors::ErrorKind::TypeError,
+                        "Proxy setPrototypeOf changed a non-extensible target's prototype",
                     ));
                     return Value::undefined();
                 }
@@ -12238,7 +12297,7 @@ pub fn object_define_property(
             return Value::undefined();
         }
     };
-    if let Some((inner, _h, _r)) = crate::vm::proxy_parts(target) {
+    while let Some((inner, _h, _r)) = crate::vm::proxy_parts(target) {
         match vm.proxy_trap_invoke_public(gc, target, "defineProperty", &[inner, raw_key, desc_obj])
         {
             Ok(Some(v)) => {
@@ -12765,7 +12824,7 @@ pub fn object_get_own_property_descriptor(
             }
         }
     }
-    if let Some((inner, _h, _r)) = crate::vm::proxy_parts(target) {
+    while let Some((inner, _h, _r)) = crate::vm::proxy_parts(target) {
         match vm.proxy_trap_invoke_public(gc, target, "getOwnPropertyDescriptor", &[inner, raw_key])
         {
             Ok(Some(v)) => return v,
@@ -13287,6 +13346,15 @@ macro_rules! integrity_builtin {
                             ));
                             return Value::undefined();
                         }
+                        if crate::vm::value_is_extensible(inner) {
+                            vm.set_pending_exception(crate::errors::error_object(
+                                gc,
+                                &vm.error_protos,
+                                crate::errors::ErrorKind::TypeError,
+                                "Proxy preventExtensions trap left the target extensible",
+                            ));
+                            return Value::undefined();
+                        }
                         return target;
                     }
                     Ok(None) => target = inner,
@@ -13326,7 +13394,19 @@ macro_rules! integrity_test_builtin {
             if $kind == 0 {
                 if let Some((inner, _h, _r)) = crate::vm::proxy_parts(target) {
                     match vm.proxy_trap_invoke_public(gc, target, "isExtensible", &[inner]) {
-                        Ok(Some(v)) => return Value::boolean(v.to_bool()),
+                        Ok(Some(v)) => {
+                            let trap = v.to_bool();
+                            if trap != crate::vm::value_is_extensible(inner) {
+                                vm.set_pending_exception(crate::errors::error_object(
+                                    gc,
+                                    &vm.error_protos,
+                                    crate::errors::ErrorKind::TypeError,
+                                    "Proxy isExtensible trap result does not match its target",
+                                ));
+                                return Value::undefined();
+                            }
+                            return Value::boolean(trap);
+                        }
                         Ok(None) => {}
                         Err(e) => {
                             vm.set_pending_exception(e);

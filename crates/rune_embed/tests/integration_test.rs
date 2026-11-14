@@ -18036,8 +18036,8 @@ fn test_proxy_revocable_and_meta_traps() {
                     return { value: 9, writable: true, enumerable: true, configurable: true };
                 },
                 defineProperty: function (t, k, d) { t[k] = d.value; return true; },
-                isExtensible: function () { return false; },
-                preventExtensions: function () { return true; },
+                isExtensible: function (t) { return Object.isExtensible(t); },
+                preventExtensions: function (t) { Object.preventExtensions(t); return true; },
                 setPrototypeOf: function (t, p) { return p === null; }
             };
             var p = new Proxy(target, handler);
@@ -18048,8 +18048,9 @@ fn test_proxy_revocable_and_meta_traps() {
             var protoOk = Object.setPrototypeOf(p, null) === p;
             var protoBad = false;
             try { Object.setPrototypeOf(p, {}); } catch (e) { protoBad = e instanceof TypeError; }
-            var ext = Object.isExtensible(p) === false;
+            var ext = Object.isExtensible(p) === true;
             var prevented = Object.preventExtensions(p) === p;
+            var extAfter = Object.isExtensible(p) === false;
 
             var fn = function (x) { return x + 1; };
             var fp = new Proxy(fn, {});
@@ -18076,6 +18077,7 @@ fn test_proxy_revocable_and_meta_traps() {
                 protoOk && protoBad,
                 ext,
                 prevented,
+                extAfter,
                 typeof fp === "function",
                 fp(2) === 3,
                 trapCall(3) === 8,
@@ -18083,7 +18085,7 @@ fn test_proxy_revocable_and_meta_traps() {
                 before === 7,
                 revokeType,
                 revoked
-            ].join("|") === "true|true|true|true|true|true|true|true|true|true|true|true|true|true";
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true|true|true|true|true|true";
             "#,
         )
         .unwrap();

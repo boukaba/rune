@@ -3688,6 +3688,31 @@ Integration suite: **911 passed, 0 failed, 3 ignored**.
 
 Integration suite: **912 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Proxy invariants + prototype-aware `in` (2026-11-14)
+
+- Added Proxy invariant checks:
+  - `has`: hiding a non-configurable target property, claiming a missing
+    property on a non-extensible target, or falling through to a missing
+    property on a non-extensible target throws TypeError;
+  - `deleteProperty`: deleting a non-configurable target property reports
+    false/throws, and non-extensible-target rules are enforced;
+  - `preventExtensions`: trap success requires the target to actually become
+    non-extensible;
+  - `isExtensible`: trap result must equal the target's actual extensibility;
+  - `setPrototypeOf`: a successful trap may not change a non-extensible
+    target's prototype (Object and Reflect paths).
+- `in`/Reflect.has now walk ordinary prototype chains while dispatching Proxy
+  `has` traps at each proxy layer, so `key in Object.create(proxy)` works.
+- Proxy revocation functions now carry anonymous `name: ""`, `length: 0` and
+  are non-constructable (arrow-flagged synthetic functions).
+- Reflect.ownKeys dispatches the `ownKeys` trap (including symbol keys) and
+  follows proxy targets.
+- Test262 Proxy **195 → 207/311**, Reflect **146 → 147/153**.
+- Regression updates: proxy meta/chaining tests now use invariant-valid
+  trap handlers.
+
+Integration suite: **912 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

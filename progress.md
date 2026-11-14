@@ -3052,6 +3052,32 @@ Integration suite: **883 passed, 0 failed, 3 ignored**.
 
 Integration suite: **883 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — MatchAll/split/search protocol completion (2026-11-14)
+
+- `@@matchAll` MatchAllIterator now matches the spec:
+  - cached `ToLength(Get(R,"lastIndex"))` applied to the matcher at creation;
+  - non-global matchers yield exactly one result instead of throwing;
+  - non-RegExp receivers use `RegExpCreate(R, "g")` (ToString(R), observable);
+  - species constructor `null`/primitive throws TypeError (only undefined means
+    default);
+  - global/unicode inferred from flags for RegExp receivers.
+- `@@split`: species-constructor validation, ToUint32 limit semantics
+  (negative limits wrap), non-object receiver TypeError, and synchronous
+  accessor setters for `lastIndex`.
+- `@@search`: non-object receiver TypeError and synchronous accessor setters
+  for initial reset/restore of `lastIndex`.
+- Added `set_value_sync` (own accessor setter invocation via re-entrant calls)
+  and made RegExp property stores honour prototype accessors with no setter
+  (assignment is a no-op, not a shadowing own property).
+- Flag accessor getter names are `get global`, `get ignoreCase`, etc.
+- Test262: RegExp/prototype **365 → 391/487** (80.3%); Symbol.matchAll
+  **20 → 26/26**; Symbol.split **34 → 43/44**; Symbol.search **18 → 22/23**;
+  String **1074/1223**.
+- Remaining: source-value tests blocked on `eval`; single flag accessor tests
+  need BigInt literals; exec alternation/backtracking; one search restore edge.
+
+Integration suite: **883 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

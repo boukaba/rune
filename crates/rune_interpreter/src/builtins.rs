@@ -9939,6 +9939,47 @@ fn get_property_value_sync_receiver(
     result
 }
 
+fn set_value_sync(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    obj: Value,
+    key: &str,
+    value: Value,
+) -> Result<(), Value> {
+    if let Some(ptr) = obj.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_OBJECT {
+            let shape = unsafe { JSObject::shape_ptr(ptr as *mut JSObject) };
+            let pk = PropertyKey::from_string(key);
+            if let Some(slot) = shape.lookup(&pk) {
+                let current = unsafe { JSObject::get_slot(ptr as *mut JSObject, slot) };
+                if let Some(acc) = current
+                    .heap_ptr()
+                    .filter(|p| unsafe { (*(*p as *const GcHeader)).tag() == TAG_ACCESSOR })
+                {
+                    let setter = unsafe { rune_core::accessor::AccessorPair::setter(acc) };
+                    if setter.is_undefined() || setter.is_null() {
+                        return Err(crate::errors::error_object(
+                            gc,
+                            &vm.error_protos,
+                            crate::errors::ErrorKind::TypeError,
+                            "Cannot set property with no setter",
+                        ));
+                    }
+                    return vm.call_value_sync(gc, setter, obj, &[value]).map(|_| ());
+                }
+            }
+        }
+    }
+    vm.set_property_sync(gc, obj, key, value).map_err(|_| {
+        crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Cannot set property",
+        )
+    })
+}
+
 fn get_value_sync(
     gc: &mut SemiSpace,
     vm: &mut Vm,
@@ -17277,7 +17318,7 @@ pub fn string_match(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
 }
 
 pub fn regexp_match_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
-    // §22.2.6.9 RegExp.prototype[@@matchAll](string)
+    // §22.2.6.9 RegExp.prototype[@@matchAll](string) → MatchAllIterator
     let rx = this;
     if !is_object_value(rx) {
         vm.set_pending_exception(crate::errors::error_object(
@@ -17292,35 +17333,6 @@ pub fn regexp_match_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
     let Some(input) = to_primitive_string(gc, input_val, vm) else {
         return Value::undefined();
     };
-    let ctor = match get_value_sync(gc, vm, rx, "constructor") {
-        Ok(v) => v,
-        Err(e) => {
-            vm.set_pending_exception(e);
-            return Value::undefined();
-        }
-    };
-    let species = if ctor.is_undefined() || ctor.is_null() {
-        Value::undefined()
-    } else {
-        match get_property_value_sync(gc, vm, ctor, Value::symbol(rune_core::symbol::SYM_SPECIES)) {
-            Ok(v) => v,
-            Err(e) => {
-                vm.set_pending_exception(e);
-                return Value::undefined();
-            }
-        }
-    };
-    let custom_species =
-        !species.is_undefined() && !species.is_null() && species != vm.regexp_constructor;
-    if custom_species && !is_callable_value(species) && !is_object_value(species) {
-        vm.set_pending_exception(crate::errors::error_object(
-            gc,
-            &vm.error_protos,
-            crate::errors::ErrorKind::TypeError,
-            "RegExp @@species is not a constructor",
-        ));
-        return Value::undefined();
-    }
     let flags_val = match get_value_sync(gc, vm, rx, "flags") {
         Ok(v) => v,
         Err(e) => {
@@ -17338,83 +17350,146 @@ pub fn regexp_match_all(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
             return Value::undefined();
         }
     };
-    let matcher = if custom_species {
-        let flags_val = Value::from_heap_ptr(HeapString::allocate(gc, &flags) as *mut u8);
-        let base = vm.temp_roots.len();
-        vm.temp_roots.push(rx);
-        let result = vm.construct_value_sync(gc, species, vec![rx, flags_val]);
-        vm.temp_roots.truncate(base);
-        match result {
-            Ok(v) => v,
-            Err(e) => {
-                vm.set_pending_exception(e);
-                return Value::undefined();
-            }
-        }
-    } else {
-        let source_val = match get_value_sync(gc, vm, rx, "source") {
+    let (matcher, global, full_unicode) = if is_re {
+        let ctor = match get_value_sync(gc, vm, rx, "constructor") {
             Ok(v) => v,
             Err(e) => {
                 vm.set_pending_exception(e);
                 return Value::undefined();
             }
         };
-        let Some(source) = to_primitive_string(gc, source_val, vm) else {
+        let species = if ctor.is_undefined() {
+            Value::undefined()
+        } else if !is_object_value(ctor) {
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "RegExp constructor is not an object",
+            ));
             return Value::undefined();
+        } else {
+            match get_property_value_sync(
+                gc,
+                vm,
+                ctor,
+                Value::symbol(rune_core::symbol::SYM_SPECIES),
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            }
         };
-        let mut bits = 0u32;
-        for ch in flags.chars() {
-            bits |= match ch {
-                'g' => 1,
-                'i' => 2,
-                'm' => 4,
-                's' => 8,
-                'u' => 16,
-                'y' => 32,
-                'd' => 64,
-                'v' => 128,
-                _ => 0,
+        let custom_species =
+            !species.is_undefined() && !species.is_null() && species != vm.regexp_constructor;
+        if custom_species && !is_callable_value(species) && !is_object_value(species) {
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "RegExp @@species is not a constructor",
+            ));
+            return Value::undefined();
+        }
+        let matcher = if custom_species {
+            let flags_val = Value::from_heap_ptr(HeapString::allocate(gc, &flags) as *mut u8);
+            let base = vm.temp_roots.len();
+            vm.temp_roots.push(rx);
+            let result = vm.construct_value_sync(gc, species, vec![rx, flags_val]);
+            vm.temp_roots.truncate(base);
+            match result {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            }
+        } else {
+            let source_val = match get_value_sync(gc, vm, rx, "source") {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
             };
-        }
-        alloc_regexp_from_string(gc, &source, bits, vm.regexp_prototype)
-    };
-    let global_val = match get_value_sync(gc, vm, matcher, "global") {
-        Ok(v) => v,
-        Err(e) => {
-            vm.set_pending_exception(e);
+            let Some(source) = to_primitive_string(gc, source_val, vm) else {
+                return Value::undefined();
+            };
+            let mut bits = 0u32;
+            for ch in flags.chars() {
+                bits |= match ch {
+                    'g' => 1,
+                    'i' => 2,
+                    'm' => 4,
+                    's' => 8,
+                    'u' => 16,
+                    'y' => 32,
+                    'd' => 64,
+                    'v' => 128,
+                    _ => 0,
+                };
+            }
+            alloc_regexp_from_string(gc, &source, bits, vm.regexp_prototype)
+        };
+        let last_val = match get_value_sync(gc, vm, rx, "lastIndex") {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        };
+        let last = match to_length_sync(gc, vm, last_val) {
+            Ok(n) => n,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        };
+        if vm
+            .set_property_sync(gc, matcher, "lastIndex", Value::smi(last as i32))
+            .is_err()
+        {
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Cannot set lastIndex",
+            ));
             return Value::undefined();
         }
-    };
-    let global = value_truthy(global_val);
-    if !global && is_re {
-        vm.set_pending_exception(crate::errors::error_object(
-            gc,
-            &vm.error_protos,
-            crate::errors::ErrorKind::TypeError,
-            "RegExp.prototype[Symbol.matchAll] requires a global RegExp",
-        ));
-        return Value::undefined();
-    }
-    let unicode_val = match get_value_sync(gc, vm, matcher, "unicode") {
-        Ok(v) => v,
-        Err(e) => {
-            vm.set_pending_exception(e);
+        (
+            matcher,
+            flags.contains('g'),
+            flags.contains('u') || flags.contains('v'),
+        )
+    } else {
+        let Some(source) = to_primitive_string(gc, rx, vm) else {
+            return Value::undefined();
+        };
+        let matcher = alloc_regexp_from_string(gc, &source, 1, vm.regexp_prototype);
+        let unicode_val = match get_value_sync(gc, vm, matcher, "unicode") {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        };
+        if vm
+            .set_property_sync(gc, matcher, "lastIndex", Value::smi(0))
+            .is_err()
+        {
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "Cannot set lastIndex",
+            ));
             return Value::undefined();
         }
+        (matcher, true, value_truthy(unicode_val))
     };
-    let full_unicode = value_truthy(unicode_val);
-    if vm
-        .set_property_sync(gc, matcher, "lastIndex", Value::smi(0))
-        .is_err()
-    {
-        vm.set_pending_exception(crate::errors::error_object(
-            gc,
-            &vm.error_protos,
-            crate::errors::ErrorKind::TypeError,
-            "Cannot set lastIndex",
-        ));
-        return Value::undefined();
-    }
 
     let mut out = fresh_dense_array(gc, vm);
     let base = vm.temp_roots.len();
@@ -28825,6 +28900,15 @@ fn dense_array_length(v: Value) -> usize {
 pub fn regexp_symbol_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     // §22.2.6.14 RegExp.prototype[@@split](string, limit)
     let rx = this;
+    if !is_object_value(rx) {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "RegExp.prototype[Symbol.split] called on non-object",
+        ));
+        return Value::undefined();
+    }
     let input_val = args.first().copied().unwrap_or(Value::undefined());
     let Some(input) = to_primitive_string(gc, input_val, vm) else {
         return Value::undefined();
@@ -28838,12 +28922,10 @@ pub fn regexp_symbol_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: 
                     return Value::undefined();
                 }
             };
-            if n.is_nan() || n <= 0.0 {
+            if n.is_nan() || n.is_infinite() || n == 0.0 {
                 0u32
-            } else if n.is_infinite() {
-                u32::MAX
             } else {
-                (n.trunc() as u64 % 4_294_967_296) as u32
+                n.trunc().rem_euclid(4_294_967_296.0) as u32
             }
         }
         _ => u32::MAX,
@@ -28861,8 +28943,16 @@ pub fn regexp_symbol_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: 
             return Value::undefined();
         }
     };
-    let species = if ctor.is_undefined() || ctor.is_null() {
+    let species = if ctor.is_undefined() {
         Value::undefined()
+    } else if !is_object_value(ctor) {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "RegExp constructor is not an object",
+        ));
+        return Value::undefined();
     } else {
         match get_property_value_sync(gc, vm, ctor, Value::symbol(rune_core::symbol::SYM_SPECIES)) {
             Ok(v) => v,
@@ -28953,6 +29043,7 @@ pub fn regexp_symbol_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: 
         };
 
     if input.is_empty() {
+        let splitter = vm.temp_roots[base + 1];
         let z = match regexp_exec_abstract(gc, vm, splitter, &input) {
             Ok(v) => v,
             Err(e) => {
@@ -28982,16 +29073,9 @@ pub fn regexp_symbol_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: 
         if q >= size {
             break;
         }
-        if vm
-            .set_property_sync(gc, splitter, "lastIndex", Value::smi(q as i32))
-            .is_err()
-        {
-            vm.set_pending_exception(crate::errors::error_object(
-                gc,
-                &vm.error_protos,
-                crate::errors::ErrorKind::TypeError,
-                "Cannot set splitter lastIndex",
-            ));
+        let splitter = vm.temp_roots[base + 1];
+        if let Err(e) = set_value_sync(gc, vm, splitter, "lastIndex", Value::smi(q as i32)) {
+            vm.set_pending_exception(e);
             vm.temp_roots.truncate(base);
             return Value::undefined();
         }
@@ -29007,6 +29091,7 @@ pub fn regexp_symbol_split(gc: &mut SemiSpace, this: Value, args: &[Value], vm: 
             q = advance_utf16_index(&input, q, unicode);
             continue;
         }
+        let splitter = vm.temp_roots[base + 1];
         let end_val = match get_value_sync(gc, vm, splitter, "lastIndex") {
             Ok(v) => v,
             Err(e) => {
@@ -29473,6 +29558,15 @@ pub fn regexp_symbol_replace(
 pub fn regexp_symbol_search(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
     // §22.2.6.13 RegExp.prototype[@@search](string)
     let rx = this;
+    if !is_object_value(rx) {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "RegExp.prototype[Symbol.search] called on non-object",
+        ));
+        return Value::undefined();
+    }
     let input_val = args.first().copied().unwrap_or(Value::undefined());
     let Some(input) = to_primitive_string(gc, input_val, vm) else {
         return Value::undefined();
@@ -29485,16 +29579,8 @@ pub fn regexp_symbol_search(gc: &mut SemiSpace, this: Value, args: &[Value], vm:
         }
     };
     if !same_value(previous, Value::smi(0)) {
-        if vm
-            .set_property_sync(gc, rx, "lastIndex", Value::smi(0))
-            .is_err()
-        {
-            vm.set_pending_exception(crate::errors::error_object(
-                gc,
-                &vm.error_protos,
-                crate::errors::ErrorKind::TypeError,
-                "Cannot set lastIndex",
-            ));
+        if let Err(e) = set_value_sync(gc, vm, rx, "lastIndex", Value::smi(0)) {
+            vm.set_pending_exception(e);
             return Value::undefined();
         }
     }
@@ -29530,13 +29616,8 @@ pub fn regexp_symbol_search(gc: &mut SemiSpace, this: Value, args: &[Value], vm:
         }
     };
     if !same_value(current, previous) {
-        if vm.set_property_sync(gc, rx, "lastIndex", previous).is_err() {
-            vm.set_pending_exception(crate::errors::error_object(
-                gc,
-                &vm.error_protos,
-                crate::errors::ErrorKind::TypeError,
-                "Cannot restore lastIndex",
-            ));
+        if let Err(e) = set_value_sync(gc, vm, rx, "lastIndex", previous) {
+            vm.set_pending_exception(e);
             return Value::undefined();
         }
     }

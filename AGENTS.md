@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **MatchAll/split/search completion (2026-11-14)**: cached lastIndex, non-global/non-RegExp matchAll, ToUint32 split limits, sync accessor setters, no-setter prototype store. RegExp/prototype **391/487 (80.3%)**, matchAll **26/26**, split **43/44**, search **22/23**, String **1074/1223**. Integration **883**.
 - **Generic RegExp @@matchAll (2026-11-14)**: IsRegExp/species/flags/global/unicode Gets, matcher construction. RegExp/prototype **365/487**, Symbol.matchAll **20/26**, String **1074/1223**. Integration **883**. Eager array iterator caveat.
 - **RegExp source/flags accessors (2026-11-14)**: real accessors, escape patterns, observable flag Gets in dgimsuvy order. RegExp/prototype **352/487**, flags **10/16**, source **5/12**, String **1074/1223**. Integration **883**. Global `eval` remains a stub.
 - **Generic RegExp @@replace (2026-11-14)**: flags/global/unicode Gets, observable exec loop, GetSubstitution, functional args. RegExp/prototype **336/487**, Symbol.replace **56/70**, String **1073/1223**. Integration **882**.

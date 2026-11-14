@@ -15028,6 +15028,25 @@ pub(crate) fn builtin_display_name(name: &'static str) -> &'static str {
     if name == "RegExp_prototype_matchAll" {
         return "[Symbol.matchAll]";
     }
+    if let Some(flag) = name.strip_prefix("RegExp_prototype_") {
+        match flag {
+            "global" | "ignoreCase" | "multiline" | "dotAll" | "unicode" | "unicodeSets"
+            | "sticky" | "hasIndices" => {
+                return match flag {
+                    "global" => "get global",
+                    "ignoreCase" => "get ignoreCase",
+                    "multiline" => "get multiline",
+                    "dotAll" => "get dotAll",
+                    "unicode" => "get unicode",
+                    "unicodeSets" => "get unicodeSets",
+                    "sticky" => "get sticky",
+                    "hasIndices" => "get hasIndices",
+                    _ => unreachable!(),
+                };
+            }
+            _ => {}
+        }
+    }
     if name == "RegExp_prototype_flags" {
         return "get flags";
     }
@@ -16361,6 +16380,33 @@ pub(crate) fn do_store_property(
             }
             if !handled {
                 if let Some(key) = value_to_prop_key(raw_key) {
+                    // A prototype accessor with no setter makes the assignment a
+                    // no-op (sloppy mode) instead of creating a shadowing own prop.
+                    let mut proto = unsafe {
+                        rune_core::regexp::RegExp::prototype(rune_core::gc::resolve_forwarded(ptr))
+                    };
+                    while !proto.is_null() {
+                        let tag = unsafe { (*(proto as *const GcHeader)).tag() };
+                        if tag != TAG_OBJECT {
+                            break;
+                        }
+                        let pshape = unsafe { JSObject::shape_ptr(proto as *mut JSObject) };
+                        if let Some(slot) = pshape.lookup(&key) {
+                            let current =
+                                unsafe { JSObject::get_slot(proto as *mut JSObject, slot) };
+                            if let Some(acc) = current.heap_ptr().filter(|p| unsafe {
+                                (*(*p as *const GcHeader)).tag() == TAG_ACCESSOR
+                            }) {
+                                let setter =
+                                    unsafe { rune_core::accessor::AccessorPair::setter(acc) };
+                                if setter.is_undefined() || setter.is_null() {
+                                    return false;
+                                }
+                            }
+                            break;
+                        }
+                        proto = unsafe { JSObject::prototype(proto as *mut JSObject) };
+                    }
                     let mut re_ptr = unsafe { rune_core::gc::resolve_forwarded(ptr) };
                     let mut extra = unsafe { rune_core::regexp::RegExp::extra_props(re_ptr) };
                     if extra.is_null() {

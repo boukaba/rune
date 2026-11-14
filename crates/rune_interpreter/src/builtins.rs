@@ -330,6 +330,130 @@ pub fn decode_uri_component_builtin(
     Value::from_heap_ptr(HeapString::allocate(gc, &decoded) as *mut u8)
 }
 
+/// `encodeURI(value)` — leaves URI reserved characters unescaped.
+pub fn encode_uri_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let text = value_to_js_string(args.first().copied().unwrap_or(Value::undefined()));
+    Value::from_heap_ptr(HeapString::allocate(gc, &uri_encode(&text, ";/?:@&=+$,#")) as *mut u8)
+}
+
+fn uri_error(gc: &mut SemiSpace, vm: &mut Vm) -> Value {
+    vm.set_pending_exception(crate::errors::error_object(
+        gc,
+        &vm.error_protos,
+        crate::errors::ErrorKind::UriError,
+        "URI malformed",
+    ));
+    Value::undefined()
+}
+
+/// `decodeURI(value)` — decodes escapes except reserved characters.
+pub fn decode_uri_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    let text = value_to_js_string(args.first().copied().unwrap_or(Value::undefined()));
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut pending: Vec<u8> = Vec::new();
+    let mut i = 0usize;
+    let reserved = b";/?:@&=+$,#";
+    let flush = |pending: &mut Vec<u8>, out: &mut String| -> bool {
+        if pending.is_empty() {
+            return true;
+        }
+        match String::from_utf8(std::mem::take(pending)) {
+            Ok(s) => {
+                out.push_str(&s);
+                true
+            }
+            Err(_) => false,
+        }
+    };
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            let (Some(hi), Some(lo)) = (hi, lo) else {
+                return uri_error(gc, vm);
+            };
+            let b = (hi * 16 + lo) as u8;
+            if b < 0x80 && reserved.contains(&b) {
+                if !flush(&mut pending, &mut out) {
+                    return uri_error(gc, vm);
+                }
+                out.push('%');
+                out.push_str(&format!("{:02X}", b));
+            } else {
+                pending.push(b);
+            }
+            i += 3;
+        } else {
+            if !flush(&mut pending, &mut out) {
+                return uri_error(gc, vm);
+            }
+            let ch = text[i..].chars().next().unwrap_or('\0');
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    if !flush(&mut pending, &mut out) {
+        return uri_error(gc, vm);
+    }
+    Value::from_heap_ptr(HeapString::allocate(gc, &out) as *mut u8)
+}
+
+/// `escape(value)` — legacy %XX / %uXXXX encoding.
+pub fn escape_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let text = value_to_js_string(args.first().copied().unwrap_or(Value::undefined()));
+    let mut out = String::new();
+    for c in text.encode_utf16() {
+        let a = c as u8;
+        if (a as char).is_ascii_alphanumeric()
+            || matches!(a as char, '@' | '*' | '_' | '+' | '-' | '.' | '/')
+        {
+            out.push(a as char);
+        } else if c <= 0xFF {
+            out.push_str(&format!("%{:02X}", c));
+        } else {
+            out.push_str(&format!("%u{:04X}", c));
+        }
+    }
+    Value::from_heap_ptr(HeapString::allocate(gc, &out) as *mut u8)
+}
+
+/// `unescape(value)` — legacy %XX / %uXXXX decoding.
+pub fn unescape_builtin(gc: &mut SemiSpace, _this: Value, args: &[Value], _vm: &mut Vm) -> Value {
+    let text = value_to_js_string(args.first().copied().unwrap_or(Value::undefined()));
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut i = 0usize;
+    while i < chars.len() {
+        if chars[i] == '%' {
+            if i + 5 < chars.len() && chars[i + 1] == 'u' {
+                if let (Some(a), Some(b), Some(c), Some(d)) = (
+                    chars[i + 2].to_digit(16),
+                    chars[i + 3].to_digit(16),
+                    chars[i + 4].to_digit(16),
+                    chars[i + 5].to_digit(16),
+                ) {
+                    if let Some(ch) = char::from_u32(a * 4096 + b * 256 + c * 16 + d) {
+                        out.push(ch);
+                        i += 6;
+                        continue;
+                    }
+                }
+            }
+            if i + 2 < chars.len() {
+                if let (Some(a), Some(b)) = (chars[i + 1].to_digit(16), chars[i + 2].to_digit(16)) {
+                    out.push(char::from_u32(a * 16 + b).unwrap_or('\0'));
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    Value::from_heap_ptr(HeapString::allocate(gc, &out) as *mut u8)
+}
+
 /// `URL` called without `new` — constructors are not callable.
 pub fn url_constructor_builtin(
     gc: &mut SemiSpace,
@@ -8842,14 +8966,11 @@ pub fn object_prototype_property_is_enumerable(
                     let okey = rune_core::shape::PropertyKey::from_string(&index.to_string());
                     let oshape = unsafe { JSObject::shape_ptr(overlay as *mut JSObject) };
                     if let Some(oslot) = oshape.lookup(&okey) {
-                        let ov = unsafe { JSObject::get_slot(overlay as *mut JSObject, oslot) };
-                        if ov.heap_ptr().is_some_and(|vp| unsafe {
-                            (*(vp as *const GcHeader)).tag() == TAG_ACCESSOR
-                        }) {
-                            return Value::boolean(
-                                oshape.attr_at(oslot) & rune_core::shape::ATTR_ENUMERABLE != 0,
-                            );
-                        }
+                        // Accessor overlays AND locked data overlays are own;
+                        // enumerability comes from their stored attrs.
+                        return Value::boolean(
+                            oshape.attr_at(oslot) & rune_core::shape::ATTR_ENUMERABLE != 0,
+                        );
                     }
                 }
                 let len = unsafe {
@@ -10462,6 +10583,12 @@ fn desc_field(
             return Ok((false, Value::undefined()));
         }
         ep
+    } else if dtag == TAG_STRING_OBJ {
+        let ep = unsafe { StringObject::extra_props(dptr as *mut StringObject) };
+        if ep.is_null() {
+            return Ok((false, Value::undefined()));
+        }
+        ep
     } else {
         return Ok((false, Value::undefined()));
     };
@@ -10594,11 +10721,15 @@ fn define_key_and_name(raw_key: Value) -> Result<(PropertyKey, String), ()> {
     }
     // 6e-key-model: integral floats are canonical string keys (same rule as
     // value_to_prop_key — huge indices define under their exact form).
-    if let Some(f) = raw_key.as_float64() {
-        if !f.is_nan() && f.is_finite() && f.fract() == 0.0 && f.abs() <= 9_007_199_254_740_992.0 {
-            let s = format!("{}", f as i64);
-            return Ok((PropertyKey::from_string(&s), s));
-        }
+    if raw_key.as_float64().is_some()
+        || raw_key.is_boolean()
+        || raw_key.is_null()
+        || raw_key.is_undefined()
+    {
+        // ToPropertyKey(primitive): JS ToString (1e21 → "1e+21", -0 → "0",
+        // booleans/null/undefined keep their names).
+        let s = value_to_js_string(raw_key);
+        return Ok((PropertyKey::from_string(&s), s));
     }
     Err(())
 }
@@ -11093,11 +11224,36 @@ fn define_array_index_property(
         };
         let pair = rune_core::accessor::AccessorPair::allocate(gc, get, set);
         let pair_val = Value::from_heap_ptr(pair);
+        // Absent enumerable/configurable keep the CURRENT property's flags
+        // (dense elements default to true/true; accessor overlays keep theirs).
+        let (cur_enum, cur_conf) = match existing {
+            Some((_, attr, _)) => (
+                attr & rune_core::shape::ATTR_ENUMERABLE != 0,
+                attr & rune_core::shape::ATTR_CONFIGURABLE != 0,
+            ),
+            None => {
+                let ap = arr.heap_ptr().unwrap() as *mut RuneArray;
+                let len = unsafe { RuneArray::length(ap) } as usize;
+                let cap = unsafe { RuneArray::capacity(ap) } as usize;
+                let present = idx < len
+                    && idx < cap
+                    && unsafe { RuneArray::get_element(ap, idx) } != Value::empty_sentinel();
+                (present, present)
+            }
+        };
         let mut attr = 0u8;
-        if desc.has_enumerable && desc.enumerable {
+        if if desc.has_enumerable {
+            desc.enumerable
+        } else {
+            cur_enum
+        } {
             attr |= rune_core::shape::ATTR_ENUMERABLE;
         }
-        if desc.has_configurable && desc.configurable {
+        if if desc.has_configurable {
+            desc.configurable
+        } else {
+            cur_conf
+        } {
             attr |= rune_core::shape::ATTR_CONFIGURABLE;
         }
         // Re-resolve after the pair allocation (GC may have moved things).
@@ -11887,6 +12043,17 @@ pub fn object_get_own_property_descriptor(
                     };
                     return make_descriptor_object(gc, v, attr, vm.object_prototype.heap_ptr());
                 }
+                // Global builtin functions/namespaces live in the builtin
+                // handle table rather than builtin_wrappers.
+                let v = vm.find_builtin_handle(&name);
+                if !v.is_undefined() {
+                    return make_descriptor_object(
+                        gc,
+                        v,
+                        rune_core::shape::ATTR_WRITABLE | rune_core::shape::ATTR_CONFIGURABLE,
+                        vm.object_prototype.heap_ptr(),
+                    );
+                }
             }
         }
     }
@@ -11894,6 +12061,35 @@ pub fn object_get_own_property_descriptor(
     // read as absent → undefined).
     if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_ARRAY {
         return array_own_property_descriptor(gc, ptr, raw_key, vm.object_prototype.heap_ptr());
+    }
+    if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_STRING {
+        let text = unsafe { HeapString::to_string(ptr as *mut HeapString) };
+        if let Some(idx) = value_to_array_index(raw_key) {
+            if idx < text.encode_utf16().count() {
+                let ch = text.chars().nth(idx).unwrap_or('\u{0}');
+                let val =
+                    Value::from_heap_ptr(HeapString::allocate(gc, &ch.to_string()) as *mut u8);
+                return make_descriptor_object(
+                    gc,
+                    val,
+                    rune_core::shape::ATTR_ENUMERABLE,
+                    vm.object_prototype.heap_ptr(),
+                );
+            }
+            return Value::undefined();
+        }
+        if let Some(pk) = value_to_prop_key(raw_key) {
+            if pk.as_u64() == PropertyKey::from_string("length").as_u64() {
+                let len = text.encode_utf16().count();
+                return make_descriptor_object(
+                    gc,
+                    Value::smi(len as i32),
+                    0,
+                    vm.object_prototype.heap_ptr(),
+                );
+            }
+        }
+        return Value::undefined();
     }
     if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_STRING_OBJ {
         let sptr = unsafe {
@@ -26417,6 +26613,26 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 1,
             name: "decodeURIComponent",
             func: decode_uri_component_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "encodeURI",
+            func: encode_uri_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "decodeURI",
+            func: decode_uri_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "escape",
+            func: escape_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "unescape",
+            func: unescape_builtin,
         },
         Builtin {
             length: 1,

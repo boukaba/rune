@@ -17300,3 +17300,39 @@ fn test_async_generator_methods_and_mixed_proto_chain() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_object_define_descriptors_and_globals() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var arr = [3];
+            Object.defineProperty(arr, "0", { set: function (v) { arr.seen = v; } });
+            var ad = Object.getOwnPropertyDescriptor(arr, "0");
+            arr[0] = 9;
+            var o = {};
+            Object.defineProperty(o, 1e21, {});
+            Object.defineProperty(o, true, { value: 1 });
+            var sd = Object.getOwnPropertyDescriptor("foo", "0");
+            var sl = Object.getOwnPropertyDescriptor("foo", "length");
+            var gd = Object.getOwnPropertyDescriptor(globalThis, "decodeURI");
+            [
+                ad.enumerable === true && ad.configurable === true && typeof ad.set === "function",
+                arr.seen === 9,
+                arr.propertyIsEnumerable("0"),
+                o.hasOwnProperty("1e+21"),
+                o.hasOwnProperty("true"),
+                sd.value === "f" && sd.writable === false && sd.enumerable === true && sd.configurable === false,
+                sl.value === 3 && sl.writable === false && sl.enumerable === false,
+                typeof decodeURI === "function" && typeof escape === "function",
+                gd.value === decodeURI && gd.writable === true,
+                decodeURI("%41%2F") === "A%2F",
+                escape("a b") === "a%20b",
+                unescape("a%20b") === "a b"
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

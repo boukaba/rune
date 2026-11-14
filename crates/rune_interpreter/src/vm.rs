@@ -6617,6 +6617,13 @@ impl Vm {
                         if let Some((v, _)) = self.lookup_global_binding(&name) {
                             return PropGetOut::Ready(v);
                         }
+                        // Builtin-handle globals (decodeURI, parseInt, ...)
+                        // are not mirrored into the globals map; expose them
+                        // on the global object too.
+                        let builtin = self.find_builtin_handle(&name);
+                        if !builtin.is_undefined() {
+                            return PropGetOut::Ready(builtin);
+                        }
                     }
                 }
             }

@@ -3252,6 +3252,29 @@ Integration suite: **890 passed, 0 failed, 3 ignored**.
 
 Integration suite: **891 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Descriptor/global-object conformance (2026-11-14)
+
+- `Object.defineProperty` core fixes:
+  - ToPropertyKey accepts numeric (JS number formatting: `1e21` → `"1e+21"`),
+    boolean, null and undefined keys;
+  - String wrapper objects are valid descriptor sources (own extra props);
+  - converting a dense array element to an accessor preserves the current
+    enumerable/configurable flags when the descriptor omits them.
+- Array overlay data entries now report `propertyIsEnumerable` from their
+  stored attributes (previously only accessor overlays did).
+- `Object.getOwnPropertyDescriptor`:
+  - primitive strings report index/length descriptors (non-writable,
+    non-configurable; indices enumerable);
+  - global builtin functions resolve through the global object read path, so
+    `globalThis.decodeURI` and its descriptor agree.
+- Added missing global builtins `encodeURI`, `decodeURI`, `escape`, `unescape`;
+  the global object now exposes builtin-handle globals as properties.
+- Test262: Object **2716 → 2812/3411**, defineProperty **~977 → 989/1131**,
+  getOwnPropertyDescriptor **290 → 298/310**.
+- Regression: `test_object_define_descriptors_and_globals`.
+
+Integration suite: **892 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

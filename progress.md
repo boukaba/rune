@@ -3904,6 +3904,24 @@ Integration suite: **921 passed, 0 failed, 3 ignored**.
 
 Integration suite: **922 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — IteratorClose in array patterns + class static `name` (2026-11-14)
+
+- Array binding patterns close the iterator when the pattern does not exhaust
+  it (`IteratorClose` on normal completion). `for (let [x] of [iter])` now
+  invokes `return()` exactly once after binding `x`.
+- The bytecode `DefineProperty` path on function targets routes `name` and
+  `length` through OrdinaryDefineOwnProperty instead of a normal property
+  store. This lets class static members named `name` replace the configurable
+  function metadata, so `class { static name() {} }` is callable and its
+  descriptor value is the method. Other function-target keys keep the store
+  path.
+- Test262: language/statements/for **313 → 325/385**, for/dstr
+  **255 → 267/285 (0 failures)**, for-of **345 → 357/751**, for-of/dstr
+  **264 → 276/569**, object/dstr **332 → 348/561**.
+- Regression: `test_destructuring_iterator_close_and_class_static_name`.
+
+Integration suite: **923 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

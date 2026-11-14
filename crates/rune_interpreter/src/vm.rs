@@ -9995,13 +9995,26 @@ impl Vm {
                                     obj = Value::from_heap_ptr(live as *mut u8);
                                 }
                             } else if tag == TAG_FUNC {
-                                // For functions, delegate to do_store_property
+                                // For functions, delegate to do_store_property,
+                                // except for the metadata slots: DefineProperty
+                                // must be able to replace a configurable
+                                // `name`/`length` (class static members).
                                 let raw_key = key_val.unwrap_or_else(|| {
                                     Value::from_heap_ptr(
                                         HeapString::allocate(gc, &key_str) as *mut u8
                                     )
                                 });
-                                do_store_property(obj, raw_key, value, gc, self);
+                                if key_str == "name" || key_str == "length" {
+                                    if let Err(e) = crate::builtins::define_value_property(
+                                        gc, self, obj, raw_key, value,
+                                    ) {
+                                        if let Some(exit) = self.handle_throw(gc, e) {
+                                            return exit;
+                                        }
+                                    }
+                                } else {
+                                    do_store_property(obj, raw_key, value, gc, self);
+                                }
                             }
                         }
                     }

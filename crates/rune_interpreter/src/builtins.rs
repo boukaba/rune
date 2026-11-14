@@ -11427,6 +11427,40 @@ fn define_key_and_name(raw_key: Value) -> Result<(PropertyKey, String), ()> {
 }
 
 /// Core [[DefineOwnProperty]] for TAG_OBJECT receivers (A4). Shared by
+/// Define a data property through the OrdinaryDefineOwnProperty path. Used by
+/// the bytecode DefineProperty opcode for function targets so class static
+/// members can replace the configurable `name`/`length` metadata.
+pub(crate) fn define_value_property(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    target: Value,
+    raw_key: Value,
+    value: Value,
+) -> Result<(), Value> {
+    let (key, key_name) = define_key_and_name(raw_key).map_err(|()| {
+        crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "Invalid property key",
+        )
+    })?;
+    let obj = define_extra_target(gc, vm, "DefineProperty", target)?;
+    let desc = PropDesc {
+        has_value: true,
+        value,
+        has_writable: true,
+        writable: true,
+        has_enumerable: true,
+        enumerable: true,
+        has_configurable: true,
+        configurable: true,
+        ..PropDesc::empty()
+    };
+    define_own_property(gc, vm, obj, key, key_name, &desc)?;
+    Ok(())
+}
+
 /// defineProperty/defineProperties/create-with-properties. Implements
 /// OrdinaryDefineOwnProperty + ValidateAndApplyPropertyDescriptor for data
 /// and accessor descriptors (accessor slot values are AccessorPairs, which
@@ -23881,6 +23915,11 @@ pub fn destructure_iter(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
         }
         vm.temp_roots.push(value);
         out_len += 1;
+    }
+    if !want_rest && !done {
+        // Array binding patterns close the iterator when the pattern does not
+        // exhaust it (IteratorClose on normal completion).
+        close_iterator(gc, vm, vm.temp_roots[base + 1]);
     }
     if want_rest {
         let rest_root_start = vm.temp_roots.len();

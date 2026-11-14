@@ -18535,3 +18535,39 @@ fn test_for_const_destructuring_and_generator_iterator_binding() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_destructuring_iterator_close_and_class_static_name() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var doneCalls = 0;
+            var iterable = {};
+            iterable[Symbol.iterator] = function () {
+                return {
+                    next: function () { return { value: 1, done: false }; },
+                    return: function () { doneCalls++; return {}; }
+                };
+            };
+            var [onlyOne] = iterable;
+
+            class Named {
+                static name() { return "custom"; }
+                static value() { return 7; }
+            }
+            var descriptor = Object.getOwnPropertyDescriptor(Named, "name");
+
+            [
+                onlyOne === 1,
+                doneCalls === 1,
+                typeof Named.name === "function",
+                Named.name() === "custom",
+                Named.value() === 7,
+                typeof descriptor.value === "function"
+            ].join("|") === "true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

@@ -11370,7 +11370,7 @@ fn define_own_property(
             }
             // Store the value (data) or pair (accessor) when provided.
             if is_accessor_desc {
-                let (get, set) = if cur_is_accessor && cur_configurable {
+                let (get, set) = if cur_is_accessor {
                     let vp = cur_val.heap_ptr().unwrap();
                     unsafe {
                         (
@@ -11773,8 +11773,8 @@ fn define_array_index_property(
         let ap = arr.heap_ptr().unwrap() as *mut RuneArray;
         let (cur_val, cw, ce, cc, is_create): (Value, bool, bool, bool, bool) = match existing {
             Some((_, attr, cur))
-                if cur.heap_ptr().is_some_and(|vp| unsafe {
-                    (*(vp as *const GcHeader)).tag() != TAG_ACCESSOR
+                if !cur.heap_ptr().is_some_and(|vp| unsafe {
+                    (*(vp as *const GcHeader)).tag() == TAG_ACCESSOR
                 }) =>
             {
                 // Overlay data entry (own attrs; seal bit overrides C,
@@ -12027,7 +12027,16 @@ pub fn object_define_property(
     vm: &mut Vm,
 ) -> Value {
     let target = args.first().copied().unwrap_or(Value::undefined());
-    let raw_key = args.get(1).copied().unwrap_or(Value::undefined());
+    let mut raw_key = args.get(1).copied().unwrap_or(Value::undefined());
+    if is_object_value(raw_key) {
+        match to_primitive_sync(gc, vm, raw_key, "string") {
+            Ok(v) => raw_key = v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        }
+    }
     let (key, key_name) = match define_key_and_name(raw_key) {
         Ok(k) => k,
         Err(()) => {
@@ -12048,6 +12057,35 @@ pub fn object_define_property(
             return Value::undefined();
         }
     };
+    // String wrappers: defining a new indexed/named property on a
+    // non-extensible wrapper is a TypeError ([[DefineOwnProperty]] on the
+    // String exotic object checks extensibility for absent properties).
+    if let Some(tptr) = target.heap_ptr() {
+        if unsafe { (*(tptr as *const GcHeader)).tag() } == TAG_STRING_OBJ
+            && vm.side_integrity_level(tptr).is_some()
+        {
+            let sptr = unsafe { StringObject::string_ptr(tptr as *mut StringObject) };
+            let text = unsafe { HeapString::to_string(sptr as *mut HeapString) };
+            let len = text.encode_utf16().count();
+            let index_present = value_to_array_index(raw_key).is_some_and(|i| i < len);
+            let extra_present = value_to_prop_key(raw_key).is_some_and(|pk| {
+                let extra = unsafe { StringObject::extra_props(tptr as *mut StringObject) };
+                !extra.is_null()
+                    && unsafe { JSObject::shape_ptr(extra as *mut JSObject) }
+                        .lookup(&pk)
+                        .is_some()
+            });
+            if !index_present && !extra_present {
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "Cannot define property on a non-extensible object",
+                ));
+                return Value::undefined();
+            }
+        }
+    }
     // B1e: dense-array definitions. Index keys go to the array-index
     // path (data → dense element with hole-preserving growth; accessor →
     // extra_props overlay pair). Other named keys (not "length") define on
@@ -12859,6 +12897,34 @@ fn exotic_is_frozen(ptr: *mut u8) -> bool {
     })
 }
 
+fn string_object_is_sealed(ptr: *mut u8) -> bool {
+    let extra = unsafe { StringObject::extra_props(ptr as *mut StringObject) };
+    if extra.is_null() {
+        return true;
+    }
+    let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+    (0..shape.entries.len()).all(|i| shape.attr_at(i) & rune_core::shape::ATTR_CONFIGURABLE == 0)
+}
+
+fn string_object_is_frozen(ptr: *mut u8) -> bool {
+    if !string_object_is_sealed(ptr) {
+        return false;
+    }
+    let extra = unsafe { StringObject::extra_props(ptr as *mut StringObject) };
+    if extra.is_null() {
+        return true;
+    }
+    let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+    (0..shape.entries.len()).all(|i| {
+        let is_accessor = unsafe {
+            JSObject::get_slot(extra as *mut JSObject, i)
+                .heap_ptr()
+                .is_some_and(|vp| (*(vp as *const GcHeader)).tag() == TAG_ACCESSOR)
+        };
+        is_accessor || shape.attr_at(i) & rune_core::shape::ATTR_WRITABLE == 0
+    })
+}
+
 fn apply_integrity_attrs(obj_ptr: *mut JSObject, level: u8) {
     let shape = unsafe { JSObject::shape_ptr(obj_ptr) };
     let mut attrs = shape.attrs.clone();
@@ -12927,6 +12993,20 @@ fn set_integrity_level(
             return set_exotic_integrity(gc, vm, what, target, level);
         }
         let tag = unsafe { (*(tptr as *const GcHeader)).tag() };
+        if tag == TAG_TYPED_ARRAY && level >= 1 {
+            let buf = unsafe { rune_core::typedarray::RuneTypedArray::buffer(tptr) };
+            if !buf.is_null()
+                && unsafe { rune_core::typedarray::RuneArrayBuffer::is_resizable(buf) }
+                && unsafe { rune_core::typedarray::RuneTypedArray::effective_length(tptr) } > 0
+            {
+                return Err(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "Cannot seal or freeze a TypedArray backed by a resizable ArrayBuffer",
+                ));
+            }
+        }
         if matches!(
             tag,
             TAG_MAP | TAG_SET | TAG_ARRAY_BUFFER | TAG_TYPED_ARRAY | TAG_STRING_OBJ
@@ -13018,10 +13098,15 @@ macro_rules! integrity_test_builtin {
                     _ => exotic_is_frozen(ptr),
                 });
             }
-            if matches!(
-                tag,
-                TAG_MAP | TAG_SET | TAG_ARRAY_BUFFER | TAG_TYPED_ARRAY | TAG_STRING_OBJ
-            ) {
+            if tag == TAG_STRING_OBJ {
+                let level = vm.side_integrity_level(ptr);
+                return Value::boolean(match $kind {
+                    0 => level.is_none(),
+                    1 => level.is_some() && string_object_is_sealed(ptr),
+                    _ => level.is_some() && string_object_is_frozen(ptr),
+                });
+            }
+            if matches!(tag, TAG_MAP | TAG_SET | TAG_ARRAY_BUFFER | TAG_TYPED_ARRAY) {
                 let level = vm.side_integrity_level(ptr);
                 return Value::boolean(match $kind {
                     0 => level.is_none(),

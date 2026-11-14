@@ -17759,3 +17759,46 @@ fn test_object_enumeration_names_values_entries() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_define_property_array_data_guard_and_keys() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var a = [];
+            Object.defineProperty(a, "0", { value: NaN });
+            Object.defineProperty(a, "0", { value: NaN });
+            var ad = Object.getOwnPropertyDescriptor(a, "0");
+            var o = {};
+            var getter = function () { return 1; };
+            Object.defineProperty(o, "foo", { get: getter });
+            Object.defineProperty(o, "foo", { set: undefined });
+            var od = Object.getOwnPropertyDescriptor(o, "foo");
+            var keyed = {};
+            Object.defineProperty(keyed, [1, 2], {});
+            var str = new String();
+            Object.preventExtensions(str);
+            var strThrew = false;
+            try { Object.defineProperty(str, "0", { value: "c" }); } catch (e) { strThrew = e instanceof TypeError; }
+            var strObj = new String("abc");
+            strObj.len = 100;
+            Object.preventExtensions(strObj);
+            [
+                Number.isNaN(ad.value),
+                ad.writable === false,
+                ad.enumerable === false,
+                ad.configurable === false,
+                od.get === getter,
+                typeof od.set === "undefined",
+                od.configurable === false,
+                keyed.hasOwnProperty("1,2"),
+                strThrew,
+                str.hasOwnProperty("0") === false,
+                Object.isFrozen(strObj) === false
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

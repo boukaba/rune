@@ -3513,6 +3513,34 @@ Integration suite: **903 passed, 0 failed, 3 ignored**.
 
 Integration suite: **904 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — defineProperty locked data + String-object integrity (2026-11-14)
+
+- Fixed a large array-define bug: a **locked overlay data property** whose value
+  is a Smi/primitive was misclassified as "accessor being converted to data",
+  so redefining it (even with the identical value, e.g. NaN twice) threw
+  TypeError. The guard now checks "is not an accessor pair" instead of
+  "has a heap pointer".
+- Redefining a non-configurable accessor with `{ get/set: undefined }` now
+  preserves the other pair half (previously the descriptor became data with
+  both halves undefined).
+- `Object.defineProperty` converts object property keys with observable
+  `ToPrimitive(hint string)`, so array keys like `[1,2]` become `"1,2"`
+  instead of "Invalid property key".
+- String-wrapper integrity:
+  - new indexed/named properties on a non-extensible String wrapper throw
+    TypeError (existing ones redefine);
+  - `Object.isSealed/isFrozen` on String wrappers inspect the wrapper's own
+    extra-property attributes instead of reporting true from the side marker
+    alone;
+  - sealing/freezing a non-zero-length TypedArray backed by a resizable
+    ArrayBuffer throws TypeError (zero-length remains allowed).
+- Test262: Object **3066 → 3094/3411**, defineProperty **1057/1131**,
+  defineProperties **518/632**, preventExtensions **37/40**, isFrozen
+  **58/59**.
+- Regression: `test_define_property_array_data_guard_and_keys`.
+
+Integration suite: **905 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

@@ -3297,6 +3297,23 @@ Integration suite: **892 passed, 0 failed, 3 ignored**.
 
 Integration suite: **893 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — String coercion edges + spec GetMethod (2026-11-14)
+
+- `String.prototype.slice`/`substring` treat an explicit `undefined` end as
+  the string length (not ToNumber 0); slice already used sync ToNumber.
+- `String.prototype.lastIndexOf` coerces searchString with observable
+  ToString (user `toString`/`valueOf`) instead of `[object Object]`.
+- `dispatch_symbol_method` uses re-entrant `get_property_value_sync`, so a
+  throwing `@@match`/`@@replace`/@@search/@split getter propagates the
+  original exception instead of being reported as a non-callable method.
+- `instanceof` with a builtin-function RHS returns false (builtin handles are
+  Objects without an exposed `.prototype`) instead of throwing.
+- Test262: String **1134 → 1152/1223**, slice **38/38**, substring **46/46**,
+  replace **51/55**, lastIndexOf **23/25**, Function **345/509**.
+- Regression: `test_string_coercion_and_replace_getters`.
+
+Integration suite: **894 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

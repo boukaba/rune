@@ -17375,3 +17375,30 @@ fn test_exotic_integrity_levels() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_string_coercion_and_replace_getters() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var obj = { toString: function () { return "AB"; } };
+            var poisoned = {};
+            Object.defineProperty(poisoned, Symbol.replace, {
+                get: function () { throw new TypeError("getter"); }
+            });
+            var getterThrew = false;
+            try { "".replace(poisoned); } catch (e) { getterThrew = e instanceof TypeError; }
+            [
+                "false".substring(true, undefined) === "alse",
+                "false".slice(true, undefined) === "alse",
+                "undefined".slice("e", undefined) === "undefined",
+                "ABBABABAB".lastIndexOf(obj) === 7,
+                getterThrew,
+                (3 instanceof parseInt) === false
+            ].join("|") === "true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

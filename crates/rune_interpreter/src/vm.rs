@@ -8275,6 +8275,13 @@ impl Vm {
                     // If rhs has @@hasInstance, call it instead of OrdinaryHasInstance.
                     let rhs = self.pop();
                     let lhs = self.pop();
+                    // Builtin function handles are Objects (no [[Prototype]]
+                    // data property exposed); OrdinaryHasInstance yields false.
+                    if rhs.is_builtin() {
+                        self.push(Value::boolean(false));
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    }
                     // §13.10.1: If Type(rhs) is not Object → TypeError
                     if !rhs.is_heap_object() {
                         let err = crate::errors::error_object(

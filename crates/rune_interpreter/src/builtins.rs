@@ -1,7 +1,6 @@
 use crate::vm::SymbolMethodResult;
 use crate::vm::Vm;
 use crate::vm::get_iter_method;
-use crate::vm::get_symbol_method;
 use crate::vm::load_property_recursive;
 use crate::vm::to_number;
 use crate::vm::value_to_array_index;
@@ -7808,7 +7807,21 @@ fn dispatch_symbol_method(
     if let Some(ptr) = pattern.heap_ptr() {
         let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
         if tag == TAG_OBJECT || tag == TAG_REGEXP {
-            match get_symbol_method(gc, pattern, symbol_id, Some(vm.function_prototype)) {
+            let method = match get_property_value_sync(gc, vm, pattern, Value::symbol(symbol_id)) {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Err(());
+                }
+            };
+            let result = if method.is_undefined() || method.is_null() {
+                SymbolMethodResult::NotFound
+            } else if is_callable_value(method) {
+                SymbolMethodResult::Found(method)
+            } else {
+                SymbolMethodResult::NotCallable
+            };
+            match result {
                 SymbolMethodResult::Found(m) => {
                     let mut args = Vec::with_capacity(1 + extra_args.len());
                     args.push(this);
@@ -16090,7 +16103,7 @@ pub fn string_slice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
                 return Value::undefined();
             }
         };
-    let raw_end = match args.get(1).copied() {
+    let raw_end = match args.get(1).copied().filter(|v| !v.is_undefined()) {
         Some(v) => match to_number_sync(gc, vm, v) {
             Ok(n) => Some(n),
             Err(e) => {
@@ -16286,7 +16299,11 @@ pub fn string_last_index_of(gc: &mut SemiSpace, this: Value, args: &[Value], vm:
         return Value::undefined();
     };
     let units = s.encode_utf16().collect::<Vec<u16>>();
-    let search_str = arg_to_string(gc, args.first().copied(), vm);
+    let search_str =
+        match to_primitive_string(gc, args.first().copied().unwrap_or(Value::undefined()), vm) {
+            Some(v) => v,
+            None => return Value::undefined(),
+        };
     let search_units = search_str.encode_utf16().collect::<Vec<u16>>();
     let len = units.len();
     let pos = args.get(1).copied().unwrap_or(Value::undefined());
@@ -16533,8 +16550,8 @@ pub fn string_substring(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mu
     let units = s.encode_utf16().collect::<Vec<u16>>();
     let len = units.len() as f64;
     let raw_start = to_int_sync!(gc, vm, args.first().copied().unwrap_or(Value::undefined()));
-    let raw_end = match args.get(1) {
-        Some(&v) => Some(to_int_sync!(gc, vm, v)),
+    let raw_end = match args.get(1).copied().filter(|v| !v.is_undefined()) {
+        Some(v) => Some(to_int_sync!(gc, vm, v)),
         None => None,
     };
     let final_start = raw_start.max(0.0).min(len) as usize;

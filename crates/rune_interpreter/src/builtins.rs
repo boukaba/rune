@@ -22189,6 +22189,11 @@ pub fn array_concat(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
+    let this = if !this.is_heap_object() {
+        crate::vm::to_object_value(gc, this, vm)
+    } else {
+        this
+    };
     // B1f-6d: species Construct installs (len 0 per spec; dense swaps in,
     // plain takes CreateDataPropertyOrThrow per write via temp install).
     let made = match species_stage(gc, vm, array_concat, this, args, 0) {
@@ -28206,7 +28211,7 @@ pub fn default_builtins() -> Vec<Builtin> {
             func: array_from,
         },
         Builtin {
-            length: 1,
+            length: 0,
             name: "Array_of",
             func: array_of,
         },
@@ -28659,17 +28664,17 @@ pub fn default_builtins() -> Vec<Builtin> {
             func: array_at,
         },
         Builtin {
-            length: 2,
+            length: 1,
             name: "Array_prototype_includes",
             func: array_includes,
         },
         Builtin {
-            length: 2,
+            length: 1,
             name: "Array_prototype_indexOf",
             func: array_index_of,
         },
         Builtin {
-            length: 2,
+            length: 1,
             name: "Array_prototype_lastIndexOf",
             func: array_last_index_of,
         },
@@ -28714,7 +28719,7 @@ pub fn default_builtins() -> Vec<Builtin> {
             func: array_every,
         },
         Builtin {
-            length: 1,
+            length: 0,
             name: "Array_prototype_flat",
             func: array_flat,
         },

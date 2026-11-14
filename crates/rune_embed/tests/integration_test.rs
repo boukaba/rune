@@ -17457,3 +17457,26 @@ fn test_array_at_and_primitive_receivers() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_array_method_lengths_and_concat_receiver() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            [
+                Array.prototype.indexOf.length === 1,
+                Array.prototype.lastIndexOf.length === 1,
+                Array.prototype.includes.length === 1,
+                Array.prototype.flat.length === 0,
+                Array.of.length === 0,
+                Array.prototype.splice.length === 2,
+                Array.prototype.slice.length === 2,
+                Array.prototype.concat.call(true)[0] instanceof Boolean,
+                Array.prototype.concat.call(3)[0] instanceof Number
+            ].join("|") === "true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

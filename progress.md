@@ -3349,6 +3349,20 @@ Integration suite: **895 passed, 0 failed, 3 ignored**.
 
 Integration suite: **896 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Array method metadata + concat receivers (2026-11-14)
+
+- Corrected builtin `length` metadata for Array methods:
+  `indexOf`/`lastIndexOf`/`includes` → 1, `Array.prototype.flat` → 0,
+  `Array.of` → 0 (`splice`/`slice` remain 2).
+- `Array.prototype.concat` boxes primitive receivers via ToObject, so
+  `concat.call(true)` yields a Boolean wrapper element and `call(3)` a Number
+  wrapper (spec receiver boxing before species/iteration).
+- Test262: Array **2657 → 2664/3081**, indexOf **164/201**, lastIndexOf
+  **158/198**, concat **50/69**.
+- Regression: `test_array_method_lengths_and_concat_receiver`.
+
+Integration suite: **897 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

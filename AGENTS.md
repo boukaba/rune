@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Array method metadata + concat receivers (2026-11-14)**: corrected lengths, primitive receiver boxing in concat. Array **2664/3081**, indexOf **164/201**, concat **50/69**. Integration **897**.
 - **Array generic receivers + at (2026-11-14)**: Array.prototype.at, primitive receiver boxing, prototype-chain length/index reads. Array **2657/3081**, at **10/13**, indexOf **163/201**. Integration **896**.
 - **padStart/padEnd + arguments semantics (2026-11-14)**: ToInteger edge cases, observable fill ToString, Object-prototype Arguments with hidden marker. String **1159/1223**, pads **13/13**, trim **128/129**. Integration **895**.
 - **String coercion edges + GetMethod (2026-11-14)**: undefined ends, lastIndexOf ToString, sync @@method getters, builtin instanceof false. String **1152/1223**, slice **38/38**, substring **46/46**, Function **345/509**. Integration **894**.

@@ -4255,6 +4255,25 @@ Integration suite: **936 passed, 0 failed, 3 ignored**.
 
 Integration suite: **937 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Computed method attrs + escaped private names (2026-11-15)
+
+- New `DefineMethodProperty` / `DefineMethodAccessor` opcodes define
+  computed-name class methods and accessors with non-enumerable,
+  writable/configurable attributes (data and accessor pairs).
+- The lexer accepts identifiers whose first character is a `\uXXXX` /
+  `\u{...}` escape (previously `Illegal`).
+- Private names accept non-ASCII IdentifierStart/Part characters
+  (Other_ID_Start such as U+2118, ZWNJ/ZWJ), not just `is_alphanumeric`.
+- Test262: language/statements/class **1849 → 1994/4367**,
+  language/expressions/class **1764 → 1909/4059**,
+  class/elements **324 → 470/1534**, elements/syntax **18 → 21/30**.
+- Regression extended: escaped private fields in
+  `test_class_methods_non_enumerable_and_unicode_identifier_fields`.
+- Known: private instance element initialization still runs at constructor
+  end; async/generator private methods and initialization order remain.
+
+Integration suite: **937 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

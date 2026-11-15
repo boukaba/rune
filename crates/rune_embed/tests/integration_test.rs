@@ -19039,6 +19039,12 @@ fn test_class_methods_non_enumerable_and_unicode_identifier_fields() {
                 \u{6F} = 4;
             }
 
+            class Escaped {
+                #\u2118 = 1;
+                #\u{6F} = 2;
+                sum() { return this.#\u2118 + this.#\u{6F}; }
+            }
+
             var keys = Object.keys(C.prototype);
             var c = new C();
             [
@@ -19050,8 +19056,9 @@ fn test_class_methods_non_enumerable_and_unicode_identifier_fields() {
                 c.o === 4,
                 c.method() === 1,
                 c.accessor === 2,
-                C.staticMethod() === 3
-            ].join("|") === "true|true|true|true|true|true|true|true|true";
+                C.staticMethod() === 3,
+                new Escaped().sum() === 3
+            ].join("|") === "true|true|true|true|true|true|true|true|true|true";
             "#,
         )
         .unwrap();

@@ -1171,7 +1171,7 @@ impl Emitter {
                 // Computed key: [proto, key] then MakeFunction → [proto, key, fn]
                 self.emit_expression(expr);
                 self.emit(Opcode::MakeFunction, vec![*func_idx as i64]);
-                self.emit(Opcode::DefineProperty, vec![usize::MAX as i64]);
+                self.emit(Opcode::DefineMethodProperty, vec![]);
                 continue;
             }
             self.emit(Opcode::MakeFunction, vec![*func_idx as i64]);
@@ -1223,7 +1223,7 @@ impl Emitter {
                     PropKey::Identifier(s) => s.to_string(),
                     PropKey::Number(n) => n.to_string(),
                     PropKey::Computed(_) => {
-                        self.emit(Opcode::DefineAccessor, vec![usize::MAX as i64]);
+                        self.emit(Opcode::DefineMethodAccessor, vec![]);
                         continue;
                     }
                 };
@@ -1542,7 +1542,7 @@ impl Emitter {
                 if let PropKey::Computed(expr) = key {
                     self.emit_expression(expr);
                     self.emit(Opcode::MakeFunction, vec![*func_idx as i64]);
-                    self.emit(Opcode::DefineProperty, vec![usize::MAX as i64]);
+                    self.emit(Opcode::DefineMethodProperty, vec![]);
                     self.emit(Opcode::Pop, vec![]);
                     continue;
                 }
@@ -1603,7 +1603,7 @@ impl Emitter {
                         PropKey::Identifier(s) => s.to_string(),
                         PropKey::Number(n) => n.to_string(),
                         PropKey::Computed(_) => {
-                            self.emit(Opcode::DefineAccessor, vec![usize::MAX as i64]);
+                            self.emit(Opcode::DefineMethodAccessor, vec![]);
                             self.emit(Opcode::Pop, vec![]);
                             continue;
                         }

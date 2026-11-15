@@ -10072,6 +10072,34 @@ impl Vm {
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
                 }
+                Opcode::DefineMethodProperty => {
+                    let value = self.pop();
+                    let raw_key = self.pop();
+                    let obj = self.pop();
+                    if let Some(key) = value_to_prop_key(raw_key) {
+                        let key_str = property_key_string(raw_key);
+                        let result = define_method_data(gc, self, obj, key, &key_str, value);
+                        self.push(result);
+                    } else {
+                        self.push(obj);
+                    }
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::DefineMethodAccessor => {
+                    let setter = self.pop();
+                    let getter = self.pop();
+                    let raw_key = self.pop();
+                    let obj = self.pop();
+                    let acc = Value::from_heap_ptr(AccessorPair::allocate(gc, getter, setter));
+                    if let Some(key) = value_to_prop_key(raw_key) {
+                        let key_str = property_key_string(raw_key);
+                        let result = define_method_data(gc, self, obj, key, &key_str, acc);
+                        self.push(result);
+                    } else {
+                        self.push(obj);
+                    }
+                    self.frames[fi].pc = pc + 1;
+                }
                 Opcode::SetMethodAttrs => {
                     let key_idx = instr.operands[0] as usize;
                     let obj = self.pop();
@@ -18822,6 +18850,51 @@ pub(crate) fn value_is_constructor(vm: &Vm, v: Value) -> bool {
         }
     }
     false
+}
+
+fn define_method_data(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    obj: Value,
+    key: PropertyKey,
+    key_str: &str,
+    value: Value,
+) -> Value {
+    let attr = rune_core::shape::ATTR_WRITABLE | rune_core::shape::ATTR_CONFIGURABLE;
+    if let Some(ptr) = obj.heap_ptr() {
+        let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+        if tag == TAG_OBJECT {
+            let o = ptr as *mut JSObject;
+            let live = vm.ensure_object_capacity(gc, o);
+            let shape = unsafe { JSObject::shape_ptr(live) };
+            if let Some(slot) = shape.lookup(&key) {
+                unsafe { JSObject::set_slot(live, slot, value) };
+                let new_shape = rune_core::shape::Shape::with_replaced_attr(shape, slot, attr);
+                unsafe { JSObject::set_shape_ptr(live, new_shape) };
+            } else {
+                unsafe {
+                    JSObject::add_property_with_attrs(live, key, key_str.to_string(), value, attr)
+                };
+            }
+            return Value::from_heap_ptr(live as *mut u8);
+        } else if tag == TAG_FUNC {
+            let props = unsafe { Func::extra_props(ptr as *mut Func) };
+            if !props.is_null() {
+                let o = vm.ensure_object_capacity(gc, props as *mut JSObject);
+                let shape = unsafe { JSObject::shape_ptr(o) };
+                if let Some(slot) = shape.lookup(&key) {
+                    unsafe { JSObject::set_slot(o, slot, value) };
+                    let new_shape = rune_core::shape::Shape::with_replaced_attr(shape, slot, attr);
+                    unsafe { JSObject::set_shape_ptr(o, new_shape) };
+                } else {
+                    unsafe {
+                        JSObject::add_property_with_attrs(o, key, key_str.to_string(), value, attr)
+                    };
+                }
+            }
+        }
+    }
+    obj
 }
 
 pub(crate) fn has_property(obj: Value, raw_key: Value, function_prototype: Option<Value>) -> bool {

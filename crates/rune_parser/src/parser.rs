@@ -3020,7 +3020,7 @@ impl Parser {
             .value
             .chars()
             .next()
-            .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
+            .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$' || c > '\u{007F}')
             && self
                 .tok
                 .value

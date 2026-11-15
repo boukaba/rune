@@ -184,6 +184,9 @@ pub enum Opcode {
     DeleteNameWith,
     // Make a class method/accessor property non-enumerable (W|C attrs).
     SetMethodAttrs,
+    // Computed class method/accessor define with W|C attributes.
+    DefineMethodProperty,
+    DefineMethodAccessor,
 }
 
 #[derive(Clone, Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]

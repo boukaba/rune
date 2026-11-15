@@ -915,6 +915,7 @@ impl Lexer {
             }
             '~' => Token::new(TokenKind::BitNot, self.start, self.pos, "~".into()),
             '#' => Token::new(TokenKind::Hash, self.start, self.pos, "#".into()),
+            '\\' => self.scan_identifier('\\'),
 
             _ => Token::new(TokenKind::Illegal, self.start, self.pos, ch.to_string()),
         }

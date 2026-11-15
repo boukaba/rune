@@ -2180,6 +2180,9 @@ impl Parser {
             self.error("yield expression must be parenthesized here".to_string());
         }
         let arg = self.parse_unary();
+        if op == UnaryOp::Delete && matches!(arg, Expr::PrivateMember(..)) {
+            self.error("Private fields cannot be deleted".to_string());
+        }
         Expr::Unary(
             op,
             Box::new(arg),
@@ -2926,6 +2929,78 @@ impl Parser {
             TokenKind::RegExp => {
                 let t = self.tok.clone();
                 self.advance();
+                // §12.2.9 early errors: validate flags and pattern at parse
+                // time so literal syntax failures are SyntaxErrors.
+                let mut seen_flags: Vec<char> = Vec::new();
+                for flag in t.flags.chars() {
+                    if !"dgimsuvy".contains(flag) || seen_flags.contains(&flag) {
+                        self.errors.push(format!(
+                            "Invalid regular expression flags: /{}/{}",
+                            t.value, t.flags
+                        ));
+                        break;
+                    }
+                    seen_flags.push(flag);
+                }
+                if seen_flags.contains(&'u') && seen_flags.contains(&'v') {
+                    self.errors
+                        .push("Invalid regular expression: u and v flags".to_string());
+                }
+                if let Err(message) = rune_regex::parse::parse_regex(&t.value) {
+                    self.errors.push(format!(
+                        "Invalid regular expression /{}/{}: {message}",
+                        t.value, t.flags
+                    ));
+                }
+                let bytes = t.value.as_bytes();
+                let mut names: Vec<(String, usize)> = Vec::new();
+                let mut alternative = 0usize;
+                let mut in_class = false;
+                let mut escaped = false;
+                let mut i = 0usize;
+                while i < bytes.len() {
+                    let b = bytes[i];
+                    if escaped {
+                        escaped = false;
+                        i += 1;
+                        continue;
+                    }
+                    match b {
+                        b'\\' => escaped = true,
+                        b'[' if !in_class => in_class = true,
+                        b']' if in_class => in_class = false,
+                        b'|' if !in_class => alternative += 1,
+                        b'(' if !in_class
+                            && i + 3 < bytes.len()
+                            && bytes[i + 1] == b'?'
+                            && bytes[i + 2] == b'<'
+                            && bytes[i + 3] != b'='
+                            && bytes[i + 3] != b'!' =>
+                        {
+                            let start = i + 3;
+                            let mut end = start;
+                            while end < bytes.len() && bytes[end] != b'>' {
+                                end += 1;
+                            }
+                            if let Ok(name) = std::str::from_utf8(&bytes[start..end]) {
+                                if names
+                                    .iter()
+                                    .any(|(n, alt)| n == name && *alt == alternative)
+                                {
+                                    self.errors.push(format!(
+                                        "Invalid regular expression /{}/{}: duplicate capture group name",
+                                        t.value, t.flags
+                                    ));
+                                } else {
+                                    names.push((name.to_string(), alternative));
+                                }
+                            }
+                            i = end;
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
                 Expr::RegExp(
                     t.value.into_boxed_str(),
                     t.flags.into_boxed_str(),

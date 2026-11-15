@@ -1066,12 +1066,11 @@ impl Lexer {
         // Scan flags
         let mut flags = String::new();
         while let Some(c) = self.peek() {
-            match c {
-                'g' | 'i' | 'm' | 's' | 'u' | 'y' | 'd' | 'v' => {
-                    flags.push(c);
-                    self.advance();
-                }
-                _ => break,
+            if c.is_alphanumeric() || c == '_' || c == '$' || c > '\u{007F}' {
+                flags.push(c);
+                self.advance();
+            } else {
+                break;
             }
         }
         Token::new_regex(start, self.pos, pattern, flags)

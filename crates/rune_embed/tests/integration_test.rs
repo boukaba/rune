@@ -19196,3 +19196,37 @@ fn test_lexical_redeclaration_early_errors() {
     assert!(ctx.eval("{ let x; { let x; } }").is_ok());
     assert!(ctx.eval("function f() {} function f() {}").is_ok());
 }
+
+#[test]
+fn test_regexp_literal_early_errors() {
+    let mut ctx = Context::new_small();
+    for source in [
+        "/a/gg;",
+        "/a/z;",
+        "/[/;",
+        "/(?<a>x)(?<a>y)/;",
+        "/(?<a>x)\\k<b>/;",
+    ] {
+        assert!(
+            ctx.eval(source).is_err(),
+            "expected SyntaxError for {source:?}"
+        );
+    }
+    assert!(ctx.eval("/a+/gim.test('AA') === true;").is_ok());
+}
+
+#[test]
+fn test_delete_private_member_early_error() {
+    let mut ctx = Context::new_small();
+    for source in [
+        "class C { #x; m() { return delete this.#x; } }",
+        "class C { #x; m() { return delete ((this.#x)); } }",
+        "class C { #x; m() { return delete (this.#x); } }",
+    ] {
+        assert!(
+            ctx.eval(source).is_err(),
+            "expected SyntaxError for {source:?}"
+        );
+    }
+    assert!(ctx.eval("var o = { x: 1 }; delete o.x;").is_ok());
+}

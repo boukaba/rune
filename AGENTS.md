@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **RegExp literal + delete-private early errors (2026-11-15)**: parse-time regex flags/pattern/duplicate-group checks, delete private member SyntaxError. regexp **134/238**, class delete **96/96**, language **12822/23979**. Integration **944**.
 - **Lexical redeclaration early errors (2026-11-15)**: block/program/function/switch lexical-vs-lexical and lexical-vs-hoisted-var checks. language **12533/23979**, block redecl **94/95**, switch redecl **63/64**. Integration **942**.
 - **Assignment/update target early errors (2026-11-15)**: AssignmentTargetType validation, invalid destructuring rejection, array holes. language **12374/23979**, assignmenttargettype **299/324**. Integration **941**.
 - **Async/generator reserved identifiers (2026-11-15)**: parser async/generator contexts reject await/yield bindings/refs/labels; unary-yield parenthesization. class statements **2297/4367**, class expressions **2191/4059**, language **12046/23979**. Integration **940**.

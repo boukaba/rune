@@ -4386,6 +4386,27 @@ Integration suite: **941 passed, 0 failed, 3 ignored**.
 
 Integration suite: **942 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — RegExp literal + delete-private early errors (2026-11-15)
+
+- RegExp literals are validated at parse time:
+  - flags must be from `dgimsuvy`, unique, and not combine u+v;
+  - lexer scans any identifier-part characters as flags so unknown flags are
+    rejected by the parser instead of becoming trailing identifiers;
+  - the pattern is parsed with `rune_regex` and invalid syntax is a SyntaxError;
+  - duplicate named capture groups are rejected only within the same
+    alternative (disjoint-alternative duplicates remain valid).
+- `delete` of a private member (including parenthesized forms) is a
+  SyntaxError.
+- Test262: literals/regexp **37 → 134/238**, class delete early errors
+  **96/96** in both statement and expression suites, language overall
+  **12,533 → 12,822/23,979**.
+- Regressions: `test_regexp_literal_early_errors`,
+  `test_delete_private_member_early_error`.
+- Remaining regexp failures: u-flag range/identity/octal validation and a few
+  legacy-literal conformance cases.
+
+Integration suite: **944 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

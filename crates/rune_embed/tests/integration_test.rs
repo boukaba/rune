@@ -19263,3 +19263,19 @@ fn test_parameter_and_object_early_errors() {
             .is_ok()
     );
 }
+
+#[test]
+fn test_escaped_keywords_and_object_property_syntax() {
+    let mut ctx = Context::new_small();
+    for source in ["({ #m() {} });", "({ \\u0067et m() {} });", "({ a b });"] {
+        assert!(
+            ctx.eval(source).is_err(),
+            "expected SyntaxError for {source:?}"
+        );
+    }
+    assert!(ctx.eval("({ a: 1, b: 2 }).b === 2;").is_ok());
+    assert!(
+        ctx.eval("class C { \\u0067et() { return 1; } } new C().get() === 1;")
+            .is_ok()
+    );
+}

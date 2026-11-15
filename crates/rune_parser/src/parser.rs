@@ -144,6 +144,10 @@ impl Parser {
 
     // ---- Statements ----
 
+    fn token_was_escaped(&self) -> bool {
+        self.source_chars.get(self.tok.span.start).copied() == Some('\\')
+    }
+
     fn is_simple_assignment_target(expr: &Expr) -> bool {
         matches!(
             expr,
@@ -1039,6 +1043,7 @@ impl Parser {
             let mstart = self.span();
             let is_static = if self.tok.kind == TokenKind::Identifier
                 && self.tok.value == "static"
+                && !self.token_was_escaped()
                 && self.lexer.peek_token().kind != TokenKind::LParen
             {
                 self.advance();
@@ -1075,7 +1080,8 @@ impl Parser {
                         | TokenKind::EqAssign
                         | TokenKind::Comma
                         | TokenKind::RBrace
-                );
+                )
+                && !self.token_was_escaped();
             if is_async {
                 self.advance();
             }
@@ -1088,6 +1094,7 @@ impl Parser {
                 && !is_generator
                 && self.tok.kind == TokenKind::Identifier
                 && self.tok.value == "get"
+                && !self.token_was_escaped()
                 && self.lexer.peek_token().kind != TokenKind::LParen
             {
                 self.advance();
@@ -1096,6 +1103,7 @@ impl Parser {
                 && !is_generator
                 && self.tok.kind == TokenKind::Identifier
                 && self.tok.value == "set"
+                && !self.token_was_escaped()
                 && self.lexer.peek_token().kind != TokenKind::LParen
             {
                 self.advance();
@@ -2782,6 +2790,11 @@ impl Parser {
                 let mut proto_count = 0usize;
                 while self.tok.kind != TokenKind::RBrace && self.tok.kind != TokenKind::Eof {
                     let pstart = self.span();
+                    if self.tok.kind == TokenKind::Hash {
+                        self.error("Private names are not allowed in object literals".to_string());
+                        self.advance();
+                        continue;
+                    }
                     let is_async = (self.tok.kind == TokenKind::Async
                         || (self.tok.kind == TokenKind::Identifier && self.tok.value == "async"))
                         && !matches!(
@@ -2791,7 +2804,8 @@ impl Parser {
                                 | TokenKind::EqAssign
                                 | TokenKind::Comma
                                 | TokenKind::RBrace
-                        );
+                        )
+                        && !self.token_was_escaped();
                     if is_async {
                         self.advance();
                     }
@@ -2862,6 +2876,7 @@ impl Parser {
                             && !is_generator
                             && self.tok.kind == TokenKind::Identifier
                             && self.tok.value == "get"
+                            && !self.token_was_escaped()
                             && self.lexer.peek_token().kind != TokenKind::LParen
                             && self.lexer.peek_token().kind != TokenKind::Colon
                         {
@@ -2871,6 +2886,7 @@ impl Parser {
                             && !is_generator
                             && self.tok.kind == TokenKind::Identifier
                             && self.tok.value == "set"
+                            && !self.token_was_escaped()
                             && self.lexer.peek_token().kind != TokenKind::LParen
                             && self.lexer.peek_token().kind != TokenKind::Colon
                         {
@@ -2997,6 +3013,9 @@ impl Parser {
                                     Box::from("_error")
                                 }
                             };
+                            if is_generator || is_async {
+                                self.error("Invalid method definition prefix".to_string());
+                            }
                             if self.strict && Self::is_strict_reserved_word(&name) {
                                 self.error(format!(
                                     "Unexpected strict mode reserved word '{name}'"
@@ -3039,6 +3058,8 @@ impl Parser {
                     }
                     if self.tok.kind == TokenKind::Comma {
                         self.advance();
+                    } else if self.tok.kind != TokenKind::RBrace {
+                        self.error("Expected comma between object properties".to_string());
                     }
                 }
                 self.expect(TokenKind::RBrace);

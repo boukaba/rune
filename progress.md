@@ -4445,6 +4445,23 @@ Integration suite: **944 passed, 0 failed, 3 ignored**.
 
 Integration suite: **945 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Escaped keywords + object property syntax (2026-11-15)
+
+- Escaped keyword spellings no longer act as modifiers:
+  - object literals: `\u0067et m(){}` / `\u0061sync` are ordinary identifiers,
+    so they fail the property-comma rule rather than becoming accessors or
+    async methods;
+  - class bodies: escaped `static`, `async`, `get`, `set` are method names,
+    not modifiers.
+- Object literals reject private names (`{ #m() {} }`) and missing commas
+  between properties (`{ a b }`).
+- Test262: language overall **13,071 → 13,093/23,979**,
+  expressions/object **770 → 787/1170**, statements/class
+  **2423 → 2458/4367**, expressions/class **2300 → 2332/4059**.
+- Regression: `test_escaped_keywords_and_object_property_syntax`.
+
+Integration suite: **946 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

@@ -19339,3 +19339,28 @@ fn test_string_escape_early_errors() {
     // Backslash line continuations contribute no characters.
     assert!(ctx.eval("\"a\\\nb\" === 'ab';").unwrap().to_bool());
 }
+
+#[test]
+fn test_regexp_quantifier_and_unicode_early_errors() {
+    let mut ctx = Context::new_small();
+    for source in [
+        "/{2,3}/;",
+        "/{2}/;",
+        "/a{3,2}/;",
+        "/(?=.)?/;",
+        r"/\M/u;",
+        r"/\1/u;",
+        r"/\8/u;",
+        r"/[\d-a]/u;",
+        r"/[%-\d]/u;",
+        "/a\\\n/;",
+    ] {
+        assert!(
+            ctx.eval(source).is_err(),
+            "expected SyntaxError for {source:?}"
+        );
+    }
+    assert!(ctx.eval(r"/a{2,3}/.test('aaa');").is_ok());
+    assert!(ctx.eval(r"/(a)\1/u.test('aa');").is_ok());
+    assert!(ctx.eval(r"/[a-z]/u.test('q');").is_ok());
+}

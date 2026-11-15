@@ -291,11 +291,8 @@ fn parse_unicode_escape(chars: &[char], i: &mut usize) -> Result<char, String> {
         let mut digits = 0;
         while *i < chars.len() && chars[*i] != '}' {
             let digit = hex_digit(chars[*i]).ok_or_else(|| "Invalid escape".to_string())?;
-            value = value * 16 + digit;
+            value = value.saturating_mul(16).saturating_add(digit);
             digits += 1;
-            if digits > 6 {
-                return Err("Invalid escape".into());
-            }
             *i += 1;
         }
         if *i >= chars.len() || chars[*i] != '}' || digits == 0 {

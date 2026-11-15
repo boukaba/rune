@@ -4520,6 +4520,25 @@ Integration suite: **948 passed, 0 failed, 3 ignored**.
 
 Integration suite: **949 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — RegExp literal validation (2026-11-15)
+
+- Regular expression literals now reject:
+  - raw line terminators in the pattern and backslash line continuations;
+  - unterminated block comments;
+  - quantifiers with nothing to repeat (`/{2}/`, `/{/u`), out-of-order
+    `{n,m}` ranges, and quantification of lookahead assertions;
+  - in `u`/`v` mode: invalid identity escapes (`\M`), out-of-bounds decimal
+    escapes (`\1` with too few groups, `\8`), invalid control escapes,
+    legacy octal escapes, and invalid class range endpoints
+    (`[\d-a]`, `[% -\d]`, `[--\d]`, reversed ranges);
+  - escaped flag sequences and flags after an escaped flag character.
+- `\u{...}` escapes accept arbitrary leading zeros (value must fit 0x10FFFF).
+- Test262: language/literals/regexp **136 → 176/238**, language overall
+  **13,364 → 13,407/23,979**.
+- Regression: `test_regexp_quantifier_and_unicode_early_errors`.
+
+Integration suite: **950 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

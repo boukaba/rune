@@ -222,11 +222,16 @@ impl Lexer {
                     // Block comment
                     self.advance();
                     self.advance();
+                    let mut closed = false;
                     while let (Some(a), Some(b)) = (self.advance(), self.peek()) {
                         if a == '*' && b == '/' {
                             self.advance();
+                            closed = true;
                             break;
                         }
+                    }
+                    if !closed {
+                        self.errors.push("Unterminated comment".into());
                     }
                 }
                 _ => break,
@@ -1094,11 +1099,25 @@ impl Lexer {
                     self.errors.push("Unterminated regex".into());
                     break;
                 }
+                Some('\n' | '\r' | '\u{2028}' | '\u{2029}') => {
+                    self.errors.push(
+                        "Line terminator is not allowed in a regular expression literal".into(),
+                    );
+                    break;
+                }
                 Some('\\') => {
                     self.advance();
                     pattern.push('\\');
-                    if let Some(c) = self.advance() {
-                        pattern.push(c);
+                    match self.advance() {
+                        Some('\n' | '\r' | '\u{2028}' | '\u{2029}') => {
+                            self.errors.push(
+                                "Line terminator is not allowed in a regular expression literal"
+                                    .into(),
+                            );
+                            break;
+                        }
+                        Some(c) => pattern.push(c),
+                        None => {}
                     }
                 }
                 Some('[') => {

@@ -443,6 +443,265 @@ impl Parser {
         }
     }
 
+    fn validate_unicode_regexp_escapes(&mut self, pattern: &str) {
+        let chars: Vec<char> = pattern.chars().collect();
+        let mut captures = 0usize;
+        let mut in_class = false;
+        let mut i = 0usize;
+        while i < chars.len() {
+            let c = chars[i];
+            if c == '\\' {
+                let Some(next) = chars.get(i + 1).copied() else {
+                    break;
+                };
+                if in_class {
+                    if matches!(next, '1'..='9') {
+                        self.errors
+                            .push("Invalid regular expression: invalid class escape".to_string());
+                    }
+                } else {
+                    match next {
+                        '1'..='9' => {
+                            let n = next.to_digit(10).unwrap_or(0) as usize;
+                            if n > captures {
+                                self.errors.push(
+                                    "Invalid regular expression: invalid decimal escape"
+                                        .to_string(),
+                                );
+                            }
+                        }
+                        '0' => {
+                            if chars.get(i + 2).is_some_and(|c| c.is_ascii_digit()) {
+                                self.errors.push(
+                                    "Invalid regular expression: legacy octal escape".to_string(),
+                                );
+                            }
+                        }
+                        'c' => {
+                            if !chars.get(i + 2).is_some_and(|c| c.is_ascii_alphabetic()) {
+                                self.errors.push(
+                                    "Invalid regular expression: invalid control escape"
+                                        .to_string(),
+                                );
+                            }
+                        }
+                        c if c.is_ascii_alphabetic() => {
+                            if !"bBcdDfknpPrsStuvwWxq".contains(c) {
+                                self.errors.push(
+                                    "Invalid regular expression: invalid identity escape"
+                                        .to_string(),
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                i += 2;
+                continue;
+            }
+            if in_class {
+                if c == ']' {
+                    in_class = false;
+                }
+                i += 1;
+                continue;
+            }
+            if c == '[' {
+                in_class = true;
+                i += 1;
+                continue;
+            }
+            if c == '(' && chars.get(i + 1) != Some(&'?') {
+                captures += 1;
+            }
+            i += 1;
+        }
+        // Class range validation.
+        let mut i = 0usize;
+        while i < chars.len() {
+            if chars[i] != '[' || (i > 0 && chars[i - 1] == '\\') {
+                i += 1;
+                continue;
+            }
+            let start = i + 1;
+            let mut j = start;
+            let mut closed = None;
+            while j < chars.len() {
+                if chars[j] == '\\' {
+                    j += 2;
+                    continue;
+                }
+                if chars[j] == ']' {
+                    closed = Some(j);
+                    break;
+                }
+                j += 1;
+            }
+            let Some(end) = closed else { break };
+            let mut atoms: Vec<Option<(char, bool)>> = Vec::new();
+            let mut k = start;
+            while k < end {
+                if chars[k] == '\\' && k + 1 < end {
+                    let next = chars[k + 1];
+                    if "dDsSwWpP".contains(next) {
+                        atoms.push(Some(('\0', true)));
+                    } else if let Some(ch) = {
+                        match next {
+                            'n' => Some('\n'),
+                            'r' => Some('\r'),
+                            't' => Some('\t'),
+                            'f' => Some('\u{c}'),
+                            'v' => Some('\u{b}'),
+                            _ => Some(next),
+                        }
+                    } {
+                        atoms.push(Some((ch, false)));
+                    }
+                    k += 2;
+                    continue;
+                }
+                if chars[k] == '-' {
+                    if k == start || k + 1 == end {
+                        atoms.push(Some(('-', false)));
+                    } else {
+                        atoms.push(None);
+                    }
+                } else {
+                    atoms.push(Some((chars[k], false)));
+                }
+                k += 1;
+            }
+            for idx in 0..atoms.len() {
+                if atoms[idx].is_some() {
+                    continue;
+                }
+                if idx == 0 || idx + 1 >= atoms.len() {
+                    continue;
+                }
+                let left = atoms[idx - 1];
+                let right = atoms[idx + 1];
+                if let (Some((lc, le)), Some((rc, re))) = (left, right) {
+                    if le || re || lc > rc {
+                        self.errors
+                            .push("Invalid regular expression: invalid class range".to_string());
+                    }
+                }
+            }
+            i = end + 1;
+        }
+    }
+
+    fn validate_regexp_syntax(&mut self, pattern: &str, flags: &str) {
+        let unicode = flags.contains('u') || flags.contains('v');
+        let chars: Vec<char> = pattern.chars().collect();
+        let mut in_class = false;
+        let mut escaped = false;
+        let mut groups: Vec<bool> = Vec::new();
+        let mut i = 0usize;
+        while i < chars.len() {
+            let c = chars[i];
+            if escaped {
+                escaped = false;
+                i += 1;
+                continue;
+            }
+            if c == '\\' {
+                escaped = true;
+                i += 1;
+                continue;
+            }
+            if in_class {
+                if c == ']' {
+                    in_class = false;
+                }
+                i += 1;
+                continue;
+            }
+            if c == '[' {
+                in_class = true;
+                i += 1;
+                continue;
+            }
+            if c == '|' {
+                i += 1;
+                continue;
+            }
+            if c == '(' {
+                let la = chars.get(i + 1) == Some(&'?')
+                    && match chars.get(i + 2) {
+                        Some('=') | Some('!') => true,
+                        Some('<') => matches!(chars.get(i + 3), Some('=') | Some('!')),
+                        _ => false,
+                    };
+                groups.push(la);
+                i += 1;
+                continue;
+            }
+            if c == ')' {
+                let la = groups.pop().unwrap_or(false);
+                if la
+                    && matches!(
+                        chars.get(i + 1),
+                        Some('?') | Some('*') | Some('+') | Some('{')
+                    )
+                {
+                    self.errors.push(
+                        "Invalid regular expression: assertion cannot be quantified".to_string(),
+                    );
+                }
+                i += 1;
+                continue;
+            }
+            if c == '?'
+                && i > 0
+                && chars[i - 1] == '('
+                && matches!(
+                    chars.get(i + 1),
+                    Some(':') | Some('=') | Some('!') | Some('<')
+                )
+            {
+                i += 1;
+                continue;
+            }
+            if c == '{' || c == '*' || c == '+' || c == '?' {
+                let prev = if i == 0 { None } else { Some(chars[i - 1]) };
+                let starts_quantifier = prev.is_none() || matches!(prev, Some('(' | '|'));
+                if starts_quantifier {
+                    if c != '{' || unicode || matches!(chars.get(i + 1), Some('0'..='9')) {
+                        self.errors
+                            .push("Invalid regular expression: nothing to repeat".to_string());
+                    }
+                } else if c == '{' {
+                    let mut j = i + 1;
+                    let mut min = String::new();
+                    while j < chars.len() && chars[j].is_ascii_digit() {
+                        min.push(chars[j]);
+                        j += 1;
+                    }
+                    if !min.is_empty() && chars.get(j) == Some(&',') {
+                        j += 1;
+                        let mut max = String::new();
+                        while j < chars.len() && chars[j].is_ascii_digit() {
+                            max.push(chars[j]);
+                            j += 1;
+                        }
+                        if !max.is_empty() && chars.get(j) == Some(&'}') {
+                            if let (Ok(a), Ok(b)) = (min.parse::<u64>(), max.parse::<u64>()) {
+                                if a > b {
+                                    self.errors.push(
+                                        "Invalid regular expression: numbers out of order in {} quantifier"
+                                            .to_string(),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+
     fn validate_private_name_references(&mut self) {
         let chars = &self.source_chars;
         let is_ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$' || c > '\u{007F}';
@@ -3381,6 +3640,18 @@ impl Parser {
                         "Invalid regular expression /{}/{}: {message}",
                         t.value, t.flags
                     ));
+                }
+                self.validate_regexp_syntax(&t.value, &t.flags);
+                if t.flags.contains('u') || t.flags.contains('v') {
+                    self.validate_unicode_regexp_escapes(&t.value);
+                }
+                if self
+                    .source_chars
+                    .get(t.span.end)
+                    .is_some_and(|c| *c == '\\')
+                {
+                    self.errors
+                        .push("Invalid regular expression flags".to_string());
                 }
                 let bytes = t.value.as_bytes();
                 let mut names: Vec<(String, usize)> = Vec::new();

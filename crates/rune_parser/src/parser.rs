@@ -1527,15 +1527,19 @@ impl Parser {
             };
             // Detect private element: #name, #name = expr, #name() {}, get #x() {}
             if self.tok.kind == TokenKind::Hash {
+                let hash_end = self.tok.span.end;
                 self.advance(); // consume '#'
-                let name = if self.is_identifier_name_token() {
-                    let t = self.tok.clone();
-                    self.advance();
-                    t.value.into_boxed_str()
-                } else {
-                    self.error("Expected identifier after #".to_string());
-                    Box::from("")
-                };
+                let name = self.parse_private_identifier(hash_end);
+                if name.as_ref() == "constructor" {
+                    self.error(
+                        "Classes may not have a private field named constructor".to_string(),
+                    );
+                }
+                if is_static && name.as_ref() == "prototype" {
+                    self.error(
+                        "Classes may not have a static private field named prototype".to_string(),
+                    );
+                }
                 if self.tok.kind == TokenKind::LParen {
                     // Private method / accessor: #m() {} | get #x() {} | set #x(v) {}
                     let func = self.parse_function_body(
@@ -1642,6 +1646,21 @@ impl Parser {
                     PropKey::Number(n) => Some(Box::from(n.to_string())),
                     _ => None,
                 };
+                if let Some(n) = &name {
+                    if n.as_ref() == "constructor"
+                        && (is_getter || is_setter || is_generator || is_async)
+                    {
+                        self.error(
+                            "Class constructor may not be an accessor, generator or async method"
+                                .to_string(),
+                        );
+                    }
+                    if is_static && n.as_ref() == "prototype" {
+                        self.error(
+                            "Classes may not have a static method named prototype".to_string(),
+                        );
+                    }
+                }
                 let func = self.parse_function_body(name, is_generator, is_async, fstart);
                 self.reject_duplicate_params(&func);
                 // Validate getter/setter param counts
@@ -1723,6 +1742,20 @@ impl Parser {
         self.parsing_class_method = outer_class_method;
         self.strict = outer_class_strict;
         (methods, private_fields, fields, static_blocks)
+    }
+
+    fn parse_private_identifier(&mut self, hash_end: usize) -> Box<str> {
+        if self.tok.span.start != hash_end {
+            self.error("Unexpected whitespace after #".to_string());
+        }
+        if self.is_identifier_name_token() {
+            let t = self.tok.clone();
+            self.advance();
+            t.value.into_boxed_str()
+        } else {
+            self.error("Expected identifier after #".to_string());
+            Box::from("")
+        }
     }
 
     fn parse_function_body(
@@ -4370,15 +4403,12 @@ impl Parser {
                     self.advance();
                     if self.tok.kind == TokenKind::Hash {
                         // Private member access: obj.#name
+                        let hash_end = self.tok.span.end;
+                        if matches!(lhs, Expr::Super(_)) {
+                            self.error("Private names are not allowed on super".to_string());
+                        }
                         self.advance();
-                        let name = if self.is_identifier_name_token() {
-                            let t = self.tok.clone();
-                            self.advance();
-                            t.value.into_boxed_str()
-                        } else {
-                            self.error("Expected identifier after #".to_string());
-                            Box::from("")
-                        };
+                        let name = self.parse_private_identifier(hash_end);
                         let span = self.span();
                         lhs = Expr::PrivateMember(Box::new(lhs), name, span);
                     } else {
@@ -4478,15 +4508,9 @@ impl Parser {
                     self.advance();
                     if self.tok.kind == TokenKind::Hash {
                         // Private member access: new X().#name
+                        let hash_end = self.tok.span.end;
                         self.advance();
-                        let name = if self.is_identifier_name_token() {
-                            let t = self.tok.clone();
-                            self.advance();
-                            t.value.into_boxed_str()
-                        } else {
-                            self.error("Expected identifier after #".to_string());
-                            Box::from("")
-                        };
+                        let name = self.parse_private_identifier(hash_end);
                         let span = self.span();
                         lhs = Expr::PrivateMember(Box::new(lhs), name, span);
                     } else {

@@ -736,6 +736,10 @@ impl Lexer {
                 break;
             }
         }
+        if cp == 0x23 {
+            self.errors
+                .push("A private name may not use an escaped # token".to_string());
+        }
         char::from_u32(cp).unwrap_or('\u{FFFD}')
     }
 

@@ -19364,3 +19364,25 @@ fn test_regexp_quantifier_and_unicode_early_errors() {
     assert!(ctx.eval(r"/(a)\1/u.test('aa');").is_ok());
     assert!(ctx.eval(r"/[a-z]/u.test('q');").is_ok());
 }
+
+#[test]
+fn test_private_name_syntax_early_errors() {
+    let mut ctx = Context::new_small();
+    for source in [
+        "class C { # x; }",
+        "class C { #x() {} #constructor() {} }",
+        "class C { get constructor() {} }",
+        "class C { static prototype() {} }",
+        "class C { #x; m() { return super.#x; } }",
+        r"class C { \u0023x; }",
+    ] {
+        assert!(
+            ctx.eval(source).is_err(),
+            "expected SyntaxError for {source:?}"
+        );
+    }
+    assert!(
+        ctx.eval("class C { #x = 1; get() { return this.#x; } } new C().get() === 1;")
+            .is_ok()
+    );
+}

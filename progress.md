@@ -4539,6 +4539,25 @@ Integration suite: **949 passed, 0 failed, 3 ignored**.
 
 Integration suite: **950 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Private identifier + special method early errors (2026-11-15)
+
+- Private identifiers reject whitespace between `#` and the name (`# x`), and
+  an escaped hash token (`\u0023x`) is a SyntaxError.
+- Class early errors:
+  - `#constructor` (field or method) is forbidden, as is a static private
+    name `prototype`;
+  - `constructor` may not be an accessor, generator or async method;
+  - a static public method named `prototype` is forbidden;
+  - private name access through `super.#x` is forbidden.
+- ZWNJ/ZWJ remain valid identifier and private-name characters (they are
+  IdentifierPart); removing an over-eager check restored the private-name
+  Unicode test families.
+- Test262: statements/class **2536 → 2577/4367**, language overall
+  **13,407 → 13,490/23,979**.
+- Regression: `test_private_name_syntax_early_errors`.
+
+Integration suite: **951 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

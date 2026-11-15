@@ -182,6 +182,8 @@ pub enum Opcode {
     StoreNameWith,
     // Dynamic `delete name` inside `with`.
     DeleteNameWith,
+    // Make a class method/accessor property non-enumerable (W|C attrs).
+    SetMethodAttrs,
 }
 
 #[derive(Clone, Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]

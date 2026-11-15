@@ -10072,6 +10072,42 @@ impl Vm {
                     self.push(result);
                     self.frames[fi].pc = pc + 1;
                 }
+                Opcode::SetMethodAttrs => {
+                    let key_idx = instr.operands[0] as usize;
+                    let obj = self.pop();
+                    if let Some(name) = self.frames[fi].prog_str(key_idx) {
+                        let key = PropertyKey::from_string(&name);
+                        let attr =
+                            rune_core::shape::ATTR_WRITABLE | rune_core::shape::ATTR_CONFIGURABLE;
+                        if let Some(ptr) = obj.heap_ptr() {
+                            let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
+                            if tag == TAG_OBJECT {
+                                let o = ptr as *mut JSObject;
+                                let shape = unsafe { JSObject::shape_ptr(o) };
+                                if let Some(slot) = shape.lookup(&key) {
+                                    let new_shape = rune_core::shape::Shape::with_replaced_attr(
+                                        shape, slot, attr,
+                                    );
+                                    unsafe { JSObject::set_shape_ptr(o, new_shape) };
+                                }
+                            } else if tag == TAG_FUNC {
+                                let props = unsafe { Func::extra_props(ptr as *mut Func) };
+                                if !props.is_null() {
+                                    let o = props as *mut JSObject;
+                                    let shape = unsafe { JSObject::shape_ptr(o) };
+                                    if let Some(slot) = shape.lookup(&key) {
+                                        let new_shape = rune_core::shape::Shape::with_replaced_attr(
+                                            shape, slot, attr,
+                                        );
+                                        unsafe { JSObject::set_shape_ptr(o, new_shape) };
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    self.push(obj);
+                    self.frames[fi].pc = pc + 1;
+                }
                 Opcode::DefineProperty => {
                     let value = self.pop();
                     let key_val = if instr.operands[0] == usize::MAX as i64 {

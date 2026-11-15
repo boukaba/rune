@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Class method attrs + braced Unicode identifiers (2026-11-15)**: non-enumerable class methods/accessors via SetMethodAttrs, `\u{...}` identifier escapes. class statements **1849/4367**, class expressions **1764/4059**, elements **324/1534**. Integration **937**. Known: computed-name method attrs, private init order.
 - **`with` strict deletion semantics (2026-11-15)**: post-unscopables HasProperty recheck, strict ReferenceError on deleted bindings, strict unresolvable global stores. with **154/181**. Integration **936**. Remaining 3.
 - **`with` conformance edges (2026-11-15)**: strict-mode SyntaxError, completion values, HasProperty-before-unscopables, error propagation, store fast path/rooting, global-this sync, dynamic update/compound. with **152/181**. Integration **936**. Remaining 5.
 - **`with` closures + lexical chain (2026-11-15)**: frame-scoped with lists, Func `\0with_objects` capture for closures, with-outer local shadowing, dynamic local slot growth. with **142/181**. Integration **936**. Remaining 15: unscopables, strict syntax, abrupt, scope-var-open.

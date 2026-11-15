@@ -4237,6 +4237,24 @@ Integration suite: **936 passed, 0 failed, 3 ignored**.
 
 Integration suite: **936 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Class method attributes + braced Unicode identifiers (2026-11-15)
+
+- Lexer identifier escapes now accept `\u{...}` as well as `\uXXXX`
+  (identifiers and private names).
+- Class methods and accessors are defined with **non-enumerable**,
+  writable/configurable attributes via a new `SetMethodAttrs` opcode
+  (prototype and static methods; non-computed accessors). This matches
+  ClassDefinitionEvaluation's DefineMethod property attributes.
+- Test262: language/statements/class **1701 → 1849/4367**,
+  language/expressions/class **1616 → 1764/4059**,
+  class/elements **178 → 324/1534**, elements/syntax **13 → 18/30**.
+- Regression: `test_class_methods_non_enumerable_and_unicode_identifier_fields`.
+- Known: computed-name methods/accessors still use default attributes;
+  private method initialization ordering and async/generator private methods
+  remain.
+
+Integration suite: **937 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

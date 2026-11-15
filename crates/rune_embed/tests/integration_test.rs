@@ -19025,3 +19025,35 @@ fn test_with_object_environment_and_unscopables() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_class_methods_non_enumerable_and_unicode_identifier_fields() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            class C {
+                method() { return 1; }
+                get accessor() { return 2; }
+                static staticMethod() { return 3; }
+                \u{6F} = 4;
+            }
+
+            var keys = Object.keys(C.prototype);
+            var c = new C();
+            [
+                keys.indexOf("method") === -1,
+                keys.indexOf("accessor") === -1,
+                C.prototype.propertyIsEnumerable("method") === false,
+                C.prototype.propertyIsEnumerable("accessor") === false,
+                C.propertyIsEnumerable("staticMethod") === false,
+                c.o === 4,
+                c.method() === 1,
+                c.accessor === 2,
+                C.staticMethod() === 3
+            ].join("|") === "true|true|true|true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

@@ -1183,6 +1183,7 @@ impl Emitter {
             };
             let key_idx = self.intern_string(&key_str) as i64;
             self.emit(Opcode::DefineProperty, vec![key_idx]);
+            self.emit(Opcode::SetMethodAttrs, vec![key_idx]);
         }
 
         // 3a. Add getter/setter accessors to prototype
@@ -1228,6 +1229,7 @@ impl Emitter {
                 };
                 let key_idx = self.intern_string(&key_str) as i64;
                 self.emit(Opcode::DefineAccessor, vec![key_idx]);
+                self.emit(Opcode::SetMethodAttrs, vec![key_idx]);
             }
         }
 
@@ -1553,6 +1555,7 @@ impl Emitter {
                 };
                 let key_idx = self.intern_string(&key_str) as i64;
                 self.emit(Opcode::DefineProperty, vec![key_idx]);
+                self.emit(Opcode::SetMethodAttrs, vec![key_idx]);
                 self.emit(Opcode::Pop, vec![]);
             }
             // 7.6 Add static getter/setter accessors to constructor

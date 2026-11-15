@@ -630,17 +630,29 @@ impl Lexer {
 
     /// Read the four hex digits following `\u` in an identifier escape.
     fn scan_identifier_escape_char(&mut self) -> char {
+        let braced = self.peek() == Some('{');
+        if braced {
+            self.advance();
+        }
         let mut cp = 0u32;
-        for _ in 0..4 {
-            let Some(ch) = self.peek() else { break };
+        let mut digits = 0usize;
+        while let Some(ch) = self.peek() {
+            if braced && ch == '}' {
+                self.advance();
+                break;
+            }
             let digit = match ch {
                 '0'..='9' => ch as u32 - '0' as u32,
                 'a'..='f' => ch as u32 - 'a' as u32 + 10,
                 'A'..='F' => ch as u32 - 'A' as u32 + 10,
                 _ => break,
             };
-            cp = cp * 16 + digit;
+            cp = cp.saturating_mul(16).saturating_add(digit);
+            digits += 1;
             self.advance();
+            if !braced && digits == 4 {
+                break;
+            }
         }
         char::from_u32(cp).unwrap_or('\u{FFFD}')
     }

@@ -19454,3 +19454,25 @@ fn test_break_continue_early_errors() {
             .is_ok()
     );
 }
+
+#[test]
+fn test_class_field_and_static_block_early_errors() {
+    let mut ctx = Context::new_small();
+    for source in [
+        "class C { x = arguments; }",
+        "class C { static x = arguments; }",
+        "class C { static { return; } }",
+        "class C { static { var x; } }",
+        "class C { constructor = 1; }",
+        "class C { static prototype = 1; }",
+        "class C { static { a: a: while (false) {} } }",
+    ] {
+        assert!(
+            ctx.eval(source).is_err(),
+            "expected SyntaxError for {source:?}"
+        );
+    }
+    assert!(ctx
+        .eval("class C { x = function () { return arguments.length; }; static { let y = 1; } } new C();")
+        .is_ok());
+}

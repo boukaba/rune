@@ -4609,6 +4609,23 @@ Integration suite: **953 passed, 0 failed, 3 ignored**.
 
 Integration suite: **954 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Template escapes + class field/static-block early errors (2026-11-15)
+
+- Untagged template literals validate escape sequences (`\x`/`\u` forms,
+  legacy octal, `\0` followed by a digit, identity escapes); invalid escapes
+  remain permitted in tagged templates (cooked value undefined).
+- Class field initializers reject `arguments` (nested ordinary functions may
+  use their own `arguments`), and fields named `constructor` or static fields
+  named `prototype` are SyntaxErrors.
+- Class static initialization blocks reject `return`, `var` declarations, and
+  `arguments`; duplicate nested labels are rejected. Nested loops inside a
+  static block may still use their own break/continue.
+- Test262: statements/class **2577 → 2621/4367**, expressions/template-literal
+  **33 → 45/57**, language overall **13,713 → 13,799/23,979**.
+- Regression: `test_class_field_and_static_block_early_errors`.
+
+Integration suite: **955 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

@@ -35,6 +35,10 @@ pub struct Parser {
     /// Active labels and labels directly attached to iteration statements.
     labels: Vec<String>,
     iteration_labels: Vec<String>,
+    /// Parsing a class field initializer (no `arguments` binding).
+    in_class_field_init: bool,
+    /// Parsing a class static initialization block.
+    in_static_block: bool,
 }
 
 impl Parser {
@@ -59,6 +63,8 @@ impl Parser {
             switch_depth: 0,
             labels: Vec::new(),
             iteration_labels: Vec::new(),
+            in_class_field_init: false,
+            in_static_block: false,
         }
     }
 
@@ -85,6 +91,8 @@ impl Parser {
             switch_depth: 0,
             labels: Vec::new(),
             iteration_labels: Vec::new(),
+            in_class_field_init: false,
+            in_static_block: false,
         }
     }
 
@@ -198,6 +206,66 @@ impl Parser {
                 }
             }
         }
+    }
+
+    fn template_has_invalid_escape(&self, span: Span) -> bool {
+        let Some(chars) = self.source_chars.get(span.start..span.end) else {
+            return false;
+        };
+        let mut i = 0usize;
+        while i + 1 < chars.len() {
+            if chars[i] != '\\' {
+                i += 1;
+                continue;
+            }
+            let next = chars[i + 1];
+            match next {
+                '`' | '$' | '\\' | 'n' | 'r' | 't' | 'b' | 'f' | 'v' => i += 2,
+                '0' => {
+                    if i + 2 < chars.len() && chars[i + 2].is_ascii_digit() {
+                        return true;
+                    }
+                    i += 2;
+                }
+                '1'..='9' => return true,
+                'x' => {
+                    if i + 3 >= chars.len()
+                        || !chars[i + 2].is_ascii_hexdigit()
+                        || !chars[i + 3].is_ascii_hexdigit()
+                    {
+                        return true;
+                    }
+                    i += 4;
+                }
+                'u' => {
+                    if i + 2 < chars.len() && chars[i + 2] == '{' {
+                        let mut j = i + 3;
+                        let mut digits = 0;
+                        while j < chars.len() && chars[j] != '}' {
+                            if !chars[j].is_ascii_hexdigit() {
+                                return true;
+                            }
+                            digits += 1;
+                            j += 1;
+                        }
+                        if digits == 0 || j >= chars.len() {
+                            return true;
+                        }
+                        i = j + 1;
+                    } else {
+                        if i + 5 >= chars.len()
+                            || !chars[i + 2..i + 6].iter().all(|c| c.is_ascii_hexdigit())
+                        {
+                            return true;
+                        }
+                        i += 6;
+                    }
+                }
+                '\n' | '\r' | '\u{2028}' | '\u{2029}' => i += 2,
+                _ => return true,
+            }
+        }
+        false
     }
 
     fn string_has_legacy_escape(&self, span: Span) -> bool {
@@ -1046,6 +1114,9 @@ impl Parser {
                     self.tok.kind,
                     TokenKind::While | TokenKind::Do | TokenKind::For
                 );
+                if self.labels.iter().any(|l| l.as_str() == name.as_ref()) {
+                    self.error(format!("Label '{name}' has already been declared"));
+                }
                 self.labels.push(name.to_string());
                 if is_loop {
                     self.iteration_labels.push(name.to_string());
@@ -1538,11 +1609,14 @@ impl Parser {
                 let outer_switch = self.switch_depth;
                 let outer_labels = std::mem::take(&mut self.labels);
                 let outer_iteration = std::mem::take(&mut self.iteration_labels);
+                let outer_static_block = self.in_static_block;
                 self.in_async = true;
+                self.in_static_block = true;
                 self.loop_depth = 0;
                 self.switch_depth = 0;
                 let block = self.parse_block();
                 self.in_async = outer_static_async;
+                self.in_static_block = outer_static_block;
                 self.loop_depth = outer_loop;
                 self.switch_depth = outer_switch;
                 self.labels = outer_labels;
@@ -1687,7 +1761,11 @@ impl Parser {
                     // Private field: #name or #name = expr
                     let init = if self.tok.kind == TokenKind::EqAssign {
                         self.advance(); // consume '='
-                        Some(Box::new(self.parse_expr(0)))
+                        let outer_field = self.in_class_field_init;
+                        self.in_class_field_init = true;
+                        let expr = Some(Box::new(self.parse_expr(0)));
+                        self.in_class_field_init = outer_field;
+                        expr
                     } else {
                         None
                     };
@@ -1769,10 +1847,24 @@ impl Parser {
                 // Public field: `key;`, `key = init;`, `static key = init;`
                 let init = if self.tok.kind == TokenKind::EqAssign {
                     self.advance();
-                    Some(Box::new(self.parse_expr(0)))
+                    let outer_field = self.in_class_field_init;
+                    self.in_class_field_init = true;
+                    let expr = Some(Box::new(self.parse_expr(0)));
+                    self.in_class_field_init = outer_field;
+                    expr
                 } else {
                     None
                 };
+                if let PropKey::Identifier(n) | PropKey::String(n) = &key {
+                    if n.as_ref() == "constructor" {
+                        self.error("Classes may not have a field named constructor".to_string());
+                    }
+                    if is_static && n.as_ref() == "prototype" {
+                        self.error(
+                            "Classes may not have a static field named prototype".to_string(),
+                        );
+                    }
+                }
                 fields.push(ClassField {
                     key,
                     init,
@@ -1851,6 +1943,10 @@ impl Parser {
         self.allow_super_call =
             outer_class_method && name.as_deref() == Some("constructor") && self.class_is_derived;
         self.parsing_class_method = false;
+        let outer_field = self.in_class_field_init;
+        let outer_static_block = self.in_static_block;
+        self.in_class_field_init = false;
+        self.in_static_block = false;
         let outer_async = self.in_async;
         let outer_generator = self.in_generator;
         self.in_async = is_async;
@@ -1943,6 +2039,8 @@ impl Parser {
         self.in_generator = outer_generator;
         self.allow_super_call = outer_allow_super;
         self.parsing_class_method = outer_class_method;
+        self.in_class_field_init = outer_field;
+        self.in_static_block = outer_static_block;
         FnNode {
             name,
             params,
@@ -1976,6 +2074,9 @@ impl Parser {
             }
             _ => unreachable!(),
         };
+        if kind == VarKind::Var && self.in_static_block {
+            self.error("var declarations are not allowed in a class static block".to_string());
+        }
         let mut decls = Vec::new();
         loop {
             let dstart = self.span();
@@ -2038,6 +2139,9 @@ impl Parser {
     }
 
     fn parse_return(&mut self) -> Stmt {
+        if self.in_static_block {
+            self.error("return is not allowed in a class static block".to_string());
+        }
         let start = self.span();
         self.advance();
         // ASI for `return` is a restricted production: only a LineTerminator
@@ -3140,6 +3244,12 @@ impl Parser {
             }
             TokenKind::Identifier => {
                 let t = self.tok.clone();
+                if (self.in_class_field_init || self.in_static_block) && t.value == "arguments" {
+                    self.error(
+                        "arguments is not allowed in class field initializers or static blocks"
+                            .to_string(),
+                    );
+                }
                 self.advance();
                 // Single-param arrow: ident => body
                 if self.tok.kind == TokenKind::Arrow {
@@ -3719,6 +3829,9 @@ impl Parser {
             }
             TokenKind::TemplateNoSub => {
                 let t = self.tok.clone();
+                if self.template_has_invalid_escape(t.span) {
+                    self.error("Invalid escape sequence in template literal".to_string());
+                }
                 self.advance();
                 Expr::Template {
                     parts: vec![t.value],
@@ -3731,6 +3844,9 @@ impl Parser {
             }
             TokenKind::TemplateHead => {
                 let t = self.tok.clone();
+                if self.template_has_invalid_escape(t.span) {
+                    self.error("Invalid escape sequence in template literal".to_string());
+                }
                 self.advance();
                 let mut parts = vec![t.value];
                 let mut exprs = Vec::new();

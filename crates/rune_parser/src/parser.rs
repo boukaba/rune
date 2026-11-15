@@ -21,6 +21,8 @@ pub struct Parser {
     in_async: bool,
     /// Parsing inside a generator function body (yield is reserved).
     in_generator: bool,
+    /// Original source characters (spans are char indices).
+    source_chars: Vec<char>,
 }
 
 impl Parser {
@@ -37,6 +39,7 @@ impl Parser {
             strict: false,
             in_async: false,
             in_generator: false,
+            source_chars: source.chars().collect(),
         }
     }
 
@@ -55,6 +58,7 @@ impl Parser {
             strict: true,
             in_async: false,
             in_generator: false,
+            source_chars: source.chars().collect(),
         }
     }
 
@@ -129,6 +133,7 @@ impl Parser {
         }
         let end = self.tok.span.end;
         let module = self.module;
+        self.validate_private_name_references();
         self.validate_block_scope_errors(&body, !module);
         Program {
             body,
@@ -339,6 +344,106 @@ impl Parser {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn validate_private_name_references(&mut self) {
+        let chars = &self.source_chars;
+        let is_ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$' || c > '\u{007F}';
+        let mut declared: Vec<String> = Vec::new();
+        let mut used: Vec<(String, usize)> = Vec::new();
+        let mut i = 0usize;
+        while i < chars.len() {
+            // Skip comments and string/template literals so examples in
+            // metadata/comments do not look like private-name references.
+            if chars[i] == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
+                i += 2;
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            if chars[i] == '/' && i + 1 < chars.len() && chars[i + 1] == '*' {
+                i += 2;
+                while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                    i += 1;
+                }
+                i = (i + 2).min(chars.len());
+                continue;
+            }
+            if chars[i] == '\'' || chars[i] == '"' || chars[i] == '`' {
+                let quote = chars[i];
+                i += 1;
+                while i < chars.len() {
+                    if chars[i] == '\\' {
+                        i += 2;
+                    } else if chars[i] == quote {
+                        i += 1;
+                        break;
+                    } else {
+                        i += 1;
+                    }
+                }
+                continue;
+            }
+            if chars[i] != '#' {
+                i += 1;
+                continue;
+            }
+            let prev = if i > 0 { Some(chars[i - 1]) } else { None };
+            let mut j = i + 1;
+            if j >= chars.len() || !is_ident(chars[j]) {
+                i += 1;
+                continue;
+            }
+            let start = j;
+            let mut name = String::new();
+            while j < chars.len() {
+                if is_ident(chars[j]) {
+                    name.push(chars[j]);
+                    j += 1;
+                    continue;
+                }
+                if chars[j] == '\\' && j + 1 < chars.len() && chars[j + 1] == 'u' {
+                    let mut k = j + 2;
+                    let mut cp = 0u32;
+                    if k < chars.len() && chars[k] == '{' {
+                        k += 1;
+                        while k < chars.len() && chars[k] != '}' {
+                            let digit = chars[k].to_digit(16).unwrap_or(0);
+                            cp = cp.saturating_mul(16).saturating_add(digit);
+                            k += 1;
+                        }
+                        k = (k + 1).min(chars.len());
+                    } else {
+                        for _ in 0..4 {
+                            if k < chars.len() {
+                                let digit = chars[k].to_digit(16).unwrap_or(0);
+                                cp = cp.saturating_mul(16).saturating_add(digit);
+                                k += 1;
+                            }
+                        }
+                    }
+                    if let Some(c) = char::from_u32(cp) {
+                        name.push(c);
+                    }
+                    j = k;
+                    continue;
+                }
+                break;
+            }
+            if prev == Some('.') {
+                used.push((name, start));
+            } else if !name.is_empty() {
+                declared.push(name);
+            }
+            i = j;
+        }
+        for (name, pos) in used {
+            if !declared.iter().any(|d| d == &name) {
+                self.errors
+                    .push(format!("Private field '#{name}' must be declared at {pos}"));
+            }
         }
     }
 

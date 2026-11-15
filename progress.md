@@ -4407,6 +4407,26 @@ Integration suite: **942 passed, 0 failed, 3 ignored**.
 
 Integration suite: **944 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Undeclared private-name early errors (2026-11-15)
+
+- Parser validates private-name references against declarations: a `.#name`
+  reference whose name is not declared anywhere in the script is a
+  SyntaxError (class invalid-names early errors), instead of a deferred
+  runtime TypeError.
+- The source scan skips `//`, `/* */`, string and template literals; decodes
+  `\uXXXX`/`\u{...}` escapes after `#` so escaped declarations and uses match.
+- Runtime brand checks still throw TypeError for declared private names used
+  on the wrong object (integration tests updated accordingly).
+- Test262: language/statements/class **2297 → 2423/4367**,
+  language/expressions/class **2191 → 2300/4059**,
+  class/elements **530 → 661/1534**, language overall
+  **12,822 → 12,878/23,979**.
+- Known: the validator uses a whole-script declared-name set, so nested-class
+  scoping is approximate (12 invalid-names tests remain); regex literals are
+  not skipped by the scan.
+
+Integration suite: **944 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

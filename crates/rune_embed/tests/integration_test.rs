@@ -9032,15 +9032,20 @@ fn test_class_super_compound_assign() {
 #[test]
 fn test_private_member_access_error() {
     let mut ctx = Context::new_small();
-    // Private member access on a class that doesn't define the field throws TypeError
+    // An undeclared private name is an early SyntaxError.
     let result = ctx.eval("class Foo { method() { return this.#x; } } new Foo().method();");
     assert!(result.is_err(), "private member access should error");
     let err = result.unwrap_err();
     assert!(
-        err.contains("class body"),
-        "error should mention class body: {}",
+        err.contains("must be declared"),
+        "error should mention the private declaration: {}",
         err
     );
+
+    // A declared private name still performs brand checks at runtime.
+    let result = ctx.eval("class Foo { #x = 1; read(o) { return o.#x; } } new Foo().read({});");
+    assert!(result.is_err(), "brand check should throw");
+    assert!(result.unwrap_err().contains("private member"));
 }
 
 #[test]
@@ -9056,15 +9061,20 @@ fn test_private_field_syntax_works() {
 #[test]
 fn test_private_member_write_error() {
     let mut ctx = Context::new_small();
-    // Private member write on a class that doesn't define the field throws TypeError
+    // An undeclared private name is an early SyntaxError.
     let result = ctx.eval("class Foo { method() { this.#x = 1; } } new Foo().method();");
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
-        err.contains("class body"),
-        "error should mention class body: {}",
+        err.contains("must be declared"),
+        "error should mention the private declaration: {}",
         err
     );
+
+    // A declared private name still performs brand checks at runtime.
+    let result = ctx.eval("class Foo { #x; write(o) { o.#x = 1; } } new Foo().write({});");
+    assert!(result.is_err(), "brand check should throw");
+    assert!(result.unwrap_err().contains("private member"));
 }
 
 #[test]

@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **`super()` context early errors (2026-11-15)**: super calls only in derived constructors; object/generator/non-constructor/base-constructor calls are SyntaxErrors. language **13260/23979**, class statements **2530/4367**, class expressions **2401/4059**. Integration **947**.
 - **Escaped keywords + object property syntax (2026-11-15)**: escaped modifiers are identifiers; private names and missing commas rejected. object **787/1170**, class statements **2458/4367**, class expressions **2332/4059**, language **13093/23979**. Integration **946**.
 - **Parameter + object literal early errors (2026-11-15)**: strict param names/duplicates/non-simple directive, duplicate __proto__, invalid method prefixes, strict reserved identifiers. language **13071/23979**, object **770/1170**. Integration **945**.
 - **Undeclared private-name early errors (2026-11-15)**: source-level private declaration/reference validation with comment/string skipping and escape decoding. class statements **2423/4367**, class expressions **2300/4059**, elements **661/1534**, language **12878/23979**. Integration **944**. Known: nested-class scoping approximate.

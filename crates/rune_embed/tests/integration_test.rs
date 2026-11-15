@@ -19279,3 +19279,27 @@ fn test_escaped_keywords_and_object_property_syntax() {
             .is_ok()
     );
 }
+
+#[test]
+fn test_super_call_early_errors() {
+    let mut ctx = Context::new_small();
+    for source in [
+        "({ method() { super(); } });",
+        "({ *gen() { super(); } });",
+        "class A { method() { super(); } }",
+        "class A { static method() { super(); } }",
+        "class A { constructor() { super(); } }",
+        "class A extends B { method() { super(); } }",
+    ] {
+        assert!(
+            ctx.eval(source).is_err(),
+            "expected SyntaxError for {source:?}"
+        );
+    }
+    assert!(
+        ctx.eval(
+            "class A { constructor() {} } class B extends A { constructor() { super(); } } new B();"
+        )
+        .is_ok()
+    );
+}

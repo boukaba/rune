@@ -4462,6 +4462,21 @@ Integration suite: **945 passed, 0 failed, 3 ignored**.
 
 Integration suite: **946 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — `super()` context early errors (2026-11-15)
+
+- `super()` calls are now rejected outside a derived class constructor:
+  object-literal methods and generators, class non-constructor methods,
+  static methods, field initializers/static blocks, ordinary functions, and
+  base-class constructors all produce SyntaxErrors.
+- Parser tracks class-method context and whether the current class has an
+  `extends` clause; arrows inside a derived constructor inherit permission.
+- Test262: language overall **13,093 → 13,260/23,979**,
+  statements/class **2458 → 2530/4367**, expressions/class
+  **2332 → 2401/4059**, expressions/object **787 → 793/1170**.
+- Regression: `test_super_call_early_errors`.
+
+Integration suite: **947 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

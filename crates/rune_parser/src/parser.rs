@@ -23,6 +23,12 @@ pub struct Parser {
     in_generator: bool,
     /// Original source characters (spans are char indices).
     source_chars: Vec<char>,
+    /// Parsing a class body (class methods may be constructors).
+    parsing_class_method: bool,
+    /// `super()` is allowed in the current function (derived constructor).
+    allow_super_call: bool,
+    /// The class currently being parsed has an `extends` clause.
+    class_is_derived: bool,
 }
 
 impl Parser {
@@ -40,6 +46,9 @@ impl Parser {
             in_async: false,
             in_generator: false,
             source_chars: source.chars().collect(),
+            parsing_class_method: false,
+            allow_super_call: false,
+            class_is_derived: false,
         }
     }
 
@@ -59,6 +68,9 @@ impl Parser {
             in_async: false,
             in_generator: false,
             source_chars: source.chars().collect(),
+            parsing_class_method: false,
+            allow_super_call: false,
+            class_is_derived: false,
         }
     }
 
@@ -963,7 +975,10 @@ impl Parser {
         } else {
             None
         };
+        let outer_derived = self.class_is_derived;
+        self.class_is_derived = heritage.is_some();
         let (methods, private_fields, fields, static_blocks) = self.parse_class_body();
+        self.class_is_derived = outer_derived;
         Stmt::Class(
             Box::new(ClassNode {
                 name: name.clone(),
@@ -1000,7 +1015,10 @@ impl Parser {
         } else {
             None
         };
+        let outer_derived = self.class_is_derived;
+        self.class_is_derived = heritage.is_some();
         let (methods, private_fields, fields, static_blocks) = self.parse_class_body();
+        self.class_is_derived = outer_derived;
         Expr::Class(
             Box::new(ClassNode {
                 name,
@@ -1030,6 +1048,8 @@ impl Parser {
         Vec<StaticBlock>,
     ) {
         self.expect(TokenKind::LBrace);
+        let outer_class_method = self.parsing_class_method;
+        self.parsing_class_method = true;
         let mut methods = Vec::new();
         let mut private_fields: Vec<PrivateField> = Vec::new();
         let mut fields: Vec<ClassField> = Vec::new();
@@ -1304,6 +1324,7 @@ impl Parser {
             }
             checked.push((pf.name.clone(), pf.is_static));
         }
+        self.parsing_class_method = outer_class_method;
         (methods, private_fields, fields, static_blocks)
     }
 
@@ -1314,6 +1335,11 @@ impl Parser {
         is_async: bool,
         start: Span,
     ) -> FnNode {
+        let outer_allow_super = self.allow_super_call;
+        let outer_class_method = self.parsing_class_method;
+        self.allow_super_call =
+            outer_class_method && name.as_deref() == Some("constructor") && self.class_is_derived;
+        self.parsing_class_method = false;
         let outer_async = self.in_async;
         let outer_generator = self.in_generator;
         self.in_async = is_async;
@@ -1395,6 +1421,8 @@ impl Parser {
         );
         self.in_async = outer_async;
         self.in_generator = outer_generator;
+        self.allow_super_call = outer_allow_super;
+        self.parsing_class_method = outer_class_method;
         FnNode {
             name,
             params,
@@ -2491,6 +2519,9 @@ impl Parser {
             }
             TokenKind::Super => {
                 self.advance();
+                if self.tok.kind == TokenKind::LParen && !self.allow_super_call {
+                    self.error("super() is only valid in a derived constructor".to_string());
+                }
                 Expr::Super(Span {
                     start: start.start,
                     end: self.span().end,

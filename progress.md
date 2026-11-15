@@ -4427,6 +4427,24 @@ Integration suite: **944 passed, 0 failed, 3 ignored**.
 
 Integration suite: **944 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Parameter + object literal early errors (2026-11-15)
+
+- Function/arrow parameter validation:
+  - strict functions reject duplicate parameter names, `eval`/`arguments`,
+    and strict reserved words (`implements`, `interface`, `package`,
+    `private`, `protected`, `public`, `static`, `let`, `yield`);
+  - non-simple parameter lists always reject duplicates;
+  - a `"use strict"` directive with a non-simple parameter list is a
+    SyntaxError.
+- Object literals: duplicate `__proto__: value` properties, invalid
+  generator/async method prefixes (`{*m: 1}`), strict reserved shorthand
+  identifiers, and strict reserved identifier references are SyntaxErrors.
+- Test262: language overall **12,878 → 13,071/23,979**,
+  expressions/object **738 → 770/1170**.
+- Regression: `test_parameter_and_object_early_errors`.
+
+Integration suite: **945 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

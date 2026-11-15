@@ -447,8 +447,101 @@ impl Parser {
         }
     }
 
+    fn is_strict_reserved_word(name: &str) -> bool {
+        matches!(
+            name,
+            "implements"
+                | "interface"
+                | "package"
+                | "private"
+                | "protected"
+                | "public"
+                | "static"
+                | "let"
+                | "yield"
+                | "await"
+        )
+    }
+
+    fn validate_parameters(
+        &mut self,
+        params: &[Pattern],
+        rest: Option<&str>,
+        strict: bool,
+        use_strict_directive: bool,
+    ) {
+        let mut names: Vec<(String, Span)> = Vec::new();
+        for param in params {
+            let mut out = Vec::new();
+            Self::collect_pattern_names(param, &mut out);
+            let span = match param {
+                Pattern::Identifier(_, s, _) => *s,
+                _ => Span { start: 0, end: 0 },
+            };
+            for name in out {
+                names.push((name, span));
+            }
+        }
+        if let Some(rest) = rest {
+            names.push((rest.to_string(), Span { start: 0, end: 0 }));
+        }
+        let simple = params
+            .iter()
+            .all(|p| matches!(p, Pattern::Identifier(_, _, None)))
+            && rest.is_none();
+        if std::env::var_os("RUPARAM").is_some() {
+            eprintln!(
+                "[params] n={} simple={} strict={} names={:?}",
+                params.len(),
+                simple,
+                strict,
+                names
+            );
+        }
+        if use_strict_directive && !simple {
+            self.error(
+                "Illegal 'use strict' directive in function with non-simple parameter list"
+                    .to_string(),
+            );
+        }
+        let mut seen: Vec<&str> = Vec::new();
+        for (name, span) in &names {
+            if strict && seen.contains(&name.as_str()) {
+                self.error(format!(
+                    "Duplicate parameter name '{name}' at {}",
+                    span.start
+                ));
+            }
+            seen.push(name);
+            if strict
+                && (name == "eval" || name == "arguments" || Self::is_strict_reserved_word(name))
+            {
+                self.error(format!(
+                    "Unexpected strict mode reserved word '{name}' at {}",
+                    span.start
+                ));
+            }
+        }
+        if !simple {
+            let mut dup: Vec<&str> = Vec::new();
+            for (name, span) in &names {
+                if dup.contains(&name.as_str()) {
+                    self.error(format!(
+                        "Duplicate parameter name '{name}' at {}",
+                        span.start
+                    ));
+                } else {
+                    dup.push(name);
+                }
+            }
+        }
+    }
+
     fn check_context_identifier(&mut self, name: &str) {
-        if (self.in_async && name == "await") || (self.in_generator && name == "yield") {
+        if (self.in_async && name == "await")
+            || (self.in_generator && name == "yield")
+            || (self.strict && Self::is_strict_reserved_word(name))
+        {
             self.error(format!(
                 "{name} is not allowed as an identifier in this context"
             ));
@@ -1286,6 +1379,12 @@ impl Parser {
         };
         self.strict = outer_strict;
         let is_strict = body_has_use_strict(&body);
+        self.validate_parameters(
+            &params,
+            rest_param.as_deref(),
+            outer_strict || is_strict,
+            is_strict,
+        );
         self.in_async = outer_async;
         self.in_generator = outer_generator;
         FnNode {
@@ -2680,6 +2779,7 @@ impl Parser {
             TokenKind::LBrace => {
                 self.advance();
                 let mut props = Vec::new();
+                let mut proto_count = 0usize;
                 while self.tok.kind != TokenKind::RBrace && self.tok.kind != TokenKind::Eof {
                     let pstart = self.span();
                     let is_async = (self.tok.kind == TokenKind::Async
@@ -2859,6 +2959,21 @@ impl Parser {
                                 },
                             });
                         } else if self.tok.kind == TokenKind::Colon {
+                            if is_generator || is_async {
+                                self.error("Invalid method definition prefix".to_string());
+                            }
+                            // Duplicate `__proto__: value` is an early error.
+                            if matches!(
+                                &key,
+                                PropKey::Identifier(n) | PropKey::String(n) if n.as_ref() == "__proto__"
+                            ) {
+                                proto_count += 1;
+                                if proto_count > 1 {
+                                    self.error(
+                                        "Duplicate __proto__ fields are not allowed".to_string(),
+                                    );
+                                }
+                            }
                             // Regular property: { key: value }
                             self.advance();
                             let value = self.parse_expr(0);
@@ -2882,6 +2997,11 @@ impl Parser {
                                     Box::from("_error")
                                 }
                             };
+                            if self.strict && Self::is_strict_reserved_word(&name) {
+                                self.error(format!(
+                                    "Unexpected strict mode reserved word '{name}'"
+                                ));
+                            }
                             let mut value = Expr::Identifier(
                                 name,
                                 Span {
@@ -4062,6 +4182,12 @@ impl Parser {
             Stmt::Expr(expr, self.span())
         };
         let is_strict = body_has_use_strict(&body);
+        self.validate_parameters(
+            &params,
+            rest_param.as_deref(),
+            self.strict || is_strict,
+            is_strict,
+        );
         self.in_async = outer_async;
         self.in_generator = outer_generator;
         Expr::Function(

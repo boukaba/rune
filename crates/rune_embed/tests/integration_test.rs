@@ -19240,3 +19240,26 @@ fn test_delete_private_member_early_error() {
     }
     assert!(ctx.eval("var o = { x: 1 }; delete o.x;").is_ok());
 }
+
+#[test]
+fn test_parameter_and_object_early_errors() {
+    let mut ctx = Context::new_small();
+    for source in [
+        "function f(a, a) { 'use strict'; }",
+        "function f(package) { 'use strict'; }",
+        "function f(eval) { 'use strict'; }",
+        "function f(a = 1) { 'use strict'; }",
+        "({ __proto__: 1, __proto__: 2 });",
+        "'use strict'; ({ package });",
+        "({ *m: 1 });",
+    ] {
+        assert!(
+            ctx.eval(source).is_err(),
+            "expected SyntaxError for {source:?}"
+        );
+    }
+    assert!(
+        ctx.eval("function f(a, a) { return a; } f(1, 2) === 2;")
+            .is_ok()
+    );
+}

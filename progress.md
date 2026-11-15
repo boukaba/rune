@@ -4295,6 +4295,21 @@ Integration suite: **937 passed, 0 failed, 3 ignored**.
 
 Integration suite: **938 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Constructor static inheritance (2026-11-15)
+
+- Function objects now use `Func::superclass` as their [[Prototype]] for
+  static property lookup: `load_property_recursive` walks the superclass
+  constructor before Function.prototype; `__proto__` reads and
+  Object.getPrototypeOf(function) return the superclass when present.
+- This makes `class C extends P` inherit static properties (`C.x`) and lets
+  static initialization blocks read `super.x`.
+- Test262: language/statements/class **2004 → 2006/4367**
+  (`static-init-super-property` passes); integration **939**.
+- Regression: `test_constructor_static_inheritance_and_super_property`.
+- Known: static `super.method()` calls still resolve through the instance
+  prototype chain (undefined); constructor `__proto__` writes do not update
+  Func.superclass; static private fields are initialized after static blocks.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

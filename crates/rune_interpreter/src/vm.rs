@@ -7107,8 +7107,17 @@ impl Vm {
             }
             let proto = if crate::vm::value_is_string(obj) {
                 self.string_prototype.heap_ptr()
-            } else if let Some(_ptr) = obj.heap_ptr() {
-                crate::vm::value_prototype(obj)
+            } else if let Some(ptr) = obj.heap_ptr() {
+                if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_FUNC {
+                    let sup = unsafe { Func::superclass(ptr as *mut Func) };
+                    if !sup.is_null() {
+                        Some(sup)
+                    } else {
+                        self.function_prototype.heap_ptr()
+                    }
+                } else {
+                    crate::vm::value_prototype(obj)
+                }
             } else if obj.is_boolean() {
                 self.boolean_prototype.heap_ptr()
             } else if obj.as_smi().is_some() || obj.as_float64().is_some() {
@@ -17699,6 +17708,13 @@ pub(crate) fn load_property_recursive(
                 }
                 return Value::undefined();
             } else if tag == TAG_FUNC {
+                if is_proto_key(raw_key) {
+                    let sup = unsafe { Func::superclass(ptr as *mut Func) };
+                    if !sup.is_null() {
+                        return Value::from_heap_ptr(sup);
+                    }
+                    return function_prototype.unwrap_or(Value::undefined());
+                }
                 if let Some(key) = value_to_prop_key(raw_key) {
                     if key == *PROTOTYPE_KEY {
                         let proto_ptr = unsafe { Func::prototype(ptr as *mut Func) };
@@ -17720,7 +17736,13 @@ pub(crate) fn load_property_recursive(
                         return result;
                     }
                 }
-                // Walk Function.prototype for other properties (e.g. .call, .apply, .bind)
+                // Static inheritance: constructor [[Prototype]] is the
+                // superclass constructor; otherwise Function.prototype.
+                let sup = unsafe { Func::superclass(ptr as *mut Func) };
+                if !sup.is_null() {
+                    current = Value::from_heap_ptr(sup);
+                    continue;
+                }
                 if let Some(fp) = function_prototype {
                     if fp.is_heap_object() {
                         current = fp;

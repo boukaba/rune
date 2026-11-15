@@ -9333,6 +9333,11 @@ pub fn object_get_prototype_of(
         return Value::undefined();
     };
     if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_FUNC {
+        let sup =
+            unsafe { rune_core::function::Func::superclass(ptr as *mut rune_core::function::Func) };
+        if !sup.is_null() {
+            return Value::from_heap_ptr(sup);
+        }
         if let Some(proto) = vm.function_prototype.heap_ptr() {
             return Value::from_heap_ptr(proto);
         }

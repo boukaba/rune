@@ -19091,3 +19091,33 @@ fn test_static_initialization_blocks_run_in_element_order() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_constructor_static_inheritance_and_super_property() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            function Parent() {}
+            Parent.inherited = 41;
+
+            var fromSuper;
+            class Child extends Parent {
+                static {
+                    fromSuper = super.inherited;
+                    this.own = fromSuper + 1;
+                }
+            }
+
+            [
+                Object.getPrototypeOf(Child) === Parent,
+                Child.inherited === 41,
+                fromSuper === 41,
+                Child.own === 42,
+                Child.__proto__ === Parent
+            ].join("|") === "true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

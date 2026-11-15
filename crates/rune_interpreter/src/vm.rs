@@ -6836,6 +6836,19 @@ impl Vm {
         vals
     }
 
+    fn with_has_property(
+        &mut self,
+        gc: &mut SemiSpace,
+        obj: Value,
+        key: Value,
+    ) -> Result<bool, Value> {
+        if crate::vm::proxy_parts(obj).is_some() {
+            self.has_property_with_vm(gc, obj, key)
+        } else {
+            Ok(has_property(obj, key, Some(self.function_prototype)))
+        }
+    }
+
     pub(crate) fn has_property_with_vm(
         &mut self,
         gc: &mut SemiSpace,
@@ -8856,7 +8869,7 @@ impl Vm {
                             }
                         }
                     }
-                    let found = match self.has_property_with_vm(gc, obj, key) {
+                    let found = match self.with_has_property(gc, obj, key) {
                         Ok(v) => v,
                         Err(e) => {
                             if let Some(exit) = self.handle_throw(gc, e) {
@@ -9801,6 +9814,14 @@ impl Vm {
                         },
                     ) {
                         PropSetOut::Ready(v) => {
+                            if obj.heap_ptr().is_some()
+                                && obj.heap_ptr() == self.global_this.heap_ptr()
+                            {
+                                if !raw_key.is_symbol() {
+                                    let name = property_key_string(raw_key);
+                                    self.globals.insert(name, v);
+                                }
+                            }
                             self.push(v);
                             self.frames[fi].pc = pc + 1;
                         }
@@ -10537,8 +10558,24 @@ impl Vm {
                     let kind = instr.operands[2];
                     let use_with = instr.operands[1] == 0 || kind > 2;
                     let withs = self.lexical_with_objects(fi);
+                    let wbase = self.temp_roots.len();
+                    for v in &withs {
+                        self.temp_roots.push(*v);
+                    }
                     if use_with {
-                        for obj in withs.iter().rev().copied() {
+                        for wi in (wbase..self.temp_roots.len()).rev() {
+                            let obj = self.temp_roots[wi];
+                            let key = self.temp_roots[root];
+                            let has = match self.with_has_property(gc, obj, key) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    resolved = Some(Err(e));
+                                    break;
+                                }
+                            };
+                            if !has {
+                                continue;
+                            }
                             let unscopables = match crate::builtins::get_property_value_sync(
                                 gc,
                                 self,
@@ -10547,42 +10584,29 @@ impl Vm {
                             ) {
                                 Ok(v) => v,
                                 Err(e) => {
-                                    self.temp_roots.truncate(root);
-                                    if let Some(exit) = self.handle_throw(gc, e) {
-                                        return exit;
-                                    }
-                                    continue;
+                                    resolved = Some(Err(e));
+                                    break;
                                 }
                             };
                             let key = self.temp_roots[root];
                             if unscopables.heap_ptr().is_some() {
-                                if let Ok(blocked) = crate::builtins::get_property_value_sync(
+                                match crate::builtins::get_property_value_sync(
                                     gc,
                                     self,
                                     unscopables,
                                     key,
                                 ) {
-                                    if blocked.to_bool() {
-                                        continue;
+                                    Ok(blocked) if blocked.to_bool() => continue,
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        resolved = Some(Err(e));
+                                        break;
                                     }
                                 }
                             }
-                            match self.has_property_with_vm(gc, obj, key) {
-                                Ok(true) => {
-                                    resolved = Some(crate::builtins::get_property_value_sync(
-                                        gc, self, obj, key,
-                                    ));
-                                    break;
-                                }
-                                Ok(false) => {}
-                                Err(e) => {
-                                    self.temp_roots.truncate(root);
-                                    if let Some(exit) = self.handle_throw(gc, e) {
-                                        return exit;
-                                    }
-                                    continue;
-                                }
-                            }
+                            resolved =
+                                Some(crate::builtins::get_property_value_sync(gc, self, obj, key));
+                            break;
                         }
                     }
                     self.temp_roots.truncate(root);
@@ -10726,9 +10750,25 @@ impl Vm {
                     let kind = instr.operands[2];
                     let use_with = instr.operands[1] == 0 || kind > 2;
                     let withs = self.lexical_with_objects(fi);
+                    let wbase = self.temp_roots.len();
+                    for v in &withs {
+                        self.temp_roots.push(*v);
+                    }
+                    let mut store_err: Option<Value> = None;
                     if use_with {
-                        for obj in withs.iter().rev().copied() {
+                        for wi in (wbase..self.temp_roots.len()).rev() {
+                            let obj = self.temp_roots[wi];
                             let key = self.temp_roots[root];
+                            let has = match self.with_has_property(gc, obj, key) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    store_err = Some(e);
+                                    break;
+                                }
+                            };
+                            if !has {
+                                continue;
+                            }
                             let unscopables = match crate::builtins::get_property_value_sync(
                                 gc,
                                 self,
@@ -10737,56 +10777,78 @@ impl Vm {
                             ) {
                                 Ok(v) => v,
                                 Err(e) => {
-                                    self.temp_roots.truncate(root);
-                                    if let Some(exit) = self.handle_throw(gc, e) {
-                                        return exit;
-                                    }
-                                    continue;
+                                    store_err = Some(e);
+                                    break;
                                 }
                             };
+                            let key = self.temp_roots[root];
                             if unscopables.heap_ptr().is_some() {
-                                if let Ok(blocked) = crate::builtins::get_property_value_sync(
+                                match crate::builtins::get_property_value_sync(
                                     gc,
                                     self,
                                     unscopables,
                                     key,
                                 ) {
-                                    if blocked.to_bool() {
-                                        continue;
+                                    Ok(blocked) if blocked.to_bool() => continue,
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        store_err = Some(e);
+                                        break;
                                     }
                                 }
                             }
-                            let has = match self.has_property_with_vm(gc, obj, key) {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    self.temp_roots.truncate(root);
-                                    if let Some(exit) = self.handle_throw(gc, e) {
-                                        return exit;
-                                    }
-                                    continue;
-                                }
-                            };
-                            if has {
-                                let val = self.temp_roots[root + 1];
-                                match crate::builtins::set_value_sync(gc, self, obj, &name, val) {
-                                    Ok(()) => {
-                                        self.temp_roots.truncate(root);
-                                        self.push(val);
-                                        handled = true;
-                                        break;
-                                    }
-                                    Err(e) => {
-                                        self.temp_roots.truncate(root);
-                                        if let Some(exit) = self.handle_throw(gc, e) {
-                                            return exit;
+                            let val = self.temp_roots[root + 1];
+                            // Fast path: plain own writable data property.
+                            if let Some(ptr) = obj.heap_ptr() {
+                                if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_OBJECT
+                                    && crate::vm::proxy_parts(obj).is_none()
+                                {
+                                    if let Some(pk) = value_to_prop_key(key) {
+                                        let o = ptr as *mut JSObject;
+                                        let shape = unsafe { JSObject::shape_ptr(o) };
+                                        if let Some(slot) = shape.lookup(&pk) {
+                                            if shape.attr_at(slot) & rune_core::shape::ATTR_WRITABLE
+                                                != 0
+                                            {
+                                                let cur = unsafe { JSObject::get_slot(o, slot) };
+                                                let is_acc =
+                                                    cur.heap_ptr().is_some_and(|p| unsafe {
+                                                        (*(p as *const GcHeader)).tag()
+                                                            == TAG_ACCESSOR
+                                                    });
+                                                if !is_acc {
+                                                    unsafe { JSObject::set_slot(o, slot, val) };
+                                                    handled = true;
+                                                    break;
+                                                }
+                                            }
                                         }
-                                        continue;
                                     }
+                                }
+                            }
+                            match crate::builtins::set_value_sync(gc, self, obj, &name, val) {
+                                Ok(()) => {
+                                    handled = true;
+                                    break;
+                                }
+                                Err(e) => {
+                                    store_err = Some(e);
+                                    break;
                                 }
                             }
                         }
                     }
+                    if let Some(e) = store_err {
+                        self.temp_roots.truncate(root);
+                        if let Some(exit) = self.handle_throw(gc, e) {
+                            return exit;
+                        }
+                        continue;
+                    }
                     if handled {
+                        let val = self.temp_roots[root + 1];
+                        self.temp_roots.truncate(root);
+                        self.push(val);
                         self.frames[fi].pc = pc + 1;
                         continue;
                     }
@@ -10859,10 +10921,15 @@ impl Vm {
                     let fallback_kind = instr.operands[2];
                     let use_with = instr.operands[1] == 0 || fallback_kind == 2;
                     let withs = self.lexical_with_objects(fi);
+                    let wbase = self.temp_roots.len();
+                    for v in &withs {
+                        self.temp_roots.push(*v);
+                    }
                     if use_with {
-                        for obj in withs.iter().rev().copied() {
+                        for wi in (wbase..self.temp_roots.len()).rev() {
+                            let obj = self.temp_roots[wi];
                             let key = self.temp_roots[root];
-                            let has = match self.has_property_with_vm(gc, obj, key) {
+                            let has = match self.with_has_property(gc, obj, key) {
                                 Ok(v) => v,
                                 Err(e) => {
                                     self.temp_roots.truncate(root);

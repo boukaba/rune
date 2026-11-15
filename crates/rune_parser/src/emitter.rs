@@ -2118,6 +2118,7 @@ impl Emitter {
                 }
             }
             Stmt::With(expr, body, _) => {
+                self.reset_completion_value();
                 self.emit_expression(expr);
                 self.emit(Opcode::WithEnter, vec![]);
                 self.with_depth += 1;
@@ -3208,6 +3209,25 @@ impl Emitter {
             Expr::Update(op, arg, prefix, _) => match arg.as_ref() {
                 Expr::Identifier(name, _) => {
                     let is_pre = *prefix;
+                    if self.with_depth > 0 && !self.module_mode {
+                        self.emit_dynamic_load(name, false);
+                        if !is_pre {
+                            self.emit(Opcode::Dup, vec![]);
+                        }
+                        self.emit(Opcode::LoadSmi, vec![1]);
+                        self.emit(
+                            match op {
+                                UpdateOp::PlusPlus => Opcode::Add,
+                                UpdateOp::MinusMinus => Opcode::Sub,
+                            },
+                            vec![],
+                        );
+                        self.emit_dynamic_store(name);
+                        if !is_pre {
+                            self.emit(Opcode::Pop, vec![]);
+                        }
+                        return;
+                    }
                     if let Some((depth, slot)) = self.env_captured_slot(name) {
                         self.emit(Opcode::LoadCaptured, vec![depth as i64, slot as i64]);
                         if !is_pre {
@@ -3864,6 +3884,13 @@ impl Emitter {
                 let bin_opcode = compound_binary_opcode(*op);
                 match target.as_ref() {
                     Expr::Identifier(name, _) => {
+                        if self.with_depth > 0 && !self.module_mode {
+                            self.emit_dynamic_load(name, false);
+                            self.emit_expression(rhs);
+                            self.emit(bin_opcode, vec![]);
+                            self.emit_dynamic_store(name);
+                            return;
+                        }
                         if let Some(idx) = self.local_index(name) {
                             if self.captured_slot(name).is_some() {
                                 if let Some((depth, slot)) = self.env_captured_slot(name) {

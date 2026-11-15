@@ -4197,6 +4197,29 @@ Integration suite: **936 passed, 0 failed, 3 ignored**.
 
 Integration suite: **936 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — `with` conformance edges (2026-11-15)
+
+- Parser tracks strict mode (module goal, `"use strict"` program/function
+  directive prologues) and rejects `with` in strict code with a SyntaxError.
+- `with` resets the eval completion value, so empty bodies produce undefined
+  and body expression values propagate; `cptn-*` tests pass.
+- With-object lookup now checks HasProperty **before** reading
+  `Symbol.unscopables`; unscopables/HasProperty getter errors propagate instead
+  of falling back to the outer binding.
+- Store lookup follows the same order, has a plain own-writable data fast path,
+  and always pushes the assigned value (fixes for-in loops losing their index
+  after a with-body assignment).
+- With-object chains are GC-rooted while resolving names.
+- Top-level `this.prop = value` assignments also update the globals map, so
+  later bare reads see the new value.
+- `x++`/`x--` and compound assignments through `with` use dynamic resolution.
+- Test262 language/statements/with **142 → 152/181**.
+- Remaining: 2 strict unscopables cases, 1 typed-array-in-prototype strict
+  case, `unscopables-inc-dec` (counts two unscopables reads for read+write),
+  `scope-var-open`.
+
+Integration suite: **936 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

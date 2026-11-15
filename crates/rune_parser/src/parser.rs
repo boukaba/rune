@@ -14,6 +14,9 @@ pub struct Parser {
     /// True while parsing a `for` head declaration: `const x of …` / `in …`
     /// may omit the initializer.
     for_head_depth: usize,
+    /// True while parsing strict-mode code (module goal, a "use strict"
+    /// directive prologue, or nested inside strict code).
+    strict: bool,
 }
 
 impl Parser {
@@ -27,6 +30,7 @@ impl Parser {
             module: false,
             no_in_depth: 0,
             for_head_depth: 0,
+            strict: false,
         }
     }
 
@@ -42,6 +46,7 @@ impl Parser {
             module: true,
             no_in_depth: 0,
             for_head_depth: 0,
+            strict: true,
         }
     }
 
@@ -93,6 +98,9 @@ impl Parser {
 
     pub fn parse(&mut self) -> Program {
         let start = self.tok.span.start;
+        if self.tok.kind == TokenKind::String && self.tok.value == "use strict" {
+            self.strict = true;
+        }
         let mut body = Vec::new();
         let mut export_names: Vec<String> = Vec::new();
         while self.tok.kind != TokenKind::Eof {
@@ -905,11 +913,20 @@ impl Parser {
             }
         }
         self.expect(TokenKind::RParen);
+        let outer_strict = self.strict;
+        if self.tok.kind == TokenKind::LBrace {
+            let mut lookahead = self.lexer.clone();
+            let next = lookahead.next_token();
+            if next.kind == TokenKind::String && next.value == "use strict" {
+                self.strict = true;
+            }
+        }
         let body = if self.tok.kind == TokenKind::LBrace {
             self.parse_block()
         } else {
             Stmt::Empty(self.span())
         };
+        self.strict = outer_strict;
         let is_strict = body_has_use_strict(&body);
         FnNode {
             name,
@@ -1123,6 +1140,9 @@ impl Parser {
 
     fn parse_with(&mut self) -> Stmt {
         let start = self.span();
+        if self.strict {
+            self.error("with statement is not allowed in strict mode".to_string());
+        }
         self.advance();
         self.expect(TokenKind::LParen);
         let expr = Box::new(self.parse_expr_comma());

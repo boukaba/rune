@@ -4367,6 +4367,25 @@ Integration suite: **940 passed, 0 failed, 3 ignored**.
 
 Integration suite: **941 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Lexical redeclaration early errors (2026-11-15)
+
+- Post-parse static-semantics validation for blocks, program/function bodies
+  and switch CaseBlocks:
+  - duplicate lexical declarations (let/const/class/block function) are
+    SyntaxErrors;
+  - a lexical declaration colliding with a `var` declaration in the same
+    function/block scope is a SyntaxError, including `var` hoisted out of
+    nested blocks/loops/switch/try;
+  - function-body top-level function declarations remain var-like (duplicates
+    allowed in sloppy scripts), while nested block functions are lexical.
+- Test262: block-scope/syntax/redeclaration **94/95 (0 failures)**,
+  switch/syntax/redeclaration **63/64**, language overall
+  **12,374 → 12,533/23,979**.
+- Regression: `test_lexical_redeclaration_early_errors`.
+- Remaining: parameter/lexical collisions and a few catch/import edge cases.
+
+Integration suite: **942 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

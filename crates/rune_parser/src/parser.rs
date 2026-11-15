@@ -128,10 +128,12 @@ impl Parser {
             body.push(stmt);
         }
         let end = self.tok.span.end;
+        let module = self.module;
+        self.validate_block_scope_errors(&body, !module);
         Program {
             body,
             span: Span { start, end },
-            is_module: self.module,
+            is_module: module,
         }
     }
 
@@ -142,6 +144,202 @@ impl Parser {
             expr,
             Expr::Identifier(..) | Expr::Member(..) | Expr::PrivateMember(..)
         )
+    }
+
+    fn collect_pattern_names(pattern: &Pattern, out: &mut Vec<String>) {
+        match pattern {
+            Pattern::Identifier(name, _, _) => out.push(name.to_string()),
+            Pattern::Object(props, rest, _) => {
+                for prop in props {
+                    Self::collect_pattern_names(&prop.pattern, out);
+                }
+                if let Some(rest) = rest {
+                    Self::collect_pattern_names(rest, out);
+                }
+            }
+            Pattern::Array(items, _) => {
+                for pat in items.iter().flatten() {
+                    Self::collect_pattern_names(pat, out);
+                }
+            }
+            Pattern::Default(inner, _) | Pattern::Rest(inner, _) => {
+                Self::collect_pattern_names(inner, out);
+            }
+            Pattern::Target(_, _) => {}
+        }
+    }
+
+    fn collect_nested_var_names(stmt: &Stmt, out: &mut Vec<String>) {
+        match stmt {
+            Stmt::Var(VarKind::Var, decls, _) => {
+                for decl in decls {
+                    if let Some(pat) = &decl.pattern {
+                        Self::collect_pattern_names(pat, out);
+                    } else {
+                        out.push(decl.name.to_string());
+                    }
+                }
+            }
+            Stmt::Block(stmts, _) => {
+                for stmt in stmts {
+                    Self::collect_nested_var_names(stmt, out);
+                }
+            }
+            Stmt::If(_, then, else_, _) => {
+                Self::collect_nested_var_names(then, out);
+                if let Some(el) = else_ {
+                    Self::collect_nested_var_names(el, out);
+                }
+            }
+            Stmt::While(_, body, _)
+            | Stmt::DoWhile(_, body, _)
+            | Stmt::ForIn(_, _, body, _)
+            | Stmt::ForOf(_, _, body, _)
+            | Stmt::Labeled(_, body, _)
+            | Stmt::With(_, body, _) => Self::collect_nested_var_names(body, out),
+            Stmt::For(init, _, _, body, _) => {
+                if let Some(init) = init {
+                    Self::collect_nested_var_names(init, out);
+                }
+                Self::collect_nested_var_names(body, out);
+            }
+            Stmt::Try(body, catch, finally, _) => {
+                for stmt in body.iter() {
+                    Self::collect_nested_var_names(stmt, out);
+                }
+                if let Some(c) = catch {
+                    for stmt in &c.body {
+                        Self::collect_nested_var_names(stmt, out);
+                    }
+                }
+                if let Some(f) = finally {
+                    for stmt in f.iter() {
+                        Self::collect_nested_var_names(stmt, out);
+                    }
+                }
+            }
+            Stmt::Switch(_, cases, default_body, _, _) => {
+                for case in cases {
+                    for stmt in &case.body {
+                        Self::collect_nested_var_names(stmt, out);
+                    }
+                }
+                if let Some(body) = default_body {
+                    for stmt in body.iter() {
+                        Self::collect_nested_var_names(stmt, out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn validate_block_scope_errors(&mut self, stmts: &[Stmt], function_body: bool) {
+        let mut lexical: Vec<(String, usize)> = Vec::new();
+        let mut vars: Vec<String> = Vec::new();
+        for stmt in stmts {
+            match stmt {
+                Stmt::Var(kind, decls, _) => {
+                    for decl in decls {
+                        let mut names = Vec::new();
+                        if let Some(pat) = &decl.pattern {
+                            Self::collect_pattern_names(pat, &mut names);
+                        } else {
+                            names.push(decl.name.to_string());
+                        }
+                        match kind {
+                            VarKind::Let | VarKind::Const => {
+                                lexical.extend(names.into_iter().map(|n| (n, decl.span.start)));
+                            }
+                            VarKind::Var => vars.extend(names),
+                        }
+                    }
+                }
+                Stmt::Class(c, _) => {
+                    if let Some(name) = &c.name {
+                        lexical.push((name.to_string(), c.span.start));
+                    }
+                }
+                Stmt::Function(f, _) => {
+                    let name = f.name.as_ref().map(|n| n.to_string());
+                    if function_body {
+                        if let Some(name) = name {
+                            vars.push(name);
+                        }
+                    } else if let Some(name) = name {
+                        lexical.push((name, f.span.start));
+                    }
+                }
+                _ => {}
+            }
+        }
+        for stmt in stmts {
+            Self::collect_nested_var_names(stmt, &mut vars);
+        }
+        vars.sort();
+        vars.dedup();
+        let mut seen: Vec<&str> = Vec::new();
+        for (name, _) in &lexical {
+            if seen.contains(&name.as_str()) {
+                self.error(format!("Identifier '{name}' has already been declared"));
+            } else {
+                seen.push(name);
+            }
+        }
+        for name in &vars {
+            if seen.contains(&name.as_str()) {
+                self.error(format!("Identifier '{name}' has already been declared"));
+            }
+        }
+        for stmt in stmts {
+            self.validate_nested_stmt_errors(stmt);
+        }
+    }
+
+    fn validate_nested_stmt_errors(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::Block(stmts, _) => self.validate_block_scope_errors(stmts, false),
+            Stmt::If(_, then, else_, _) => {
+                self.validate_nested_stmt_errors(then);
+                if let Some(el) = else_ {
+                    self.validate_nested_stmt_errors(el);
+                }
+            }
+            Stmt::While(_, body, _)
+            | Stmt::DoWhile(_, body, _)
+            | Stmt::ForIn(_, _, body, _)
+            | Stmt::ForOf(_, _, body, _)
+            | Stmt::Labeled(_, body, _)
+            | Stmt::With(_, body, _) => self.validate_nested_stmt_errors(body),
+            Stmt::For(_, _, _, body, _) => self.validate_nested_stmt_errors(body),
+            Stmt::Try(body, catch, finally, _) => {
+                self.validate_block_scope_errors(body, false);
+                if let Some(c) = catch {
+                    self.validate_block_scope_errors(&c.body, false);
+                }
+                if let Some(f) = finally {
+                    self.validate_block_scope_errors(f, false);
+                }
+            }
+            Stmt::Switch(_, cases, default_body, _, _) => {
+                let mut all: Vec<Stmt> = Vec::new();
+                for case in cases {
+                    all.extend(case.body.iter().cloned());
+                }
+                if let Some(body) = default_body {
+                    all.extend(body.iter().cloned());
+                }
+                self.validate_block_scope_errors(&all, false);
+            }
+            Stmt::Function(f, _) => {
+                if let Stmt::Block(body, _) = &f.body {
+                    self.validate_block_scope_errors(body, true);
+                } else {
+                    self.validate_nested_stmt_errors(&f.body);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn check_context_identifier(&mut self, name: &str) {

@@ -19176,3 +19176,23 @@ fn test_assignment_and_update_target_early_errors() {
             .is_ok()
     );
 }
+
+#[test]
+fn test_lexical_redeclaration_early_errors() {
+    let mut ctx = Context::new_small();
+    for source in [
+        "{ let x; let x; }",
+        "{ let x; { var x; } }",
+        "{ class C {} class C {} }",
+        "{ function f() {} var f; }",
+        "switch (1) { case 1: let a; break; case 2: let a; }",
+        "function f() { let a; { var a; } }",
+    ] {
+        assert!(
+            ctx.eval(source).is_err(),
+            "expected SyntaxError for {source:?}"
+        );
+    }
+    assert!(ctx.eval("{ let x; { let x; } }").is_ok());
+    assert!(ctx.eval("function f() {} function f() {}").is_ok());
+}

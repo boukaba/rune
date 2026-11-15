@@ -18910,3 +18910,30 @@ fn test_switch_block_declarations_do_not_leak() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_computed_public_class_fields() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var key = "x";
+            var staticKey = "s";
+            class C {
+                [key] = 1;
+                ["y"];
+                static [staticKey + "tatic"] = 3;
+            }
+
+            var c = new C();
+            [
+                c.x === 1,
+                c.hasOwnProperty("y"),
+                c.y === undefined,
+                C.static === 3
+            ].join("|") === "true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

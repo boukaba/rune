@@ -1441,22 +1441,23 @@ impl Emitter {
         //     static methods/accessors for now).
         if let Some(ctor_slot) = save_slot {
             for field in class.fields.iter().filter(|f| f.is_static) {
+                self.emit(Opcode::LoadLocal, vec![ctor_slot as i64]);
                 let key_idx = match &field.key {
-                    PropKey::Identifier(n) => Some(self.intern_string(n) as i64),
-                    PropKey::String(n) => Some(self.intern_string(n) as i64),
-                    PropKey::Number(n) => Some(self.intern_string(&n.to_string()) as i64),
-                    PropKey::Computed(_) => None,
+                    PropKey::Identifier(n) => self.intern_string(n) as i64,
+                    PropKey::String(n) => self.intern_string(n) as i64,
+                    PropKey::Number(n) => self.intern_string(&n.to_string()) as i64,
+                    PropKey::Computed(expr) => {
+                        self.emit_expression(expr);
+                        usize::MAX as i64
+                    }
                 };
-                let Some(key_idx) = key_idx else { continue };
                 if let Some(init) = &field.init {
                     let synth = field_initializer_function(init);
                     let idx = self.compile_function(&synth);
-                    self.emit(Opcode::LoadLocal, vec![ctor_slot as i64]);
                     self.emit(Opcode::Dup, vec![]);
                     self.emit(Opcode::MakeFunction, vec![idx as i64]);
                     self.emit(Opcode::Call, vec![0]);
                 } else {
-                    self.emit(Opcode::LoadLocal, vec![ctor_slot as i64]);
                     self.emit(Opcode::LoadUndefined, vec![]);
                 }
                 self.emit(Opcode::DefineProperty, vec![key_idx]);
@@ -2586,14 +2587,16 @@ impl Emitter {
             }
             Stmt::FieldInit(fields, _) => {
                 for field in fields {
-                    let key_idx = match &field.key {
-                        PropKey::Identifier(n) => Some(self.intern_string(n) as i64),
-                        PropKey::String(n) => Some(self.intern_string(n) as i64),
-                        PropKey::Number(n) => Some(self.intern_string(&n.to_string()) as i64),
-                        PropKey::Computed(_) => None,
-                    };
-                    let Some(key_idx) = key_idx else { continue };
                     self.emit(Opcode::LoadThis, vec![]);
+                    let key_idx = match &field.key {
+                        PropKey::Identifier(n) => self.intern_string(n) as i64,
+                        PropKey::String(n) => self.intern_string(n) as i64,
+                        PropKey::Number(n) => self.intern_string(&n.to_string()) as i64,
+                        PropKey::Computed(expr) => {
+                            self.emit_expression(expr);
+                            usize::MAX as i64
+                        }
+                    };
                     if let Some(init) = &field.init {
                         self.emit_expression(init);
                     } else {

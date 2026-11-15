@@ -4114,6 +4114,22 @@ Integration suite: **932 passed, 0 failed, 3 ignored**.
 
 Integration suite: **933 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Computed public class fields (2026-11-15)
+
+- Public instance fields with computed names are now initialized
+  (`class C { [expr] = value }`): the key expression is evaluated at field
+  initialization and the value is defined via a computed DefineProperty.
+  Static computed fields evaluate their key once during class definition.
+- Known limitation: an instance computed key is re-evaluated per construction
+  instead of once at class definition; evaluation-count/order tests that
+  depend on that remain failing. Proxy defineProperty traps are still bypassed.
+- Test262: language/statements/class **1636 → 1687/4367**,
+  language/expressions/class **1566 → 1612/4059**, class/elements
+  **147 → 165/1534**.
+- Regression: `test_computed_public_class_fields`.
+
+Integration suite: **934 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Computed keys once + super binding + proxy define traps (2026-11-15)**: hidden field-key arrays, LoadCurrentFunc, static fields instance-clean, super() constructs/binds returned object, proxy DefineProperty trap. class statements **1701/4367**, class expressions **1616/4059**, elements **178/1534**, Proxy **208/311**. Integration **935**.
 - **Computed public class fields (2026-11-15)**: computed instance/static field keys via DefineProperty. class statements **1687/4367**, class expressions **1612/4059**, elements **165/1534**. Integration **934**. Known: instance key re-evaluated per construction.
 - **Block-scoped function/class declarations (2026-11-14)**: direct-only script/function declaration pre-scans, switch locals restore. switch **39/111 (0 fail)**. Integration **933**.
 - **Switch CaseBlock scope + honest negatives (2026-11-14)**: one CaseBlock lexical env with closure capture/cleanup, negative metadata type/phase parsing, no-throw negatives fail. switch **35/111**, class **1636/4367**, class expr **1566/4059**, object **648/1170**. Integration **932**.

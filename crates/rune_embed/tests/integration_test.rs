@@ -18925,13 +18925,56 @@ fn test_computed_public_class_fields() {
                 static [staticKey + "tatic"] = 3;
             }
 
+            var evaluations = 0;
+            class Once {
+                [(evaluations += 1, "only")] = 1;
+            }
+            new Once();
+            new Once();
+
             var c = new C();
             [
                 c.x === 1,
                 c.hasOwnProperty("y"),
                 c.y === undefined,
-                C.static === 3
-            ].join("|") === "true|true|true|true";
+                C.static === 3,
+                evaluations === 1
+            ].join("|") === "true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}
+
+#[test]
+fn test_class_fields_use_super_return_proxy_and_define_trap() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var trapKey = "";
+            var trapped = false;
+            function ProxyBase() {
+                return new Proxy(this, {
+                    defineProperty: function (target, key) {
+                        trapKey = key;
+                        trapped = true;
+                        throw new Error("define-trap");
+                    }
+                });
+            }
+            class Derived extends ProxyBase {
+                field = 1;
+            }
+
+            var threw = false;
+            try {
+                new Derived();
+            } catch (e) {
+                threw = e.message === "define-trap";
+            }
+
+            [threw, trapped, trapKey === "field"].join("|") === "true|true|true";
             "#,
         )
         .unwrap();

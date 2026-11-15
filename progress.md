@@ -4130,6 +4130,28 @@ Integration suite: **933 passed, 0 failed, 3 ignored**.
 
 Integration suite: **934 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Computed field keys once, super() binding, proxy define traps (2026-11-15)
+
+- Computed instance field names are evaluated **once at class definition** and
+  stashed in a hidden `\0class_field_keys` array on the constructor.
+  `FieldInit` reads the key via a new `LoadCurrentFunc` opcode, so
+  `new C()` twice evaluates each computed key only once.
+- Static fields are no longer re-initialized on instances (`FieldInit` receives
+  only non-static fields).
+- `super()` calls to ordinary functions (not just classes) now use construction
+  semantics: the superclass activation is a constructor call, its returned
+  object becomes the derived constructor's `this`, and subsequent field
+  initialization targets that object (visible to Proxy defineProperty traps).
+- `DefineProperty` on a Proxy now builds a data descriptor and invokes the
+  `defineProperty` trap (false → TypeError; absent trap → define on target).
+- Test262: language/statements/class **1687 → 1701/4367**,
+  language/expressions/class **1612 → 1616/4059**, class/elements
+  **165 → 178/1534**, built-ins/Proxy **207 → 208/311**.
+- Regression: `test_computed_public_class_fields` (now asserts single
+  evaluation) and `test_class_fields_use_super_return_proxy_and_define_trap`.
+
+Integration suite: **935 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

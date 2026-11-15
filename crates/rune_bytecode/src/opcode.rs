@@ -170,6 +170,8 @@ pub enum Opcode {
     Rot3,
     // Push the current activation's `new.target` (undefined for ordinary calls).
     LoadNewTarget,
+    // Push the currently executing function object (undefined at script level).
+    LoadCurrentFunc,
 }
 
 #[derive(Clone, Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]

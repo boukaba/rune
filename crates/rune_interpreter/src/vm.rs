@@ -8080,6 +8080,15 @@ impl Vm {
                 }
 
                 // ---- `this` binding ----
+                Opcode::LoadCurrentFunc => {
+                    let fp = self.frames[fi].func_ptr;
+                    if fp.is_null() {
+                        self.push(Value::undefined());
+                    } else {
+                        self.push(Value::from_heap_ptr(fp));
+                    }
+                    self.frames[fi].pc = pc + 1;
+                }
                 Opcode::LoadNewTarget => {
                     let fp = self.frames[fi].func_ptr;
                     let mut nt = self.frames[fi].new_target;
@@ -10007,6 +10016,94 @@ impl Vm {
                             .prog_str(instr.operands[0] as usize)
                             .map(|s| s.to_string())
                     };
+                    // DefineProperty on a Proxy must invoke the defineProperty
+                    // trap (class fields, literals). Build a full data
+                    // descriptor object for the trap.
+                    if crate::vm::proxy_parts(obj).is_some() {
+                        let proxy = obj;
+                        let (target, _handler, revoked) = crate::vm::proxy_parts(proxy).unwrap();
+                        if revoked {
+                            let exc = crate::errors::error_object(
+                                gc,
+                                &self.error_protos,
+                                crate::errors::ErrorKind::TypeError,
+                                "Cannot define property on a revoked proxy",
+                            );
+                            if let Some(exit) = self.handle_throw(gc, exc) {
+                                return exit;
+                            }
+                            continue;
+                        }
+                        if let Some(key_str) = &key_str {
+                            let raw_key = key_val.unwrap_or_else(|| {
+                                Value::from_heap_ptr(HeapString::allocate(gc, key_str) as *mut u8)
+                            });
+                            let shape = Shape::intern_with_attrs(
+                                vec![
+                                    (PropertyKey::from_string("value"), 0usize),
+                                    (PropertyKey::from_string("writable"), 1),
+                                    (PropertyKey::from_string("enumerable"), 2),
+                                    (PropertyKey::from_string("configurable"), 3),
+                                ],
+                                vec![
+                                    "value".to_string(),
+                                    "writable".to_string(),
+                                    "enumerable".to_string(),
+                                    "configurable".to_string(),
+                                ],
+                                vec![
+                                    rune_core::shape::ATTR_ENUMERABLE,
+                                    rune_core::shape::ATTR_ENUMERABLE,
+                                    rune_core::shape::ATTR_ENUMERABLE,
+                                    rune_core::shape::ATTR_ENUMERABLE,
+                                ],
+                            );
+                            let desc = JSObject::allocate(
+                                gc,
+                                shape,
+                                &[
+                                    value,
+                                    Value::boolean(true),
+                                    Value::boolean(true),
+                                    Value::boolean(true),
+                                ],
+                            );
+                            match self.proxy_trap_invoke_public(
+                                gc,
+                                proxy,
+                                "defineProperty",
+                                &[target, raw_key, Value::from_heap_ptr(desc as *mut u8)],
+                            ) {
+                                Ok(Some(v)) => {
+                                    if !v.to_bool() {
+                                        let exc = crate::errors::error_object(
+                                            gc,
+                                            &self.error_protos,
+                                            crate::errors::ErrorKind::TypeError,
+                                            "Proxy defineProperty trap returned false",
+                                        );
+                                        if let Some(exit) = self.handle_throw(gc, exc) {
+                                            return exit;
+                                        }
+                                        continue;
+                                    }
+                                    self.push(proxy);
+                                    self.frames[fi].pc = pc + 1;
+                                    continue;
+                                }
+                                Ok(None) => {
+                                    // No trap: define directly on the target.
+                                    obj = target;
+                                }
+                                Err(e) => {
+                                    if let Some(exit) = self.handle_throw(gc, e) {
+                                        return exit;
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     if let Some(key_str) = key_str {
                         if let Some(ptr) = obj.heap_ptr() {
                             let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
@@ -13350,8 +13447,7 @@ impl Vm {
                                 // currently executing constructor.
                                 let call_is_super =
                                     instr.operands.get(1).copied().unwrap_or(0) != 0;
-                                let super_construct =
-                                    call_is_super && func_prog.is_class_constructor;
+                                let super_construct = call_is_super;
                                 let caller_new_target = self.frames[fi].new_target;
                                 self.frames.push(Frame {
                                     locals,
@@ -13471,6 +13567,7 @@ impl Vm {
                     let popped_frame = self.frames.len() - 1;
                     let is_constructor = self.frames[popped_frame].is_constructor_call;
                     let constructed_obj = self.frames[popped_frame].constructed_object;
+                    let popped_new_target = self.frames[popped_frame].new_target;
                     let popped_func = self.frames[popped_frame].func_ptr;
                     self.last_locals = self.frames[popped_frame].locals.clone();
                     // B1e: callee identity for machine Return arms (nested
@@ -15034,6 +15131,19 @@ impl Vm {
                             }
                         }
                         if result.is_heap_object() {
+                            // A super() call's returned object becomes the
+                            // derived constructor's `this`.
+                            let popped_func_value = if popped_func.is_null() {
+                                Value::undefined()
+                            } else {
+                                Value::from_heap_ptr(popped_func)
+                            };
+                            if popped_new_target != popped_func_value
+                                && self.frames[new_fi].is_constructor_call
+                            {
+                                self.frames[new_fi].this = result;
+                                self.frames[new_fi].constructed_object = result;
+                            }
                             self.push(result);
                         } else {
                             self.push(constructed_obj);
@@ -15367,8 +15477,7 @@ impl Vm {
                                 locals.extend(args);
                                 let call_is_super =
                                     instr.operands.first().copied().unwrap_or(0) != 0;
-                                let super_construct =
-                                    call_is_super && func_prog.is_class_constructor;
+                                let super_construct = call_is_super;
                                 let caller_new_target = self.frames[fi].new_target;
                                 self.frames.push(Frame {
                                     locals,

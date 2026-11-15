@@ -1248,10 +1248,16 @@ impl Emitter {
                 // Base class default constructor: empty body
                 Stmt::Block(vec![], Span { start: 0, end: 0 })
             };
-            let body = if class.fields.is_empty() {
+            let mut instance_fields: Vec<ClassField> = class
+                .fields
+                .iter()
+                .filter(|f| !f.is_static)
+                .cloned()
+                .collect();
+            let body = if instance_fields.is_empty() {
                 body
             } else {
-                let init_stmt = Stmt::FieldInit(class.fields.clone(), Span::default());
+                let init_stmt = Stmt::FieldInit(instance_fields, Span::default());
                 match body {
                     Stmt::Block(mut stmts, span) => {
                         if has_heritage {
@@ -1428,6 +1434,29 @@ impl Emitter {
                 }
             }
         }
+        // 5-key. Evaluate computed instance field names once at class
+        // definition and stash them on the constructor for FieldInit.
+        let computed_instance_fields: Vec<&ClassField> = class
+            .fields
+            .iter()
+            .filter(|f| !f.is_static && matches!(f.key, PropKey::Computed(_)))
+            .collect();
+        if let Some(ctor_slot) = save_slot {
+            if !computed_instance_fields.is_empty() {
+                self.emit(Opcode::LoadLocal, vec![ctor_slot as i64]);
+                self.emit(Opcode::NewArray, vec![0]);
+                for field in computed_instance_fields {
+                    if let PropKey::Computed(expr) = &field.key {
+                        self.emit_expression(expr);
+                    }
+                    self.emit(Opcode::ArrayPush, vec![]);
+                }
+                let hidden = self.intern_string("\0class_field_keys") as i64;
+                self.emit(Opcode::DefineProperty, vec![hidden]);
+                self.emit(Opcode::Pop, vec![]);
+            }
+        }
+
         // 5-pre. Bind the class name inside the capture env (slot filled any
         // time before the first method call — closures hold the env object).
         if class_env_pushed {
@@ -2586,14 +2615,21 @@ impl Emitter {
                 }
             }
             Stmt::FieldInit(fields, _) => {
+                let mut computed_index = 0usize;
                 for field in fields {
                     self.emit(Opcode::LoadThis, vec![]);
                     let key_idx = match &field.key {
                         PropKey::Identifier(n) => self.intern_string(n) as i64,
                         PropKey::String(n) => self.intern_string(n) as i64,
                         PropKey::Number(n) => self.intern_string(&n.to_string()) as i64,
-                        PropKey::Computed(expr) => {
-                            self.emit_expression(expr);
+                        PropKey::Computed(_) => {
+                            let hidden = self.intern_string("\0class_field_keys") as i64;
+                            self.emit(Opcode::LoadCurrentFunc, vec![]);
+                            self.emit(Opcode::LoadStringConst, vec![hidden]);
+                            self.emit(Opcode::LoadProperty, vec![]);
+                            self.emit(Opcode::LoadSmi, vec![computed_index as i64]);
+                            self.emit(Opcode::LoadProperty, vec![]);
+                            computed_index += 1;
                             usize::MAX as i64
                         }
                     };

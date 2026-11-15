@@ -4588,6 +4588,27 @@ Integration suite: **952 passed, 0 failed, 3 ignored**.
 
 Integration suite: **953 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Break/continue + identifier early errors (2026-11-15)
+
+- Parser tracks loop/switch depth, labels and iteration labels:
+  - bare `break` outside loop/switch, bare `continue` outside a loop, and
+    unknown labels are SyntaxErrors;
+  - `continue label` requires the label to name an iteration statement;
+  - static initialisation blocks reset the loop/switch/label context, so
+    `break`/`continue` cannot cross the static-block boundary (nested loops
+    inside the block still permit their own break/continue).
+- `var` declarations reject reserved-word binding names (`var with`, `var enum`,
+  `var debugger`) including escaped spellings; invalid identifier-start
+  characters (leading ZWNJ/ZWJ, U+2E2F) are rejected.
+- for-in/for-of heads validate initializers (for-of forbids all; for-in forbids
+  initializers on binding patterns), and array binding patterns validate rest
+  placement/defaults.
+- Test262: statements/break **7 → 18/20**, statements/continue **10 → 22/24**,
+  identifiers **246 → 261/268**, language overall **13,658 → 13,713/23,979**.
+- Regression: `test_break_continue_early_errors`.
+
+Integration suite: **954 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

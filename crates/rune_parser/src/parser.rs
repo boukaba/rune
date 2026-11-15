@@ -29,6 +29,12 @@ pub struct Parser {
     allow_super_call: bool,
     /// The class currently being parsed has an `extends` clause.
     class_is_derived: bool,
+    /// Nesting depth of loops/switch for break/continue early errors.
+    loop_depth: usize,
+    switch_depth: usize,
+    /// Active labels and labels directly attached to iteration statements.
+    labels: Vec<String>,
+    iteration_labels: Vec<String>,
 }
 
 impl Parser {
@@ -49,6 +55,10 @@ impl Parser {
             parsing_class_method: false,
             allow_super_call: false,
             class_is_derived: false,
+            loop_depth: 0,
+            switch_depth: 0,
+            labels: Vec::new(),
+            iteration_labels: Vec::new(),
         }
     }
 
@@ -71,6 +81,10 @@ impl Parser {
             parsing_class_method: false,
             allow_super_call: false,
             class_is_derived: false,
+            loop_depth: 0,
+            switch_depth: 0,
+            labels: Vec::new(),
+            iteration_labels: Vec::new(),
         }
     }
 
@@ -1028,7 +1042,19 @@ impl Parser {
                 self.check_context_identifier(&name);
                 self.advance(); // identifier
                 self.advance(); // ':'
+                let is_loop = matches!(
+                    self.tok.kind,
+                    TokenKind::While | TokenKind::Do | TokenKind::For
+                );
+                self.labels.push(name.to_string());
+                if is_loop {
+                    self.iteration_labels.push(name.to_string());
+                }
                 let body = Box::new(self.parse_statement());
+                self.labels.pop();
+                if is_loop {
+                    self.iteration_labels.pop();
+                }
                 if matches!(body.as_ref(), Stmt::Function(_, _)) {
                     self.error("Labelled function declarations are not allowed".to_string());
                 }
@@ -1508,9 +1534,19 @@ impl Parser {
             if is_static && self.tok.kind == TokenKind::LBrace {
                 let bstart = self.span();
                 let outer_static_async = self.in_async;
+                let outer_loop = self.loop_depth;
+                let outer_switch = self.switch_depth;
+                let outer_labels = std::mem::take(&mut self.labels);
+                let outer_iteration = std::mem::take(&mut self.iteration_labels);
                 self.in_async = true;
+                self.loop_depth = 0;
+                self.switch_depth = 0;
                 let block = self.parse_block();
                 self.in_async = outer_static_async;
+                self.loop_depth = outer_loop;
+                self.switch_depth = outer_switch;
+                self.labels = outer_labels;
+                self.iteration_labels = outer_iteration;
                 let body = match block {
                     Stmt::Block(stmts, _) => stmts,
                     other => vec![other],
@@ -1949,7 +1985,11 @@ impl Parser {
                     (Box::from("_destructure"), Some(pat))
                 } else if self.tok.kind == TokenKind::Identifier {
                     let t = self.tok.clone();
-                    self.check_context_identifier(&t.value);
+                    if Self::is_reserved_identifier(&t.value) {
+                        self.error(format!("Unexpected reserved word '{}'", t.value));
+                    } else {
+                        self.check_context_identifier(&t.value);
+                    }
                     self.advance();
                     (t.value.into_boxed_str(), None)
                 } else {
@@ -2166,6 +2206,13 @@ impl Parser {
     }
 
     fn parse_switch(&mut self) -> Stmt {
+        self.switch_depth += 1;
+        let stmt = self.parse_switch_inner();
+        self.switch_depth -= 1;
+        stmt
+    }
+
+    fn parse_switch_inner(&mut self) -> Stmt {
         let start = self.span();
         self.expect(TokenKind::Switch);
         self.expect(TokenKind::LParen);
@@ -2264,8 +2311,10 @@ impl Parser {
         self.expect(TokenKind::LParen);
         let cond = self.parse_expr(0);
         self.expect(TokenKind::RParen);
+        self.loop_depth += 1;
         let body = Box::new(self.parse_statement());
         self.check_statement_body(&body);
+        self.loop_depth -= 1;
         Stmt::While(
             Box::new(cond),
             body,
@@ -2279,8 +2328,10 @@ impl Parser {
     fn parse_do_while(&mut self) -> Stmt {
         let start = self.span();
         self.expect(TokenKind::Do);
+        self.loop_depth += 1;
         let body = Box::new(self.parse_statement());
         self.check_statement_body(&body);
+        self.loop_depth -= 1;
         self.expect(TokenKind::While);
         self.expect(TokenKind::LParen);
         let cond = self.parse_expr(0);
@@ -2296,7 +2347,24 @@ impl Parser {
         )
     }
 
+    fn for_head_initializer_invalid(&self, stmt: &Stmt, is_of: bool) -> bool {
+        if let Stmt::Var(_, decls, _) = stmt {
+            decls
+                .iter()
+                .any(|d| d.init.is_some() && (is_of || d.pattern.is_some()))
+        } else {
+            false
+        }
+    }
+
     fn parse_for(&mut self) -> Stmt {
+        self.loop_depth += 1;
+        let stmt = self.parse_for_inner();
+        self.loop_depth -= 1;
+        stmt
+    }
+
+    fn parse_for_inner(&mut self) -> Stmt {
         let start = self.span();
         self.expect(TokenKind::For);
         self.expect(TokenKind::LParen);
@@ -2324,6 +2392,11 @@ impl Parser {
                 }
             }
             if self.tok.kind == TokenKind::In {
+                if self.for_head_initializer_invalid(&var_stmt, false) {
+                    self.error(
+                        "for-in loop variable declaration may not have an initializer".to_string(),
+                    );
+                }
                 // for (var x in obj)
                 self.advance();
                 let obj = self.parse_expr(0);
@@ -2522,6 +2595,24 @@ impl Parser {
         } else {
             None
         };
+        if let Some(name) = &label {
+            let valid = if is_break {
+                self.labels.iter().any(|l| l.as_str() == name.as_ref())
+            } else {
+                self.iteration_labels
+                    .iter()
+                    .any(|l| l.as_str() == name.as_ref())
+            };
+            if !valid {
+                self.error(format!("Undefined label '{name}'"));
+            }
+        } else if is_break {
+            if self.loop_depth == 0 && self.switch_depth == 0 {
+                self.error("Illegal break statement".to_string());
+            }
+        } else if self.loop_depth == 0 {
+            self.error("Illegal continue statement".to_string());
+        }
         self.consume_semicolon();
         if is_break {
             Stmt::Break(
@@ -4049,16 +4140,22 @@ impl Parser {
                     if self.tok.kind == TokenKind::Ellipsis {
                         self.advance();
                         let inner = self.parse_binding_pattern();
+                        if self.tok.kind == TokenKind::EqAssign {
+                            self.error("Rest element may not have a default value".to_string());
+                        }
                         items.push(Some(Pattern::Rest(Box::new(inner), start)));
-                        // Rest must be last — consume remaining up to RBracket
-                        while self.tok.kind != TokenKind::RBracket
-                            && self.tok.kind != TokenKind::Eof
-                        {
-                            if self.tok.kind == TokenKind::Comma {
-                                self.advance();
-                            } else {
-                                break;
+                        if self.tok.kind == TokenKind::Comma {
+                            self.advance();
+                            if self.tok.kind != TokenKind::RBracket {
+                                self.error("Rest element must be last in a pattern".to_string());
+                                while self.tok.kind != TokenKind::RBracket
+                                    && self.tok.kind != TokenKind::Eof
+                                {
+                                    self.advance();
+                                }
                             }
+                        } else if self.tok.kind != TokenKind::RBracket {
+                            self.error("Rest element must be last in a pattern".to_string());
                         }
                         break;
                     }

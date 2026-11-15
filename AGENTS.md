@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Break/continue + identifier early errors (2026-11-15)**: loop/switch/label tracking, static-block context reset, reserved var names, invalid identifier starts, for-head/rest validation. break **18/20**, continue **22/24**, identifiers **261/268**, language **13713/23979**. Integration **954**.
 - **Destructuring early errors (2026-11-15)**: reserved/escaped binding identifiers rejected, rest default/non-last rejected. arrow dstr **223/231 (0 fail)**, language **13658/23979**. Integration **953**.
 - **Single-statement body early errors (2026-11-15)**: lexical/generator/async/labelled function declarations rejected as if/loop/with bodies. if **57/69**, language **13576/23979**. Integration **952**.
 - **Private identifier + special method early errors (2026-11-15)**: whitespace/escaped-hash rejection, #constructor/#prototype bans, constructor accessor/generator/async and static prototype checks, super.#x rejection; ZWNJ/ZWJ stay valid. class **2577/4367**, language **13490/23979**. Integration **951**.

@@ -666,6 +666,14 @@ impl Lexer {
                 break;
             }
         }
+        if word
+            .chars()
+            .next()
+            .is_some_and(|c| matches!(c, '\u{200C}' | '\u{200D}' | '\u{2E2F}'))
+        {
+            self.errors
+                .push("Invalid identifier start character".into());
+        }
         let kind = match word.as_str() {
             "true" => TokenKind::True,
             "false" => TokenKind::False,

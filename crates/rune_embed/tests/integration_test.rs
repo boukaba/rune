@@ -19429,3 +19429,28 @@ fn test_destructuring_pattern_early_errors() {
     );
     assert!(ctx.eval("var { a: b } = { a: 1 }; b === 1;").is_ok());
 }
+
+#[test]
+fn test_break_continue_early_errors() {
+    let mut ctx = Context::new_small();
+    for source in [
+        "break;",
+        "continue;",
+        "continue missing;",
+        "while (true) { break missing; }",
+        "class C { static { break; } }",
+    ] {
+        assert!(
+            ctx.eval(source).is_err(),
+            "expected SyntaxError for {source:?}"
+        );
+    }
+    assert!(
+        ctx.eval("var n = 0; while (n < 3) { n++; if (n === 2) break; } n === 2;")
+            .is_ok()
+    );
+    assert!(
+        ctx.eval("var i = 0; while (i < 2) { i++; continue; } i === 2;")
+            .is_ok()
+    );
+}

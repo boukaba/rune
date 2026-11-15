@@ -19407,3 +19407,25 @@ fn test_single_statement_body_early_errors() {
     }
     assert!(ctx.eval("if (false) function f() {}").is_ok());
 }
+
+#[test]
+fn test_destructuring_pattern_early_errors() {
+    let mut ctx = Context::new_small();
+    for source in [
+        "({ var } = {});",
+        r"var f = ({ v\u0061r }) => {};",
+        "var f = ([default]) => {};",
+        "([...x = 1] = []);",
+        "([...x, y] = []);",
+    ] {
+        assert!(
+            ctx.eval(source).is_err(),
+            "expected SyntaxError for {source:?}"
+        );
+    }
+    assert!(
+        ctx.eval("var [a, ...rest] = [1, 2, 3]; rest.length === 2;")
+            .is_ok()
+    );
+    assert!(ctx.eval("var { a: b } = { a: 1 }; b === 1;").is_ok());
+}

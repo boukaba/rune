@@ -802,6 +802,48 @@ impl Parser {
         }
     }
 
+    fn is_reserved_identifier(name: &str) -> bool {
+        matches!(
+            name,
+            "break"
+                | "case"
+                | "catch"
+                | "class"
+                | "const"
+                | "continue"
+                | "debugger"
+                | "default"
+                | "delete"
+                | "do"
+                | "else"
+                | "enum"
+                | "export"
+                | "extends"
+                | "false"
+                | "finally"
+                | "for"
+                | "function"
+                | "if"
+                | "import"
+                | "in"
+                | "instanceof"
+                | "new"
+                | "null"
+                | "return"
+                | "super"
+                | "switch"
+                | "this"
+                | "throw"
+                | "true"
+                | "try"
+                | "typeof"
+                | "var"
+                | "void"
+                | "while"
+                | "with"
+        )
+    }
+
     fn is_strict_reserved_word(name: &str) -> bool {
         matches!(
             name,
@@ -3531,10 +3573,10 @@ impl Parser {
                             if is_generator || is_async {
                                 self.error("Invalid method definition prefix".to_string());
                             }
-                            if self.strict && Self::is_strict_reserved_word(&name) {
-                                self.error(format!(
-                                    "Unexpected strict mode reserved word '{name}'"
-                                ));
+                            if Self::is_reserved_identifier(&name) {
+                                self.error(format!("Unexpected reserved word '{name}'"));
+                            } else {
+                                self.check_context_identifier(&name);
                             }
                             let mut value = Expr::Identifier(
                                 name,
@@ -3818,13 +3860,19 @@ impl Parser {
         match expr {
             Expr::Array(elems, span) => {
                 let mut items = Vec::new();
-                for elem in elems {
+                for (index, elem) in elems.iter().enumerate() {
                     if elem.is_hole {
                         items.push(None);
                         continue;
                     }
                     if elem.is_spread {
+                        if index + 1 != elems.len() {
+                            self.error("Rest element must be last in a pattern".to_string());
+                        }
                         let inner = self.expr_to_pattern(&elem.expr)?;
+                        if matches!(inner, Pattern::Default(_, _)) {
+                            self.error("Rest element may not have a default value".to_string());
+                        }
                         items.push(Some(Pattern::Rest(Box::new(inner), *span)));
                     } else {
                         items.push(Some(self.binding_from_value(&elem.expr)?));
@@ -3871,7 +3919,14 @@ impl Parser {
     /// binding pattern (identifier, nested literal, or `= default`).
     fn binding_from_value(&mut self, expr: &Expr) -> Option<Pattern> {
         match expr {
-            Expr::Identifier(name, ispan) => Some(Pattern::Identifier(name.clone(), *ispan, None)),
+            Expr::Identifier(name, ispan) => {
+                if Self::is_reserved_identifier(name) {
+                    self.error(format!("Unexpected reserved word '{name}'"));
+                } else {
+                    self.check_context_identifier(name);
+                }
+                Some(Pattern::Identifier(name.clone(), *ispan, None))
+            }
             Expr::Assign(target, default, _) => {
                 if let Expr::Identifier(name, ispan) = target.as_ref() {
                     Some(Pattern::Default(
@@ -3937,6 +3992,11 @@ impl Parser {
                             } else {
                                 None
                             };
+                            if Self::is_reserved_identifier(id) {
+                                self.error(format!("Unexpected reserved word '{id}'"));
+                            } else {
+                                self.check_context_identifier(id);
+                            }
                             Pattern::Identifier(
                                 id.clone(),
                                 Span {
@@ -4027,6 +4087,11 @@ impl Parser {
             _ => {
                 let t = self.tok.clone();
                 self.advance();
+                if Self::is_reserved_identifier(&t.value) {
+                    self.error(format!("Unexpected reserved word '{}'", t.value));
+                } else {
+                    self.check_context_identifier(&t.value);
+                }
                 Pattern::Identifier(
                     t.value.into_boxed_str(),
                     Span {

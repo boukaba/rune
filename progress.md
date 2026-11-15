@@ -4572,6 +4572,22 @@ Integration suite: **951 passed, 0 failed, 3 ignored**.
 
 Integration suite: **952 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Destructuring binding/assignment early errors (2026-11-15)
+
+- Shorthand and binding identifiers that are reserved words are SyntaxErrors:
+  `({ var } = {})`, `({ default }) => {}`, escaped spellings such as
+  `({ v\u0061r })`, etc.
+- Contextual restrictions are checked in binding patterns (await/yield,
+  strict reserved words).
+- Array patterns reject a rest element with a default value
+  (`[...x = 1]`) and a rest element that is not last (`[...x, y]`).
+- Test262: expressions/arrow-function/dstr **186 → 223/231 (0 failures)**,
+  expressions/assignment/dstr early errors reduced to three nested-invalid
+  cases, language overall **13,576 → 13,658/23,979**.
+- Regression: `test_destructuring_pattern_early_errors`.
+
+Integration suite: **953 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

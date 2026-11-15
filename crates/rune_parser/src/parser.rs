@@ -987,6 +987,9 @@ impl Parser {
                 self.advance(); // identifier
                 self.advance(); // ':'
                 let body = Box::new(self.parse_statement());
+                if matches!(body.as_ref(), Stmt::Function(_, _)) {
+                    self.error("Labelled function declarations are not allowed".to_string());
+                }
                 Stmt::Labeled(name, body, self.span())
             }
             _ => {
@@ -2073,6 +2076,32 @@ impl Parser {
         )
     }
 
+    fn check_statement_body(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::Var(VarKind::Let | VarKind::Const, _, _) | Stmt::Class(_, _) => {
+                self.error(
+                    "Lexical declaration is not allowed as a single statement body".to_string(),
+                );
+            }
+            Stmt::Function(f, _) => {
+                if f.is_async || f.is_generator || self.strict {
+                    self.error(
+                        "Function declaration is not allowed as a single statement body"
+                            .to_string(),
+                    );
+                }
+            }
+            Stmt::Labeled(_, body, _) => {
+                if matches!(body.as_ref(), Stmt::Function(_, _)) {
+                    self.error("Labelled function declaration is not allowed here".to_string());
+                } else {
+                    self.check_statement_body(body);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn parse_with(&mut self) -> Stmt {
         let start = self.span();
         if self.strict {
@@ -2083,6 +2112,7 @@ impl Parser {
         let expr = Box::new(self.parse_expr_comma());
         self.expect(TokenKind::RParen);
         let body = Box::new(self.parse_statement());
+        self.check_statement_body(&body);
         Stmt::With(
             expr,
             body,
@@ -2166,9 +2196,12 @@ impl Parser {
         let cond = self.parse_expr(0);
         self.expect(TokenKind::RParen);
         let then = Box::new(self.parse_statement());
+        self.check_statement_body(&then);
         let else_branch = if self.tok.kind == TokenKind::Else {
             self.advance();
-            Some(Box::new(self.parse_statement()))
+            let branch = Box::new(self.parse_statement());
+            self.check_statement_body(&branch);
+            Some(branch)
         } else {
             None
         };
@@ -2190,6 +2223,7 @@ impl Parser {
         let cond = self.parse_expr(0);
         self.expect(TokenKind::RParen);
         let body = Box::new(self.parse_statement());
+        self.check_statement_body(&body);
         Stmt::While(
             Box::new(cond),
             body,
@@ -2204,6 +2238,7 @@ impl Parser {
         let start = self.span();
         self.expect(TokenKind::Do);
         let body = Box::new(self.parse_statement());
+        self.check_statement_body(&body);
         self.expect(TokenKind::While);
         self.expect(TokenKind::LParen);
         let cond = self.parse_expr(0);
@@ -2252,6 +2287,7 @@ impl Parser {
                 let obj = self.parse_expr(0);
                 self.expect(TokenKind::RParen);
                 let body = Box::new(self.parse_statement());
+                self.check_statement_body(&body);
                 // Extract the variable name from the var declaration
                 let name = match &var_stmt {
                     Stmt::Var(_, decls, _) if decls.len() == 1 => decls[0].name.clone(),
@@ -2370,6 +2406,7 @@ impl Parser {
             let obj = self.parse_expr(0);
             self.expect(TokenKind::RParen);
             let body = Box::new(self.parse_statement());
+            self.check_statement_body(&body);
             return Stmt::ForIn(
                 Box::new(lhs),
                 Box::new(obj),
@@ -2386,6 +2423,7 @@ impl Parser {
             let obj = self.parse_expr(0);
             self.expect(TokenKind::RParen);
             let body = Box::new(self.parse_statement());
+            self.check_statement_body(&body);
             return Stmt::ForOf(
                 Box::new(lhs),
                 Box::new(obj),
@@ -2419,6 +2457,7 @@ impl Parser {
         };
         self.expect(TokenKind::RParen);
         let body = Box::new(self.parse_statement());
+        self.check_statement_body(&body);
         Stmt::For(
             init,
             cond,

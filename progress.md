@@ -4558,6 +4558,20 @@ Integration suite: **950 passed, 0 failed, 3 ignored**.
 
 Integration suite: **951 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Single-statement body early errors (2026-11-15)
+
+- Lexical declarations (`let`/`const`/`class`), generator/async function
+  declarations, and labelled function declarations are rejected when used as
+  the single statement body of `if`/`else`, `while`, `do`, `for`/`for-in`/
+  `for-of`, or `with`.
+- Plain function declarations remain permitted as sloppy-mode `if`/loop bodies
+  (Annex B), and are rejected in strict code.
+- Test262: statements/if **31 → 57/69**, language overall
+  **13,490 → 13,576/23,979**.
+- Regression: `test_single_statement_body_early_errors`.
+
+Integration suite: **952 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

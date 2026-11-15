@@ -19386,3 +19386,24 @@ fn test_private_name_syntax_early_errors() {
             .is_ok()
     );
 }
+
+#[test]
+fn test_single_statement_body_early_errors() {
+    let mut ctx = Context::new_small();
+    for source in [
+        "if (true) let x;",
+        "if (true) ; else const y = 1;",
+        "if (true) class C {}",
+        "if (true) function* g() {}",
+        "if (true) async function f() {}",
+        "while (false) let x;",
+        "label: function f() {}",
+        "if (true) label: function f() {}",
+    ] {
+        assert!(
+            ctx.eval(source).is_err(),
+            "expected SyntaxError for {source:?}"
+        );
+    }
+    assert!(ctx.eval("if (false) function f() {}").is_ok());
+}

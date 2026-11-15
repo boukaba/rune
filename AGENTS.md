@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Single-statement body early errors (2026-11-15)**: lexical/generator/async/labelled function declarations rejected as if/loop/with bodies. if **57/69**, language **13576/23979**. Integration **952**.
 - **Private identifier + special method early errors (2026-11-15)**: whitespace/escaped-hash rejection, #constructor/#prototype bans, constructor accessor/generator/async and static prototype checks, super.#x rejection; ZWNJ/ZWJ stay valid. class **2577/4367**, language **13490/23979**. Integration **951**.
 - **RegExp literal validation (2026-11-15)**: line terminators/comments, quantifier/assertion rules, u/v identity/decimal/class-range escapes, escaped flags. regexp **176/238**, language **13407/23979**. Integration **950**.
 - **String literal escape early errors (2026-11-15)**: invalid hex/unicode escapes, legacy octal decoding, line continuations, strict directive retroactive validation. strings **67/73 (0 fail)**, language **13364/23979**. Integration **949**.

@@ -19004,14 +19004,22 @@ fn test_with_object_environment_and_unscopables() {
                 blocked = x;
             }
 
+            var captured;
+            with ({ capturedKey: 11 }) {
+                captured = function () {
+                    return capturedKey;
+                };
+            }
+
             [
                 obj.value === 6,
                 created === 7,
                 globalFromWith === 8,
                 obj.x === undefined,
                 outer === 1,
-                blocked === 2
-            ].join("|") === "true|true|true|true|true|true";
+                blocked === 2,
+                captured() === 11
+            ].join("|") === "true|true|true|true|true|true|true";
             "#,
         )
         .unwrap();

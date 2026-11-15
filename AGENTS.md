@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **`with` closures + lexical chain (2026-11-15)**: frame-scoped with lists, Func `\0with_objects` capture for closures, with-outer local shadowing, dynamic local slot growth. with **142/181**. Integration **936**. Remaining 15: unscopables, strict syntax, abrupt, scope-var-open.
 - **`with` object environments (2026-11-15)**: WithEnter/Leave, dynamic Load/Store/DeleteNameWith, unscopables, global object property fallback, vars through with. with **117/181**. Integration **936**. Known: closures, strict syntax, abrupt cleanup.
 - **Computed keys once + super binding + proxy define traps (2026-11-15)**: hidden field-key arrays, LoadCurrentFunc, static fields instance-clean, super() constructs/binds returned object, proxy DefineProperty trap. class statements **1701/4367**, class expressions **1616/4059**, elements **178/1534**, Proxy **208/311**. Integration **935**.
 - **Computed public class fields (2026-11-15)**: computed instance/static field keys via DefineProperty. class statements **1687/4367**, class expressions **1612/4059**, elements **165/1534**. Integration **934**. Known: instance key re-evaluated per construction.

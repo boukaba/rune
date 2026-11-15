@@ -47,6 +47,9 @@ pub struct Emitter {
     completion_slot: Option<usize>,
     /// Nesting depth of `with` bodies (dynamic identifier resolution).
     with_depth: usize,
+    /// True when compiling a function body created inside `with`: captured
+    /// with environments are outer to the function's own bindings.
+    with_outer: bool,
     /// How many env slots this function's env object has (0 = no env).
     captured_env_size: usize,
     /// Captured_names of enclosing functions, ordered closest-first.
@@ -142,6 +145,7 @@ impl Emitter {
             eval_completion: false,
             completion_slot: None,
             with_depth: 0,
+            with_outer: false,
             captured_env_size: 0,
             env_scope_stack: Vec::new(),
             env_scope_is_per_iter: Vec::new(),
@@ -664,6 +668,9 @@ impl Emitter {
             .map(|s| function_source_slice(s, func.span))
             .unwrap_or_default();
         sub.env_scope_stack = self.env_scope_stack.clone();
+        sub.with_depth = self.with_depth;
+        sub.with_outer = self.with_depth > 0;
+        sub.with_depth = self.with_depth;
         sub.env_scope_is_per_iter = self.env_scope_is_per_iter.clone();
         sub.script_const_names = self.script_const_names.clone();
         sub.function_depth = self.function_depth + 1;
@@ -1993,7 +2000,7 @@ impl Emitter {
             return false;
         }
         let name_idx = self.intern_string(name) as i64;
-        let mut ops: Vec<i64> = vec![name_idx];
+        let mut ops: Vec<i64> = vec![name_idx, if self.with_outer { 1 } else { 0 }];
         if let Some(idx) = self.local_index(name) {
             if self.captured_slot(name).is_some() {
                 if let Some((depth, slot)) = self.env_captured_slot(name) {
@@ -2020,7 +2027,7 @@ impl Emitter {
             return false;
         }
         let name_idx = self.intern_string(name) as i64;
-        let mut ops: Vec<i64> = vec![name_idx];
+        let mut ops: Vec<i64> = vec![name_idx, if self.with_outer { 1 } else { 0 }];
         if let Some(idx) = self.local_index(name) {
             if self.captured_slot(name).is_some() {
                 if let Some((depth, slot)) = self.env_captured_slot(name) {
@@ -2047,7 +2054,7 @@ impl Emitter {
             return false;
         }
         let name_idx = self.intern_string(name) as i64;
-        let mut ops: Vec<i64> = vec![name_idx];
+        let mut ops: Vec<i64> = vec![name_idx, if self.with_outer { 1 } else { 0 }];
         if self.local_index(name).is_some() || self.env_captured_slot(name).is_some() {
             ops.push(0);
         } else if self.lexical_slot(name).is_some() {

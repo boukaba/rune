@@ -4178,6 +4178,25 @@ Integration suite: **935 passed, 0 failed, 3 ignored**.
 
 Integration suite: **936 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — `with` closures + lexical scope chain (2026-11-15)
+
+- `with` environments are now frame-scoped: a frame sees its own
+  `WithEnter` objects plus the with chain captured when its function was
+  created; caller with scopes are excluded (with is lexical, not dynamic).
+- Functions/arrows created inside a `with` body snapshot the current with
+  object chain into a hidden `\0with_objects` array on the `Func`; later
+  calls restore that chain even outside the original with statement.
+- Function bodies compiled inside `with` mark their with environments as
+  *outer* to their own locals, so local/parameter/lexical bindings shadow the
+  with object, while globals still resolve through it.
+- Dynamic `StoreNameWith` now grows the frame's locals when the target slot is
+  beyond the argument count.
+- Test262 language/statements/with **117 → 142/181**.
+- Remaining with failures: 6 unscopables edge cases, 3 strict-mode negative
+  tests, 2 abrupt-completion cases, `scope-var-open`, `has-property-err`.
+
+Integration suite: **936 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

@@ -19121,3 +19121,34 @@ fn test_constructor_static_inheritance_and_super_property() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_async_generator_reserved_identifier_early_errors() {
+    let mut ctx = Context::new_small();
+    assert!(
+        ctx.eval(
+            r#"
+            class C {
+                async *#m() { void yield; }
+            }
+            "#,
+        )
+        .is_err()
+    );
+    assert!(
+        ctx.eval(
+            r#"
+            (async function () { var await; });
+            "#,
+        )
+        .is_err()
+    );
+    assert!(
+        ctx.eval(
+            r#"
+            (function* () { var yield; });
+            "#,
+        )
+        .is_err()
+    );
+}

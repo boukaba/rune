@@ -4329,6 +4329,24 @@ Integration suite: **938 passed, 0 failed, 3 ignored**.
 
 Integration suite: **939 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Async/generator reserved-identifier early errors (2026-11-15)
+
+- Parser tracks whether it is inside an async function (`await` reserved) or a
+  generator (`yield` reserved), restoring the outer context for nested
+  functions and arrows.
+- Binding identifiers, identifier references, labels and parameters now reject
+  contextual `await`/`yield` (including escaped spellings).
+- `yield` is rejected as the direct operand of a unary operator
+  (`void yield;` requires parentheses), matching UnaryExpression grammar.
+- Test262: language/statements/class **2281 → 2297/4367**,
+  language/expressions/class **2175 → 2191/4059**, language overall
+  **12,046 / 23,979** (1,742 skipped).
+- Regression: `test_async_generator_reserved_identifier_early_errors`.
+- Remaining async-generator private-method failures are runtime semantics
+  (`yield*` async iteration), not early errors.
+
+Integration suite: **940 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

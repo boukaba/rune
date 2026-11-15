@@ -17,6 +17,10 @@ pub struct Parser {
     /// True while parsing strict-mode code (module goal, a "use strict"
     /// directive prologue, or nested inside strict code).
     strict: bool,
+    /// Parsing inside an async function body (await is reserved).
+    in_async: bool,
+    /// Parsing inside a generator function body (yield is reserved).
+    in_generator: bool,
 }
 
 impl Parser {
@@ -31,6 +35,8 @@ impl Parser {
             no_in_depth: 0,
             for_head_depth: 0,
             strict: false,
+            in_async: false,
+            in_generator: false,
         }
     }
 
@@ -47,6 +53,8 @@ impl Parser {
             no_in_depth: 0,
             for_head_depth: 0,
             strict: true,
+            in_async: false,
+            in_generator: false,
         }
     }
 
@@ -129,6 +137,14 @@ impl Parser {
 
     // ---- Statements ----
 
+    fn check_context_identifier(&mut self, name: &str) {
+        if (self.in_async && name == "await") || (self.in_generator && name == "yield") {
+            self.error(format!(
+                "{name} is not allowed as an identifier in this context"
+            ));
+        }
+    }
+
     fn parse_statement(&mut self) -> Stmt {
         if self.tok.kind == TokenKind::Identifier && self.tok.value == "with" {
             return self.parse_with();
@@ -161,6 +177,7 @@ impl Parser {
             TokenKind::Identifier if self.lexer.peek_token().kind == TokenKind::Colon => {
                 // Labeled statement (§13.13): Identifier ':' Statement
                 let name: Box<str> = self.tok.value.clone().into();
+                self.check_context_identifier(&name);
                 self.advance(); // identifier
                 self.advance(); // ':'
                 let body = Box::new(self.parse_statement());
@@ -886,6 +903,10 @@ impl Parser {
         is_async: bool,
         start: Span,
     ) -> FnNode {
+        let outer_async = self.in_async;
+        let outer_generator = self.in_generator;
+        self.in_async = is_async;
+        self.in_generator = is_generator;
         self.expect(TokenKind::LParen);
         let mut params = Vec::new();
         let mut rest_param = None;
@@ -903,6 +924,7 @@ impl Parser {
             }
             if self.tok.kind == TokenKind::Identifier {
                 let t = self.tok.clone();
+                self.check_context_identifier(&t.value);
                 self.advance();
                 let default = if self.tok.kind == TokenKind::EqAssign {
                     self.advance(); // skip =
@@ -954,6 +976,8 @@ impl Parser {
         };
         self.strict = outer_strict;
         let is_strict = body_has_use_strict(&body);
+        self.in_async = outer_async;
+        self.in_generator = outer_generator;
         FnNode {
             name,
             params,
@@ -996,6 +1020,7 @@ impl Parser {
                     (Box::from("_destructure"), Some(pat))
                 } else if self.tok.kind == TokenKind::Identifier {
                     let t = self.tok.clone();
+                    self.check_context_identifier(&t.value);
                     self.advance();
                     (t.value.into_boxed_str(), None)
                 } else {
@@ -1928,6 +1953,9 @@ impl Parser {
     }
 
     fn make_unary(&mut self, op: UnaryOp, start: Span) -> Expr {
+        if self.tok.kind == TokenKind::Yield && self.in_generator {
+            self.error("yield expression must be parenthesized here".to_string());
+        }
         let arg = self.parse_unary();
         Expr::Unary(
             op,
@@ -2050,6 +2078,7 @@ impl Parser {
                         start,
                     );
                 }
+                self.check_context_identifier(&t.value);
                 Expr::Identifier(
                     t.value.clone().into_boxed_str(),
                     Span {
@@ -3622,6 +3651,10 @@ impl Parser {
         is_async: bool,
         start: Span,
     ) -> Expr {
+        let outer_async = self.in_async;
+        let outer_generator = self.in_generator;
+        self.in_async = is_async;
+        self.in_generator = false;
         self.expect(TokenKind::Arrow);
         let body = if self.tok.kind == TokenKind::LBrace {
             // Block body: { ... }
@@ -3632,6 +3665,8 @@ impl Parser {
             Stmt::Expr(expr, self.span())
         };
         let is_strict = body_has_use_strict(&body);
+        self.in_async = outer_async;
+        self.in_generator = outer_generator;
         Expr::Function(
             Box::new(FnNode {
                 name: None,

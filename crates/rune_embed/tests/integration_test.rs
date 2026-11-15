@@ -19152,3 +19152,27 @@ fn test_async_generator_reserved_identifier_early_errors() {
         .is_err()
     );
 }
+
+#[test]
+fn test_assignment_and_update_target_early_errors() {
+    let mut ctx = Context::new_small();
+    for source in [
+        "1 = 2;",
+        "a + b = 1;",
+        "f() = 1;",
+        "(a = 1) = 2;",
+        "1++;",
+        "f()--;",
+        "++1;",
+        "({ a: 1 } = {});",
+    ] {
+        assert!(
+            ctx.eval(source).is_err(),
+            "expected SyntaxError for {source:?}"
+        );
+    }
+    assert!(
+        ctx.eval("var a = 1; a += 2; a++; ++a; ({ b: a } = { b: 3 }); a === 6;")
+            .is_ok()
+    );
+}

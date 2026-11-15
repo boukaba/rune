@@ -137,6 +137,13 @@ impl Parser {
 
     // ---- Statements ----
 
+    fn is_simple_assignment_target(expr: &Expr) -> bool {
+        matches!(
+            expr,
+            Expr::Identifier(..) | Expr::Member(..) | Expr::PrivateMember(..)
+        )
+    }
+
     fn check_context_identifier(&mut self, name: &str) {
         if (self.in_async && name == "await") || (self.in_generator && name == "yield") {
             self.error(format!(
@@ -1720,20 +1727,32 @@ impl Parser {
                     if matches!(lhs, Expr::OptionalChain(..)) {
                         self.error("Invalid assignment target: optional chaining".to_string());
                     }
+                    // §13.15.1 early errors: AssignmentTargetType must be
+                    // simple for compound assignment and a valid pattern for
+                    // `=`.
+                    let simple_target = matches!(
+                        lhs,
+                        Expr::Identifier(..) | Expr::Member(..) | Expr::PrivateMember(..)
+                    );
                     if op == BinaryOp::Assign {
-                        // Destructuring assignment only applies when the LHS is an
-                        // array or object literal; plain identifiers stay Assign.
                         if matches!(lhs, Expr::Array(..) | Expr::Object(..)) {
                             if let Some(pattern) = self.expr_to_pattern(&lhs) {
                                 lhs =
                                     Expr::DestructureAssign(Box::new(pattern), Box::new(rhs), span);
                             } else {
+                                self.error("Invalid destructuring assignment target".to_string());
                                 lhs = Expr::Assign(Box::new(lhs), Box::new(rhs), span);
                             }
                         } else {
+                            if !simple_target {
+                                self.error("Invalid assignment target".to_string());
+                            }
                             lhs = Expr::Assign(Box::new(lhs), Box::new(rhs), span);
                         }
                     } else {
+                        if !simple_target {
+                            self.error("Invalid compound assignment target".to_string());
+                        }
                         lhs = Expr::CompoundAssign(op, Box::new(lhs), Box::new(rhs), span);
                     }
                     break; // assignments consume the rest
@@ -1823,6 +1842,9 @@ impl Parser {
             TokenKind::PlusPlus => {
                 self.advance();
                 let arg = self.parse_unary();
+                if !Self::is_simple_assignment_target(&arg) {
+                    self.error("Invalid update target".to_string());
+                }
                 Expr::Update(
                     UpdateOp::PlusPlus,
                     Box::new(arg),
@@ -1836,6 +1858,9 @@ impl Parser {
             TokenKind::MinusMinus => {
                 self.advance();
                 let arg = self.parse_unary();
+                if !Self::is_simple_assignment_target(&arg) {
+                    self.error("Invalid update target".to_string());
+                }
                 Expr::Update(
                     UpdateOp::MinusMinus,
                     Box::new(arg),
@@ -2748,17 +2773,15 @@ impl Parser {
             Expr::Array(elems, span) => {
                 let mut items = Vec::new();
                 for elem in elems {
+                    if elem.is_hole {
+                        items.push(None);
+                        continue;
+                    }
                     if elem.is_spread {
-                        let inner = self.expr_to_pattern(&elem.expr).unwrap_or_else(|| {
-                            Pattern::Identifier(
-                                Box::from("_error"),
-                                Span { start: 0, end: 0 },
-                                None,
-                            )
-                        });
+                        let inner = self.expr_to_pattern(&elem.expr)?;
                         items.push(Some(Pattern::Rest(Box::new(inner), *span)));
                     } else {
-                        items.push(Some(self.binding_from_value(&elem.expr)));
+                        items.push(Some(self.binding_from_value(&elem.expr)?));
                     }
                 }
                 Some(Pattern::Array(items, *span))
@@ -2768,18 +2791,12 @@ impl Parser {
                 let mut rest = None;
                 for prop in props {
                     if prop.is_spread {
-                        let inner = self.expr_to_pattern(&prop.value).unwrap_or_else(|| {
-                            Pattern::Identifier(
-                                Box::from("_error"),
-                                Span { start: 0, end: 0 },
-                                None,
-                            )
-                        });
+                        let inner = self.expr_to_pattern(&prop.value)?;
                         rest = Some(Box::new(inner));
                     } else {
                         out.push(ObjectPatternProp {
                             key: prop.key.clone(),
-                            pattern: self.binding_from_value(&prop.value),
+                            pattern: self.binding_from_value(&prop.value)?,
                             span: prop.span,
                         });
                     }
@@ -2806,25 +2823,24 @@ impl Parser {
 
     /// Convert a value expression inside a destructuring literal into a
     /// binding pattern (identifier, nested literal, or `= default`).
-    fn binding_from_value(&mut self, expr: &Expr) -> Pattern {
-        let fallback = || Pattern::Identifier(Box::from("_error"), Span { start: 0, end: 0 }, None);
+    fn binding_from_value(&mut self, expr: &Expr) -> Option<Pattern> {
         match expr {
-            Expr::Identifier(name, ispan) => Pattern::Identifier(name.clone(), *ispan, None),
+            Expr::Identifier(name, ispan) => Some(Pattern::Identifier(name.clone(), *ispan, None)),
             Expr::Assign(target, default, _) => {
                 if let Expr::Identifier(name, ispan) = target.as_ref() {
-                    Pattern::Default(
+                    Some(Pattern::Default(
                         Box::new(Pattern::Identifier(name.clone(), *ispan, None)),
                         default.clone(),
-                    )
+                    ))
                 } else {
-                    let inner = self.expr_to_pattern(target).unwrap_or_else(fallback);
-                    Pattern::Default(Box::new(inner), default.clone())
+                    let inner = self.expr_to_pattern(target)?;
+                    Some(Pattern::Default(Box::new(inner), default.clone()))
                 }
             }
             Expr::Member(_, _, _, span) | Expr::PrivateMember(_, _, span) => {
-                Pattern::Target(Box::new(expr.clone()), *span)
+                Some(Pattern::Target(Box::new(expr.clone()), *span))
             }
-            _ => self.expr_to_pattern(expr).unwrap_or_else(fallback),
+            _ => self.expr_to_pattern(expr),
         }
     }
 
@@ -3453,6 +3469,9 @@ impl Parser {
                     self.advance();
                     if matches!(lhs, Expr::OptionalChain(..)) {
                         self.error("Invalid update target: optional chaining".to_string());
+                    }
+                    if !Self::is_simple_assignment_target(&lhs) {
+                        self.error("Invalid update target".to_string());
                     }
                     let span = self.span();
                     lhs = Expr::Update(

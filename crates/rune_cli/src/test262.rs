@@ -308,8 +308,9 @@ fn run_test(test: &TestCase) -> Outcome {
         Err(e) => return Outcome::Skipped { reason: e },
     };
 
-    // Skip tests containing $DONOTEVALUATE (must not be executed)
-    if source.contains("$DONOTEVALUATE") {
+    // Negative parse tests intentionally contain $DONOTEVALUATE; parsing is
+    // the whole test. Other tests containing it must not be executed.
+    if source.contains("$DONOTEVALUATE") && test.meta.negative_phase.as_deref() != Some("parse") {
         return Outcome::Skipped {
             reason: "contains $DONOTEVALUATE".to_string(),
         };

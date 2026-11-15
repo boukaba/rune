@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Honest negative-parse execution (2026-11-15)**: negative parse `$DONOTEVALUATE` tests now run; class statements **2281/4367**, class expressions **2175/4059**, elements **530/1534**, language **11998/23979**. Integration **939**. Exposes async-generator await/yield early-error gaps.
 - **Constructor static inheritance (2026-11-15)**: Func::superclass as function [[Prototype]] for lookups/`__proto__`/Object.getPrototypeOf. class statements **2006/4367**. Integration **939**. Known: static super calls, __proto__ writes, private static order.
 - **Class static initialization blocks (2026-11-15)**: parser/AST static blocks, ctor-this execution, interleaved with static fields, static-block feature enabled. class statements **2004/4367**. Integration **938**. Known: static super [[Prototype]], private-before-init, await/arguments early errors.
 - **Computed method attrs + escaped private names (2026-11-15)**: DefineMethodProperty/Accessor W|C attrs, identifier-start `\u` escapes, non-ASCII private names. class statements **1994/4367**, class expressions **1909/4059**, elements **470/1534**. Integration **937**.

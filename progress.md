@@ -4310,6 +4310,25 @@ Integration suite: **938 passed, 0 failed, 3 ignored**.
   prototype chain (undefined); constructor `__proto__` writes do not update
   Func.superclass; static private fields are initialized after static blocks.
 
+### Phase 2 — Honest negative-parse execution (2026-11-15)
+
+- The test262 runner previously skipped **every** source containing
+  `$DONOTEVALUATE`, including negative parse tests where the marker exists
+  precisely because the source must never execute. Negative `phase: parse`
+  tests now run through the normal parse expectation (child must report a
+  SyntaxError); only non-negative `$DONOTEVALUATE` tests remain skipped.
+- This un-skips a large body of early-error tests and turns skipped tests into
+  honest pass/fail results.
+- Test262: language/statements/class **2006 → 2281/4367**,
+  language/expressions/class **1909 → 2175/4059**,
+  class/elements **470 → 530/1534**, language overall
+  **11,998 passed / 23,979** (1,742 skipped).
+- Newly exposed gap: 60 `async-gen-private-method` negative tests still fail
+  because the parser accepts `await`/`yield` as binding identifiers in async
+  generator contexts; other early-error gaps now surface instead of hiding.
+
+Integration suite: **939 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

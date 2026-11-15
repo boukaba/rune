@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Lexer errors + numeric separators (2026-11-15)**: lexer diagnostics propagated (speculative lookahead discarded), numeric separator/leading-zero validation, param lexical collisions, duplicate method params, escaped modifiers anywhere, class strict + static-block await. language **13338/23979**, numeric separators **62/63**, object **803/1170**. Integration **948**.
 - **`super()` context early errors (2026-11-15)**: super calls only in derived constructors; object/generator/non-constructor/base-constructor calls are SyntaxErrors. language **13260/23979**, class statements **2530/4367**, class expressions **2401/4059**. Integration **947**.
 - **Escaped keywords + object property syntax (2026-11-15)**: escaped modifiers are identifiers; private names and missing commas rejected. object **787/1170**, class statements **2458/4367**, class expressions **2332/4059**, language **13093/23979**. Integration **946**.
 - **Parameter + object literal early errors (2026-11-15)**: strict param names/duplicates/non-simple directive, duplicate __proto__, invalid method prefixes, strict reserved identifiers. language **13071/23979**, object **770/1170**. Integration **945**.

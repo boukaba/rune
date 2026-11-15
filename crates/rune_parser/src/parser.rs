@@ -145,6 +145,11 @@ impl Parser {
         }
         let end = self.tok.span.end;
         let module = self.module;
+        for error in self.lexer.errors.clone() {
+            if !self.errors.contains(&error) {
+                self.errors.push(error);
+            }
+        }
         self.validate_private_name_references();
         self.validate_block_scope_errors(&body, !module);
         Program {
@@ -156,8 +161,36 @@ impl Parser {
 
     // ---- Statements ----
 
+    fn has_line_terminator_between(&self, start: usize, end: usize) -> bool {
+        self.source_chars.get(start..end).is_some_and(|chars| {
+            chars
+                .iter()
+                .any(|c| matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}'))
+        })
+    }
+
+    fn reject_duplicate_params(&mut self, func: &FnNode) {
+        let mut names = Vec::new();
+        for param in &func.params {
+            Self::collect_pattern_names(param, &mut names);
+        }
+        if let Some(rest) = &func.rest_param {
+            names.push(rest.to_string());
+        }
+        let mut seen: Vec<&str> = Vec::new();
+        for name in &names {
+            if seen.contains(&name.as_str()) {
+                self.error(format!("Duplicate parameter name '{name}'"));
+            } else {
+                seen.push(name);
+            }
+        }
+    }
+
     fn token_was_escaped(&self) -> bool {
-        self.source_chars.get(self.tok.span.start).copied() == Some('\\')
+        self.source_chars
+            .get(self.tok.span.start..self.tok.span.end)
+            .is_some_and(|chars| chars.contains(&'\\'))
     }
 
     fn is_simple_assignment_target(expr: &Expr) -> bool {
@@ -485,6 +518,7 @@ impl Parser {
         rest: Option<&str>,
         strict: bool,
         use_strict_directive: bool,
+        unique: bool,
     ) {
         let mut names: Vec<(String, Span)> = Vec::new();
         for param in params {
@@ -522,7 +556,7 @@ impl Parser {
         }
         let mut seen: Vec<&str> = Vec::new();
         for (name, span) in &names {
-            if strict && seen.contains(&name.as_str()) {
+            if (strict || unique) && seen.contains(&name.as_str()) {
                 self.error(format!(
                     "Duplicate parameter name '{name}' at {}",
                     span.start
@@ -549,6 +583,53 @@ impl Parser {
                 } else {
                     dup.push(name);
                 }
+            }
+        }
+    }
+
+    fn validate_param_lexical_collisions(
+        &mut self,
+        params: &[Pattern],
+        rest: Option<&str>,
+        body: &[Stmt],
+    ) {
+        let mut names = Vec::new();
+        for param in params {
+            Self::collect_pattern_names(param, &mut names);
+        }
+        if let Some(rest) = rest {
+            names.push(rest.to_string());
+        }
+        if names.is_empty() {
+            return;
+        }
+        for stmt in body {
+            match stmt {
+                Stmt::Var(VarKind::Let | VarKind::Const, decls, _) => {
+                    for decl in decls {
+                        let mut bound = Vec::new();
+                        if let Some(pat) = &decl.pattern {
+                            Self::collect_pattern_names(pat, &mut bound);
+                        } else {
+                            bound.push(decl.name.to_string());
+                        }
+                        for name in bound {
+                            if names.contains(&name) {
+                                self.error(format!(
+                                    "Identifier '{name}' has already been declared"
+                                ));
+                            }
+                        }
+                    }
+                }
+                Stmt::Class(c, _) => {
+                    if let Some(name) = &c.name {
+                        if names.iter().any(|n| n == name.as_ref()) {
+                            self.error(format!("Identifier '{name}' has already been declared"));
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -1049,7 +1130,9 @@ impl Parser {
     ) {
         self.expect(TokenKind::LBrace);
         let outer_class_method = self.parsing_class_method;
+        let outer_class_strict = self.strict;
         self.parsing_class_method = true;
+        self.strict = true;
         let mut methods = Vec::new();
         let mut private_fields: Vec<PrivateField> = Vec::new();
         let mut fields: Vec<ClassField> = Vec::new();
@@ -1073,7 +1156,10 @@ impl Parser {
             };
             if is_static && self.tok.kind == TokenKind::LBrace {
                 let bstart = self.span();
+                let outer_static_async = self.in_async;
+                self.in_async = true;
                 let block = self.parse_block();
+                self.in_async = outer_static_async;
                 let body = match block {
                     Stmt::Block(stmts, _) => stmts,
                     other => vec![other],
@@ -1091,17 +1177,19 @@ impl Parser {
             // Function.prototype.toString output).
             let fstart = self.span();
             // `async name(...)` / `async *name(...)` method modifiers.
+            let peek_async = self.lexer.peek_token();
             let is_async = (self.tok.kind == TokenKind::Async
                 || (self.tok.kind == TokenKind::Identifier && self.tok.value == "async"))
                 && !matches!(
-                    self.lexer.peek_token().kind,
+                    peek_async.kind,
                     TokenKind::LParen
                         | TokenKind::Colon
                         | TokenKind::EqAssign
                         | TokenKind::Comma
                         | TokenKind::RBrace
                 )
-                && !self.token_was_escaped();
+                && !self.token_was_escaped()
+                && !self.has_line_terminator_between(self.tok.span.end, peek_async.span.start);
             if is_async {
                 self.advance();
             }
@@ -1150,6 +1238,7 @@ impl Parser {
                         is_async,
                         mstart,
                     );
+                    self.reject_duplicate_params(&func);
                     if is_getter && !func.params.is_empty() {
                         self.error("Getter must have 0 parameters".to_string());
                     }
@@ -1248,6 +1337,7 @@ impl Parser {
                     _ => None,
                 };
                 let func = self.parse_function_body(name, is_generator, is_async, fstart);
+                self.reject_duplicate_params(&func);
                 // Validate getter/setter param counts
                 if is_getter && !func.params.is_empty() {
                     self.error("Getter must have 0 parameters".to_string());
@@ -1325,6 +1415,7 @@ impl Parser {
             checked.push((pf.name.clone(), pf.is_static));
         }
         self.parsing_class_method = outer_class_method;
+        self.strict = outer_class_strict;
         (methods, private_fields, fields, static_blocks)
     }
 
@@ -1418,7 +1509,13 @@ impl Parser {
             rest_param.as_deref(),
             outer_strict || is_strict,
             is_strict,
+            is_async || is_generator,
         );
+        let body_stmts: &[Stmt] = match &body {
+            Stmt::Block(stmts, _) => stmts,
+            _ => &[],
+        };
+        self.validate_param_lexical_collisions(&params, rest_param.as_deref(), body_stmts);
         self.in_async = outer_async;
         self.in_generator = outer_generator;
         self.allow_super_call = outer_allow_super;
@@ -2826,17 +2923,20 @@ impl Parser {
                         self.advance();
                         continue;
                     }
+                    let peek_async = self.lexer.peek_token();
                     let is_async = (self.tok.kind == TokenKind::Async
                         || (self.tok.kind == TokenKind::Identifier && self.tok.value == "async"))
                         && !matches!(
-                            self.lexer.peek_token().kind,
+                            peek_async.kind,
                             TokenKind::LParen
                                 | TokenKind::Colon
                                 | TokenKind::EqAssign
                                 | TokenKind::Comma
                                 | TokenKind::RBrace
                         )
-                        && !self.token_was_escaped();
+                        && !self.token_was_escaped()
+                        && !self
+                            .has_line_terminator_between(self.tok.span.end, peek_async.span.start);
                     if is_async {
                         self.advance();
                     }
@@ -2868,6 +2968,7 @@ impl Parser {
                             let name = None;
                             let fn_body =
                                 self.parse_function_body(name, is_generator, is_async, pstart);
+                            self.reject_duplicate_params(&fn_body);
                             props.push(Property {
                                 key: PropKey::Computed(Box::new(key_expr)),
                                 value: Expr::Function(
@@ -2955,6 +3056,7 @@ impl Parser {
                                 _ => None,
                             };
                             let fn_body = self.parse_function_body(name, false, false, pstart);
+                            self.reject_duplicate_params(&fn_body);
                             if is_getter && !fn_body.params.is_empty() {
                                 self.error("Getter must have 0 parameters".to_string());
                             }
@@ -2988,6 +3090,7 @@ impl Parser {
                             };
                             let fn_body =
                                 self.parse_function_body(name, is_generator, is_async, pstart);
+                            self.reject_duplicate_params(&fn_body);
                             props.push(Property {
                                 key,
                                 value: Expr::Function(
@@ -4239,7 +4342,13 @@ impl Parser {
             rest_param.as_deref(),
             self.strict || is_strict,
             is_strict,
+            is_async,
         );
+        let body_stmts: &[Stmt] = match &body {
+            Stmt::Block(stmts, _) => stmts,
+            _ => &[],
+        };
+        self.validate_param_lexical_collisions(&params, rest_param.as_deref(), body_stmts);
         self.in_async = outer_async;
         self.in_generator = outer_generator;
         Expr::Function(

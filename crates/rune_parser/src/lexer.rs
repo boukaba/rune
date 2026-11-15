@@ -301,7 +301,7 @@ impl Lexer {
                 self.advance();
             }
             while let Some(ch) = self.peek() {
-                if ch.is_ascii_digit() {
+                if ch.is_ascii_digit() || ch == '_' {
                     self.advance();
                 } else {
                     break;
@@ -309,7 +309,47 @@ impl Lexer {
             }
         }
 
-        Token::new(TokenKind::Number, self.start, self.pos, self.source_slice())
+        let text = self.source_slice();
+        let chars: Vec<char> = text.chars().collect();
+        let radix_is = |c: char, radix: u32| c.is_digit(radix);
+        let (radix, digits_start) = if chars.len() >= 2 && chars[0] == '0' {
+            match chars[1] {
+                'x' | 'X' => (16, 2),
+                'o' | 'O' => (8, 2),
+                'b' | 'B' => (2, 2),
+                _ => (10, 1),
+            }
+        } else {
+            (10, 0)
+        };
+        // Numeric separators must sit between two valid digits, and legacy
+        // leading-zero decimal/octal forms cannot use separators.
+        for i in 0..chars.len() {
+            if chars[i] != '_' {
+                continue;
+            }
+            let prev_ok = i > 0 && radix_is(chars[i - 1], radix);
+            let next_ok = i + 1 < chars.len() && radix_is(chars[i + 1], radix);
+            if !prev_ok || !next_ok {
+                self.errors
+                    .push("Numeric separator must be between two digits".to_string());
+                break;
+            }
+        }
+        if chars.first() == Some(&'0') && chars.len() > 1 {
+            let second = chars[1];
+            let legacy = if second == '_' {
+                chars.get(2).is_some_and(|c| c.is_ascii_digit())
+            } else {
+                second.is_ascii_digit()
+            };
+            if legacy {
+                self.errors
+                    .push("Legacy octal/decimal literal cannot use separators".to_string());
+            }
+        }
+        let _ = digits_start;
+        Token::new(TokenKind::Number, self.start, self.pos, text)
     }
 
     fn scan_string(&mut self) -> Token {
@@ -925,9 +965,13 @@ impl Lexer {
     pub fn peek_token(&mut self) -> Token {
         let saved = self.pos;
         let saved_stack = self.template_brace_stack.clone();
+        let saved_errors = self.errors.len();
         let token = self.next_token();
         self.pos = saved;
         self.template_brace_stack = saved_stack;
+        // Lookahead errors are speculative; they resurface if the parser
+        // actually consumes the token.
+        self.errors.truncate(saved_errors);
         token
     }
 

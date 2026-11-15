@@ -19303,3 +19303,18 @@ fn test_super_call_early_errors() {
         .is_ok()
     );
 }
+
+#[test]
+fn test_numeric_separator_early_errors() {
+    let mut ctx = Context::new_small();
+    for source in ["1_;", "0_1;", "1__2;", "0x_1;", "07;", "09;", "1_e1;"] {
+        assert!(
+            ctx.eval(source).is_err(),
+            "expected SyntaxError for {source:?}"
+        );
+    }
+    assert_eq!(
+        ctx.eval("0.1_2 + 1e1_0;").unwrap().as_float64(),
+        Some(10000000000.12)
+    );
+}

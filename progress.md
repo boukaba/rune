@@ -4477,6 +4477,30 @@ Integration suite: **946 passed, 0 failed, 3 ignored**.
 
 Integration suite: **947 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Lexer error propagation + numeric separators (2026-11-15)
+
+- Lexer diagnostics now reach the parser: once parsing completes, unconsumed
+  lexer errors (numeric separator, unterminated string/template/regex, invalid
+  escapes) become parse errors. Lookahead via `peek_token` truncates its
+  speculative errors so division is never mistaken for an unterminated regex.
+- Numeric separators are validated: `_` must sit between two radix digits;
+  legacy leading-zero decimal/octal forms and separators in them are
+  SyntaxErrors. Exponent separators are scanned.
+- Parameters: body lexical declarations (`let`/`const`/`class`) colliding with
+  parameters are SyntaxErrors; duplicate method parameters and async/generator
+  duplicate parameters are rejected.
+- Escaped modifier detection now covers escapes anywhere in the token; async
+  methods with a line terminator after `async` are no longer modifiers.
+- Class bodies parse in strict mode, and class static blocks disallow `await`
+  identifiers.
+- Test262: language overall **13,260 → 13,338/23,979**,
+  literals/numeric/numeric-separators **28 → 62/63**,
+  expressions/object **793 → 803/1170**, statements/class
+  **2530 → 2535/4367**.
+- Regression: `test_numeric_separator_early_errors`.
+
+Integration suite: **948 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

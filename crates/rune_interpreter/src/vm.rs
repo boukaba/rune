@@ -10604,6 +10604,28 @@ impl Vm {
                                     }
                                 }
                             }
+                            // The unscopables getter may have deleted the
+                            // binding. Re-check before Get (§9.1.1.2.6).
+                            let still = match self.with_has_property(gc, obj, key) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    resolved = Some(Err(e));
+                                    break;
+                                }
+                            };
+                            if !still {
+                                if self.executing_is_strict(fi) {
+                                    resolved = Some(Err(crate::errors::error_object(
+                                        gc,
+                                        &self.error_protos,
+                                        crate::errors::ErrorKind::ReferenceError,
+                                        &format!("{name} is not defined"),
+                                    )));
+                                } else {
+                                    resolved = Some(Ok(Value::undefined()));
+                                }
+                                break;
+                            }
                             resolved =
                                 Some(crate::builtins::get_property_value_sync(gc, self, obj, key));
                             break;
@@ -10797,6 +10819,22 @@ impl Vm {
                                     }
                                 }
                             }
+                            let still = match self.with_has_property(gc, obj, key) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    store_err = Some(e);
+                                    break;
+                                }
+                            };
+                            if !still && self.executing_is_strict(fi) {
+                                store_err = Some(crate::errors::error_object(
+                                    gc,
+                                    &self.error_protos,
+                                    crate::errors::ErrorKind::ReferenceError,
+                                    &format!("{name} is not defined"),
+                                ));
+                                break;
+                            }
                             let val = self.temp_roots[root + 1];
                             // Fast path: plain own writable data property.
                             if let Some(ptr) = obj.heap_ptr() {
@@ -10901,6 +10939,30 @@ impl Vm {
                             }
                         }
                         _ => {
+                            let exists = self.globals.contains_key(name.as_str())
+                                || self.builtin_wrappers.contains_key(name.as_str())
+                                || self.get_builtin(&name).is_some()
+                                || self.global_this.heap_ptr().is_some_and(|gptr| {
+                                    if unsafe { (*(gptr as *const GcHeader)).tag() } != TAG_OBJECT {
+                                        return false;
+                                    }
+                                    let obj = gptr as *mut JSObject;
+                                    let key = PropertyKey::from_string(&name);
+                                    let shape = unsafe { JSObject::shape_ptr(obj) };
+                                    shape.lookup(&key).is_some()
+                                });
+                            if self.executing_is_strict(fi) && !exists {
+                                let exc = crate::errors::error_object(
+                                    gc,
+                                    &self.error_protos,
+                                    crate::errors::ErrorKind::ReferenceError,
+                                    &format!("{name} is not defined"),
+                                );
+                                if let Some(exit) = self.handle_throw(gc, exc) {
+                                    return exit;
+                                }
+                                continue;
+                            }
                             self.globals.insert(name.to_string(), val);
                         }
                     }

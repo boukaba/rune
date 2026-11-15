@@ -4220,6 +4220,23 @@ Integration suite: **936 passed, 0 failed, 3 ignored**.
 
 Integration suite: **936 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — `with` strict deletion semantics (2026-11-15)
+
+- With-name resolution re-checks HasProperty after reading
+  `Symbol.unscopables`; if the getter deleted the binding, strict code throws
+  ReferenceError and sloppy code yields undefined (GetBindingValue).
+- Store resolution re-checks after unscopables; strict code throws
+  ReferenceError instead of recreating the property
+  (SetMutableBinding-with-environment).
+- Strict assignment to an unresolvable global in a with fallback throws
+  ReferenceError instead of creating a global.
+- Test262 language/statements/with **152 → 154/181**.
+- Remaining: typed-array-in-prototype strict case (reference must remain bound
+  to the with environment after RHS deletion), `unscopables-inc-dec`
+  (read+write resolves twice), `scope-var-open`.
+
+Integration suite: **936 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

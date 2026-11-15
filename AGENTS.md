@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **Unicode identifier starts (2026-11-16)**: non-ASCII ID_Start dispatch (℘, ㄥ, private-name Unicode families). class elements **965/1534**, language **14119/23979**. Integration **957**.
 - **Return-statement early errors (2026-11-16)**: function/arrow depth tracking, return outside function rejected; full test262 **25426/53658**, language **13810/23979**. Integration **956**.
 - **Template escapes + class field/static-block early errors (2026-11-15)**: untagged template escapes, field `arguments`/constructor/prototype bans, static-block return/var/arguments/duplicate labels. class **2621/4367**, template **45/57**, language **13799/23979**. Integration **955**.
 - **Break/continue + identifier early errors (2026-11-15)**: loop/switch/label tracking, static-block context reset, reserved var names, invalid identifier starts, for-head/rest validation. break **18/20**, continue **22/24**, identifiers **261/268**, language **13713/23979**. Integration **954**.

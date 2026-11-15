@@ -19489,3 +19489,14 @@ fn test_return_statement_early_errors() {
     assert!(ctx.eval("function f() { return 1; } f();").is_ok());
     assert!(ctx.eval("var f = () => { return 2; }; f();").is_ok());
 }
+
+#[test]
+fn test_unicode_identifier_starts() {
+    let mut ctx = Context::new_small();
+    assert_eq!(ctx.eval("var ㄥ = 1; ㄥ;").unwrap().as_smi(), Some(1));
+    assert!(
+        ctx.eval("class C { #℘ = 1; get() { return this.#℘; } } new C().get() === 1;")
+            .is_ok()
+    );
+    assert!(ctx.eval("var ⸯ;").is_err());
+}

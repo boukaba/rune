@@ -4639,6 +4639,19 @@ Integration suite: **955 passed, 0 failed, 3 ignored**.
 
 Integration suite: **956 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Unicode identifier starts (2026-11-16)
+
+- Identifier dispatch now accepts any non-ASCII code point above U+007F as a
+  start character, including non-alphabetic ID_Start characters such as `℘`
+  (U+2118 SCRIPT CAPITAL P) and `ㄥ`. Previously these were lexed as Illegal.
+- Invalid start characters (leading ZWNJ/ZWJ, U+2E2F) remain rejected by the
+  explicit identifier-start validation.
+- Test262: statements/class/elements **811 → 965/1534**, language overall
+  **13,810 → 14,119/23,979**.
+- Regression: `test_unicode_identifier_starts`.
+
+Integration suite: **957 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

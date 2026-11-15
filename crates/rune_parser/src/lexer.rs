@@ -833,7 +833,9 @@ impl Lexer {
 
             // Identifier or keyword
             '\\' if self.peek() == Some('u') => self.scan_identifier(ch),
-            c if c.is_alphabetic() || c == '_' || c == '$' => self.scan_identifier(ch),
+            c if c.is_alphabetic() || c == '_' || c == '$' || c > '\u{007F}' => {
+                self.scan_identifier(ch)
+            }
 
             // Operators
             '+' => {

@@ -19476,3 +19476,16 @@ fn test_class_field_and_static_block_early_errors() {
         .eval("class C { x = function () { return arguments.length; }; static { let y = 1; } } new C();")
         .is_ok());
 }
+
+#[test]
+fn test_return_statement_early_errors() {
+    let mut ctx = Context::new_small();
+    for source in ["return;", "if (true) { return 1; }"] {
+        assert!(
+            ctx.eval(source).is_err(),
+            "expected SyntaxError for {source:?}"
+        );
+    }
+    assert!(ctx.eval("function f() { return 1; } f();").is_ok());
+    assert!(ctx.eval("var f = () => { return 2; }; f();").is_ok());
+}

@@ -39,6 +39,8 @@ pub struct Parser {
     in_class_field_init: bool,
     /// Parsing a class static initialization block.
     in_static_block: bool,
+    /// Function/arrow nesting depth for return-statement early errors.
+    function_depth: usize,
 }
 
 impl Parser {
@@ -65,6 +67,7 @@ impl Parser {
             iteration_labels: Vec::new(),
             in_class_field_init: false,
             in_static_block: false,
+            function_depth: 0,
         }
     }
 
@@ -93,6 +96,7 @@ impl Parser {
             iteration_labels: Vec::new(),
             in_class_field_init: false,
             in_static_block: false,
+            function_depth: 0,
         }
     }
 
@@ -1947,6 +1951,7 @@ impl Parser {
         let outer_static_block = self.in_static_block;
         self.in_class_field_init = false;
         self.in_static_block = false;
+        self.function_depth += 1;
         let outer_async = self.in_async;
         let outer_generator = self.in_generator;
         self.in_async = is_async;
@@ -2041,6 +2046,7 @@ impl Parser {
         self.parsing_class_method = outer_class_method;
         self.in_class_field_init = outer_field;
         self.in_static_block = outer_static_block;
+        self.function_depth -= 1;
         FnNode {
             name,
             params,
@@ -2141,6 +2147,9 @@ impl Parser {
     fn parse_return(&mut self) -> Stmt {
         if self.in_static_block {
             self.error("return is not allowed in a class static block".to_string());
+        }
+        if self.function_depth == 0 {
+            self.error("return is only allowed inside a function".to_string());
         }
         let start = self.span();
         self.advance();
@@ -4985,6 +4994,7 @@ impl Parser {
         is_async: bool,
         start: Span,
     ) -> Expr {
+        self.function_depth += 1;
         let outer_async = self.in_async;
         let outer_generator = self.in_generator;
         self.in_async = is_async;
@@ -5016,6 +5026,7 @@ impl Parser {
         self.validate_param_lexical_collisions(&params, rest_param.as_deref(), body_stmts);
         self.in_async = outer_async;
         self.in_generator = outer_generator;
+        self.function_depth -= 1;
         Expr::Function(
             Box::new(FnNode {
                 name: None,
@@ -5360,9 +5371,15 @@ mod tests {
 
     #[test]
     fn test_asi_inserts_semicolon() {
-        let prog = parse("return\n42;");
-        // With ASI, this becomes: return; 42; — two statements
-        assert_eq!(prog.body.len(), 2);
+        let prog = parse("function f() { return\n42; }");
+        let Stmt::Function(f, _) = &prog.body[0] else {
+            panic!("expected function");
+        };
+        let Stmt::Block(stmts, _) = &f.body else {
+            panic!("expected block body");
+        };
+        // With ASI inside the function body: return; 42; — two statements
+        assert_eq!(stmts.len(), 2);
     }
 
     #[test]

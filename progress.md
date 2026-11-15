@@ -4626,6 +4626,19 @@ Integration suite: **954 passed, 0 failed, 3 ignored**.
 
 Integration suite: **955 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Return-statement early errors (2026-11-16)
+
+- Parser tracks function/arrow nesting and rejects `return` outside a function
+  body (`return;` at script top level, inside blocks/loops, class static blocks).
+- Arrow bodies correctly raise the function depth so `() => { return ... }`
+  continues to parse and execute.
+- Full test262 baseline recorded: **25,426 passed / 53,658** (4,027 skipped,
+  24,205 failed). Test262 language: **13,810/23,979**.
+- Test262: statements/return **4 → 14/16**.
+- Regression: `test_return_statement_early_errors`.
+
+Integration suite: **956 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

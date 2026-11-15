@@ -4501,6 +4501,25 @@ Integration suite: **947 passed, 0 failed, 3 ignored**.
 
 Integration suite: **948 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — String literal escape early errors (2026-11-15)
+
+- Lexer string escapes:
+  - malformed `\x`, `\uXXXX`, `\u{...}` (non-hex, out of range, missing
+    digits) are SyntaxErrors;
+  - legacy octal escapes (`\1`..`\7`, `\0` sequences) decode correctly in
+    sloppy mode;
+  - non-octal decimal escapes (`\8`/`\9`) decode as the digit in sloppy mode;
+  - backslash line continuations (LF, CR, CRLF, LS, PS) contribute nothing.
+- Strict-mode legacy escapes are rejected even when the `"use strict"`
+  directive appears after them: the directive prologue is scanned and all
+  preceding directive string literals are validated. This applies to program,
+  function and arrow bodies.
+- Test262: language overall **13,338 → 13,364/23,979**,
+  literals/string **54 → 67/73 (0 failures)**.
+- Regression: `test_string_escape_early_errors`.
+
+Integration suite: **949 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

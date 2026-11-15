@@ -145,6 +145,7 @@ impl Parser {
         }
         let end = self.tok.span.end;
         let module = self.module;
+        self.validate_directive_legacy_escapes(&body);
         for error in self.lexer.errors.clone() {
             if !self.errors.contains(&error) {
                 self.errors.push(error);
@@ -160,6 +161,52 @@ impl Parser {
     }
 
     // ---- Statements ----
+
+    fn validate_directive_legacy_escapes(&mut self, stmts: &[Stmt]) {
+        let mut strings: Vec<Span> = Vec::new();
+        let mut use_strict = false;
+        for stmt in stmts {
+            match stmt {
+                Stmt::Expr(Expr::String(value, span), _) => {
+                    if value.as_ref() == "use strict" {
+                        use_strict = true;
+                    }
+                    strings.push(*span);
+                }
+                _ => break,
+            }
+        }
+        if use_strict {
+            for span in strings {
+                if self.string_has_legacy_escape(span) {
+                    self.errors
+                        .push("Legacy escape sequences are not allowed in strict mode".to_string());
+                }
+            }
+        }
+    }
+
+    fn string_has_legacy_escape(&self, span: Span) -> bool {
+        let Some(chars) = self.source_chars.get(span.start..span.end) else {
+            return false;
+        };
+        let mut i = 0usize;
+        while i + 1 < chars.len() {
+            if chars[i] == '\\' {
+                let next = chars[i + 1];
+                if matches!(next, '1'..='9') {
+                    return true;
+                }
+                if next == '0' && i + 2 < chars.len() && chars[i + 2].is_ascii_digit() {
+                    return true;
+                }
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+        false
+    }
 
     fn has_line_terminator_between(&self, start: usize, end: usize) -> bool {
         self.source_chars.get(start..end).is_some_and(|chars| {
@@ -1504,6 +1551,9 @@ impl Parser {
         };
         self.strict = outer_strict;
         let is_strict = body_has_use_strict(&body);
+        if let Stmt::Block(stmts, _) = &body {
+            self.validate_directive_legacy_escapes(stmts);
+        }
         self.validate_parameters(
             &params,
             rest_param.as_deref(),
@@ -4337,6 +4387,9 @@ impl Parser {
             Stmt::Expr(expr, self.span())
         };
         let is_strict = body_has_use_strict(&body);
+        if let Stmt::Block(stmts, _) = &body {
+            self.validate_directive_legacy_escapes(stmts);
+        }
         self.validate_parameters(
             &params,
             rest_param.as_deref(),

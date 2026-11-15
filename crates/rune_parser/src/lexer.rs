@@ -371,17 +371,45 @@ impl Lexer {
                         Some('b') => value.push('\u{0008}'),
                         Some('f') => value.push('\u{000C}'),
                         Some('v') => value.push('\u{000B}'),
-                        Some('0') => value.push('\0'),
+                        Some(d @ '0'..='7') => {
+                            let mut code = d.to_digit(8).unwrap_or(0);
+                            let mut digits = 1;
+                            let max_digits = if d <= '3' { 3 } else { 2 };
+                            while digits < max_digits {
+                                match self.peek() {
+                                    Some(next @ '0'..='7') => {
+                                        code = code * 8 + next.to_digit(8).unwrap_or(0);
+                                        self.advance();
+                                        digits += 1;
+                                    }
+                                    _ => break,
+                                }
+                            }
+                            value.push(char::from_u32(code).unwrap_or('\u{FFFD}'));
+                        }
+                        Some(d @ '8'..='9') => value.push(d),
+                        Some(d @ ('\n' | '\r' | '\u{2028}' | '\u{2029}')) => {
+                            if d == '\r' && self.peek() == Some('\n') {
+                                self.advance();
+                            }
+                        }
                         Some('x') => {
                             let hex = self
                                 .chars
                                 .get(self.pos..self.pos + 2)
                                 .map(|s| s.iter().collect::<String>());
-                            if let Some(hex) = hex {
-                                if let Ok(codepoint) = u32::from_str_radix(&hex, 16) {
+                            match hex.as_deref().and_then(|h| u32::from_str_radix(h, 16).ok()) {
+                                Some(codepoint)
+                                    if hex.as_deref().is_some_and(|h| {
+                                        h.chars().all(|c| c.is_ascii_hexdigit())
+                                    }) =>
+                                {
                                     value.push(char::from_u32(codepoint).unwrap_or('\u{FFFD}'));
                                     self.pos += 2;
                                 }
+                                _ => self
+                                    .errors
+                                    .push("Invalid hexadecimal escape sequence".into()),
                             }
                         }
                         Some('u') => {
@@ -399,15 +427,20 @@ impl Lexer {
                                 if self.peek() == Some('}') {
                                     self.advance();
                                 }
-                                if let Ok(cp) = u32::from_str_radix(&code, 16) {
-                                    value.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+                                match u32::from_str_radix(&code, 16) {
+                                    Ok(cp) if cp <= 0x10FFFF => {
+                                        value.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+                                    }
+                                    _ => self.errors.push("Invalid Unicode escape sequence".into()),
                                 }
                             } else {
                                 let hex = self
                                     .chars
                                     .get(self.pos..self.pos + 4)
                                     .map(|s| s.iter().collect::<String>());
-                                if let Some(hex) = hex {
+                                if let Some(hex) =
+                                    hex.filter(|h| h.chars().all(|c| c.is_ascii_hexdigit()))
+                                {
                                     if let Ok(codepoint) = u32::from_str_radix(&hex, 16) {
                                         self.pos += 4;
                                         let ch = self
@@ -416,7 +449,11 @@ impl Lexer {
                                                 char::from_u32(codepoint).unwrap_or('\u{FFFD}')
                                             });
                                         value.push(ch);
+                                    } else {
+                                        self.errors.push("Invalid Unicode escape sequence".into());
                                     }
+                                } else {
+                                    self.errors.push("Invalid Unicode escape sequence".into());
                                 }
                             }
                         }

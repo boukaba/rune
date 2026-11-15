@@ -19318,3 +19318,24 @@ fn test_numeric_separator_early_errors() {
         Some(10000000000.12)
     );
 }
+
+#[test]
+fn test_string_escape_early_errors() {
+    let mut ctx = Context::new_small();
+    for source in [
+        r#""use strict"; "\1";"#,
+        r#"function f() { "\1"; "use strict"; }"#,
+        r#""\x";"#,
+        r#""\u12";"#,
+        r#""\u{110000}";"#,
+    ] {
+        assert!(
+            ctx.eval(source).is_err(),
+            "expected SyntaxError for {source:?}"
+        );
+    }
+    // Legacy octal escapes are valid in sloppy mode and decode as octal.
+    assert!(ctx.eval("'\\101' === '\\x41';").unwrap().to_bool());
+    // Backslash line continuations contribute no characters.
+    assert!(ctx.eval("\"a\\\nb\" === 'ab';").unwrap().to_bool());
+}

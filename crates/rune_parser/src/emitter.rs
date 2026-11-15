@@ -1248,7 +1248,7 @@ impl Emitter {
                 // Base class default constructor: empty body
                 Stmt::Block(vec![], Span { start: 0, end: 0 })
             };
-            let mut instance_fields: Vec<ClassField> = class
+            let instance_fields: Vec<ClassField> = class
                 .fields
                 .iter()
                 .filter(|f| !f.is_static)

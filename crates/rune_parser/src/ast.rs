@@ -179,6 +179,14 @@ pub struct ClassNode {
     pub private_fields: Vec<PrivateField>,
     /// Public instance/static fields (`x = 1;`, `static y;`).
     pub fields: Vec<ClassField>,
+    /// `static { ... }` initialization blocks, in source order.
+    pub static_blocks: Vec<StaticBlock>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct StaticBlock {
+    pub body: Vec<Stmt>,
     pub span: Span,
 }
 

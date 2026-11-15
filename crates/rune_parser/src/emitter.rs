@@ -50,6 +50,8 @@ pub struct Emitter {
     /// True when compiling a function body created inside `with`: captured
     /// with environments are outer to the function's own bindings.
     with_outer: bool,
+    /// Compiling a class static initialization block (`super` is static).
+    static_block: bool,
     /// How many env slots this function's env object has (0 = no env).
     captured_env_size: usize,
     /// Captured_names of enclosing functions, ordered closest-first.
@@ -146,6 +148,7 @@ impl Emitter {
             completion_slot: None,
             with_depth: 0,
             with_outer: false,
+            static_block: false,
             captured_env_size: 0,
             env_scope_stack: Vec::new(),
             env_scope_is_per_iter: Vec::new(),
@@ -670,6 +673,7 @@ impl Emitter {
         sub.env_scope_stack = self.env_scope_stack.clone();
         sub.with_depth = self.with_depth;
         sub.with_outer = self.with_depth > 0;
+        sub.static_block = self.static_block;
         sub.with_depth = self.with_depth;
         sub.env_scope_is_per_iter = self.env_scope_is_per_iter.clone();
         sub.script_const_names = self.script_const_names.clone();
@@ -1478,34 +1482,6 @@ impl Emitter {
             }
         }
 
-        // 7.7 Static public fields (evaluated in class-element order after
-        //     static methods/accessors for now).
-        if let Some(ctor_slot) = save_slot {
-            for field in class.fields.iter().filter(|f| f.is_static) {
-                self.emit(Opcode::LoadLocal, vec![ctor_slot as i64]);
-                let key_idx = match &field.key {
-                    PropKey::Identifier(n) => self.intern_string(n) as i64,
-                    PropKey::String(n) => self.intern_string(n) as i64,
-                    PropKey::Number(n) => self.intern_string(&n.to_string()) as i64,
-                    PropKey::Computed(expr) => {
-                        self.emit_expression(expr);
-                        usize::MAX as i64
-                    }
-                };
-                if let Some(init) = &field.init {
-                    let synth = field_initializer_function(init);
-                    let idx = self.compile_function(&synth);
-                    self.emit(Opcode::Dup, vec![]);
-                    self.emit(Opcode::MakeFunction, vec![idx as i64]);
-                    self.emit(Opcode::Call, vec![0]);
-                } else {
-                    self.emit(Opcode::LoadUndefined, vec![]);
-                }
-                self.emit(Opcode::DefineProperty, vec![key_idx]);
-                self.emit(Opcode::Pop, vec![]);
-            }
-        }
-
         // 5a. Set superclass on the constructor for super() calls in derived classes
         if let (Some(sslot), Some(ctor_slot)) = (heritage_super_slot, save_slot) {
             self.emit(Opcode::LoadLocal, vec![sslot as i64]);
@@ -1513,16 +1489,6 @@ impl Emitter {
             // ctor was consumed by SetSuperclass, restore from saved slot
             self.emit(Opcode::LoadLocal, vec![ctor_slot as i64]);
         }
-
-        // 6. Link: Constructor.prototype = Proto
-        //    Stack: [..., proto, ctor]
-        //    StoreProperty pops: obj=ctor, key="prototype", value=proto
-        //    and pushes value (proto) back.
-        self.emit(Opcode::Swap, vec![]);
-        self.emit(Opcode::LoadStringConst, vec![proto_key_idx]);
-        self.emit(Opcode::Swap, vec![]);
-        self.emit(Opcode::StoreProperty, vec![]);
-        self.emit(Opcode::Pop, vec![]);
 
         // 7. Link: Constructor.__proto__ = SuperClass (for extends, static inheritance)
         if let Some(sslot) = heritage_super_slot {
@@ -1534,6 +1500,87 @@ impl Emitter {
                 self.emit(Opcode::Pop, vec![]);
             }
         }
+
+        // 7.7 Static public fields (evaluated in class-element order after
+        //     static methods/accessors for now).
+        if let Some(ctor_slot) = save_slot {
+            enum StaticEvent<'a> {
+                Field(&'a ClassField),
+                Block(&'a StaticBlock),
+            }
+            let mut events: Vec<(usize, StaticEvent<'_>)> = class
+                .fields
+                .iter()
+                .filter(|f| f.is_static && !matches!(f.key, PropKey::Computed(_) | _ if false))
+                .filter(|f| f.is_static)
+                .map(|f| (f.span.start, StaticEvent::Field(f)))
+                .chain(
+                    class
+                        .static_blocks
+                        .iter()
+                        .map(|b| (b.span.start, StaticEvent::Block(b))),
+                )
+                .collect();
+            events.sort_by_key(|(start, _)| *start);
+            for (_, event) in events {
+                match event {
+                    StaticEvent::Field(field) => {
+                        self.emit(Opcode::LoadLocal, vec![ctor_slot as i64]);
+                        let key_idx = match &field.key {
+                            PropKey::Identifier(n) => self.intern_string(n) as i64,
+                            PropKey::String(n) => self.intern_string(n) as i64,
+                            PropKey::Number(n) => self.intern_string(&n.to_string()) as i64,
+                            PropKey::Computed(expr) => {
+                                self.emit_expression(expr);
+                                usize::MAX as i64
+                            }
+                        };
+                        if let Some(init) = &field.init {
+                            let synth = field_initializer_function(init);
+                            let idx = self.compile_function(&synth);
+                            self.emit(Opcode::Dup, vec![]);
+                            self.emit(Opcode::MakeFunction, vec![idx as i64]);
+                            self.emit(Opcode::Call, vec![0]);
+                        } else {
+                            self.emit(Opcode::LoadUndefined, vec![]);
+                        }
+                        self.emit(Opcode::DefineProperty, vec![key_idx]);
+                        self.emit(Opcode::Pop, vec![]);
+                    }
+                    StaticEvent::Block(block) => {
+                        let synth = FnNode {
+                            name: None,
+                            params: vec![],
+                            rest_param: None,
+                            body: Stmt::Block(block.body.clone(), block.span),
+                            is_generator: false,
+                            is_async: false,
+                            is_arrow: false,
+                            is_strict: true,
+                            span: block.span,
+                        };
+                        let saved_static = self.static_block;
+                        self.static_block = true;
+                        let idx = self.compile_function(&synth);
+                        self.static_block = saved_static;
+                        self.emit(Opcode::LoadLocal, vec![ctor_slot as i64]);
+                        self.emit(Opcode::MakeFunction, vec![idx as i64]);
+                        self.emit(Opcode::Call, vec![0]);
+                        self.emit(Opcode::Pop, vec![]);
+                    }
+                }
+            }
+        }
+
+        // 6. Link: Constructor.prototype = Proto
+        //    Stack: [..., proto, ctor]
+        //    StoreProperty pops: obj=ctor, key="prototype", value=proto
+        //    and pushes value (proto) back.
+        self.emit(Opcode::Swap, vec![]);
+        self.emit(Opcode::LoadStringConst, vec![proto_key_idx]);
+        self.emit(Opcode::Swap, vec![]);
+        self.emit(Opcode::StoreProperty, vec![]);
+        self.emit(Opcode::Pop, vec![]);
 
         // 7.5 Add static methods to constructor
         if let Some(ctor_slot) = save_slot {
@@ -3784,13 +3831,17 @@ impl Emitter {
             Expr::Member(obj, prop, computed, _) => {
                 match obj.as_ref() {
                     Expr::Super(_) => {
-                        // super.prop: lookup via this.__proto__.__proto__
+                        // super.prop: instance lookup via
+                        // this.__proto__.__proto__; static blocks use the
+                        // constructor's [[Prototype]] (super constructor).
                         self.emit(Opcode::LoadThis, vec![]);
                         let proto_key = self.intern_string("__proto__") as i64;
                         self.emit(Opcode::LoadStringConst, vec![proto_key]);
                         self.emit(Opcode::LoadProperty, vec![]);
-                        self.emit(Opcode::LoadStringConst, vec![proto_key]);
-                        self.emit(Opcode::LoadProperty, vec![]);
+                        if !self.static_block {
+                            self.emit(Opcode::LoadStringConst, vec![proto_key]);
+                            self.emit(Opcode::LoadProperty, vec![]);
+                        }
                     }
                     _ => {
                         self.emit_expression(obj);

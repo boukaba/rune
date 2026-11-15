@@ -539,7 +539,7 @@ impl Parser {
         } else {
             None
         };
-        let (methods, private_fields, fields) = self.parse_class_body();
+        let (methods, private_fields, fields, static_blocks) = self.parse_class_body();
         Stmt::Class(
             Box::new(ClassNode {
                 name: name.clone(),
@@ -547,6 +547,7 @@ impl Parser {
                 methods,
                 private_fields,
                 fields,
+                static_blocks,
                 span: Span {
                     start: start.start,
                     end: self.span().end,
@@ -575,7 +576,7 @@ impl Parser {
         } else {
             None
         };
-        let (methods, private_fields, fields) = self.parse_class_body();
+        let (methods, private_fields, fields, static_blocks) = self.parse_class_body();
         Expr::Class(
             Box::new(ClassNode {
                 name,
@@ -583,6 +584,7 @@ impl Parser {
                 methods,
                 private_fields,
                 fields,
+                static_blocks,
                 span: Span {
                     start: start.start,
                     end: self.span().end,
@@ -595,11 +597,19 @@ impl Parser {
         )
     }
 
-    fn parse_class_body(&mut self) -> (Vec<ClassMethod>, Vec<PrivateField>, Vec<ClassField>) {
+    fn parse_class_body(
+        &mut self,
+    ) -> (
+        Vec<ClassMethod>,
+        Vec<PrivateField>,
+        Vec<ClassField>,
+        Vec<StaticBlock>,
+    ) {
         self.expect(TokenKind::LBrace);
         let mut methods = Vec::new();
         let mut private_fields: Vec<PrivateField> = Vec::new();
         let mut fields: Vec<ClassField> = Vec::new();
+        let mut static_blocks: Vec<StaticBlock> = Vec::new();
         while self.tok.kind != TokenKind::RBrace && self.tok.kind != TokenKind::Eof {
             // ClassElement : `;` (empty class elements are valid).
             if self.tok.kind == TokenKind::Semicolon {
@@ -616,6 +626,22 @@ impl Parser {
             } else {
                 false
             };
+            if is_static && self.tok.kind == TokenKind::LBrace {
+                let bstart = self.span();
+                let block = self.parse_block();
+                let body = match block {
+                    Stmt::Block(stmts, _) => stmts,
+                    other => vec![other],
+                };
+                static_blocks.push(StaticBlock {
+                    body,
+                    span: Span {
+                        start: bstart.start,
+                        end: self.span().end,
+                    },
+                });
+                continue;
+            }
             // Function source starts after `static` (static is not part of
             // Function.prototype.toString output).
             let fstart = self.span();
@@ -850,7 +876,7 @@ impl Parser {
             }
             checked.push((pf.name.clone(), pf.is_static));
         }
-        (methods, private_fields, fields)
+        (methods, private_fields, fields, static_blocks)
     }
 
     fn parse_function_body(

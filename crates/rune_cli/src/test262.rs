@@ -38,7 +38,6 @@ pub struct TestCase {
 const UNSUPPORTED_FEATURES: &[&str] = &[
     "bigint",
     "BigInt",
-    "class-static-block",
     "cross-realm",
     "dynamic-import",
     "error-cause",

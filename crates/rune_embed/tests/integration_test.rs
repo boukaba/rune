@@ -19064,3 +19064,30 @@ fn test_class_methods_non_enumerable_and_unicode_identifier_fields() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_static_initialization_blocks_run_in_element_order() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            class C {
+                static order = [];
+                static a = (this.order.push("a"), 1);
+                static {
+                    this.order.push("block");
+                    this.b = this.a + 1;
+                }
+                static c = (this.order.push("c"), 3);
+            }
+
+            [
+                C.b === 2,
+                C.c === 3,
+                C.order.join(",") === "a,block,c"
+            ].join("|") === "true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

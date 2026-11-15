@@ -4274,6 +4274,27 @@ Integration suite: **937 passed, 0 failed, 3 ignored**.
 
 Integration suite: **937 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Class static initialization blocks (2026-11-15)
+
+- Parser/AST add `static { ... }` class elements (`ClassNode.static_blocks`).
+- Static blocks are compiled as zero-arg functions called with `this` =
+  constructor during class evaluation. They are interleaved with static public
+  fields in source order (sorting by element span), so side-effect order matches
+  the class element list.
+- Constructor `[[Prototype]]` (static inheritance) linkage moved before static
+  field/block evaluation.
+- The test262 runner now treats `class-static-block` as supported.
+- Test262: language/statements/class **1994 → 2004/4367** (static-init tests
+  now execute instead of being skipped); class expressions unchanged at
+  **1909/4059**.
+- Regression: `test_static_initialization_blocks_run_in_element_order`.
+- Known: static `super.x` still returns undefined because Func objects have no
+  per-function [[Prototype]] slot (static inheritance unimplemented); static
+  private access from a block before the field's initializer runs throws;
+  `await`/`arguments` early-error rules in static blocks are not enforced.
+
+Integration suite: **938 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

@@ -4152,6 +4152,32 @@ Integration suite: **934 passed, 0 failed, 3 ignored**.
 
 Integration suite: **935 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — `with` object environments (2026-11-15)
+
+- Added `with (expr) stmt` parsing/emission and an object-environment stack on
+  the VM (`WithEnter`/`WithLeave`, GC-rooted). The expression is ToObject'd;
+  null/undefined throw TypeError.
+- Dynamic identifier opcodes inside `with` bodies:
+  - `LoadNameWith` consults each active with object (respecting
+    `Symbol.unscopables`), then falls back to the compile-time binding
+    (local/captured/lexical/global or soft global for `typeof`);
+  - `StoreNameWith` sets an existing with-object property, otherwise falls
+    back to the outer binding;
+  - `DeleteNameWith` deletes a with-object property or reports false for
+    local/lexical bindings.
+- LoadGlobal/soft lookup now also reads properties of the global object, so
+  `this.p = …` bindings resolve as globals.
+- `collect_var_names_stmt`/const collection descend through `with`, so
+  `var` declarations inside a with body create their function/global binding
+  even when the initialization is captured by the object.
+- Test262 language/statements/with **2 → 117/181**.
+- Regression: `test_with_object_environment_and_unscopables`.
+- Known limitations: closures created inside a with body do not yet carry the
+  with object; abrupt completion (`return`/`throw`) cleanup relies on frame
+  with-base truncation; strict-mode `with` is not rejected as a SyntaxError.
+
+Integration suite: **936 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

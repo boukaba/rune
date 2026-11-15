@@ -172,6 +172,16 @@ pub enum Opcode {
     LoadNewTarget,
     // Push the currently executing function object (undefined at script level).
     LoadCurrentFunc,
+    // Object environment record for `with`: pop object / pop environment.
+    WithEnter,
+    WithLeave,
+    // Dynamic identifier load/store: operands = [name_idx, kind, a, b].
+    // kind: 0 local slot, 1 captured depth/slot, 2 lexical slot,
+    //       3 global, 4 soft global (typeof).
+    LoadNameWith,
+    StoreNameWith,
+    // Dynamic `delete name` inside `with`.
+    DeleteNameWith,
 }
 
 #[derive(Clone, Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]

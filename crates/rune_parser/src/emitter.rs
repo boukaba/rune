@@ -45,6 +45,8 @@ pub struct Emitter {
     /// function keeps the last expression-statement value in a local.
     eval_completion: bool,
     completion_slot: Option<usize>,
+    /// Nesting depth of `with` bodies (dynamic identifier resolution).
+    with_depth: usize,
     /// How many env slots this function's env object has (0 = no env).
     captured_env_size: usize,
     /// Captured_names of enclosing functions, ordered closest-first.
@@ -139,6 +141,7 @@ impl Emitter {
             captured_names: Vec::new(),
             eval_completion: false,
             completion_slot: None,
+            with_depth: 0,
             captured_env_size: 0,
             env_scope_stack: Vec::new(),
             env_scope_is_per_iter: Vec::new(),
@@ -1983,6 +1986,79 @@ impl Emitter {
         }
     }
 
+    /// Emit a dynamic identifier load when inside `with`; returns false when
+    /// normal compile-time resolution applies.
+    fn emit_dynamic_load(&mut self, name: &str, soft: bool) -> bool {
+        if self.with_depth == 0 || self.module_mode {
+            return false;
+        }
+        let name_idx = self.intern_string(name) as i64;
+        let mut ops: Vec<i64> = vec![name_idx];
+        if let Some(idx) = self.local_index(name) {
+            if self.captured_slot(name).is_some() {
+                if let Some((depth, slot)) = self.env_captured_slot(name) {
+                    ops.extend([1, depth as i64, slot as i64]);
+                } else {
+                    ops.extend([0, idx as i64]);
+                }
+            } else {
+                ops.extend([0, idx as i64]);
+            }
+        } else if let Some((depth, slot)) = self.env_captured_slot(name) {
+            ops.extend([1, depth as i64, slot as i64]);
+        } else if let Some(slot) = self.lexical_slot(name) {
+            ops.extend([2, slot as i64]);
+        } else {
+            ops.push(if soft { 4 } else { 3 });
+        }
+        self.emit(Opcode::LoadNameWith, ops);
+        true
+    }
+
+    fn emit_dynamic_store(&mut self, name: &str) -> bool {
+        if self.with_depth == 0 || self.module_mode {
+            return false;
+        }
+        let name_idx = self.intern_string(name) as i64;
+        let mut ops: Vec<i64> = vec![name_idx];
+        if let Some(idx) = self.local_index(name) {
+            if self.captured_slot(name).is_some() {
+                if let Some((depth, slot)) = self.env_captured_slot(name) {
+                    ops.extend([1, depth as i64, slot as i64]);
+                } else {
+                    ops.extend([0, idx as i64]);
+                }
+            } else {
+                ops.extend([0, idx as i64]);
+            }
+        } else if let Some((depth, slot)) = self.env_captured_slot(name) {
+            ops.extend([1, depth as i64, slot as i64]);
+        } else if let Some(slot) = self.lexical_slot(name) {
+            ops.extend([2, slot as i64]);
+        } else {
+            ops.push(3);
+        }
+        self.emit(Opcode::StoreNameWith, ops);
+        true
+    }
+
+    fn emit_dynamic_delete(&mut self, name: &str) -> bool {
+        if self.with_depth == 0 || self.module_mode {
+            return false;
+        }
+        let name_idx = self.intern_string(name) as i64;
+        let mut ops: Vec<i64> = vec![name_idx];
+        if self.local_index(name).is_some() || self.env_captured_slot(name).is_some() {
+            ops.push(0);
+        } else if self.lexical_slot(name).is_some() {
+            ops.push(1);
+        } else {
+            ops.push(2);
+        }
+        self.emit(Opcode::DeleteNameWith, ops);
+        true
+    }
+
     fn emit_statement(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Expr(expr, _) => {
@@ -2033,6 +2109,14 @@ impl Emitter {
                     self.emit(Opcode::BlockLeave, vec![]);
                     self.leave_lexical_scope();
                 }
+            }
+            Stmt::With(expr, body, _) => {
+                self.emit_expression(expr);
+                self.emit(Opcode::WithEnter, vec![]);
+                self.with_depth += 1;
+                self.emit_statement(body);
+                self.with_depth -= 1;
+                self.emit(Opcode::WithLeave, vec![]);
             }
             Stmt::If(cond, then, else_, _) => {
                 self.reset_completion_value();
@@ -2359,6 +2443,10 @@ impl Emitter {
                             }
                             if let Some(init) = &decl.init {
                                 self.emit_expression(init);
+                                if self.emit_dynamic_store(&decl.name) {
+                                    self.emit(Opcode::Pop, vec![]);
+                                    continue;
+                                }
                                 if let Some((depth, env_slot)) = self.env_captured_slot(&decl.name)
                                 {
                                     // StoreCaptured pops the value — no Pop needed
@@ -3004,6 +3092,9 @@ impl Emitter {
                 }
             }
             Expr::Identifier(name, _) => {
+                if self.emit_dynamic_load(name, false) {
+                    return;
+                }
                 // A local/parameter shadows an ancestor capture, but a
                 // captured local must use its env slot; block/loop lexicals
                 // resolve through the nearest env (per-iteration envs).
@@ -3050,8 +3141,10 @@ impl Emitter {
                             || self.local_index(name).is_some()
                             || (self.module_mode && self.module_imports.contains_key(name));
                         if known {
-                            self.emit_expression(arg);
-                        } else {
+                            if !self.emit_dynamic_load(name, false) {
+                                self.emit_expression(arg);
+                            }
+                        } else if !self.emit_dynamic_load(name, true) {
                             let name_idx = self.intern_string(name) as i64;
                             self.emit(Opcode::LoadGlobalSoft, vec![name_idx]);
                         }
@@ -3075,6 +3168,13 @@ impl Emitter {
                                 self.emit(Opcode::LoadStringConst, vec![idx]);
                             }
                             self.emit(Opcode::DeleteProperty, vec![]);
+                        }
+                        Expr::Identifier(name, _) => {
+                            if !self.emit_dynamic_delete(name) {
+                                self.emit_expression(arg);
+                                self.emit(Opcode::Pop, vec![]);
+                                self.emit(Opcode::LoadBoolean, vec![1]);
+                            }
                         }
                         _ => {
                             self.emit_expression(arg);
@@ -3678,6 +3778,9 @@ impl Emitter {
             Expr::Assign(target, value, _) => match target.as_ref() {
                 Expr::Identifier(name, _) => {
                     self.emit_expression(value);
+                    if self.emit_dynamic_store(name) {
+                        return;
+                    }
                     if let Some(idx) = self.local_index(name) {
                         if self.captured_slot(name).is_some() {
                             if let Some((depth, slot)) = self.env_captured_slot(name) {
@@ -4203,6 +4306,9 @@ impl Emitter {
     /// (StoreLocal/StoreGlobal push the value back; StoreCaptured/StoreLexical
     /// pop it, so only the net-0 stores need a trailing Pop.)
     fn emit_assign_store(&mut self, name: &str) {
+        if self.emit_dynamic_store(name) {
+            return;
+        }
         if let Some(idx) = self.local_index(name) {
             if self.captured_slot(name).is_some() {
                 if let Some((depth, slot)) = self.env_captured_slot(name) {
@@ -4658,6 +4764,9 @@ fn contains_inner_function_stmt(stmt: &Stmt) -> bool {
                 .as_ref()
                 .is_some_and(|e| contains_inner_function_expr(e))
         }),
+        Stmt::With(expr, body, _) => {
+            contains_inner_function_expr(expr) || contains_inner_function_stmt(body)
+        }
         Stmt::If(cond, then, else_, _) => {
             contains_inner_function_expr(cond)
                 || contains_inner_function_stmt(then)
@@ -4817,6 +4926,7 @@ fn collect_var_names_stmt(stmt: &Stmt, names: &mut Vec<String>) {
             }
         }
         Stmt::Labeled(_, body, _) => collect_var_names_stmt(body, names),
+        Stmt::With(_, body, _) => collect_var_names_stmt(body, names),
         _ => {}
     }
 }
@@ -4876,6 +4986,7 @@ fn collect_const_names_stmt(stmt: &Stmt, names: &mut Vec<String>) {
             }
         }
         Stmt::Labeled(_, body, _) => collect_const_names_stmt(body, names),
+        Stmt::With(_, body, _) => collect_const_names_stmt(body, names),
         _ => {}
     }
 }
@@ -4971,6 +5082,7 @@ fn uses_arguments_stmt(stmt: &Stmt) -> bool {
         Stmt::Expr(expr, _) => uses_arguments_expr(expr),
         Stmt::Import(_, _) | Stmt::Export(_, _) => false,
         Stmt::FieldInit(_, _) => false,
+        Stmt::With(expr, body, _) => uses_arguments_expr(expr) || uses_arguments_stmt(body),
         Stmt::Block(stmts, _) => stmts.iter().any(uses_arguments_stmt),
         Stmt::If(cond, then, else_, _) => {
             uses_arguments_expr(cond)

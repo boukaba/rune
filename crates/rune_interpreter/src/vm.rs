@@ -120,6 +120,7 @@ struct Frame {
     is_constructor_call: bool,
     constructed_object: Value,
     new_target: Value,
+    with_base: usize,
     /// Pointer to this frame's lexical environment object (may be null).
     /// Set by MakeEnv at function entry. Child closures capture this pointer.
     env: *mut u8,
@@ -1008,6 +1009,8 @@ pub struct Vm {
     frames: Vec<Frame>,
     try_stack: Vec<TryFrame>,
     pub generators: Vec<Generator>,
+    /// Active `with` object environments (innermost last).
+    with_stack: Vec<Value>,
     pub builtins: Vec<Builtin>,
     pub globals: HashMap<String, Value>,
     /// ESM module records, indexed by `modules[specifier]`. Programs are kept
@@ -1363,6 +1366,7 @@ impl Vm {
             frames: Vec::new(),
             try_stack: Vec::new(),
             generators: Vec::new(),
+            with_stack: Vec::new(),
             builtins: Vec::new(),
             globals: HashMap::new(),
             call_ics: Vec::new(),
@@ -4860,6 +4864,9 @@ impl Vm {
         for val in &self.temp_roots {
             gc.push_root(val as *const Value as *mut u64);
         }
+        for val in &self.with_stack {
+            gc.push_root(val as *const Value as *mut u64);
+        }
         for g in &self.generators {
             for local in &g.locals {
                 gc.push_root(local as *const Value as *mut u64);
@@ -5340,6 +5347,7 @@ impl Vm {
             this,
             is_constructor_call: false,
             new_target: Value::undefined(),
+            with_base: self.with_stack.len(),
             constructed_object: Value::undefined(),
             env,
             func_ptr: std::ptr::null_mut(),
@@ -5484,6 +5492,7 @@ impl Vm {
             this,
             is_constructor_call: false,
             new_target: Value::undefined(),
+            with_base: self.with_stack.len(),
             constructed_object: Value::undefined(),
             env: func_env,
             func_ptr: func_ptr as *mut u8,
@@ -5835,6 +5844,7 @@ impl Vm {
                         is_constructor_call: true,
                         constructed_object: obj_val,
                         new_target,
+                        with_base: self.with_stack.len(),
                         env: func_env,
                         func_ptr: func_ptr as *mut u8,
                         private_name_ids: std::ptr::null_mut(),
@@ -6084,6 +6094,7 @@ impl Vm {
                                     this,
                                     is_constructor_call: false,
                                     new_target: Value::undefined(),
+                                    with_base: self.with_stack.len(),
                                     constructed_object: Value::undefined(),
                                     env: func_env,
                                     func_ptr,
@@ -6169,6 +6180,7 @@ impl Vm {
             this: obj,
             is_constructor_call: false,
             new_target: Value::undefined(),
+            with_base: self.with_stack.len(),
             constructed_object: Value::undefined(),
             env: func_env,
             func_ptr,
@@ -6223,6 +6235,7 @@ impl Vm {
             },
             is_constructor_call: false,
             new_target: Value::undefined(),
+            with_base: self.with_stack.len(),
             constructed_object: Value::undefined(),
             env: std::ptr::null_mut(),
             func_ptr: std::ptr::null_mut(),
@@ -6352,6 +6365,7 @@ impl Vm {
             this: Value::undefined(),
             is_constructor_call: false,
             new_target: Value::undefined(),
+            with_base: self.with_stack.len(),
             constructed_object: Value::undefined(),
             env: std::ptr::null_mut(),
             func_ptr: std::ptr::null_mut(),
@@ -6615,6 +6629,7 @@ impl Vm {
             this: saved_this,
             is_constructor_call: false,
             new_target: Value::undefined(),
+            with_base: self.with_stack.len(),
             constructed_object: Value::undefined(),
             env: saved_env,
             func_ptr: std::ptr::null_mut(),
@@ -7667,6 +7682,7 @@ impl Vm {
                                                         this: obj,
                                                         is_constructor_call: false,
                                                         new_target: Value::undefined(),
+                                                        with_base: self.with_stack.len(),
                                                         constructed_object: Value::undefined(),
                                                         env: func_env,
                                                         func_ptr,
@@ -10438,6 +10454,403 @@ impl Vm {
                     }
                     self.frames[fi].pc = pc + 1;
                 }
+                Opcode::WithEnter => {
+                    let val = self.pop();
+                    if val.is_null() || val.is_undefined() {
+                        let exc = crate::errors::error_object(
+                            gc,
+                            &self.error_protos,
+                            crate::errors::ErrorKind::TypeError,
+                            "Cannot convert undefined or null to object",
+                        );
+                        if let Some(exit) = self.handle_throw(gc, exc) {
+                            return exit;
+                        }
+                        continue;
+                    }
+                    let obj = if val.heap_ptr().is_some() {
+                        val
+                    } else {
+                        to_object_value(gc, val, self)
+                    };
+                    if let Some(exc) = self.pending_exception.take() {
+                        if let Some(exit) = self.handle_throw(gc, exc) {
+                            return exit;
+                        }
+                        continue;
+                    }
+                    self.with_stack.push(obj);
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::WithLeave => {
+                    self.with_stack.pop();
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::LoadNameWith => {
+                    let name_idx = instr.operands[0] as usize;
+                    let Some(name) = self.frames[fi].prog_str(name_idx) else {
+                        self.push(Value::undefined());
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    };
+                    let key_val = Value::from_heap_ptr(HeapString::allocate(gc, &name) as *mut u8);
+                    let root = self.temp_roots.len();
+                    self.temp_roots.push(key_val);
+                    let mut resolved: Option<Result<Value, Value>> = None;
+                    for i in (0..self.with_stack.len()).rev() {
+                        let obj = self.with_stack[i];
+                        let unscopables = match crate::builtins::get_property_value_sync(
+                            gc,
+                            self,
+                            obj,
+                            Value::symbol(rune_core::symbol::SYM_UNSCOPABLES),
+                        ) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                self.temp_roots.truncate(root);
+                                if let Some(exit) = self.handle_throw(gc, e) {
+                                    return exit;
+                                }
+                                continue;
+                            }
+                        };
+                        let key = self.temp_roots[root];
+                        if unscopables.heap_ptr().is_some() {
+                            if let Ok(blocked) =
+                                crate::builtins::get_property_value_sync(gc, self, unscopables, key)
+                            {
+                                if blocked.to_bool() {
+                                    continue;
+                                }
+                            }
+                        }
+                        match self.has_property_with_vm(gc, obj, key) {
+                            Ok(true) => {
+                                resolved = Some(crate::builtins::get_property_value_sync(
+                                    gc, self, obj, key,
+                                ));
+                                break;
+                            }
+                            Ok(false) => {}
+                            Err(e) => {
+                                self.temp_roots.truncate(root);
+                                if let Some(exit) = self.handle_throw(gc, e) {
+                                    return exit;
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                    self.temp_roots.truncate(root);
+                    if let Some(r) = resolved {
+                        match r {
+                            Ok(v) => {
+                                self.push(v);
+                                self.frames[fi].pc = pc + 1;
+                            }
+                            Err(e) => {
+                                if let Some(exit) = self.handle_throw(gc, e) {
+                                    return exit;
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    let kind = instr.operands[1];
+                    match kind {
+                        0 => {
+                            let slot = instr.operands[2] as usize;
+                            let v = self.frames[fi]
+                                .locals
+                                .get(slot)
+                                .copied()
+                                .unwrap_or(Value::undefined());
+                            self.push(v);
+                        }
+                        1 => {
+                            let depth = instr.operands[2] as usize;
+                            let slot = instr.operands[3] as usize;
+                            let env = self.frames[fi].env as *mut EnvObject;
+                            let target = unsafe { EnvObject::ancestor(env, depth) };
+                            let v = unsafe { EnvObject::get_slot(target, slot) };
+                            if v == Value::empty_sentinel() {
+                                let exc = crate::errors::error_object(
+                                    gc,
+                                    &self.error_protos,
+                                    crate::errors::ErrorKind::ReferenceError,
+                                    "Cannot access binding before initialization",
+                                );
+                                if let Some(exit) = self.handle_throw(gc, exc) {
+                                    return exit;
+                                }
+                                continue;
+                            }
+                            self.push(v);
+                        }
+                        2 => {
+                            let slot = instr.operands[2] as usize;
+                            let f = &self.frames[fi];
+                            if slot < f.lexical_slots.len() {
+                                if f.lexical_tdz.get(slot).copied().unwrap_or(false) {
+                                    let exc = crate::errors::error_object(
+                                        gc,
+                                        &self.error_protos,
+                                        crate::errors::ErrorKind::ReferenceError,
+                                        "Cannot access binding before initialization",
+                                    );
+                                    if let Some(exit) = self.handle_throw(gc, exc) {
+                                        return exit;
+                                    }
+                                    continue;
+                                }
+                                let v = f.lexical_slots[slot];
+                                self.push(v);
+                            } else {
+                                self.push(Value::undefined());
+                            }
+                        }
+                        4 => {
+                            let v = self
+                                .globals
+                                .get(&name)
+                                .copied()
+                                .or_else(|| self.builtin_wrappers.get(&name).copied())
+                                .or_else(|| self.get_builtin(&name))
+                                .or_else(|| {
+                                    let gptr = self.global_this.heap_ptr()?;
+                                    if unsafe { (*(gptr as *const GcHeader)).tag() } != TAG_OBJECT {
+                                        return None;
+                                    }
+                                    let obj = gptr as *mut JSObject;
+                                    let key = PropertyKey::from_string(&name);
+                                    let shape = unsafe { JSObject::shape_ptr(obj) };
+                                    shape
+                                        .lookup(&key)
+                                        .map(|slot| unsafe { JSObject::get_slot(obj, slot) })
+                                })
+                                .unwrap_or(Value::undefined());
+                            self.push(v);
+                        }
+                        _ => {
+                            let v = self
+                                .globals
+                                .get(&name)
+                                .copied()
+                                .or_else(|| self.builtin_wrappers.get(&name).copied())
+                                .or_else(|| self.get_builtin(&name))
+                                .or_else(|| {
+                                    let gptr = self.global_this.heap_ptr()?;
+                                    if unsafe { (*(gptr as *const GcHeader)).tag() } != TAG_OBJECT {
+                                        return None;
+                                    }
+                                    let obj = gptr as *mut JSObject;
+                                    let key = PropertyKey::from_string(&name);
+                                    let shape = unsafe { JSObject::shape_ptr(obj) };
+                                    shape
+                                        .lookup(&key)
+                                        .map(|slot| unsafe { JSObject::get_slot(obj, slot) })
+                                });
+                            match v {
+                                Some(v) => self.push(v),
+                                None => {
+                                    let exc = crate::errors::error_object(
+                                        gc,
+                                        &self.error_protos,
+                                        crate::errors::ErrorKind::ReferenceError,
+                                        &format!("{name} is not defined"),
+                                    );
+                                    if let Some(exit) = self.handle_throw(gc, exc) {
+                                        return exit;
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::StoreNameWith => {
+                    let name_idx = instr.operands[0] as usize;
+                    let Some(name) = self.frames[fi].prog_str(name_idx) else {
+                        continue;
+                    };
+                    let value = self.pop();
+                    let key_val = Value::from_heap_ptr(HeapString::allocate(gc, &name) as *mut u8);
+                    let root = self.temp_roots.len();
+                    self.temp_roots.push(key_val);
+                    self.temp_roots.push(value);
+                    let mut handled = false;
+                    for i in (0..self.with_stack.len()).rev() {
+                        let obj = self.with_stack[i];
+                        let key = self.temp_roots[root];
+                        let unscopables = match crate::builtins::get_property_value_sync(
+                            gc,
+                            self,
+                            obj,
+                            Value::symbol(rune_core::symbol::SYM_UNSCOPABLES),
+                        ) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                self.temp_roots.truncate(root);
+                                if let Some(exit) = self.handle_throw(gc, e) {
+                                    return exit;
+                                }
+                                continue;
+                            }
+                        };
+                        if unscopables.heap_ptr().is_some() {
+                            if let Ok(blocked) =
+                                crate::builtins::get_property_value_sync(gc, self, unscopables, key)
+                            {
+                                if blocked.to_bool() {
+                                    continue;
+                                }
+                            }
+                        }
+                        let has = match self.has_property_with_vm(gc, obj, key) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                self.temp_roots.truncate(root);
+                                if let Some(exit) = self.handle_throw(gc, e) {
+                                    return exit;
+                                }
+                                continue;
+                            }
+                        };
+                        if has {
+                            let val = self.temp_roots[root + 1];
+                            match crate::builtins::set_value_sync(gc, self, obj, &name, val) {
+                                Ok(()) => {
+                                    self.temp_roots.truncate(root);
+                                    self.push(val);
+                                    handled = true;
+                                    break;
+                                }
+                                Err(e) => {
+                                    self.temp_roots.truncate(root);
+                                    if let Some(exit) = self.handle_throw(gc, e) {
+                                        return exit;
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    if handled {
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    }
+                    let val = self.temp_roots[root + 1];
+                    self.temp_roots.truncate(root);
+                    let kind = instr.operands[1];
+                    match kind {
+                        0 => {
+                            let slot = instr.operands[2] as usize;
+                            if slot < self.frames[fi].locals.len() {
+                                self.frames[fi].locals[slot] = val;
+                            }
+                        }
+                        1 => {
+                            let depth = instr.operands[2] as usize;
+                            let slot = instr.operands[3] as usize;
+                            let env = self.frames[fi].env as *mut EnvObject;
+                            let target = unsafe { EnvObject::ancestor(env, depth) };
+                            unsafe { EnvObject::set_slot(target, slot, val) };
+                        }
+                        2 => {
+                            let slot = instr.operands[2] as usize;
+                            let f = &mut self.frames[fi];
+                            if slot < f.lexical_slots.len() {
+                                if f.lexical_tdz.get(slot).copied().unwrap_or(false) {
+                                    let exc = crate::errors::error_object(
+                                        gc,
+                                        &self.error_protos,
+                                        crate::errors::ErrorKind::ReferenceError,
+                                        "Cannot access binding before initialization",
+                                    );
+                                    if let Some(exit) = self.handle_throw(gc, exc) {
+                                        return exit;
+                                    }
+                                    continue;
+                                }
+                                if f.lexical_const.get(slot).copied().unwrap_or(false) {
+                                    let exc = crate::errors::error_object(
+                                        gc,
+                                        &self.error_protos,
+                                        crate::errors::ErrorKind::TypeError,
+                                        "Assignment to constant variable",
+                                    );
+                                    if let Some(exit) = self.handle_throw(gc, exc) {
+                                        return exit;
+                                    }
+                                    continue;
+                                }
+                                f.lexical_slots[slot] = val;
+                            }
+                        }
+                        _ => {
+                            self.globals.insert(name.to_string(), val);
+                        }
+                    }
+                    self.push(val);
+                    self.frames[fi].pc = pc + 1;
+                }
+                Opcode::DeleteNameWith => {
+                    let name_idx = instr.operands[0] as usize;
+                    let Some(name) = self.frames[fi].prog_str(name_idx) else {
+                        self.push(Value::boolean(true));
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    };
+                    let key_val = Value::from_heap_ptr(HeapString::allocate(gc, &name) as *mut u8);
+                    let root = self.temp_roots.len();
+                    self.temp_roots.push(key_val);
+                    let mut result = None;
+                    for i in (0..self.with_stack.len()).rev() {
+                        let obj = self.with_stack[i];
+                        let key = self.temp_roots[root];
+                        let has = match self.has_property_with_vm(gc, obj, key) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                self.temp_roots.truncate(root);
+                                if let Some(exit) = self.handle_throw(gc, e) {
+                                    return exit;
+                                }
+                                continue;
+                            }
+                        };
+                        if has {
+                            let deleted = crate::builtins::reflect_delete_property(
+                                gc,
+                                Value::undefined(),
+                                &[obj, key],
+                                self,
+                            );
+                            if let Some(exc) = self.pending_exception.take() {
+                                self.temp_roots.truncate(root);
+                                if let Some(exit) = self.handle_throw(gc, exc) {
+                                    return exit;
+                                }
+                                continue;
+                            }
+                            result = Some(deleted);
+                            break;
+                        }
+                    }
+                    self.temp_roots.truncate(root);
+                    if let Some(v) = result {
+                        self.push(v);
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    }
+                    if instr.operands[1] == 2 {
+                        self.globals.remove(&name);
+                        self.push(Value::boolean(true));
+                    } else {
+                        self.push(Value::boolean(false));
+                    }
+                    self.frames[fi].pc = pc + 1;
+                }
                 Opcode::LoadGlobal => {
                     let name_idx = instr.operands[0] as usize;
                     let Some(name) = self.frames[fi].prog_str(name_idx) else {
@@ -10446,11 +10859,24 @@ impl Vm {
                         continue;
                     };
                     let global_chain = |vm: &Vm| {
+                        let key = PropertyKey::from_string(&name);
+                        let global_prop = || {
+                            let gptr = vm.global_this.heap_ptr()?;
+                            if unsafe { (*(gptr as *const GcHeader)).tag() } != TAG_OBJECT {
+                                return None;
+                            }
+                            let obj = gptr as *mut JSObject;
+                            let shape = unsafe { JSObject::shape_ptr(obj) };
+                            shape
+                                .lookup(&key)
+                                .map(|slot| unsafe { JSObject::get_slot(obj, slot) })
+                        };
                         vm.globals
                             .get(&name)
                             .copied()
                             .or_else(|| vm.builtin_wrappers.get(&name).copied())
                             .or_else(|| vm.get_builtin(&name))
+                            .or_else(global_prop)
                     };
                     let value = if self.module_mi_of_frame(fi).is_some() {
                         self.load_global_from_module_frame(gc, fi, &name)
@@ -11888,6 +12314,7 @@ impl Vm {
                                                 this: obj,
                                                 is_constructor_call: false,
                                                 new_target: Value::undefined(),
+                                                with_base: self.with_stack.len(),
                                                 constructed_object: Value::undefined(),
                                                 env: func_env,
                                                 func_ptr,
@@ -12592,6 +13019,7 @@ impl Vm {
                                     is_constructor_call: true,
                                     constructed_object: obj_val,
                                     new_target: constructor,
+                                    with_base: self.with_stack.len(),
                                     env: func_env,
                                     func_ptr: func_ptr as *mut u8,
                                     private_name_ids: std::ptr::null_mut(),
@@ -13089,6 +13517,7 @@ impl Vm {
                                         this,
                                         is_constructor_call: false,
                                         new_target: Value::undefined(),
+                                        with_base: self.with_stack.len(),
                                         constructed_object: Value::undefined(),
                                         env: func_env,
                                         func_ptr: func_ptr as *mut u8,
@@ -13213,6 +13642,7 @@ impl Vm {
                                                     this,
                                                     is_constructor_call: false,
                                                     new_target: Value::undefined(),
+                                                    with_base: self.with_stack.len(),
                                                     constructed_object: Value::undefined(),
                                                     env: func_env,
                                                     func_ptr: ptr,
@@ -13382,6 +13812,7 @@ impl Vm {
                                             this,
                                             is_constructor_call: false,
                                             new_target: Value::undefined(),
+                                            with_base: self.with_stack.len(),
                                             constructed_object: Value::undefined(),
                                             env: func_env,
                                             func_ptr: ptr,
@@ -13472,6 +13903,7 @@ impl Vm {
                                     } else {
                                         Value::undefined()
                                     },
+                                    with_base: self.with_stack.len(),
                                     env: func_env,
                                     func_ptr: func_ptr as *mut u8,
                                     private_name_ids: std::ptr::null_mut(),
@@ -13568,6 +14000,7 @@ impl Vm {
                     let is_constructor = self.frames[popped_frame].is_constructor_call;
                     let constructed_obj = self.frames[popped_frame].constructed_object;
                     let popped_new_target = self.frames[popped_frame].new_target;
+                    let popped_with_base = self.frames[popped_frame].with_base;
                     let popped_func = self.frames[popped_frame].func_ptr;
                     self.last_locals = self.frames[popped_frame].locals.clone();
                     // B1e: callee identity for machine Return arms (nested
@@ -13579,6 +14012,7 @@ impl Vm {
                         Value::from_heap_ptr(popped_func)
                     };
                     self.frames.pop();
+                    self.with_stack.truncate(popped_with_base);
                     self.try_stack
                         .retain(|tf| tf.frame_depth != popped_frame + 1);
                     // Generator nested-loop return: hand the value to the
@@ -15435,6 +15869,7 @@ impl Vm {
                                         this,
                                         is_constructor_call: false,
                                         new_target: Value::undefined(),
+                                        with_base: self.with_stack.len(),
                                         constructed_object: Value::undefined(),
                                         env: func_env,
                                         func_ptr: func_ptr as *mut u8,
@@ -15502,6 +15937,7 @@ impl Vm {
                                     } else {
                                         Value::undefined()
                                     },
+                                    with_base: self.with_stack.len(),
                                     env: func_env,
                                     func_ptr: func_ptr as *mut u8,
                                     private_name_ids: std::ptr::null_mut(),
@@ -19032,6 +19468,7 @@ pub(crate) fn push_accessor_frame(
         this: receiver,
         is_constructor_call: false,
         new_target: Value::undefined(),
+        with_base: 0,
         constructed_object: Value::undefined(),
         env: func_env,
         func_ptr: gptr,
@@ -19659,6 +20096,7 @@ pub unsafe extern "C" fn rune_jit_call_helper(
                         this: Value::from_raw(this_raw),
                         is_constructor_call: false,
                         new_target: Value::undefined(),
+                        with_base: vm.with_stack.len(),
                         constructed_object: Value::undefined(),
                         env: func_env,
                         func_ptr: func_ptr as *mut u8,

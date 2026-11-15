@@ -18980,3 +18980,40 @@ fn test_class_fields_use_super_return_proxy_and_define_trap() {
         .unwrap();
     assert_eq!(r.to_boolean(), Some(true));
 }
+
+#[test]
+fn test_with_object_environment_and_unscopables() {
+    let mut ctx = Context::new_small();
+    let r = ctx
+        .eval(
+            r#"
+            var outer = 1;
+            var obj = { value: 5, x: 9 };
+            var x = 2;
+
+            with (obj) {
+                value = 6;
+                var created = 7;
+                globalFromWith = 8;
+                delete x;
+            }
+
+            obj[Symbol.unscopables] = { x: true };
+            var blocked;
+            with (obj) {
+                blocked = x;
+            }
+
+            [
+                obj.value === 6,
+                created === 7,
+                globalFromWith === 8,
+                obj.x === undefined,
+                outer === 1,
+                blocked === 2
+            ].join("|") === "true|true|true|true|true|true";
+            "#,
+        )
+        .unwrap();
+    assert_eq!(r.to_boolean(), Some(true));
+}

@@ -122,6 +122,9 @@ impl Parser {
     // ---- Statements ----
 
     fn parse_statement(&mut self) -> Stmt {
+        if self.tok.kind == TokenKind::Identifier && self.tok.value == "with" {
+            return self.parse_with();
+        }
         match self.tok.kind {
             TokenKind::Function => self.parse_function_decl(),
             TokenKind::Async if self.lexer.peek_token().kind == TokenKind::Function => {
@@ -1111,6 +1114,23 @@ impl Parser {
             body,
             catch,
             finalizer,
+            Span {
+                start: start.start,
+                end: self.span().end,
+            },
+        )
+    }
+
+    fn parse_with(&mut self) -> Stmt {
+        let start = self.span();
+        self.advance();
+        self.expect(TokenKind::LParen);
+        let expr = Box::new(self.parse_expr_comma());
+        self.expect(TokenKind::RParen);
+        let body = Box::new(self.parse_statement());
+        Stmt::With(
+            expr,
+            body,
             Span {
                 start: start.start,
                 end: self.span().end,

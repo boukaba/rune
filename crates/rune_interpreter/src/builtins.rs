@@ -10719,7 +10719,7 @@ fn build_grouped_map(
 /// supported inside sync builtins — documented gap).
 /// Synchronous Get that invokes accessor getters through the re-entrant call
 /// path. `load_property_recursive` returns an AccessorPair for accessor slots.
-fn get_property_value_sync(
+pub(crate) fn get_property_value_sync(
     gc: &mut SemiSpace,
     vm: &mut Vm,
     object: Value,
@@ -10785,7 +10785,7 @@ fn get_property_value_sync_receiver(
     result
 }
 
-fn set_value_sync(
+pub(crate) fn set_value_sync(
     gc: &mut SemiSpace,
     vm: &mut Vm,
     obj: Value,

@@ -253,6 +253,8 @@ pub enum Stmt {
     /// `label: stmt` (§13.13). Only loops consume the label today; on any
     /// other statement kind it is parsed and attached for completeness.
     Labeled(Box<str>, Box<Stmt>, Span),
+    /// `with (expr) stmt` (sloppy mode only).
+    With(Box<Expr>, Box<Stmt>, Span),
     /// Synthetic class-field initialization sequence inserted into a
     /// constructor before (base) or after (derived) the user body.
     FieldInit(Vec<ClassField>, Span),

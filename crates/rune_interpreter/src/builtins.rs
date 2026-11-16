@@ -3376,6 +3376,84 @@ pub fn make_generator_instance(gc: &mut SemiSpace, vm: &mut Vm, gen_id: usize) -
     Value::from_heap_ptr(obj as *mut u8)
 }
 
+pub fn make_async_generator_instance(gc: &mut SemiSpace, vm: &mut Vm, gen_id: usize) -> Value {
+    let next_h = find_handle(&vm.builtins, "AsyncGenerator_prototype_next").unwrap();
+    let ret_h = find_handle(&vm.builtins, "AsyncGenerator_prototype_return").unwrap();
+    let thr_h = find_handle(&vm.builtins, "AsyncGenerator_prototype_throw").unwrap();
+    let iter_h = find_handle(
+        &vm.builtins,
+        "AsyncGenerator_prototype_symbol_asyncIterator",
+    )
+    .unwrap();
+    let keys = vec![
+        (PropertyKey::from_string("next"), 0),
+        (PropertyKey::from_string("return"), 1),
+        (PropertyKey::from_string("throw"), 2),
+        (
+            PropertyKey::from_symbol(rune_core::symbol::SYM_ASYNC_ITERATOR),
+            3,
+        ),
+        (PropertyKey::from_symbol(vm.gen_state_symbol), 4),
+    ];
+    let key_names = vec![
+        "next".to_string(),
+        "return".to_string(),
+        "throw".to_string(),
+        "\u{0}".to_string(),
+        "\u{0}".to_string(),
+    ];
+    let shape = Shape::intern(keys, key_names);
+    let vals = vec![next_h, ret_h, thr_h, iter_h, Value::smi(gen_id as i32)];
+    let obj = JSObject::allocate(gc, shape, &vals);
+    Value::from_heap_ptr(obj as *mut u8)
+}
+
+fn async_generator_wrap_result(gc: &mut SemiSpace, vm: &mut Vm, result: Value) -> Value {
+    if let Some(exception) = vm.pending_exception.take() {
+        return promise_static_reject(gc, Value::undefined(), &[exception], vm);
+    }
+    promise_static_resolve(gc, Value::undefined(), &[result], vm)
+}
+
+pub fn async_generator_next_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let result = generator_next_builtin(gc, this, args, vm);
+    async_generator_wrap_result(gc, vm, result)
+}
+
+pub fn async_generator_return_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let result = generator_return_builtin(gc, this, args, vm);
+    async_generator_wrap_result(gc, vm, result)
+}
+
+pub fn async_generator_throw_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let result = generator_throw_builtin(gc, this, args, vm);
+    async_generator_wrap_result(gc, vm, result)
+}
+
+pub fn async_generator_symbol_async_iterator_builtin(
+    _gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    _vm: &mut Vm,
+) -> Value {
+    this
+}
+
 /// The shared next() for array iterators — reads the hidden state
 /// [iterated array, index, kind] stored on the iterator object.
 pub fn array_iterator_next(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
@@ -28443,6 +28521,26 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 0,
             name: "Array_prototype_values",
             func: array_values_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "AsyncGenerator_prototype_next",
+            func: async_generator_next_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "AsyncGenerator_prototype_return",
+            func: async_generator_return_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "AsyncGenerator_prototype_throw",
+            func: async_generator_throw_builtin,
+        },
+        Builtin {
+            length: 0,
+            name: "AsyncGenerator_prototype_symbol_asyncIterator",
+            func: async_generator_symbol_async_iterator_builtin,
         },
         Builtin {
             length: 1,

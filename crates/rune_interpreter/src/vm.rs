@@ -13769,6 +13769,28 @@ impl Vm {
                             if func_idx < creator_prog.functions.len() {
                                 let func_prog = &creator_prog.functions[func_idx];
 
+                                if func_prog.is_async && func_prog.is_generator {
+                                    let mut gen_locals = if func_prog.named_function {
+                                        vec![callee]
+                                    } else {
+                                        vec![]
+                                    };
+                                    gen_locals.extend(args);
+                                    let mut g = Generator::new(
+                                        gen_locals,
+                                        func_prog as *const BytecodeProgram,
+                                    );
+                                    g.this = this;
+                                    g.env = unsafe { Func::env_ptr(ptr as *mut Func) };
+                                    let gen_id = self.generators.len();
+                                    self.generators.push(g);
+                                    let instance = crate::builtins::make_async_generator_instance(
+                                        gc, self, gen_id,
+                                    );
+                                    self.push(instance);
+                                    self.frames[fi].pc = pc + 1;
+                                    continue;
+                                }
                                 if func_prog.is_async {
                                     let passed_argc = args.len();
                                     let mut g = Generator::new(
@@ -15958,6 +15980,15 @@ impl Vm {
                 Opcode::Await => {
                     let val = self.pop();
                     if let Some(gen_id) = self.frames[fi].generator_id {
+                        if !self.async_tasks.iter().any(|t| t.gen_id == gen_id) {
+                            // Async generators currently drive a synchronous
+                            // Generator object; no async task is attached, so
+                            // awaits of already-available values complete
+                            // inline instead of suspending.
+                            self.push(val);
+                            self.frames[fi].pc = pc + 1;
+                            continue;
+                        }
                         // Save generator state
                         let g = &mut self.generators[gen_id];
                         g.locals = self.frames[fi].locals.clone();

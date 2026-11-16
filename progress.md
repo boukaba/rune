@@ -4696,6 +4696,25 @@ Integration suite: **959 passed, 0 failed, 3 ignored**.
 
 Integration suite: **960 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Async generators (2026-11-16)
+
+- Async generator functions now return an async generator object instead of
+  `undefined`: a synchronous `Generator` is created and wrapped by an object
+  whose `next`/`throw`/`return` methods resolve the generator step into a
+  Promise, and whose `Symbol.asyncIterator` returns the object itself.
+- `await` inside a sync-driven async generator completes inline for
+  already-available values (no async task attached), avoiding a panic and
+  enabling `for await` inside async generator bodies.
+- Test262: expressions/async-generator **202 → 460/623**,
+  statements/for-await-of **789 → 896/1234**, language overall
+  **14,931 → 16,906/23,979**.
+- Regression: `test_async_generator_basics`.
+- Known gap: awaiting a pending Promise inside a sync-driven async generator
+  does not suspend (it completes inline), and `.throw`/queueing semantics are
+  simplified.
+
+Integration suite: **961 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

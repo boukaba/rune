@@ -19557,3 +19557,27 @@ fn test_for_await_of_async_iteration() {
         .is_ok());
     assert!(ctx.eval("for await (let x of []) {}").is_err());
 }
+
+#[test]
+fn test_async_generator_basics() {
+    let mut ctx = Context::new_small();
+    assert!(
+        ctx.eval(
+            "async function* g(){ yield 1; yield 2; return 3; } \
+             var it = g(); \
+             typeof it.next === 'function' && it[Symbol.asyncIterator]() === it;"
+        )
+        .is_ok()
+    );
+    assert!(ctx
+        .eval(
+            "async function* g(){ yield 1; yield 2; } \
+             async function f(){ let out=[]; for await (let x of g()) out.push(x); return out.join(','); } \
+             f();"
+        )
+        .is_ok());
+    assert!(
+        ctx.eval("async function* g(){ for await (let x of [1,2]) { yield x; } } g();")
+            .is_ok()
+    );
+}

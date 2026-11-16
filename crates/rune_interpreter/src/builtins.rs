@@ -1401,6 +1401,15 @@ pub(crate) fn to_primitive_string_sync(val: Value, gc: &mut SemiSpace, vm: &mut 
         return value_to_js_string(function_prototype_to_string(gc, val, &[], vm));
     }
     if tag == TAG_OBJECT {
+        if let Some((target, _handler, _revoked)) = crate::vm::proxy_parts(val) {
+            let callable = target.is_builtin()
+                || target
+                    .heap_ptr()
+                    .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_FUNC });
+            if callable {
+                return "function () { [native code] }".to_string();
+            }
+        }
         // A2: chain-walk like the async version so inherited BUILTIN methods
         // (Error.prototype.toString) dispatch; user-defined (JS-func) methods
         // are still skipped — no pending protocol in sync contexts.
@@ -7675,10 +7684,11 @@ pub fn array_buffer_is_view_builtin(
     _vm: &mut Vm,
 ) -> Value {
     let _ = this;
-    let ok = args
-        .first()
-        .and_then(|v| v.heap_ptr())
-        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_TYPED_ARRAY });
+    let arg = args.first().copied().unwrap_or(Value::undefined());
+    let ok = arg
+        .heap_ptr()
+        .is_some_and(|p| unsafe { (*(p as *const GcHeader)).tag() == TAG_TYPED_ARRAY })
+        || dataview_parts(arg).is_some();
     Value::boolean(ok)
 }
 
@@ -7709,15 +7719,105 @@ pub fn array_buffer_slice_builtin(
         to_clamped_index(args[1], len)
     };
     let new_len = final_.saturating_sub(first);
-    let proto = vm
-        .array_buffer_prototype
-        .heap_ptr()
-        .unwrap_or(std::ptr::null_mut());
-    let new_ptr = typedarray::RuneArrayBuffer::allocate(gc, new_len, proto);
+    // §24.1.3.3 ArrayBufferSpeciesCreate: Get constructor/@@species and use a
+    // custom constructor when present; otherwise allocate with the default
+    // prototype.
+    let ctor = match get_value_sync(gc, vm, this, "constructor") {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    if !is_object_value(ctor) {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "constructor is not an object",
+        ));
+        return Value::undefined();
+    }
+    let species = match get_property_value_sync(
+        gc,
+        vm,
+        ctor,
+        Value::symbol(rune_core::symbol::SYM_SPECIES),
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    if species.is_null() || species.is_undefined() {
+        let proto = vm
+            .array_buffer_prototype
+            .heap_ptr()
+            .unwrap_or(std::ptr::null_mut());
+        let new_ptr = typedarray::RuneArrayBuffer::allocate(gc, new_len, proto);
+        if new_len > 0 {
+            unsafe {
+                typedarray::RuneArrayBuffer::copy_from(
+                    new_ptr,
+                    0,
+                    typedarray::RuneArrayBuffer::data(ptr),
+                    first,
+                    new_len,
+                );
+            }
+        }
+        return Value::from_heap_ptr(new_ptr);
+    }
+    if !crate::vm::value_is_constructor(vm, species) {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "species is not a constructor",
+        ));
+        return Value::undefined();
+    }
+    let result =
+        match vm.construct_value_sync(gc, species, species, vec![Value::smi(new_len as i32)]) {
+            Ok(v) => v,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        };
+    let Some(rp) = result.heap_ptr() else {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "species did not return an ArrayBuffer",
+        ));
+        return Value::undefined();
+    };
+    if unsafe { (*(rp as *const GcHeader)).tag() } != TAG_ARRAY_BUFFER {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "species did not return an ArrayBuffer",
+        ));
+        return Value::undefined();
+    }
+    let result_len = unsafe { typedarray::RuneArrayBuffer::byte_length(rp) };
+    if result_len < new_len {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "species returned an ArrayBuffer that is too small",
+        ));
+        return Value::undefined();
+    }
     if new_len > 0 {
         unsafe {
             typedarray::RuneArrayBuffer::copy_from(
-                new_ptr,
+                rp,
                 0,
                 typedarray::RuneArrayBuffer::data(ptr),
                 first,
@@ -7725,7 +7825,7 @@ pub fn array_buffer_slice_builtin(
             );
         }
     }
-    Value::from_heap_ptr(new_ptr)
+    result
 }
 
 /// §23.2.3.30 TypedArray.prototype.subarray ( start, end ) — shares the buffer.

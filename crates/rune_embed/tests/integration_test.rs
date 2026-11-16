@@ -19677,3 +19677,19 @@ fn test_function_to_string_source_normalization() {
         .is_ok()
     );
 }
+
+#[test]
+fn test_arraybuffer_isview_and_constructor_backref() {
+    let mut ctx = Context::new_small();
+    assert!(
+        ctx.eval(
+            "var b = new ArrayBuffer(8); \
+             b.constructor === ArrayBuffer && \
+             ArrayBuffer.isView(new DataView(b)) && \
+             ArrayBuffer.isView(new Uint8Array(b)) && \
+             !ArrayBuffer.isView(b) && !ArrayBuffer.isView({}) && \
+             !ArrayBuffer.isView();"
+        )
+        .is_ok()
+    );
+}

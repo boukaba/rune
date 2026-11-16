@@ -2616,6 +2616,16 @@ impl Vm {
                 );
             }
             let ab_ctor = make_object(gc, &[("prototype", ab_proto)]);
+            unsafe {
+                let proto_ptr = ab_proto.heap_ptr().unwrap() as *mut JSObject;
+                JSObject::add_property_with_attrs(
+                    proto_ptr,
+                    PropertyKey::from_string("constructor"),
+                    "constructor".to_string(),
+                    ab_ctor,
+                    rune_core::shape::ATTR_WRITABLE | rune_core::shape::ATTR_CONFIGURABLE,
+                );
+            }
             self.builtin_wrappers
                 .insert("ArrayBuffer".to_string(), ab_ctor);
             // SharedArrayBuffer shares the ArrayBuffer storage/tag for now;
@@ -2630,6 +2640,14 @@ impl Vm {
                     let shape = JSObject::shape_ptr(ctor_ptr);
                     if let Some(slot) = shape.lookup(&PropertyKey::from_string("isView")) {
                         JSObject::set_slot(ctor_ptr, slot, h);
+                    } else {
+                        JSObject::add_property_with_attrs(
+                            ctor_ptr,
+                            PropertyKey::from_string("isView"),
+                            "isView".to_string(),
+                            h,
+                            rune_core::shape::ATTR_WRITABLE | rune_core::shape::ATTR_CONFIGURABLE,
+                        );
                     }
                 }
             }

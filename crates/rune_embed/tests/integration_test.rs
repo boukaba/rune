@@ -19500,3 +19500,18 @@ fn test_unicode_identifier_starts() {
     );
     assert!(ctx.eval("var ⸯ;").is_err());
 }
+
+#[test]
+fn test_class_field_asi_by_newline() {
+    let mut ctx = Context::new_small();
+    assert!(
+        ctx.eval("class C { a\nb = 2\nm() { return this.b; } } new C().m() === 2;")
+            .is_ok()
+    );
+    assert!(
+        ctx.eval(
+            "class C { async *m() { return 1; } a\nb = 2; } typeof C.prototype.m === 'function';"
+        )
+        .is_ok()
+    );
+}

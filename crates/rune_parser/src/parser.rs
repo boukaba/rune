@@ -1847,6 +1847,7 @@ impl Parser {
             } else if self.tok.kind == TokenKind::EqAssign
                 || self.tok.kind == TokenKind::Semicolon
                 || self.tok.kind == TokenKind::RBrace
+                || self.lexer.had_newline
             {
                 // Public field: `key;`, `key = init;`, `static key = init;`
                 let init = if self.tok.kind == TokenKind::EqAssign {

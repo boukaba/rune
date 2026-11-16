@@ -4652,6 +4652,19 @@ Integration suite: **956 passed, 0 failed, 3 ignored**.
 
 Integration suite: **957 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — Class field ASI (2026-11-16)
+
+- Class fields without initializers now terminate by automatic semicolon
+  insertion when a line terminator follows (`class C { a\nb = 2 }`), matching
+  the ClassElement grammar. This fixes the generated `after`/`new`/`same-line`
+  class-element families that mix fields and async-generator methods.
+- Test262: statements/class/elements **965 → 988/1534**,
+  expressions/class/elements **940/1428**, language overall
+  **14,119 → 14,165/23,979**.
+- Regression: `test_class_field_asi_by_newline`.
+
+Integration suite: **958 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

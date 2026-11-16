@@ -6852,6 +6852,31 @@ fn dv_hidden(this: Value, key: &str) -> Option<Value> {
     Some(unsafe { JSObject::get_slot(obj, slot) })
 }
 
+fn dv_to_index(gc: &mut SemiSpace, vm: &mut Vm, value: Value) -> Result<usize, Value> {
+    let n = to_number_sync(gc, vm, value)?;
+    if n.is_nan() {
+        return Ok(0);
+    }
+    if n.is_infinite() {
+        return Err(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::RangeError,
+            "Invalid DataView index",
+        ));
+    }
+    let t = n.trunc();
+    if !(0.0..=9007199254740991.0).contains(&t) {
+        return Err(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::RangeError,
+            "Invalid DataView index",
+        ));
+    }
+    Ok(t as usize)
+}
+
 pub(crate) fn dataview_parts(this: Value) -> Option<(Value, usize, usize)> {
     let buffer = dv_hidden(this, "\u{0}dv_buffer")?;
     let offset = dv_hidden(this, "\u{0}dv_offset")?.as_smi()? as usize;
@@ -6877,12 +6902,14 @@ pub fn dataview_constructor(
         return dv_type_error(gc, vm, "DataView requires a non-detached ArrayBuffer");
     }
     let buf_len = unsafe { typedarray::RuneArrayBuffer::byte_length(buf_ptr) };
-    let offset_val = args.get(1).copied().unwrap_or(Value::smi(0));
-    let offset_num = to_number(offset_val);
-    if !offset_num.is_finite() || offset_num < 0.0 {
-        return dv_range_error(gc, vm, "Invalid DataView byteOffset");
-    }
-    let offset = offset_num.trunc() as usize;
+    let offset_val = args.get(1).copied().unwrap_or(Value::undefined());
+    let offset = match dv_to_index(gc, vm, offset_val) {
+        Ok(n) => n,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
     if offset > buf_len {
         return dv_range_error(gc, vm, "DataView byteOffset is out of range");
     }
@@ -6890,11 +6917,13 @@ pub fn dataview_constructor(
         if len_val.is_undefined() {
             buf_len - offset
         } else {
-            let n = to_number(len_val);
-            if !n.is_finite() || n < 0.0 {
-                return dv_range_error(gc, vm, "Invalid DataView byteLength");
+            match dv_to_index(gc, vm, len_val) {
+                Ok(n) => n,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
             }
-            n.trunc() as usize
         }
     } else {
         buf_len - offset
@@ -6959,16 +6988,14 @@ fn dv_checked_offset(
         dv_type_error(gc, vm, "DataView buffer is detached");
         return None;
     }
-    let Some(off_val) = args.first().copied() else {
-        dv_range_error(gc, vm, "DataView offset is required");
-        return None;
+    let off_val = args.first().copied().unwrap_or(Value::undefined());
+    let off = match dv_to_index(gc, vm, off_val) {
+        Ok(n) => n,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return None;
+        }
     };
-    let n = to_number(off_val);
-    if !n.is_finite() || n < 0.0 {
-        dv_range_error(gc, vm, "Invalid DataView offset");
-        return None;
-    }
-    let off = n.trunc() as usize;
     if off.checked_add(size).is_none_or(|end| end > len) {
         dv_range_error(gc, vm, "DataView offset is out of bounds");
         return None;
@@ -7048,50 +7075,108 @@ fn dv_get(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm, kind: Dv
     }
 }
 
+fn dv_mod_u32(n: f64) -> u32 {
+    if !n.is_finite() {
+        return 0;
+    }
+    let m = n.trunc() % 4294967296.0;
+    let m = if m < 0.0 { m + 4294967296.0 } else { m };
+    m as u32
+}
+
+fn dv_mod_u16(n: f64) -> u16 {
+    if !n.is_finite() {
+        return 0;
+    }
+    let m = n.trunc() % 65536.0;
+    let m = if m < 0.0 { m + 65536.0 } else { m };
+    m as u16
+}
+
+fn dv_mod_u8(n: f64) -> u8 {
+    if !n.is_finite() {
+        return 0;
+    }
+    let m = n.trunc() % 256.0;
+    let m = if m < 0.0 { m + 256.0 } else { m };
+    m as u8
+}
+
 fn dv_set(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm, kind: DvKind) -> Value {
     let size = kind.size();
-    let Some((buffer, off, _)) = dv_checked_offset(gc, vm, this, args, size) else {
-        return Value::undefined();
+    let Some((buffer, base, len)) = dataview_parts(this) else {
+        return dv_type_error(gc, vm, "DataView method called on incompatible receiver");
+    };
+    let Some(buf_ptr) = buffer.heap_ptr() else {
+        return dv_type_error(gc, vm, "DataView buffer is detached");
+    };
+    if unsafe { typedarray::RuneArrayBuffer::is_detached(buf_ptr) } {
+        return dv_type_error(gc, vm, "DataView buffer is detached");
+    }
+    let off_value = args.first().copied().unwrap_or(Value::undefined());
+    let off = match dv_to_index(gc, vm, off_value) {
+        Ok(n) => n,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
     };
     let value = args.get(1).copied().unwrap_or(Value::undefined());
-    let n = to_number(value);
+    let n = match to_number_sync(gc, vm, value) {
+        Ok(n) => n,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    // A valueOf call may detach the buffer during value conversion.
+    if unsafe { typedarray::RuneArrayBuffer::is_detached(buf_ptr) } {
+        return dv_type_error(gc, vm, "DataView buffer is detached");
+    }
+    if off.checked_add(size).is_none_or(|end| end > len) {
+        return dv_range_error(gc, vm, "DataView offset is out of bounds");
+    }
+    let off = base + off;
     let little = args.get(2).is_some_and(|v| v.to_bool());
-    let buf_ptr = buffer.heap_ptr().unwrap();
     let data = unsafe { typedarray::RuneArrayBuffer::data(buf_ptr) };
     unsafe {
         let dst = std::slice::from_raw_parts_mut(data.add(off), size);
         match kind {
-            DvKind::Int8 => dst[0] = n as i64 as i8 as u8,
-            DvKind::Uint8 => dst[0] = n as i64 as u8,
+            DvKind::Int8 => dst[0] = dv_mod_u8(n) as i8 as u8,
+            DvKind::Uint8 => dst[0] = dv_mod_u8(n),
             DvKind::Int16 => {
+                let v = dv_mod_u16(n) as i16;
                 let b = if little {
-                    (n as i64 as i16).to_le_bytes()
+                    v.to_le_bytes()
                 } else {
-                    (n as i64 as i16).to_be_bytes()
+                    v.to_be_bytes()
                 };
                 dst.copy_from_slice(&b);
             }
             DvKind::Uint16 => {
+                let v = dv_mod_u16(n);
                 let b = if little {
-                    (n as i64 as u16).to_le_bytes()
+                    v.to_le_bytes()
                 } else {
-                    (n as i64 as u16).to_be_bytes()
+                    v.to_be_bytes()
                 };
                 dst.copy_from_slice(&b);
             }
             DvKind::Int32 => {
+                let v = dv_mod_u32(n) as i32;
                 let b = if little {
-                    (n as i64 as i32).to_le_bytes()
+                    v.to_le_bytes()
                 } else {
-                    (n as i64 as i32).to_be_bytes()
+                    v.to_be_bytes()
                 };
                 dst.copy_from_slice(&b);
             }
             DvKind::Uint32 => {
+                let v = dv_mod_u32(n);
                 let b = if little {
-                    (n as i64 as u32).to_le_bytes()
+                    v.to_le_bytes()
                 } else {
-                    (n as i64 as u32).to_be_bytes()
+                    v.to_be_bytes()
                 };
                 dst.copy_from_slice(&b);
             }

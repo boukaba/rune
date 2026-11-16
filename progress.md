@@ -4731,6 +4731,23 @@ Integration suite: **961 passed, 0 failed, 3 ignored**.
 
 Integration suite: **962 passed, 0 failed, 3 ignored**.
 
+### Phase 3 — DataView conformance + `$262` harness (2026-11-16)
+
+- DataView offset/length/value conversions now use the reentrant ToNumber
+  path (object `valueOf`/`toString`), ToIndex semantics (NaN/undefined/fractional
+  clamp, negative and infinite RangeError), and spec modulo conversion for
+  integer setters (Infinity/NaN wrap correctly).
+- Set methods validate the buffer again after value conversion so a
+  `valueOf` that detaches the buffer throws TypeError, matching
+  SetViewValue ordering.
+- test262 child provides a minimal `$262` object with
+  `detachArrayBuffer`/`gc` backed by a host function.
+- `SharedArrayBuffer` is aliased to the ArrayBuffer storage for now
+  (non-growable semantics).
+- Test262: DataView **216 → 367/561**, ArrayBuffer **93 → 109/221**,
+  TypedArray **105 → 108/1446**.
+- Integration: **962 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

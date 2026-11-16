@@ -2618,6 +2618,10 @@ impl Vm {
             let ab_ctor = make_object(gc, &[("prototype", ab_proto)]);
             self.builtin_wrappers
                 .insert("ArrayBuffer".to_string(), ab_ctor);
+            // SharedArrayBuffer shares the ArrayBuffer storage/tag for now;
+            // growable-shared semantics are not implemented.
+            self.builtin_wrappers
+                .insert("SharedArrayBuffer".to_string(), ab_ctor);
             self.array_buffer_constructor = ab_ctor;
             self.array_buffer_prototype = ab_proto;
             if let Some(h) = find_handle(&self.builtins, "ArrayBuffer_isView") {

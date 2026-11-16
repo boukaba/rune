@@ -351,13 +351,22 @@ fn main() {
                     eprintln!("usage: rune test262-exec <file> <ok|throw|parse>");
                     std::process::exit(3);
                 }
-                let src = match std::fs::read_to_string(path.unwrap()) {
+                let mut src = match std::fs::read_to_string(path.unwrap()) {
                     Ok(s) => s,
                     Err(e) => {
                         eprintln!("read error: {e}");
                         std::process::exit(3);
                     }
                 };
+                if src.contains("$262") {
+                    // Minimal `$262` harness object: detachArrayBuffer and gc
+                    // are enough for the ArrayBuffer/TypedArray/DataView
+                    // detached-buffer families.
+                    src = format!(
+                        "var $262 = {{ global: globalThis, gc: function() {{}}, \
+                          detachArrayBuffer: function(b) {{ __rune_detach_array_buffer(b); }} }};\n{src}"
+                    );
+                }
                 let result =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match mode {
                         "parse" => {
@@ -371,6 +380,23 @@ fn main() {
                             let mut jobs = rune_runtime::install(&mut ctx);
                             let done = std::rc::Rc::new(std::cell::RefCell::new(None::<String>));
                             let done_sink = done.clone();
+                            ctx.register_host_fn(
+                                "__rune_detach_array_buffer",
+                                1,
+                                |_gc, _this, args, _vm| {
+                                    if let Some(ptr) = args.first().and_then(|v| v.heap_ptr()) {
+                                        if unsafe {
+                                            (*(ptr as *const rune_core::gc::GcHeader)).tag()
+                                        } == rune_core::gc::TAG_ARRAY_BUFFER
+                                        {
+                                            unsafe {
+                                                rune_core::typedarray::RuneArrayBuffer::detach(ptr)
+                                            };
+                                        }
+                                    }
+                                    rune_core::value::Value::undefined()
+                                },
+                            );
                             ctx.register_host_fn("$DONE", 1, move |_gc, _this, args, _vm| {
                                 if let Some(error) = args.first() {
                                     if !error.is_undefined() {

@@ -90,7 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
-- **DataView (2026-11-16)**: constructor, all numeric get/set methods, buffer/byteOffset/byteLength accessors, toStringTag, brand/range checks. DataView **216/561**. Integration **962**.
+- **DataView (2026-11-16)**: constructor, numeric get/set, accessors, toStringTag, brand/range checks; reentrant ToNumber/ToIndex, modulo integer conversion, post-conversion detach checks, `$262.detachArrayBuffer` harness, SharedArrayBuffer alias. DataView **367/561**, ArrayBuffer **109/221**. Integration **962**.
 - **Async generators (2026-11-16)**: async generator objects wrapping sync generators, promise-returning next/throw/return, Symbol.asyncIterator, inline await fallback for sync-driven generators. async-gen expr **460/623**, for-await **896/1234**, language **16906/23979**. Integration **961**. Known: pending-promise await doesn't suspend.
 - **`for await (... of ...)` (2026-11-16)**: parser + emitter desugar to awaited async-iterator pull loop with sync-iterator fallback. for-await-of **789/1234**, language **14931/23979**. Integration **960**.
 - **ASI/semicolon early errors (2026-11-16)**: postfix newline restriction, missing-semicolon checks for expression statements/var declarations. asi **93/102**, language **14215/23979**. Integration **959**.

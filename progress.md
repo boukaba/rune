@@ -4870,6 +4870,18 @@ Integration: **968 passed, 0 failed, 3 ignored**.
 
 Integration: **969 passed, 0 failed, 3 ignored**.
 
+### Phase 3 — DataView Float16 (2026-11-16)
+
+- Added DataView `getFloat16`/`setFloat16` using the `half` crate's IEEE-754
+  binary16 conversion (little/big-endian, NaN/infinity, subnormals).
+- ArrayBuffer expandos now participate in `Object.defineProperty` and
+  `Object.getOwnPropertyDescriptor` through the lazy extra-props object.
+- Test262: built-ins/DataView **385 → 415/561**.
+- Regression: `test_dataview_float16`.
+- Dependency: `half = "2.7"` (resolved offline from the local registry cache).
+
+Integration: **970 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

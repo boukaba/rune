@@ -19731,3 +19731,17 @@ fn test_arraybuffer_species_and_construct() {
         .is_ok()
     );
 }
+
+#[test]
+fn test_dataview_float16() {
+    let mut ctx = Context::new_small();
+    assert!(
+        ctx.eval(
+            "var b = new ArrayBuffer(4); var d = new DataView(b); \
+             d.setFloat16(0, 1.5); d.setFloat16(2, -0.5, true); \
+             d.getFloat16(0) === 1.5 && d.getFloat16(2, true) === -0.5 && \
+             d.getUint16(0) === 0x3E00;"
+        )
+        .is_ok()
+    );
+}

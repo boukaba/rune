@@ -884,6 +884,7 @@ dependencies = [
 name = "rune_interpreter"
 version = "0.1.0"
 dependencies = [
+ "half",
  "num-bigint",
  "num-traits",
  "rkyv",

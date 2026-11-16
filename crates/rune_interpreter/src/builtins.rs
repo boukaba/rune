@@ -6931,6 +6931,7 @@ enum DvKind {
     Uint8,
     Int16,
     Uint16,
+    Float16,
     Int32,
     Uint32,
     Float32,
@@ -6941,7 +6942,7 @@ impl DvKind {
     fn size(self) -> usize {
         match self {
             DvKind::Int8 | DvKind::Uint8 => 1,
-            DvKind::Int16 | DvKind::Uint16 => 2,
+            DvKind::Int16 | DvKind::Uint16 | DvKind::Float16 => 2,
             DvKind::Int32 | DvKind::Uint32 | DvKind::Float32 => 4,
             DvKind::Float64 => 8,
         }
@@ -7186,6 +7187,15 @@ fn dv_get(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm, kind: Dv
                 };
                 Value::smi(v as i32)
             }
+            DvKind::Float16 => {
+                let arr = [bytes[0], bytes[1]];
+                let bits = if little {
+                    u16::from_le_bytes(arr)
+                } else {
+                    u16::from_be_bytes(arr)
+                };
+                Value::from_float64(half::f16::from_bits(bits).to_f64())
+            }
             DvKind::Int32 => {
                 let arr = [bytes[0], bytes[1], bytes[2], bytes[3]];
                 let v = if little {
@@ -7318,6 +7328,15 @@ fn dv_set(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm, kind: Dv
                 };
                 dst.copy_from_slice(&b);
             }
+            DvKind::Float16 => {
+                let v = half::f16::from_f64(n).to_bits();
+                let b = if little {
+                    v.to_le_bytes()
+                } else {
+                    v.to_be_bytes()
+                };
+                dst.copy_from_slice(&b);
+            }
             DvKind::Int32 => {
                 let v = dv_mod_u32(n) as i32;
                 let b = if little {
@@ -7376,6 +7395,7 @@ dv_getter!(dataview_get_int8, DvKind::Int8);
 dv_getter!(dataview_get_uint8, DvKind::Uint8);
 dv_getter!(dataview_get_int16, DvKind::Int16);
 dv_getter!(dataview_get_uint16, DvKind::Uint16);
+dv_getter!(dataview_get_float16, DvKind::Float16);
 dv_getter!(dataview_get_int32, DvKind::Int32);
 dv_getter!(dataview_get_uint32, DvKind::Uint32);
 dv_getter!(dataview_get_float32, DvKind::Float32);
@@ -7384,6 +7404,7 @@ dv_setter!(dataview_set_int8, DvKind::Int8);
 dv_setter!(dataview_set_uint8, DvKind::Uint8);
 dv_setter!(dataview_set_int16, DvKind::Int16);
 dv_setter!(dataview_set_uint16, DvKind::Uint16);
+dv_setter!(dataview_set_float16, DvKind::Float16);
 dv_setter!(dataview_set_int32, DvKind::Int32);
 dv_setter!(dataview_set_uint32, DvKind::Uint32);
 dv_setter!(dataview_set_float32, DvKind::Float32);
@@ -12608,6 +12629,7 @@ fn define_extra_target(
             (!p.is_null()).then_some(p as *mut JSObject)
         }
         TAG_PROMISE => Some(crate::vm::promise_extra_object(gc, ptr)),
+        TAG_ARRAY_BUFFER => Some(crate::vm::array_buffer_extra_object(gc, ptr)),
         TAG_ARRAY => {
             let arr = ptr as *mut RuneArray;
             let mut p = unsafe { RuneArray::extra_props(arr) };
@@ -13846,6 +13868,24 @@ pub fn object_get_own_property_descriptor(
             &[Value::from_heap_ptr(extra), raw_key],
             vm,
         );
+    }
+    if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_ARRAY_BUFFER {
+        if let Some(pk) = value_to_prop_key(raw_key) {
+            let extra = unsafe { typedarray::RuneArrayBuffer::extra_props(ptr) };
+            if !extra.is_null() {
+                let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                if let Some(slot) = shape.lookup(&pk) {
+                    let val = unsafe { JSObject::get_slot(extra as *mut JSObject, slot) };
+                    return make_descriptor_object(
+                        gc,
+                        val,
+                        shape.attr_at(slot),
+                        vm.object_prototype.heap_ptr(),
+                    );
+                }
+            }
+        }
+        return Value::undefined();
     }
     let tag = unsafe { (*(ptr as *const GcHeader)).tag() };
     if matches!(tag, TAG_FUNC | TAG_DATE | TAG_REGEXP) {
@@ -29499,6 +29539,11 @@ pub fn default_builtins() -> Vec<Builtin> {
         },
         Builtin {
             length: 1,
+            name: "DataView_prototype_getFloat16",
+            func: dataview_get_float16,
+        },
+        Builtin {
+            length: 1,
             name: "DataView_prototype_getInt32",
             func: dataview_get_int32,
         },
@@ -29536,6 +29581,11 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 2,
             name: "DataView_prototype_setUint16",
             func: dataview_set_uint16,
+        },
+        Builtin {
+            length: 2,
+            name: "DataView_prototype_setFloat16",
+            func: dataview_set_float16,
         },
         Builtin {
             length: 2,

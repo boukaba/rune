@@ -4882,6 +4882,24 @@ Integration: **969 passed, 0 failed, 3 ignored**.
 
 Integration: **970 passed, 0 failed, 3 ignored**.
 
+### Phase 3 — TypedArray expandos + species slice/map/filter (2026-11-16)
+
+- RuneTypedArray grows to 48 bytes with a lazy, GC-traced `extra_props`
+  object; named loads/stores, `Object.defineProperty` and
+  `Object.getOwnPropertyDescriptor` now use it.
+- TypedArray.prototype.slice honours `constructor[Symbol.species]`, validates
+  the returned TypedArray's tag/length, and copies with the result kind.
+- TypedArray.prototype.map/filter route through the typed result helper and
+  species creation.
+- ArrayBuffer expandos gain defineProperty/getOwnPropertyDescriptor wiring.
+- Test262: built-ins/TypedArray **460 → 518/1446** (slice 18→33, map 18→31).
+- Regression: `test_typedarray_expando_and_species_slice`.
+- Known gap: direct `Uint8Array.prototype.map` probe still reports an Array
+  result in some paths; test262 map/filter coverage improved but result-type
+  identity needs follow-up.
+
+Integration: **971 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

@@ -8147,6 +8147,186 @@ pub fn typed_array_set_builtin(
 }
 
 /// §23.2.3.32 TypedArray.prototype.slice ( start, end )
+fn typed_array_custom_species(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    exemplar: Value,
+) -> Result<Option<Value>, Value> {
+    let ctor = get_value_sync(gc, vm, exemplar, "constructor")?;
+    if !is_object_value(ctor) && !ctor.is_builtin() {
+        return Err(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "constructor is not an object",
+        ));
+    }
+    let species =
+        get_property_value_sync(gc, vm, ctor, Value::symbol(rune_core::symbol::SYM_SPECIES))?;
+    if species.is_undefined() || species.is_null() {
+        return Ok(None);
+    }
+    if vm.typed_array_ctors.contains(&species) {
+        return Ok(None);
+    }
+    if !crate::vm::value_is_constructor(vm, species) {
+        return Err(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "species is not a constructor",
+        ));
+    }
+    Ok(Some(species))
+}
+
+fn typed_array_from_values(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    exemplar: Value,
+    values: Value,
+) -> Result<Value, Value> {
+    let (len, kind) = if let Some(vp) = values.heap_ptr() {
+        let vtag = unsafe { (*(vp as *const GcHeader)).tag() };
+        if vtag == TAG_TYPED_ARRAY {
+            (
+                unsafe { typedarray::RuneTypedArray::effective_length(vp) },
+                unsafe { typedarray::RuneTypedArray::kind(vp) },
+            )
+        } else {
+            (
+                unsafe { rune_core::array::RuneArray::length(vp as *mut RuneArray) } as usize,
+                typedarray::TypedArrayKind::Uint8,
+            )
+        }
+    } else {
+        (0, typedarray::TypedArrayKind::Uint8)
+    };
+    let source_kind = typed_array_receiver_kind(exemplar);
+    let custom_species = typed_array_custom_species(gc, vm, exemplar)?;
+    let base = vm.temp_roots.len();
+    vm.temp_roots.push(exemplar);
+    vm.temp_roots.push(values);
+    let (result, result_kind, result_len) = if let Some(species) = custom_species {
+        let result = vm.construct_value_sync(gc, species, species, vec![Value::smi(len as i32)])?;
+        let Some(rp) = result.heap_ptr() else {
+            vm.temp_roots.truncate(base);
+            return Err(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "species did not return a TypedArray",
+            ));
+        };
+        if unsafe { (*(rp as *const GcHeader)).tag() } != TAG_TYPED_ARRAY {
+            vm.temp_roots.truncate(base);
+            return Err(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "species did not return a TypedArray",
+            ));
+        }
+        let rk = unsafe { typedarray::RuneTypedArray::kind(rp) };
+        let rl = unsafe { typedarray::RuneTypedArray::effective_length(rp) };
+        if rl < len {
+            vm.temp_roots.truncate(base);
+            return Err(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "species returned a TypedArray that is too small",
+            ));
+        }
+        (result, rk, rl)
+    } else {
+        let proto = vm
+            .typed_array_protos
+            .get(source_kind as usize)
+            .and_then(|v| v.heap_ptr())
+            .unwrap_or(std::ptr::null_mut());
+        let new_ptr = typedarray::RuneTypedArray::allocate(gc, proto);
+        if let Some(buf) = typed_alloc_buffer(gc, vm, source_kind, len) {
+            unsafe {
+                typedarray::RuneTypedArray::set_buffer(new_ptr, buf);
+                typedarray::RuneTypedArray::set_kind(new_ptr, source_kind);
+                typedarray::RuneTypedArray::set_length(new_ptr, len);
+                typedarray::RuneTypedArray::set_byte_offset(new_ptr, 0);
+            }
+        }
+        (Value::from_heap_ptr(new_ptr), source_kind, len)
+    };
+    let live_values = vm.temp_roots[base + 1];
+    for i in 0..len {
+        let raw = load_property_recursive(live_values, Value::smi(i as i32), None, gc);
+        let n = to_number(raw);
+        unsafe {
+            typedarray::write_element(
+                result.heap_ptr().unwrap(),
+                i,
+                typedarray::convert_number(result_kind, n),
+            );
+        }
+    }
+    let _ = result_len;
+    let _ = kind;
+    vm.temp_roots.truncate(base);
+    Ok(result)
+}
+
+fn typed_array_receiver_kind(this: Value) -> typedarray::TypedArrayKind {
+    if let Some(ptr) = this.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_TYPED_ARRAY {
+            return unsafe { typedarray::RuneTypedArray::kind(ptr) };
+        }
+    }
+    typedarray::TypedArrayKind::Uint8
+}
+
+pub fn typed_array_map_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    if typed_array_receiver(gc, this, vm).is_none() {
+        return Value::undefined();
+    }
+    let mapped = array_map(gc, this, args, vm);
+    if vm.pending_exception.is_some() {
+        return Value::undefined();
+    }
+    match typed_array_from_values(gc, vm, this, mapped) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            Value::undefined()
+        }
+    }
+}
+
+pub fn typed_array_filter_builtin(
+    gc: &mut SemiSpace,
+    this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    if typed_array_receiver(gc, this, vm).is_none() {
+        return Value::undefined();
+    }
+    let filtered = array_filter(gc, this, args, vm);
+    if vm.pending_exception.is_some() {
+        return Value::undefined();
+    }
+    match typed_array_from_values(gc, vm, this, filtered) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            Value::undefined()
+        }
+    }
+}
+
 pub fn typed_array_slice_builtin(
     gc: &mut SemiSpace,
     this: Value,
@@ -8165,6 +8345,60 @@ pub fn typed_array_slice_builtin(
         to_clamped_index(args[1], length)
     };
     let new_len = end.saturating_sub(start);
+    let custom_species = match typed_array_custom_species(gc, vm, this) {
+        Ok(v) => v,
+        Err(e) => {
+            vm.set_pending_exception(e);
+            return Value::undefined();
+        }
+    };
+    if let Some(species) = custom_species {
+        let result =
+            match vm.construct_value_sync(gc, species, species, vec![Value::smi(new_len as i32)]) {
+                Ok(v) => v,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            };
+        let Some(rp) = result.heap_ptr() else {
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "species did not return a TypedArray",
+            ));
+            return Value::undefined();
+        };
+        if unsafe { (*(rp as *const GcHeader)).tag() } != TAG_TYPED_ARRAY {
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "species did not return a TypedArray",
+            ));
+            return Value::undefined();
+        }
+        let result_len = unsafe { typedarray::RuneTypedArray::effective_length(rp) };
+        if result_len < new_len {
+            vm.set_pending_exception(crate::errors::error_object(
+                gc,
+                &vm.error_protos,
+                crate::errors::ErrorKind::TypeError,
+                "species returned a TypedArray that is too small",
+            ));
+            return Value::undefined();
+        }
+        let result_kind = unsafe { typedarray::RuneTypedArray::kind(rp) };
+        for i in 0..new_len {
+            let v = unsafe { typedarray::read_element(ptr, start + i) };
+            let n = to_number(v);
+            unsafe {
+                typedarray::write_element(rp, i, typedarray::convert_number(result_kind, n));
+            }
+        }
+        return result;
+    }
     let proto = vm
         .typed_array_protos
         .get(kind as usize)
@@ -12630,6 +12864,7 @@ fn define_extra_target(
         }
         TAG_PROMISE => Some(crate::vm::promise_extra_object(gc, ptr)),
         TAG_ARRAY_BUFFER => Some(crate::vm::array_buffer_extra_object(gc, ptr)),
+        TAG_TYPED_ARRAY => Some(crate::vm::typed_array_extra_object(gc, ptr)),
         TAG_ARRAY => {
             let arr = ptr as *mut RuneArray;
             let mut p = unsafe { RuneArray::extra_props(arr) };
@@ -13868,6 +14103,23 @@ pub fn object_get_own_property_descriptor(
             &[Value::from_heap_ptr(extra), raw_key],
             vm,
         );
+    }
+    if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_TYPED_ARRAY {
+        if let Some(pk) = value_to_prop_key(raw_key) {
+            let extra = unsafe { typedarray::RuneTypedArray::extra_props(ptr) };
+            if !extra.is_null() {
+                let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                if let Some(slot) = shape.lookup(&pk) {
+                    let val = unsafe { JSObject::get_slot(extra as *mut JSObject, slot) };
+                    return make_descriptor_object(
+                        gc,
+                        val,
+                        shape.attr_at(slot),
+                        vm.object_prototype.heap_ptr(),
+                    );
+                }
+            }
+        }
     }
     if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_ARRAY_BUFFER {
         if let Some(pk) = value_to_prop_key(raw_key) {
@@ -29666,6 +29918,16 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 3,
             name: "Float64Array",
             func: float64array_constructor,
+        },
+        Builtin {
+            length: 1,
+            name: "TypedArray_prototype_map",
+            func: typed_array_map_builtin,
+        },
+        Builtin {
+            length: 1,
+            name: "TypedArray_prototype_filter",
+            func: typed_array_filter_builtin,
         },
         Builtin {
             length: 2,

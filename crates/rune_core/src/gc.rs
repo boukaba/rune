@@ -415,6 +415,8 @@ impl SemiSpace {
                         self.forward_value(buf_ptr);
                         let proto_ptr = scan_ptr.add(32) as *mut u64;
                         self.forward_value(proto_ptr);
+                        let extra_ptr = scan_ptr.add(40) as *mut u64;
+                        self.forward_value(extra_ptr);
                     }
                     _ => {}
                 }

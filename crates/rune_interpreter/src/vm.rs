@@ -2683,8 +2683,8 @@ impl Vm {
                 ("keys", "TypedArray_prototype_keys"),
                 ("entries", "TypedArray_prototype_entries"),
                 ("forEach", "Array_prototype_forEach"),
-                ("map", "Array_prototype_map"),
-                ("filter", "Array_prototype_filter"),
+                ("map", "TypedArray_prototype_map"),
+                ("filter", "TypedArray_prototype_filter"),
                 ("some", "Array_prototype_some"),
                 ("every", "Array_prototype_every"),
                 ("find", "Array_prototype_find"),
@@ -17751,6 +17751,22 @@ pub(crate) const MAX_PROTOTYPE_DEPTH: usize = 256;
 /// For dense arrays: numeric keys access elements directly; non-numeric walks to prototype.
 /// Returns undefined if the chain exceeds MAX_PROTOTYPE_DEPTH (prevents infinite loops on cycles).
 /// Allocate (if needed) and return the extra-properties object for a promise.
+pub(crate) fn typed_array_extra_object(
+    gc: &mut SemiSpace,
+    ptr: *mut u8,
+) -> *mut rune_core::object::JSObject {
+    let ptr = unsafe { rune_core::gc::resolve_forwarded(ptr) };
+    let existing = unsafe { typedarray::RuneTypedArray::extra_props(ptr) };
+    if !existing.is_null() {
+        return existing as *mut rune_core::object::JSObject;
+    }
+    let shape = Shape::intern(Vec::new(), Vec::new());
+    let obj = JSObject::allocate(gc, shape, &[]);
+    let resolved = unsafe { rune_core::gc::resolve_forwarded(ptr) };
+    unsafe { typedarray::RuneTypedArray::set_extra_props(resolved, obj as *mut u8) };
+    obj
+}
+
 pub(crate) fn array_buffer_extra_object(
     gc: &mut SemiSpace,
     ptr: *mut u8,
@@ -18119,6 +18135,15 @@ pub(crate) fn load_property_recursive(
                         return unsafe { typedarray::read_element(ptr, index) };
                     }
                     return Value::undefined();
+                }
+                let extra = unsafe { typedarray::RuneTypedArray::extra_props(ptr) };
+                if !extra.is_null() {
+                    if let Some(key) = value_to_prop_key(raw_key) {
+                        let shape = unsafe { JSObject::shape_ptr(extra as *mut JSObject) };
+                        if let Some(slot) = shape.lookup(&key) {
+                            return unsafe { JSObject::get_slot(extra as *mut JSObject, slot) };
+                        }
+                    }
                 }
                 if let Some(key_ptr) = raw_key.heap_ptr() {
                     if unsafe { (*(key_ptr as *const GcHeader)).tag() == TAG_STRING } {
@@ -18816,7 +18841,16 @@ pub(crate) fn do_store_property(
                         typedarray::write_element(ptr, index, typedarray::convert_number(kind, n));
                     }
                 }
+                return true;
             }
+            let extra = typed_array_extra_object(gc, ptr);
+            return do_store_property(
+                Value::from_heap_ptr(extra as *mut u8),
+                raw_key,
+                value,
+                gc,
+                vm,
+            );
         } else if tag == TAG_ARRAY_BUFFER {
             let extra = array_buffer_extra_object(gc, ptr);
             return do_store_property(

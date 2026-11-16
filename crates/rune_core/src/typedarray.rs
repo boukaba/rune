@@ -3,7 +3,7 @@ use crate::value::Value;
 use std::sync::atomic::Ordering;
 
 pub const ARRAY_BUFFER_SIZE: usize = 48;
-pub const TYPED_ARRAY_SIZE: usize = 40;
+pub const TYPED_ARRAY_SIZE: usize = 48;
 
 /// The supported TypedArray element types (Table 71 minus BigInt/Float16 —
 /// the engine has no BigInt yet, and Float16 is skipped for now).
@@ -93,6 +93,7 @@ pub struct RuneTypedArray {
     kind: u8,
     _pad: [u8; 7],
     prototype: *mut u8,
+    extra_props: *mut u8,
 }
 
 impl RuneArrayBuffer {
@@ -303,6 +304,16 @@ impl RuneTypedArray {
 
     pub unsafe fn prototype(ptr: *mut u8) -> *mut u8 {
         unsafe { crate::gc::resolve_forwarded((*(ptr as *mut RuneTypedArray)).prototype) }
+    }
+
+    pub unsafe fn extra_props(ptr: *mut u8) -> *mut u8 {
+        unsafe { crate::gc::resolve_forwarded((*(ptr as *mut RuneTypedArray)).extra_props) }
+    }
+
+    pub unsafe fn set_extra_props(ptr: *mut u8, props: *mut u8) {
+        unsafe {
+            (*(ptr as *mut RuneTypedArray)).extra_props = props;
+        }
     }
 
     /// Byte length of the viewed region: length × element size.

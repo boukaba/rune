@@ -19745,3 +19745,25 @@ fn test_dataview_float16() {
         .is_ok()
     );
 }
+
+#[test]
+fn test_typedarray_expando_and_species_slice() {
+    let mut ctx = Context::new_small();
+    assert!(
+        ctx.eval(
+            "var a = new Uint8Array([1,2,3]); \
+             Object.defineProperty(a, 'extra', { value: 7, enumerable: true }); \
+             a.extra === 7 && Object.getOwnPropertyDescriptor(a, 'extra').value === 7;"
+        )
+        .is_ok()
+    );
+    assert!(
+        ctx.eval(
+            "var C = {}; C[Symbol.species] = function(len){ return new Float64Array(len); }; \
+             var a = new Uint8Array([1,2,3]); a.constructor = C; \
+             var s = a.slice(1); \
+             s instanceof Float64Array && s.length === 2 && s[0] === 2 && s[1] === 3;"
+        )
+        .is_ok()
+    );
+}

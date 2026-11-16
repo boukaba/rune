@@ -2695,6 +2695,24 @@ impl Vm {
             }
             let base_ptr = ta_base.heap_ptr().unwrap();
             let base_obj = base_ptr as *mut JSObject;
+            // %TypedArray% abstract constructor with the shared prototype.
+            let ta_ctor = {
+                let ctor_keys = vec![(PropertyKey::from_string("prototype"), 0usize)];
+                let ctor_shape = Shape::intern(ctor_keys, vec!["prototype".to_string()]);
+                let ctor_ptr = JSObject::allocate(gc, ctor_shape, &[ta_base]);
+                Value::from_heap_ptr(ctor_ptr as *mut u8)
+            };
+            self.builtin_wrappers
+                .insert("TypedArray".to_string(), ta_ctor);
+            unsafe {
+                JSObject::add_property_with_attrs(
+                    base_obj,
+                    PropertyKey::from_string("constructor"),
+                    "constructor".to_string(),
+                    ta_ctor,
+                    rune_core::shape::ATTR_WRITABLE | rune_core::shape::ATTR_CONFIGURABLE,
+                );
+            }
             for i in 0..typedarray::NUM_KINDS {
                 let kind = typedarray::TypedArrayKind::from_index(i);
                 let ctor_handle = find_handle(&self.builtins, kind.name());
@@ -2724,6 +2742,11 @@ impl Vm {
                         ("BYTES_PER_ELEMENT", Value::smi(kind.element_size() as i32)),
                     ],
                 );
+                if let (Some(cp), Some(tp)) = (ctor_obj.heap_ptr(), ta_ctor.heap_ptr()) {
+                    unsafe {
+                        JSObject::set_prototype(cp as *mut JSObject, tp);
+                    }
+                }
                 self.builtin_wrappers
                     .insert(kind.name().to_string(), ctor_obj);
                 self.typed_array_ctors.push(ctor_obj);
@@ -3715,7 +3738,14 @@ impl Vm {
             let mut wrappers: Vec<Value> = Vec::new();
             wrappers.extend(self.error_ctors.iter().copied());
             for name in [
-                "Object", "Array", "Boolean", "Function", "WeakMap", "WeakSet", "Proxy",
+                "Object",
+                "Array",
+                "Boolean",
+                "Function",
+                "WeakMap",
+                "WeakSet",
+                "Proxy",
+                "TypedArray",
             ] {
                 if let Some(v) = self.builtin_wrappers.get(name).copied() {
                     wrappers.push(v);
@@ -3757,6 +3787,13 @@ impl Vm {
             wrappers.extend(self.typed_array_ctors.iter().copied());
             for w in &wrappers {
                 if let Some(ptr) = w.heap_ptr() {
+                    if self
+                        .typed_array_ctors
+                        .iter()
+                        .any(|t| t.heap_ptr() == Some(ptr))
+                    {
+                        continue;
+                    }
                     // Native error constructors inherit from %Error%, not
                     // %Function.prototype% (their proto was set in the error
                     // family block above).
@@ -3794,6 +3831,7 @@ impl Vm {
                 ("Date", 7),
                 ("ArrayBuffer", 1),
                 ("DataView", 1),
+                ("TypedArray", 0),
                 ("RegExp", 2),
                 ("AggregateError", 2),
             ] {

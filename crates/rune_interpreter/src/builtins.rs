@@ -6545,6 +6545,16 @@ fn to_absolute_index(v: Value, length: usize) -> i64 {
 fn typed_array_receiver(gc: &mut SemiSpace, this: Value, vm: &mut Vm) -> Option<*mut u8> {
     if let Some(ptr) = this.heap_ptr() {
         if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_TYPED_ARRAY {
+            let buf = unsafe { typedarray::RuneTypedArray::buffer(ptr) };
+            if buf.is_null() || unsafe { typedarray::RuneArrayBuffer::is_detached(buf) } {
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "Method called on a detached TypedArray",
+                ));
+                return None;
+            }
             return Some(ptr);
         }
     }

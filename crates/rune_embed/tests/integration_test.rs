@@ -19600,3 +19600,24 @@ fn test_dataview_basic_semantics() {
     );
     assert!(ctx.eval("new DataView(new ArrayBuffer(4), 5);").is_err());
 }
+
+#[test]
+fn test_typedarray_intrinsic_constructor() {
+    let mut ctx = Context::new_small();
+    assert!(
+        ctx.eval(
+            "typeof TypedArray === 'function' && \
+             Object.getPrototypeOf(Int8Array) === TypedArray && \
+             TypedArray.prototype.values === Uint8Array.prototype.values && \
+             Object.getPrototypeOf(TypedArray) === Function.prototype;"
+        )
+        .is_ok()
+    );
+    assert!(
+        ctx.eval(
+            "var a = new Int8Array([1,2,3]); var it = TypedArray.prototype.values.call(a); \
+             it.next().value === 1 && it.next().value === 2;"
+        )
+        .is_ok()
+    );
+}

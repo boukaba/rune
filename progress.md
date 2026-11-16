@@ -4748,6 +4748,23 @@ Integration suite: **962 passed, 0 failed, 3 ignored**.
   TypedArray **105 → 108/1446**.
 - Integration: **962 passed, 0 failed, 3 ignored**.
 
+### Phase 3 — %TypedArray% intrinsic (2026-11-16)
+
+- Added the global abstract `%TypedArray%` constructor:
+  - `TypedArray.prototype` is the shared prototype used by all nine typed-array
+    prototypes;
+  - each concrete constructor's [[Prototype]] is `%TypedArray%` (instead of
+    `Function.prototype`), so `Object.getPrototypeOf(Int8Array) === TypedArray`;
+  - the shared prototype gains a `constructor` backref;
+  - `%TypedArray%` itself chains to `Function.prototype` with spec
+    `name`/`length`.
+- TypedArray prototype methods reject detached buffers with TypeError.
+- test262 child provides the `$DETACHBUFFER` harness helper.
+- Test262: built-ins/TypedArray **113 → 288/1446** (488 skipped).
+- Regression: `test_typedarray_intrinsic_constructor`.
+
+Integration: **963 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

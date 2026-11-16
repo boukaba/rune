@@ -397,6 +397,18 @@ fn main() {
                                     rune_core::value::Value::undefined()
                                 },
                             );
+                            ctx.register_host_fn("$DETACHBUFFER", 1, |_gc, _this, args, _vm| {
+                                if let Some(ptr) = args.first().and_then(|v| v.heap_ptr()) {
+                                    if unsafe { (*(ptr as *const rune_core::gc::GcHeader)).tag() }
+                                        == rune_core::gc::TAG_ARRAY_BUFFER
+                                    {
+                                        unsafe {
+                                            rune_core::typedarray::RuneArrayBuffer::detach(ptr)
+                                        };
+                                    }
+                                }
+                                rune_core::value::Value::undefined()
+                            });
                             ctx.register_host_fn("$DONE", 1, move |_gc, _this, args, _vm| {
                                 if let Some(error) = args.first() {
                                     if !error.is_undefined() {

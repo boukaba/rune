@@ -19789,3 +19789,16 @@ fn test_dataview_arraybuffer_newtarget_prototypes() {
         .is_ok()
     );
 }
+
+#[test]
+fn test_dataview_accessor_metadata() {
+    let mut ctx = Context::new_small();
+    assert!(
+        ctx.eval(
+            "var d = Object.getOwnPropertyDescriptor(DataView.prototype, 'byteLength'); \
+             d.get.name === 'get byteLength' && d.enumerable === false && \
+             d.configurable === true && d.set === undefined;"
+        )
+        .is_ok()
+    );
+}

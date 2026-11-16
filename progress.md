@@ -4923,6 +4923,18 @@ Integration: **971 passed, 0 failed, 3 ignored**.
 
 Integration: **972 passed, 0 failed, 3 ignored**.
 
+### Phase 3 — DataView accessor metadata (2026-11-16)
+
+- DataView.prototype now uses spec property attributes: methods
+  {writable, configurable}, accessors configurable-only, `Symbol.toStringTag`
+  configurable-only, and the constructor backref {writable, configurable}.
+- Accessor getters are registered as `get byteLength`/`get byteOffset`/
+  `get buffer`, so their `name` matches the spec.
+- Test262: built-ins/DataView **432 → 439/561**.
+- Regression: `test_dataview_accessor_metadata`.
+
+Integration: **973 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

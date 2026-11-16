@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **DataView accessor metadata (2026-11-16)**: spec attrs on DataView.prototype, named accessor getters. DataView **439/561**. Integration **973**.
 - **DataView/AB newTarget (2026-11-16)**: pending construct-new-target slot, Reflect.construct prototypes for DataView/ArrayBuffer. DataView **432/561**, ArrayBuffer **157/221**. Integration **972**.
 - **DataView constructor backref (2026-11-16)**: DataView.prototype.constructor now points at the wrapper. DataView **425/561**. Integration **971**.
 - **TypedArray expandos/species (2026-11-16)**: 48-byte typed array with traced extra_props, named/define/gOPD support, slice species constructor, typed map/filter helper. TypedArray **518/1446** (slice 33/92, map 31/85). Integration **971**. Known: map result-type identity gap.

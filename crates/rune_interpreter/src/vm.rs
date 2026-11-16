@@ -2843,21 +2843,29 @@ impl Vm {
             let mut proto_keys: Vec<(PropertyKey, usize)> = Vec::new();
             let mut proto_names: Vec<String> = Vec::new();
             let mut proto_vals: Vec<Value> = Vec::new();
-            let mut add_prop = |key: PropertyKey, name: String, value: Value| {
-                let idx = proto_vals.len();
-                proto_keys.push((key, idx));
-                proto_names.push(name);
-                proto_vals.push(value);
-            };
+            let mut proto_attrs: Vec<rune_core::shape::PropAttr> = Vec::new();
+            let mut add_prop =
+                |key: PropertyKey, name: String, value: Value, attr: rune_core::shape::PropAttr| {
+                    let idx = proto_vals.len();
+                    proto_keys.push((key, idx));
+                    proto_names.push(name);
+                    proto_vals.push(value);
+                    proto_attrs.push(attr);
+                };
             for (name, handle) in methods {
                 if let Some(h) = find_handle(&self.builtins, handle) {
-                    add_prop(PropertyKey::from_string(name), name.to_string(), h);
+                    add_prop(
+                        PropertyKey::from_string(name),
+                        name.to_string(),
+                        h,
+                        rune_core::shape::ATTR_WRITABLE | rune_core::shape::ATTR_CONFIGURABLE,
+                    );
                 }
             }
             for (name, handle) in [
-                ("buffer", "DataView_prototype_buffer"),
-                ("byteOffset", "DataView_prototype_byteOffset"),
-                ("byteLength", "DataView_prototype_byteLength"),
+                ("buffer", "get buffer"),
+                ("byteOffset", "get byteOffset"),
+                ("byteLength", "get byteLength"),
             ] {
                 if let Some(getter) = find_handle(&self.builtins, handle) {
                     let pair =
@@ -2866,6 +2874,7 @@ impl Vm {
                         PropertyKey::from_string(name),
                         name.to_string(),
                         Value::from_heap_ptr(pair),
+                        rune_core::shape::ATTR_CONFIGURABLE,
                     );
                 }
             }
@@ -2874,13 +2883,15 @@ impl Vm {
                 PropertyKey::from_symbol(rune_core::symbol::SYM_TO_STRING_TAG),
                 "\u{0}".to_string(),
                 Value::from_heap_ptr(tag_str),
+                rune_core::shape::ATTR_CONFIGURABLE,
             );
             add_prop(
                 PropertyKey::from_string("constructor"),
                 "constructor".to_string(),
                 ctor_handle,
+                rune_core::shape::ATTR_WRITABLE | rune_core::shape::ATTR_CONFIGURABLE,
             );
-            let proto_shape = Shape::intern(proto_keys, proto_names);
+            let proto_shape = Shape::intern_with_attrs(proto_keys, proto_names, proto_attrs);
             let proto_ptr = JSObject::allocate(gc, proto_shape, &proto_vals);
             let proto = Value::from_heap_ptr(proto_ptr as *mut u8);
             if let Some(op) = self.object_prototype.heap_ptr() {

@@ -29897,17 +29897,17 @@ pub fn default_builtins() -> Vec<Builtin> {
         },
         Builtin {
             length: 0,
-            name: "DataView_prototype_buffer",
+            name: "get buffer",
             func: dataview_buffer,
         },
         Builtin {
             length: 0,
-            name: "DataView_prototype_byteOffset",
+            name: "get byteOffset",
             func: dataview_byte_offset,
         },
         Builtin {
             length: 0,
-            name: "DataView_prototype_byteLength",
+            name: "get byteLength",
             func: dataview_byte_length,
         },
         Builtin {

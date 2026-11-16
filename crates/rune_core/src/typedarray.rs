@@ -213,7 +213,7 @@ impl RuneArrayBuffer {
     ) {
         unsafe {
             let dst = (*(ptr as *mut RuneArrayBuffer)).data.add(dst_off);
-            std::ptr::copy_nonoverlapping(src.add(src_off), dst, src_len);
+            std::ptr::copy(src.add(src_off), dst, src_len);
         }
     }
 }

@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **ArrayBuffer species construct (2026-11-16)**: species accessor, ArrayBuffer/DataView arms in sync Construct, overlap-safe buffer copies. ArrayBuffer **156/221**, species **4/4**. Integration **969**.
 - **ArrayBuffer expandos + DataView resize (2026-11-16)**: 48-byte ArrayBuffer with traced extra_props, named load/store, working custom species; DataView auto vs fixed length tracking and TypeError for out-of-bounds views. ArrayBuffer **152/221**, DataView **385/561**. Integration **968**.
 - **ArrayBuffer statics/species (2026-11-16)**: `isView` (typed arrays + DataView), prototype constructor backref, slice SpeciesConstructor shell. ArrayBuffer **146/221**. Integration **967**. Known: ArrayBuffer own expando props unsupported.
 - **ArrayBuffer.slice / source fidelity (2026-11-16)**: detached-slice TypeError, CR frontmatter metadata parsing, CR-preserving Function.toString, callable-proxy native form. ArrayBuffer **130/221**. Integration **966**.

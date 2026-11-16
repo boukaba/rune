@@ -19717,3 +19717,17 @@ fn test_arraybuffer_expando_and_dataview_resizable() {
         .is_ok()
     );
 }
+
+#[test]
+fn test_arraybuffer_species_and_construct() {
+    let mut ctx = Context::new_small();
+    assert!(
+        ctx.eval(
+            "var ok = ArrayBuffer[Symbol.species] === ArrayBuffer; \
+             var b = new ArrayBuffer(6); \
+             var c = b.slice(1, 5); \
+             ok && c !== b && c.byteLength === 4;"
+        )
+        .is_ok()
+    );
+}

@@ -4856,6 +4856,20 @@ Integration: **967 passed, 0 failed, 3 ignored**.
 
 Integration: **968 passed, 0 failed, 3 ignored**.
 
+### Phase 3 — ArrayBuffer species construct (2026-11-16)
+
+- `ArrayBuffer[Symbol.species]` is now an accessor returning the constructor.
+- `Vm::push_construct_frame` handles the ArrayBuffer and DataView wrappers, so
+  `ArrayBuffer.prototype.slice`'s default species path and sync
+  `Construct(species, …)` work.
+- `RuneArrayBuffer::copy_from` uses overlap-safe `ptr::copy`, removing a UB
+  panic when a species constructor returns the source buffer itself.
+- Test262: built-ins/ArrayBuffer **152 → 156/221**,
+  Symbol.species **4/4**, prototype/slice **29/33**.
+- Regression: `test_arraybuffer_species_and_construct`.
+
+Integration: **969 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

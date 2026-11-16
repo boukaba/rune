@@ -2634,6 +2634,20 @@ impl Vm {
                 .insert("SharedArrayBuffer".to_string(), ab_ctor);
             self.array_buffer_constructor = ab_ctor;
             self.array_buffer_prototype = ab_proto;
+            if let Some(getter) = find_handle(&self.builtins, "get [Symbol.species]") {
+                unsafe {
+                    let ctor_ptr = ab_ctor.heap_ptr().unwrap() as *mut JSObject;
+                    let pair =
+                        rune_core::accessor::AccessorPair::allocate(gc, getter, Value::undefined());
+                    JSObject::add_property_with_attrs(
+                        ctor_ptr,
+                        PropertyKey::from_symbol(rune_core::symbol::SYM_SPECIES),
+                        "\u{0}".to_string(),
+                        Value::from_heap_ptr(pair),
+                        rune_core::shape::ATTR_CONFIGURABLE,
+                    );
+                }
+            }
             if let Some(h) = find_handle(&self.builtins, "ArrayBuffer_isView") {
                 unsafe {
                     let ctor_ptr = ab_ctor.heap_ptr().unwrap() as *mut JSObject;
@@ -5936,6 +5950,27 @@ impl Vm {
                 }
             }
             return ConstructOut::Done(Value::from_heap_ptr(obj as *mut u8));
+        }
+        if ctor == self.array_buffer_constructor {
+            let proto_ptr = self.array_buffer_prototype.heap_ptr();
+            let obj_ptr = typedarray::RuneArrayBuffer::allocate(
+                gc,
+                0,
+                proto_ptr.unwrap_or(std::ptr::null_mut()),
+            );
+            let obj_val = Value::from_heap_ptr(obj_ptr);
+            let result = crate::builtins::array_buffer_constructor(gc, obj_val, &args, self);
+            if let Some(exc) = self.pending_exception.take() {
+                return ConstructOut::Fail(exc);
+            }
+            return ConstructOut::Done(result);
+        }
+        if ctor == self.dataview_constructor {
+            let result = crate::builtins::dataview_constructor(gc, Value::undefined(), &args, self);
+            if let Some(exc) = self.pending_exception.take() {
+                return ConstructOut::Fail(exc);
+            }
+            return ConstructOut::Done(result);
         }
         // Smi builtins: only Test262Error constructs (New-arm rule).
         if let Some(smi_val) = ctor.as_smi() {

@@ -6755,6 +6755,96 @@ fn typed_array_ctor_impl(
             }
             return this;
         }
+        // Iterable object: drain @@iterator before the array-like path.
+        match get_iter_method(vm, gc, first) {
+            SymbolMethodResult::Found(method) => {
+                let base = vm.temp_roots.len();
+                vm.temp_roots.push(first);
+                let iterator = match vm.call_value_sync(gc, method, first, &[]) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        vm.temp_roots.truncate(base);
+                        vm.set_pending_exception(e);
+                        return Value::undefined();
+                    }
+                };
+                vm.temp_roots.push(iterator);
+                loop {
+                    let iter = vm.temp_roots[base + 1];
+                    let next = match get_value_sync(gc, vm, iter, "next") {
+                        Ok(v) => v,
+                        Err(e) => {
+                            vm.temp_roots.truncate(base);
+                            vm.set_pending_exception(e);
+                            return Value::undefined();
+                        }
+                    };
+                    let result = match vm.call_value_sync(gc, next, iter, &[]) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            vm.temp_roots.truncate(base);
+                            vm.set_pending_exception(e);
+                            return Value::undefined();
+                        }
+                    };
+                    let done = match get_value_sync(gc, vm, result, "done") {
+                        Ok(v) => v.to_bool(),
+                        Err(e) => {
+                            vm.temp_roots.truncate(base);
+                            vm.set_pending_exception(e);
+                            return Value::undefined();
+                        }
+                    };
+                    if done {
+                        break;
+                    }
+                    let item = match get_value_sync(gc, vm, result, "value") {
+                        Ok(v) => v,
+                        Err(e) => {
+                            vm.temp_roots.truncate(base);
+                            vm.set_pending_exception(e);
+                            return Value::undefined();
+                        }
+                    };
+                    vm.temp_roots.push(item);
+                }
+                let count = vm.temp_roots.len().saturating_sub(base + 2);
+                if let Some(buf) = typed_alloc_buffer(gc, vm, kind, count) {
+                    unsafe {
+                        typedarray::RuneTypedArray::set_buffer(ptr, buf);
+                        typedarray::RuneTypedArray::set_kind(ptr, kind);
+                        typedarray::RuneTypedArray::set_length(ptr, count);
+                        typedarray::RuneTypedArray::set_byte_offset(ptr, 0);
+                    }
+                }
+                for i in 0..count {
+                    let v = vm.temp_roots[base + 2 + i];
+                    let n = match to_number_sync(gc, vm, v) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            vm.temp_roots.truncate(base);
+                            vm.set_pending_exception(e);
+                            return Value::undefined();
+                        }
+                    };
+                    unsafe {
+                        typedarray::write_element(ptr, i, typedarray::convert_number(kind, n));
+                    }
+                }
+                vm.temp_roots.truncate(base);
+                return this;
+            }
+            SymbolMethodResult::NotCallable => {
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "value[Symbol.iterator] is not a function",
+                ));
+                return Value::undefined();
+            }
+            SymbolMethodResult::NotFound => {}
+        }
         // Generic array-like object (plain objects): length + index gets.
         let len_val = load_property_recursive(
             first,

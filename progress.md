@@ -4765,6 +4765,19 @@ Integration suite: **962 passed, 0 failed, 3 ignored**.
 
 Integration: **963 passed, 0 failed, 3 ignored**.
 
+### Phase 3 — TypedArray constructor/species/iterables (2026-11-16)
+
+- TypedArray constructors now accept iterables via `@@iterator` (sync drain,
+  reentrant next/value calls, TypeError for non-callable iterator methods)
+  instead of treating them as zero-length array-likes.
+- Per-type prototypes expose the real constructor wrapper backref, and
+  `%TypedArray%.prototype`/`DataView.prototype` chain to `Object.prototype`.
+- `%TypedArray%` gains the inherited `[Symbol.species]` getter.
+- Test262: built-ins/TypedArray **288 → 424/1446**, DataView **367 → 369/561**.
+- Regression: `test_typedarray_iterable_constructor_and_species`.
+
+Integration: **964 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

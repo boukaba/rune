@@ -19621,3 +19621,21 @@ fn test_typedarray_intrinsic_constructor() {
         .is_ok()
     );
 }
+
+#[test]
+fn test_typedarray_iterable_constructor_and_species() {
+    let mut ctx = Context::new_small();
+    assert!(
+        ctx.eval(
+            "var a = new Float64Array({ [Symbol.iterator]: function*(){ yield 1; yield 2; } }); \
+             a.length === 2 && a[0] === 1 && a[1] === 2 && \
+             a.constructor === Float64Array && Float64Array[Symbol.species] === Float64Array && \
+             typeof a.hasOwnProperty === 'function' && a.hasOwnProperty(0) && !a.hasOwnProperty(2);"
+        )
+        .is_ok()
+    );
+    assert!(
+        ctx.eval("new Uint8Array({ [Symbol.iterator]: 1 });")
+            .is_err()
+    );
+}

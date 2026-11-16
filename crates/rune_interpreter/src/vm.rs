@@ -2675,6 +2675,9 @@ impl Vm {
             let ta_base = make_object(gc, &ta_base_entries);
             unsafe {
                 let base_ptr = ta_base.heap_ptr().unwrap() as *mut JSObject;
+                if let Some(op) = self.object_prototype.heap_ptr() {
+                    JSObject::set_prototype(base_ptr, op);
+                }
                 if let Some(h) = find_handle(&self.builtins, "TypedArray_prototype_values") {
                     JSObject::add_property(
                         base_ptr,
@@ -2702,6 +2705,21 @@ impl Vm {
                 let ctor_ptr = JSObject::allocate(gc, ctor_shape, &[ta_base]);
                 Value::from_heap_ptr(ctor_ptr as *mut u8)
             };
+            if let Some(getter) = find_handle(&self.builtins, "get [Symbol.species]") {
+                if let Some(cp) = ta_ctor.heap_ptr() {
+                    let pair =
+                        rune_core::accessor::AccessorPair::allocate(gc, getter, Value::undefined());
+                    unsafe {
+                        JSObject::add_property_with_attrs(
+                            cp as *mut JSObject,
+                            PropertyKey::from_symbol(rune_core::symbol::SYM_SPECIES),
+                            "\u{0}".to_string(),
+                            Value::from_heap_ptr(pair),
+                            rune_core::shape::ATTR_CONFIGURABLE,
+                        );
+                    }
+                }
+            }
             self.builtin_wrappers
                 .insert("TypedArray".to_string(), ta_ctor);
             unsafe {
@@ -2745,6 +2763,15 @@ impl Vm {
                 if let (Some(cp), Some(tp)) = (ctor_obj.heap_ptr(), ta_ctor.heap_ptr()) {
                     unsafe {
                         JSObject::set_prototype(cp as *mut JSObject, tp);
+                    }
+                }
+                if let Some(pp) = proto.heap_ptr() {
+                    unsafe {
+                        let proto_obj = pp as *mut JSObject;
+                        let shape = JSObject::shape_ptr(proto_obj);
+                        if let Some(slot) = shape.lookup(&PropertyKey::from_string("constructor")) {
+                            JSObject::set_slot(proto_obj, slot, ctor_obj);
+                        }
                     }
                 }
                 self.builtin_wrappers
@@ -2820,6 +2847,11 @@ impl Vm {
             let proto_shape = Shape::intern(proto_keys, proto_names);
             let proto_ptr = JSObject::allocate(gc, proto_shape, &proto_vals);
             let proto = Value::from_heap_ptr(proto_ptr as *mut u8);
+            if let Some(op) = self.object_prototype.heap_ptr() {
+                unsafe {
+                    JSObject::set_prototype(proto_ptr, op);
+                }
+            }
             let ctor_keys = vec![(PropertyKey::from_string("prototype"), 0usize)];
             let ctor_shape = Shape::intern(ctor_keys, vec!["prototype".to_string()]);
             let ctor_ptr = JSObject::allocate(gc, ctor_shape, &[proto]);
@@ -3329,6 +3361,26 @@ impl Vm {
             unsafe {
                 JSObject::set_prototype(sym_proto as *mut JSObject, obj_proto_ptr as *mut u8)
             };
+        }
+        // TypedArray/DataView prototypes were created before Object.prototype;
+        // link their shared prototypes now.
+        for name in ["TypedArray", "DataView"] {
+            if let Some(ctor) = self.builtin_wrappers.get(name).copied() {
+                if let Some(cptr) = ctor.heap_ptr() {
+                    let shape = unsafe { JSObject::shape_ptr(cptr as *mut JSObject) };
+                    if let Some(slot) = shape.lookup(&PropertyKey::from_string("prototype")) {
+                        let pv = unsafe { JSObject::get_slot(cptr as *mut JSObject, slot) };
+                        if let Some(pp) = pv.heap_ptr() {
+                            unsafe {
+                                JSObject::set_prototype(
+                                    pp as *mut JSObject,
+                                    obj_proto_ptr as *mut u8,
+                                )
+                            };
+                        }
+                    }
+                }
+            }
         }
         // Namespace objects created before Object.prototype existed (Reflect)
         // get their prototype and @@toStringTag here.

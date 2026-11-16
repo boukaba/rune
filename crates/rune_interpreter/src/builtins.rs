@@ -8292,7 +8292,14 @@ pub fn typed_array_map_builtin(
     if typed_array_receiver(gc, this, vm).is_none() {
         return Value::undefined();
     }
+    eprintln!("DBGMAP enter");
     let mapped = array_map(gc, this, args, vm);
+    eprintln!(
+        "DBGMAP mapped tag {:?}",
+        mapped
+            .heap_ptr()
+            .map(|p| unsafe { (*(p as *const GcHeader)).tag() })
+    );
     if vm.pending_exception.is_some() {
         return Value::undefined();
     }

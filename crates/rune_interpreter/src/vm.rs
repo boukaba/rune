@@ -2890,8 +2890,15 @@ impl Vm {
             let ctor_shape = Shape::intern(ctor_keys, vec!["prototype".to_string()]);
             let ctor_ptr = JSObject::allocate(gc, ctor_shape, &[proto]);
             let ctor_obj = Value::from_heap_ptr(ctor_ptr as *mut u8);
+            unsafe {
+                let shape = JSObject::shape_ptr(proto_ptr);
+                if let Some(slot) = shape.lookup(&PropertyKey::from_string("constructor")) {
+                    JSObject::set_slot(proto_ptr, slot, ctor_obj);
+                }
+            }
             self.builtin_wrappers
                 .insert("DataView".to_string(), ctor_obj);
+            self.dataview_constructor = ctor_obj;
             self.dataview_prototype = proto;
         }
 

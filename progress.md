@@ -4900,6 +4900,17 @@ Integration: **970 passed, 0 failed, 3 ignored**.
 
 Integration: **971 passed, 0 failed, 3 ignored**.
 
+### Phase 3 — DataView constructor backref (2026-11-16)
+
+- `DataView.prototype.constructor` now points at the DataView wrapper (the
+  builtin handle was leaking through), so `sample.constructor === DataView`
+  and prototype identity checks pass.
+- Removed temporary debug output from the typed map/filter species helpers.
+- Test262: built-ins/DataView **415 → 425/561**.
+- TypedArray remains **518/1446**.
+
+Integration: **971 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

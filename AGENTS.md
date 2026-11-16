@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **DataView constructor backref (2026-11-16)**: DataView.prototype.constructor now points at the wrapper. DataView **425/561**. Integration **971**.
 - **TypedArray expandos/species (2026-11-16)**: 48-byte typed array with traced extra_props, named/define/gOPD support, slice species constructor, typed map/filter helper. TypedArray **518/1446** (slice 33/92, map 31/85). Integration **971**. Known: map result-type identity gap.
 - **DataView Float16 (2026-11-16)**: get/setFloat16 via `half`; ArrayBuffer expando defineProperty/gOPD. DataView **415/561**. Integration **970**.
 - **ArrayBuffer species construct (2026-11-16)**: species accessor, ArrayBuffer/DataView arms in sync Construct, overlap-safe buffer copies. ArrayBuffer **156/221**, species **4/4**. Integration **969**.

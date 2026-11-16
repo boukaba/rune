@@ -2,7 +2,7 @@ use crate::gc::{GcHeader, SemiSpace, TAG_ARRAY_BUFFER, TAG_TYPED_ARRAY};
 use crate::value::Value;
 use std::sync::atomic::Ordering;
 
-pub const ARRAY_BUFFER_SIZE: usize = 40;
+pub const ARRAY_BUFFER_SIZE: usize = 48;
 pub const TYPED_ARRAY_SIZE: usize = 40;
 
 /// The supported TypedArray element types (Table 71 minus BigInt/Float16 —
@@ -76,6 +76,8 @@ pub struct RuneArrayBuffer {
     prototype: *mut u8,
     /// Max byte length; high bit marks a resizable buffer.
     max_byte_length: u64,
+    /// Lazy JSObject for named own properties (expando).
+    extra_props: *mut u8,
 }
 
 /// Heap-allocated TypedArray object (integer-indexed exotic object).
@@ -106,6 +108,7 @@ impl RuneArrayBuffer {
             (*b).byte_length = byte_length as u64;
             (*b).prototype = prototype;
             (*b).max_byte_length = byte_length as u64;
+            (*b).extra_props = std::ptr::null_mut();
         }
         ptr
     }
@@ -125,6 +128,16 @@ impl RuneArrayBuffer {
     pub unsafe fn set_prototype(ptr: *mut u8, proto: *mut u8) {
         unsafe {
             (*(ptr as *mut RuneArrayBuffer)).prototype = proto;
+        }
+    }
+
+    pub unsafe fn extra_props(ptr: *mut u8) -> *mut u8 {
+        unsafe { crate::gc::resolve_forwarded((*(ptr as *mut RuneArrayBuffer)).extra_props) }
+    }
+
+    pub unsafe fn set_extra_props(ptr: *mut u8, props: *mut u8) {
+        unsafe {
+            (*(ptr as *mut RuneArrayBuffer)).extra_props = props;
         }
     }
 

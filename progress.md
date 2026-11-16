@@ -4840,6 +4840,22 @@ Integration: **966 passed, 0 failed, 3 ignored**.
 
 Integration: **967 passed, 0 failed, 3 ignored**.
 
+### Phase 3 — ArrayBuffer expandos + DataView resizable tracking (2026-11-16)
+
+- RuneArrayBuffer grows from 40 to 48 bytes with a lazy `extra_props` JSObject;
+  GC forwards the prototype and extra-props slots. Named property loads and
+  stores now use the expando object, so `buffer.constructor = customSpecies`
+  works and `ArrayBuffer.prototype.slice` species overrides construct correctly.
+- DataView distinguishes auto-length views (no explicit byteLength) from fixed
+  views: auto views recompute byteLength on buffer resize, fixed views keep it.
+  A view whose region extends past the current buffer throws TypeError, while
+  in-bounds views throw RangeError for out-of-view offsets.
+- Test262: built-ins/ArrayBuffer **146 → 152/221**,
+  built-ins/DataView **369 → 385/561**.
+- Regression: `test_arraybuffer_expando_and_dataview_resizable`.
+
+Integration: **968 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

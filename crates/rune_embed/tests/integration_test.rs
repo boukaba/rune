@@ -19693,3 +19693,27 @@ fn test_arraybuffer_isview_and_constructor_backref() {
         .is_ok()
     );
 }
+
+#[test]
+fn test_arraybuffer_expando_and_dataview_resizable() {
+    let mut ctx = Context::new_small();
+    assert!(
+        ctx.eval(
+            "var buf = new ArrayBuffer(8, { maxByteLength: 16 }); \
+             var auto = new DataView(buf); \
+             var fixed = new DataView(buf, 0, 4); \
+             buf.resize(12); \
+             auto.byteLength === 12 && fixed.byteLength === 4;"
+        )
+        .is_ok()
+    );
+    assert!(
+        ctx.eval(
+            "var called = 0; var ctor = {}; \
+             ctor[Symbol.species] = function(len){ called++; return new ArrayBuffer(len); }; \
+             var b = new ArrayBuffer(8); b.constructor = ctor; \
+             var out = b.slice(); called === 1 && out.byteLength === 8 && out !== b;"
+        )
+        .is_ok()
+    );
+}

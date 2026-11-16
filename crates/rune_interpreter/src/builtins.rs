@@ -7007,7 +7007,19 @@ fn dv_to_index(gc: &mut SemiSpace, vm: &mut Vm, value: Value) -> Result<usize, V
 pub(crate) fn dataview_parts(this: Value) -> Option<(Value, usize, usize)> {
     let buffer = dv_hidden(this, "\u{0}dv_buffer")?;
     let offset = dv_hidden(this, "\u{0}dv_offset")?.as_smi()? as usize;
-    let length = dv_hidden(this, "\u{0}dv_length")?.as_smi()? as usize;
+    let auto = dv_hidden(this, "\u{0}dv_auto")
+        .and_then(|v| v.as_smi())
+        .is_some_and(|v| v != 0);
+    let length = if auto {
+        match buffer.heap_ptr() {
+            Some(ptr) => {
+                unsafe { typedarray::RuneArrayBuffer::byte_length(ptr) }.saturating_sub(offset)
+            }
+            None => 0,
+        }
+    } else {
+        dv_hidden(this, "\u{0}dv_length")?.as_smi()? as usize
+    };
     Some((buffer, offset, length))
 }
 
@@ -7040,6 +7052,7 @@ pub fn dataview_constructor(
     if offset > buf_len {
         return dv_range_error(gc, vm, "DataView byteOffset is out of range");
     }
+    let auto_length = args.get(2).is_none_or(|len_val| len_val.is_undefined());
     let length = if let Some(len_val) = args.get(2).copied() {
         if len_val.is_undefined() {
             buf_len - offset
@@ -7088,6 +7101,13 @@ pub fn dataview_constructor(
                 Value::smi(length as i32),
                 attrs,
             );
+            JSObject::add_property_with_attrs(
+                obj_ptr,
+                PropertyKey::from_string("\u{0}dv_auto"),
+                "\u{0}".to_string(),
+                Value::smi(if auto_length { 1 } else { 0 }),
+                attrs,
+            );
             if let Some(proto) = vm.dataview_prototype.heap_ptr() {
                 JSObject::set_prototype(obj_ptr, proto);
             }
@@ -7113,6 +7133,11 @@ fn dv_checked_offset(
     };
     if unsafe { typedarray::RuneArrayBuffer::is_detached(buf_ptr) } {
         dv_type_error(gc, vm, "DataView buffer is detached");
+        return None;
+    }
+    let buf_len = unsafe { typedarray::RuneArrayBuffer::byte_length(buf_ptr) };
+    if base.checked_add(len).is_none_or(|end| end > buf_len) {
+        dv_type_error(gc, vm, "DataView is out of bounds of its buffer");
         return None;
     }
     let off_val = args.first().copied().unwrap_or(Value::undefined());
@@ -7239,6 +7264,10 @@ fn dv_set(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm, kind: Dv
     };
     if unsafe { typedarray::RuneArrayBuffer::is_detached(buf_ptr) } {
         return dv_type_error(gc, vm, "DataView buffer is detached");
+    }
+    let buf_len = unsafe { typedarray::RuneArrayBuffer::byte_length(buf_ptr) };
+    if base.checked_add(len).is_none_or(|end| end > buf_len) {
+        return dv_type_error(gc, vm, "DataView is out of bounds of its buffer");
     }
     let off_value = args.first().copied().unwrap_or(Value::undefined());
     let off = match dv_to_index(gc, vm, off_value) {

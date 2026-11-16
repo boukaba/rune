@@ -403,7 +403,12 @@ impl SemiSpace {
                         self.forward_value(proto_ptr);
                     }
                     TAG_ARRAY_BUFFER => {
-                        // Byte block is Box'd outside the semi-space — no children.
+                        // Byte block is Box'd outside the semi-space; the
+                        // prototype and lazy extra-props object are traced.
+                        let proto_ptr = scan_ptr.add(24) as *mut u64;
+                        self.forward_value(proto_ptr);
+                        let extra_ptr = scan_ptr.add(40) as *mut u64;
+                        self.forward_value(extra_ptr);
                     }
                     TAG_TYPED_ARRAY => {
                         let buf_ptr = scan_ptr.add(8) as *mut u64;

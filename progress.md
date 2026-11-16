@@ -4809,6 +4809,21 @@ Integration: **965 passed, 0 failed, 3 ignored**.
 
 Integration: **966 passed, 0 failed, 3 ignored**.
 
+### Phase 3 — ArrayBuffer.slice detached semantics + source fidelity (2026-11-16)
+
+- ArrayBuffer.prototype.slice now throws TypeError on a detached buffer, fixing
+  the transfer/transferToFixedLength families that assert a detached source
+  cannot be sliced.
+- test262 metadata parsing normalises CR/CRLF frontmatter, so CR-only tests
+  (Function.prototype.toString line-terminator cases) receive their harness
+  includes.
+- Function.prototype.toString preserves the original CR/CRLF terminators and
+  reports callable proxies in native-function form.
+- Test262: built-ins/ArrayBuffer **109 → 130/221**.
+- Function suite unchanged at **370/509**.
+
+Integration: **966 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

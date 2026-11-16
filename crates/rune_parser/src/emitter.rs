@@ -4727,7 +4727,7 @@ fn find_matching(s: &[u8], mut i: usize, open: u8, close: u8) -> Option<usize> {
 }
 
 fn normalize_source_text(text: &str) -> String {
-    text.replace("\r\n", "\n").replace('\r', "\n")
+    text.to_string()
 }
 
 fn function_source_slice(source: &str, span: Span) -> String {

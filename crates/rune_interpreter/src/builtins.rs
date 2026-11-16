@@ -7692,6 +7692,15 @@ pub fn array_buffer_slice_builtin(
     let Some(ptr) = array_buffer_receiver(gc, this, vm) else {
         return Value::undefined();
     };
+    if unsafe { typedarray::RuneArrayBuffer::is_detached(ptr) } {
+        vm.set_pending_exception(crate::errors::error_object(
+            gc,
+            &vm.error_protos,
+            crate::errors::ErrorKind::TypeError,
+            "ArrayBuffer is detached",
+        ));
+        return Value::undefined();
+    }
     let len = unsafe { typedarray::RuneArrayBuffer::byte_length(ptr) };
     let first = to_clamped_index(args.first().copied().unwrap_or(Value::smi(0)), len);
     let final_ = if args.get(1).is_none_or(|v| v.is_undefined()) {
@@ -28216,6 +28225,11 @@ pub fn function_prototype_to_string(
             return Value::undefined();
         }
     } else if let Some(ptr) = this.heap_ptr() {
+        if crate::vm::proxy_parts(this).is_some() {
+            return Value::from_heap_ptr(
+                HeapString::allocate(gc, "function () { [native code] }") as *mut u8
+            );
+        }
         if unsafe { (*(ptr as *const GcHeader)).tag() } != TAG_FUNC {
             vm.set_pending_exception(crate::errors::error_object(
                 gc,

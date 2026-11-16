@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **ArrayBuffer.slice / source fidelity (2026-11-16)**: detached-slice TypeError, CR frontmatter metadata parsing, CR-preserving Function.toString, callable-proxy native form. ArrayBuffer **130/221**. Integration **966**.
 - **Function.toString source (2026-11-16)**: leading-comment span slash stripped, CR/CRLF normalisation. Function **370/509**, toString **57/80**. Integration **966**.
 - **TypedArray soundness/detached (2026-11-16)**: Smi-range fix for Int32/Uint32 (2^30..2^31 no longer panics), detached reads return undefined, generic methods throw TypeError on detached receivers, reentrant set offsets. TypedArray **460/1446**; full test262 **31091/53658**. Integration **965**.
 - **TypedArray ctor/species/iterables (2026-11-16)**: iterable constructor drain, real prototype constructor backrefs, Object.prototype linkage, inherited species getter. TypedArray **424/1446**. Integration **964**.

@@ -389,6 +389,8 @@ fn parse_metadata(source: &str) -> TestMeta {
         _ => return meta,
     };
 
+    // Tests may use CR or CRLF line terminators; normalise for parsing only.
+    let body = body.replace("\r\n", "\n").replace('\r', "\n");
     let mut negative_next = false;
     for line in body.lines() {
         let line = line.trim();

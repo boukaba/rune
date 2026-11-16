@@ -19533,3 +19533,27 @@ fn test_asi_and_semicolon_early_errors() {
     assert!(ctx.eval("var x = 0;\nx++;\nx === 1;").is_ok());
     assert!(ctx.eval("var x = 0;\nx\n++x;\nx === 1;").is_ok());
 }
+
+#[test]
+fn test_for_await_of_async_iteration() {
+    let mut ctx = Context::new_small();
+    assert!(
+        ctx.eval(
+            "async function f(){ \
+               let out=[]; \
+               let it={ [Symbol.asyncIterator](){ let i=0; return { \
+                 next(){ i++; return Promise.resolve(i<=2?{value:i,done:false}:{done:true}); } \
+               }; } }; \
+               for await (let x of it) out.push(x); \
+               return out.join(','); \
+             } f();"
+        )
+        .is_ok()
+    );
+    assert!(ctx
+        .eval(
+            "async function g(){ let out=[]; for await (let x of [1,2,3]) out.push(x); return out.length; } g();"
+        )
+        .is_ok());
+    assert!(ctx.eval("for await (let x of []) {}").is_err());
+}

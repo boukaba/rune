@@ -41,6 +41,8 @@ pub struct Parser {
     in_static_block: bool,
     /// Function/arrow nesting depth for return-statement early errors.
     function_depth: usize,
+    /// Counter for synthetic for-await temporaries.
+    temp_counter: usize,
 }
 
 impl Parser {
@@ -68,6 +70,7 @@ impl Parser {
             in_class_field_init: false,
             in_static_block: false,
             function_depth: 0,
+            temp_counter: 0,
         }
     }
 
@@ -97,6 +100,7 @@ impl Parser {
             in_class_field_init: false,
             in_static_block: false,
             function_depth: 0,
+            temp_counter: 0,
         }
     }
 
@@ -2482,9 +2486,193 @@ impl Parser {
         stmt
     }
 
+    fn syn_ident(name: &str) -> Expr {
+        Expr::Identifier(Box::from(name), Span::default())
+    }
+
+    fn syn_member(obj: Expr, prop: Expr, computed: bool) -> Expr {
+        Expr::Member(Box::new(obj), Box::new(prop), computed, Span::default())
+    }
+
+    fn syn_call(callee: Expr, args: Vec<Expr>) -> Expr {
+        Expr::Call(
+            Box::new(callee),
+            args.into_iter()
+                .map(|expr| ArrayElement {
+                    expr,
+                    is_spread: false,
+                    is_hole: false,
+                    span: Span::default(),
+                })
+                .collect(),
+            Span::default(),
+        )
+    }
+
+    fn syn_assign(lhs: Expr, rhs: Expr) -> Stmt {
+        Stmt::Expr(
+            Expr::Assign(Box::new(lhs), Box::new(rhs), Span::default()),
+            Span::default(),
+        )
+    }
+
+    fn syn_let(name: &str, init: Option<Expr>) -> Stmt {
+        Stmt::Var(
+            VarKind::Let,
+            vec![Decl {
+                name: Box::from(name),
+                pattern: None,
+                init: init.map(Box::new),
+                span: Span::default(),
+            }],
+            Span::default(),
+        )
+    }
+
+    /// Desugar `for await (lhs of iterable) body` into an awaited pull loop.
+    /// Only valid inside an async function (enforced by the caller).
+    fn build_for_await(
+        &mut self,
+        binding: Option<(VarKind, Decl)>,
+        assign_lhs: Option<Expr>,
+        iterable: Expr,
+        body: Stmt,
+        span: Span,
+    ) -> Stmt {
+        self.temp_counter += 1;
+        let p = format!("__rune_await_{}", self.temp_counter);
+        let it = format!("{p}_it");
+        let method = format!("{p}_method");
+        let iterator = format!("{p}_iterator");
+        let next = format!("{p}_next");
+        let result = format!("{p}_result");
+        let done = format!("{p}_done");
+
+        let it_expr = Self::syn_ident(&it);
+        let method_expr = || Self::syn_ident(&method);
+        let iterator_expr = || Self::syn_ident(&iterator);
+        let next_expr = || Self::syn_ident(&next);
+        let result_expr = || Self::syn_ident(&result);
+        let done_expr = || Self::syn_ident(&done);
+
+        let symbol_member =
+            |name: &str| Self::syn_member(Self::syn_ident("Symbol"), Self::syn_ident(name), false);
+        let async_method = Self::syn_member(it_expr.clone(), symbol_member("asyncIterator"), true);
+        let sync_method = Self::syn_member(it_expr.clone(), symbol_member("iterator"), true);
+
+        let fallback = Stmt::If(
+            Box::new(Expr::Binary(
+                BinaryOp::StrictEq,
+                Box::new(method_expr()),
+                Box::new(Self::syn_ident("undefined")),
+                Span::default(),
+            )),
+            Box::new(Self::syn_assign(method_expr(), sync_method)),
+            None,
+            Span::default(),
+        );
+
+        let make_iter = Self::syn_call(
+            Self::syn_member(method_expr(), Self::syn_ident("call"), false),
+            vec![it_expr],
+        );
+        let make_next = Self::syn_member(iterator_expr(), Self::syn_ident("next"), false);
+
+        let awaited_next = Expr::Await(
+            Box::new(Self::syn_call(
+                Self::syn_member(next_expr(), Self::syn_ident("call"), false),
+                vec![iterator_expr()],
+            )),
+            Span::default(),
+        );
+        let read_done = Self::syn_member(result_expr(), Self::syn_ident("done"), false);
+        let read_value = Self::syn_member(result_expr(), Self::syn_ident("value"), false);
+
+        let value_stmt = if let Some((kind, decl)) = binding {
+            let value_decl = Decl {
+                name: decl.name,
+                pattern: decl.pattern,
+                init: Some(Box::new(read_value)),
+                span: Span::default(),
+            };
+            Stmt::Var(kind, vec![value_decl], Span::default())
+        } else if let Some(lhs) = assign_lhs {
+            Self::syn_assign(lhs, read_value)
+        } else {
+            Stmt::Empty(Span::default())
+        };
+
+        let inner = Stmt::Block(
+            vec![
+                value_stmt,
+                Stmt::Expr(
+                    Expr::Binary(
+                        BinaryOp::StrictEq,
+                        Box::new(Self::syn_ident(&done)),
+                        Box::new(Expr::Boolean(false, Span::default())),
+                        Span::default(),
+                    ),
+                    Span::default(),
+                ),
+                body,
+            ],
+            Span::default(),
+        );
+
+        let iter_done_check = Stmt::If(
+            Box::new(Expr::Unary(
+                UnaryOp::Not,
+                Box::new(read_done.clone()),
+                Span::default(),
+            )),
+            Box::new(inner),
+            None,
+            Span::default(),
+        );
+
+        let loop_body = Stmt::Block(
+            vec![
+                Self::syn_let(&result, Some(awaited_next)),
+                Self::syn_assign(done_expr(), read_done),
+                iter_done_check,
+            ],
+            Span::default(),
+        );
+
+        let while_loop = Stmt::While(
+            Box::new(Expr::Unary(
+                UnaryOp::Not,
+                Box::new(done_expr()),
+                Span::default(),
+            )),
+            Box::new(loop_body),
+            Span::default(),
+        );
+
+        Stmt::Block(
+            vec![
+                Self::syn_let(&it, Some(iterable)),
+                Self::syn_let(&method, Some(async_method)),
+                fallback,
+                Self::syn_let(&iterator, Some(make_iter)),
+                Self::syn_let(&next, Some(make_next)),
+                Self::syn_let(&done, Some(Expr::Boolean(false, Span::default()))),
+                while_loop,
+            ],
+            span,
+        )
+    }
+
     fn parse_for_inner(&mut self) -> Stmt {
         let start = self.span();
         self.expect(TokenKind::For);
+        let is_for_await = self.tok.kind == TokenKind::Await;
+        if is_for_await {
+            if !self.in_async {
+                self.error("for await is only allowed inside an async function".to_string());
+            }
+            self.advance();
+        }
         self.expect(TokenKind::LParen);
         // Check for no-initializer C-style: `for (; cond; update)`
         if self.tok.kind == TokenKind::Semicolon {
@@ -2508,6 +2696,9 @@ impl Parser {
                         self.error("const declaration must be initialized".to_string());
                     }
                 }
+            }
+            if is_for_await && self.tok.kind != TokenKind::Of {
+                self.error("for await must be followed by 'of'".to_string());
             }
             if self.tok.kind == TokenKind::In {
                 if self.for_head_initializer_invalid(&var_stmt, false) {
@@ -2546,6 +2737,23 @@ impl Parser {
                 let obj = self.parse_expr(0);
                 self.expect(TokenKind::RParen);
                 let user_body = self.parse_statement();
+                if is_for_await {
+                    self.check_statement_body(&user_body);
+                    let (kind, decl) = match &var_stmt {
+                        Stmt::Var(kind, decls, _) if decls.len() == 1 => {
+                            (kind.clone(), decls[0].clone())
+                        }
+                        _ => {
+                            self.error("for await must have exactly one loop variable".into());
+                            return Stmt::Empty(Span::default());
+                        }
+                    };
+                    let span = Span {
+                        start: start.start,
+                        end: self.span().end,
+                    };
+                    return self.build_for_await(Some((kind, decl)), None, obj, user_body, span);
+                }
                 let (name, body): (Box<str>, Box<Stmt>) = match &var_stmt {
                     Stmt::Var(_, decls, _) if decls.len() == 1 => {
                         if let Some(pattern) = &decls[0].pattern {
@@ -2626,6 +2834,10 @@ impl Parser {
                     },
                 );
             }
+            if is_for_await {
+                self.error("for await does not support a C-style loop".to_string());
+                return Stmt::Empty(Span::default());
+            }
             // C-style for with var: cond and update follow
             return self.parse_for_c_style(Some(Box::new(var_stmt)), start);
         }
@@ -2657,6 +2869,13 @@ impl Parser {
             self.expect(TokenKind::RParen);
             let body = Box::new(self.parse_statement());
             self.check_statement_body(&body);
+            if is_for_await {
+                let span = Span {
+                    start: start.start,
+                    end: self.span().end,
+                };
+                return self.build_for_await(None, Some(lhs), obj, *body, span);
+            }
             return Stmt::ForOf(
                 Box::new(lhs),
                 Box::new(obj),

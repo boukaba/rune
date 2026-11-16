@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **`for await (... of ...)` (2026-11-16)**: parser + emitter desugar to awaited async-iterator pull loop with sync-iterator fallback. for-await-of **789/1234**, language **14931/23979**. Integration **960**.
 - **ASI/semicolon early errors (2026-11-16)**: postfix newline restriction, missing-semicolon checks for expression statements/var declarations. asi **93/102**, language **14215/23979**. Integration **959**.
 - **Class field ASI (2026-11-16)**: newline terminates field without initializer; generated class-element families fixed. class elements **988/1534**, language **14165/23979**. Integration **958**.
 - **Unicode identifier starts (2026-11-16)**: non-ASCII ID_Start dispatch (℘, ㄥ, private-name Unicode families). class elements **965/1534**, language **14119/23979**. Integration **957**.

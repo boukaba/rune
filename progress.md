@@ -4679,6 +4679,23 @@ Integration suite: **958 passed, 0 failed, 3 ignored**.
 
 Integration suite: **959 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — `for await (... of ...)` (2026-11-16)
+
+- Parser accepts `for await (lhs of iterable) body` inside async functions only;
+  C-style and `in` forms are SyntaxErrors.
+- Emitter desugars each form into an awaited pull loop:
+  - reads `iterable[Symbol.asyncIterator]`, falling back to
+    `iterable[Symbol.iterator]` (sync iterables work through `await`);
+  - `next.call(iterator)` is awaited each iteration, `done`/`value` are read
+    off the awaited result, and the binding/assignment runs in the body;
+  - lexical/var bindings and destructuring declarations reuse the normal
+    variable-declaration path, so patterns work.
+- Test262: statements/for-await-of **87 → 789/1234**, language overall
+  **14,215 → 14,931/23,979**.
+- Regression: `test_for_await_of_async_iteration`.
+
+Integration suite: **960 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

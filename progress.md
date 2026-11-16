@@ -4715,6 +4715,22 @@ Integration suite: **960 passed, 0 failed, 3 ignored**.
 
 Integration suite: **961 passed, 0 failed, 3 ignored**.
 
+### Phase 3 — DataView (2026-11-16)
+
+- Added the `DataView` builtin:
+  - constructor validates a non-detached `ArrayBuffer`, ToIndex byteOffset,
+    explicit/remaining byteLength, and range bounds;
+  - prototype methods `getInt8/Uint8/Int16/Uint16/Int32/Uint32/Float32/Float64`
+    and their `set*` counterparts honour byte offsets, bounds and
+    little-endian flags;
+  - prototype accessors `buffer`, `byteOffset`, `byteLength`,
+    `Symbol.toStringTag`, and constructor backref;
+  - brand checks throw TypeError, out-of-bounds throws RangeError.
+- Test262: built-ins/DataView **0 → 216/561** (63 skipped).
+- Regression: `test_dataview_basic_semantics`.
+
+Integration suite: **962 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

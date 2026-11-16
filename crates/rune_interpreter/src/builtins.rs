@@ -6796,6 +6796,400 @@ fn typed_array_ctor_impl(
     this
 }
 
+// ---- DataView -----------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DvKind {
+    Int8,
+    Uint8,
+    Int16,
+    Uint16,
+    Int32,
+    Uint32,
+    Float32,
+    Float64,
+}
+
+impl DvKind {
+    fn size(self) -> usize {
+        match self {
+            DvKind::Int8 | DvKind::Uint8 => 1,
+            DvKind::Int16 | DvKind::Uint16 => 2,
+            DvKind::Int32 | DvKind::Uint32 | DvKind::Float32 => 4,
+            DvKind::Float64 => 8,
+        }
+    }
+}
+
+fn dv_type_error(gc: &mut SemiSpace, vm: &mut Vm, msg: &str) -> Value {
+    vm.set_pending_exception(crate::errors::error_object(
+        gc,
+        &vm.error_protos,
+        crate::errors::ErrorKind::TypeError,
+        msg,
+    ));
+    Value::undefined()
+}
+
+fn dv_range_error(gc: &mut SemiSpace, vm: &mut Vm, msg: &str) -> Value {
+    vm.set_pending_exception(crate::errors::error_object(
+        gc,
+        &vm.error_protos,
+        crate::errors::ErrorKind::RangeError,
+        msg,
+    ));
+    Value::undefined()
+}
+
+fn dv_hidden(this: Value, key: &str) -> Option<Value> {
+    let ptr = this.heap_ptr()?;
+    if unsafe { (*(ptr as *const GcHeader)).tag() } != TAG_OBJECT {
+        return None;
+    }
+    let obj = ptr as *mut JSObject;
+    let shape = unsafe { JSObject::shape_ptr(obj) };
+    let slot = shape.lookup(&PropertyKey::from_string(key))?;
+    Some(unsafe { JSObject::get_slot(obj, slot) })
+}
+
+pub(crate) fn dataview_parts(this: Value) -> Option<(Value, usize, usize)> {
+    let buffer = dv_hidden(this, "\u{0}dv_buffer")?;
+    let offset = dv_hidden(this, "\u{0}dv_offset")?.as_smi()? as usize;
+    let length = dv_hidden(this, "\u{0}dv_length")?.as_smi()? as usize;
+    Some((buffer, offset, length))
+}
+
+pub fn dataview_constructor(
+    gc: &mut SemiSpace,
+    _this: Value,
+    args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    let Some(buffer) = args.first().copied() else {
+        return dv_type_error(gc, vm, "DataView requires an ArrayBuffer");
+    };
+    let Some(buf_ptr) = buffer.heap_ptr() else {
+        return dv_type_error(gc, vm, "DataView requires an ArrayBuffer");
+    };
+    if unsafe { (*(buf_ptr as *const GcHeader)).tag() } != TAG_ARRAY_BUFFER
+        || unsafe { typedarray::RuneArrayBuffer::is_detached(buf_ptr) }
+    {
+        return dv_type_error(gc, vm, "DataView requires a non-detached ArrayBuffer");
+    }
+    let buf_len = unsafe { typedarray::RuneArrayBuffer::byte_length(buf_ptr) };
+    let offset_val = args.get(1).copied().unwrap_or(Value::smi(0));
+    let offset_num = to_number(offset_val);
+    if !offset_num.is_finite() || offset_num < 0.0 {
+        return dv_range_error(gc, vm, "Invalid DataView byteOffset");
+    }
+    let offset = offset_num.trunc() as usize;
+    if offset > buf_len {
+        return dv_range_error(gc, vm, "DataView byteOffset is out of range");
+    }
+    let length = if let Some(len_val) = args.get(2).copied() {
+        if len_val.is_undefined() {
+            buf_len - offset
+        } else {
+            let n = to_number(len_val);
+            if !n.is_finite() || n < 0.0 {
+                return dv_range_error(gc, vm, "Invalid DataView byteLength");
+            }
+            n.trunc() as usize
+        }
+    } else {
+        buf_len - offset
+    };
+    if length > buf_len.saturating_sub(offset) {
+        return dv_range_error(gc, vm, "DataView byteLength is out of range");
+    }
+    let obj = {
+        let shape = rune_core::shape::Shape::intern(Vec::new(), Vec::new());
+        let ptr = JSObject::allocate(gc, shape, &[]);
+        Value::from_heap_ptr(ptr as *mut u8)
+    };
+    if let Some(ptr) = obj.heap_ptr() {
+        let obj_ptr = ptr as *mut JSObject;
+        let attrs = rune_core::shape::ATTR_WRITABLE | rune_core::shape::ATTR_CONFIGURABLE;
+        unsafe {
+            JSObject::add_property_with_attrs(
+                obj_ptr,
+                PropertyKey::from_string("\u{0}dv_buffer"),
+                "\u{0}".to_string(),
+                buffer,
+                attrs,
+            );
+            JSObject::add_property_with_attrs(
+                obj_ptr,
+                PropertyKey::from_string("\u{0}dv_offset"),
+                "\u{0}".to_string(),
+                Value::smi(offset as i32),
+                attrs,
+            );
+            JSObject::add_property_with_attrs(
+                obj_ptr,
+                PropertyKey::from_string("\u{0}dv_length"),
+                "\u{0}".to_string(),
+                Value::smi(length as i32),
+                attrs,
+            );
+            if let Some(proto) = vm.dataview_prototype.heap_ptr() {
+                JSObject::set_prototype(obj_ptr, proto);
+            }
+        }
+    }
+    obj
+}
+
+fn dv_checked_offset(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    this: Value,
+    args: &[Value],
+    size: usize,
+) -> Option<(Value, usize, usize)> {
+    let Some((buffer, base, len)) = dataview_parts(this) else {
+        dv_type_error(gc, vm, "DataView method called on incompatible receiver");
+        return None;
+    };
+    let Some(buf_ptr) = buffer.heap_ptr() else {
+        dv_type_error(gc, vm, "DataView buffer is detached");
+        return None;
+    };
+    if unsafe { typedarray::RuneArrayBuffer::is_detached(buf_ptr) } {
+        dv_type_error(gc, vm, "DataView buffer is detached");
+        return None;
+    }
+    let Some(off_val) = args.first().copied() else {
+        dv_range_error(gc, vm, "DataView offset is required");
+        return None;
+    };
+    let n = to_number(off_val);
+    if !n.is_finite() || n < 0.0 {
+        dv_range_error(gc, vm, "Invalid DataView offset");
+        return None;
+    }
+    let off = n.trunc() as usize;
+    if off.checked_add(size).is_none_or(|end| end > len) {
+        dv_range_error(gc, vm, "DataView offset is out of bounds");
+        return None;
+    }
+    Some((buffer, base + off, len))
+}
+
+fn dv_get(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm, kind: DvKind) -> Value {
+    let size = kind.size();
+    let Some((buffer, off, _)) = dv_checked_offset(gc, vm, this, args, size) else {
+        return Value::undefined();
+    };
+    let buf_ptr = buffer.heap_ptr().unwrap();
+    let data = unsafe { typedarray::RuneArrayBuffer::data(buf_ptr) };
+    let little = args.get(1).is_some_and(|v| v.to_bool());
+    unsafe {
+        let bytes = std::slice::from_raw_parts(data.add(off), size);
+        match kind {
+            DvKind::Int8 => Value::smi(bytes[0] as i8 as i32),
+            DvKind::Uint8 => Value::smi(bytes[0] as i32),
+            DvKind::Int16 => {
+                let arr = [bytes[0], bytes[1]];
+                let v = if little {
+                    i16::from_le_bytes(arr)
+                } else {
+                    i16::from_be_bytes(arr)
+                };
+                Value::smi(v as i32)
+            }
+            DvKind::Uint16 => {
+                let arr = [bytes[0], bytes[1]];
+                let v = if little {
+                    u16::from_le_bytes(arr)
+                } else {
+                    u16::from_be_bytes(arr)
+                };
+                Value::smi(v as i32)
+            }
+            DvKind::Int32 => {
+                let arr = [bytes[0], bytes[1], bytes[2], bytes[3]];
+                let v = if little {
+                    i32::from_le_bytes(arr)
+                } else {
+                    i32::from_be_bytes(arr)
+                };
+                Value::from_float64(v as f64)
+            }
+            DvKind::Uint32 => {
+                let arr = [bytes[0], bytes[1], bytes[2], bytes[3]];
+                let v = if little {
+                    u32::from_le_bytes(arr)
+                } else {
+                    u32::from_be_bytes(arr)
+                };
+                Value::from_float64(v as f64)
+            }
+            DvKind::Float32 => {
+                let arr = [bytes[0], bytes[1], bytes[2], bytes[3]];
+                let v = if little {
+                    f32::from_le_bytes(arr)
+                } else {
+                    f32::from_be_bytes(arr)
+                };
+                Value::from_float64(v as f64)
+            }
+            DvKind::Float64 => {
+                let mut arr = [0u8; 8];
+                arr.copy_from_slice(bytes);
+                let v = if little {
+                    f64::from_le_bytes(arr)
+                } else {
+                    f64::from_be_bytes(arr)
+                };
+                Value::from_float64(v)
+            }
+        }
+    }
+}
+
+fn dv_set(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm, kind: DvKind) -> Value {
+    let size = kind.size();
+    let Some((buffer, off, _)) = dv_checked_offset(gc, vm, this, args, size) else {
+        return Value::undefined();
+    };
+    let value = args.get(1).copied().unwrap_or(Value::undefined());
+    let n = to_number(value);
+    let little = args.get(2).is_some_and(|v| v.to_bool());
+    let buf_ptr = buffer.heap_ptr().unwrap();
+    let data = unsafe { typedarray::RuneArrayBuffer::data(buf_ptr) };
+    unsafe {
+        let dst = std::slice::from_raw_parts_mut(data.add(off), size);
+        match kind {
+            DvKind::Int8 => dst[0] = n as i64 as i8 as u8,
+            DvKind::Uint8 => dst[0] = n as i64 as u8,
+            DvKind::Int16 => {
+                let b = if little {
+                    (n as i64 as i16).to_le_bytes()
+                } else {
+                    (n as i64 as i16).to_be_bytes()
+                };
+                dst.copy_from_slice(&b);
+            }
+            DvKind::Uint16 => {
+                let b = if little {
+                    (n as i64 as u16).to_le_bytes()
+                } else {
+                    (n as i64 as u16).to_be_bytes()
+                };
+                dst.copy_from_slice(&b);
+            }
+            DvKind::Int32 => {
+                let b = if little {
+                    (n as i64 as i32).to_le_bytes()
+                } else {
+                    (n as i64 as i32).to_be_bytes()
+                };
+                dst.copy_from_slice(&b);
+            }
+            DvKind::Uint32 => {
+                let b = if little {
+                    (n as i64 as u32).to_le_bytes()
+                } else {
+                    (n as i64 as u32).to_be_bytes()
+                };
+                dst.copy_from_slice(&b);
+            }
+            DvKind::Float32 => {
+                let b = if little {
+                    (n as f32).to_le_bytes()
+                } else {
+                    (n as f32).to_be_bytes()
+                };
+                dst.copy_from_slice(&b);
+            }
+            DvKind::Float64 => {
+                let b = if little {
+                    n.to_le_bytes()
+                } else {
+                    n.to_be_bytes()
+                };
+                dst.copy_from_slice(&b);
+            }
+        }
+    }
+    Value::undefined()
+}
+
+macro_rules! dv_getter {
+    ($name:ident, $kind:expr) => {
+        pub fn $name(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+            dv_get(gc, this, args, vm, $kind)
+        }
+    };
+}
+macro_rules! dv_setter {
+    ($name:ident, $kind:expr) => {
+        pub fn $name(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+            dv_set(gc, this, args, vm, $kind)
+        }
+    };
+}
+
+dv_getter!(dataview_get_int8, DvKind::Int8);
+dv_getter!(dataview_get_uint8, DvKind::Uint8);
+dv_getter!(dataview_get_int16, DvKind::Int16);
+dv_getter!(dataview_get_uint16, DvKind::Uint16);
+dv_getter!(dataview_get_int32, DvKind::Int32);
+dv_getter!(dataview_get_uint32, DvKind::Uint32);
+dv_getter!(dataview_get_float32, DvKind::Float32);
+dv_getter!(dataview_get_float64, DvKind::Float64);
+dv_setter!(dataview_set_int8, DvKind::Int8);
+dv_setter!(dataview_set_uint8, DvKind::Uint8);
+dv_setter!(dataview_set_int16, DvKind::Int16);
+dv_setter!(dataview_set_uint16, DvKind::Uint16);
+dv_setter!(dataview_set_int32, DvKind::Int32);
+dv_setter!(dataview_set_uint32, DvKind::Uint32);
+dv_setter!(dataview_set_float32, DvKind::Float32);
+dv_setter!(dataview_set_float64, DvKind::Float64);
+
+fn dataview_this_parts(
+    gc: &mut SemiSpace,
+    vm: &mut Vm,
+    this: Value,
+) -> Option<(Value, usize, usize)> {
+    match dataview_parts(this) {
+        Some(parts) => Some(parts),
+        None => {
+            dv_type_error(gc, vm, "DataView method called on incompatible receiver");
+            None
+        }
+    }
+}
+
+pub fn dataview_buffer(gc: &mut SemiSpace, this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    dataview_this_parts(gc, vm, this)
+        .map(|p| p.0)
+        .unwrap_or(Value::undefined())
+}
+
+pub fn dataview_byte_offset(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    dataview_this_parts(gc, vm, this)
+        .map(|p| Value::smi(p.1 as i32))
+        .unwrap_or(Value::undefined())
+}
+
+pub fn dataview_byte_length(
+    gc: &mut SemiSpace,
+    this: Value,
+    _args: &[Value],
+    vm: &mut Vm,
+) -> Value {
+    dataview_this_parts(gc, vm, this)
+        .map(|p| Value::smi(p.2 as i32))
+        .unwrap_or(Value::undefined())
+}
+
 macro_rules! typed_array_ctor {
     ($name:ident, $kind:expr) => {
         pub fn $name(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
@@ -28656,6 +29050,106 @@ pub fn default_builtins() -> Vec<Builtin> {
             length: 0,
             name: "ArrayBuffer_prototype_maxByteLength",
             func: array_buffer_max_byte_length,
+        },
+        Builtin {
+            length: 1,
+            name: "DataView",
+            func: dataview_constructor,
+        },
+        Builtin {
+            length: 1,
+            name: "DataView_prototype_getInt8",
+            func: dataview_get_int8,
+        },
+        Builtin {
+            length: 1,
+            name: "DataView_prototype_getUint8",
+            func: dataview_get_uint8,
+        },
+        Builtin {
+            length: 1,
+            name: "DataView_prototype_getInt16",
+            func: dataview_get_int16,
+        },
+        Builtin {
+            length: 1,
+            name: "DataView_prototype_getUint16",
+            func: dataview_get_uint16,
+        },
+        Builtin {
+            length: 1,
+            name: "DataView_prototype_getInt32",
+            func: dataview_get_int32,
+        },
+        Builtin {
+            length: 1,
+            name: "DataView_prototype_getUint32",
+            func: dataview_get_uint32,
+        },
+        Builtin {
+            length: 1,
+            name: "DataView_prototype_getFloat32",
+            func: dataview_get_float32,
+        },
+        Builtin {
+            length: 1,
+            name: "DataView_prototype_getFloat64",
+            func: dataview_get_float64,
+        },
+        Builtin {
+            length: 2,
+            name: "DataView_prototype_setInt8",
+            func: dataview_set_int8,
+        },
+        Builtin {
+            length: 2,
+            name: "DataView_prototype_setUint8",
+            func: dataview_set_uint8,
+        },
+        Builtin {
+            length: 2,
+            name: "DataView_prototype_setInt16",
+            func: dataview_set_int16,
+        },
+        Builtin {
+            length: 2,
+            name: "DataView_prototype_setUint16",
+            func: dataview_set_uint16,
+        },
+        Builtin {
+            length: 2,
+            name: "DataView_prototype_setInt32",
+            func: dataview_set_int32,
+        },
+        Builtin {
+            length: 2,
+            name: "DataView_prototype_setUint32",
+            func: dataview_set_uint32,
+        },
+        Builtin {
+            length: 2,
+            name: "DataView_prototype_setFloat32",
+            func: dataview_set_float32,
+        },
+        Builtin {
+            length: 2,
+            name: "DataView_prototype_setFloat64",
+            func: dataview_set_float64,
+        },
+        Builtin {
+            length: 0,
+            name: "DataView_prototype_buffer",
+            func: dataview_buffer,
+        },
+        Builtin {
+            length: 0,
+            name: "DataView_prototype_byteOffset",
+            func: dataview_byte_offset,
+        },
+        Builtin {
+            length: 0,
+            name: "DataView_prototype_byteLength",
+            func: dataview_byte_length,
         },
         Builtin {
             length: 1,

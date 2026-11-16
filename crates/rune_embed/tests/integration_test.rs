@@ -19581,3 +19581,22 @@ fn test_async_generator_basics() {
             .is_ok()
     );
 }
+
+#[test]
+fn test_dataview_basic_semantics() {
+    let mut ctx = Context::new_small();
+    assert!(
+        ctx.eval(
+            "var b = new ArrayBuffer(16); var d = new DataView(b); \
+             d.setUint8(0, 255); d.setInt16(2, -2); d.setFloat64(8, 1.5); \
+             d.getUint8(0) === 255 && d.getInt16(2, true) === -2 && d.getFloat64(8) === 1.5 && \
+             d.byteLength === 16 && d.byteOffset === 0 && d.buffer === b;"
+        )
+        .is_ok()
+    );
+    assert!(
+        ctx.eval("new DataView(new ArrayBuffer(4)).getUint32(2);")
+            .is_err()
+    );
+    assert!(ctx.eval("new DataView(new ArrayBuffer(4), 5);").is_err());
+}

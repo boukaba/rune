@@ -1159,6 +1159,9 @@ pub struct Vm {
     /// `typedarray::TypedArrayKind as usize` (order matches `from_index`).
     pub typed_array_ctors: Vec<Value>,
     pub typed_array_protos: Vec<Value>,
+    /// %DataView.prototype% and DataView constructor wrapper.
+    pub dataview_prototype: Value,
+    pub dataview_constructor: Value,
     pub typed_array_ctor_handles: Vec<Value>,
     /// Error-family ctor wrappers / prototypes, indexed by
     /// `builtins::ERROR_TYPE_NAMES` (Error, EvalError, RangeError,
@@ -1444,6 +1447,8 @@ impl Vm {
             array_buffer_prototype: Value::undefined(),
             typed_array_ctors: Vec::new(),
             typed_array_protos: Vec::new(),
+            dataview_prototype: Value::undefined(),
+            dataview_constructor: Value::undefined(),
             typed_array_ctor_handles: Vec::new(),
             error_ctors: Vec::new(),
             callable_wrappers: Vec::new(),
@@ -2724,6 +2729,79 @@ impl Vm {
             let _ = base_obj;
         }
 
+        // DataView constructor + %DataView.prototype%
+        if let Some(ctor_handle) = find_handle(&self.builtins, "DataView") {
+            let methods = [
+                ("getInt8", "DataView_prototype_getInt8"),
+                ("getUint8", "DataView_prototype_getUint8"),
+                ("getInt16", "DataView_prototype_getInt16"),
+                ("getUint16", "DataView_prototype_getUint16"),
+                ("getInt32", "DataView_prototype_getInt32"),
+                ("getUint32", "DataView_prototype_getUint32"),
+                ("getFloat32", "DataView_prototype_getFloat32"),
+                ("getFloat64", "DataView_prototype_getFloat64"),
+                ("setInt8", "DataView_prototype_setInt8"),
+                ("setUint8", "DataView_prototype_setUint8"),
+                ("setInt16", "DataView_prototype_setInt16"),
+                ("setUint16", "DataView_prototype_setUint16"),
+                ("setInt32", "DataView_prototype_setInt32"),
+                ("setUint32", "DataView_prototype_setUint32"),
+                ("setFloat32", "DataView_prototype_setFloat32"),
+                ("setFloat64", "DataView_prototype_setFloat64"),
+            ];
+            // Build the prototype shape with names.
+            let mut proto_keys: Vec<(PropertyKey, usize)> = Vec::new();
+            let mut proto_names: Vec<String> = Vec::new();
+            let mut proto_vals: Vec<Value> = Vec::new();
+            let mut add_prop = |key: PropertyKey, name: String, value: Value| {
+                let idx = proto_vals.len();
+                proto_keys.push((key, idx));
+                proto_names.push(name);
+                proto_vals.push(value);
+            };
+            for (name, handle) in methods {
+                if let Some(h) = find_handle(&self.builtins, handle) {
+                    add_prop(PropertyKey::from_string(name), name.to_string(), h);
+                }
+            }
+            for (name, handle) in [
+                ("buffer", "DataView_prototype_buffer"),
+                ("byteOffset", "DataView_prototype_byteOffset"),
+                ("byteLength", "DataView_prototype_byteLength"),
+            ] {
+                if let Some(getter) = find_handle(&self.builtins, handle) {
+                    let pair =
+                        rune_core::accessor::AccessorPair::allocate(gc, getter, Value::undefined());
+                    add_prop(
+                        PropertyKey::from_string(name),
+                        name.to_string(),
+                        Value::from_heap_ptr(pair),
+                    );
+                }
+            }
+            let tag_str = HeapString::allocate(gc, "DataView") as *mut u8;
+            add_prop(
+                PropertyKey::from_symbol(rune_core::symbol::SYM_TO_STRING_TAG),
+                "\u{0}".to_string(),
+                Value::from_heap_ptr(tag_str),
+            );
+            add_prop(
+                PropertyKey::from_string("constructor"),
+                "constructor".to_string(),
+                ctor_handle,
+            );
+            let proto_shape = Shape::intern(proto_keys, proto_names);
+            let proto_ptr = JSObject::allocate(gc, proto_shape, &proto_vals);
+            let proto = Value::from_heap_ptr(proto_ptr as *mut u8);
+            let ctor_keys = vec![(PropertyKey::from_string("prototype"), 0usize)];
+            let ctor_shape = Shape::intern(ctor_keys, vec!["prototype".to_string()]);
+            let ctor_ptr = JSObject::allocate(gc, ctor_shape, &[proto]);
+            let ctor_obj = Value::from_heap_ptr(ctor_ptr as *mut u8);
+            self.builtin_wrappers
+                .insert("DataView".to_string(), ctor_obj);
+            self.dataview_prototype = proto;
+        }
+
         // Iteration protocol — Array.prototype.values/keys/entries/[Symbol.iterator]
         // and String.prototype[Symbol.iterator]. Iterator state is stored under a
         // hidden symbol (excluded from enumeration) on each iterator object.
@@ -3663,6 +3741,9 @@ impl Vm {
             if let Some(v) = self.array_buffer_constructor.heap_ptr() {
                 wrappers.push(Value::from_heap_ptr(v));
             }
+            if let Some(v) = self.dataview_constructor.heap_ptr() {
+                wrappers.push(Value::from_heap_ptr(v));
+            }
             if let Some(v) = self.regexp_constructor.heap_ptr() {
                 wrappers.push(Value::from_heap_ptr(v));
             }
@@ -3708,6 +3789,7 @@ impl Vm {
                 ("Set", 0),
                 ("Date", 7),
                 ("ArrayBuffer", 1),
+                ("DataView", 1),
                 ("RegExp", 2),
                 ("AggregateError", 2),
             ] {
@@ -4949,6 +5031,8 @@ impl Vm {
         for v in self.typed_array_ctors.iter_mut() {
             gc.push_root(v as *mut Value as *mut u64);
         }
+        gc.push_root(&self.dataview_prototype as *const Value as *mut u64);
+        gc.push_root(&self.dataview_constructor as *const Value as *mut u64);
         for v in self.typed_array_protos.iter_mut() {
             gc.push_root(v as *mut Value as *mut u64);
         }
@@ -13076,6 +13160,23 @@ impl Vm {
                     // ArrayBuffer constructor [[Construct]]: allocate the tagged
                     // RuneArrayBuffer (zero-length) and let the builtin set the
                     // real backing block and byte length.
+                    if self.builtin_wrappers.get("DataView").copied() == Some(constructor) {
+                        let result = crate::builtins::dataview_constructor(
+                            gc,
+                            Value::undefined(),
+                            &args,
+                            self,
+                        );
+                        if let Some(exc) = self.pending_exception.take() {
+                            if let Some(exit) = self.handle_throw(gc, exc) {
+                                return exit;
+                            }
+                            continue;
+                        }
+                        self.push(result);
+                        self.frames[fi].pc = pc + 1;
+                        continue;
+                    }
                     if constructor == self.array_buffer_constructor {
                         let proto_ptr = self.array_buffer_prototype.heap_ptr();
                         let obj_ptr = typedarray::RuneArrayBuffer::allocate(

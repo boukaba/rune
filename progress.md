@@ -4665,6 +4665,20 @@ Integration suite: **957 passed, 0 failed, 3 ignored**.
 
 Integration suite: **958 passed, 0 failed, 3 ignored**.
 
+### Phase 2 — ASI and semicolon early errors (2026-11-16)
+
+- Postfix `++`/`--` no longer attaches across a line terminator, so
+  `x\n++` performs ASI after `x` and leaves `++` as a prefix operator.
+- Expression statements and variable declarations now require a semicolon,
+  `}`/EOF, or a line terminator: `{ 1 2 } 3`, `var x = 1 x;`, and
+  `if (false) x = 1 else ...` are SyntaxErrors. For-loop heads skip the
+  variable-declaration end check.
+- Test262: language/asi **90 → 93/102**, language overall
+  **14,165 → 14,215/23,979**.
+- Regression: `test_asi_and_semicolon_early_errors`.
+
+Integration suite: **959 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

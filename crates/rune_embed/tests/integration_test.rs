@@ -19515,3 +19515,21 @@ fn test_class_field_asi_by_newline() {
         .is_ok()
     );
 }
+
+#[test]
+fn test_asi_and_semicolon_early_errors() {
+    let mut ctx = Context::new_small();
+    for source in [
+        "var x = 0;\nx\n++;",
+        "{ 1 2 } 3",
+        "var x = 1 x;",
+        "if (false) x = 1 else x = -1",
+    ] {
+        assert!(
+            ctx.eval(source).is_err(),
+            "expected SyntaxError for {source:?}"
+        );
+    }
+    assert!(ctx.eval("var x = 0;\nx++;\nx === 1;").is_ok());
+    assert!(ctx.eval("var x = 0;\nx\n++x;\nx === 1;").is_ok());
+}

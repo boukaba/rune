@@ -1137,6 +1137,7 @@ impl Parser {
             }
             _ => {
                 let expr = self.parse_expr_comma();
+                self.check_statement_end();
                 self.consume_semicolon();
                 Stmt::Expr(expr, self.span())
             }
@@ -2133,6 +2134,9 @@ impl Parser {
             } else {
                 break;
             }
+        }
+        if self.for_head_depth == 0 {
+            self.check_statement_end();
         }
         self.consume_semicolon();
         Stmt::Var(
@@ -4796,6 +4800,9 @@ impl Parser {
                     lhs = Expr::Member(Box::new(lhs), Box::new(index), true, span);
                 }
                 TokenKind::PlusPlus | TokenKind::MinusMinus => {
+                    if self.lexer.had_newline {
+                        break;
+                    }
                     let is_plus = self.tok.kind == TokenKind::PlusPlus;
                     self.advance();
                     if matches!(lhs, Expr::OptionalChain(..)) {
@@ -5158,6 +5165,16 @@ impl Parser {
             | TokenKind::OrAssign
             | TokenKind::NullishAssign => 0,
             _ => 0,
+        }
+    }
+
+    fn check_statement_end(&mut self) {
+        if !matches!(
+            self.tok.kind,
+            TokenKind::Semicolon | TokenKind::RBrace | TokenKind::Eof
+        ) && !self.lexer.has_semicolon_or_asi()
+        {
+            self.error(format!("Missing semicolon before {:?}", self.tok.kind));
         }
     }
 

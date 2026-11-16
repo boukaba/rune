@@ -4797,6 +4797,18 @@ Integration: **964 passed, 0 failed, 3 ignored**.
 
 Integration: **965 passed, 0 failed, 3 ignored**.
 
+### Phase 3 — Function.toString source fidelity (2026-11-16)
+
+- `Function.prototype.toString` now strips a stray leading `/` left when a
+  function declaration follows a block comment with no whitespace
+  (`/* c */function f(){}`).
+- Returned source text normalises CRLF/CR line terminators to LF.
+- Test262: built-ins/Function **359 → 370/509**,
+  Function.prototype/toString **46 → 57/80**.
+- Regression: `test_function_to_string_source_normalization`.
+
+Integration: **966 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

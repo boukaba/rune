@@ -4726,9 +4726,20 @@ fn find_matching(s: &[u8], mut i: usize, open: u8, close: u8) -> Option<usize> {
     None
 }
 
+fn normalize_source_text(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 fn function_source_slice(source: &str, span: Span) -> String {
     let Some(raw) = source.get(span.start..span.end) else {
         return String::new();
+    };
+    // A leading comment may leave the span on its closing slash (the lexer
+    // consumes comments before recording the token start in some paths).
+    let raw = if raw.starts_with('/') && !raw.starts_with("//") && !raw.starts_with("/*") {
+        &raw[1..]
+    } else {
+        raw
     };
     let bytes = raw.as_bytes();
     let mut i = 0usize;
@@ -4770,23 +4781,23 @@ fn function_source_slice(source: &str, span: Span) -> String {
         skip_ws_comments(bytes, a)
     } else {
         let Some(p) = paren else {
-            return raw.trim_end().to_string();
+            return normalize_source_text(raw.trim_end());
         };
         let Some(after) = find_matching(bytes, p, b'(', b')') else {
-            return raw.trim_end().to_string();
+            return normalize_source_text(raw.trim_end());
         };
         let b = skip_ws_comments(bytes, after);
         if b < bytes.len() && bytes[b] == b'{' {
             b
         } else {
-            return raw.trim_end().to_string();
+            return normalize_source_text(raw.trim_end());
         }
     };
     if body_start < bytes.len() && bytes[body_start] == b'{' {
         if let Some(end) = find_matching(bytes, body_start, b'{', b'}') {
-            return raw[..end].to_string();
+            return normalize_source_text(&raw[..end]);
         }
-        return raw[..body_start].to_string();
+        return normalize_source_text(&raw[..body_start]);
     }
     // Arrow expression body: drop trailing comments, whitespace and `;`.
     let mut end = bytes.len();
@@ -4805,7 +4816,7 @@ fn function_source_slice(source: &str, span: Span) -> String {
         }
         break;
     }
-    raw[..end].trim_end().to_string()
+    normalize_source_text(raw[..end].trim_end())
 }
 
 /// Whether a binding pattern contains a function/arrow in a default

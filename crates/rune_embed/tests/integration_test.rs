@@ -19658,3 +19658,22 @@ fn test_typedarray_large_uint32_values() {
         .is_ok()
     );
 }
+
+#[test]
+fn test_function_to_string_source_normalization() {
+    let mut ctx = Context::new_small();
+    assert!(
+        ctx.eval(
+            "/* before */ function f(a, b) { return a + b; } \
+             f.toString().indexOf('function f(a, b)') === 0;"
+        )
+        .is_ok()
+    );
+    assert!(
+        ctx.eval(
+            "var g = function () {\r\n  return 1;\r\n}; \
+             g.toString().indexOf('\\r') === -1;"
+        )
+        .is_ok()
+    );
+}

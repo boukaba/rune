@@ -4911,6 +4911,18 @@ Integration: **971 passed, 0 failed, 3 ignored**.
 
 Integration: **971 passed, 0 failed, 3 ignored**.
 
+### Phase 3 — DataView/ArrayBuffer newTarget prototypes (2026-11-16)
+
+- Added a pending construct-new-target slot on Vm so builtin constructors can
+  see the `newTarget` passed through `Reflect.construct`/sync Construct.
+- DataView and ArrayBuffer now install `newTarget.prototype` on the created
+  object when it is an object, falling back to the default prototype.
+- Test262: built-ins/DataView **425 → 432/561**,
+  built-ins/ArrayBuffer **156 → 157/221**.
+- Regression: `test_dataview_arraybuffer_newtarget_prototypes`.
+
+Integration: **972 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

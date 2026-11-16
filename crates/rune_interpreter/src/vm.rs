@@ -1162,6 +1162,7 @@ pub struct Vm {
     /// %DataView.prototype% and DataView constructor wrapper.
     pub dataview_prototype: Value,
     pub dataview_constructor: Value,
+    pub(crate) pending_construct_new_target: Value,
     pub typed_array_ctor_handles: Vec<Value>,
     /// Error-family ctor wrappers / prototypes, indexed by
     /// `builtins::ERROR_TYPE_NAMES` (Error, EvalError, RangeError,
@@ -1449,6 +1450,7 @@ impl Vm {
             typed_array_protos: Vec::new(),
             dataview_prototype: Value::undefined(),
             dataview_constructor: Value::undefined(),
+            pending_construct_new_target: Value::undefined(),
             typed_array_ctor_handles: Vec::new(),
             error_ctors: Vec::new(),
             callable_wrappers: Vec::new(),
@@ -5168,6 +5170,7 @@ impl Vm {
         }
         gc.push_root(&self.dataview_prototype as *const Value as *mut u64);
         gc.push_root(&self.dataview_constructor as *const Value as *mut u64);
+        gc.push_root(&self.pending_construct_new_target as *const Value as *mut u64);
         for v in self.typed_array_protos.iter_mut() {
             gc.push_root(v as *mut Value as *mut u64);
         }
@@ -5669,6 +5672,13 @@ impl Vm {
         self.builtin_wrappers.get("Function").copied()
     }
 
+    pub(crate) fn current_new_target(&self) -> Value {
+        self.frames
+            .last()
+            .map(|f| f.new_target)
+            .unwrap_or(Value::undefined())
+    }
+
     pub fn current_call_is_constructor(&self) -> bool {
         self.frames
             .last()
@@ -5961,6 +5971,8 @@ impl Vm {
             return ConstructOut::Done(Value::from_heap_ptr(obj as *mut u8));
         }
         if ctor == self.array_buffer_constructor {
+            let saved = self.pending_construct_new_target;
+            self.pending_construct_new_target = new_target;
             let proto_ptr = self.array_buffer_prototype.heap_ptr();
             let obj_ptr = typedarray::RuneArrayBuffer::allocate(
                 gc,
@@ -5969,6 +5981,7 @@ impl Vm {
             );
             let obj_val = Value::from_heap_ptr(obj_ptr);
             let result = crate::builtins::array_buffer_constructor(gc, obj_val, &args, self);
+            self.pending_construct_new_target = saved;
             if let Some(exc) = self.pending_exception.take() {
                 return ConstructOut::Fail(exc);
             }
@@ -13341,8 +13354,11 @@ impl Vm {
                             proto_ptr.unwrap_or(std::ptr::null_mut()),
                         );
                         let obj_val = Value::from_heap_ptr(obj_ptr);
+                        let saved_nt = self.pending_construct_new_target;
+                        self.pending_construct_new_target = constructor;
                         let result =
                             crate::builtins::array_buffer_constructor(gc, obj_val, &args, self);
+                        self.pending_construct_new_target = saved_nt;
                         if let Some(exc) = self.pending_exception.take() {
                             if let Some(exit) = self.handle_throw(gc, exc) {
                                 return exit;
@@ -19217,6 +19233,7 @@ pub(crate) fn value_is_constructor(vm: &Vm, v: Value) -> bool {
             || v == vm.map_constructor
             || v == vm.set_constructor
             || v == vm.array_buffer_constructor
+            || v == vm.dataview_constructor
             || vm.function_constructor_value() == Some(v)
         {
             return true;

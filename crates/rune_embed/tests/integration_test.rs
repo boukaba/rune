@@ -19767,3 +19767,25 @@ fn test_typedarray_expando_and_species_slice() {
         .is_ok()
     );
 }
+
+#[test]
+fn test_dataview_arraybuffer_newtarget_prototypes() {
+    let mut ctx = Context::new_small();
+    assert!(
+        ctx.eval(
+            "var b = new ArrayBuffer(4); \
+             class D extends DataView {} \
+             var d = Reflect.construct(DataView, [b, 1], D); \
+             Object.getPrototypeOf(d) === D.prototype && d.byteOffset === 1;"
+        )
+        .is_ok()
+    );
+    assert!(
+        ctx.eval(
+            "class B extends ArrayBuffer {} \
+             var b = Reflect.construct(ArrayBuffer, [4], B); \
+             Object.getPrototypeOf(b) === B.prototype && b.byteLength === 4;"
+        )
+        .is_ok()
+    );
+}

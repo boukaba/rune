@@ -7109,7 +7109,20 @@ pub fn dataview_constructor(
                 Value::smi(if auto_length { 1 } else { 0 }),
                 attrs,
             );
-            if let Some(proto) = vm.dataview_prototype.heap_ptr() {
+            let mut proto = vm.dataview_prototype;
+            let new_target = if vm.pending_construct_new_target.is_undefined() {
+                vm.current_new_target()
+            } else {
+                vm.pending_construct_new_target
+            };
+            if !new_target.is_undefined() && new_target != vm.dataview_constructor {
+                if let Ok(candidate) = get_value_sync(gc, vm, new_target, "prototype") {
+                    if is_object_value(candidate) {
+                        proto = candidate;
+                    }
+                }
+            }
+            if let Some(proto) = proto.heap_ptr() {
                 JSObject::set_prototype(obj_ptr, proto);
             }
         }
@@ -7507,6 +7520,22 @@ pub fn array_buffer_constructor(
     }
     let ptr = unsafe { rune_core::gc::resolve_forwarded(ptr) };
     unsafe { typedarray::RuneArrayBuffer::set_max_byte_length(ptr, byte_length) };
+    let mut proto = vm.array_buffer_prototype;
+    let new_target = if vm.pending_construct_new_target.is_undefined() {
+        vm.current_new_target()
+    } else {
+        vm.pending_construct_new_target
+    };
+    if !new_target.is_undefined() && new_target != vm.array_buffer_constructor {
+        if let Ok(candidate) = get_value_sync(gc, vm, new_target, "prototype") {
+            if is_object_value(candidate) {
+                proto = candidate;
+            }
+        }
+    }
+    if let Some(pp) = proto.heap_ptr() {
+        unsafe { typedarray::RuneArrayBuffer::set_prototype(ptr, pp) };
+    }
     if let Some(options) = args.get(1).copied() {
         if !options.is_undefined() {
             let Some(opt_ptr) = options.heap_ptr() else {

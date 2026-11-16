@@ -390,10 +390,17 @@ pub unsafe fn read_element(ptr: *mut u8, index: usize) -> Value {
             TypedArrayKind::Uint8Clamped => Value::smi(*(data as *const u8) as i32),
             TypedArrayKind::Int16 => Value::smi(*(data as *const i16) as i32),
             TypedArrayKind::Uint16 => Value::smi(*(data as *const u16) as i32),
-            TypedArrayKind::Int32 => Value::smi(*(data as *const i32)),
+            TypedArrayKind::Int32 => {
+                let v = *(data as *const i32);
+                if (-(1 << 30)..(1 << 30)).contains(&v) {
+                    Value::smi(v)
+                } else {
+                    Value::from_float64(v as f64)
+                }
+            }
             TypedArrayKind::Uint32 => {
                 let v = *(data as *const u32);
-                if v <= i32::MAX as u32 {
+                if v < (1 << 30) {
                     Value::smi(v as i32)
                 } else {
                     Value::from_float64(v as f64)

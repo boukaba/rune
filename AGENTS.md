@@ -90,6 +90,7 @@ This repo uses: `user.name = "boukaba"`, `user.email = "boukaba@users.noreply.gi
 ## Anchored Summary
 
 ### Done — v0.12 / runtime API + timers (2026-11-13)
+- **TypedArray soundness/detached (2026-11-16)**: Smi-range fix for Int32/Uint32 (2^30..2^31 no longer panics), detached reads return undefined, generic methods throw TypeError on detached receivers, reentrant set offsets. TypedArray **460/1446**; full test262 **31091/53658**. Integration **965**.
 - **TypedArray ctor/species/iterables (2026-11-16)**: iterable constructor drain, real prototype constructor backrefs, Object.prototype linkage, inherited species getter. TypedArray **424/1446**. Integration **964**.
 - **%TypedArray% intrinsic (2026-11-16)**: global abstract constructor, shared prototype linkage on all typed-array ctors, detached-buffer receiver TypeErrors, `$DETACHBUFFER` harness. TypedArray **288/1446**. Integration **963**.
 - **DataView (2026-11-16)**: constructor, numeric get/set, accessors, toStringTag, brand/range checks; reentrant ToNumber/ToIndex, modulo integer conversion, post-conversion detach checks, `$262.detachArrayBuffer` harness, SharedArrayBuffer alias. DataView **367/561**, ArrayBuffer **109/221**. Integration **962**.

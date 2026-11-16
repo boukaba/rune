@@ -6542,6 +6542,24 @@ fn to_absolute_index(v: Value, length: usize) -> i64 {
 }
 
 /// Receiver check for TypedArray builtins — returns the RuneTypedArray ptr.
+fn reject_detached_typed_receiver(gc: &mut SemiSpace, vm: &mut Vm, this: Value) -> bool {
+    if let Some(ptr) = this.heap_ptr() {
+        if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_TYPED_ARRAY {
+            let buf = unsafe { typedarray::RuneTypedArray::buffer(ptr) };
+            if buf.is_null() || unsafe { typedarray::RuneArrayBuffer::is_detached(buf) } {
+                vm.set_pending_exception(crate::errors::error_object(
+                    gc,
+                    &vm.error_protos,
+                    crate::errors::ErrorKind::TypeError,
+                    "Method called on a detached TypedArray",
+                ));
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn typed_array_receiver(gc: &mut SemiSpace, this: Value, vm: &mut Vm) -> Option<*mut u8> {
     if let Some(ptr) = this.heap_ptr() {
         if unsafe { (*(ptr as *const GcHeader)).tag() } == TAG_TYPED_ARRAY {
@@ -7854,7 +7872,13 @@ pub fn typed_array_set_builtin(
         return Value::undefined();
     };
     let target_offset = {
-        let n = to_number(args.get(1).copied().unwrap_or(Value::smi(0)));
+        let n = match to_number_sync(gc, vm, args.get(1).copied().unwrap_or(Value::smi(0))) {
+            Ok(n) => n,
+            Err(e) => {
+                vm.set_pending_exception(e);
+                return Value::undefined();
+            }
+        };
         if n.is_nan() || n == 0.0 {
             0.0
         } else {
@@ -7899,7 +7923,13 @@ pub fn typed_array_set_builtin(
                 Some(vm.function_prototype),
                 gc,
             );
-            let ln = to_number(len_val);
+            let ln = match to_number_sync(gc, vm, len_val) {
+                Ok(n) => n,
+                Err(e) => {
+                    vm.set_pending_exception(e);
+                    return Value::undefined();
+                }
+            };
             let ln = if ln.is_nan() || ln <= 0.0 {
                 0
             } else {
@@ -15547,6 +15577,9 @@ pub fn array_from(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
 /// B1a length getters). The source range is snapshotted first, which is
 /// overlap-safe by construction.
 pub fn array_copy_within(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if reject_detached_typed_receiver(gc, vm, this) {
+        return Value::undefined();
+    }
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
@@ -17293,6 +17326,9 @@ pub fn array_unshift(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &m
     }
 }
 pub fn array_reverse(gc: &mut SemiSpace, mut this: Value, _args: &[Value], vm: &mut Vm) -> Value {
+    if reject_detached_typed_receiver(gc, vm, this) {
+        return Value::undefined();
+    }
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
@@ -17374,6 +17410,9 @@ pub fn array_reverse(gc: &mut SemiSpace, mut this: Value, _args: &[Value], vm: &
 /// with frames — return-abrupt-from-setting-property-value), returns `this`
 /// (return-this). No species (plain here — fill never ArraySpeciesCreates).
 pub fn array_fill(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if reject_detached_typed_receiver(gc, vm, this) {
+        return Value::undefined();
+    }
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
@@ -23786,6 +23825,9 @@ pub(crate) fn copy_resume(
 /// length/element getters (create-non-array-invalid-len) + Proxy/resizable →
 /// B1f-6/B7/out-of-scope.
 pub fn array_slice(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if reject_detached_typed_receiver(gc, vm, this) {
+        return Value::undefined();
+    }
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
@@ -24291,6 +24333,9 @@ fn array_like_length_sync(gc: &mut SemiSpace, vm: &mut Vm, this: Value) -> Resul
 }
 
 pub fn array_index_of(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if reject_detached_typed_receiver(gc, vm, this) {
+        return Value::undefined();
+    }
     array_index_search(gc, vm, this, args, crate::vm::ArrayOpKind::IndexOf)
 }
 
@@ -24422,6 +24467,9 @@ fn array_index_search(
 /// Array.prototype.lastIndexOf(search, fromIndex) — reverse search (B1b).
 /// Strict equality, holes included, getters dispatched via the search step.
 pub fn array_last_index_of(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if reject_detached_typed_receiver(gc, vm, this) {
+        return Value::undefined();
+    }
     array_index_search(gc, vm, this, args, crate::vm::ArrayOpKind::LastIndexOf)
 }
 
@@ -24739,6 +24787,9 @@ pub fn array_to_locale_string(
 }
 
 pub fn array_join(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if reject_detached_typed_receiver(gc, vm, this) {
+        return Value::undefined();
+    }
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
@@ -24800,6 +24851,9 @@ pub fn array_join(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) 
 /// Array.prototype.includes(searchElement, fromIndex) — SameValueZero search.
 /// Array.prototype.at(index) — generic relative indexing (§23.1.3.1).
 pub fn array_at(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if reject_detached_typed_receiver(gc, vm, this) {
+        return Value::undefined();
+    }
     if !require_object_coercible(this, vm, gc) {
         return Value::undefined();
     }
@@ -24844,6 +24898,9 @@ pub fn array_at(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) ->
 }
 
 pub fn array_includes(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if reject_detached_typed_receiver(gc, vm, this) {
+        return Value::undefined();
+    }
     array_index_search(gc, vm, this, args, crate::vm::ArrayOpKind::Includes)
 }
 
@@ -24989,6 +25046,9 @@ fn prev_existing_index(this: Value, before: usize) -> Option<usize> {
 }
 
 pub fn array_for_each(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if reject_detached_typed_receiver(gc, vm, this) {
+        return Value::undefined();
+    }
     let Some((length, callback, this_arg, source_ptr, boxed_this)) = array_iter_prologue(
         gc,
         vm,
@@ -25045,6 +25105,9 @@ pub fn array_for_each(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &
 
 /// Array.prototype.filter(callback, thisArg) — set up state machine iteration.
 pub fn array_filter(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if reject_detached_typed_receiver(gc, vm, this) {
+        return Value::undefined();
+    }
     let Some((length, callback, this_arg, _, boxed_this)) =
         array_iter_prologue(gc, vm, this, args, "Array.prototype.filter", array_filter)
     else {
@@ -25138,6 +25201,9 @@ pub fn array_filter(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mu
 
 /// Array.prototype.map(callback, thisArg) — set up state machine iteration.
 pub fn array_map(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if reject_detached_typed_receiver(gc, vm, this) {
+        return Value::undefined();
+    }
     let Some((length, callback, this_arg, _, boxed_this)) =
         array_iter_prologue(gc, vm, this, args, "Array.prototype.map", array_map)
     else {
@@ -25244,6 +25310,9 @@ pub fn array_map(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut V
 /// Without initialValue the accumulator starts at the first PRESENT element
 /// (holes skipped); no present elements at all → TypeError.
 pub fn array_reduce(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if reject_detached_typed_receiver(gc, vm, this) {
+        return Value::undefined();
+    }
     let Some((length, callback, _, source_ptr, boxed_this)) =
         array_iter_prologue(gc, vm, this, args, "Array.prototype.reduce", array_reduce)
     else {
@@ -25381,6 +25450,9 @@ pub fn array_reduce_right(
     args: &[Value],
     vm: &mut Vm,
 ) -> Value {
+    if reject_detached_typed_receiver(gc, vm, this) {
+        return Value::undefined();
+    }
     let Some((length, callback, _, source_ptr, boxed_this)) = array_iter_prologue(
         gc,
         vm,
@@ -25510,6 +25582,9 @@ pub fn array_reduce_right(
 
 /// Array.prototype.findLast(callback, thisArg) — backward find (B1c).
 pub fn array_find_last(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if reject_detached_typed_receiver(gc, vm, this) {
+        return Value::undefined();
+    }
     let Some((length, callback, this_arg, source_ptr, boxed_this)) = array_iter_prologue(
         gc,
         vm,
@@ -25569,6 +25644,9 @@ pub fn array_find_last_index(
     args: &[Value],
     vm: &mut Vm,
 ) -> Value {
+    if reject_detached_typed_receiver(gc, vm, this) {
+        return Value::undefined();
+    }
     let Some((length, callback, this_arg, source_ptr, boxed_this)) = array_iter_prologue(
         gc,
         vm,
@@ -25623,6 +25701,9 @@ pub fn array_find_last_index(
 
 /// Array.prototype.find(callback, thisArg) — set up state machine iteration.
 pub fn array_find(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if reject_detached_typed_receiver(gc, vm, this) {
+        return Value::undefined();
+    }
     let Some((length, callback, this_arg, source_ptr, boxed_this)) =
         array_iter_prologue(gc, vm, this, args, "Array.prototype.find", array_find)
     else {
@@ -25674,6 +25755,9 @@ pub fn array_find(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut 
 
 /// Array.prototype.findIndex(callback, thisArg) — set up state machine iteration.
 pub fn array_find_index(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if reject_detached_typed_receiver(gc, vm, this) {
+        return Value::undefined();
+    }
     let Some((length, callback, this_arg, source_ptr, boxed_this)) = array_iter_prologue(
         gc,
         vm,
@@ -26970,6 +27054,9 @@ fn array_sort_entry(
 
 /// Array.prototype.sort(comparator) — stable, observable (§23.1.3.30).
 pub fn array_sort(gc: &mut SemiSpace, this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if reject_detached_typed_receiver(gc, vm, this) {
+        return Value::undefined();
+    }
     array_sort_entry(gc, this, args, vm, false)
 }
 
@@ -27076,6 +27163,9 @@ pub fn array_flat_map(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &
 
 /// Array.prototype.some(callback, thisArg) — set up state machine iteration.
 pub fn array_some(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if reject_detached_typed_receiver(gc, vm, this) {
+        return Value::undefined();
+    }
     let Some((length, callback, this_arg, source_ptr, boxed_this)) =
         array_iter_prologue(gc, vm, this, args, "Array.prototype.some", array_some)
     else {
@@ -27127,6 +27217,9 @@ pub fn array_some(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut 
 
 /// Array.prototype.every(callback, thisArg) — set up state machine iteration.
 pub fn array_every(gc: &mut SemiSpace, mut this: Value, args: &[Value], vm: &mut Vm) -> Value {
+    if reject_detached_typed_receiver(gc, vm, this) {
+        return Value::undefined();
+    }
     let Some((length, callback, this_arg, source_ptr, boxed_this)) =
         array_iter_prologue(gc, vm, this, args, "Array.prototype.every", array_every)
     else {

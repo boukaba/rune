@@ -4778,6 +4778,25 @@ Integration: **963 passed, 0 failed, 3 ignored**.
 
 Integration: **964 passed, 0 failed, 3 ignored**.
 
+### Phase 3 — TypedArray soundness + detached semantics (2026-11-16)
+
+- Fixed a Smi-overflow panic reading Int32/Uint32 elements in the
+  2^30..2^31 range (values now stay Smis only inside the 31-bit Smi range,
+  otherwise Float64).
+- Detached typed-array element reads return undefined instead of
+  dereferencing a null data pointer (fixes an engine panic in
+  `map`/callback paths).
+- Generic Array.prototype methods invoked on a detached typed array now throw
+  TypeError (map/filter/forEach/some/every/reduce/find*/indexOf/includes/join/
+  sort/reverse/copyWithin/fill/slice/at).
+- TypedArray.prototype.set converts its offset/length with the reentrant
+  ToNumber path (observable `valueOf`).
+- Test262: built-ins/TypedArray **424 → 460/1446**.
+- Full test262 snapshot: **31,091/53,658**.
+- Regression: `test_typedarray_large_uint32_values`.
+
+Integration: **965 passed, 0 failed, 3 ignored**.
+
 > **v1.0 roadmap (2026-09-05):** full 1.0 survey done (38 suites re-measured,
 > cluster map + root causes in AGENTS.md Next Steps). Execution order:
 > foundations F1–F5 (anti-rewrite) → multipliers A1–A4 → families B1–B7 →

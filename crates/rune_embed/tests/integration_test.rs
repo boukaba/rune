@@ -19639,3 +19639,22 @@ fn test_typedarray_iterable_constructor_and_species() {
             .is_err()
     );
 }
+
+#[test]
+fn test_typedarray_large_uint32_values() {
+    let mut ctx = Context::new_small();
+    assert!(
+        ctx.eval(
+            "var a = new Uint32Array([2147483647, 4294967295, 1073741824]); \
+             a[0] === 2147483647 && a[1] === 4294967295 && a[2] === 1073741824;"
+        )
+        .is_ok()
+    );
+    assert!(
+        ctx.eval(
+            "var b = new Int32Array([-1073741825, -2147483648, -1073741824]); \
+             b[0] === -1073741825 && b[1] === -2147483648 && b[2] === -1073741824;"
+        )
+        .is_ok()
+    );
+}

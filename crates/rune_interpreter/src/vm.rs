@@ -18039,6 +18039,10 @@ pub(crate) fn load_property_recursive(
                 // keys read elements directly (out of bounds → undefined, no
                 // prototype consult); own computed keys; else walk proto.
                 if let Some(index) = value_to_array_index(raw_key) {
+                    let buf = unsafe { typedarray::RuneTypedArray::buffer(ptr) };
+                    if buf.is_null() || unsafe { typedarray::RuneArrayBuffer::is_detached(buf) } {
+                        return Value::undefined();
+                    }
                     let len = unsafe { typedarray::RuneTypedArray::effective_length(ptr) };
                     if index < len {
                         return unsafe { typedarray::read_element(ptr, index) };
